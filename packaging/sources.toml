@@ -1,0 +1,20 @@
+# packaging/sources.toml — upstream source for the build-time pull of agents/.
+#
+# build.py step 7 (per spec section 10.2) reads this file to decide where to
+# pull the skills source from. The default is the local sibling folder of
+# the upstream platform-agnostic-skills project. Once that project is
+# published, swap "kind" to "git" and supply the URL + ref.
+
+[upstream]
+kind = "local"          # one of: "local", "git"
+
+# Used when kind = "local". Path is resolved relative to this file.
+local_path = "../../platform-agnostic-skills/agents"
+
+# Used when kind = "git". Ignored otherwise.
+git_url = ""
+git_ref = ""            # tag, branch, or commit SHA
+
+# What gets copied. Filenames matching any glob in `exclude` are skipped.
+include = ["**/*.py", "**/*.md", "**/*.txt", "**/*.yaml", "**/*.yml"]
+exclude = ["**/__pycache__/**", "**/.pytest_cache/**", "**/*.pyc"]

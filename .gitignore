@@ -1,0 +1,42 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Build artifacts ---
+build/
+staging/
+dist/
+*.spec.bak
+
+# --- PyInstaller ---
+# (paskills.spec IS tracked; only PyInstaller-generated work-dirs are not)
+build_pyinstaller/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs / outputs (build-time scratch) ---
+*.log
+.coverage
+
+# --- Local dev overrides ---
+.env
+.env.*
+!.env.example

@@ -1,0 +1,78 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pa-skills-portable"
+version = "0.1.0"
+description = "LLM-powered PDF and statement processing skills, packaged portably."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Harshal" }
+]
+keywords = ["llm", "ollama", "skills", "pdf", "ocr", "26as", "hsbc", "bob"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Text Processing",
+]
+
+# Runtime dependencies are also listed in requirements.txt for the build
+# pipeline (PyInstaller reads from a fresh venv built off requirements.txt).
+# Keep the two in sync.
+dependencies = [
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langgraph>=0.2.0",
+    "langchain-ollama>=0.2.0",
+    "langchain-openai>=0.2.0",
+    "pdfplumber>=0.11.0",
+    "pypdfium2>=4.30.0",
+    "pytesseract>=0.3.10",
+    "openpyxl>=3.1.0",
+    "pandas>=2.2.0",
+    "extract-msg>=0.41.0",
+    "gradio>=4.44.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+build = [
+    "pyinstaller>=6.10",
+    "packaging>=24.0",
+    "tomli>=2.0.0; python_version<'3.11'",
+]
+dev = [
+    "pytest>=8.0",
+    "pyflakes>=3.2",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/harshal/platform-agnostic-skills-portable"
+Source   = "https://github.com/harshal/platform-agnostic-skills-portable"
+Issues   = "https://github.com/harshal/platform-agnostic-skills-portable/issues"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"

@@ -1,0 +1,26 @@
+; PASkillsPortable.ini — PortableApps.com Launcher config.
+; Rendered by packaging/build.py; placed at App\AppInfo\Launcher\.
+
+[Launch]
+ProgramExecutable=PASkills\pa_skills.exe
+WorkingDirectory=%PAL:DataDir%
+WaitForProgram=true
+SinglePortableAppInstance=true
+
+[Activate]
+Registry=false
+RegistryValueWrite=false
+
+[FileWrite]
+Base=%PAL:DataDir%
+
+[DirectoriesCleanupIfEmpty]
+1=%PAL:DataDir%\settings
+2=%PAL:DataDir%\outputs
+3=%PAL:DataDir%\logs
+
+[FilesMove]
+; (none; first-run copy of DefaultData -> Data is handled by PAL automatically)
+
+[Language]
+Base=ENGLISH

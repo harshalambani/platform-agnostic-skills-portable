@@ -1,0 +1,30 @@
+# Runtime dependencies for PA Skills Portable.
+# Mirrored in pyproject.toml; keep the two in sync.
+# This file is the single source of truth for the build venv that PyInstaller
+# is run against.
+
+# --- LangChain / LangGraph (skills runtime) ---
+langchain>=0.3.0
+langchain-community>=0.3.0
+langgraph>=0.2.0
+
+# --- LLM provider adapters ---
+langchain-ollama>=0.2.0       # local / LAN Ollama (default)
+langchain-openai>=0.2.0       # OpenAI-compatible (vLLM, LM Studio, GPT-4o)
+
+# --- PDF / OCR ---
+pdfplumber>=0.11.0            # text-mode PDF parsing (BoB, 26AS)
+pypdfium2>=4.30.0             # raster fallback
+pytesseract>=0.3.10           # Tesseract Python wrapper (HSBC OCR)
+
+# --- Spreadsheets ---
+openpyxl>=3.1.0
+pandas>=2.2.0
+
+# --- Misc ---
+extract-msg>=0.41.0           # CDFV2 binary Outlook MSG (used by cc_sort skill)
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# --- Web UI ---
+gradio>=4.44.0                # Gradio web frontend (Home + 26AS in Phase 1)

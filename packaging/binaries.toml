@@ -1,0 +1,26 @@
+# packaging/binaries.toml — pinned native-binary sources for Phase 2.
+#
+# build.py reads this file when --pull-binaries is passed (Phase 2 only).
+# In Phase 1 the file is present but unused. The fields below match what
+# packaging/refresh_binaries.py will consume.
+#
+# Each entry: stable URL + SHA-256 of the archive + the inner subpath that
+# gets extracted into vendor/.
+
+[tesseract]
+version       = "5.4.0"
+url           = "https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-portable-5.4.0.20240606.zip"
+sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+extract_into  = "tesseract"
+
+[poppler]
+version       = "24.07.0"
+url           = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.07.0-0/Release-24.07.0-0.zip"
+sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+extract_into  = "poppler"
+
+[tessdata.eng]
+version       = "4.1.0"
+url           = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata"
+sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+extract_into  = "tesseract/tessdata"
