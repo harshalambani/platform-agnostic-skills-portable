@@ -1,0 +1,196 @@
+"""
+ui/_config.py — adapter between the portable multi-endpoint settings schema
+(Data\\settings\\config.yaml) and the legacy single-provider config.yaml
+that agents.base_agent.load_model still consumes.
+
+The agents/ tree is mirrored verbatim from the upstream platform-agnostic-skills
+project (build-time-pull contract, locked decision §15.1). We must not modify
+it, so this adapter writes a transient legacy-shaped file in the user's
+%TEMP% / /tmp and hands its path to load_model().
+
+The portable schema lives at Data\\settings\\config.yaml and has the shape:
+
+    active_endpoint: local_ollama
+    endpoints:
+      local_ollama:
+        provider: ollama
+        base_url: http://localhost:11434
+        default_model: gemma4
+        temperature: 0.0
+      ...
+
+The legacy schema expected by agents.base_agent.load_model is:
+
+    provider: ollama
+    ollama:
+      base_url: http://localhost:11434
+      default_model: gemma4
+      temperature: 0.0
+      models: {...}            # optional
+    openai_compatible:
+      ...                       # if provider is openai_compatible
+
+Public surface:
+    PORTABLE_CONFIG_PATH  — Path to the live multi-endpoint config file.
+    load_portable_config() -> dict
+    write_portable_config(cfg: dict) -> None
+    materialize_legacy_config(endpoint_name: str | None = None) -> Path
+    available_endpoints() -> list[str]
+    active_endpoint_name() -> str
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Resolving the live config path.
+# ---------------------------------------------------------------------------
+#
+# In a frozen PA-Skills build the PortableApps Launcher sets %PAL:DataDir%
+# as the working directory and copies DefaultData/ into Data/ on first run,
+# so the live config lives at .\settings\config.yaml relative to cwd.
+#
+# In source mode we fall back to packaging/templates/DefaultData/settings/
+# config.yaml (read-only) plus an optional dev override in ./Data/settings/
+# config.yaml that the user can hand-edit.
+# ---------------------------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_TEMPLATE = (
+    PROJECT_ROOT / "packaging" / "templates" / "DefaultData" / "settings" / "config.yaml"
+)
+
+
+def _resolve_config_path() -> Path:
+    """
+    Resolution order:
+      1. PA_SKILLS_CONFIG  env var, if set and the file exists.
+      2. <cwd>/settings/config.yaml         — frozen build, PAL sets cwd to Data\\.
+      3. <project>/Data/settings/config.yaml — dev convenience for source mode.
+      4. packaging/templates/DefaultData/settings/config.yaml — read-only fallback.
+    """
+    env_path = os.environ.get("PA_SKILLS_CONFIG")
+    if env_path and Path(env_path).is_file():
+        return Path(env_path)
+
+    cwd_candidate = Path.cwd() / "settings" / "config.yaml"
+    if cwd_candidate.is_file():
+        return cwd_candidate
+
+    dev_candidate = PROJECT_ROOT / "Data" / "settings" / "config.yaml"
+    if dev_candidate.is_file():
+        return dev_candidate
+
+    return _DEFAULT_TEMPLATE
+
+
+PORTABLE_CONFIG_PATH: Path = _resolve_config_path()
+
+
+# ---------------------------------------------------------------------------
+# Read / write the portable config.
+# ---------------------------------------------------------------------------
+
+def load_portable_config(path: Path | None = None) -> dict[str, Any]:
+    """Load the portable multi-endpoint config. Returns an empty dict if missing."""
+    path = path or PORTABLE_CONFIG_PATH
+    if not path.is_file():
+        return {}
+    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+
+
+def write_portable_config(cfg: dict[str, Any], path: Path | None = None) -> None:
+    """Persist the portable multi-endpoint config back to disk."""
+    path = path or PORTABLE_CONFIG_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+
+def available_endpoints() -> list[str]:
+    cfg = load_portable_config()
+    return list((cfg.get("endpoints") or {}).keys())
+
+
+def active_endpoint_name() -> str:
+    cfg = load_portable_config()
+    return cfg.get("active_endpoint", "")
+
+
+# ---------------------------------------------------------------------------
+# Bridge to the legacy load_model() contract.
+# ---------------------------------------------------------------------------
+
+def _legacy_from_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert a single endpoint block from the portable schema into the
+    flat shape that base_agent.load_model expects.
+    """
+    provider = endpoint.get("provider")
+    if provider not in ("ollama", "openai_compatible"):
+        raise ValueError(f"Unknown provider '{provider}' in endpoint config.")
+
+    common = {
+        "base_url": endpoint["base_url"],
+        "default_model": endpoint.get("default_model", ""),
+        "temperature": float(endpoint.get("temperature", 0.0)),
+    }
+    if provider == "openai_compatible":
+        common["api_key"] = endpoint.get("api_key", "not-needed")
+
+    return {
+        "provider": provider,
+        provider: common,
+        # output_dir is honoured by agents that read the legacy file directly;
+        # we keep it harmlessly present so the file is a strict superset.
+        "output_dir": "./outputs",
+    }
+
+
+def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
+    """
+    Materialise a transient legacy-shaped config.yaml in a temp dir and
+    return its path. Caller passes this path to base_agent.load_model
+    (or to any skill's run() function).
+
+    If endpoint_name is None, the active endpoint from the portable config
+    is used.
+    """
+    cfg = load_portable_config()
+    endpoints = cfg.get("endpoints") or {}
+    if not endpoints:
+        raise RuntimeError(
+            "No endpoints defined in the portable config "
+            f"({PORTABLE_CONFIG_PATH}). Set up at least one in the Settings tab."
+        )
+
+    name = endpoint_name or cfg.get("active_endpoint") or next(iter(endpoints))
+    if name not in endpoints:
+        raise KeyError(f"Endpoint '{name}' not found in portable config.")
+
+    legacy = _legacy_from_endpoint(endpoints[name])
+
+    # Write into a per-process temp dir so concurrent runs don't collide.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="pa-skills-cfg-"))
+    legacy_path = tmp_dir / "config.yaml"
+    legacy_path.write_text(yaml.safe_dump(legacy, sort_keys=False), encoding="utf-8")
+    return legacy_path
+
+
+def output_dir() -> Path:
+    """Resolve the outputs folder; create it if absent."""
+    cfg = load_portable_config()
+    raw = cfg.get("output_dir") or "./outputs"
+    p = Path(raw)
+    if not p.is_absolute():
+        # Anchor to the live config's parent's parent (Data\) when possible,
+        # else fall back to cwd.
+        if PORTABLE_CONFIG_PATH.is_file() and PORTABLE_CONFIG_PATH != _DEFAULT_TEMPLATE:
+            p = PORTABLE_CONFIG_PATH.parent.parent / raw
+    p.mkdir(parents=True, exist_ok=True)
+    return p

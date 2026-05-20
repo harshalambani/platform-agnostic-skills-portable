@@ -1,0 +1,32 @@
+# PA Skills Portable — default settings.
+# Copied to Data\settings\config.yaml on first launch by the PortableApps Launcher.
+# Subsequent runs read and write this file directly; PA Launcher does not overwrite it.
+
+active_endpoint: local_ollama
+
+endpoints:
+  local_ollama:
+    provider: ollama
+    base_url: http://localhost:11434
+    default_model: gemma4
+    temperature: 0.0
+
+  lan_ollama:
+    provider: ollama
+    base_url: http://192.168.1.50:11434
+    default_model: gemma4
+    temperature: 0.0
+
+  openai_compatible:
+    provider: openai_compatible
+    base_url: http://localhost:8000/v1
+    api_key: not-needed
+    default_model: gemma-4
+    temperature: 0.0
+
+# Where skill outputs land (relative to %PAL:DataDir% in frozen builds,
+# relative to the cwd in source mode).
+output_dir: ./outputs
+
+# Theme override (Phase 3 will surface a toggle; Phase 1 always uses 'dark').
+theme: dark
