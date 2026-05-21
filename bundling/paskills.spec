@@ -1,6 +1,6 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
-# packaging/paskills.spec — PyInstaller spec for PA Skills Portable.
+# bundling/paskills.spec — PyInstaller spec for PA Skills Portable.
 #
 # Mode:        --onedir (per spec §10.3 — faster start, easier to debug).
 # Entry point: ui/webui.py
@@ -12,8 +12,8 @@
 #              ui/ Python sources (already discovered, but bundled
 #              explicitly to keep the spec self-documenting).
 #
-# Invoked by:  packaging/build.py.
-# Run directly: pyinstaller packaging\paskills.spec --clean --noconfirm
+# Invoked by:  bundling/build.py.
+# Run directly: pyinstaller bundling\paskills.spec --clean --noconfirm
 #               (assumes cwd = repo root, venv with deps + pyinstaller active)
 
 from pathlib import Path
@@ -24,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path.cwd()
 SRC_AGENTS   = PROJECT_ROOT / "src" / "agents"
 UI_DIR       = PROJECT_ROOT / "ui"
-ICON_PATH    = PROJECT_ROOT / "packaging" / "icons" / "appicon.ico"
+ICON_PATH    = PROJECT_ROOT / "bundling" / "icons" / "appicon.ico"
 
 # ---------------------------------------------------------------------------
 # Hidden imports — see spec §10.3.
@@ -68,7 +68,7 @@ datas = [
     # so non-py assets (markdown, etc.) inside ui/ are carried along.
     (str(UI_DIR), "ui"),
     # Template default settings copied to %PAL:DataDir% on first run.
-    (str(PROJECT_ROOT / "packaging" / "templates" / "DefaultData"), "DefaultData"),
+    (str(PROJECT_ROOT / "bundling" / "templates" / "DefaultData"), "DefaultData"),
 ]
 
 # Drop directories not present (e.g., when running spec in a partial tree).

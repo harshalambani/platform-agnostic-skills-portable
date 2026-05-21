@@ -62,7 +62,7 @@ Expected on launch:
 4. The **26AS** tab's model dropdown is populated from Ollama's `/api/tags`.
 
 If Ollama is on a non-default port, edit `Data\settings\config.yaml`
-(create the file by copying `packaging\templates\DefaultData\settings\config.yaml`
+(create the file by copying `bundling\templates\DefaultData\settings\config.yaml`
 into `Data\settings\config.yaml`) and change `local_ollama.base_url`.
 
 ## 3.  Frozen build (PyInstaller `--onedir`)
@@ -70,7 +70,7 @@ into `Data\settings\config.yaml`) and change `local_ollama.base_url`.
 This is steps 1–4 of spec §10.2. From the repo root, on Windows:
 
 ```powershell
-python packaging\build.py
+python bundling\build.py
 ```
 
 What the script does, in order:
@@ -81,7 +81,7 @@ What the script does, in order:
 | 2 | Wipe `staging/` and recreate the PortableApps.com folder skeleton. | `staging/App/...`, `staging/Data/`, `staging/Other/`. |
 | 7 | (logical step 7) Verify `src/agents/` is populated. | Logs the .py file count. |
 | 3 | Create a clean venv in `build_pyinstaller/venv/`, install `requirements.txt` + PyInstaller. | `build_pyinstaller/venv/Scripts/python.exe`. |
-| 4 | Run `pyinstaller packaging\paskills.spec`. Copy `build_pyinstaller/dist/pa_skills/` → `staging/App/PASkills/`. | `staging/App/PASkills/pa_skills.exe` (+ `_internal/`). |
+| 4 | Run `pyinstaller bundling\paskills.spec`. Copy `build_pyinstaller/dist/pa_skills/` → `staging/App/PASkills/`. | `staging/App/PASkills/pa_skills.exe` (+ `_internal/`). |
 | 5–11 | Print "Phase 2, skipped" markers. | (no output) |
 
 Useful flags:
@@ -123,11 +123,11 @@ you eventually launch via `PASkillsPortable.exe` in Phase 2).
 
 - **No launcher yet.** You launch the frozen `pa_skills.exe` directly;
   the `PASkillsPortable.exe` shell is generated in Phase 2 by the
-  PortableApps Launcher Generator from `packaging\templates\appinfo.ini.tmpl`.
+  PortableApps Launcher Generator from `bundling\templates\appinfo.ini.tmpl`.
 - **No Tesseract / Poppler.** The HSBC skill's OCR path is not yet wired
   end-to-end; HSBC and BoB tabs are intentionally absent from the UI.
 - **`vendor/` is empty.** Git LFS still has nothing to track.
-- **Icons are placeholders.** `packaging/icons/` has only a `README.md`;
+- **Icons are placeholders.** `bundling/icons/` has only a `README.md`;
   PyInstaller will warn that no icon was supplied and use its default.
 
 ## 6.  Reporting back

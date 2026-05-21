@@ -1,4 +1,4 @@
-# packaging/sources.toml — upstream source for the build-time pull of agents/.
+# bundling/sources.toml — upstream source for the build-time pull of agents/.
 #
 # build.py step 7 (per spec section 10.2) reads this file to decide where to
 # pull the skills source from. The default is the local sibling folder of

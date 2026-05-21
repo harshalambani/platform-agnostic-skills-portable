@@ -1,5 +1,5 @@
 """
-ui/_buildinfo.py — overwritten by packaging/build.py on each build.
+ui/_buildinfo.py — overwritten by bundling/build.py on each build.
 
 In source-mode runs, both fields fall back to "dev". The build script rewrites
 this file just before running PyInstaller so the frozen executable carries

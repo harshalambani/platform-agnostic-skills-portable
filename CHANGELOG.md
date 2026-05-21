@@ -12,15 +12,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Repo root: `LICENSE` (Apache 2.0), `NOTICE`, `README.md`, `pyproject.toml`,
   `requirements.txt`, `.gitignore`, `.gitattributes` (LFS rules per spec §10.5).
 - Source tree skeleton: `src/agents/`, `ui/{tabs,_buildinfo.py}`,
-  `packaging/{templates,icons}`, `tests/`, placeholder `vendor/`.
+  `bundling/{templates,icons}`, `tests/`, placeholder `vendor/`.
 - `src/agents/` mirrored from the sibling `platform-agnostic-skills` project
   per the build-time-pull contract (locked decision §15.1).
 - Minimal Gradio `ui/webui.py` with Home and 26AS tabs only, custom black +
   electric-blue theme (locked decision §15.4), bound to 127.0.0.1 with
   free-port pick.
-- `packaging/build.py` covering steps 1–4 of spec §10.2 (read git tag,
+- `bundling/build.py` covering steps 1–4 of spec §10.2 (read git tag,
   reset staging, create venv, run PyInstaller `--onedir`).
-- `packaging/paskills.spec` with hidden imports per spec §10.3.
+- `bundling/paskills.spec` with hidden imports per spec §10.3.
+
+### Changed
+- Renamed top-level `packaging/` folder to `bundling/` to avoid a Python
+  import-path shadow on the PyPI `packaging` package (gradio_client and
+  several other deps do `from packaging import version`, which resolved
+  to our empty folder when run from the repo root). Deviates from §12 of
+  the v0.2 spec; the spec doc will be updated to v0.3 to match.
 
 ### Notes
 - Native binaries (Tesseract, Poppler) are deferred to Phase 2.
