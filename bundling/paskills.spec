@@ -59,6 +59,37 @@ hiddenimports = [
 ]
 
 # ---------------------------------------------------------------------------
+# Packages with data files / dynamic imports PyInstaller misses on its own.
+# collect_all() returns (datas, binaries, hiddenimports) for each.
+# ---------------------------------------------------------------------------
+from PyInstaller.utils.hooks import collect_all  # noqa: E402
+
+_extra_datas = []
+_extra_binaries = []
+_extra_hiddenimports = []
+
+for _pkg in (
+    "gradio",
+    "gradio_client",
+    "safehttpx",
+    "groovy",
+    "starlette",
+    "fastapi",
+    "uvicorn",
+    "pdfplumber",
+):
+    try:
+        _d, _b, _h = collect_all(_pkg)
+        _extra_datas += _d
+        _extra_binaries += _b
+        _extra_hiddenimports += _h
+    except Exception as _e:
+        print(f"[paskills.spec] collect_all('{_pkg}') skipped: {_e}")
+
+hiddenimports += _extra_hiddenimports
+
+
+# ---------------------------------------------------------------------------
 # Data files — bundled into _internal\ at runtime.
 # ---------------------------------------------------------------------------
 datas = [
@@ -73,6 +104,7 @@ datas = [
 
 # Drop directories not present (e.g., when running spec in a partial tree).
 datas = [(src, dst) for (src, dst) in datas if Path(src).exists()]
+datas += _extra_datas
 
 
 block_cipher = None
@@ -80,7 +112,7 @@ block_cipher = None
 a = Analysis(
     [str(PROJECT_ROOT / "ui" / "webui.py")],
     pathex=[str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)],
-    binaries=[],
+    binaries=_extra_binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -112,7 +144,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,                     # PortableApps doesn't require UPX; keep symbols
-    console=False,                 # GUI-style launch (no stray console window)
+    console=True,                  # console required for uvicorn logger; PA launcher hides it in Phase 2
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
