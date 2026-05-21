@@ -35,10 +35,10 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from . import _theme  # noqa: E402
-from . import _buildinfo  # noqa: E402
-from .tabs import home as tab_home  # noqa: E402
-from .tabs import skill_26as as tab_26as  # noqa: E402
+from ui import _theme  # noqa: E402
+from ui import _buildinfo  # noqa: E402
+from ui.tabs import home as tab_home  # noqa: E402
+from ui.tabs import skill_26as as tab_26as  # noqa: E402
 
 
 APP_TITLE = "PA Skills Portable"
