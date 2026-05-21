@@ -54,7 +54,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 policy (127.0.0.1, free port, no public share, no analytics).
                 When False, returns the unlaunched object — used by tests.
     """
-    with gr.Blocks(theme=_theme.make_theme(), title=APP_TITLE, analytics_enabled=False) as app:
+    with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
         with gr.Tabs():
             with gr.Tab("Home"):
                 tab_home.render()
@@ -69,8 +69,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
             server_port=port,
             share=False,
             inbrowser=os.environ.get("PA_SKILLS_NO_BROWSER") != "1",
-            show_api=False,
             quiet=False,
+            theme=_theme.make_theme(),
         )
     return app
 
