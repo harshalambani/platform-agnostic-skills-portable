@@ -78,8 +78,8 @@ datas = [(src, dst) for (src, dst) in datas if Path(src).exists()]
 block_cipher = None
 
 a = Analysis(
-    ["ui/webui.py"],
-    pathex=["src", "."],
+    [str(PROJECT_ROOT / "ui" / "webui.py")],
+    pathex=[str(PROJECT_ROOT / "src"), str(PROJECT_ROOT)],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
