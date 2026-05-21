@@ -56,14 +56,14 @@ import yaml
 # as the working directory and copies DefaultData/ into Data/ on first run,
 # so the live config lives at .\settings\config.yaml relative to cwd.
 #
-# In source mode we fall back to packaging/templates/DefaultData/settings/
+# In source mode we fall back to bundling/templates/DefaultData/settings/
 # config.yaml (read-only) plus an optional dev override in ./Data/settings/
 # config.yaml that the user can hand-edit.
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DEFAULT_TEMPLATE = (
-    PROJECT_ROOT / "packaging" / "templates" / "DefaultData" / "settings" / "config.yaml"
+    PROJECT_ROOT / "bundling" / "templates" / "DefaultData" / "settings" / "config.yaml"
 )
 
 
@@ -73,7 +73,7 @@ def _resolve_config_path() -> Path:
       1. PA_SKILLS_CONFIG  env var, if set and the file exists.
       2. <cwd>/settings/config.yaml         — frozen build, PAL sets cwd to Data\\.
       3. <project>/Data/settings/config.yaml — dev convenience for source mode.
-      4. packaging/templates/DefaultData/settings/config.yaml — read-only fallback.
+      4. bundling/templates/DefaultData/settings/config.yaml — read-only fallback.
     """
     env_path = os.environ.get("PA_SKILLS_CONFIG")
     if env_path and Path(env_path).is_file():

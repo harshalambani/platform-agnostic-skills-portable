@@ -1,8 +1,8 @@
-# packaging/binaries.toml — pinned native-binary sources for Phase 2.
+# bundling/binaries.toml — pinned native-binary sources for Phase 2.
 #
 # build.py reads this file when --pull-binaries is passed (Phase 2 only).
 # In Phase 1 the file is present but unused. The fields below match what
-# packaging/refresh_binaries.py will consume.
+# bundling/refresh_binaries.py will consume.
 #
 # Each entry: stable URL + SHA-256 of the archive + the inner subpath that
 # gets extracted into vendor/.

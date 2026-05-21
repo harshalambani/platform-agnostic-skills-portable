@@ -34,7 +34,7 @@ python -m ui.webui
 
 ```powershell
 # Phase 1: produces a PyInstaller --onedir output under staging\App\PASkills\
-python packaging\build.py
+python bundling\build.py
 ```
 
 See `BUILD-NOTES.md` for the full per-phase command set, prerequisites, and
@@ -48,7 +48,7 @@ platform-agnostic-skills-portable/
 ├── src/agents/         ← skill implementations, mirrored from the upstream
 │                         platform-agnostic-skills project at build time
 ├── ui/                 ← Gradio web UI (Home + 26AS in Phase 1)
-├── packaging/          ← build.py, paskills.spec, INI templates, icons
+├── bundling/           ← build.py, paskills.spec, INI templates, icons
 ├── tests/              ← unit and smoke tests
 ├── vendor/             ← LFS-tracked native binaries (Phase 2)
 ├── staging/            ← intermediate build tree (gitignored)
