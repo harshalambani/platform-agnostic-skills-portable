@@ -8,7 +8,8 @@ Spec mapping:
              small JSON file the PortableApps Launcher reads to open the
              browser. In source mode we let Gradio open the browser directly.
     §9.4   — Custom black + electric-blue theme (see ui._theme).
-    §14.1  — Phase 1 covers Home + 26AS tabs only.
+    §14.1  — Phase 1 covers Home + 26AS tabs.
+    §14.2  — Phase 2a adds BoB + HSBC tabs.
 
 Public surface:
     build_app(launch: bool = False)      — construct the Gradio Blocks object.
@@ -39,6 +40,8 @@ from ui import _theme  # noqa: E402
 from ui import _buildinfo  # noqa: E402
 from ui.tabs import home as tab_home  # noqa: E402
 from ui.tabs import skill_26as as tab_26as  # noqa: E402
+from ui.tabs import skill_bob as tab_bob  # noqa: E402
+from ui.tabs import skill_hsbc as tab_hsbc  # noqa: E402
 
 
 APP_TITLE = "PA Skills Portable"
@@ -73,6 +76,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 tab_home.render()
             with gr.Tab("26AS"):
                 tab_26as.render()
+            with gr.Tab("BoB"):
+                tab_bob.render()
+            with gr.Tab("HSBC"):
+                tab_hsbc.render()
 
     if launch:
         port = _pick_free_port()

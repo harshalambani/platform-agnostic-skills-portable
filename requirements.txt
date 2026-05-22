@@ -27,4 +27,4 @@ pyyaml>=6.0
 python-dotenv>=1.0.0
 
 # --- Web UI ---
-gradio>=4.44.0                # Gradio web frontend (Home + 26AS in Phase 1)
+gradio>=6.0,<7.0              # Gradio 6.x; API differs from 4.x (theme/css live on launch(), show_api removed)
