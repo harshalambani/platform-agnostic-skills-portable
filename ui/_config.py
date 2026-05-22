@@ -41,6 +41,7 @@ Public surface:
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -57,14 +58,22 @@ import yaml
 # so the live config lives at .\settings\config.yaml relative to cwd.
 #
 # In source mode we fall back to bundling/templates/DefaultData/settings/
-# config.yaml (read-only) plus an optional dev override in ./Data/settings/
-# config.yaml that the user can hand-edit.
+# config.yaml (read-only); in frozen mode the spec bundles that file under
+# _internal/DefaultData/, exposed at runtime via sys._MEIPASS.
 # ---------------------------------------------------------------------------
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_TEMPLATE = (
-    PROJECT_ROOT / "bundling" / "templates" / "DefaultData" / "settings" / "config.yaml"
-)
+
+
+def _resolve_default_template() -> Path:
+    """Locate the read-only fallback config — different layout in source vs frozen."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "DefaultData" / "settings" / "config.yaml"
+    return PROJECT_ROOT / "bundling" / "templates" / "DefaultData" / "settings" / "config.yaml"
+
+
+_DEFAULT_TEMPLATE = _resolve_default_template()
 
 
 def _resolve_config_path() -> Path:

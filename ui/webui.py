@@ -44,6 +44,19 @@ from ui.tabs import skill_26as as tab_26as  # noqa: E402
 APP_TITLE = "PA Skills Portable"
 PORT_FILE_NAME = "ui_port.json"   # written next to the executable / project root
 
+# Override Gradio's default inline-code rendering so backtick spans don't render
+# as light-on-light in our dark theme. Affects markdown inside any tab.
+APP_CSS = """
+code, .prose code, .markdown code, .gradio-container code {
+    background: #262626 !important;
+    color: #F5F5F5 !important;
+    padding: 0.12em 0.36em;
+    border-radius: 0.28em;
+    font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+    font-size: 0.92em;
+}
+"""
+
 
 def build_app(launch: bool = False) -> gr.Blocks:
     """
@@ -71,6 +84,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
             inbrowser=os.environ.get("PA_SKILLS_NO_BROWSER") != "1",
             quiet=False,
             theme=_theme.make_theme(),
+            css=APP_CSS,
         )
     return app
 
