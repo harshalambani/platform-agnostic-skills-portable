@@ -31,7 +31,7 @@ import platform
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -143,7 +143,7 @@ def _git_describe(log: _Log) -> tuple[str, str, bool]:
 
     dirty = bool(
         subprocess.run(
-            [git, "diff-index", "--quiet", "HEAD", "--"], cwd=PROJECT_ROOT
+            [git, "diff-index", "--quiet", "HEAD", "--", ":(exclude)ui/_buildinfo.py"], cwd=PROJECT_ROOT
         ).returncode
     )
 
@@ -188,7 +188,7 @@ def step1_resolve_version(args: argparse.Namespace, log: _Log) -> tuple[str, str
         f'VERSION: str = {version!r}\n'
         f'COMMIT_SHA: str = {sha!r}\n'
         f'BUILD_DIRTY: bool = {dirty!r}\n'
-        f'BUILD_TIMESTAMP: str = {datetime.utcnow().isoformat(timespec="seconds")+"Z"!r}\n',
+        f'BUILD_TIMESTAMP: str = {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")!r}\n',
         encoding="utf-8",
     )
     log.ok(f"wrote {BUILDINFO_PY.relative_to(PROJECT_ROOT)} ({version})")
@@ -284,12 +284,36 @@ def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
 # Phase 2+ stubs.
 # ---------------------------------------------------------------------------
 
+def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
+    """Copy a vendor/<sub> directory into staging. Returns file count copied."""
+    if not src.is_dir():
+        log.warn(f"vendor source missing: {src} — {label} not bundled")
+        log.warn("  run: python bundling\\refresh_binaries.py --target " + label)
+        return 0
+    if dest.exists():
+        _rmtree(dest)
+    shutil.copytree(src, dest)
+    count = sum(1 for _ in dest.rglob("*") if _.is_file())
+    log.info(f"  {label}: {count} files copied to {dest.relative_to(PROJECT_ROOT)}")
+    return count
+
+
 def step5_native_binaries(log: _Log) -> None:
-    log.step(5, "Native binaries (Tesseract, Poppler) — Phase 2, skipped")
+    log.step(5, "Native binaries — Tesseract")
+    src = PROJECT_ROOT / "vendor" / "tesseract"
+    dest = STAGING / "App" / "PASkills" / "tesseract"
+    n = _copy_vendor_subtree(src, dest, "tesseract", log)
+    if n:
+        log.ok(f"tesseract bundled ({n} files)")
 
 
 def step6_poppler(log: _Log) -> None:
-    log.step(6, "Poppler — Phase 2, skipped (covered by step 5 stub)")
+    log.step(6, "Native binaries — Poppler")
+    src = PROJECT_ROOT / "vendor" / "poppler"
+    dest = STAGING / "App" / "PASkills" / "poppler"
+    n = _copy_vendor_subtree(src, dest, "poppler", log)
+    if n:
+        log.ok(f"poppler bundled ({n} files)")
 
 
 def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
