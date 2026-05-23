@@ -42,6 +42,7 @@ from ui.tabs import home as tab_home  # noqa: E402
 from ui.tabs import skill_26as as tab_26as  # noqa: E402
 from ui.tabs import skill_bob as tab_bob  # noqa: E402
 from ui.tabs import skill_hsbc as tab_hsbc  # noqa: E402
+from ui import _config as _config_mod  # noqa: E402
 
 
 APP_TITLE = "PA Skills Portable"
@@ -84,6 +85,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
     if launch:
         port = _pick_free_port()
         _write_port_file(port)
+        # Gradio 6 only serves files from cwd by default — explicitly allow
+        # the outputs folder so download links resolve outside the cwd tree.
+        try:
+            allowed = [str(_config_mod.output_dir().resolve())]
+        except Exception:
+            allowed = []
+
         app.launch(
             server_name="127.0.0.1",
             server_port=port,
@@ -92,6 +100,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
             quiet=False,
             theme=_theme.make_theme(),
             css=APP_CSS,
+            allowed_paths=allowed,
         )
     return app
 
@@ -143,10 +152,43 @@ def _write_port_file(port: int) -> None:
 # CLI entry.
 # ---------------------------------------------------------------------------
 
+def _maybe_dispatch_script(argv: list[str]) -> int | None:
+    """
+    PyInstaller-frozen sys.executable points to pa_skills.exe, not python.exe. The
+    skills (agents/skill_*/tools.py) do `subprocess.run([sys.executable, script, ...])`
+    to invoke their deterministic extraction scripts, which would otherwise just
+    relaunch the UI. Detect that pattern and execute the requested .py file via
+    runpy.run_path() with the remaining args as sys.argv.
+
+    Returns the script's exit code if a script was dispatched, else None.
+    """
+    if not argv:
+        return None
+    first = argv[0]
+    if not first.lower().endswith(".py"):
+        return None
+    if not Path(first).is_file():
+        return None
+    import runpy
+    sys.argv = [first] + list(argv[1:])
+    try:
+        runpy.run_path(first, run_name="__main__")
+        return 0
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+
+
 def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
+    # Frozen-mode script-runner shim — see _maybe_dispatch_script().
+    rc = _maybe_dispatch_script(raw_argv)
+    if rc is not None:
+        return rc
+
     parser = argparse.ArgumentParser(prog="ui.webui", description="Launch the PA Skills Portable UI.")
     parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser.")
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     if args.no_browser:
         os.environ["PA_SKILLS_NO_BROWSER"] = "1"
     build_app(launch=True)

@@ -2,8 +2,8 @@
 ui/tabs/skill_26as.py — 26AS skill tab.
 
 Shape per spec §9.2: file upload, model dropdown, Run button, output preview,
-download link. Runs the upstream `agents.skill_26as.agent.run` function with
-a transient legacy-shaped config materialised by ui._config.materialize_legacy_config.
+download link. The Run handler is a generator that yields a "Running..."
+status immediately, then the final result.
 """
 from __future__ import annotations
 
@@ -18,8 +18,6 @@ from .. import _health
 
 
 def _refresh_models() -> list[str]:
-    """Pull the model list from the active endpoint, falling back to the
-    endpoint's default_model if the health probe fails."""
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
@@ -32,15 +30,17 @@ def _refresh_models() -> list[str]:
 
 
 def _run_26as(pdf_file, model_choice):
-    """Invoked when the user clicks Run."""
+    yield "Running — please wait. The LLM call alone can take 30–60s on first invocation.", gr.update(value=None, visible=False)
+
     if pdf_file is None:
-        return "Warning: upload a Form 26AS PDF first.", gr.update(value=None, visible=False)
+        yield "Warning: upload a Form 26AS PDF first.", gr.update(value=None, visible=False)
+        return
 
     pdf_path = Path(pdf_file.name if hasattr(pdf_file, "name") else pdf_file)
     if not pdf_path.is_file():
-        return f"Warning: PDF not found at `{pdf_path}`.", gr.update(value=None, visible=False)
+        yield f"Warning: PDF not found at `{pdf_path}`.", gr.update(value=None, visible=False)
+        return
 
-    # Pre-flight: make sure the active endpoint is reachable.
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
@@ -51,25 +51,26 @@ def _run_26as(pdf_file, model_choice):
             f"Error: active endpoint `{active}` is {health.status}: {health.detail}\n\n"
             "Fix it in `Data\\settings\\config.yaml` and click Refresh status on the Home tab."
         )
-        return msg, gr.update(value=None, visible=False)
+        yield msg, gr.update(value=None, visible=False)
+        return
 
-    # Resolve the output path inside the project's outputs dir.
     out_dir = _config.output_dir()
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     out_path = out_dir / f"{stamp}-{pdf_path.stem}-26AS.xlsx"
 
-    # Materialise the legacy config the skill expects.
     try:
         legacy_cfg = _config.materialize_legacy_config(active)
     except Exception as e:
-        return f"Error: config error: {e}", gr.update(value=None, visible=False)
+        yield f"Error: config error: {e}", gr.update(value=None, visible=False)
+        return
 
-    # Lazy import the skill module (pulls heavy LangChain deps).
     try:
         from agents.skill_26as.agent import run as run_26as
     except Exception as e:
-        msg = "Error: failed to import `agents.skill_26as.agent`:\n" + f"```\n{e}\n```"
-        return msg, gr.update(value=None, visible=False)
+        yield "Error: failed to import `agents.skill_26as.agent`:\n" + f"```\n{e}\n```", gr.update(value=None, visible=False)
+        return
+
+    yield f"Running 26AS extraction against `{ep.get('base_url', '?')}` with model `{model_choice}`…", gr.update(value=None, visible=False)
 
     try:
         agent_reply = run_26as(
@@ -84,25 +85,26 @@ def _run_26as(pdf_file, model_choice):
             f"Error: run failed: {e}\n\n"
             f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
         )
-        return details, gr.update(value=None, visible=False)
+        yield details, gr.update(value=None, visible=False)
+        return
 
     if not out_path.is_file():
         msg = (
             f"Warning: skill returned but no output file was produced at `{out_path}`.\n\n"
             f"Agent reply:\n\n```\n{agent_reply}\n```"
         )
-        return msg, gr.update(value=None, visible=False)
+        yield msg, gr.update(value=None, visible=False)
+        return
 
     msg = (
         f"Extraction complete.\n\n"
         f"**Output:** `{out_path.name}`\n\n"
         f"**Agent reply:**\n\n```\n{agent_reply}\n```"
     )
-    return msg, gr.update(value=str(out_path), visible=True)
+    yield msg, gr.update(value=str(out_path.resolve()), visible=True)
 
 
 def render() -> None:
-    """Render the 26AS tab; must be called inside a gr.Tab context."""
     gr.Markdown(
         """
         ## 26AS — Form 26AS PDF to Excel
@@ -132,7 +134,7 @@ def render() -> None:
             run_btn = gr.Button("Run", variant="primary")
 
         with gr.Column(scale=2):
-            result_md = gr.Markdown("_Awaiting input._")
+            result_md = gr.Markdown("_Awaiting input._", min_height=120)
             download = gr.File(label="Download Excel output", visible=False, interactive=False)
 
     refresh_models_btn.click(
