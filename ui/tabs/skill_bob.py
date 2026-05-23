@@ -1,12 +1,11 @@
 """
 ui/tabs/skill_bob.py — BoB (Bank of Baroda) skill tab.
 
-Shape mirrors skill_26as.py: file upload, model dropdown, Run button,
-output preview, download. BoB uses pdfplumber only — no Tesseract/Poppler.
-
-The Run handler is a generator: it yields an immediate "Running..." update
-so the user sees feedback, then yields the final result. Each early-exit
-condition `yield`s then `return`s to terminate the generator.
+The Run handler is a generator. It builds an accumulating step log so the
+result panel fills up chronologically rather than overwriting itself. The
+slow LLM call is delegated to ui._runner which yields elapsed-time ticks
+every 2 seconds; we consume that via `yield from` so we both forward the
+ticks to Gradio AND capture the worker's return value.
 """
 from __future__ import annotations
 
@@ -18,6 +17,7 @@ import gradio as gr
 
 from .. import _config
 from .. import _health
+from .. import _runner
 
 
 def _refresh_models() -> list[str]:
@@ -33,18 +33,32 @@ def _refresh_models() -> list[str]:
 
 
 def _run_bob(pdf_file, model_choice):
-    """Generator click-handler for the Run button. Yields (status_md, download_update) tuples."""
-    # Immediate feedback so the user sees something happen.
-    yield "Running — please wait. The LLM call alone can take 30–60s on first invocation.", gr.update(value=None, visible=False)
+    log: list[str] = []
+
+    def add(line: str) -> str:
+        log.append(line)
+        return "\n\n".join(log)
+
+    def tick(line: str) -> str:
+        # Replace the last entry if it was a tick from the same step, otherwise append.
+        if log and log[-1].startswith("**Step 3/4** — Agent running"):
+            log[-1] = line
+        else:
+            log.append(line)
+        return "\n\n".join(log)
+
+    yield add("**Step 1/4** — Validating inputs."), gr.update(visible=False)
 
     if pdf_file is None:
-        yield "Warning: upload a Bank of Baroda statement PDF first.", gr.update(value=None, visible=False)
+        yield add("Warning: upload a Bank of Baroda statement PDF first."), gr.update(visible=False)
         return
 
     pdf_path = Path(pdf_file.name if hasattr(pdf_file, "name") else pdf_file)
     if not pdf_path.is_file():
-        yield f"Warning: PDF not found at `{pdf_path}`.", gr.update(value=None, visible=False)
+        yield add(f"Warning: PDF not found at {pdf_path}."), gr.update(visible=False)
         return
+
+    yield add("**Step 2/4** — Checking the LLM endpoint."), gr.update(visible=False)
 
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
@@ -52,12 +66,16 @@ def _run_bob(pdf_file, model_choice):
     ep = endpoints.get(active) or {}
     health = _health.check(ep)
     if not health.ok:
-        msg = (
-            f"Error: active endpoint `{active}` is {health.status}: {health.detail}\n\n"
-            "Fix it in `Data\\settings\\config.yaml` and click Refresh status on the Home tab."
-        )
-        yield msg, gr.update(value=None, visible=False)
+        yield add(
+            f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
+            "Fix it in Data\\settings\\config.yaml and click Refresh status on the Home tab."
+        ), gr.update(visible=False)
         return
+
+    yield add(
+        f"**Step 3/4** — Endpoint OK. Calling agent loop against {ep.get('base_url', '?')} "
+        f"with model {model_choice}. First call can take 30–60s while the model warms up."
+    ), gr.update(visible=False)
 
     out_dir = _config.output_dir()
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
@@ -66,47 +84,54 @@ def _run_bob(pdf_file, model_choice):
     try:
         legacy_cfg = _config.materialize_legacy_config(active)
     except Exception as e:
-        yield f"Error: config error: {e}", gr.update(value=None, visible=False)
+        yield add(f"Error: config error: {e}"), gr.update(visible=False)
         return
 
     try:
         from agents.skill_bob.agent import run as run_bob
     except Exception as e:
-        yield "Error: failed to import `agents.skill_bob.agent`:\n" + f"```\n{e}\n```", gr.update(value=None, visible=False)
+        yield add(f"Error: failed to import agents.skill_bob.agent — {e}"), gr.update(visible=False)
         return
 
-    yield f"Running BoB extraction against `{ep.get('base_url', '?')}` with model `{model_choice}`…", gr.update(value=None, visible=False)
-
-    try:
-        agent_reply = run_bob(
+    def work():
+        return run_bob(
             pdf_path=str(pdf_path),
             output_path=str(out_path),
             config_path=str(legacy_cfg),
             model_override=model_choice or None,
         )
+
+    def tick_factory(elapsed: int):
+        return tick(f"**Step 3/4** — Agent running… still working ({elapsed}s elapsed)"), gr.update(visible=False)
+
+    try:
+        agent_reply = yield from _runner.run_with_progress(work, tick_factory)
     except Exception as e:
         tb = "".join(traceback.format_exception(e))
-        details = (
-            f"Error: run failed: {e}\n\n"
-            f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
-        )
-        yield details, gr.update(value=None, visible=False)
+        yield add(
+            f"Error: run failed: {e}\n\n<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
+        ), gr.update(visible=False)
         return
+
+    yield add("**Step 4/4** — Verifying output."), gr.update(visible=False)
 
     if not out_path.is_file():
-        msg = (
-            f"Warning: skill returned but no output file was produced at `{out_path}`.\n\n"
-            f"Agent reply:\n\n```\n{agent_reply}\n```"
-        )
-        yield msg, gr.update(value=None, visible=False)
+        yield add(
+            f"Warning: skill returned but no output file was produced at {out_path}.\n\n"
+            f"**Agent reply:**\n\n{agent_reply}"
+        ), gr.update(visible=False)
         return
 
-    msg = (
-        f"Extraction complete.\n\n"
-        f"**Output:** `{out_path.name}`\n\n"
-        f"**Agent reply:**\n\n```\n{agent_reply}\n```"
+    out_abs = str(out_path.resolve())
+    msg = add(
+        f"### ✓ Extraction complete\n\n"
+        f"**File:** {out_path.name}\n\n"
+        f"**Saved to:** {out_abs}\n\n"
+        f"Click the **Download CSV** button below to save it locally.\n\n"
+        f"---\n\n"
+        f"**Agent reply:**\n\n{agent_reply}"
     )
-    yield msg, gr.update(value=str(out_path.resolve()), visible=True)
+    yield msg, gr.update(value=out_abs, visible=True)
 
 
 def render() -> None:
@@ -122,32 +147,19 @@ def render() -> None:
 
     with gr.Row():
         with gr.Column(scale=1):
-            pdf_upload = gr.File(
-                label="Bank of Baroda statement PDF",
-                file_types=[".pdf"],
-                type="filepath",
-            )
+            pdf_upload = gr.File(label="Bank of Baroda statement PDF", file_types=[".pdf"], type="filepath")
             initial_models = _refresh_models()
             model_dd = gr.Dropdown(
-                label="Model",
-                choices=initial_models,
+                label="Model", choices=initial_models,
                 value=initial_models[0] if initial_models else None,
-                allow_custom_value=True,
-                interactive=True,
+                allow_custom_value=True, interactive=True,
             )
             refresh_models_btn = gr.Button("Refresh model list", variant="secondary")
             run_btn = gr.Button("Run", variant="primary")
 
         with gr.Column(scale=2):
-            result_md = gr.Markdown("_Awaiting input._", min_height=120)
-            download = gr.File(label="Download CSV output", visible=False, interactive=False)
+            result_md = gr.Markdown("_Awaiting input._", min_height=200)
+            download = gr.DownloadButton(label="Download CSV", visible=False, variant="primary")
 
-    refresh_models_btn.click(
-        fn=lambda: gr.update(choices=_refresh_models()),
-        outputs=model_dd,
-    )
-    run_btn.click(
-        fn=_run_bob,
-        inputs=[pdf_upload, model_dd],
-        outputs=[result_md, download],
-    )
+    refresh_models_btn.click(fn=lambda: gr.update(choices=_refresh_models()), outputs=model_dd)
+    run_btn.click(fn=_run_bob, inputs=[pdf_upload, model_dd], outputs=[result_md, download])
