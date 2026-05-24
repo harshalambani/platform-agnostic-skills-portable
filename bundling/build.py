@@ -10,6 +10,10 @@ Phase 1 scope: steps 1–4 of spec §10.2.
        Output lands in staging/App/PASkills/.
 
 Phase 2a added steps 5–7 (native binary vendoring + agent pull).
+    Step 7 reads bundling/sources.toml to decide where to pull agents/
+    from: "local" (sibling folder) or "git" (clone from upstream URL).
+    Git clones are cached in build_pyinstaller/.agents_cache/.
+    Use --skip-pull to skip this step entirely.
 
 Phase 2b adds steps 8–11:
     8.  Render appinfo.ini + Launcher INI from bundling/templates/, and
@@ -37,6 +41,8 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import fnmatch
+import hashlib
 import os
 import platform
 import re
@@ -49,6 +55,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
 
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 STAGING       = PROJECT_ROOT / "staging"
@@ -57,6 +71,7 @@ BUILD_VENV_DIR = PROJECT_ROOT / "build_pyinstaller"
 BUILD_VENV    = BUILD_VENV_DIR / "venv"
 
 SRC_AGENTS    = PROJECT_ROOT / "src" / "agents"
+AGENTS_CACHE  = BUILD_VENV_DIR / ".agents_cache"
 UI_DIR        = PROJECT_ROOT / "ui"
 BUILDINFO_PY  = UI_DIR / "_buildinfo.py"
 PASKILLS_SPEC = PROJECT_ROOT / "bundling" / "paskills.spec"
@@ -330,12 +345,194 @@ def step6_poppler(log: _Log) -> None:
         log.ok(f"poppler bundled ({n} files)")
 
 
+# ---------------------------------------------------------------------------
+# Step 7 — Pull agents/ from upstream (local copy or git clone).
+# ---------------------------------------------------------------------------
+
+def _parse_sources_toml(path: Path) -> dict:
+    """Parse bundling/sources.toml. Uses tomllib/tomli if available,
+    otherwise a minimal regex parser for the flat key=value format."""
+    text = path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        return tomllib.loads(text)
+
+    # Minimal fallback — handles our simple single-section TOML.
+    result: dict = {}
+    section: dict = result
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            key = line[1:-1].strip()
+            section = result.setdefault(key, {})
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            # Handle arrays: ["*.py", "*.md"]
+            if v.startswith("[") and v.endswith("]"):
+                items = [
+                    i.strip().strip('"').strip("'")
+                    for i in v[1:-1].split(",")
+                    if i.strip()
+                ]
+                section[k] = items
+            else:
+                section[k] = v
+    return result
+
+
+def _matches_globs(rel_path: str, patterns: list[str]) -> bool:
+    """True if rel_path matches any of the glob patterns."""
+    for pat in patterns:
+        if fnmatch.fnmatch(rel_path, pat):
+            return True
+    return False
+
+
+def _sync_agents(source_dir: Path, dest_dir: Path,
+                 includes: list[str], excludes: list[str],
+                 log: _Log) -> int:
+    """Copy files from source_dir to dest_dir, filtered by include/exclude
+    globs. Returns the number of files copied."""
+    if not source_dir.is_dir():
+        log.err(f"source directory not found: {source_dir}")
+        sys.exit(2)
+
+    # Wipe dest and recreate
+    if dest_dir.exists():
+        _rmtree(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for src_file in sorted(source_dir.rglob("*")):
+        if not src_file.is_file():
+            continue
+        rel = src_file.relative_to(source_dir).as_posix()
+
+        if not _matches_globs(rel, includes):
+            continue
+        if _matches_globs(rel, excludes):
+            continue
+
+        dst = dest_dir / src_file.relative_to(source_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst)
+        copied += 1
+
+    return copied
+
+
+def _pull_agents_local(cfg: dict, log: _Log) -> Path:
+    """Resolve the local source path for agents/."""
+    local_path = cfg.get("local_path", "")
+    if not local_path:
+        log.err("sources.toml: kind='local' but local_path is empty")
+        sys.exit(1)
+    # Resolve relative to sources.toml location
+    resolved = (SOURCES_TOML.parent / local_path).resolve()
+    if not resolved.is_dir():
+        log.err(f"local agents source not found: {resolved}")
+        log.err("Ensure the sibling platform-agnostic-skills repo exists, "
+                "or switch sources.toml to kind='git'.")
+        sys.exit(2)
+    log.info(f"source: local  {resolved}")
+    return resolved
+
+
+def _cache_key(url: str, ref: str) -> str:
+    """Deterministic short hash for a (url, ref) pair, used as cache dir name."""
+    return hashlib.sha256(f"{url}@{ref}".encode()).hexdigest()[:12]
+
+
+def _pull_agents_git(cfg: dict, log: _Log) -> Path:
+    """Clone or update the upstream repo into .agents_cache/ and return
+    the path to the agents/ subtree inside the clone."""
+    url = cfg.get("git_url", "")
+    ref = cfg.get("git_ref", "") or "main"
+    if not url:
+        log.err("sources.toml: kind='git' but git_url is empty")
+        sys.exit(1)
+
+    cache_dir = AGENTS_CACHE / _cache_key(url, ref)
+    clone_ok = False
+
+    if cache_dir.is_dir() and (cache_dir / ".git").is_dir():
+        # Cache exists — try to update
+        log.info(f"cache hit: {cache_dir.relative_to(PROJECT_ROOT)}")
+        try:
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin", ref],
+                cwd=cache_dir, check=True,
+                capture_output=True, timeout=120,
+            )
+            subprocess.run(
+                ["git", "checkout", "FETCH_HEAD"],
+                cwd=cache_dir, check=True,
+                capture_output=True, timeout=30,
+            )
+            clone_ok = True
+            log.info(f"updated cache to {ref}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warn(f"git fetch failed ({exc!r}); using stale cache")
+            clone_ok = True  # stale but usable
+    else:
+        # Fresh clone
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        log.info(f"cloning {url}  (ref={ref})")
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", ref, url, str(cache_dir)],
+                check=True, capture_output=True, timeout=300,
+            )
+            clone_ok = True
+            log.info("clone complete")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.err(f"git clone failed: {exc!r}")
+            # If there's a partial clone, clean it up
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+
+    if not clone_ok:
+        log.err("upstream unreachable and no cached clone available")
+        sys.exit(2)
+
+    # The agents/ subtree is expected at the repo root
+    agents_in_clone = cache_dir / "agents"
+    if not agents_in_clone.is_dir():
+        # Try src/agents/ as fallback
+        agents_in_clone = cache_dir / "src" / "agents"
+    if not agents_in_clone.is_dir():
+        log.err(f"agents/ directory not found in cloned repo at {cache_dir}")
+        sys.exit(2)
+
+    log.info(f"source: git  {url} @ {ref}")
+    return agents_in_clone
+
+
 def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
     log.step(7, "Pull agents/ from upstream")
     if args.skip_pull:
         log.info("--skip-pull set; agents/ not refreshed")
         return
-    log.info(f"using already-mirrored src/agents/  ({sum(1 for _ in SRC_AGENTS.rglob('*.py'))} .py files)")
+
+    cfg = _parse_sources_toml(SOURCES_TOML).get("upstream", {})
+    kind = cfg.get("kind", "local")
+    includes = cfg.get("include", ["**/*.py", "**/*.md", "**/*.yaml"])
+    excludes = cfg.get("exclude", ["**/__pycache__/**", "**/*.pyc"])
+
+    if kind == "local":
+        source_dir = _pull_agents_local(cfg, log)
+    elif kind == "git":
+        source_dir = _pull_agents_git(cfg, log)
+    else:
+        log.err(f"sources.toml: unknown kind '{kind}' (expected 'local' or 'git')")
+        sys.exit(1)
+
+    count = _sync_agents(source_dir, SRC_AGENTS, includes, excludes, log)
+    log.ok(f"synced {count} files into src/agents/")
 
 
 # ---------------------------------------------------------------------------
