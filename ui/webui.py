@@ -21,6 +21,18 @@ Source-mode invocation:
 """
 from __future__ import annotations
 
+# Frozen GUI build (console=False in paskills.spec) makes the PyInstaller
+# runw.exe bootloader set sys.stdout / sys.stderr to None. uvicorn's
+# DefaultFormatter then calls sys.stdout.isatty() during dictConfig and
+# crashes - see pitfall #6 in project_paskills_frozen_pitfalls. Redirect
+# the None streams to os.devnull before anything imports uvicorn.
+import os as _os
+import sys as _sys
+if _sys.stdout is None:
+    _sys.stdout = open(_os.devnull, "w", encoding="utf-8")
+if _sys.stderr is None:
+    _sys.stderr = open(_os.devnull, "w", encoding="utf-8")
+
 import argparse
 import json
 import os
