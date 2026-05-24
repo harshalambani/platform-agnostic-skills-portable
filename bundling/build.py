@@ -9,7 +9,14 @@ Phase 1 scope: steps 1–4 of spec §10.2.
     4. Run PyInstaller against ui/webui.py via bundling/paskills.spec.
        Output lands in staging/App/PASkills/.
 
-Phase 2+ steps (5–11 of §10.2) are stubbed with TODO markers but no-op.
+Phase 2a added steps 5–7 (native binary vendoring + agent pull).
+
+Phase 2b adds steps 8–11:
+    8.  Render appinfo.ini + Launcher INI from bundling/templates/.
+    9.  Copy bundling/templates/DefaultData → staging/App/DefaultData.
+    10. Invoke the PortableApps.com Launcher Generator (Windows-only,
+        warn-and-skip if not installed).
+    11. Build a deterministic dist/PASkillsPortable_<version>.zip.
 
 Invocation (from repo root):
     python bundling\\build.py
@@ -17,6 +24,8 @@ Invocation (from repo root):
     python bundling\\build.py --allow-dirty
     python bundling\\build.py --skip-venv     # reuse existing build venv
     python bundling\\build.py --skip-pull     # don't re-pull agents/
+    python bundling\\build.py --skip-launcher # skip step10 + step11
+    python bundling\\build.py --launcher-gen <path-to-generator.exe>
 
 Exit codes:
     0  success
@@ -28,12 +37,15 @@ from __future__ import annotations
 import argparse
 import os
 import platform
+import re
 import shutil
+import string
 import subprocess
 import sys
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Iterable, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,6 +60,20 @@ BUILDINFO_PY  = UI_DIR / "_buildinfo.py"
 PASKILLS_SPEC = PROJECT_ROOT / "bundling" / "paskills.spec"
 REQUIREMENTS  = PROJECT_ROOT / "requirements.txt"
 SOURCES_TOML  = PROJECT_ROOT / "bundling" / "sources.toml"
+
+TEMPLATES_DIR    = PROJECT_ROOT / "bundling" / "templates"
+APPINFO_TMPL     = TEMPLATES_DIR / "appinfo.ini.tmpl"
+LAUNCHER_TMPL    = TEMPLATES_DIR / "PASkillsPortable.ini.tmpl"
+DEFAULTDATA_TMPL = TEMPLATES_DIR / "DefaultData"
+
+# Well-known places the user might keep the PortableApps.com Launcher Generator.
+# step10 also checks PATH and any --launcher-gen override / env var.
+LAUNCHER_GEN_HINTS = (
+    Path(r"C:\PortableApps\PortableApps.com"),
+    Path(r"C:\PortableApps\PortableApps.comLauncher"),
+    Path(r"C:\PortableApps"),
+)
+LAUNCHER_GEN_EXE = "PortableApps.comLauncherGenerator.exe"
 
 
 # ---------------------------------------------------------------------------
@@ -281,13 +307,13 @@ def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2+ stubs.
+# Phase 2a — native binaries + agent pull.
 # ---------------------------------------------------------------------------
 
 def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
     """Copy a vendor/<sub> directory into staging. Returns file count copied."""
     if not src.is_dir():
-        log.warn(f"vendor source missing: {src} — {label} not bundled")
+        log.warn(f"vendor source missing: {src} - {label} not bundled")
         log.warn("  run: python bundling\\refresh_binaries.py --target " + label)
         return 0
     if dest.exists():
@@ -299,7 +325,7 @@ def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
 
 
 def step5_native_binaries(log: _Log) -> None:
-    log.step(5, "Native binaries — Tesseract")
+    log.step(5, "Native binaries - Tesseract")
     src = PROJECT_ROOT / "vendor" / "tesseract"
     dest = STAGING / "App" / "PASkills" / "tesseract"
     n = _copy_vendor_subtree(src, dest, "tesseract", log)
@@ -308,7 +334,7 @@ def step5_native_binaries(log: _Log) -> None:
 
 
 def step6_poppler(log: _Log) -> None:
-    log.step(6, "Native binaries — Poppler")
+    log.step(6, "Native binaries - Poppler")
     src = PROJECT_ROOT / "vendor" / "poppler"
     dest = STAGING / "App" / "PASkills" / "poppler"
     n = _copy_vendor_subtree(src, dest, "poppler", log)
@@ -326,20 +352,224 @@ def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
     log.info(f"using already-mirrored src/agents/  ({sum(1 for _ in SRC_AGENTS.rglob('*.py'))} .py files)")
 
 
-def step8_render_inis(log: _Log) -> None:
-    log.step(8, "Render appinfo.ini + Launcher INI — Phase 2, skipped")
+# ---------------------------------------------------------------------------
+# Phase 2b - INI rendering, launcher generator, zip.
+# ---------------------------------------------------------------------------
+
+_VERSION_CORE_RE = re.compile(r"^(\d+\.\d+\.\d+)")
+
+
+def _portable_versions(version: str) -> tuple[str, str]:
+    """
+    Convert the build version string into the two forms the PortableApps.com
+    Format needs.
+
+    ``VERSION_3`` is the dotted-3 form (e.g. ``0.2.0``); ``VERSION_4`` is the
+    dotted-4 form (e.g. ``0.2.0.0``). ``+dirty``/``+sha`` suffixes are stripped
+    because the PA Launcher's INI parser dislikes ``+`` in version fields.
+    Falls back to ``0.0.0`` / ``0.0.0.0`` when no recognisable core is found
+    (e.g. for the ``0.0.0+local`` fallback emitted when git is unavailable).
+    """
+    m = _VERSION_CORE_RE.match(version)
+    core = m.group(1) if m else "0.0.0"
+    return core, f"{core}.0"
+
+
+def _write_ini(dest: Path, text: str) -> None:
+    """Write an INI string with CRLF line endings, parents created."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    normalised = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    dest.write_bytes(normalised.encode("utf-8"))
+
+
+def step8_render_inis(version: str, log: _Log) -> None:
+    log.step(8, "Render appinfo.ini + Launcher INI")
+
+    v3, v4 = _portable_versions(version)
+    log.info(f"VERSION_3={v3}  VERSION_4={v4}")
+
+    if not APPINFO_TMPL.is_file():
+        log.err(f"missing template: {APPINFO_TMPL}")
+        sys.exit(1)
+    if not LAUNCHER_TMPL.is_file():
+        log.err(f"missing template: {LAUNCHER_TMPL}")
+        sys.exit(1)
+
+    mapping = {"VERSION_3": v3, "VERSION_4": v4}
+
+    appinfo_txt  = string.Template(APPINFO_TMPL.read_text(encoding="utf-8")).safe_substitute(mapping)
+    launcher_txt = string.Template(LAUNCHER_TMPL.read_text(encoding="utf-8")).safe_substitute(mapping)
+
+    appinfo_out  = STAGING / "App" / "AppInfo" / "appinfo.ini"
+    launcher_out = STAGING / "App" / "AppInfo" / "Launcher" / "PASkillsPortable.ini"
+
+    _write_ini(appinfo_out, appinfo_txt)
+    _write_ini(launcher_out, launcher_txt)
+
+    log.ok(f"wrote {appinfo_out.relative_to(PROJECT_ROOT)}")
+    log.ok(f"wrote {launcher_out.relative_to(PROJECT_ROOT)}")
 
 
 def step9_copy_defaults(log: _Log) -> None:
-    log.step(9, "Copy DefaultData → staging — Phase 2, skipped")
+    log.step(9, "Copy DefaultData -> staging")
+
+    if not DEFAULTDATA_TMPL.is_dir():
+        log.warn(f"no DefaultData template at {DEFAULTDATA_TMPL} - skipping")
+        return
+
+    dest = STAGING / "App" / "DefaultData"
+    if dest.exists():
+        _rmtree(dest)
+    shutil.copytree(DEFAULTDATA_TMPL, dest)
+    count = sum(1 for _ in dest.rglob("*") if _.is_file())
+    log.ok(f"DefaultData copied -> {dest.relative_to(PROJECT_ROOT)} ({count} files)")
 
 
-def step10_launcher_gen(log: _Log) -> None:
-    log.step(10, "Invoke PortableApps Launcher Generator — Phase 2, skipped")
+def _find_launcher_generator(override: str | None, log: _Log) -> Path | None:
+    """
+    Locate ``PortableApps.comLauncherGenerator.exe``.
+
+    Order of resolution:
+        1. ``--launcher-gen`` CLI flag (exact file or folder).
+        2. ``PASKILLS_LAUNCHER_GEN`` environment variable.
+        3. ``shutil.which()`` (catches PATH installs).
+        4. Recursive search under each hint in :data:`LAUNCHER_GEN_HINTS`.
+
+    Returns the resolved ``.exe`` path or ``None`` if not found.
+    """
+    def _from(p: Path) -> Path | None:
+        if p.is_file() and p.name.lower() == LAUNCHER_GEN_EXE.lower():
+            return p
+        if p.is_dir():
+            direct = p / LAUNCHER_GEN_EXE
+            if direct.is_file():
+                return direct
+            for found in p.rglob(LAUNCHER_GEN_EXE):
+                return found
+        return None
+
+    if override:
+        c = _from(Path(override))
+        if c is not None:
+            return c
+        log.warn(f"--launcher-gen path did not resolve: {override}")
+
+    env_val = os.environ.get("PASKILLS_LAUNCHER_GEN")
+    if env_val:
+        c = _from(Path(env_val))
+        if c is not None:
+            return c
+
+    on_path = shutil.which(LAUNCHER_GEN_EXE)
+    if on_path:
+        return Path(on_path)
+
+    for hint in LAUNCHER_GEN_HINTS:
+        c = _from(hint)
+        if c is not None:
+            return c
+
+    return None
 
 
-def step11_zip(log: _Log) -> None:
-    log.step(11, "Zip staging → dist — Phase 2, skipped")
+def step10_launcher_gen(args: argparse.Namespace, log: _Log) -> bool:
+    """
+    Invoke the PortableApps.com Launcher Generator against ``staging/``.
+
+    Returns ``True`` when ``staging/PASkillsPortable.exe`` was produced;
+    ``False`` when the generator was missing or failed (warn-and-skip mode,
+    by user request - Phase 2b decision 2026-05-24).
+    """
+    log.step(10, "Invoke PortableApps Launcher Generator")
+
+    gen = _find_launcher_generator(args.launcher_gen, log)
+    if gen is None:
+        log.warn("PortableApps.comLauncherGenerator.exe not found.")
+        log.warn("  Install: https://portableapps.com/apps/development/portableapps.com_launcher")
+        log.warn("  Or pass: --launcher-gen <path-to-generator.exe>")
+        log.warn("  Skipping; staging/PASkillsPortable.exe will not be created.")
+        return False
+
+    log.info(f"using launcher generator: {gen}")
+
+    if platform.system() != "Windows":
+        log.warn("Launcher Generator is a Windows .exe; current platform isn't Windows.")
+        log.warn("  Skipping; rerun this step on Windows to wrap pa_skills.exe.")
+        return False
+
+    # Generator signature: PortableApps.comLauncherGenerator.exe "<App folder>"
+    # where <App folder> is the top of the PA app tree (== STAGING here).
+    res = subprocess.run([str(gen), str(STAGING)], cwd=PROJECT_ROOT, check=False)
+    if res.returncode != 0:
+        log.warn(f"launcher generator exited {res.returncode} - wrapper exe may not be present")
+
+    wrapper = STAGING / "PASkillsPortable.exe"
+    if wrapper.is_file():
+        log.ok(f"wrapper produced: {wrapper.relative_to(PROJECT_ROOT)}")
+        return True
+    log.warn(f"expected wrapper not found at {wrapper}")
+    return False
+
+
+def _iter_staging_files() -> Iterable[Path]:
+    """Walk staging/ in deterministic (sorted) order."""
+    for p in sorted(STAGING.rglob("*")):
+        if p.is_file():
+            yield p
+
+
+def step11_zip(version: str, log: _Log, *, launcher_ok: bool) -> Path | None:
+    """
+    Produce ``dist/PASkillsPortable_<version>.zip`` from ``staging/``.
+
+    File order is deterministic (sorted) and every entry uses a fixed
+    timestamp (2026-01-01 00:00:00) so identical inputs produce a
+    byte-identical archive - useful for cache/SHA verification.
+
+    Skipped (with a loud warning) if the launcher wrapper isn't present,
+    since shipping a zip without ``PASkillsPortable.exe`` defeats the
+    purpose of the portable bundle.
+    """
+    log.step(11, "Zip staging -> dist")
+
+    if not launcher_ok:
+        log.warn("launcher wrapper missing - skipping zip. Run step10 successfully, then re-build.")
+        return None
+
+    if not STAGING.is_dir():
+        log.err(f"staging missing: {STAGING}")
+        sys.exit(2)
+
+    v3, _ = _portable_versions(version)
+    DIST.mkdir(parents=True, exist_ok=True)
+    out = DIST / f"PASkillsPortable_{v3}.zip"
+    if out.exists():
+        out.unlink()
+
+    fixed_time = (2026, 1, 1, 0, 0, 0)
+    count = 0
+    total_bytes = 0
+
+    # Top-level folder inside the zip is "PASkillsPortable/" - what the PA
+    # platform expects when the user drops the zip into its menu's
+    # "Install a new app" flow.
+    top = "PASkillsPortable"
+
+    with zipfile.ZipFile(out, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for path in _iter_staging_files():
+            rel = path.relative_to(STAGING).as_posix()
+            arcname = f"{top}/{rel}"
+            info = zipfile.ZipInfo(filename=arcname, date_time=fixed_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o644 & 0xFFFF) << 16
+            data = path.read_bytes()
+            zf.writestr(info, data)
+            count += 1
+            total_bytes += len(data)
+
+    mb = total_bytes / (1024 * 1024)
+    log.ok(f"wrote {out.relative_to(PROJECT_ROOT)}  ({count} files, {mb:.1f} MiB uncompressed)")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -353,6 +583,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--skip-venv", action="store_true", help="Reuse the existing build venv if present.")
     p.add_argument("--skip-pull", action="store_true", help="Don't refresh src/agents/ from upstream.")
     p.add_argument("--no-color", action="store_true", help="Disable ANSI colour output.")
+    p.add_argument(
+        "--launcher-gen",
+        metavar="PATH",
+        help="Path to PortableApps.comLauncherGenerator.exe (or its folder). "
+             "Otherwise PASKILLS_LAUNCHER_GEN env var, PATH, and standard install hints are searched.",
+    )
+    p.add_argument(
+        "--skip-launcher",
+        action="store_true",
+        help="Don't invoke the launcher generator (also skips the zip step).",
+    )
     return p.parse_args(argv)
 
 
@@ -370,17 +611,26 @@ def main(argv: list[str] | None = None) -> int:
     py = step3_create_venv(args, log)
     step4_run_pyinstaller(py, log)
 
-    # Phase 2+ stubs (noisy "skipped" markers so the build script's shape
-    # matches the spec even before those phases are implemented).
     step5_native_binaries(log)
     step6_poppler(log)
-    step8_render_inis(log)
+    step8_render_inis(version, log)
     step9_copy_defaults(log)
-    step10_launcher_gen(log)
-    step11_zip(log)
 
-    log.ok(f"Phase 1 build complete (version {version}, sha {sha})")
+    if args.skip_launcher:
+        log.step(10, "Invoke PortableApps Launcher Generator - skipped (--skip-launcher)")
+        log.step(11, "Zip staging -> dist - skipped (no launcher)")
+        launcher_ok = False
+        zip_path: Path | None = None
+    else:
+        launcher_ok = step10_launcher_gen(args, log)
+        zip_path = step11_zip(version, log, launcher_ok=launcher_ok)
+
+    log.ok(f"build complete (version {version}, sha {sha})")
     log.info(f"Frozen output: {STAGING / 'App' / 'PASkills' / 'pa_skills.exe'}")
+    if launcher_ok:
+        log.info(f"Wrapper:       {STAGING / 'PASkillsPortable.exe'}")
+    if zip_path is not None:
+        log.info(f"Release zip:   {zip_path}")
     return 0
 
 

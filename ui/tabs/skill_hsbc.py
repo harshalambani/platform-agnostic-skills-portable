@@ -156,7 +156,7 @@ def _run_hsbc(pdf_file, model_choice):
 
 def render() -> None:
     if _NATIVE.ok:
-        banner = f"_Native OCR binaries detected ({_NATIVE.mode} mode)._"
+        banner = "_Native OCR binaries detected._"
     else:
         banner = "_Native binaries missing — see Run button error for details._"
 
