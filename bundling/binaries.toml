@@ -16,7 +16,7 @@ extract_into  = "tesseract"
 [poppler]
 version       = "24.07.0"
 url           = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.07.0-0/Release-24.07.0-0.zip"
-sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+sha256        = "112899b5e13f241a0c4c4d7d95467cf70fb12025b0951ec34a66cf68d4e50a2e"
 extract_into  = "poppler"
 
 [tessdata.eng]
