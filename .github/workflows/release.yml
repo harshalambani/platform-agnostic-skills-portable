@@ -1,0 +1,140 @@
+# .github/workflows/release.yml
+#
+# CI release pipeline for PA Skills Portable.
+#
+# Trigger: push a tag matching "v*" (e.g. v0.3.0).
+# What it does:
+#   1. Checks out the repo (with LFS for vendor/ binaries).
+#   2. Installs Python 3.10 and the PortableApps.com Launcher Generator.
+#   3. Runs `python bundling/build.py` with --skip-pull (agents/ is
+#      already committed in the repo) to produce the frozen exe,
+#      PortableApps wrapper, and release zip.
+#   4. Creates a GitHub Release and attaches the zip.
+#
+# The build uses --skip-pull because the GitHub runner has no sibling
+# platform-agnostic-skills folder. src/agents/ is committed in-tree.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # needed to create GitHub Releases
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ------------------------------------------------------------------
+      # 1. Checkout with LFS (vendor/ has Tesseract + Poppler via LFS)
+      # ------------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0     # full history so git-describe finds tags
+
+      - name: Verify LFS files
+        run: git lfs pull
+
+      # ------------------------------------------------------------------
+      # 2. Python
+      # ------------------------------------------------------------------
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      # ------------------------------------------------------------------
+      # 3. PortableApps.com Launcher Generator
+      #    Downloaded from the official site, extracted, and made available
+      #    to build.py via the --launcher-gen flag.
+      # ------------------------------------------------------------------
+      - name: Install PortableApps.com Launcher Generator
+        shell: pwsh
+        run: |
+          $launcherUrl = "https://download.portableapps.com/portableapps/PortableApps.comLauncher/PortableApps.comLauncher_2.2.4.paf.exe"
+          $installer = "$env:RUNNER_TEMP\PALauncher.paf.exe"
+          $installDir = "$env:RUNNER_TEMP\PALauncher"
+
+          Write-Host "Downloading PortableApps.com Launcher Generator..."
+          Invoke-WebRequest -Uri $launcherUrl -OutFile $installer -UseBasicParsing
+
+          Write-Host "Extracting (7z silent extract)..."
+          # The .paf.exe is a 7-Zip self-extractor; /S = silent, /D = destination
+          Start-Process -FilePath $installer -ArgumentList "/S /D=$installDir" -Wait -NoNewWindow
+
+          # Find the generator exe
+          $gen = Get-ChildItem -Path $installDir -Recurse -Filter "PortableApps.comLauncherGenerator.exe" |
+                 Select-Object -First 1 -ExpandProperty FullName
+
+          if ($gen) {
+            Write-Host "Found generator at: $gen"
+            echo "LAUNCHER_GEN=$gen" >> $env:GITHUB_ENV
+          } else {
+            Write-Host "::warning::Launcher Generator not found after extraction. Build will skip the wrapper."
+            echo "LAUNCHER_GEN=" >> $env:GITHUB_ENV
+          }
+
+      # ------------------------------------------------------------------
+      # 4. Extract version from tag
+      # ------------------------------------------------------------------
+      - name: Extract version from tag
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          Write-Host "Tag: $tag  Version: $version"
+          echo "VERSION=$version" >> $env:GITHUB_ENV
+
+      # ------------------------------------------------------------------
+      # 5. Build
+      # ------------------------------------------------------------------
+      - name: Run build.py
+        shell: pwsh
+        run: |
+          $args = @(
+            "bundling/build.py",
+            "--version", "$env:VERSION",
+            "--skip-pull",
+            "--allow-dirty"
+          )
+          if ($env:LAUNCHER_GEN) {
+            $args += "--launcher-gen"
+            $args += $env:LAUNCHER_GEN
+          }
+          Write-Host "Running: python $($args -join ' ')"
+          python @args
+
+      # ------------------------------------------------------------------
+      # 6. Upload zip as build artifact (useful for debugging)
+      # ------------------------------------------------------------------
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PASkillsPortable_${{ env.VERSION }}
+          path: dist/PASkillsPortable_*.zip
+          if-no-files-found: error
+
+      # ------------------------------------------------------------------
+      # 7. Create GitHub Release and attach the zip
+      # ------------------------------------------------------------------
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: PA Skills Portable ${{ env.VERSION }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/PASkillsPortable_*.zip
+          body: |
+            ## PA Skills Portable ${{ env.VERSION }}
+
+            Download `PASkillsPortable_${{ env.VERSION }}.zip`, extract it,
+            and double-click `PASkillsPortable.exe` to launch.
+
+            Built from commit ${{ github.sha }}.
