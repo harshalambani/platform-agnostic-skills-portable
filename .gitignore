@@ -40,3 +40,6 @@ desktop.ini
 .env
 .env.*
 !.env.example
+
+CmdResult/
+Error/
