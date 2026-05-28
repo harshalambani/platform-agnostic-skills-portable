@@ -1,7 +1,15 @@
 """
-base_agent.py — shared model loader and LangGraph agent builder.
-All three skills import this. To switch models, edit config.yaml or pass
+base_agent.py — shared model loader, LangGraph agent builder, and direct
+(non-agent) chat completion.
+
+All skills import this. To switch models, edit config.yaml or pass
 model_override at runtime (used by the --model CLI flag).
+
+Two execution modes:
+    build_agent()  — LangGraph ReAct agent with tool-calling (existing).
+    run_direct()   — Simple prompt → LLM → response. No tools, no agent
+                     loop. For skills that are pure prompt-in/text-out
+                     (summarisation, translation, etc.).
 """
 import yaml
 from pathlib import Path
@@ -84,3 +92,34 @@ def build_agent(
             tools=tools,
             state_modifier=system_prompt,
         )
+
+
+def run_direct(
+    user_message: str,
+    system_prompt: str | None = None,
+    config_path: str = "config.yaml",
+    model_override: str | None = None,
+) -> str:
+    """
+    Simple prompt → LLM → response.  No tools, no agent loop.
+
+    Use this for skills whose mode is "direct" — they don't need tool-calling
+    and benefit from lower latency and broader model compatibility (any model
+    that supports chat completions works, no function-calling required).
+
+    Args:
+        user_message:   The user's input (may include file contents, etc.).
+        system_prompt:  Optional system prompt (loaded from AGENT.md).
+        config_path:    Path to config.yaml.
+        model_override: Optional model name override.
+
+    Returns:
+        The model's text response.
+    """
+    model = load_model(config_path, model_override)
+    messages = []
+    if system_prompt:
+        messages.append(("system", system_prompt))
+    messages.append(("user", user_message))
+    response = model.invoke(messages)
+    return response.content

@@ -1,0 +1,39 @@
+# skill.yaml — CC Sort skill manifest
+
+name: "CC Sort"
+display_name: "CC Sort — Extract & Organize CC PDFs"
+description: >
+  Extract PDFs from Outlook emails (.msg) and organize credit card statement
+  PDFs by bank and card type. Supports encrypted PDFs with multiple passwords.
+  Auto-detects bank from filename (Axis, HDFC, YES, SBM, ICICI).
+category: "financial"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "input_folder"
+    type: "directory"
+    label: "Input folder (MSG files and/or PDFs)"
+    required: true
+  - name: "password"
+    type: "text"
+    label: "PDF password(s), comma-separated (or leave blank for auto-detect)"
+    required: false
+
+run_args:
+  input_folder: "{inputs.input_folder}"
+  output_folder: "{output_path_dir}"
+  password: "{inputs.password}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  type: "directory"
+  suffix: "CC-Sort"
+  download_label: "Open output folder"
+
+requires:
+  native_binaries: []
+  external_tools: ["qpdf"]

@@ -2,17 +2,21 @@
 ui/tabs/home.py — Home tab.
 
 Renders a short description, the status of each configured LLM endpoint
-(green / amber / red dot per spec §8.2), and a quick-link button per
-skill that's wired in the current build. In Phase 1 the only wired skill
-is 26AS; the BoB / HSBC entries are placeholders.
+(green / amber / red dot per spec §8.2), and a dynamic listing of all
+skills discovered by the registry.
 """
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import gradio as gr
 
 from .. import _config
 from .. import _health
 from .. import _buildinfo
+
+if TYPE_CHECKING:
+    from agents.registry import SkillInfo
 
 
 _STATUS_DOT = {
@@ -51,17 +55,30 @@ def _build_status_markdown() -> str:
     )
 
 
-def render() -> None:
+def _build_skills_markdown(skills: list[SkillInfo]) -> str:
+    """Build a markdown listing of all discovered skills."""
+    if not skills:
+        return "_No skills discovered. Check that agents/*/skill.yaml files exist._"
+    lines = []
+    for s in skills:
+        desc = s.description.strip().split("\n")[0]  # first line only
+        mode_badge = f"`{s.mode}`"
+        lines.append(f"- **{s.name}** — {desc} {mode_badge}")
+    return "\n".join(lines)
+
+
+def render(skills: list[SkillInfo] | None = None) -> None:
     """Render the Home tab; must be called inside a gr.Tab context."""
+    skill_count = len(skills) if skills else 0
+
     gr.Markdown(
         f"""
         # PA Skills Portable
 
-        LLM-powered PDF and statement processing skills, packaged portably.
-        Three skills ship with this build; **Phase 1 wires the 26AS skill only**.
-        BoB and HSBC become available in Phase 2.
+        LLM-powered document processing skills, packaged portably.
+        Works with any LLM — local (Ollama), LAN, or cloud (OpenAI-compatible).
 
-        _Version `{_buildinfo.VERSION}` · commit `{_buildinfo.COMMIT_SHA[:7] if _buildinfo.COMMIT_SHA else 'dev'}`_
+        **{skill_count} skill(s) loaded** · _Version `{_buildinfo.VERSION}` · commit `{_buildinfo.COMMIT_SHA[:7] if _buildinfo.COMMIT_SHA else 'dev'}`_
         """
     )
 
@@ -73,12 +90,5 @@ def render() -> None:
             refresh_btn.click(fn=_build_status_markdown, outputs=status_md)
 
         with gr.Column(scale=1):
-            gr.Markdown(
-                """
-                ## Quick links
-
-                - **26AS** — extract Form 26AS PDF → Excel with one sheet per Part.
-
-                _(BoB, HSBC: coming in Phase 2.)_
-                """
-            )
+            gr.Markdown("## Available skills")
+            gr.Markdown(_build_skills_markdown(skills or []))
