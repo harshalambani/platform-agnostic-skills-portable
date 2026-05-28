@@ -15,9 +15,8 @@ entry_point: "agent:run"
 
 inputs:
   - name: "pdf_dir"
-    type: "file"
-    label: "HSBC statement PDF"
-    file_types: [".pdf"]
+    type: "directory"
+    label: "Folder containing HSBC statement PDF(s)"
     required: true
 
 # HSBC's run() has extra args (work_dir, title) that the generic runner

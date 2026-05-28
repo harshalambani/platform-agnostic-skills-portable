@@ -1,9 +1,14 @@
 """
 agent.py - Extract and Sort CC PDFs LangGraph agent (v3.0).
+
+Frozen-mode note: this skill calls a Python script directly (Step 2).
+In frozen mode sys.executable is pa_skills.exe, so we use runpy.run_path()
+to avoid re-launching the entire exe as a child process. In source mode
+we keep the normal subprocess.run() approach.
 """
-import subprocess
 import sys
 from pathlib import Path
+
 from agents.base_agent import build_agent
 from agents.skill_cc_sort.tools import check_qpdf_available, check_extract_msg_available
 
@@ -11,6 +16,31 @@ SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
 TOOLS = [check_qpdf_available, check_extract_msg_available]
 
 SCRIPT = Path(__file__).parent / "scripts" / "extract_sort_cc_pdfs.py"
+
+
+def _run_script(script: Path, args: list[str]) -> int:
+    """
+    Run a Python script. In frozen mode, uses runpy to avoid re-launching
+    the exe. In source mode, uses subprocess for clean process isolation.
+    """
+    if getattr(sys, "frozen", False):
+        import runpy
+        saved_argv = sys.argv[:]
+        sys.argv = [str(script)] + args
+        try:
+            runpy.run_path(str(script), run_name="__main__")
+            return 0
+        except SystemExit as e:
+            return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+        finally:
+            sys.argv = saved_argv
+    else:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(script)] + args,
+            capture_output=False, text=True,
+        )
+        return result.returncode
 
 
 def run(
@@ -45,16 +75,17 @@ def run(
     check_summary = check_result["messages"][-1].content
     print(f"[Pre-flight] {check_summary}")
 
-    # Step 2: call the script directly with exact paths (no LLM involvement)
-    cmd = [sys.executable, str(SCRIPT), input_folder, output_folder]
+    # Step 2: call the script directly with exact paths (no LLM involvement).
+    # Uses runpy in frozen mode to avoid subprocess → pa_skills.exe → shim overhead.
+    args = [input_folder, output_folder]
     if password:
-        cmd.append(password)
+        args.append(password)
 
-    print(f"\n[Running] {' '.join(str(c) for c in cmd)}\n")
-    result = subprocess.run(cmd, capture_output=False, text=True)
+    print(f"\n[Running] {SCRIPT.name} {' '.join(args)}\n")
+    rc = _run_script(SCRIPT, args)
 
-    if result.returncode != 0:
-        return f"Sort failed with exit code {result.returncode}. Check output above for details."
+    if rc != 0:
+        return f"Sort failed with exit code {rc}. Check output above for details."
 
     return (
         f"Sort completed successfully.\n"

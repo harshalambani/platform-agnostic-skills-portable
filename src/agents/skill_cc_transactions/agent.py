@@ -4,14 +4,41 @@ agent.py - Create CC Transaction List skill.
 This skill runs the extraction script directly — no LLM loop needed because
 the paths are fully determined at call time and no reasoning is required.
 The LLM agent path is preserved in run_with_agent() for future use.
+
+Frozen-mode note: uses runpy.run_path() when sys.frozen is set, avoiding
+the subprocess → pa_skills.exe → shim roundtrip.
 """
-import subprocess
 import sys
 from pathlib import Path
+
 from agents.base_agent import build_agent
 
 SCRIPT = Path(__file__).parent / "scripts" / "create_cc_transaction_list.py"
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
+
+
+def _run_script(script: Path, args: list[str]) -> int:
+    """
+    Run a Python script. In frozen mode, uses runpy to avoid re-launching
+    the exe. In source mode, uses subprocess for clean process isolation.
+    """
+    if getattr(sys, "frozen", False):
+        import runpy
+        saved_argv = sys.argv[:]
+        sys.argv = [str(script)] + args
+        try:
+            runpy.run_path(str(script), run_name="__main__")
+            return 0
+        except SystemExit as e:
+            return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+        finally:
+            sys.argv = saved_argv
+    else:
+        import subprocess
+        result = subprocess.run(
+            [sys.executable, str(script)] + args,
+        )
+        return result.returncode
 
 
 def run(
@@ -38,12 +65,9 @@ def run(
     output_path = Path(output_excel)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    result = subprocess.run(
-        [sys.executable, str(SCRIPT), pdf_dir, output_excel],
-        # capture_output=False streams stdout/stderr to terminal in real time
-    )
-    if result.returncode != 0:
-        return f"ERROR: script exited with code {result.returncode}"
+    rc = _run_script(SCRIPT, [pdf_dir, output_excel])
+    if rc != 0:
+        return f"ERROR: script exited with code {rc}"
     return f"Done. Output: {output_excel}"
 
 
