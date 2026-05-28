@@ -1,0 +1,34 @@
+# skill.yaml — BoB skill manifest
+
+name: "BoB"
+display_name: "BoB — Bank of Baroda to CSV"
+description: >
+  Parse a Bank of Baroda transaction-statement PDF into a flat CSV of rows.
+  Handles multi-page table overflow without column-header re-banner.
+category: "financial"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_path"
+    type: "file"
+    label: "Bank of Baroda statement PDF"
+    file_types: [".pdf"]
+    required: true
+
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "BoB"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []

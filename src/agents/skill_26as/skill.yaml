@@ -1,0 +1,44 @@
+# skill.yaml — 26AS skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "26AS"
+display_name: "26AS — Form 26AS to Excel"
+description: >
+  Convert an Indian Income Tax Form 26AS (TRACES Annual Tax Statement) into
+  a single Excel workbook with one sheet per Part. Per-deductor sub-totals
+  are inserted inline; a Grand Total row closes Part I.
+category: "financial"
+version: "1.0.0"
+
+# Execution mode: "agent" (LangGraph ReAct with tools) or "direct" (prompt → LLM → response).
+mode: "agent"
+
+# The run() function to call. Relative to this skill's package.
+entry_point: "agent:run"
+
+# Input fields rendered in the generic tab. Order matters.
+inputs:
+  - name: "pdf_path"
+    type: "file"
+    label: "Form 26AS PDF"
+    file_types: [".pdf"]
+    required: true
+
+# How the run() function is called. Maps input field names to run() kwargs.
+# Reserved tokens: {output_path}, {config_path}, {model_override}
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".xlsx"
+  suffix: "26AS"
+  download_label: "Download Excel"
+
+# External dependencies beyond pip packages.
+requires:
+  native_binaries: []
+  external_tools: []

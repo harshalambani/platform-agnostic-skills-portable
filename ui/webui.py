@@ -8,8 +8,10 @@ Spec mapping:
              small JSON file the PortableApps Launcher reads to open the
              browser. In source mode we let Gradio open the browser directly.
     §9.4   — Custom black + electric-blue theme (see ui._theme).
-    §14.1  — Phase 1 covers Home + 26AS tabs.
-    §14.2  — Phase 2a adds BoB + HSBC tabs.
+
+Phase 4A: tabs are now auto-generated from agents/*/skill.yaml via the
+skill registry (agents.registry) and the generic tab builder (ui.tabs._generic).
+No more hand-coded per-skill tab files.
 
 Public surface:
     build_app(launch: bool = False)      — construct the Gradio Blocks object.
@@ -51,10 +53,11 @@ if str(SRC) not in sys.path:
 from ui import _theme  # noqa: E402
 from ui import _buildinfo  # noqa: E402
 from ui.tabs import home as tab_home  # noqa: E402
-from ui.tabs import skill_26as as tab_26as  # noqa: E402
-from ui.tabs import skill_bob as tab_bob  # noqa: E402
-from ui.tabs import skill_hsbc as tab_hsbc  # noqa: E402
+from ui.tabs import _generic as tab_generic  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
+
+# Skill registry — auto-discovers agents/*/skill.yaml.
+from agents.registry import discover as _discover_skills  # noqa: E402
 
 
 APP_TITLE = "PA Skills Portable"
@@ -83,16 +86,15 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 policy (127.0.0.1, free port, no public share, no analytics).
                 When False, returns the unlaunched object — used by tests.
     """
+    skills = _discover_skills()
+
     with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
         with gr.Tabs():
             with gr.Tab("Home"):
-                tab_home.render()
-            with gr.Tab("26AS"):
-                tab_26as.render()
-            with gr.Tab("BoB"):
-                tab_bob.render()
-            with gr.Tab("HSBC"):
-                tab_hsbc.render()
+                tab_home.render(skills=skills)
+            for skill in skills:
+                with gr.Tab(skill.name):
+                    tab_generic.render(skill)
 
     if launch:
         port = _pick_free_port()

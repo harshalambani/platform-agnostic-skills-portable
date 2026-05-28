@@ -1,0 +1,35 @@
+# skill.yaml — CC Transactions skill manifest
+
+name: "CC Transactions"
+display_name: "CC Transactions — Extract to Excel"
+description: >
+  Scan a folder of organized credit card PDFs (output of the CC Sort skill),
+  apply bank-specific parsing rules, and produce a consolidated Excel workbook
+  with all transactions plus a summary sheet.
+category: "financial"
+version: "1.0.0"
+
+# This skill calls the script directly — no LLM loop needed.
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_dir"
+    type: "directory"
+    label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort)"
+    required: true
+
+run_args:
+  pdf_dir: "{inputs.pdf_dir}"
+  output_excel: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "CC-Transactions"
+  download_label: "Download Excel"
+
+requires:
+  native_binaries: []
+  external_tools: []
