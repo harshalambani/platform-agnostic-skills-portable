@@ -13,11 +13,14 @@ entry_point: "agent:run"
 
 inputs:
   - name: "pdf_path"
-    type: "file"
-    label: "Bank of Baroda statement PDF"
+    type: "files"
+    label: "Bank of Baroda statement PDF(s)"
     file_types: [".pdf"]
     required: true
 
+# With type: "files", the generic runner stages uploads into a temp
+# directory. {inputs.pdf_path} resolves to that directory path.
+# agent.run() iterates over all PDFs in the directory.
 run_args:
   pdf_path: "{inputs.pdf_path}"
   output_path: "{output_path}"

@@ -86,14 +86,16 @@ def check_extract_msg_available() -> str:
     when emails are saved directly from Outlook). MIME-format MSG files do not need it.
     Returns 'OK: extract-msg <version>' or installation instructions.
     """
-    result = subprocess.run(
-        [sys.executable, "-c", "import extract_msg; print(extract_msg.__version__)"],
-        capture_output=True, text=True,
-    )
-    if result.returncode == 0:
-        return f"OK: extract-msg {result.stdout.strip()}"
-    return (
-        "extract-msg not installed. Required for CDFV2 binary Outlook MSG files.\n"
-        "Install with: pip install extract-msg\n"
-        "Note: MIME-format MSG files work without this library."
-    )
+    # Direct import check — the old subprocess approach used
+    # `sys.executable -c "import ..."` which breaks in frozen mode
+    # because sys.executable is pa_skills.exe, not python.exe.
+    try:
+        import extract_msg
+        version = getattr(extract_msg, "__version__", "unknown")
+        return f"OK: extract-msg {version}"
+    except ImportError:
+        return (
+            "extract-msg not installed. Required for CDFV2 binary Outlook MSG files.\n"
+            "Install with: pip install extract-msg\n"
+            "Note: MIME-format MSG files work without this library."
+        )

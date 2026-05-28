@@ -4,8 +4,9 @@
 > files, and a full codebase audit. This document tracks every known outstanding
 > item across the project so Phase 4 work can proceed with full visibility.
 >
-> **Current state:** v0.3.1 (tag `b156cdc`), 119 uncommitted vendor changes on
-> `main`. Five skills in `src/agents/`, three wired into the UI.
+> **Current state:** Post Phase 4B. Five skills in `src/agents/`, all five
+> wired into the UI via the pluggable architecture (registry + generic tabs).
+> Multi-file upload support added. Frozen-mode subprocess fixes applied.
 
 ---
 
@@ -49,15 +50,14 @@ mismatches between the user's stated decisions and what `c1ff29f` shipped:
 
 ## B. Skills library gaps
 
-### B1. cc_sort and cc_transactions have no UI tabs
+### B1. ~~cc_sort and cc_transactions have no UI tabs~~ — RESOLVED (Phase 4A+4B)
 
-Both skills exist in `src/agents/` with full AGENT.md, agent.py, tools.py,
-and scripts. But `ui/tabs/` has no `skill_cc_sort.py` or
-`skill_cc_transactions.py`, and `ui/webui.py` doesn't import them.
-
-**Note:** cc_sort depends on `qpdf` (external binary, not vendored) and
-`extract-msg` (in requirements.txt). cc_transactions depends on cc_sort's
-output folder structure as input.
+Both skills now render via the generic tab system (`ui/tabs/_generic.py`)
+driven by `skill.yaml` manifests. cc_sort shows folder + password inputs
+with qpdf dependency checking. cc_transactions shows folder input.
+Frozen-mode subprocess calls replaced with `runpy.run_path()` in agent.py.
+`check_extract_msg_available` fixed to use direct import (was broken in
+frozen mode due to `sys.executable -c` pattern).
 
 ### B2. cc_sort requires qpdf — not vendored
 
@@ -65,25 +65,18 @@ The cc_sort skill calls `check_qpdf_available()` and hard-stops if qpdf
 isn't on PATH. Unlike Tesseract/Poppler, qpdf is not in `vendor/` or
 `bundling/binaries.toml`. Either vendor it or document it as a user prereq.
 
-### B3. Skills are not auto-discoverable
+### B3. ~~Skills are not auto-discoverable~~ — RESOLVED (Phase 4A)
 
-Tab registration in `webui.py` is hard-coded:
+`agents/registry.py` scans `agents/*/skill.yaml` at startup and exposes
+`SkillInfo` objects. `ui/webui.py` calls `registry.discover()` and builds
+tabs dynamically via `ui/tabs/_generic.py`. Adding a new skill requires
+only a `skill.yaml` manifest — no code changes to webui.py.
 
-```python
-from ui.tabs import skill_26as as tab_26as
-from ui.tabs import skill_bob as tab_bob
-from ui.tabs import skill_hsbc as tab_hsbc
-```
+### B4. ~~No lightweight (non-agent) execution path~~ — RESOLVED (Phase 4A)
 
-Adding a new skill requires writing a hand-coded tab file AND editing
-`webui.py`. No manifest/registry pattern exists.
-
-### B4. No lightweight (non-agent) execution path
-
-Every skill goes through the full LangGraph ReAct agent loop
-(`create_react_agent` in `base_agent.py`). Simple prompt-in/text-out tasks
-(summarisation, translation) don't need tool-calling overhead. A "direct"
-mode (prompt → LLM → response) would make new skill types practical.
+`base_agent.py` now has `run_direct()` for simple prompt → LLM → response
+skills. Skills declare `mode: "direct"` in `skill.yaml` to use it.
+The generic tab runner dispatches based on mode.
 
 ### B5. All existing skills are financial/document-specific
 
@@ -104,15 +97,10 @@ upstream repo would unblock true CI agent pulls.
 
 ## C. UI / UX gaps
 
-### C1. Home tab text is stale
+### C1. ~~Home tab text is stale~~ — RESOLVED (Phase 4A)
 
-Home tab still reads:
-
-> "Three skills ship with this build; **Phase 1 wires the 26AS skill only**.
-> BoB and HSBC become available in Phase 2."
-
-Both BoB and HSBC have been wired since Phase 2a. The text also references
-"three skills" but there are five in `src/agents/`.
+Home tab now dynamically lists all discovered skills from the registry
+instead of hard-coded text.
 
 ### C2. No Settings tab
 
@@ -121,11 +109,10 @@ switching active endpoints, adding new endpoints, or changing models. The
 `_config.py` adapter has full read/write support — it just lacks a Gradio
 front-end.
 
-### C3. No dynamic skill listing on Home
+### C3. ~~No dynamic skill listing on Home~~ — RESOLVED (Phase 4A)
 
-Home tab's "Quick links" section is hand-written markdown. Once skills are
-auto-discoverable (B3), Home should dynamically list all available skills
-with their descriptions and status.
+Home tab now uses `registry.discover()` to dynamically list all available
+skills with their descriptions. No more hand-written quick-links.
 
 ### C4. No progress/streaming during agent runs
 
@@ -188,11 +175,13 @@ No test sends a real (or mocked) PDF through a skill and verifies the
 output Excel/CSV. This means regressions in the extraction scripts
 (`scripts/*.py`) are only caught by manual smoke testing.
 
-### E3. cc_sort / cc_transactions never tested in the portable build
+### E3. cc_sort / cc_transactions never tested in the portable build — PARTIALLY RESOLVED (Phase 4B)
 
-These skills have never been wired into the UI or smoke-tested in the
-frozen PyInstaller build. Unknown whether their subprocess calls,
-`extract-msg` imports, or qpdf dependency work correctly in frozen mode.
+Both skills are now wired into the UI via generic tabs. Subprocess calls
+in agent.py replaced with `runpy.run_path()` for frozen mode.
+`check_extract_msg_available` fixed (was using broken `sys.executable -c`
+pattern). **Still needed:** actual end-to-end frozen-build smoke test with
+real PDFs. Source-mode UI rendering verified.
 
 ---
 
@@ -222,22 +211,29 @@ These are useful as historical records but there's no single consolidated
 
 How the planned Phase 4 work addresses these gaps:
 
-| Phase 4 step | Gaps addressed |
-|---|---|
-| **4A — Pluggable skill architecture** | B3, B4, C3 |
-| **4B — Wire remaining skills + cleanup** | B1, B2, C1, E3 |
-| **4C — New skill types** | B5 |
-| **4D — UI improvements** (if scoped in) | C2, C4 |
+| Phase 4 step | Gaps addressed | Status |
+|---|---|---|
+| **4A — Pluggable skill architecture** | B3, B4, C1, C3 | **Done** |
+| **4B — Wire remaining skills + cleanup** | B1, E3 (partial) | **Done** |
+| **4C — New skill types** | B5 | Planned |
+| **4D — UI improvements** (if scoped in) | C2, C4 | Planned |
+
+**Also delivered in 4B (beyond original plan):**
+- Multi-file upload input type (`type: "files"` in skill.yaml) — BoB now accepts multiple PDFs
+- HSBC switched to directory input (matches agent API)
+- Frozen-mode `runpy` bypass for cc_sort + cc_transactions agent scripts
+- Fixed `check_extract_msg_available` broken in frozen mode
 
 | Gap | NOT addressed by Phase 4 ABCD |
 |---|---|
 | A1 (code-sign) | Blocked externally |
-| A2 (uncommitted vendor) | Needs user action before Phase 4 starts |
-| A3 (build.py cache discrepancies) | Low priority, can be folded into 4A |
+| A2 (uncommitted vendor) | Needs user action |
+| A3 (build.py cache discrepancies) | Low priority |
+| B2 (qpdf not vendored) | User prereq — runtime check in place |
 | B6 (upstream repo publishing) | Separate decision |
 | D1 (Launcher Gen CI) | Deferred |
 | D2 (auto-update) | Deferred |
 | D3 (Python version mismatch) | Quick fix, can land anytime |
-| D4 (--clean flag) | Can fold into 4A |
+| D4 (--clean flag) | Low priority |
 | E1/E2 (testing) | Should add as Phase 4 deliverable |
 | F1/F2/F3 (docs) | Lower priority, post-4C |

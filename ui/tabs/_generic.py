@@ -7,9 +7,18 @@ execution flow. Replaces the hand-coded per-skill tab files.
 
 The run handler follows the same accumulating-log + yield-from pattern
 established in skill_26as.py / skill_bob.py / skill_hsbc.py.
+
+Supported input types (declared in skill.yaml):
+  - "file"      → single file upload (gr.File)
+  - "files"     → multi-file upload (gr.File with file_count="multiple").
+                   Uploaded files are staged into a temp directory; the
+                   input value passed to the skill is that directory path.
+  - "directory"  → paste a folder path (gr.Textbox)
+  - "text"       → free-text input (gr.Textbox)
 """
 from __future__ import annotations
 
+import shutil
 import tempfile
 import traceback
 from datetime import datetime
@@ -122,6 +131,30 @@ def _make_run_handler(skill: SkillInfo):
                     yield add(f"Warning: file not found at {fpath}"), gr.update(visible=False)
                     return
                 input_map[inp_def.name] = str(fpath)
+            elif inp_def.type == "files":
+                # Multi-file upload: Gradio gives a list of file paths.
+                # Stage them into a temp directory so the skill receives
+                # a single directory path containing all uploaded files.
+                if val is None or (isinstance(val, list) and len(val) == 0):
+                    if inp_def.required:
+                        yield add(f"Warning: please upload at least one file for: {inp_def.label}"), gr.update(visible=False)
+                        return
+                    input_map[inp_def.name] = ""
+                else:
+                    file_list = val if isinstance(val, list) else [val]
+                    stage_dir = Path(tempfile.mkdtemp(
+                        prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-",
+                    ))
+                    for fp in file_list:
+                        src = Path(fp.name if hasattr(fp, "name") else fp)
+                        if src.is_file():
+                            shutil.copy2(src, stage_dir / src.name)
+                    staged_count = len(list(stage_dir.iterdir()))
+                    if staged_count == 0:
+                        yield add(f"Warning: no valid files found for: {inp_def.label}"), gr.update(visible=False)
+                        return
+                    yield add(f"Staged **{staged_count}** file(s) into temp directory."), gr.update(visible=False)
+                    input_map[inp_def.name] = str(stage_dir)
             elif inp_def.type == "directory":
                 if val is None or str(val).strip() == "":
                     if inp_def.required:
@@ -176,7 +209,10 @@ def _make_run_handler(skill: SkillInfo):
                 (v for k, v in input_map.items() if v),
                 "output",
             )
-            stem = Path(primary_input).stem if Path(primary_input).suffix else primary_input
+            # Use .stem for files (strips extension), .name for dirs/paths
+            # (takes last component only — avoids embedding full paths in filename).
+            p = Path(primary_input)
+            stem = p.stem if p.suffix else p.name
             out_path = out_dir / f"{stamp}-{stem}-{skill.output.suffix}{skill.output.extension}"
 
         # -- Materialise legacy config --
@@ -300,6 +336,13 @@ def render(skill: SkillInfo) -> None:
                     comp = gr.File(
                         label=inp.label,
                         file_types=list(inp.file_types) if inp.file_types else None,
+                        type="filepath",
+                    )
+                elif inp.type == "files":
+                    comp = gr.File(
+                        label=inp.label,
+                        file_types=list(inp.file_types) if inp.file_types else None,
+                        file_count="multiple",
                         type="filepath",
                     )
                 elif inp.type == "directory":
