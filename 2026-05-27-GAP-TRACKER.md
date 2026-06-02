@@ -127,12 +127,12 @@ verification with real output from each bank.
 Home tab now dynamically lists all discovered skills from the registry
 instead of hard-coded text.
 
-### C2. No Settings tab
+### C2. ~~No Settings tab~~ — RESOLVED (Phase 4D)
 
-`config.yaml` editing requires opening the file manually. There's no UI for
-switching active endpoints, adding new endpoints, or changing models. The
-`_config.py` adapter has full read/write support — it just lacks a Gradio
-front-end.
+Settings tab added in `ui/tabs/settings.py`. Users can view/switch active
+endpoint, add/edit/delete endpoints (provider, URL, model, API key,
+temperature), and test connectivity — all from the Gradio UI. Changes
+are saved to `config.yaml` immediately via `_config.write_portable_config()`.
 
 ### C3. ~~No dynamic skill listing on Home~~ — RESOLVED (Phase 4A)
 
@@ -260,7 +260,7 @@ How the planned Phase 4 work addresses these gaps:
 | **4A — Pluggable skill architecture** | B3, B4, C1, C3 | **Done** |
 | **4B — Wire remaining skills + cleanup** | B1, E3 (partial) | **Done** |
 | **4C — New skill types + tests** | B5, E1 (partial), E2 (partial) | **Done** |
-| **4D — UI improvements** (if scoped in) | C2, C4 | Planned |
+| **4D — UI improvements** | C2 (done), C4 (pending) | **In progress** |
 
 **Also delivered in 4B (beyond original plan):**
 - Multi-file upload input type (`type: "files"` in skill.yaml) — BoB now accepts multiple PDFs
