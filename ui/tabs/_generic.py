@@ -13,6 +13,9 @@ Supported input types (declared in skill.yaml):
   - "files"     → multi-file upload (gr.File with file_count="multiple").
                    Uploaded files are staged into a temp directory; the
                    input value passed to the skill is that directory path.
+  - "select"    → dropdown with predefined choices (gr.Dropdown).
+                   Requires "options: [...]" in skill.yaml. Allows custom
+                   values typed by the user.
   - "directory"  → paste a folder path (gr.Textbox)
   - "text"       → free-text input (gr.Textbox)
 """
@@ -163,6 +166,8 @@ def _make_run_handler(skill: SkillInfo):
                     input_map[inp_def.name] = ""
                 else:
                     input_map[inp_def.name] = str(val).strip()
+            elif inp_def.type == "select":
+                input_map[inp_def.name] = str(val or "").strip()
             else:  # text
                 input_map[inp_def.name] = str(val or "").strip()
 
@@ -344,6 +349,14 @@ def render(skill: SkillInfo) -> None:
                         file_types=list(inp.file_types) if inp.file_types else None,
                         file_count="multiple",
                         type="filepath",
+                    )
+                elif inp.type == "select":
+                    comp = gr.Dropdown(
+                        label=inp.label,
+                        choices=list(inp.options),
+                        value=inp.options[0] if inp.options else None,
+                        allow_custom_value=True,
+                        interactive=True,
                     )
                 elif inp.type == "directory":
                     comp = gr.Textbox(

@@ -1,0 +1,78 @@
+# skill.yaml — Text Translator skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "translate"
+display_name: "Text Translator"
+description: >
+  Translate text between languages using any chat-capable LLM.
+  Paste or type your text, specify source and target languages,
+  and get the translation back. Works with local models via Ollama
+  — no cloud API required.
+category: "general"
+version: "1.0.0"
+
+# Execution mode: "direct" — prompt → LLM → response. No tools needed.
+mode: "direct"
+
+# The run() function to call. Relative to this skill's package.
+entry_point: "agent:run"
+
+# Input fields rendered in the generic tab. Order matters.
+inputs:
+  - name: "text"
+    type: "text"
+    label: "Text to translate"
+    required: true
+
+  - name: "source_lang"
+    type: "select"
+    label: "Source language"
+    required: false
+    options:
+      - "auto"
+      - "English"
+      - "Hindi"
+      - "Spanish"
+      - "French"
+      - "German"
+      - "Japanese"
+      - "Chinese"
+      - "Arabic"
+      - "Portuguese"
+      - "Russian"
+
+  - name: "target_lang"
+    type: "select"
+    label: "Target language"
+    required: true
+    options:
+      - "English"
+      - "Hindi"
+      - "Spanish"
+      - "French"
+      - "German"
+      - "Japanese"
+      - "Chinese"
+      - "Arabic"
+      - "Portuguese"
+      - "Russian"
+
+# How the run() function is called. Maps input field names to run() kwargs.
+run_args:
+  text: "{inputs.text}"
+  source_lang: "{inputs.source_lang}"
+  target_lang: "{inputs.target_lang}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".txt"
+  suffix: "translation"
+  download_label: "Download Translation"
+
+# External dependencies beyond pip packages.
+requires:
+  native_binaries: []
+  external_tools: []
