@@ -42,10 +42,11 @@ else:
 class SkillInput:
     """One input field declared in skill.yaml."""
     name: str
-    type: str           # "file", "directory", "text"
+    type: str           # "file", "files", "directory", "text", "select"
     label: str
     file_types: tuple[str, ...] = ()
     required: bool = True
+    options: tuple[str, ...] = ()   # choices for type="select"
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             label=inp.get("label", inp["name"]),
             file_types=tuple(inp.get("file_types") or ()),
             required=inp.get("required", True),
+            options=tuple(inp.get("options") or ()),
         ))
 
     # Parse output.

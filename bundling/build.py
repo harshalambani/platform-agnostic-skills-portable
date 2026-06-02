@@ -32,6 +32,7 @@ Invocation (from repo root):
     python bundling\\build.py --skip-pull     # don't re-pull agents/
     python bundling\\build.py --skip-launcher # skip step10 + step11
     python bundling\\build.py --launcher-gen <path-to-generator.exe>
+    python bundling\\build.py --clean         # delete agents cache and exit
 
 Exit codes:
     0  success
@@ -823,12 +824,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Don't invoke the launcher generator (also skips the zip step).",
     )
+    p.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete the agents cache directory (build_pyinstaller/.agents_cache/) and exit.",
+    )
     return p.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     log = _Log(use_color=not args.no_color)
+
+    # --clean: nuke the agents cache and exit.
+    if args.clean:
+        if AGENTS_CACHE.is_dir():
+            import shutil as _shutil
+            _shutil.rmtree(AGENTS_CACHE)
+            log.ok(f"Deleted agents cache: {AGENTS_CACHE}")
+        else:
+            log.info(f"Nothing to clean — {AGENTS_CACHE} does not exist.")
+        return 0
 
     log.info(f"project root: {PROJECT_ROOT}")
     log.info(f"python:       {sys.executable} ({sys.version.split()[0]})")

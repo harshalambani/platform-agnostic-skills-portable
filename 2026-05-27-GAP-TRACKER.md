@@ -4,9 +4,11 @@
 > files, and a full codebase audit. This document tracks every known outstanding
 > item across the project so Phase 4 work can proceed with full visibility.
 >
-> **Current state:** Post Phase 4B. Five skills in `src/agents/`, all five
-> wired into the UI via the pluggable architecture (registry + generic tabs).
-> Multi-file upload support added. Frozen-mode subprocess fixes applied.
+> **Current state:** Post Phase 4C. Eight skills in `src/agents/` — five
+> financial (26as, bob, cc_sort, cc_transactions, hsbc) and three general
+> (summarize, translate, csv_analyzer). All wired into the UI via the
+> pluggable architecture (registry + generic tabs). Multi-file upload
+> support added. Frozen-mode subprocess fixes applied.
 
 ---
 
@@ -78,12 +80,17 @@ only a `skill.yaml` manifest — no code changes to webui.py.
 skills. Skills declare `mode: "direct"` in `skill.yaml` to use it.
 The generic tab runner dispatches based on mode.
 
-### B5. All existing skills are financial/document-specific
+### B5. ~~All existing skills are financial/document-specific~~ — RESOLVED (Phase 4C)
 
-The five skills (26as, bob, cc_sort, cc_transactions, hsbc) are all Indian
-financial document processors. The project goal is "skills that can work on
-any LLM including local ones" — broader skill types (summarisation,
-translation, data analysis) are needed to demonstrate that promise.
+Three non-financial skills added: **Document Summarizer** (`skill_summarize`,
+direct mode), **Text Translator** (`skill_translate`, direct mode), and
+**CSV Data Analyzer** (`skill_csv_analyzer`, agent mode with pandas tools).
+All three use `category: "general"` and require no native binaries.
+The summarizer and translator prove `mode: "direct"` works end-to-end; the
+CSV analyzer is the first `agent`-mode skill outside the financial domain.
+60 unit tests added in `tests/test_phase4c_skills.py` covering registry
+discovery, file reading, truncation, input validation, safety guards, and
+CSV tool functions.
 
 ### B6. Upstream repo has no git history
 
@@ -92,6 +99,24 @@ translation, data analysis) are needed to demonstrate that promise.
 `git_ref`. The build-time pull works for local dev, but CI uses
 `--skip-pull` because there's no remote to clone from. Publishing the
 upstream repo would unblock true CI agent pulls.
+
+### B7. MSG/Email parser skill — candidate
+
+The roadmap (Phase 4C) listed an Email/MSG parser as a candidate skill.
+The cc-sort skill already extracts PDFs from `.msg` files (tested against
+93 MSG files in the Gemma4 session), but there's no standalone skill that
+parses `.msg`/`.eml` files and returns structured fields (sender, date,
+subject, body, attachments). The `extract-msg` dependency is already
+in `requirements.txt`.
+
+### B8. Multi-bank cc_transactions coverage not verified
+
+The Gemma4 session processed 109 PDFs across 9 bank/card formats
+(Axis-Flipkart, Axis-IndianOil, HDFC-Regalia, HSBC-Premier, ICICI-Amazon,
+ICICI-Sapphiro, SBI-BPCL, SBM-Global, YES-Reserv). cc-sort successfully
+sorted all 109, but it's unclear whether `cc_transactions` can actually
+parse the transaction tables from all 9 formats or just a subset. Needs
+verification with real output from each bank.
 
 ---
 
@@ -121,6 +146,14 @@ streaming of intermediate agent thoughts, tool calls, or step-by-step logs
 visible in the UI. The agent's stdout goes to the console (or devnull in
 frozen mode).
 
+### C5. No skill output history
+
+No way to view or re-download outputs from previous skill runs. Users must
+navigate to the `outputs/` directory manually. A history tab or section
+listing previous runs (timestamp, skill name, input file, output file) with
+download links would improve usability. Data source: scan the `outputs/`
+directory.
+
 ---
 
 ## D. Infrastructure / build gaps
@@ -141,39 +174,43 @@ Users have no way to know a new version is available. PortableApps.com has
 an update-checker protocol (`update.ini` + a URL endpoint), but no
 `update.ini` has been created.
 
-### D3. CI uses Python 3.10, pyproject.toml targets 3.13
+### D3. ~~CI uses Python 3.10, pyproject.toml targets 3.13~~ — RESOLVED
 
-`release.yml` sets up Python 3.10, but `pyproject.toml` declares
-`requires-python = ">=3.13"`. This mismatch hasn't caused issues yet
-(PyInstaller doesn't enforce the target's Python version at build time)
-but could bite if a dependency drops 3.10 support or if type hints use
-3.13-only syntax.
+`release.yml` updated from Python 3.10 to 3.13 to match `pyproject.toml`.
 
-### D4. No `--clean` flag on build.py
+### D4. ~~No `--clean` flag on build.py~~ — RESOLVED
 
-The agents cache at `build_pyinstaller/.agents_cache/` can only be cleaned
-manually. A `--clean` flag was requested but never implemented (see A3).
+`--clean` flag added to `bundling/build.py`. Deletes
+`build_pyinstaller/.agents_cache/` and exits.
 
 ---
 
 ## E. Testing gaps
 
-### E1. Tests are smoke-only
+### E1. Tests are smoke-only — PARTIALLY RESOLVED (Phase 4C)
 
 `tests/test_smoke.py` has 8 tests: import checks, buildinfo shape,
-native resolver, and Gradio app construction. No tests exercise:
+native resolver, and Gradio app construction.
 
-- Actual skill execution (even with mocked LLM responses)
+**Added in Phase 4C:** `tests/test_phase4c_skills.py` adds 60 tests
+covering registry discovery, YAML validation, summarizer file reading and
+truncation, translator input validation, CSV analyzer safety guards
+(allowlist/blocklist), and CSV tool functions (describe_csv, query_csv)
+with synthetic fixtures in `tests/fixtures/`.
+
+**Still not tested:**
 - The `_config.py` adapter's legacy materialisation
 - The `_runner.py` background-thread executor
 - The `_health.py` endpoint checker
 - Build pipeline steps
 
-### E2. No end-to-end skill tests
+### E2. No end-to-end skill tests — PARTIALLY RESOLVED (Phase 4C)
 
-No test sends a real (or mocked) PDF through a skill and verifies the
-output Excel/CSV. This means regressions in the extraction scripts
-(`scripts/*.py`) are only caught by manual smoke testing.
+No test sends a real (or mocked) PDF through a financial skill and verifies
+the output Excel/CSV. The Phase 4C CSV analyzer tools are tested end-to-end
+with synthetic CSV data (groupby, filter, mean queries verified against
+known values). Financial skill extraction scripts (`scripts/*.py`) are
+still only caught by manual smoke testing.
 
 ### E3. cc_sort / cc_transactions never tested in the portable build — PARTIALLY RESOLVED (Phase 4B)
 
@@ -182,6 +219,14 @@ in agent.py replaced with `runpy.run_path()` for frozen mode.
 `check_extract_msg_available` fixed (was using broken `sys.executable -c`
 pattern). **Still needed:** actual end-to-end frozen-build smoke test with
 real PDFs. Source-mode UI rendering verified.
+
+### E4. No frozen-build CI smoke test
+
+CI builds the frozen exe but never launches it. A CI step that runs
+`pa_skills.exe`, verifies it starts, binds a port, and responds to a
+health check would catch PyInstaller bundling regressions early. This is
+distinct from E3 (which is about specific skills) — E4 covers the app
+startup path itself.
 
 ---
 
@@ -192,10 +237,9 @@ real PDFs. Source-mode UI rendering verified.
 Current README is a brief description with no setup instructions, no
 architecture overview, no contribution guide, and no screenshots.
 
-### F2. CHANGELOG.md stopped at Phase 1
+### F2. ~~CHANGELOG.md stopped at Phase 1~~ — RESOLVED
 
-`CHANGELOG.md` was created during Phase 1 and hasn't been updated for
-Phases 2a, 2b, or 3.
+`CHANGELOG.md` updated with entries for all phases: 2a, 2b, 3, 4A, 4B, 4C.
 
 ### F3. Build notes are session-specific, not consolidated
 
@@ -215,7 +259,7 @@ How the planned Phase 4 work addresses these gaps:
 |---|---|---|
 | **4A — Pluggable skill architecture** | B3, B4, C1, C3 | **Done** |
 | **4B — Wire remaining skills + cleanup** | B1, E3 (partial) | **Done** |
-| **4C — New skill types** | B5 | Planned |
+| **4C — New skill types + tests** | B5, E1 (partial), E2 (partial) | **Done** |
 | **4D — UI improvements** (if scoped in) | C2, C4 | Planned |
 
 **Also delivered in 4B (beyond original plan):**
@@ -224,6 +268,10 @@ How the planned Phase 4 work addresses these gaps:
 - Frozen-mode `runpy` bypass for cc_sort + cc_transactions agent scripts
 - Fixed `check_extract_msg_available` broken in frozen mode
 
+**Also delivered in 4C (beyond original plan):**
+- 60-test suite in `tests/test_phase4c_skills.py` with synthetic fixtures
+- Expression safety guards (allowlist + blocklist) for CSV analyzer tools
+
 | Gap | NOT addressed by Phase 4 ABCD |
 |---|---|
 | A1 (code-sign) | Blocked externally |
@@ -231,9 +279,14 @@ How the planned Phase 4 work addresses these gaps:
 | A3 (build.py cache discrepancies) | Low priority |
 | B2 (qpdf not vendored) | User prereq — runtime check in place |
 | B6 (upstream repo publishing) | Separate decision |
+| B7 (MSG/Email parser skill) | Candidate — not yet scoped |
+| B8 (multi-bank cc_transactions) | Needs verification |
+| C5 (skill output history) | Deferred to post-4D |
 | D1 (Launcher Gen CI) | Deferred |
 | D2 (auto-update) | Deferred |
-| D3 (Python version mismatch) | Quick fix, can land anytime |
-| D4 (--clean flag) | Low priority |
-| E1/E2 (testing) | Should add as Phase 4 deliverable |
-| F1/F2/F3 (docs) | Lower priority, post-4C |
+| ~~D3 (Python version mismatch)~~ | **Resolved** |
+| ~~D4 (--clean flag)~~ | **Resolved** |
+| E1/E2 (testing) | Partially addressed in 4C; _config/_runner/_health still untested |
+| E4 (frozen-build CI smoke test) | Deferred |
+| F1/F3 (README + build docs) | Lower priority |
+| ~~F2 (CHANGELOG)~~ | **Resolved** |
