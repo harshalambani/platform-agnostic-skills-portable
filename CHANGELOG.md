@@ -12,6 +12,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   values typed by the user.
 - `--clean` flag on `bundling/build.py` — deletes
   `build_pyinstaller/.agents_cache/` and exits.
+- **Agent progress streaming (C4)** — agent-mode skills now show live
+  intermediate steps (tool calls, tool results, LLM reasoning) in the
+  result area instead of just elapsed-time ticks. Implemented via
+  `_StreamingAgentWrapper` in `base_agent.py` and `run_with_streaming()`
+  in `_runner.py`. Zero changes to individual skill files.
+- 17 unit tests for streaming infrastructure in
+  `tests/test_phase4d_streaming.py`.
 
 ### Changed
 - CI Python version bumped from 3.10 to 3.13 to match `pyproject.toml`
