@@ -1,21 +1,26 @@
 """
-ui/_runner.py — shared helper for skill tabs.
+ui/_runner.py — shared helpers for skill tabs.
 
-Runs a blocking callable in a background thread and yields periodic
-status-tick tuples so the Gradio UI can show elapsed seconds while the
-agent loop is in flight.
+Two runners:
 
-`run_with_progress` is itself a generator. The outer skill-tab generator
-should consume it with `agent_reply = yield from runner_gen` — that
-pattern both forwards the tick yields to Gradio AND captures the
-worker's return value (since `yield from` surfaces StopIteration.value).
+    run_with_progress()    — elapsed-time ticks only (direct-mode skills).
+    run_with_streaming()   — real-time agent progress events via a shared
+                             queue (agent-mode skills, Phase 4D / C4).
+
+Both are generators consumed with ``yield from`` — the pattern forwards
+yields to Gradio AND surfaces the worker's return value.
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from typing import Any, Callable
 
+
+# ---------------------------------------------------------------------------
+# Original elapsed-tick runner (unchanged, used for direct-mode skills).
+# ---------------------------------------------------------------------------
 
 def run_with_progress(
     work: Callable[[], Any],
@@ -55,6 +60,144 @@ def run_with_progress(
             break
         elapsed = int(time.monotonic() - start)
         yield tick_factory(elapsed)
+
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+# ---------------------------------------------------------------------------
+# Streaming runner (Phase 4D / C4) — agent-mode skills.
+# ---------------------------------------------------------------------------
+
+def _format_event(event: dict, elapsed: int) -> str:
+    """
+    Turn a progress-queue event dict into a single Markdown line for the
+    Gradio result area.
+    """
+    step = event.get("step", "?")
+    etype = event.get("type", "")
+
+    if etype == "tool_call":
+        tool = event.get("tool", "?")
+        args = event.get("args", "")
+        return (
+            f"**Step {step}** — Calling tool: `{tool}`\n"
+            f"> {args}"
+        )
+    elif etype == "tool_result":
+        tool = event.get("tool", "?")
+        snippet = event.get("snippet", "")
+        return f"**Step {step}** — `{tool}` returned:\n> {snippet}"
+    elif etype == "llm_response":
+        snippet = event.get("snippet", "")
+        if snippet:
+            return f"**Step {step}** — LLM composing answer…"
+        return f"**Step {step}** — LLM responded."
+    elif etype == "llm_start":
+        return f"**Step {step}** — LLM is thinking…"
+    else:
+        return f"**Step {step}** — {etype} ({elapsed}s)"
+
+
+def run_with_streaming(
+    work: Callable[[], Any],
+    log: list[str],
+    make_tuple: Callable[[str], tuple],
+    *,
+    poll_interval: float = 0.5,
+):
+    """
+    Like run_with_progress, but also drains a progress queue populated
+    by the _StreamingAgentWrapper in base_agent.py.
+
+    Before calling ``work()``, sets a progress queue on the current
+    worker thread via ``base_agent.set_progress_queue()``.  The main
+    thread polls the queue and yields formatted markdown.
+
+    Args:
+        work:       zero-arg callable (runs in background thread).
+        log:        mutable list of markdown lines (shared with caller so
+                    it can prepend setup lines before calling us).
+        make_tuple: f(full_markdown) -> Gradio output tuple.
+        poll_interval: seconds between polls (default 0.5 for snappier UI).
+
+    Returns:
+        The worker's return value.
+    """
+    from agents.base_agent import set_progress_queue
+
+    progress_q: queue.Queue = queue.Queue()
+    result: dict[str, Any] = {}
+
+    def _worker() -> None:
+        # Install the queue so build_agent() / run_direct() can find it.
+        set_progress_queue(progress_q)
+        try:
+            result["value"] = work()
+        except BaseException as e:  # noqa: BLE001
+            result["error"] = e
+        finally:
+            set_progress_queue(None)
+            # Sentinel so the main loop knows the worker is done even if
+            # the queue still has items.
+            progress_q.put(None)
+
+    t = threading.Thread(target=_worker, daemon=True)
+    start = time.monotonic()
+    t.start()
+
+    # Track last yielded state to avoid duplicate yields.
+    last_len = len(log)
+
+    while True:
+        # Drain all available events.
+        while True:
+            try:
+                event = progress_q.get_nowait()
+            except queue.Empty:
+                break
+            if event is None:
+                # Sentinel — worker is done.
+                break
+            elapsed = int(time.monotonic() - start)
+            log.append(_format_event(event, elapsed))
+
+        # Yield if log changed.
+        if len(log) != last_len:
+            last_len = len(log)
+            yield make_tuple("\n\n".join(log))
+
+        # Check if worker finished.
+        if not t.is_alive():
+            # Final drain.
+            while True:
+                try:
+                    event = progress_q.get_nowait()
+                except queue.Empty:
+                    break
+                if event is None:
+                    continue
+                elapsed = int(time.monotonic() - start)
+                log.append(_format_event(event, elapsed))
+            if len(log) != last_len:
+                yield make_tuple("\n\n".join(log))
+            break
+
+        # If no events came, yield an elapsed-time tick so the UI
+        # doesn't appear frozen.
+        if len(log) == last_len:
+            elapsed = int(time.monotonic() - start)
+            # Update the last "still working" line in-place.
+            working_line = f"**Running** — still working ({elapsed}s elapsed)"
+            if log and log[-1].startswith("**Running** —"):
+                log[-1] = working_line
+            else:
+                log.append(working_line)
+            last_len = len(log)
+            yield make_tuple("\n\n".join(log))
+
+        time.sleep(poll_interval)
 
     if "error" in result:
         raise result["error"]
