@@ -1,0 +1,44 @@
+# skill.yaml — Document Summarizer skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "summarize"
+display_name: "Document Summarizer"
+description: >
+  Summarise any PDF or text file into a structured Markdown document.
+  Produces sections for Key Points, Detailed Summary, and Conclusions.
+  Works with any chat-capable LLM — no function-calling required.
+category: "general"
+version: "1.0.0"
+
+# Execution mode: "direct" — prompt → LLM → response. No tools needed.
+mode: "direct"
+
+# The run() function to call. Relative to this skill's package.
+entry_point: "agent:run"
+
+# Input fields rendered in the generic tab. Order matters.
+inputs:
+  - name: "file_path"
+    type: "file"
+    label: "Document (PDF or text file)"
+    file_types: [".pdf", ".txt", ".md", ".csv", ".log", ".json", ".xml", ".html"]
+    required: true
+
+# How the run() function is called. Maps input field names to run() kwargs.
+# Reserved tokens: {output_path}, {config_path}, {model_override}
+run_args:
+  file_path: "{inputs.file_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".md"
+  suffix: "summary"
+  download_label: "Download Summary"
+
+# External dependencies beyond pip packages.
+requires:
+  native_binaries: []
+  external_tools: []
