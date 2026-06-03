@@ -11,6 +11,8 @@ import importlib
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
 
@@ -80,16 +82,21 @@ def test_skill_cc_transactions_imports():
 # ---------------------------------------------------------------------------
 
 def test_registry_discovers_all_skills():
-    """Registry must find all 5 skills via skill.yaml manifests."""
+    """Registry must find all 8 skills via skill.yaml manifests."""
     from agents.registry import discover
     skills = discover(refresh=True)
     names = {s.name for s in skills}
+    # Phase 1-3 financial skills
     assert "26AS" in names
     assert "BoB" in names
     assert "HSBC" in names
     assert "CC Sort" in names
     assert "CC Transactions" in names
-    assert len(skills) == 5
+    # Phase 4C general skills
+    assert "summarize" in names
+    assert "translate" in names
+    assert "CSV Analyzer" in names
+    assert len(skills) == 8
 
 
 def test_registry_get_by_name():
@@ -171,6 +178,12 @@ def test_native_resolver_idempotent():
 
 def test_webui_constructs():
     """Gradio app object should construct with dynamic registry-driven tabs."""
+    try:
+        import gradio  # noqa: F401
+        if not hasattr(gradio, "Blocks"):
+            pytest.skip("gradio not fully installed")
+    except ImportError:
+        pytest.skip("gradio not installed")
     from ui import webui
     app = webui.build_app(launch=False)
     assert app is not None
