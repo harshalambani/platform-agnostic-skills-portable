@@ -13,12 +13,25 @@ Tests cover:
 from __future__ import annotations
 
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+
+# ---------------------------------------------------------------------------
+# Mock gradio before importing history — gradio is not required for the
+# pure-logic functions under test and may not be installed in CI / bare
+# Python environments.
+# ---------------------------------------------------------------------------
+try:
+    import gradio  # noqa: F401 — real import; leave sys.modules alone
+except ImportError:
+    _fake_gr = ModuleType("gradio")
+    sys.modules["gradio"] = _fake_gr
 
 
 # ---------------------------------------------------------------------------
