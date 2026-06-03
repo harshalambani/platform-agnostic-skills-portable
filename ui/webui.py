@@ -55,6 +55,7 @@ from ui import _buildinfo  # noqa: E402
 from ui.tabs import home as tab_home  # noqa: E402
 from ui.tabs import _generic as tab_generic  # noqa: E402
 from ui.tabs import settings as tab_settings  # noqa: E402
+from ui.tabs import history as tab_history  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
@@ -96,6 +97,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
             for skill in skills:
                 with gr.Tab(skill.name):
                     tab_generic.render(skill)
+            with gr.Tab("History"):
+                tab_history.render()
             with gr.Tab("Settings"):
                 tab_settings.render()
 
