@@ -4,12 +4,15 @@
 #
 # Trigger: push a tag matching "v*" (e.g. v0.3.0).
 # What it does:
-#   1. Checks out the repo (with LFS for vendor/ binaries).
-#   2. Installs Python 3.10 and the PortableApps.com Launcher Generator.
+#   1. Checks out the repo (with LFS for vendor/ + bundled binaries).
+#   2. Installs Python 3.13.
 #   3. Runs `python bundling/build.py` with --skip-pull (agents/ is
 #      already committed in the repo) to produce the frozen exe,
 #      PortableApps wrapper, and release zip.
 #   4. Creates a GitHub Release and attaches the zip.
+#
+# The Launcher Generator is bundled in bundling/launcher-gen/2.2.4/
+# so CI no longer needs to download it from portableapps.com.
 #
 # The build uses --skip-pull because the GitHub runner has no sibling
 # platform-agnostic-skills folder. src/agents/ is committed in-tree.
@@ -30,7 +33,7 @@ jobs:
 
     steps:
       # ------------------------------------------------------------------
-      # 1. Checkout with LFS (vendor/ has Tesseract + Poppler via LFS)
+      # 1. Checkout with LFS (vendor/ + launcher-gen binaries via LFS)
       # ------------------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,63 +53,7 @@ jobs:
           python-version: "3.13"
 
       # ------------------------------------------------------------------
-      # 3. PortableApps.com Launcher Generator
-      #    Downloaded from the official site, extracted, and made available
-      #    to build.py via the --launcher-gen flag.
-      # ------------------------------------------------------------------
-      - name: Install PortableApps.com Launcher Generator
-        shell: pwsh
-        run: |
-          $launcherUrl = "https://download.portableapps.com/portableapps/PortableApps.comLauncher/PortableApps.comLauncher_2.2.4.paf.exe"
-          $installer = "$env:RUNNER_TEMP\PALauncher.paf.exe"
-          $installDir = "$env:RUNNER_TEMP\PALauncher"
-
-          # Try curl.exe first (better TLS compat on Windows runners)
-          Write-Host "Downloading PortableApps.com Launcher Generator..."
-          $downloaded = $false
-          try {
-            & curl.exe -L -o $installer --fail --silent --show-error $launcherUrl
-            if ($LASTEXITCODE -eq 0 -and (Test-Path $installer)) { $downloaded = $true }
-          } catch { }
-
-          # Fallback: PowerShell with TLS 1.2 forced
-          if (-not $downloaded) {
-            Write-Host "curl failed, trying Invoke-WebRequest with TLS 1.2..."
-            try {
-              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-              Invoke-WebRequest -Uri $launcherUrl -OutFile $installer -UseBasicParsing
-              if (Test-Path $installer) { $downloaded = $true }
-            } catch {
-              Write-Host "::warning::Download failed: $_"
-            }
-          }
-
-          if (-not $downloaded) {
-            Write-Host "::warning::Could not download Launcher Generator. Build will use --skip-launcher."
-            echo "LAUNCHER_GEN=" >> $env:GITHUB_ENV
-            echo "SKIP_LAUNCHER=true" >> $env:GITHUB_ENV
-            exit 0
-          }
-
-          Write-Host "Extracting (7z silent extract)..."
-          Start-Process -FilePath $installer -ArgumentList "/S /D=$installDir" -Wait -NoNewWindow
-
-          # Find the generator exe
-          $gen = Get-ChildItem -Path $installDir -Recurse -Filter "PortableApps.comLauncherGenerator.exe" -ErrorAction SilentlyContinue |
-                 Select-Object -First 1 -ExpandProperty FullName
-
-          if ($gen) {
-            Write-Host "Found generator at: $gen"
-            echo "LAUNCHER_GEN=$gen" >> $env:GITHUB_ENV
-            echo "SKIP_LAUNCHER=false" >> $env:GITHUB_ENV
-          } else {
-            Write-Host "::warning::Launcher Generator not found after extraction. Build will use --skip-launcher."
-            echo "LAUNCHER_GEN=" >> $env:GITHUB_ENV
-            echo "SKIP_LAUNCHER=true" >> $env:GITHUB_ENV
-          }
-
-      # ------------------------------------------------------------------
-      # 4. Extract version from tag
+      # 3. Extract version from tag
       # ------------------------------------------------------------------
       - name: Extract version from tag
         shell: pwsh
@@ -117,42 +64,18 @@ jobs:
           echo "VERSION=$version" >> $env:GITHUB_ENV
 
       # ------------------------------------------------------------------
-      # 5. Build
+      # 4. Build (launcher generator found automatically via bundled copy)
       # ------------------------------------------------------------------
       - name: Run build.py
         shell: pwsh
         run: |
-          $buildArgs = @(
-            "bundling/build.py",
-            "--version", "$env:VERSION",
-            "--skip-pull",
-            "--allow-dirty"
-          )
-          if ($env:LAUNCHER_GEN) {
-            $buildArgs += "--launcher-gen"
-            $buildArgs += $env:LAUNCHER_GEN
-          }
-          if ($env:SKIP_LAUNCHER -eq "true") {
-            $buildArgs += "--skip-launcher"
-          }
-          Write-Host "Running: python $($buildArgs -join ' ')"
-          python @buildArgs
-
-      # If the launcher was skipped, build.py won't produce a zip.
-      # Create one from staging/ so we still have a release artifact.
-      - name: Fallback zip (if launcher was skipped)
-        if: env.SKIP_LAUNCHER == 'true'
-        shell: pwsh
-        run: |
-          $zipName = "PASkillsPortable_$env:VERSION.zip"
-          $zipPath = "dist\$zipName"
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Write-Host "Creating fallback zip (no PASkillsPortable.exe wrapper)..."
-          Compress-Archive -Path "staging\*" -DestinationPath $zipPath -Force
-          Write-Host "Wrote $zipPath"
+          python bundling/build.py `
+            --version "$env:VERSION" `
+            --skip-pull `
+            --allow-dirty
 
       # ------------------------------------------------------------------
-      # 6. Upload zip as build artifact (useful for debugging)
+      # 5. Upload zip as build artifact (useful for debugging)
       # ------------------------------------------------------------------
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -162,7 +85,7 @@ jobs:
           if-no-files-found: error
 
       # ------------------------------------------------------------------
-      # 7. Create GitHub Release and attach the zip
+      # 6. Create GitHub Release and attach the zip
       # ------------------------------------------------------------------
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -179,8 +102,4 @@ jobs:
             Download `PASkillsPortable_${{ env.VERSION }}.zip`, extract it,
             and double-click `PASkillsPortable.exe` to launch.
 
-            Built from commit ${{ github.sha }}.${{ env.SKIP_LAUNCHER == 'true' && '
-
-            > **Note:** This build was produced without the PortableApps.com wrapper
-            > (`PASkillsPortable.exe`) because the Launcher Generator could not be
-            > downloaded during CI. Launch `App/PASkills/pa_skills.exe` directly instead.' || '' }}
+            Built from commit ${{ github.sha }}.

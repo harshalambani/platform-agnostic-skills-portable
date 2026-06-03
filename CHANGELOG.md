@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-06-03
+
+### Fixed
+- **Self-hosted Launcher Generator (D1)** — bundled PortableApps.com
+  Launcher Generator v2.2.4 under `bundling/launcher-gen/2.2.4/` so CI
+  no longer needs to download it from portableapps.com (TLS handshake
+  was failing on GitHub-hosted runners). Every release zip now ships
+  with `PASkillsPortable.exe`.
+- Simplified `release.yml` — removed download step, `SKIP_LAUNCHER`
+  env var, and fallback zip logic.
+- Updated `build.py` `LAUNCHER_GEN_HINTS` to check bundled copy first.
+- Smoke test `test_registry_discovers_all_skills` updated for 8 skills.
+- `test_webui_constructs` skipped gracefully when gradio is not installed.
+- `test_history_tab.py` mocks gradio safely (try real import first).
+
+## [0.4.0] — 2026-06-03
+
 ### Added
 - `type: "select"` input for generic skill tabs — renders a `gr.Dropdown`
   with predefined choices from `options:` in `skill.yaml`. Allows custom
@@ -17,8 +34,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   result area instead of just elapsed-time ticks. Implemented via
   `_StreamingAgentWrapper` in `base_agent.py` and `run_with_streaming()`
   in `_runner.py`. Zero changes to individual skill files.
-- 17 unit tests for streaming infrastructure in
-  `tests/test_phase4d_streaming.py`.
+- **Skill output history tab (C5)** — scan outputs directory, sortable
+  table with download and delete actions.
+- **Document Summarizer** — direct-mode skill for PDF/text summarization.
+- **Text Translator** — direct-mode skill with select dropdowns.
+- **CSV Data Analyzer** — agent-mode skill with pandas tools and safety guards.
+- 60-test suite for Phase 4C skills with synthetic fixtures.
+- 30-test suite for history tab.
+- 17 unit tests for streaming infrastructure.
+- End-to-end test runner (`test_4c_e2e.bat`) for Ollama-backed validation.
 
 ### Changed
 - CI Python version bumped from 3.10 to 3.13 to match `pyproject.toml`
