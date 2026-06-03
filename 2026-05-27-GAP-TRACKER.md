@@ -139,20 +139,25 @@ are saved to `config.yaml` immediately via `_config.write_portable_config()`.
 Home tab now uses `registry.discover()` to dynamically list all available
 skills with their descriptions. No more hand-written quick-links.
 
-### C4. No progress/streaming during agent runs
+### C4. ~~No progress/streaming during agent runs~~ — RESOLVED (Phase 4D)
 
-`_runner.py` shows elapsed-time ticks while the agent runs, but there's no
-streaming of intermediate agent thoughts, tool calls, or step-by-step logs
-visible in the UI. The agent's stdout goes to the console (or devnull in
-frozen mode).
+Agent-mode skills now stream live progress via `_StreamingAgentWrapper`
+in `base_agent.py`. The wrapper intercepts `.invoke()` and uses
+`.stream(stream_mode="updates")` internally, pushing tool_call,
+tool_result, and llm_response events to a `queue.Queue`. The UI runner
+(`_runner.run_with_streaming()`) polls this queue and renders events as
+markdown in real time. Direct-mode skills are unaffected. 17 unit tests
+in `tests/test_phase4d_streaming.py`.
 
-### C5. No skill output history
+### C5. ~~No skill output history~~ — RESOLVED (Phase 4D)
 
-No way to view or re-download outputs from previous skill runs. Users must
-navigate to the `outputs/` directory manually. A history tab or section
-listing previous runs (timestamp, skill name, input file, output file) with
-download links would improve usability. Data source: scan the `outputs/`
-directory.
+History tab added in `ui/tabs/history.py`. Scans the outputs directory,
+parses timestamps and skill suffixes from the `YYYY-MM-DD-HHMMSS-{stem}-{suffix}{ext}`
+filename convention, and presents a sortable table (Date, Skill, Filename, Size)
+with download and delete actions. Click a row to select it, then download or
+delete. Safety guard prevents deletion outside the outputs directory.
+Wired into `webui.py` between the last skill tab and Settings.
+30 unit tests in `tests/test_history_tab.py`.
 
 ---
 
@@ -212,6 +217,12 @@ with synthetic CSV data (groupby, filter, mean queries verified against
 known values). Financial skill extraction scripts (`scripts/*.py`) are
 still only caught by manual smoke testing.
 
+**Added (2026-06-03):** `src/test_4c_e2e_runner.py` + `test_4c_e2e.bat` —
+full Ollama-backed end-to-end test for all 3 Phase 4C skills (summarizer,
+translator, CSV analyzer). Checks LLM output structure, correct numbers,
+and translation divergence. Requires Ollama running locally — run via
+`test_4c_e2e.bat` from the project root.
+
 ### E3. cc_sort / cc_transactions never tested in the portable build — PARTIALLY RESOLVED (Phase 4B)
 
 Both skills are now wired into the UI via generic tabs. Subprocess calls
@@ -260,7 +271,7 @@ How the planned Phase 4 work addresses these gaps:
 | **4A — Pluggable skill architecture** | B3, B4, C1, C3 | **Done** |
 | **4B — Wire remaining skills + cleanup** | B1, E3 (partial) | **Done** |
 | **4C — New skill types + tests** | B5, E1 (partial), E2 (partial) | **Done** |
-| **4D — UI improvements** | C2 (done), C4 (pending) | **In progress** |
+| **4D — UI improvements** | C2 (done), C4 (done), C5 (done) | **Done** |
 
 **Also delivered in 4B (beyond original plan):**
 - Multi-file upload input type (`type: "files"` in skill.yaml) — BoB now accepts multiple PDFs
@@ -281,7 +292,7 @@ How the planned Phase 4 work addresses these gaps:
 | B6 (upstream repo publishing) | Separate decision |
 | B7 (MSG/Email parser skill) | Candidate — not yet scoped |
 | B8 (multi-bank cc_transactions) | Needs verification |
-| C5 (skill output history) | Deferred to post-4D |
+| ~~C5 (skill output history)~~ | **Resolved** |
 | D1 (Launcher Gen CI) | Deferred |
 | D2 (auto-update) | Deferred |
 | ~~D3 (Python version mismatch)~~ | **Resolved** |
