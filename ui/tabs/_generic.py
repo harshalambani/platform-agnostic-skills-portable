@@ -257,14 +257,24 @@ def _make_run_handler(skill: SkillInfo):
         def work():
             return run_fn(**kwargs)
 
-        def tick_factory(elapsed: int):
-            return (
-                tick(f"**Running** — still working ({elapsed}s elapsed)"),
-                gr.update(visible=False),
-            )
-
         try:
-            agent_reply = yield from _runner.run_with_progress(work, tick_factory)
+            if skill.mode == "agent":
+                # Agent-mode: use streaming runner for live progress.
+                def make_tuple(md: str):
+                    return (md, gr.update(visible=False))
+
+                agent_reply = yield from _runner.run_with_streaming(
+                    work, log, make_tuple,
+                )
+            else:
+                # Direct-mode: elapsed-time ticks only.
+                def tick_factory(elapsed: int):
+                    return (
+                        tick(f"**Running** — still working ({elapsed}s elapsed)"),
+                        gr.update(visible=False),
+                    )
+
+                agent_reply = yield from _runner.run_with_progress(work, tick_factory)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
             yield add(
