@@ -43,15 +43,21 @@ as separate processes via subprocess; it does not link against Poppler
 libraries, and is therefore distributed under its own Apache 2.0 license.
 
 ================================================================================
-PortableApps.com Launcher
+PortableApps.com Launcher + Launcher Generator
 ================================================================================
 Source:    https://portableapps.com/development/portableapps_launcher
+Download:  https://download.portableapps.com/portableapps/PortableApps.comLauncher/PortableApps.comLauncher_2.2.4.paf.exe
 License:   GPL-2.0-only
 Copyright (c) Rare Ideas, LLC and the PortableApps.com contributors.
 
 The launcher executable (PASkillsPortable.exe) is generated from the
 PortableApps.com Launcher Generator and remains under its original GPL
-license. The accompanying configuration files (appinfo.ini,
+license. A copy of the Launcher Generator (v2.2.4) is bundled under
+bundling/launcher-gen/ so that CI builds can produce complete release
+zips without downloading from portableapps.com at build time. The
+bundled NSIS compiler (App/NSIS/) is also GPL-2.0-licensed.
+
+The accompanying configuration files (appinfo.ini,
 PASkillsPortable.ini) authored by this project are released under the
 Apache 2.0 license stated above.
 

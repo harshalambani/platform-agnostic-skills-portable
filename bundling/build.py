@@ -85,6 +85,9 @@ LAUNCHER_TMPL    = TEMPLATES_DIR / "PASkillsPortable.ini.tmpl"
 DEFAULTDATA_TMPL = TEMPLATES_DIR / "DefaultData"
 
 LAUNCHER_GEN_HINTS = (
+    # Bundled copy (CI + local fallback) — checked first
+    PROJECT_ROOT / "bundling" / "launcher-gen" / "2.2.4",
+    # Common local install paths
     Path(r"C:\PortableApps\PortableApps.com"),
     Path(r"C:\PortableApps\PortableApps.comLauncher"),
     Path(r"C:\PortableApps"),
