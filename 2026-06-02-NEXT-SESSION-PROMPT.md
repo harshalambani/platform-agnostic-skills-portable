@@ -9,58 +9,56 @@
 
 Project: `C:\Users\inabm\Documents\Cowork Playground\platform-agnostic-skills-portable`
 
-Session 2026-06-02 delivered:
-- `type: "select"` input for generic tabs (translator has language dropdowns)
-- CI Python 3.13 (D3), `--clean` flag (D4), CHANGELOG catch-up (F2) — all resolved
-- Gap tracker expanded with 4 new gaps (B7, B8, C5, E4)
-- **Settings tab** (`ui/tabs/settings.py`) — endpoint management UI (C2 resolved)
-- Memory consolidated (3 phase-status files → 1)
+Session 2026-06-02 (second) delivered:
+- **Agent progress streaming (C4)** — agent-mode skills now show live
+  tool calls, tool results, and LLM reasoning steps in the result area
+  instead of just elapsed-time ticks
+- `_StreamingAgentWrapper` in `base_agent.py` — intercepts `.invoke()`
+  → `.stream(stream_mode="updates")`, pushes events to a `queue.Queue`
+- `run_with_streaming()` in `_runner.py` — polls the queue from the main
+  thread, renders events as markdown
+- 17 unit tests in `tests/test_phase4d_streaming.py`
+- Zero changes to individual skill files
+- Gap tracker updated: C4 resolved, Phase 4D → Done
 
-The project now has 8 skills, a Settings tab, 60 unit tests, and a fully
-pluggable architecture. Gap tracker is current at `2026-05-27-GAP-TRACKER.md`.
+The project now has 8 skills, Settings tab, 77 unit tests (60 + 17),
+streaming agent progress, and a fully pluggable architecture.
+Gap tracker is current at `2026-05-27-GAP-TRACKER.md`.
 
 ## Read these files first
 
 1. `2026-05-27-GAP-TRACKER.md` — master list of all open items with status
-2. `ui/tabs/settings.py` — just-completed Settings tab (for context)
+2. `src/agents/base_agent.py` — streaming wrapper lives here
+3. `ui/_runner.py` — both runners (elapsed-tick + streaming)
 
 ## Recommended open items (in priority order)
 
-### 1. Phase 4D — Agent Progress Streaming (C4, highest remaining impact)
+### 1. End-to-end LLM testing on local machine (highest priority)
 
-**Why:** Agent runs show no intermediate progress (just elapsed-time
-ticks). Users can't tell what the agent is doing or whether it's stuck.
-
-**Scope:**
-- Surface LangGraph intermediate messages (tool calls, thoughts) in the
-  result markdown area during runs.
-- `_runner.py` already has the yield-from pattern — extend it to stream
-  agent steps.
-- Options: (a) LangGraph callback handler that yields intermediate events,
-  (b) stdout capture from the agent process, (c) Gradio Chatbot component
-  for agent turns as chat bubbles.
-
-**Key files:**
-- `ui/_runner.py` — background-thread executor with progress ticks
-- `ui/tabs/_generic.py` — run handler that yields (markdown, download_update)
-- `src/agents/base_agent.py` — `build_agent()` + `run_direct()`
-
-### 2. End-to-end LLM testing on local machine
-
-**Why:** The 60 sandbox tests cover everything except the actual LLM
-round-trip. These need Ollama running locally.
+**Why:** The 77 sandbox tests cover everything except the actual LLM
+round-trip. The new streaming code especially needs real-world validation.
 
 **Manual test plan:**
-- Summarizer: upload a PDF, confirm `.md` output has Key Points /
-  Detailed Summary / Conclusions sections
-- Translator: paste text, select source=English target=Hindi, confirm
-  translated `.txt` output
-- CSV Analyzer: upload `tests/fixtures/sales.csv`, ask "What is the
-  total revenue by region?", confirm `.md` output cites correct numbers
-  (North=3945, South=3790, East=3750, West=2227.5)
+- **CSV Analyzer** (agent-mode, best streaming test): upload
+  `tests/fixtures/sales.csv`, ask "What is the total revenue by region?",
+  confirm live tool call/result steps appear in the result area, and
+  `.md` output cites correct numbers (North=3945, South=3790, East=3750,
+  West=2227.5)
+- **Summarizer** (direct-mode): upload a PDF, confirm `.md` output has
+  Key Points / Detailed Summary / Conclusions sections
+- **Translator** (direct-mode): paste text, select source=English
+  target=Hindi, confirm translated `.txt` output
 - **Settings tab**: switch endpoints, test connection, add/delete endpoint
 
-### 3. New gaps from session scan (lower priority)
+### 2. Streaming edge cases to verify
+
+- What happens if the LLM errors mid-stream (e.g. Ollama OOM)?
+- Does the final return value from `_StreamingAgentWrapper.invoke()`
+  match what the skill expects? (`result["messages"][-1].content`)
+  — the `get_state()` path vs the fallback path both need testing.
+- Multi-step agent runs (3+ tool calls) — do step numbers render correctly?
+
+### 3. New gaps (lower priority)
 
 - **B7** — MSG/Email parser skill (candidate, not yet scoped)
 - **B8** — Multi-bank cc_transactions coverage not verified
@@ -76,7 +74,7 @@ round-trip. These need Ollama running locally.
 - B6 (upstream repo publishing) — separate decision
 - D1 (Launcher Generator CI) — TLS failure on Azure runners, fallback works
 - D2 (auto-update mechanism) — post-4D
-- F1/F3 (README + consolidated build docs) — post-4D
+- F1/F3 (README + consolidated build docs) — lower priority
 
 ---
 
@@ -84,15 +82,16 @@ round-trip. These need Ollama running locally.
 
 | File | Purpose |
 |---|---|
-| `src/agents/registry.py` | Skill auto-discovery, SkillInfo + SkillInput (with `options` for select) |
-| `src/agents/base_agent.py` | `build_agent()` + `run_direct()` |
-| `ui/tabs/_generic.py` | Generic tab rendering (file, files, select, directory, text) + run handler |
+| `src/agents/base_agent.py` | `build_agent()`, `run_direct()`, `_StreamingAgentWrapper`, progress queue |
+| `src/agents/registry.py` | Skill auto-discovery, SkillInfo + SkillInput |
+| `ui/tabs/_generic.py` | Generic tab rendering + run handler (streaming for agent, ticks for direct) |
 | `ui/tabs/settings.py` | Settings tab — endpoint management UI |
-| `ui/_runner.py` | Background-thread executor with progress ticks |
+| `ui/_runner.py` | `run_with_progress()` (elapsed ticks) + `run_with_streaming()` (live events) |
 | `ui/_config.py` | Config loading, legacy materialisation, read/write support |
 | `ui/_health.py` | LLM endpoint health check |
 | `ui/webui.py` | Main Gradio app construction |
 | `tests/test_phase4c_skills.py` | 60 unit tests for Phase 4C skills |
+| `tests/test_phase4d_streaming.py` | 17 unit tests for streaming infrastructure |
 
 ## CLAUDE.md reminders
 
