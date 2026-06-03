@@ -1,0 +1,50 @@
+# skill.yaml — CSV Data Analyzer skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "CSV Analyzer"
+display_name: "CSV Data Analyzer"
+description: >
+  Ask natural-language questions about any CSV file. The LLM inspects
+  the data structure, runs pandas operations via tool calls, and returns
+  a Markdown answer with cited numbers. Requires a model that supports
+  function calling (e.g. llama3.1, qwen3, gemma4 via Ollama).
+category: "general"
+version: "1.0.0"
+
+# Execution mode: "agent" — LangGraph ReAct with tool-calling.
+mode: "agent"
+
+# The run() function to call. Relative to this skill's package.
+entry_point: "agent:run"
+
+# Input fields rendered in the generic tab. Order matters.
+inputs:
+  - name: "csv_path"
+    type: "file"
+    label: "CSV file"
+    file_types: [".csv"]
+    required: true
+
+  - name: "question"
+    type: "text"
+    label: "Question about this data (e.g. 'What is the average revenue by region?')"
+    required: true
+
+# How the run() function is called. Maps input field names to run() kwargs.
+run_args:
+  csv_path: "{inputs.csv_path}"
+  question: "{inputs.question}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".md"
+  suffix: "analysis"
+  download_label: "Download Analysis"
+
+# External dependencies beyond pip packages.
+requires:
+  native_binaries: []
+  external_tools: []
