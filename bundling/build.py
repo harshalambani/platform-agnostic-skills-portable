@@ -349,6 +349,15 @@ def step6_poppler(log: _Log) -> None:
         log.ok(f"poppler bundled ({n} files)")
 
 
+def step6b_qpdf(log: _Log) -> None:
+    log.step("6b", "Native binaries - qpdf")
+    src = PROJECT_ROOT / "vendor" / "qpdf"
+    dest = STAGING / "App" / "PASkills" / "qpdf"
+    n = _copy_vendor_subtree(src, dest, "qpdf", log)
+    if n:
+        log.ok(f"qpdf bundled ({n} files)")
+
+
 # ---------------------------------------------------------------------------
 # Step 7 — Pull agents/ from upstream (local copy or git clone).
 # ---------------------------------------------------------------------------
@@ -861,6 +870,7 @@ def main(argv: list[str] | None = None) -> int:
 
     step5_native_binaries(log)
     step6_poppler(log)
+    step6b_qpdf(log)
     step8_render_inis(version, log)
     step9_copy_defaults(log)
 

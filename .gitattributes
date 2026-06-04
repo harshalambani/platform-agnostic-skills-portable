@@ -1,5 +1,5 @@
 # Git LFS tracking — see spec section 10.5.
-# Native binaries (Tesseract, Poppler) and OCR language data live under vendor/
+# Native binaries (Tesseract, Poppler, qpdf) and OCR language data live under vendor/
 # and are tracked via LFS so the repo can be cloned for fully air-gapped builds.
 
 vendor/** filter=lfs diff=lfs merge=lfs -text

@@ -19,6 +19,12 @@ url           = "https://github.com/oschwartz10612/poppler-windows/releases/down
 sha256        = "112899b5e13f241a0c4c4d7d95467cf70fb12025b0951ec34a66cf68d4e50a2e"
 extract_into  = "poppler"
 
+[qpdf]
+version       = "11.9.1"
+url           = "https://github.com/qpdf/qpdf/releases/download/v11.9.1/qpdf-11.9.1-msvc64.zip"
+sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+extract_into  = "qpdf"
+
 [tessdata.eng]
 version       = "4.1.0"
 url           = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata"
