@@ -167,9 +167,38 @@ def install_poppler(meta: dict, tmp: Path) -> None:
     _eprint(f"  poppler: {sum(1 for _ in (dest / 'bin').iterdir())} files under vendor/poppler/bin/")
 
 
+def install_qpdf(meta: dict, tmp: Path) -> None:
+    """Extract the qpdf-msvc64 zip, copy bin/* into vendor/qpdf/bin/."""
+    dest = VENDOR / "qpdf"
+    if dest.exists():
+        shutil.rmtree(dest)
+    (dest / "bin").mkdir(parents=True, exist_ok=True)
+
+    extract_root = tmp / "qpdf_unzipped"
+    extract_root.mkdir()
+    _eprint(f"  unzipping into {extract_root}")
+    with zipfile.ZipFile(meta["_local_zip"]) as zf:
+        zf.extractall(extract_root)
+
+    # qpdf-msvc64 ships qpdf-<version>/bin/qpdf.exe (nested one level).
+    qpdf_exe = next(extract_root.rglob("qpdf.exe"), None)
+    if qpdf_exe is None:
+        raise RuntimeError("qpdf.exe not found in extracted archive")
+    bin_dir = qpdf_exe.parent
+    _eprint(f"  using bin/ source: {bin_dir.relative_to(extract_root)}")
+
+    n = 0
+    for f in bin_dir.iterdir():
+        if f.is_file():
+            shutil.copy2(f, dest / "bin" / f.name)
+            n += 1
+    _eprint(f"  qpdf: {n} files under vendor/qpdf/bin/")
+
+
 INSTALLERS = {
     "tesseract": install_tesseract,
     "poppler":   install_poppler,
+    "qpdf":      install_qpdf,
 }
 
 
@@ -289,6 +318,31 @@ def install_from_local(name: str, src_root: Path) -> bool:
         print(f"  copied {n} files into vendor/poppler/bin/")
         return True
 
+    if name == "qpdf":
+        # Either src_root contains bin/, or src_root IS the bin folder.
+        if (src_root / "bin").is_dir():
+            bin_dir = src_root / "bin"
+        elif (src_root.name == "bin") and (src_root / "qpdf.exe").is_file():
+            bin_dir = src_root
+        else:
+            cand = next(src_root.rglob("qpdf.exe"), None)
+            if cand is None:
+                raise RuntimeError(f"qpdf.exe not found under {src_root}")
+            bin_dir = cand.parent
+        print(f"  using bin/ source: {bin_dir}")
+
+        dest = VENDOR / "qpdf"
+        if dest.exists():
+            shutil.rmtree(dest)
+        (dest / "bin").mkdir(parents=True, exist_ok=True)
+        n = 0
+        for f in bin_dir.iterdir():
+            if f.is_file():
+                shutil.copy2(f, dest / "bin" / f.name)
+                n += 1
+        print(f"  copied {n} files into vendor/qpdf/bin/")
+        return True
+
     raise ValueError(f"install_from_local doesn't know how to handle '{name}'")
 
 
@@ -299,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--target",
-        choices=("tesseract", "poppler", "all"),
+        choices=("tesseract", "poppler", "qpdf", "all"),
         default="all",
         help="Which native binary to refresh.",
     )
@@ -315,14 +369,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Skip Poppler download; copy from a local Poppler tree. "
              "Path should contain a bin/ folder with pdftoppm.exe.",
     )
+    parser.add_argument(
+        "--from-qpdf",
+        metavar="PATH",
+        help="Skip qpdf download; copy from a local qpdf install. "
+             "Path should contain a bin/ folder with qpdf.exe.",
+    )
     args = parser.parse_args(argv)
 
     config = _load_binaries()
 
-    targets = ("tesseract", "poppler") if args.target == "all" else (args.target,)
+    targets = ("tesseract", "poppler", "qpdf") if args.target == "all" else (args.target,)
     local_from = {
         "tesseract": args.from_tesseract,
         "poppler":   args.from_poppler,
+        "qpdf":      args.from_qpdf,
     }
 
     all_ok = True

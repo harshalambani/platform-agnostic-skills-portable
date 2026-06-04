@@ -57,9 +57,13 @@ from ui.tabs import _generic as tab_generic  # noqa: E402
 from ui.tabs import settings as tab_settings  # noqa: E402
 from ui.tabs import history as tab_history  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
+from ui import _update  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
 from agents.registry import discover as _discover_skills  # noqa: E402
+
+# Kick off background update check early so it's ready when Home renders.
+_update.start_check()
 
 
 APP_TITLE = "PA Skills Portable"

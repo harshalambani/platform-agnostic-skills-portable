@@ -1,16 +1,18 @@
 """
 ui/_native.py — resolves and registers the bundled native binaries
-(Tesseract OCR + Poppler) so subprocess calls inside the skills find them
-without the user touching PATH.
+(Tesseract OCR, Poppler, qpdf) so subprocess calls inside the skills find
+them without the user touching PATH.
 
 Resolution layers:
     Frozen build:   pa_skills.exe lives at  staging/App/PASkills/pa_skills.exe
                     Tesseract:              .../PASkills/tesseract/tesseract.exe
                     Poppler:                .../PASkills/poppler/bin/pdftoppm.exe
+                    qpdf:                   .../PASkills/qpdf/bin/qpdf.exe
                     (i.e., siblings of pa_skills.exe, not inside _internal/)
 
     Source mode:    vendor/tesseract/tesseract.exe
                     vendor/poppler/bin/pdftoppm.exe
+                    vendor/qpdf/bin/qpdf.exe
 
 Public surface:
     ensure_native_path() -> NativeStatus
@@ -40,6 +42,8 @@ class NativeStatus:
     tessdata_dir: Path | None
     poppler_bin:  Path | None      # the bin/ folder, not pdftoppm.exe itself
     pdftoppm_exe: Path | None
+    qpdf_bin:     Path | None      # the bin/ folder containing qpdf.exe
+    qpdf_exe:     Path | None
     mode: str                      # "frozen" or "source"
 
     @property
@@ -56,6 +60,10 @@ class NativeStatus:
             parts.append(f"pdftoppm={self.pdftoppm_exe.name}")
         else:
             parts.append("pdftoppm=MISSING")
+        if self.qpdf_exe and self.qpdf_exe.is_file():
+            parts.append(f"qpdf={self.qpdf_exe.name}")
+        else:
+            parts.append("qpdf=MISSING")
         return f"native ({self.mode}): " + ", ".join(parts)
 
 
@@ -66,20 +74,20 @@ def _frozen_root() -> Path | None:
     return None
 
 
-def _candidate_roots() -> tuple[Path | None, Path | None, str]:
+def _candidate_roots() -> tuple[Path | None, Path | None, Path | None, str]:
     """
-    Return (tesseract_root, poppler_root, mode).
-    tesseract_root contains tesseract.exe; poppler_root contains the bin/ subfolder.
+    Return (tesseract_root, poppler_root, qpdf_root, mode).
+    tesseract_root contains tesseract.exe; poppler_root and qpdf_root contain bin/ subfolders.
     """
     frozen = _frozen_root()
     if frozen is not None:
-        return (frozen / "tesseract", frozen / "poppler", "frozen")
-    return (PROJECT_ROOT / "vendor" / "tesseract", PROJECT_ROOT / "vendor" / "poppler", "source")
+        return (frozen / "tesseract", frozen / "poppler", frozen / "qpdf", "frozen")
+    return (PROJECT_ROOT / "vendor" / "tesseract", PROJECT_ROOT / "vendor" / "poppler", PROJECT_ROOT / "vendor" / "qpdf", "source")
 
 
 def native_status() -> NativeStatus:
     """Inspect-only resolver. Does not mutate os.environ."""
-    tess_root, popp_root, mode = _candidate_roots()
+    tess_root, popp_root, qpdf_root, mode = _candidate_roots()
     tess_exe = (tess_root / "tesseract.exe") if tess_root else None
     if tess_exe is not None and not tess_exe.is_file():
         tess_exe = None
@@ -92,11 +100,19 @@ def native_status() -> NativeStatus:
     pdftoppm = (pop_bin / "pdftoppm.exe") if pop_bin else None
     if pdftoppm is not None and not pdftoppm.is_file():
         pdftoppm = None
+    qpdf_bin = (qpdf_root / "bin") if qpdf_root else None
+    if qpdf_bin is not None and not qpdf_bin.is_dir():
+        qpdf_bin = None
+    qpdf_exe = (qpdf_bin / "qpdf.exe") if qpdf_bin else None
+    if qpdf_exe is not None and not qpdf_exe.is_file():
+        qpdf_exe = None
     return NativeStatus(
         tesseract_exe=tess_exe,
         tessdata_dir=tessdata,
         poppler_bin=pop_bin,
         pdftoppm_exe=pdftoppm,
+        qpdf_bin=qpdf_bin,
+        qpdf_exe=qpdf_exe,
         mode=mode,
     )
 
@@ -122,6 +138,8 @@ def ensure_native_path() -> NativeStatus:
         parts.append(str(status.tesseract_exe.parent))
     if status.poppler_bin is not None:
         parts.append(str(status.poppler_bin))
+    if status.qpdf_bin is not None:
+        parts.append(str(status.qpdf_bin))
 
     if parts:
         existing = os.environ.get("PATH", "")

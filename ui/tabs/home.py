@@ -14,6 +14,7 @@ import gradio as gr
 from .. import _config
 from .. import _health
 from .. import _buildinfo
+from .. import _update
 
 if TYPE_CHECKING:
     from agents.registry import SkillInfo
@@ -81,6 +82,11 @@ def render(skills: list[SkillInfo] | None = None) -> None:
         **{skill_count} skill(s) loaded** · _Version `{_buildinfo.VERSION}` · commit `{_buildinfo.COMMIT_SHA[:7] if _buildinfo.COMMIT_SHA else 'dev'}`_
         """
     )
+
+    # Update banner — shows only if a newer GitHub release exists.
+    update_banner = _update.format_banner()
+    if update_banner:
+        gr.Markdown(update_banner)
 
     with gr.Row():
         with gr.Column(scale=2):
