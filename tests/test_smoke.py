@@ -96,7 +96,9 @@ def test_registry_discovers_all_skills():
     assert "summarize" in names
     assert "translate" in names
     assert "CSV Analyzer" in names
-    assert len(skills) == 8
+    # Phase 6 skill
+    assert "MSG Parser" in names
+    assert len(skills) == 9
 
 
 def test_registry_get_by_name():

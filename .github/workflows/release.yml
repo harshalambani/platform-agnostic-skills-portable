@@ -75,6 +75,60 @@ jobs:
             --allow-dirty
 
       # ------------------------------------------------------------------
+      # 4b. Frozen-build smoke test (Phase 6, E4)
+      #     Launch pa_skills.exe, wait for the port file, GET the root
+      #     URL, verify a 200 response, then kill the process.
+      # ------------------------------------------------------------------
+      - name: Smoke-test frozen build
+        shell: pwsh
+        run: |
+          $exe = "staging\App\PASkills\pa_skills.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Frozen exe not found at $exe"
+            exit 1
+          }
+
+          # Launch in background; suppress browser auto-open.
+          $env:PA_SKILLS_NO_BROWSER = "1"
+          $env:PA_SKILLS_PORT_FILE = "$PWD\smoke_port.json"
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+
+          # Wait up to 45s for the port file to appear.
+          $deadline = (Get-Date).AddSeconds(45)
+          while (-not (Test-Path $env:PA_SKILLS_PORT_FILE)) {
+            if ((Get-Date) -gt $deadline) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Write-Error "Timed out waiting for port file."
+              exit 1
+            }
+            Start-Sleep -Milliseconds 500
+          }
+
+          $portInfo = Get-Content $env:PA_SKILLS_PORT_FILE | ConvertFrom-Json
+          $url = $portInfo.url
+          Write-Host "Frozen build listening at $url"
+
+          # Give Gradio a moment to fully bind after writing the port file.
+          Start-Sleep -Seconds 3
+
+          # Hit the root URL — Gradio returns HTML with status 200.
+          try {
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
+            if ($resp.StatusCode -ne 200) {
+              Write-Error "Expected 200, got $($resp.StatusCode)"
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              exit 1
+            }
+            Write-Host "Smoke test PASSED — got HTTP $($resp.StatusCode) from $url"
+          } catch {
+            Write-Error "HTTP request failed: $_"
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            exit 1
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      # ------------------------------------------------------------------
       # 5. Upload zip as build artifact (useful for debugging)
       # ------------------------------------------------------------------
       - name: Upload build artifact

@@ -1,0 +1,43 @@
+# skill.yaml — MSG/Email Parser skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "MSG Parser"
+display_name: "MSG / Email Parser"
+description: >
+  Parse .msg (Outlook) or .eml files and extract structured fields:
+  sender, date, subject, body text, and attachment list.
+  No LLM required — pure deterministic extraction.
+category: "general"
+version: "1.0.0"
+
+# Execution mode: "direct" — no LLM, pure extraction.
+mode: "direct"
+
+# The run() function to call. Relative to this skill's package.
+entry_point: "agent:run"
+
+# Input fields rendered in the generic tab.
+inputs:
+  - name: "file_path"
+    type: "file"
+    label: "Email file (.msg or .eml)"
+    file_types: [".msg", ".eml"]
+    required: true
+
+# How the run() function is called.
+run_args:
+  file_path: "{inputs.file_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".json"
+  suffix: "email-parsed"
+  download_label: "Download Parsed Email"
+
+# External dependencies beyond pip packages.
+requires:
+  native_binaries: []
+  external_tools: []
