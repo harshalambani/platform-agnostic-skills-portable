@@ -1,0 +1,101 @@
+# .github/workflows/check-native-binaries.yml
+#
+# Scheduled check for new releases of vendored native binaries
+# (Tesseract, Poppler, qpdf). Opens an issue when a newer version
+# is detected compared to what's pinned in bundling/binaries.toml.
+#
+# Runs weekly on Tuesdays. Can also be triggered manually.
+
+name: Check Native Binary Updates
+
+on:
+  schedule:
+    - cron: "0 8 * * 2"   # 08:00 UTC every Tuesday
+  workflow_dispatch:        # manual trigger
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: bundling/binaries.toml
+
+      - name: Check for updates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Parse pinned versions from binaries.toml
+          pinned_tesseract=$(grep -A2 '^\[tesseract\]' bundling/binaries.toml | grep 'version' | sed 's/.*= *"//' | sed 's/".*//')
+          pinned_poppler=$(grep -A2 '^\[poppler\]' bundling/binaries.toml | grep 'version' | sed 's/.*= *"//' | sed 's/".*//')
+          pinned_qpdf=$(grep -A2 '^\[qpdf\]' bundling/binaries.toml | grep 'version' | sed 's/.*= *"//' | sed 's/".*//')
+
+          echo "Pinned: tesseract=$pinned_tesseract  poppler=$pinned_poppler  qpdf=$pinned_qpdf"
+
+          updates=""
+
+          # Check Tesseract (UB-Mannheim)
+          latest_tess=$(gh api repos/UB-Mannheim/tesseract/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//' || echo "")
+          if [ -n "$latest_tess" ] && [ "$latest_tess" != "$pinned_tesseract" ]; then
+            echo "Tesseract: pinned=$pinned_tesseract  latest=$latest_tess"
+            updates="${updates}\n- **Tesseract**: pinned \`$pinned_tesseract\`, latest \`$latest_tess\` ([releases](https://github.com/UB-Mannheim/tesseract/releases))"
+          fi
+
+          # Check Poppler (oschwartz10612)
+          latest_poppler=$(gh api repos/oschwartz10612/poppler-windows/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//' | sed 's/-[0-9]*$//' || echo "")
+          if [ -n "$latest_poppler" ] && [ "$latest_poppler" != "$pinned_poppler" ]; then
+            echo "Poppler: pinned=$pinned_poppler  latest=$latest_poppler"
+            updates="${updates}\n- **Poppler**: pinned \`$pinned_poppler\`, latest \`$latest_poppler\` ([releases](https://github.com/oschwartz10612/poppler-windows/releases))"
+          fi
+
+          # Check qpdf
+          latest_qpdf=$(gh api repos/qpdf/qpdf/releases/latest --jq '.tag_name' 2>/dev/null | sed 's/^v//' || echo "")
+          if [ -n "$latest_qpdf" ] && [ "$latest_qpdf" != "$pinned_qpdf" ]; then
+            echo "qpdf: pinned=$pinned_qpdf  latest=$latest_qpdf"
+            updates="${updates}\n- **qpdf**: pinned \`$pinned_qpdf\`, latest \`$latest_qpdf\` ([releases](https://github.com/qpdf/qpdf/releases))"
+          fi
+
+          if [ -z "$updates" ]; then
+            echo "All native binaries are up to date."
+            exit 0
+          fi
+
+          echo "UPDATES<<EOF" >> $GITHUB_ENV
+          echo -e "$updates" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Open issue if updates found
+        if: env.UPDATES != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Check if an open issue already exists
+          existing=$(gh issue list --label "native-binary-update" --state open --limit 1 --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -n "$existing" ]; then
+            echo "Issue #$existing already open — skipping."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Native binary updates available" \
+            --label "native-binary-update,dependencies" \
+            --body "The following vendored native binaries have newer releases:
+
+          ${{ env.UPDATES }}
+
+          **To update:**
+          1. Edit \`bundling/binaries.toml\` with the new version + URL
+          2. Run \`python bundling/refresh_binaries.py --target <name>\`
+          3. Paste the new SHA256 into \`binaries.toml\`
+          4. Re-run to verify, then commit the updated \`vendor/\` directory
+
+          _This issue was opened automatically by the check-native-binaries workflow._"

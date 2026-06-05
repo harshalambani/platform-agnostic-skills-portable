@@ -1,0 +1,44 @@
+# .github/dependabot.yml — automated dependency update PRs.
+#
+# Dependabot checks for new versions of pip packages weekly and opens PRs
+# against main. Each PR triggers CI (if a test workflow exists), so you can
+# see whether the update breaks anything before merging.
+#
+# Native binaries (Tesseract, Poppler, qpdf) are NOT covered here — they're
+# managed via binaries.toml and checked by the check-native-binaries workflow.
+
+version: 2
+updates:
+  # Python pip dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+    # Group minor/patch updates into a single PR to reduce noise
+    groups:
+      langchain-ecosystem:
+        patterns:
+          - "langchain*"
+          - "langgraph*"
+      pdf-ocr:
+        patterns:
+          - "pdfplumber"
+          - "pypdfium2"
+          - "pytesseract"
+      ui:
+        patterns:
+          - "gradio"
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"

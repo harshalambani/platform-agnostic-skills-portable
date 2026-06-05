@@ -6,14 +6,14 @@
 # published, swap "kind" to "git" and supply the URL + ref.
 
 [upstream]
-kind = "local"          # one of: "local", "git"
+kind = "git"            # one of: "local", "git"
 
 # Used when kind = "local". Path is resolved relative to this file.
 local_path = "../../platform-agnostic-skills/agents"
 
 # Used when kind = "git". Ignored otherwise.
-git_url = ""
-git_ref = ""            # tag, branch, or commit SHA
+git_url = "https://github.com/harshalambani/platform-agnostic-skills.git"
+git_ref = "main"        # tag, branch, or commit SHA
 
 # What gets copied. Filenames matching any glob in `exclude` are skipped.
 include = ["**/*.py", "**/*.md", "**/*.txt", "**/*.yaml", "**/*.yml"]

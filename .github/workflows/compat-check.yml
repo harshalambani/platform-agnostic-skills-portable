@@ -1,0 +1,129 @@
+# .github/workflows/compat-check.yml
+#
+# Weekly compatibility check: installs the latest versions allowed by the
+# loose pins in requirements.txt (NOT the lock file), runs the full test
+# suite, then attempts a frozen build + smoke test.
+#
+# Purpose: detect breaking changes in dependencies BEFORE you update the
+# lock file. If this workflow fails, investigate the failing dependency
+# before updating requirements-lock.txt.
+#
+# Runs every Sunday at 06:00 UTC. Can also be triggered manually.
+
+name: Compatibility Check
+
+on:
+  schedule:
+    - cron: "0 6 * * 0"   # 06:00 UTC every Sunday
+  workflow_dispatch:        # manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  compat-test:
+    runs-on: windows-latest
+
+    steps:
+      # ----------------------------------------------------------------
+      # 1. Checkout with LFS
+      # ----------------------------------------------------------------
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+
+      - name: Verify LFS files
+        run: git lfs pull
+
+      # ----------------------------------------------------------------
+      # 2. Python
+      # ----------------------------------------------------------------
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ----------------------------------------------------------------
+      # 3. Install from LOOSE pins (not lock file)
+      # ----------------------------------------------------------------
+      - name: Install latest-compatible dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller>=6.10 pytest
+
+      # ----------------------------------------------------------------
+      # 4. Run full test suite
+      # ----------------------------------------------------------------
+      - name: Run tests
+        shell: pwsh
+        run: |
+          cd src
+          python -m pytest ..\tests\ -v --tb=short
+
+      # ----------------------------------------------------------------
+      # 5. Frozen build (using loose pins, not lock file)
+      # ----------------------------------------------------------------
+      - name: Frozen build
+        shell: pwsh
+        run: |
+          python bundling/build.py `
+            --version "0.0.0-compat-check" `
+            --allow-dirty `
+            --skip-venv
+
+      # ----------------------------------------------------------------
+      # 6. Smoke test frozen exe
+      # ----------------------------------------------------------------
+      - name: Smoke-test frozen build
+        shell: pwsh
+        run: |
+          $exe = "staging\App\PASkills\pa_skills.exe"
+          if (-not (Test-Path $exe)) {
+            Write-Error "Frozen exe not found at $exe"
+            exit 1
+          }
+
+          $env:PA_SKILLS_NO_BROWSER = "1"
+          $env:PA_SKILLS_PORT_FILE = "$PWD\compat_port.json"
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+
+          $deadline = (Get-Date).AddSeconds(45)
+          while (-not (Test-Path $env:PA_SKILLS_PORT_FILE)) {
+            if ((Get-Date) -gt $deadline) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+              Write-Error "Timed out waiting for port file."
+              exit 1
+            }
+            Start-Sleep -Milliseconds 500
+          }
+
+          $portInfo = Get-Content $env:PA_SKILLS_PORT_FILE | ConvertFrom-Json
+          $url = $portInfo.url
+          Start-Sleep -Seconds 3
+
+          try {
+            $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
+            if ($resp.StatusCode -ne 200) {
+              Write-Error "Expected 200, got $($resp.StatusCode)"
+              exit 1
+            }
+            Write-Host "Compat smoke test PASSED — HTTP $($resp.StatusCode)"
+          } catch {
+            Write-Error "HTTP request failed: $_"
+            exit 1
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      # ----------------------------------------------------------------
+      # 7. Report installed versions (for debugging failures)
+      # ----------------------------------------------------------------
+      - name: Report dependency versions
+        if: always()
+        shell: pwsh
+        run: |
+          python -m pip freeze | Sort-Object

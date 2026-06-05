@@ -174,7 +174,7 @@ class TestRunWithStreaming:
         """Worker that finishes immediately should still return its value."""
         fake_set, _ = self._mock_set_progress_queue()
 
-        with patch("ui._runner.set_progress_queue", fake_set):
+        with patch("agents.base_agent.set_progress_queue", fake_set):
             def _consumer():
                 return (yield from run_with_streaming(
                     work=lambda: "result",
@@ -205,7 +205,7 @@ class TestRunWithStreaming:
             return "ok"
 
         log: list[str] = []
-        with patch("ui._runner.set_progress_queue", fake_set):
+        with patch("agents.base_agent.set_progress_queue", fake_set):
             list(run_with_streaming(
                 work=work_with_events,
                 log=log,
@@ -223,7 +223,7 @@ class TestRunWithStreaming:
         def boom():
             raise RuntimeError("stream-boom")
 
-        with patch("ui._runner.set_progress_queue", fake_set):
+        with patch("agents.base_agent.set_progress_queue", fake_set):
             with pytest.raises(RuntimeError, match="stream-boom"):
                 list(run_with_streaming(
                     work=boom,
@@ -241,7 +241,7 @@ class TestRunWithStreaming:
             return "done"
 
         log: list[str] = []
-        with patch("ui._runner.set_progress_queue", fake_set):
+        with patch("agents.base_agent.set_progress_queue", fake_set):
             list(run_with_streaming(
                 work=slow,
                 log=log,
