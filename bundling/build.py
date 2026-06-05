@@ -76,7 +76,8 @@ AGENTS_CACHE  = BUILD_VENV_DIR / ".agents_cache"
 UI_DIR        = PROJECT_ROOT / "ui"
 BUILDINFO_PY  = UI_DIR / "_buildinfo.py"
 PASKILLS_SPEC = PROJECT_ROOT / "bundling" / "paskills.spec"
-REQUIREMENTS  = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS      = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS_LOCK = PROJECT_ROOT / "requirements-lock.txt"
 SOURCES_TOML  = PROJECT_ROOT / "bundling" / "sources.toml"
 
 TEMPLATES_DIR    = PROJECT_ROOT / "bundling" / "templates"
@@ -273,7 +274,15 @@ def step3_create_venv(args: argparse.Namespace, log: _Log) -> Path:
         sys.exit(2)
 
     _run([py, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], log=log)
-    _run([py, "-m", "pip", "install", "-r", REQUIREMENTS], log=log)
+
+    # Prefer the lock file for reproducible builds; fall back to loose pins.
+    if REQUIREMENTS_LOCK.is_file():
+        log.info(f"installing from lock file: {REQUIREMENTS_LOCK.name}")
+        _run([py, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK], log=log)
+    else:
+        log.warn("requirements-lock.txt not found — using loose pins from requirements.txt")
+        _run([py, "-m", "pip", "install", "-r", REQUIREMENTS], log=log)
+
     _run([py, "-m", "pip", "install", "pyinstaller>=6.10"], log=log)
     log.ok(f"venv ready at {BUILD_VENV.relative_to(PROJECT_ROOT)}")
     return py

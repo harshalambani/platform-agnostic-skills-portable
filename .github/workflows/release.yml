@@ -14,8 +14,8 @@
 # The Launcher Generator is bundled in bundling/launcher-gen/2.2.4/
 # so CI no longer needs to download it from portableapps.com.
 #
-# The build uses --skip-pull because the GitHub runner has no sibling
-# platform-agnostic-skills folder. src/agents/ is committed in-tree.
+# The build pulls agents/ from the published upstream repo
+# (github.com/harshalambani/platform-agnostic-skills) via git clone.
 
 name: Release
 
@@ -71,7 +71,6 @@ jobs:
         run: |
           python bundling/build.py `
             --version "$env:VERSION" `
-            --skip-pull `
             --allow-dirty
 
       # ------------------------------------------------------------------

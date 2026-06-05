@@ -149,8 +149,8 @@ class TestParseMsg:
 
     def test_basic_fields(self, tmp_path):
         mock = self._mock_msg()
-        with patch("agents.skill_msg_parser.agent.extract_msg") as m:
-            m.Message.return_value = mock
+        with patch("extract_msg.Message") as MockMessage:
+            MockMessage.return_value = mock
             result = _parse_msg(tmp_path / "dummy.msg")
 
         assert result["sender"] == "Bob"
@@ -166,8 +166,8 @@ class TestParseMsg:
         att.data = b"x" * 1024
 
         mock = self._mock_msg(attachments=[att])
-        with patch("agents.skill_msg_parser.agent.extract_msg") as m:
-            m.Message.return_value = mock
+        with patch("extract_msg.Message") as MockMessage:
+            MockMessage.return_value = mock
             result = _parse_msg(tmp_path / "dummy.msg")
 
         assert len(result["attachments"]) == 1
@@ -176,15 +176,15 @@ class TestParseMsg:
 
     def test_msg_close_called(self, tmp_path):
         mock = self._mock_msg()
-        with patch("agents.skill_msg_parser.agent.extract_msg") as m:
-            m.Message.return_value = mock
+        with patch("extract_msg.Message") as MockMessage:
+            MockMessage.return_value = mock
             _parse_msg(tmp_path / "dummy.msg")
         mock.close.assert_called_once()
 
     def test_date_as_string(self, tmp_path):
         mock = self._mock_msg(date="2026-01-01 12:00:00")
-        with patch("agents.skill_msg_parser.agent.extract_msg") as m:
-            m.Message.return_value = mock
+        with patch("extract_msg.Message") as MockMessage:
+            MockMessage.return_value = mock
             result = _parse_msg(tmp_path / "dummy.msg")
         assert result["date"] == "2026-01-01 12:00:00"
 

@@ -4,7 +4,51 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.0.0] — 2026-06-04
+
+### Added
+- **MSG / Email Parser skill** — direct-mode skill that parses `.msg`
+  (Outlook) and `.eml` files into structured JSON (sender, date, subject,
+  body, attachment list). Uses `extract-msg` for `.msg` and stdlib `email`
+  for `.eml`. No LLM required. (B7 resolved)
+- **Auto-update checker** — Home tab checks the GitHub releases API on
+  startup and shows a banner when a newer version is available. Background
+  thread, cached for the process lifetime. (D2 resolved)
+- **Frozen-build CI smoke test** — new step in `release.yml`: launches
+  `pa_skills.exe`, waits for port file, GETs the root URL, verifies
+  HTTP 200, then kills the process. Catches PyInstaller bundling
+  regressions. (E4 resolved)
+- **qpdf vendored** — added to `binaries.toml`, `refresh_binaries.py`,
+  `build.py` (step 6b), and `_native.py` resolver. CC Sort no longer
+  requires qpdf to be installed by the user. (B2 resolved)
+- Unit tests for `_config.py` (~15 tests), `_runner.py` (~12 tests),
+  `_health.py` (~13 tests), MSG parser (~15 tests), update checker
+  (~12 tests). Total test count ~175+. (E1 substantially resolved)
+- `README.md` overhauled — architecture overview, dev + user setup,
+  skill authoring guide, CI badge. (F1 resolved)
+- `BUILDING.md` — consolidated build guide replacing 4 date-stamped
+  notes files. (F3 resolved)
+
+- **Dependency management infrastructure:**
+  - `requirements-lock.txt` — exact pinned versions for reproducible
+    frozen builds. `build.py` prefers the lock file when present.
+  - Dependabot config (`.github/dependabot.yml`) — weekly PRs for pip
+    and GitHub Actions dependency updates.
+  - Native binary update checker (`.github/workflows/check-native-binaries.yml`)
+    — weekly scheduled job checks Tesseract, Poppler, qpdf releases via
+    GitHub API and opens an issue when updates are available.
+  - Compatibility check (`.github/workflows/compat-check.yml`) — weekly
+    scheduled job installs latest-compatible deps from loose pins, runs
+    full test suite, and attempts frozen build + smoke test.
+
+### Changed
+- **Upstream repo published** — `platform-agnostic-skills` pushed to
+  GitHub. `sources.toml` switched from `kind = "local"` to `kind = "git"`
+  with public URL. CI no longer uses `--skip-pull`. (B6 resolved)
+- Historical plan/notes/prompt files moved to `docs/history/`.
+- Skill count: 8 → 9 (MSG Parser added).
+- `_native.py` now resolves Tesseract, Poppler, and qpdf.
+- `.gitattributes` comment updated for qpdf.
 
 ## [0.4.1] — 2026-06-03
 
