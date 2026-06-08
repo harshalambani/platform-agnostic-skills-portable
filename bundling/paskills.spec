@@ -44,34 +44,15 @@ hiddenimports = [
     # UI.
     "gradio",
     "gradio_client",
-    # Skill modules (imported by string at runtime via the agent loop).
-    "agents",
-    "agents.base_agent",
-    "agents.registry",
-    "agents.skill_26as",
-    "agents.skill_26as.agent",
-    "agents.skill_26as.tools",
-    "agents.skill_bob",
-    "agents.skill_bob.agent",
-    "agents.skill_bob.tools",
-    "agents.skill_cc_sort",
-    "agents.skill_cc_sort.agent",
-    "agents.skill_cc_sort.tools",
-    "agents.skill_cc_transactions",
-    "agents.skill_cc_transactions.agent",
-    "agents.skill_cc_transactions.tools",
-    "agents.skill_csv_analyzer",
-    "agents.skill_csv_analyzer.agent",
-    "agents.skill_csv_analyzer.tools",
-    "agents.skill_hsbc",
-    "agents.skill_hsbc.agent",
-    "agents.skill_hsbc.tools",
-    "agents.skill_msg_parser",
-    "agents.skill_msg_parser.agent",
-    "agents.skill_summarize",
-    "agents.skill_summarize.agent",
-    "agents.skill_translate",
-    "agents.skill_translate.agent",
+    # NOTE: agents.* modules are NOT listed as hidden imports.
+    # They are bundled as raw .py data files via the datas line below
+    # (SRC_AGENTS -> "agents") and imported from _MEIPASS/agents/ at
+    # runtime.  Listing them as hidden imports causes a "partially
+    # compiled package" conflict: PyInstaller compiles __init__ but
+    # fails to compile base_agent/registry (complex transitive imports
+    # from langgraph break analysis), so at runtime Python finds the
+    # compiled package but can't find the uncompiled sub-modules.
+    #
     # MSG parser dependency (local import inside _parse_msg).
     "extract_msg",
 ]
