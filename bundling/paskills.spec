@@ -135,7 +135,7 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(PROJECT_ROOT / "bundling" / "rthook_agents.py")],
     excludes=[
         # Heavy optional deps we never call but PyInstaller may pull in.
         "tkinter",
