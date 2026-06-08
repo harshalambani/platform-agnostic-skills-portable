@@ -88,14 +88,27 @@ jobs:
           }
 
           # Launch in background; suppress browser auto-open.
+          # Redirect stdout/stderr so we can diagnose startup crashes.
           $env:PA_SKILLS_NO_BROWSER = "1"
           $env:PA_SKILLS_PORT_FILE = "$PWD\smoke_port.json"
-          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+          $stdoutLog = "$PWD\smoke_stdout.log"
+          $stderrLog = "$PWD\smoke_stderr.log"
+          $proc = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $stdoutLog `
+            -RedirectStandardError $stderrLog
 
-          # Wait up to 45s for the port file to appear.
-          $deadline = (Get-Date).AddSeconds(45)
+          # Wait up to 60s for the port file to appear.
+          $deadline = (Get-Date).AddSeconds(60)
           while (-not (Test-Path $env:PA_SKILLS_PORT_FILE)) {
             if ((Get-Date) -gt $deadline) {
+              Write-Host "=== STDOUT (last 50 lines) ==="
+              if (Test-Path $stdoutLog) { Get-Content $stdoutLog -Tail 50 }
+              Write-Host "=== STDERR (last 50 lines) ==="
+              if (Test-Path $stderrLog) { Get-Content $stderrLog -Tail 50 }
+              # Check if process already exited (crashed)
+              if ($proc.HasExited) {
+                Write-Host "Process exited with code: $($proc.ExitCode)"
+              }
               Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
               Write-Error "Timed out waiting for port file."
               exit 1
