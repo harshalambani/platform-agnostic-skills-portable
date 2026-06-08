@@ -53,6 +53,12 @@ hiddenimports = [
     # from langgraph break analysis), so at runtime Python finds the
     # compiled package but can't find the uncompiled sub-modules.
     #
+    # Transitive deps of agents/ modules — since agents is excluded from
+    # Analysis, PyInstaller won't discover these automatically.
+    "yaml",
+    "pandas",
+    "langchain_core",
+    "langchain_core.tools",
     # MSG parser dependency (local import inside _parse_msg).
     "extract_msg",
 ]
@@ -124,6 +130,12 @@ a = Analysis(
         "numpy.tests",
         "pandas.tests",
         "scipy",
+        # --- agents/ is shipped as raw .py data files (datas line above),
+        # NOT as compiled modules.  Excluding the package from Analysis
+        # prevents PyInstaller's FrozenImporter from claiming ownership
+        # of the 'agents' namespace; at runtime PathFinder discovers
+        # the .py files from _MEIPASS/agents/ instead.
+        "agents",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
