@@ -154,7 +154,7 @@ jobs:
       # 6. Create GitHub Release and attach the zip
       # ------------------------------------------------------------------
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: PA Skills Portable ${{ env.VERSION }}
