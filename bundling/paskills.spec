@@ -47,15 +47,33 @@ hiddenimports = [
     # Skill modules (imported by string at runtime via the agent loop).
     "agents",
     "agents.base_agent",
+    "agents.registry",
     "agents.skill_26as",
     "agents.skill_26as.agent",
     "agents.skill_26as.tools",
     "agents.skill_bob",
     "agents.skill_bob.agent",
     "agents.skill_bob.tools",
+    "agents.skill_cc_sort",
+    "agents.skill_cc_sort.agent",
+    "agents.skill_cc_sort.tools",
+    "agents.skill_cc_transactions",
+    "agents.skill_cc_transactions.agent",
+    "agents.skill_cc_transactions.tools",
+    "agents.skill_csv_analyzer",
+    "agents.skill_csv_analyzer.agent",
+    "agents.skill_csv_analyzer.tools",
     "agents.skill_hsbc",
     "agents.skill_hsbc.agent",
     "agents.skill_hsbc.tools",
+    "agents.skill_msg_parser",
+    "agents.skill_msg_parser.agent",
+    "agents.skill_summarize",
+    "agents.skill_summarize.agent",
+    "agents.skill_translate",
+    "agents.skill_translate.agent",
+    # MSG parser dependency (local import inside _parse_msg).
+    "extract_msg",
 ]
 
 # ---------------------------------------------------------------------------
