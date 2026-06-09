@@ -176,6 +176,21 @@ def _write_port_file(port: int) -> None:
 # CLI entry.
 # ---------------------------------------------------------------------------
 
+def _bundled_scripts_root() -> Path:
+    """
+    Return the root directory under which all bundled agent scripts live.
+
+    - Frozen build (PyInstaller): scripts are extracted under sys._MEIPASS/agents.
+    - Source mode: scripts live under <project>/src/agents.
+
+    Used by _maybe_dispatch_script() to enforce path containment.
+    """
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return (Path(meipass) / "agents").resolve()
+    return (PROJECT_ROOT / "src" / "agents").resolve()
+
+
 def _maybe_dispatch_script(argv: list[str]) -> int | None:
     """
     PyInstaller-frozen sys.executable points to pa_skills.exe, not python.exe. The
@@ -184,40 +199,15 @@ def _maybe_dispatch_script(argv: list[str]) -> int | None:
     relaunch the UI. Detect that pattern and execute the requested .py file via
     runpy.run_path() with the remaining args as sys.argv.
 
-    Returns the script's exit code if a script was dispatched, else None.
-    """
-    if not argv:
-        return None
-    first = argv[0]
-    if not first.lower().endswith(".py"):
-        return None
-    if not Path(first).is_file():
-        return None
-    import runpy
-    sys.argv = [first] + list(argv[1:])
-    try:
-        runpy.run_path(first, run_name="__main__")
-        return 0
-    except SystemExit as e:
-        return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+    SECURITY (2026-06-09, fixes Tracker finding #2 / MP-02):
+    The original dispatcher had no allowlist — any .py file passed as the first
+    argument was executed unconditionally. This permits code execution through the
+    trusted binary via file associations, crafted shortcuts, or sibling processes
+    (living-off-the-land primitive).
 
+    Fix: path containment. The resolved script path must be a child of the bundled
+    scripts root (sys._MEIPASS/agents in frozen mode; src/agents in source mode).
+    Anything outside that root is rejected with exit code 1 — it never falls through
+    to launching the UI on the attacker-supplied argv.
 
-def main(argv: list[str] | None = None) -> int:
-    raw_argv = list(argv) if argv is not None else sys.argv[1:]
-
-    # Frozen-mode script-runner shim — see _maybe_dispatch_script().
-    rc = _maybe_dispatch_script(raw_argv)
-    if rc is not None:
-        return rc
-
-    parser = argparse.ArgumentParser(prog="ui.webui", description="Launch the PA Skills Portable UI.")
-    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser.")
-    args = parser.parse_args(raw_argv)
-    if args.no_browser:
-        os.environ["PA_SKILLS_NO_BROWSER"] = "1"
-    build_app(launch=True)
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    Follow-up (MP-02 phas
