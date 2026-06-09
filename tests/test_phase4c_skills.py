@@ -224,14 +224,22 @@ class TestTranslatorValidation:
 # ===================================================================
 # 5. CSV Analyzer — tools
 # ===================================================================
+#
+# NOTE (2026-06-08, Tracker finding #1 / MP-01): the old `query_csv` tool ran
+# LLM-authored strings through `eval()` guarded only by a regex blocklist —
+# a sandbox-escape RCE (see docs/security/2026-06-08-miniproject-01-csv-eval-rce.md).
+# It has been replaced with a fixed set of parameterized, allowlisted
+# operations (`aggregate_csv`, `value_counts_csv`, `filter_count_csv`,
+# `sort_head_csv`). These tests cover that surface; deeper security/parity
+# coverage lives in tests/test_csv_analyzer_security.py.
 
 class TestCSVAnalyzerSafety:
-    """Test the expression safety validator."""
+    """Test the structured CSV analyzer tools (no eval, no free-form code)."""
 
     @pytest.fixture(autouse=True)
     def _setup(self):
-        # Extract _validate_expression and _BLOCKED_PATTERNS from tools.py
-        # without importing langchain_core.
+        # Extract the tool functions from tools.py without importing
+        # langchain_core (keeps this test fast and dependency-light).
         source = (SKILLS_DIR / "skill_csv_analyzer" / "tools.py").read_text()
         # Remove langchain import
         source = source.replace("from langchain_core.tools import tool", "")
@@ -239,45 +247,47 @@ class TestCSVAnalyzerSafety:
         source = re.sub(r"^@tool\s*$", "", source, flags=re.MULTILINE)
         ns = {}
         exec(compile(source, "tools.py", "exec"), ns)
-        self.validate = ns["_validate_expression"]
         self.describe_csv = ns["describe_csv"]
-        self.query_csv = ns["query_csv"]
+        self.aggregate_csv = ns["aggregate_csv"]
+        self.value_counts_csv = ns["value_counts_csv"]
+        self.filter_count_csv = ns["filter_count_csv"]
+        self.sort_head_csv = ns["sort_head_csv"]
         self.load_csv = ns["_load_csv"]
+        self.ns = ns
 
-    # -- Safety: allowed expressions --
+    # -- No eval/exec surface remains --
 
-    @pytest.mark.parametrize("expr", [
-        "df.groupby('region')['revenue'].sum()",
-        "df.describe()",
-        "df['quantity'].mean()",
-        "df[df['quantity'] > 100].shape[0]",
-        "df.head(10)",
-        "df['product'].value_counts()",
-        "df.sort_values('revenue', ascending=False).head(3)",
-        "df.corr(numeric_only=True)",
-    ])
-    def test_safe_expressions_pass(self, expr):
-        assert self.validate(expr) is None
+    def test_no_eval_exec_compile_in_module(self):
+        """
+        Use AST inspection rather than raw string search so that mentions of
+        removed symbols in the module docstring (historical context) do not
+        produce false positives.  The real constraint is: no live call to
+        eval/exec/compile/__import__, no import of runpy, and no function
+        definition named query_csv/_validate_expression.
+        """
+        import ast as _ast
+        source = (SKILLS_DIR / "skill_csv_analyzer" / "tools.py").read_text()
+        tree = _ast.parse(source)
 
-    # -- Safety: blocked expressions --
+        _FORBIDDEN_CALLS = {"eval", "exec", "compile", "__import__"}
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.Call):
+                if isinstance(node.func, _ast.Name) and node.func.id in _FORBIDDEN_CALLS:
+                    raise AssertionError(
+                        f"{node.func.id!r}() call found in tools.py at line "
+                        f"{getattr(node, 'lineno', '?')} — must not execute code strings"
+                    )
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    assert "runpy" not in alias.name, "runpy must not be imported"
+            elif isinstance(node, _ast.ImportFrom):
+                if node.module and "runpy" in node.module:
+                    raise AssertionError("runpy must not be imported")
+            elif isinstance(node, _ast.FunctionDef):
+                assert node.name != "query_csv", "query_csv function must not exist in tools.py"
+                assert node.name != "_validate_expression", "_validate_expression must not exist"
 
-    @pytest.mark.parametrize("expr", [
-        "exec('import os')",
-        "eval('1+1')",
-        "__import__('os').system('ls')",
-        "open('/etc/passwd').read()",
-        "os.remove('file.csv')",
-        "df.to_csv('hack.csv')",
-        "df.to_excel('hack.xlsx')",
-        "import subprocess",
-        "subprocess.run(['ls'])",
-        "df.to_pickle('x')",
-        "sys.exit()",
-    ])
-    def test_unsafe_expressions_blocked(self, expr):
-        result = self.validate(expr)
-        assert result is not None, f"Expression should be blocked: {expr}"
-        assert "Blocked" in result
+        assert "_BLOCKED_PATTERNS" not in source, "_BLOCKED_PATTERNS must not exist in tools.py"
 
     # -- describe_csv tool --
 
@@ -299,35 +309,124 @@ class TestCSVAnalyzerSafety:
         result = self.describe_csv("/nonexistent/file.csv")
         assert "ERROR" in result
 
-    # -- query_csv tool --
+    # -- aggregate_csv tool --
 
-    def test_query_csv_groupby(self):
-        result = self.query_csv(str(FIXTURES / "sales.csv"), "df.groupby('region')['revenue'].sum()")
+    def test_aggregate_groupby_sum(self):
+        result = self.aggregate_csv(str(FIXTURES / "sales.csv"), metric="revenue", agg="sum", group_by=["region"])
         assert "North" in result
         # North: 1050 + 1575 + 1320 = 3945
         assert "3945" in result
 
-    def test_query_csv_filter_count(self):
-        result = self.query_csv(str(FIXTURES / "sales.csv"), "df[df['quantity'] > 100].shape[0]")
-        # rows with qty > 100: 200, 150, 120, 200, 180 = 5 rows
-        assert "5" in result
-
-    def test_query_csv_mean(self):
-        result = self.query_csv(str(FIXTURES / "sales.csv"), "df['revenue'].mean()")
+    def test_aggregate_overall_mean(self):
+        result = self.aggregate_csv(str(FIXTURES / "sales.csv"), metric="revenue", agg="mean")
         # Mean: (1050+1650+1575+1650+1260+742.5+1320+2100+1485+880) / 10 = 1371.25
         assert "1371.25" in result
 
-    def test_query_csv_blocks_unsafe(self):
-        result = self.query_csv(str(FIXTURES / "sales.csv"), "exec('import os')")
-        assert "Blocked" in result
+    def test_aggregate_with_filter(self):
+        result = self.aggregate_csv(
+            str(FIXTURES / "sales.csv"), metric="revenue", agg="sum",
+            filters=[{"column": "region", "op": "==", "value": "North"}],
+        )
+        assert "3945" in result
 
-    def test_query_csv_bad_expression(self):
-        result = self.query_csv(str(FIXTURES / "sales.csv"), "df.nonexistent_method()")
+    def test_aggregate_unknown_column(self):
+        result = self.aggregate_csv(str(FIXTURES / "sales.csv"), metric="nope", agg="sum")
+        assert "ERROR" in result
+        assert "unknown column" in result.lower()
+
+    def test_aggregate_bad_agg(self):
+        result = self.aggregate_csv(str(FIXTURES / "sales.csv"), metric="revenue", agg="hack")
+        assert "ERROR" in result
+        assert "unsupported agg" in result.lower()
+
+    def test_aggregate_missing_file(self):
+        result = self.aggregate_csv("/nonexistent/file.csv", metric="revenue", agg="sum")
         assert "ERROR" in result
 
-    def test_query_csv_missing_file(self):
-        result = self.query_csv("/nonexistent/file.csv", "df.head()")
+    # -- value_counts_csv tool --
+
+    def test_value_counts_top_n(self):
+        result = self.value_counts_csv(str(FIXTURES / "sales.csv"), column="product", top_n=1)
+        assert "Widget A" in result
+        assert "4" in result  # Widget A appears 4 times
+
+    def test_value_counts_unknown_column(self):
+        result = self.value_counts_csv(str(FIXTURES / "sales.csv"), column="nope")
         assert "ERROR" in result
+
+    def test_value_counts_caps_at_max_rows(self):
+        result = self.value_counts_csv(str(FIXTURES / "sales.csv"), column="product", top_n=999)
+        assert "ERROR" not in result
+
+    # -- filter_count_csv tool --
+
+    def test_filter_count_basic(self):
+        result = self.filter_count_csv(
+            str(FIXTURES / "sales.csv"),
+            filters=[{"column": "quantity", "op": ">", "value": 100}],
+        )
+        # rows with qty > 100: 200, 150, 120, 200, 180 = 5 rows
+        assert "5 of 10" in result
+
+    def test_filter_count_combines_with_and(self):
+        result = self.filter_count_csv(
+            str(FIXTURES / "sales.csv"),
+            filters=[
+                {"column": "quantity", "op": ">", "value": 100},
+                {"column": "region", "op": "==", "value": "North"},
+            ],
+        )
+        # qty>100 AND region==North: row 3 only (North, Widget A, qty 150)
+        assert "1 of 10" in result
+
+    def test_filter_count_in_op(self):
+        result = self.filter_count_csv(
+            str(FIXTURES / "sales.csv"),
+            filters=[{"column": "region", "op": "in", "value": ["North", "South"]}],
+        )
+        assert "5 of 10" in result
+
+    def test_filter_count_empty_filters_rejected(self):
+        result = self.filter_count_csv(str(FIXTURES / "sales.csv"), filters=[])
+        assert "ERROR" in result
+
+    def test_filter_count_unknown_column(self):
+        result = self.filter_count_csv(
+            str(FIXTURES / "sales.csv"),
+            filters=[{"column": "nope", "op": "==", "value": 1}],
+        )
+        assert "ERROR" in result
+
+    def test_filter_count_bad_op(self):
+        result = self.filter_count_csv(
+            str(FIXTURES / "sales.csv"),
+            filters=[{"column": "quantity", "op": "~~", "value": 1}],
+        )
+        assert "ERROR" in result
+        assert "unsupported op" in result.lower()
+
+    # -- sort_head_csv tool --
+
+    def test_sort_head_descending(self):
+        result = self.sort_head_csv(str(FIXTURES / "sales.csv"), sort_by=["revenue"], n=1, ascending=False)
+        assert "2100" in result
+        assert "East" in result
+
+    def test_sort_head_caps_n(self):
+        result = self.sort_head_csv(str(FIXTURES / "sales.csv"), sort_by=["revenue"], n=999)
+        assert "ERROR" not in result
+
+    def test_sort_head_unknown_sort_column(self):
+        result = self.sort_head_csv(str(FIXTURES / "sales.csv"), sort_by=["nope"], n=5)
+        assert "ERROR" in result
+
+    def test_sort_head_column_subset(self):
+        result = self.sort_head_csv(
+            str(FIXTURES / "sales.csv"), sort_by=["revenue"], n=2,
+            ascending=False, columns=["region", "revenue"],
+        )
+        assert "ERROR" not in result
+        assert "product" not in result.lower()
 
     # -- _load_csv --
 
