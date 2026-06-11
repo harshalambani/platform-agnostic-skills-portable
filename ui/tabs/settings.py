@@ -133,7 +133,10 @@ def render() -> None:
     gr.Markdown(
         "## Settings\n\n"
         "Manage LLM endpoints and test connectivity. "
-        "Changes are saved to `config.yaml` immediately."
+        "Changes are saved to `config.yaml` immediately.\n\n"
+        "> **Security note:** API keys are stored unencrypted in "
+        "`Data\\settings\\config.yaml`. Keep this file private. "
+        "API key fields are masked in this UI but the underlying file is plaintext."
     )
 
     # -- Current config info --
@@ -210,6 +213,10 @@ def render() -> None:
                 placeholder="not-needed",
                 interactive=True,
                 visible=True,
+                # type="password" masks the value in the browser — it is never
+                # shown in cleartext in the UI.  The key is still stored
+                # unencrypted in config.yaml (see security note below).
+                type="password",
             )
             ep_temperature = gr.Slider(
                 label="Temperature",

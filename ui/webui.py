@@ -109,10 +109,14 @@ def build_app(launch: bool = False) -> gr.Blocks:
     if launch:
         port = _pick_free_port()
         _write_port_file(port)
-        # Gradio 6 only serves files from cwd by default — explicitly allow
-        # the outputs folder so download links resolve outside the cwd tree.
+        # Gradio's file server only serves files under allowed_paths.
+        # We allow ONLY the per-session download staging dir (not the full
+        # outputs/ folder) so the file route cannot reach other run outputs.
+        # Each run copies its result file into this dir before handing the path
+        # to DownloadButton (see ui/tabs/_generic.py).
+        # Security: finding #5 / MP-05 — narrows file-serving scope.
         try:
-            allowed = [str(_config_mod.output_dir().resolve())]
+            allowed = [str(_config_mod.download_staging_dir().resolve())]
         except Exception:
             allowed = []
 
@@ -210,4 +214,70 @@ def _maybe_dispatch_script(argv: list[str]) -> int | None:
     Anything outside that root is rejected with exit code 1 — it never falls through
     to launching the UI on the attacker-supplied argv.
 
-    Follow-up (MP-02 phas
+    Follow-up (MP-02 phase 2): add a --pa-internal-script sentinel to the
+    subprocess callers in src/agents/*/tools.py so the dispatch branch is
+    unreachable from a bare `pa_skills.exe <path>` invocation. Deferred because
+    it requires upstream changes in platform-agnostic-skills.
+
+    Returns the script's exit code if a script was dispatched, else None.
+    """
+    if not argv:
+        return None
+    first = argv[0]
+    if not first.lower().endswith(".py"):
+        return None
+
+    requested = Path(first)
+    if not requested.is_file():
+        return None
+
+    # --- Path containment check -------------------------------------------
+    # Resolve both paths (follows symlinks, collapses ..) so that traversal
+    # tricks like "scripts_root/../../evil.py" are caught.
+    try:
+        resolved = requested.resolve()
+        scripts_root = _bundled_scripts_root()
+        contained = resolved.is_relative_to(scripts_root)
+    except Exception:
+        contained = False
+
+    if not contained:
+        # Reject and exit non-zero. Do NOT fall through to UI launch —
+        # that would let an attacker trigger arbitrary UI argv processing.
+        print(
+            f"[pa-skills] SECURITY: rejecting script dispatch for {first!r} — "
+            f"path is not inside the bundled scripts root ({scripts_root}). "
+            "Exiting.",
+            file=sys.stderr,
+        )
+        return 1
+    # ----------------------------------------------------------------------
+
+    import runpy
+    sys.argv = [str(resolved)] + list(argv[1:])
+    try:
+        runpy.run_path(str(resolved), run_name="__main__")
+        return 0
+    except SystemExit as e:
+        return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+
+
+def main(argv: list[str] | None = None) -> int:
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
+    # Frozen-mode script-runner shim — see _maybe_dispatch_script().
+    rc = _maybe_dispatch_script(raw_argv)
+    if rc is not None:
+        return rc
+
+    parser = argparse.ArgumentParser(prog="ui.webui", description="Launch the PA Skills Portable UI.")
+    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser.")
+    args = parser.parse_args(raw_argv)
+    if args.no_browser:
+        os.environ["PA_SKILLS_NO_BROWSER"] = "1"
+    build_app(launch=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

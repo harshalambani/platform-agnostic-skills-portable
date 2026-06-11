@@ -307,11 +307,39 @@ def _make_run_handler(skill: SkillInfo):
                     f"**Agent reply:**\n\n{agent_reply}"
                 ), gr.update(visible=False)
                 return
-            out_abs = str(out_path.resolve())
+
+            # --- Path containment + download staging (security: finding #5) ---
+            # 1. Assert the produced file resolves inside output_dir so a buggy
+            #    or malicious run_fn can't point us at an arbitrary path.
+            # 2. Copy only this file into the per-session download staging dir.
+            #    Gradio's file server is allowed ONLY that dir (not all of
+            #    outputs/), so other run outputs aren't reachable via the HTTP
+            #    route. The durable copy in outputs/ is untouched.
+            try:
+                resolved = out_path.resolve()
+                expected_root = _config.output_dir().resolve()
+                if not resolved.is_relative_to(expected_root):
+                    yield add(
+                        f"Security error: output path {resolved} is outside "
+                        f"the expected output directory ({expected_root}). "
+                        "Download aborted."
+                    ), gr.update(visible=False)
+                    return
+                staging = _config.download_staging_dir()
+                served_path = staging / out_path.name
+                shutil.copy2(out_path, served_path)
+                out_abs = str(served_path)
+            except Exception as e:
+                yield add(
+                    f"Error: could not stage download file: {e}"
+                ), gr.update(visible=False)
+                return
+            # --- end security block ---
+
             msg = add(
                 f"### Done\n\n"
                 f"**File:** {out_path.name}\n\n"
-                f"**Saved to:** {out_abs}\n\n"
+                f"**Saved to:** {out_path.resolve()}\n\n"
                 f"Click **{skill.output.download_label}** below.\n\n"
                 f"---\n\n**Agent reply:**\n\n{agent_reply}"
             )

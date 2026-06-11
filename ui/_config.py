@@ -40,13 +40,36 @@ Public surface:
 """
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Temp-dir registry: every legacy config dir created by
+# materialize_legacy_config() is tracked here and wiped at process exit.
+# This prevents API keys lingering in %TEMP% after the app closes.
+# ---------------------------------------------------------------------------
+
+_LEGACY_TEMP_DIRS: list[Path] = []
+
+
+def _cleanup_legacy_temp_dirs() -> None:
+    """atexit handler — silently removes all legacy config temp dirs."""
+    for d in _LEGACY_TEMP_DIRS:
+        try:
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+
+
+atexit.register(_cleanup_legacy_temp_dirs)
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +207,11 @@ def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
 
     legacy = _legacy_from_endpoint(endpoints[name])
 
-    # Write into a per-process temp dir so concurrent runs don't collide.
+    # Write into a per-process temp dir so concurrent skill runs don't collide.
+    # The dir is registered for deletion on process exit so the API key does
+    # not linger in %TEMP% after the app closes (security: finding #4).
     tmp_dir = Path(tempfile.mkdtemp(prefix="pa-skills-cfg-"))
+    _LEGACY_TEMP_DIRS.append(tmp_dir)
     legacy_path = tmp_dir / "config.yaml"
     legacy_path.write_text(yaml.safe_dump(legacy, sort_keys=False), encoding="utf-8")
     return legacy_path
@@ -203,3 +229,35 @@ def output_dir() -> Path:
             p = PORTABLE_CONFIG_PATH.parent.parent / raw
     p.mkdir(parents=True, exist_ok=True)
     return p
+
+
+# Module-level singleton for the per-session download staging directory.
+_DOWNLOAD_STAGING_DIR: Path | None = None
+
+
+def download_staging_dir() -> Path:
+    """
+    Return a per-session temp directory used exclusively for staging files
+    that the Gradio UI needs to serve for download.
+
+    WHY: Gradio's ``allowed_paths`` in ``app.launch()`` makes every file
+    under the listed directories fetchable via the local HTTP server.  Using
+    ``output_dir()`` there exposes the entire outputs folder to any local
+    process or browser tab.  This function returns a narrower staging dir
+    — only the one output file the current run just produced is copied here
+    before being handed to ``gr.DownloadButton``.  The durable copy in
+    ``output_dir()`` is not reachable through the Gradio file route.
+
+    The directory is created lazily on first call and registered for deletion
+    on process exit (security: finding #5 / MP-05).
+    """
+    global _DOWNLOAD_STAGING_DIR
+    if _DOWNLOAD_STAGING_DIR is None:
+        _DOWNLOAD_STAGING_DIR = Path(tempfile.mkdtemp(prefix="pa-skills-dl-"))
+        _dl_dir = _DOWNLOAD_STAGING_DIR  # capture for closure
+
+        def _cleanup_dl() -> None:
+            shutil.rmtree(_dl_dir, ignore_errors=True)
+
+        atexit.register(_cleanup_dl)
+    return _DOWNLOAD_STAGING_DIR
