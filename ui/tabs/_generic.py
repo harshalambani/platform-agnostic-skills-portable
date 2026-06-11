@@ -39,6 +39,25 @@ if TYPE_CHECKING:
 
 
 # ---------------------------------------------------------------------------
+# Upload safety limits (security: finding #7)
+#
+# Gradio's file-type filter in gr.File is a browser-side hint only — it does
+# not prevent a user from uploading an oversized or unexpected file via the
+# API.  These constants are enforced server-side before any file is copied
+# into the staging directory and fed to a native parser (Poppler, Tesseract,
+# qpdf, pypdf).
+#
+# PATCH CADENCE NOTE: the native binaries bundled in vendor/ (Tesseract, Poppler,
+# qpdf) should be updated on each release cycle.  Parser vulnerabilities in these
+# binaries are the primary attack surface for untrusted document inputs.  Track
+# their CVE feeds and update refresh_binaries.py SHA pins when new versions ship.
+# ---------------------------------------------------------------------------
+
+_MAX_UPLOAD_SIZE_BYTES: int = 100 * 1024 * 1024  # 100 MB per file
+_MAX_FILE_COUNT: int = 20                          # max files per run
+
+
+# ---------------------------------------------------------------------------
 # Shared helpers (same as the old hand-coded tabs).
 # ---------------------------------------------------------------------------
 
@@ -145,13 +164,37 @@ def _make_run_handler(skill: SkillInfo):
                     input_map[inp_def.name] = ""
                 else:
                     file_list = val if isinstance(val, list) else [val]
+
+                    # -- File count cap (security: finding #7) --
+                    if len(file_list) > _MAX_FILE_COUNT:
+                        yield add(
+                            f"Error: too many files — received {len(file_list)}, "
+                            f"maximum is {_MAX_FILE_COUNT} per run."
+                        ), gr.update(visible=False)
+                        return
+
                     stage_dir = Path(tempfile.mkdtemp(
                         prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-",
                     ))
                     for fp in file_list:
                         src = Path(fp.name if hasattr(fp, "name") else fp)
-                        if src.is_file():
-                            shutil.copy2(src, stage_dir / src.name)
+                        if not src.is_file():
+                            continue
+
+                        # -- Per-file size cap (security: finding #7) --
+                        try:
+                            file_size = src.stat().st_size
+                        except OSError:
+                            file_size = 0
+                        if file_size > _MAX_UPLOAD_SIZE_BYTES:
+                            yield add(
+                                f"Error: file **{src.name}** is too large "
+                                f"({file_size // (1024 * 1024)} MB) — "
+                                f"maximum is {_MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB per file."
+                            ), gr.update(visible=False)
+                            return
+
+                        shutil.copy2(src, stage_dir / src.name)
                     staged_count = len(list(stage_dir.iterdir()))
                     if staged_count == 0:
                         yield add(f"Warning: no valid files found for: {inp_def.label}"), gr.update(visible=False)

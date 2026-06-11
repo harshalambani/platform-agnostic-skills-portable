@@ -103,7 +103,11 @@ def _do_check() -> None:
                 checked=True,
             )
 
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 — intentional broad catch (finding #9)
+        # SECURITY NOTE (finding #9): all exceptions (including TLS/network failures)
+        # are stored in UpdateInfo.error, which is available via get_result().
+        # The update check runs in a daemon thread and must never crash the app;
+        # errors are surfaced to the caller, not silently dropped.
         with _lock:
             _result = UpdateInfo(
                 error=f"{type(e).__name__}: {e}",

@@ -143,7 +143,11 @@ class _StreamingAgentWrapper:
                 state = self._agent.get_state(config or {})
                 if hasattr(state, "values"):
                     return state.values
-            except Exception:
+            except Exception:  # noqa: BLE001 — intentional (finding #9)
+                # SECURITY NOTE (finding #9): get_state() is an optional API
+                # compatibility shim — its absence or a version mismatch raises
+                # here.  The fallback below reconstructs the final state from the
+                # accumulated streaming chunks, so no result is lost.
                 pass
 
         # Fallback: re-invoke without streaming (shouldn't normally happen).

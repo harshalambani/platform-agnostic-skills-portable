@@ -50,7 +50,11 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
         return HealthResult(False, "unreachable", f"{type(e).__name__}: {e.reason}")
     except TimeoutError:
         return HealthResult(False, "slow", "Timed out after 2s.")
-    except Exception as e:  # noqa: BLE001 — we want a consistent return shape
+    except Exception as e:  # noqa: BLE001 — intentional broad catch (finding #9)
+        # SECURITY NOTE (finding #9): this broad handler is intentional.  Every
+        # exception — including TLS/SSL errors, certificate failures, and network
+        # errors — is captured in HealthResult.detail and surfaced to the user in
+        # the Settings tab.  Nothing is silently swallowed.
         return HealthResult(False, "unreachable", f"{type(e).__name__}: {e}")
 
     # Extract model list for the picker.

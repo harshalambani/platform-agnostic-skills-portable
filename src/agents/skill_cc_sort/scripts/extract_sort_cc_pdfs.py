@@ -26,8 +26,15 @@ import shutil
 from datetime import datetime
 
 def calculate_md5(filepath):
-    """Calculate MD5 hash of a file."""
-    md5_hash = hashlib.md5()
+    """Calculate MD5 hash of a file.
+
+    SECURITY NOTE (finding #10): MD5 is used here solely as a fast file-identity
+    / deduplication key — two files with the same hash are treated as duplicates.
+    MD5 is NOT used as a cryptographic integrity or authentication check.  Do not
+    promote this function to a security boundary (e.g., tamper detection, signature
+    verification) without replacing it with SHA-256 or stronger.
+    """
+    md5_hash = hashlib.md5()  # noqa: S324 — dedup only, not a security boundary
     with open(filepath, 'rb') as f:
         for chunk in iter(lambda: f.read(4096), b''):
             md5_hash.update(chunk)
@@ -303,7 +310,19 @@ def extract_all_pdfs_from_msgs(msg_folder, extract_folder, folder_structure=None
 
 def find_passwords(search_folder):
     """
-    Find passwords from the input folder. Supports two formats:
+    Find PDF decryption passwords from the input folder.
+
+    SECURITY NOTE (finding #8 — accepted risk): passwords are stored as plaintext
+    in a .txt file adjacent to the PDF data.  This is intentional for the qpdf
+    decrypt workflow — the password must be available at call time, and encrypting
+    it (e.g., with Windows DPAPI) would require this agent to depend on
+    platform-specific keyring APIs, violating the platform-agnostic contract.
+    Risk is accepted for this threat model (local, single-user portable app where
+    the user controls their own data folder).  Users should restrict access to
+    the folder containing passwords.txt (e.g., NTFS permissions) and delete the
+    file once decryption is complete.
+
+    Supports two formats:
 
     Format 1 - Single password: a .txt file whose filename stem is the password.
         e.g.  HARS2806.txt  ->  password list = ['HARS2806']

@@ -23,6 +23,16 @@ Public surface:
     native_status()      -> NativeStatus
         Pure inspection; no side effects. Used by the Home tab to display
         a quick health pill.
+
+SECURITY — PATCH CADENCE (finding #7):
+    Parser vulnerabilities in Tesseract, Poppler, and qpdf are the primary
+    attack surface for untrusted document inputs (malformed PDFs, crafted
+    TIFFs, etc.).  These binaries should be updated on every release cycle:
+      - Tesseract: https://github.com/tesseract-ocr/tesseract/releases
+      - Poppler:   https://poppler.freedesktop.org/ (or poppler-windows builds)
+      - qpdf:      https://github.com/qpdf/qpdf/releases
+    Update the SHA-256 pins in bundling/refresh_binaries.py when new versions
+    ship and re-run `python bundling/refresh_binaries.py` to pull them in.
 """
 from __future__ import annotations
 
@@ -156,7 +166,12 @@ def ensure_native_path() -> NativeStatus:
         try:
             import pytesseract  # type: ignore[import-not-found]
             pytesseract.pytesseract.tesseract_cmd = str(status.tesseract_exe)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001 — intentional (finding #9)
+            # SECURITY NOTE (finding #9): pytesseract is an optional dependency.
+            # ImportError or AttributeError here means it isn't installed; any
+            # other exception means the attribute path changed between versions.
+            # In both cases the failure is harmless — skills that use Tesseract
+            # call the binary via subprocess, not via pytesseract's Python API.
             pass
 
     _REGISTERED = True

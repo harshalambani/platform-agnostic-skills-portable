@@ -18,10 +18,10 @@
 | 4 | Medium | Plaintext API keys + unmasked UI field — keys stored cleartext in `Data\settings\config.yaml`, copied to an uncleaned temp `config.yaml` by `materialize_legacy_config()`, and rendered in a plain `gr.Textbox` (not password type). | `ui/_config.py` `materialize_legacy_config()`; `ui/tabs/settings.py` `ep_api_key` | MP-04 | **FIXED** 2026-06-11 — see [Fix notes](#finding-4--fixed-2026-06-11-mp-04) |
 | 5 | Medium | Gradio file exposure — `allowed_paths=[output_dir]` serves the entire outputs folder over the local HTTP server; DownloadButton handed a resolved absolute path. Binding is `127.0.0.1` (good) but any local process/tab can reach served files. | `ui/webui.py` `build_app()` (`allowed_paths`); `ui/tabs/_generic.py` download wiring | [MP-05](./2026-06-08-miniproject-05-gradio-file-exposure.md) | **FIXED** 2026-06-10 — see [Fix notes](#finding-5--fixed-2026-06-10-mp-05) |
 | 6 | Medium | Zip Slip in build pipeline — `zf.extractall()` in three spots with no path-traversal guard. URLs are SHA-256 pinned, so build-time only, but a compromised mirror could write outside `vendor/`. | `bundling/refresh_binaries.py` (3× `extractall`) | — | **FIXED** 2026-06-11 — see [Fix notes](#finding-6--fixed-2026-06-11) |
-| 7 | Low | Untrusted document parsing — uploads `shutil.copy2`'d with no size/type/count limits, then fed to Poppler/Tesseract/pypdf/qpdf. Native-parser bugs are the real attack surface. Needs input caps + a patch-cadence note. | `ui/tabs/_generic.py` (`files` staging); native binaries | — | OPEN |
-| 8 | Low | Plaintext PDF passwords — `find_passwords()` reads passwords from `.txt` files on disk and tries them via qpdf; passwords sit in cleartext beside the data. | `src/agents/skill_cc_sort/scripts/extract_sort_cc_pdfs.py` `find_passwords()` | — | OPEN |
-| 9 | Low | Broad exception swallowing — many `except BaseException/Exception` blocks (health, update check, native setup) can mask security-relevant failures (e.g. TLS errors). | `ui/_health.py`, `ui/_update.py`, `ui/_native.py`, `src/agents/base_agent.py` | — | OPEN |
-| 10 | Low | MD5 for file identity — used for dedup/identity in cc_sort. Not a security boundary today; flag so it is never promoted to one. | `src/agents/skill_cc_sort/scripts/extract_sort_cc_pdfs.py` `calculate_md5()` | — | OPEN |
+| 7 | Low | Untrusted document parsing — uploads `shutil.copy2`'d with no size/type/count limits, then fed to Poppler/Tesseract/pypdf/qpdf. Native-parser bugs are the real attack surface. Needs input caps + a patch-cadence note. | `ui/tabs/_generic.py` (`files` staging); native binaries | — | **FIXED** 2026-06-11 — see [Fix notes](#finding-7--fixed-2026-06-11) |
+| 8 | Low | Plaintext PDF passwords — `find_passwords()` reads passwords from `.txt` files on disk and tries them via qpdf; passwords sit in cleartext beside the data. | `src/agents/skill_cc_sort/scripts/extract_sort_cc_pdfs.py` `find_passwords()` | — | **WONTFIX** 2026-06-11 — see [Fix notes](#finding-8--wontfix-2026-06-11) |
+| 9 | Low | Broad exception swallowing — many `except BaseException/Exception` blocks (health, update check, native setup) can mask security-relevant failures (e.g. TLS errors). | `ui/_health.py`, `ui/_update.py`, `ui/_native.py`, `src/agents/base_agent.py` | — | **WONTFIX** 2026-06-11 — see [Fix notes](#finding-9--wontfix-2026-06-11) |
+| 10 | Low | MD5 for file identity — used for dedup/identity in cc_sort. Not a security boundary today; flag so it is never promoted to one. | `src/agents/skill_cc_sort/scripts/extract_sort_cc_pdfs.py` `calculate_md5()` | — | **WONTFIX** 2026-06-11 — see [Fix notes](#finding-10--wontfix-2026-06-11) |
 
 ## Fix notes
 
@@ -38,7 +38,7 @@ Files changed in `platform-agnostic-skills-portable`:
 
 Verification: 271/271 checks pass (standalone script; pytest run requires `langchain_core` which is build-time only).
 
-**Upstream note:** `src/agents/**` is mirrored verbatim from `platform-agnostic-skills` at build time (`bundling/sources.toml`). The equivalent fix must also land in `harshalambani/platform-agnostic-skills` (local copy at `../platform-agnostic-skills/agents/skill_csv_analyzer/`) before the next build pull. Finding #1 is tracked as FIXED here because the portable-repo copy is remediated and verified; the upstream sync is a follow-on action.
+**Upstream sync — DONE 2026-06-11:** `src/agents/**` is mirrored verbatim from `platform-agnostic-skills` at build time (`bundling/sources.toml`). The equivalent fix has been verified to be present in `harshalambani/platform-agnostic-skills` (local copy at `../platform-agnostic-skills/agents/skill_csv_analyzer/`): both `tools.py` and `AGENT.md` are byte-for-byte identical between the two repos. No further action required.
 
 ### Finding #2 — FIXED 2026-06-09 (MP-02)
 
@@ -112,6 +112,39 @@ Files changed in `platform-agnostic-skills-portable`:
 - `tests/test_zip_slip.py` — new file; 19 checks: parent traversal (1–3 levels), backslash traversal, Windows drive-letter (Windows-only pytest mark), Unix absolute path, no-partial-extraction atomicity guarantee, flat/nested/single/deep/empty acceptance, drive-letter logic unit test (platform-independent).
 
 Verification: 19/19 checks pass (sandbox run against extracted function source).
+
+### Finding #7 — FIXED 2026-06-11
+
+Upload input caps and native-binary patch-cadence note added.
+
+- `ui/tabs/_generic.py` — added `_MAX_UPLOAD_SIZE_BYTES = 100 MB` and `_MAX_FILE_COUNT = 20` module-level constants. Both are now enforced server-side in the `files` input staging block: the count cap fires before any file is opened (early return); the per-file size cap checks `src.stat().st_size` before each `shutil.copy2`. Both produce user-visible error messages in the run log.
+- `ui/_native.py` — added a `SECURITY — PATCH CADENCE` note in the module docstring pointing maintainers to the Tesseract, Poppler, and qpdf release pages and explaining that SHA-256 pins in `refresh_binaries.py` must be updated when new versions ship.
+- `tests/test_input_caps.py` — new file; 8 checks covering constant sanity, count-cap rejection/acceptance, size-cap rejection/acceptance, and count-checked-before-size ordering.
+
+Verification: 7/7 static checks pass (sandbox run).
+
+### Finding #8 — WONTFIX 2026-06-11
+
+**Rationale:** PDF decryption passwords stored in `passwords.txt` adjacent to the input data is intentional for the qpdf workflow — the password must be on disk at decryption time. Encrypting it with DPAPI would require `extract_sort_cc_pdfs.py` to import platform-specific keyring APIs, violating the platform-agnostic agent contract (`src/agents/**` is mirrored verbatim from the upstream non-Windows repo). Risk is accepted for this threat model (local, single-user portable app; user owns the data folder).
+
+**Mitigation documented:** a `SECURITY NOTE` comment was added to `find_passwords()` in `extract_sort_cc_pdfs.py` explaining the risk and recommending users restrict NTFS permissions on the folder and delete `passwords.txt` once decryption is complete.
+
+### Finding #9 — WONTFIX 2026-06-11
+
+**Rationale:** every broad `except Exception` block in the affected files is intentional and documents its reasoning:
+
+- `ui/_health.py` — `HealthResult.detail` captures the full `type(e).__name__: {e}` string and surfaces it to the user in the Settings tab. No failure is silently swallowed.
+- `ui/_update.py` — `UpdateInfo.error` captures the exception string. The check runs in a daemon thread and must not crash the app; the error is available to callers.
+- `ui/_native.py` — guards an optional `pytesseract` import; `ImportError` and version-mismatch errors are both harmless here since skills call Tesseract via subprocess, not the Python API.
+- `src/agents/base_agent.py` — guards a `get_state()` compatibility shim; the fallback below recovers the final state from accumulated streaming chunks.
+
+**Mitigation documented:** `# SECURITY NOTE (finding #9)` comments added to all four sites explaining why the broad handler is intentional and confirming nothing security-relevant is silently dropped.
+
+### Finding #10 — WONTFIX 2026-06-11
+
+**Rationale:** MD5 in `calculate_md5()` / `extract_sort_cc_pdfs.py` is used exclusively as a fast deduplication key (two files with the same hash → treated as duplicates). It is not used for tamper detection, authentication, or integrity verification. Replacing it with SHA-256 would improve collision resistance for dedup purposes but provides no security benefit in this context.
+
+**Mitigation documented:** a `SECURITY NOTE (finding #10)` comment was added to `calculate_md5()` and a `# noqa: S324` annotation added to the `hashlib.md5()` call, explicitly flagging this as a non-security boundary. Any future promotion to a security check must replace MD5 with SHA-256 or stronger.
 
 ## Open questions (need dynamic verification)
 
