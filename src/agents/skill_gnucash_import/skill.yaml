@@ -1,0 +1,72 @@
+# skill.yaml — GnuCash Bank Statement Import skill manifest
+# Read by agents/registry.py at startup.
+#
+# Phase 1 scaffold (2026-06-09) — see
+# 2026-06-09-GNUCASH-AUTOMATION-PROJECT-PLAN.md for the full project plan.
+# This manifest deliberately ships with the minimum input set so the tab
+# renders cleanly while business logic is still being designed. PDF input,
+# QIF output, and account-mapping rules come in Phase 2+.
+
+name: "gnucash_import"
+display_name: "GnuCash Statement Import"
+description: >
+  Convert a bank-statement CSV or Excel file into a GnuCash-importable CSV
+  using the canonical Date,TxnID,Description,Account,Deposit,Withdrawal,
+  Balance schema. Pure direct-mode LLM transformation — no tool calls.
+  PDF input and QIF output land in a later phase.
+category: "financial"
+version: "0.1.0-scaffold"
+
+# Execution mode — direct (prompt → LLM → response).
+mode: "direct"
+
+# Entry point relative to this skill's package.
+entry_point: "agent:run"
+
+# Inputs rendered by the generic tab.
+inputs:
+  - name: "file_path"
+    type: "file"
+    label: "Bank statement (CSV or Excel)"
+    file_types: [".csv", ".xlsx", ".xls", ".txt"]
+    required: true
+
+  - name: "account_name"
+    type: "text"
+    label: "GnuCash account name (optional, e.g. Assets:Bank:HDFC Savings)"
+    required: false
+
+  - name: "bank_hint"
+    type: "select"
+    label: "Source bank (hint, optional)"
+    options:
+      - "Auto-detect"
+      - "HDFC"
+      - "SBI"
+      - "ICICI"
+      - "Axis"
+      - "HSBC"
+      - "Bank of Baroda"
+      - "Other"
+    required: false
+
+# Maps input fields to run() kwargs. Reserved tokens:
+# {output_path}, {config_path}, {model_override}.
+run_args:
+  file_path: "{inputs.file_path}"
+  account_name: "{inputs.account_name}"
+  bank_hint: "{inputs.bank_hint}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+# Output file configuration.
+output:
+  extension: ".csv"
+  suffix: "gnucash"
+  download_label: "Download GnuCash CSV"
+
+# External dependencies (none for the Phase-1 CSV-only path).
+requires:
+  native_binaries: []
+  external_tools: []
