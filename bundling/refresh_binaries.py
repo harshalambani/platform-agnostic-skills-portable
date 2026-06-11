@@ -85,6 +85,51 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _safe_extractall(zf: zipfile.ZipFile, dest: Path) -> None:
+    """
+    Extract all members of *zf* into *dest*, rejecting any entry whose resolved
+    path would land outside *dest* (Zip Slip / path-traversal attack).
+
+    A crafted archive can carry entries like ``../../evil.exe`` or an absolute
+    path such as ``C:/Windows/evil.dll``.  ``zipfile.extractall()`` follows those
+    paths verbatim; this wrapper pre-validates every member before a single byte
+    is written to disk.
+
+    Build-time only, but a compromised mirror could supply a malicious archive
+    that bypasses the SHA-256 pin (mirror compromise → pin update → Zip Slip).
+    Security: tracker finding #6.
+    """
+    dest_resolved = dest.resolve()
+    for info in zf.infolist():
+        # Normalize separators so Path handles both / and \ in zip entry names.
+        normalized = info.filename.replace("\\", "/")
+
+        # Explicit Windows drive-letter check: entries like "C:/Windows/evil.dll"
+        # are absolute on Windows but on Linux Path.resolve() would treat them as
+        # relative (the colon has no special meaning). Reject proactively so the
+        # guard works identically on both platforms.
+        if len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha():
+            raise RuntimeError(
+                f"Zip Slip blocked: archive entry {info.filename!r} has a Windows "
+                f"drive-letter path and would escape the destination {dest_resolved}. "
+                "Archive may be malicious or corrupt — aborting."
+            )
+
+        member_path = dest / normalized
+        try:
+            resolved = member_path.resolve()
+            contained = resolved.is_relative_to(dest_resolved)
+        except Exception:
+            contained = False
+        if not contained:
+            raise RuntimeError(
+                f"Zip Slip blocked: archive entry {info.filename!r} would extract to "
+                f"{member_path}, which escapes the destination {dest_resolved}. "
+                "Archive may be malicious or corrupt — aborting."
+            )
+    zf.extractall(dest)
+
+
 def _copy_globs(src_root: Path, patterns: Iterable[str], dest: Path) -> int:
     """Copy files matching any of the patterns (relative to src_root) into dest, preserving subpath. Returns count copied."""
     count = 0
@@ -116,7 +161,7 @@ def install_tesseract(meta: dict, tmp: Path) -> None:
     extract_root.mkdir()
     _eprint(f"  unzipping into {extract_root}")
     with zipfile.ZipFile(meta["_local_zip"]) as zf:
-        zf.extractall(extract_root)
+        _safe_extractall(zf, extract_root)
 
     # The UB-Mannheim layout nests everything inside a single top-level folder.
     # Find the first folder containing tesseract.exe and use it as the root.
@@ -150,7 +195,7 @@ def install_poppler(meta: dict, tmp: Path) -> None:
     extract_root.mkdir()
     _eprint(f"  unzipping into {extract_root}")
     with zipfile.ZipFile(meta["_local_zip"]) as zf:
-        zf.extractall(extract_root)
+        _safe_extractall(zf, extract_root)
 
     # poppler-windows ships Library/bin (older releases) or just bin (newer).
     bin_dir = next(extract_root.rglob("pdftoppm.exe"), None)
@@ -178,7 +223,7 @@ def install_qpdf(meta: dict, tmp: Path) -> None:
     extract_root.mkdir()
     _eprint(f"  unzipping into {extract_root}")
     with zipfile.ZipFile(meta["_local_zip"]) as zf:
-        zf.extractall(extract_root)
+        _safe_extractall(zf, extract_root)
 
     # qpdf-msvc64 ships qpdf-<version>/bin/qpdf.exe (nested one level).
     qpdf_exe = next(extract_root.rglob("qpdf.exe"), None)

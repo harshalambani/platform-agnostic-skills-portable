@@ -17,7 +17,7 @@
 | 3 | Medium | Dependency integrity not enforced — `requirements.txt` uses loose ranges (`gradio>=6,<7`, `langchain>=0.3`); `requirements-lock.txt` pins versions but carries **no hashes** (`--require-hashes` absent). Frozen build can pull a newer/tampered wheel. | `requirements.txt`, `requirements-lock.txt`, `bundling/build.py` | [MP-03](./2026-06-08-miniproject-03-dependency-hashing.md) | **IN PROGRESS** — build harness + CI done; lock regen pending (needs internet, queued for on-return PS block) |
 | 4 | Medium | Plaintext API keys + unmasked UI field — keys stored cleartext in `Data\settings\config.yaml`, copied to an uncleaned temp `config.yaml` by `materialize_legacy_config()`, and rendered in a plain `gr.Textbox` (not password type). | `ui/_config.py` `materialize_legacy_config()`; `ui/tabs/settings.py` `ep_api_key` | — | **PARTIAL** 2026-06-09 — UI masked + temp cleanup done; at-rest encryption tracked as MP-04 |
 | 5 | Medium | Gradio file exposure — `allowed_paths=[output_dir]` serves the entire outputs folder over the local HTTP server; DownloadButton handed a resolved absolute path. Binding is `127.0.0.1` (good) but any local process/tab can reach served files. | `ui/webui.py` `build_app()` (`allowed_paths`); `ui/tabs/_generic.py` download wiring | [MP-05](./2026-06-08-miniproject-05-gradio-file-exposure.md) | **FIXED** 2026-06-10 — see [Fix notes](#finding-5--fixed-2026-06-10-mp-05) |
-| 6 | Medium | Zip Slip in build pipeline — `zf.extractall()` in three spots with no path-traversal guard. URLs are SHA-256 pinned, so build-time only, but a compromised mirror could write outside `vendor/`. | `bundling/refresh_binaries.py` (3× `extractall`) | — | OPEN |
+| 6 | Medium | Zip Slip in build pipeline — `zf.extractall()` in three spots with no path-traversal guard. URLs are SHA-256 pinned, so build-time only, but a compromised mirror could write outside `vendor/`. | `bundling/refresh_binaries.py` (3× `extractall`) | — | **FIXED** 2026-06-11 — see [Fix notes](#finding-6--fixed-2026-06-11) |
 | 7 | Low | Untrusted document parsing — uploads `shutil.copy2`'d with no size/type/count limits, then fed to Poppler/Tesseract/pypdf/qpdf. Native-parser bugs are the real attack surface. Needs input caps + a patch-cadence note. | `ui/tabs/_generic.py` (`files` staging); native binaries | — | OPEN |
 | 8 | Low | Plaintext PDF passwords — `find_passwords()` reads passwords from `.txt` files on disk and tries them via qpdf; passwords sit in cleartext beside the data. | `src/agents/skill_cc_sort/scripts/extract_sort_cc_pdfs.py` `find_passwords()` | — | OPEN |
 | 9 | Low | Broad exception swallowing — many `except BaseException/Exception` blocks (health, update check, native setup) can mask security-relevant failures (e.g. TLS errors). | `ui/_health.py`, `ui/_update.py`, `ui/_native.py`, `src/agents/base_agent.py` | — | OPEN |
@@ -116,6 +116,19 @@ Files changed in `platform-agnostic-skills-portable`:
 Verification: 8/8 static checks pass (sandbox run).
 
 **Residual risk:** Any local process that knows the staging dir path (readable via `ps aux` / process inspection) could fetch its contents during the brief window between copy and download. Mitigated by: (a) per-session random temp dir name; (b) `atexit` cleanup; (c) `127.0.0.1`-only binding. Accepted residual for this threat model (local, single-user portable app).
+
+### Finding #6 — FIXED 2026-06-11
+
+All three `zf.extractall()` calls in `bundling/refresh_binaries.py` replaced with `_safe_extractall(zf, dest)`. The new helper pre-validates every archive member before a single byte is written: resolves each entry's target path and rejects it if it escapes `dest` via `is_relative_to()`. An additional explicit check rejects Windows drive-letter paths (e.g. `C:/Windows/evil.dll`) which Python's `Path` on Linux would not flag via resolution alone. Because validation runs in a pre-pass before `zf.extractall()`, a mixed-entry archive (one benign, one malicious) is rejected atomically — no partial extraction.
+
+**Attack scenario (even with SHA-256 pinning):** mirror compromise → attacker updates the pinned SHA in a PR → `refresh_binaries.py` downloads + verifies the new (tampered) archive → without this guard, extraction writes anywhere the process has write access.
+
+Files changed in `platform-agnostic-skills-portable`:
+
+- `bundling/refresh_binaries.py` — added `_safe_extractall(zf, dest)` helper (pre-validation loop + `is_relative_to` + explicit drive-letter check); replaced all three `zf.extractall(extract_root)` calls (`install_tesseract`, `install_poppler`, `install_qpdf`).
+- `tests/test_zip_slip.py` — new file; 19 checks: parent traversal (1–3 levels), backslash traversal, Windows drive-letter (Windows-only pytest mark), Unix absolute path, no-partial-extraction atomicity guarantee, flat/nested/single/deep/empty acceptance, drive-letter logic unit test (platform-independent).
+
+Verification: 19/19 checks pass (sandbox run against extracted function source).
 
 ## Open questions (need dynamic verification)
 
