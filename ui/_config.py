@@ -41,6 +41,8 @@ Public surface:
 from __future__ import annotations
 
 import atexit
+import base64
+import ctypes
 import os
 import shutil
 import sys
@@ -49,6 +51,133 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# API key encryption (security: finding #4 / MP-04)
+#
+# API keys are encrypted at rest in config.yaml using Windows DPAPI
+# (CryptProtectData / CryptUnprotectData), which binds the ciphertext to the
+# current Windows user account.  Even if config.yaml is copied off the
+# machine, the blob cannot be decrypted without the same user credential.
+#
+# Storage format: stored values use a prefix to identify how they are encoded:
+#   "dpapi:<base64>"  — DPAPI ciphertext (Windows, new behaviour)
+#   "plain:<value>"   — unencrypted fallback (non-Windows dev / CI)
+#   "<no prefix>"     — legacy plaintext from before this feature landed;
+#                       read as-is; re-encrypted on next save.
+#
+# The two sentinels "not-needed" and "" are never encrypted; they pass through
+# unchanged so Ollama endpoints (which don't use a key) are unaffected.
+# ---------------------------------------------------------------------------
+
+_DPAPI_PREFIX = "dpapi:"
+_PLAIN_PREFIX = "plain:"
+_SENTINELS = {"", "not-needed"}
+
+
+def _dpapi_encrypt(plaintext: str) -> str:
+    """
+    Encrypt *plaintext* with Windows DPAPI (user context) and return a
+    base64-encoded ciphertext string.  Raises RuntimeError on failure.
+    Only call this on Windows (sys.platform == "win32").
+    """
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.c_char_p)]
+
+    data = plaintext.encode("utf-8")
+    blob_in = _BLOB(len(data), data)
+    blob_out = _BLOB()
+
+    ok = ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(blob_in),
+        None, None, None, None,
+        0,
+        ctypes.byref(blob_out),
+    )
+    if not ok:
+        raise RuntimeError(
+            f"CryptProtectData failed (err={ctypes.GetLastError()}). "
+            "The API key could not be encrypted."
+        )
+    try:
+        raw = ctypes.string_at(blob_out.pbData, blob_out.cbData)
+        return base64.b64encode(raw).decode("ascii")
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def _dpapi_decrypt(b64: str) -> str:
+    """
+    Decrypt a base64-encoded DPAPI ciphertext back to the original string.
+    Raises RuntimeError on failure.  Only call this on Windows.
+    """
+    class _BLOB(ctypes.Structure):
+        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.c_char_p)]
+
+    raw = base64.b64decode(b64)
+    blob_in = _BLOB(len(raw), raw)
+    blob_out = _BLOB()
+
+    ok = ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in),
+        None, None, None, None,
+        0,
+        ctypes.byref(blob_out),
+    )
+    if not ok:
+        raise RuntimeError(
+            f"CryptUnprotectData failed (err={ctypes.GetLastError()}). "
+            "The API key could not be decrypted — it may have been encrypted by "
+            "a different Windows user account."
+        )
+    try:
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData).decode("utf-8")
+    finally:
+        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+
+
+def encrypt_api_key(plaintext: str) -> str:
+    """
+    Encrypt an API key for storage in config.yaml.
+
+    Sentinels ("", "not-needed") are returned unchanged so Ollama endpoints
+    are unaffected.  On Windows the key is wrapped with DPAPI and stored as
+    "dpapi:<base64>".  On other platforms (dev / CI) it is stored as
+    "plain:<value>" — no encryption is available, but the prefix is present
+    so the value is round-trip safe through decrypt_api_key().
+    """
+    if plaintext in _SENTINELS:
+        return plaintext
+    if sys.platform == "win32":
+        return _DPAPI_PREFIX + _dpapi_encrypt(plaintext)
+    return _PLAIN_PREFIX + plaintext
+
+
+def decrypt_api_key(stored: str) -> str:
+    """
+    Decrypt a stored API key value from config.yaml.
+
+    Handles all three storage formats:
+      • "dpapi:<base64>"  — DPAPI ciphertext (Windows only)
+      • "plain:<value>"   — cleartext with explicit prefix
+      • "<no prefix>"     — legacy cleartext; returned as-is for compatibility
+
+    Raises RuntimeError if a DPAPI blob is encountered on a non-Windows host.
+    """
+    if not stored or stored in _SENTINELS:
+        return stored
+    if stored.startswith(_DPAPI_PREFIX):
+        if sys.platform != "win32":
+            raise RuntimeError(
+                "Cannot decrypt a DPAPI-encrypted API key on a non-Windows platform. "
+                "Please re-enter the key in the Settings tab."
+            )
+        return _dpapi_decrypt(stored[len(_DPAPI_PREFIX):])
+    if stored.startswith(_PLAIN_PREFIX):
+        return stored[len(_PLAIN_PREFIX):]
+    # Legacy plaintext (no prefix) — return as-is; will be encrypted on next save.
+    return stored
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +302,8 @@ def _legacy_from_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
         "temperature": float(endpoint.get("temperature", 0.0)),
     }
     if provider == "openai_compatible":
-        common["api_key"] = endpoint.get("api_key", "not-needed")
+        stored_key = endpoint.get("api_key", "not-needed")
+        common["api_key"] = decrypt_api_key(stored_key)
 
     return {
         "provider": provider,

@@ -15,7 +15,7 @@
 | 1 | **High** | `eval()` sandbox escape — LLM-generated expressions run via `eval(expr, {"__builtins__": {}}, {df, pd})`; regex blocklist is bypassable (string-concat, `__getattribute__`, `__reduce__`, `vars()`). Untrusted CSV → indirect prompt injection → RCE / arbitrary file read-write. | `src/agents/skill_csv_analyzer/tools.py:149` (`query_csv`, `_validate_expression`, `_BLOCKED_PATTERNS`) | [MP-01](./2026-06-08-miniproject-01-csv-eval-rce.md) | **FIXED** 2026-06-09 — see [Fix notes](#fix-notes) |
 | 2 | **High** | Frozen-mode arbitrary-script dispatcher — `pa_skills.exe <anything>.py` is executed via `runpy.run_path(..., "__main__")` with no allowlist. Attacker-influenced argv (shortcut, file association, sibling process) = code execution. | `ui/webui.py` `_maybe_dispatch_script()` / `main()` | [MP-02](./2026-06-08-miniproject-02-frozen-script-dispatcher.md) | **FIXED** 2026-06-09 — see [Fix notes](#finding-2--fixed-2026-06-09-mp-02) |
 | 3 | Medium | Dependency integrity not enforced — `requirements.txt` uses loose ranges (`gradio>=6,<7`, `langchain>=0.3`); `requirements-lock.txt` pins versions but carries **no hashes** (`--require-hashes` absent). Frozen build can pull a newer/tampered wheel. | `requirements.txt`, `requirements-lock.txt`, `bundling/build.py` | [MP-03](./2026-06-08-miniproject-03-dependency-hashing.md) | **FIXED** 2026-06-11 — see [Fix notes](#finding-3--fixed-2026-06-11-mp-03) |
-| 4 | Medium | Plaintext API keys + unmasked UI field — keys stored cleartext in `Data\settings\config.yaml`, copied to an uncleaned temp `config.yaml` by `materialize_legacy_config()`, and rendered in a plain `gr.Textbox` (not password type). | `ui/_config.py` `materialize_legacy_config()`; `ui/tabs/settings.py` `ep_api_key` | — | **PARTIAL** 2026-06-09 — UI masked + temp cleanup done; at-rest encryption tracked as MP-04 |
+| 4 | Medium | Plaintext API keys + unmasked UI field — keys stored cleartext in `Data\settings\config.yaml`, copied to an uncleaned temp `config.yaml` by `materialize_legacy_config()`, and rendered in a plain `gr.Textbox` (not password type). | `ui/_config.py` `materialize_legacy_config()`; `ui/tabs/settings.py` `ep_api_key` | MP-04 | **FIXED** 2026-06-11 — see [Fix notes](#finding-4--fixed-2026-06-11-mp-04) |
 | 5 | Medium | Gradio file exposure — `allowed_paths=[output_dir]` serves the entire outputs folder over the local HTTP server; DownloadButton handed a resolved absolute path. Binding is `127.0.0.1` (good) but any local process/tab can reach served files. | `ui/webui.py` `build_app()` (`allowed_paths`); `ui/tabs/_generic.py` download wiring | [MP-05](./2026-06-08-miniproject-05-gradio-file-exposure.md) | **FIXED** 2026-06-10 — see [Fix notes](#finding-5--fixed-2026-06-10-mp-05) |
 | 6 | Medium | Zip Slip in build pipeline — `zf.extractall()` in three spots with no path-traversal guard. URLs are SHA-256 pinned, so build-time only, but a compromised mirror could write outside `vendor/`. | `bundling/refresh_binaries.py` (3× `extractall`) | — | **FIXED** 2026-06-11 — see [Fix notes](#finding-6--fixed-2026-06-11) |
 | 7 | Low | Untrusted document parsing — uploads `shutil.copy2`'d with no size/type/count limits, then fed to Poppler/Tesseract/pypdf/qpdf. Native-parser bugs are the real attack surface. Needs input caps + a patch-cadence note. | `ui/tabs/_generic.py` (`files` staging); native binaries | — | OPEN |
@@ -67,19 +67,23 @@ Build harness, CI, and lock file all hardened.
 
 Verification: `regen_lock.py` completed cleanly (`OK: requirements-lock.txt written — 125 packages pinned, 2680 hash entries`).
 
-### Finding #4 — PARTIAL FIX 2026-06-09
+### Finding #4 — FIXED 2026-06-11 (MP-04)
 
-Two of the three issues addressed; at-rest encryption deferred as MP-04.
+All three issues fully resolved across two sessions.
 
-**Done:**
+**Done (2026-06-09):**
 
 - `ui/tabs/settings.py` — `ep_api_key` Textbox: added `type="password"` so the key is masked in the browser; added a security note in the Settings tab header explaining the cleartext-on-disk situation.
 - `ui/_config.py` — added module-level `_LEGACY_TEMP_DIRS` list and `_cleanup_legacy_temp_dirs()` atexit handler; `materialize_legacy_config()` now appends each new temp dir to the list so all temp config files (containing API keys) are wiped on clean process exit. Abnormal exits (kill/crash) still leave files — acceptable residual risk for a local app.
 - `bundling/templates/DefaultData/settings/config.yaml` — added `# SECURITY:` comment flagging unencrypted storage.
 
-**Not done (follow-on MP-04):**
+**Done (2026-06-11 — MP-04 at-rest encryption):**
 
-- At-rest encryption of `api_key` in `config.yaml` using Windows DPAPI or a portable keyring. Requires a platform-specific encryption layer and changes to both `_config.py` (encrypt on write, decrypt on read) and the legacy bridge. Tracked separately; this finding moves to FIXED once MP-04 lands.
+- `ui/_config.py` — added Windows DPAPI encryption layer via `ctypes` (no extra dependencies): `_dpapi_encrypt()`, `_dpapi_decrypt()`, `encrypt_api_key()`, `decrypt_api_key()`. Keys stored as `dpapi:<base64>` on Windows; `plain:<value>` on non-Windows (dev/CI). Legacy plaintext values (no prefix) are read as-is and re-encrypted on next save. `_legacy_from_endpoint()` now calls `decrypt_api_key()` so the agent always receives the plaintext key regardless of how it is stored on disk.
+- `ui/tabs/settings.py` — `_save_endpoint()` now calls `encrypt_api_key()` before writing any new key. A blank API key field means "keep the existing stored value" (standard password-manager UX — the stored blob is never re-exposed in the UI). `_on_select_endpoint()` and `_on_delete()` both return `""` for the key field instead of the raw stored value; a contextual note tells the user whether a key is already stored.
+- `tests/test_api_key_encryption.py` — new file; tests prefix constants, sentinel passthrough, `plain:` round-trip, legacy passthrough, `dpapi:` raises on non-Windows, Windows DPAPI round-trip (Windows-only marks), encrypt prefix output per platform.
+
+Verification: 7/7 platform-independent checks pass (sandbox run).
 
 ### Finding #5 — FIXED 2026-06-10 (MP-05)
 

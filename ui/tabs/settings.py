@@ -79,7 +79,14 @@ def _save_endpoint(
         "temperature": round(temperature, 2),
     }
     if provider == "openai_compatible":
-        ep["api_key"] = api_key.strip() or "not-needed"
+        new_key = api_key.strip()
+        if new_key:
+            # User supplied a key — encrypt it before storing.
+            ep["api_key"] = _config.encrypt_api_key(new_key)
+        else:
+            # Blank field means "keep the existing stored value".
+            existing = (cfg.get("endpoints") or {}).get(name, {})
+            ep["api_key"] = existing.get("api_key") or "not-needed"
 
     cfg["endpoints"][name] = ep
     if set_active:
@@ -251,15 +258,20 @@ def render() -> None:
                 False,                           # ep_set_active
                 f"_No endpoint named `{name}`._",  # save_status
             )
+        # Never return the stored (possibly encrypted) key to the UI.
+        # An empty field means "leave unchanged" when the user saves.
+        has_key = bool(ep.get("api_key") and ep.get("api_key") != "not-needed")
+        key_status = "_Key stored — leave blank to keep, or type a new key to replace._" if has_key else ""
         return (
             name,
             ep.get("provider", "ollama"),
             ep.get("base_url", ""),
             ep.get("default_model", ""),
-            ep.get("api_key", ""),
+            "",                              # ep_api_key — never expose stored value
             float(ep.get("temperature", 0.0)),
             False,
-            f"_Loaded `{name}`. Edit and Save, or Delete._",
+            f"_Loaded `{name}`. Edit and Save, or Delete._"
+            + (f"\n\n{key_status}" if key_status else ""),
         )
 
     active_dd.change(
@@ -300,7 +312,7 @@ def render() -> None:
             ep.get("provider", "ollama"),
             ep.get("base_url", ""),
             ep.get("default_model", ""),
-            ep.get("api_key", ""),
+            "",                              # ep_api_key — never expose stored value
             float(ep.get("temperature", 0.0)),
             False,
         )
