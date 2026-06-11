@@ -256,6 +256,25 @@ def step2_reset_staging(log: _Log) -> None:
     log.ok(f"staging/ recreated with {len(skeleton)} folders")
 
 
+def _lock_has_hashes(lock_path: Path) -> bool:
+    """
+    Return True if *lock_path* contains at least one ``--hash=sha256:`` entry.
+
+    Also handles UTF-16 encoded files (the legacy encoding of our lock file)
+    by detecting the BOM before decoding.
+    """
+    try:
+        raw = lock_path.read_bytes()
+        # Detect UTF-16 LE/BE BOM.
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            text = raw.decode("utf-16")
+        else:
+            text = raw.decode("utf-8", errors="replace")
+        return "--hash=sha256:" in text
+    except Exception:
+        return False
+
+
 def step3_create_venv(args: argparse.Namespace, log: _Log) -> Path:
     log.step(3, "Build venv + pip install")
     py = _venv_python(BUILD_VENV)
@@ -275,12 +294,33 @@ def step3_create_venv(args: argparse.Namespace, log: _Log) -> Path:
 
     _run([py, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], log=log)
 
-    # Prefer the lock file for reproducible builds; fall back to loose pins.
+    # Install dependencies with the strictest mode the lock file supports.
+    #
+    #   Lock file present + hashes  → --require-hashes --no-deps  (secure, reproducible)
+    #   Lock file present, no hashes → warn loudly, install unhashed  (transition state)
+    #   No lock file                 → warn, use loose requirements.txt  (dev only)
+    #
+    # To move from transition to secure: run `python scripts\regen_lock.py`
+    # which regenerates requirements-lock.txt with full SHA-256 hashes.
     if REQUIREMENTS_LOCK.is_file():
-        log.info(f"installing from lock file: {REQUIREMENTS_LOCK.name}")
-        _run([py, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK], log=log)
+        if _lock_has_hashes(REQUIREMENTS_LOCK):
+            log.info(f"installing from hashed lock (--require-hashes): {REQUIREMENTS_LOCK.name}")
+            _run(
+                [py, "-m", "pip", "install",
+                 "--require-hashes", "--no-deps",
+                 "-r", REQUIREMENTS_LOCK],
+                log=log,
+            )
+        else:
+            log.warn("=" * 60)
+            log.warn("SECURITY: requirements-lock.txt has NO hashes.")
+            log.warn("  This build is NOT integrity-verified.")
+            log.warn("  Regenerate with: python scripts\\regen_lock.py")
+            log.warn("=" * 60)
+            _run([py, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK], log=log)
     else:
         log.warn("requirements-lock.txt not found — using loose pins from requirements.txt")
+        log.warn("  Run `python scripts\\regen_lock.py` to create a hashed lock file.")
         _run([py, "-m", "pip", "install", "-r", REQUIREMENTS], log=log)
 
     _run([py, "-m", "pip", "install", "pyinstaller>=6.10"], log=log)

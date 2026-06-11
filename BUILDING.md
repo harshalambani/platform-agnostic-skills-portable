@@ -76,7 +76,7 @@ python bundling\build.py
 |------|--------|--------|
 | 1 | Read version from `git describe --tags`, write `ui/_buildinfo.py` | Version + SHA + dirty flag |
 | 2 | Wipe `staging/`, create PortableApps.com folder skeleton | `staging/App/...`, `staging/Data/`, `staging/Other/` |
-| 3 | Create build venv, install `requirements.txt` + PyInstaller | `build_pyinstaller/venv/` |
+| 3 | Create build venv, install `requirements-lock.txt` with `--require-hashes` + PyInstaller | `build_pyinstaller/venv/` |
 | 4 | Run PyInstaller via `bundling/paskills.spec` | `staging/App/PASkills/pa_skills.exe` |
 | 5 | Copy Tesseract from `vendor/tesseract/` into staging | Native binary in frozen output |
 | 6 | Copy Poppler from `vendor/poppler/` into staging | Native binary in frozen output |
@@ -137,6 +137,54 @@ git push origin v0.5.0
 
 This triggers the CI pipeline. If the tag contains a hyphen (e.g., `v0.5.0-rc1`),
 the release is marked as a prerelease.
+
+## Dependency lock file
+
+`requirements-lock.txt` is the single source of truth for the exact package
+set installed into the build venv. It is generated from `requirements.txt`
+by `pip-compile --generate-hashes` (pip-tools), which pins every transitive
+dependency to an exact version **and** records the SHA-256 hash of every
+wheel or sdist. The build script (`build.py` step 3) installs using
+`pip install --require-hashes --no-deps`, so pip refuses to install any
+package whose hash does not match the lock file — even if PyPI is compromised.
+
+### When to regenerate
+
+Regenerate the lock file whenever you:
+- Add, remove, or change a version constraint in `requirements.txt`
+- Want to pull in upstream security fixes across the full dependency tree
+- See the CI `lock-check` job warn that the lock is out of date
+
+### How to regenerate
+
+From the repo root, in your dev venv (needs internet access):
+
+```powershell
+python scripts\regen_lock.py
+```
+
+The script installs pip-tools if needed, runs `pip-compile --generate-hashes`,
+verifies the output has hashes, and reports a summary. Then commit both files:
+
+```powershell
+git add requirements.txt requirements-lock.txt
+git commit -m "chore: regenerate dependency lock"
+```
+
+### Manual equivalent
+
+```powershell
+pip install pip-tools
+pip-compile --generate-hashes --resolver backtracking --no-header --annotate `
+    --output-file requirements-lock.txt requirements.txt
+```
+
+### Lock file encoding
+
+The lock file must be **UTF-8**. An older version was accidentally saved as
+UTF-16 (recognisable by the `ÿþ` / `þÿ` prefix in a text editor, or by the
+spaces between every character). The `regen_lock.py` script always emits
+UTF-8. The CI `lock-check` job rejects UTF-16 files with a clear error.
 
 ## Vendoring native binaries
 
