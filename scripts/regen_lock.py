@@ -1,13 +1,14 @@
 """
-scripts/regen_lock.py — Regenerate requirements-lock.txt with full SHA-256 hashes.
+scripts/regen_lock.py - Regenerate requirements-lock.txt with full SHA-256 hashes.
 
 This script is the single authoritative way to update the dependency lock.
 It:
-  1. Ensures pip-tools is installed in the current (dev) Python.
-  2. Runs pip-compile --generate-hashes to produce a fully-pinned, hashed
-     requirements-lock.txt from requirements.txt.
-  3. Verifies the output is UTF-8 and contains hashes.
-  4. Reports the number of pinned packages.
+  1. Detects uv on PATH and uses it (much faster resolver, ~10x speed-up).
+  2. Falls back to pip-compile (pip-tools) if uv is not found.
+  3. Runs the chosen tool with --generate-hashes to produce a fully-pinned,
+     hashed requirements-lock.txt from requirements.txt.
+  4. Verifies the output is UTF-8 and contains hashes.
+  5. Reports the number of pinned packages.
 
 Run from the repo root:
 
@@ -20,9 +21,14 @@ The resulting lock file is used by bundling/build.py with --require-hashes
 --no-deps, which means pip will refuse to install any package whose wheel
 hash does not match an entry in the file. This prevents supply-chain
 substitution even if a package index is compromised.
+
+NOTE: uv is optional but strongly recommended for speed.
+  Install: pipx install uv
+  Docs: https://github.com/astral-sh/uv
 """
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -47,8 +53,38 @@ def _python_exe() -> str:
     return sys.executable
 
 
-def _pipcompile(py: str, *args: str) -> None:
-    cmd = [py, "-m", "piptools", "compile", *args]
+def _compile_with_uv(req_in: Path, lock_out: Path) -> None:
+    """Compile lock file using uv (fast, modern resolver)."""
+    cmd = [
+        "uv", "pip", "compile",
+        "--generate-hashes",
+        "--resolver", "backtracking",
+        "--output-file", str(lock_out),
+        "--no-header",
+        str(req_in),
+    ]
+    print("$", " ".join(cmd))
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        print(
+            "\nERROR: uv pip compile failed.\n"
+            "  Make sure you are running from a terminal with internet access.\n"
+            "  Ensure uv is up-to-date: pipx upgrade uv",
+            file=sys.stderr,
+        )
+        sys.exit(result.returncode)
+
+
+def _compile_with_piptools(py: str, req_in: Path, lock_out: Path) -> None:
+    """Compile lock file using pip-compile (fallback when uv is unavailable)."""
+    cmd = [
+        py, "-m", "piptools", "compile",
+        "--generate-hashes",
+        "--output-file", str(lock_out),
+        "--resolver", "backtracking",
+        "--no-header",
+        str(req_in),
+    ]
     print("$", " ".join(cmd))
     result = subprocess.run(cmd, check=False)
     if result.returncode != 0:
@@ -63,7 +99,7 @@ def _pipcompile(py: str, *args: str) -> None:
 
 def main() -> int:
     print("=" * 60)
-    print("PA Skills Portable — dependency lock regeneration")
+    print("PA Skills Portable - dependency lock regeneration")
     print("=" * 60)
 
     if not REQUIREMENTS.is_file():
@@ -72,30 +108,33 @@ def main() -> int:
 
     py = _python_exe()
 
-    # Ensure pip-tools is available in the chosen Python.
-    result = subprocess.run(
-        [py, "-c", "import piptools"],
-        capture_output=True,
-    )
-    if result.returncode == 0:
-        print("pip-tools already installed.")
-    else:
-        print("pip-tools not found — installing...")
-        subprocess.run([py, "-m", "pip", "install", "pip-tools"], check=True)
+    # Detect uv on PATH; prefer it if available, fall back to pip-tools.
+    uv_path = shutil.which("uv")
 
-    # Run pip-compile.
-    print(f"\nCompiling {REQUIREMENTS.name} → {LOCK_OUT.name} with hashes...\n")
-    print("NOTE: this takes 5–15 minutes for a large dependency tree (gradio + langchain).\n")
-    _pipcompile(
-        py,
-        "--generate-hashes",
-        "--output-file", str(LOCK_OUT),
-        "--resolver", "backtracking",
-        "--no-header",           # don't embed the invocation command (reproducible output)
-        # "--annotate" omitted — adds per-package source comments but roughly
-        # doubles resolution time by requiring extra metadata fetches.
-        str(REQUIREMENTS),
-    )
+    if uv_path:
+        print(f"\nuv found at {uv_path} - using uv pip compile (fast resolver).\n")
+        print(f"Compiling {REQUIREMENTS.name} -> {LOCK_OUT.name} with hashes...\n")
+        print("NOTE: this typically takes 1-3 minutes with uv.\n")
+        _compile_with_uv(REQUIREMENTS, LOCK_OUT)
+    else:
+        print("\nuv not found on PATH. Falling back to pip-compile (pip-tools).")
+        print("TIP: for ~10x faster resolution, install uv: pipx install uv\n")
+
+        # Ensure pip-tools is available in the chosen Python.
+        result = subprocess.run(
+            [py, "-c", "import piptools"],
+            capture_output=True,
+        )
+        if result.returncode == 0:
+            print("pip-tools already installed.")
+        else:
+            print("pip-tools not found - installing...")
+            subprocess.run([py, "-m", "pip", "install", "pip-tools"], check=True)
+
+        # Run pip-compile.
+        print(f"\nCompiling {REQUIREMENTS.name} -> {LOCK_OUT.name} with hashes...\n")
+        print("NOTE: this takes 5-15 minutes for a large dependency tree (gradio + langchain).\n")
+        _compile_with_piptools(py, REQUIREMENTS, LOCK_OUT)
 
     # Verify the output.
     if not LOCK_OUT.is_file():

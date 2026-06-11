@@ -163,12 +163,20 @@ From the repo root, in your dev venv (needs internet access):
 python scripts\regen_lock.py
 ```
 
-The script installs pip-tools if needed, runs `pip-compile --generate-hashes`,
-verifies the output has hashes, and reports a summary. Then commit both files:
+The script detects `uv` on your PATH and uses it if available (~10x faster
+resolver); otherwise it falls back to `pip-compile` (pip-tools). Either way,
+it verifies the output has hashes and reports a summary. Then commit both files:
 
 ```powershell
 git add requirements.txt requirements-lock.txt
 git commit -m "chore: regenerate dependency lock"
+```
+
+**For faster regeneration (recommended):** Install uv via pipx:
+
+```powershell
+pipx install uv
+python scripts\regen_lock.py  # will now use uv pip compile (1–3 min instead of 5–15 min)
 ```
 
 ### Manual equivalent
@@ -217,10 +225,4 @@ that PyInstaller can't detect statically.
 `paskills.spec` and rebuild. See also `webui.py`'s `sys.stdout`/`sys.stderr`
 redirect for the `None`-stream pitfall.
 
-**Launcher Generator not found:** It's self-hosted at
-`bundling/launcher-gen/2.2.4/`. If this path is missing, run `git lfs pull`.
-
-## Historical notes
-
-The date-stamped build notes from earlier phases are archived in
-`docs/history/` for reference. This document supersedes all of them.
+**Launcher Generat
