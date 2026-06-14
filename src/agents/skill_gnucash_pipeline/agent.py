@@ -1,0 +1,741 @@
+#!/usr/bin/env python3
+"""
+GnuCash Import Pipeline
+End-to-end: raw bank statement → GnuCash-ready mapped CSV.
+
+Chain:
+  1. Bank extraction   (skill_icici / skill_bob / skill_hsbc / generic CSV normaliser)
+  2. Canonical convert (adapter_bob / adapter_hsbc; ICICI already outputs canonical;
+                        HDFC + Other Bank use LLM-assisted column normalisation)
+  3. Account mapping   (skill_gnucash_account_mapper)
+
+Public surface:
+    run() — PA Skills UI entry point.
+"""
+
+import csv
+import gzip
+import json
+import logging
+import sys
+import tempfile
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from pathlib import Path
+
+from agents.balance_utils import (
+    verify_running_balance,
+    verify_closing_balance,
+    extract_opening_closing,
+    format_balance_summary,
+    _safe_float,
+)
+
+log = logging.getLogger(__name__)
+
+# GnuCash XML namespaces
+_NS = {
+    'gnc': '{http://www.gnucash.org/XML/gnc}',
+    'act': '{http://www.gnucash.org/XML/act}',
+    'trn': '{http://www.gnucash.org/XML/trn}',
+    'split': '{http://www.gnucash.org/XML/split}',
+    'ts': '{http://www.gnucash.org/XML/ts}',
+    'slot': '{http://www.gnucash.org/XML/slot}',
+    'cmdty': '{http://www.gnucash.org/XML/cmdty}',
+}
+
+# Banks with dedicated extraction skills
+DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]
+# Banks that go through the generic CSV normalisation path
+CSV_BANKS = ["Other Bank (CSV)"]
+SUPPORTED_BANKS = DEDICATED_BANKS + CSV_BANKS
+
+# Canonical schema (order matters — GnuCash importer expects this sequence)
+CANONICAL_COLS = [
+    "Date",
+    "Transaction ID",
+    "Description",
+    "Account",
+    "Deposit",
+    "Withdrawal",
+    "Balance",
+    "Currency",
+]
+
+# ---------------------------------------------------------------------------
+# GnuCash ledger balance extraction
+# ---------------------------------------------------------------------------
+
+def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
+    """
+    Parse a .gnucash XML file and find the bank account's ledger balance.
+
+    Searches for an account whose name contains bank_name (case-insensitive)
+    under Assets, sums all transaction splits to compute the balance.
+
+    Returns:
+        {
+            "found": bool,
+            "account_name": str,
+            "balance": float,
+            "last_txn_date": str or None,  # YYYY-MM-DD
+        }
+    """
+    try:
+        with gzip.open(gnucash_file, 'rt', encoding='utf-8') as f:
+            tree = ET.parse(f)
+    except Exception:
+        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+
+    root = tree.getroot()
+
+    # Build account map: id → {name, parent_id, type}
+    acc_map = {}
+    for acc in root.findall(f'.//{_NS["gnc"]}account'):
+        aid = acc.findtext(f'{_NS["act"]}id', '')
+        aname = acc.findtext(f'{_NS["act"]}name', '')
+        atype = acc.findtext(f'{_NS["act"]}type', '')
+        parent_el = acc.find(f'{_NS["act"]}parent')
+        parent_id = parent_el.text if parent_el is not None else None
+        acc_map[aid] = {"name": aname, "parent_id": parent_id, "type": atype}
+
+    def _full_path(aid):
+        parts = []
+        visited = set()
+        while aid and aid in acc_map and aid not in visited:
+            visited.add(aid)
+            parts.append(acc_map[aid]["name"])
+            aid = acc_map[aid]["parent_id"]
+        return ":".join(reversed(parts))
+
+    # Find the bank account by name match
+    target_id = None
+    target_name = ""
+    bank_lower = bank_name.lower()
+
+    for aid, info in acc_map.items():
+        full = _full_path(aid)
+        if bank_lower in full.lower() and info["type"] in ("BANK", "ASSET"):
+            target_id = aid
+            target_name = full
+            break
+
+    if not target_id:
+        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+
+    # Sum splits for this account
+    balance = 0.0
+    last_date = None
+
+    for trn in root.findall(f'.//{_NS["gnc"]}transaction'):
+        date_el = trn.find(f'{_NS["trn"]}date-posted/{_NS["ts"]}date')
+        trn_date = date_el.text[:10] if date_el is not None else None
+
+        for sp in trn.findall(f'{_NS["trn"]}splits/{_NS["trn"]}split'):
+            sp_acc = sp.findtext(f'{_NS["split"]}account', '')
+            if sp_acc == target_id:
+                val_str = sp.findtext(f'{_NS["split"]}value', '0/1')
+                # GnuCash stores values as "num/denom" e.g. "150000/100"
+                parts = val_str.split('/')
+                if len(parts) == 2:
+                    try:
+                        balance += int(parts[0]) / int(parts[1])
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                if trn_date:
+                    if last_date is None or trn_date > last_date:
+                        last_date = trn_date
+
+    return {
+        "found": True,
+        "account_name": target_name,
+        "balance": round(balance, 2),
+        "last_txn_date": last_date,
+    }
+
+
+def _reconcile_opening_balance(
+    canonical_rows: list[dict],
+    gnucash_file: str,
+    bank_name: str,
+) -> dict:
+    """
+    Reconcile the canonical CSV's opening balance against GnuCash ledger.
+
+    Three scenarios:
+      A. Statement has entries dated before/on GnuCash's last txn date
+         → these are duplicates already posted → skip them
+      B. GnuCash has entries not in the statement (previous statement omitted)
+         → cannot detect without prior statement → flag warning
+      C. Some other error → flag error
+
+    Returns:
+        {
+            "ok": bool,
+            "message": str,
+            "rows_skipped": int,           # scenario A duplicates removed
+            "filtered_rows": list[dict],   # rows after removing duplicates
+            "gnucash_balance": float,
+            "statement_opening": float,
+        }
+    """
+    if not canonical_rows:
+        return {
+            "ok": False,
+            "message": "No rows in canonical CSV.",
+            "rows_skipped": 0,
+            "filtered_rows": [],
+            "gnucash_balance": 0.0,
+            "statement_opening": 0.0,
+        }
+
+    gc = _get_gnucash_account_balance(gnucash_file, bank_name)
+    if not gc["found"]:
+        log.warning(
+            "Could not find %s account in GnuCash — skipping opening balance check",
+            bank_name,
+        )
+        return {
+            "ok": True,
+            "message": f"GnuCash account for '{bank_name}' not found — skipping balance reconciliation.",
+            "rows_skipped": 0,
+            "filtered_rows": canonical_rows,
+            "gnucash_balance": 0.0,
+            "statement_opening": 0.0,
+        }
+
+    gc_balance = gc["balance"]
+    gc_last_date = gc["last_txn_date"]
+
+    # Derive statement opening balance
+    oc = extract_opening_closing(canonical_rows)
+    stmt_opening = oc["opening_balance"]
+
+    diff = abs(gc_balance - stmt_opening)
+
+    if diff <= 0.02:
+        # Perfect match — no duplicates, no gap
+        return {
+            "ok": True,
+            "message": (
+                f"Opening balance matches GnuCash ({gc['account_name']}): "
+                f"GnuCash={gc_balance:.2f}, Statement={stmt_opening:.2f}"
+            ),
+            "rows_skipped": 0,
+            "filtered_rows": canonical_rows,
+            "gnucash_balance": gc_balance,
+            "statement_opening": stmt_opening,
+        }
+
+    # Scenario A check: are there rows in the statement dated on or before
+    # GnuCash's last transaction date? If so, they're likely duplicates.
+    if gc_last_date:
+        filtered = []
+        skipped = 0
+        running_bal = stmt_opening
+
+        for row in canonical_rows:
+            row_date = row.get("Date", "")
+            # Normalise date for comparison — handle DD/MM/YYYY and YYYY-MM-DD
+            try:
+                if "/" in row_date:
+                    parts = row_date.split("/")
+                    if len(parts[2]) == 4:
+                        cmp_date = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                    else:
+                        cmp_date = f"20{parts[2]}-{parts[1]}-{parts[0]}"
+                else:
+                    cmp_date = row_date
+            except (IndexError, ValueError):
+                cmp_date = row_date
+
+            if cmp_date <= gc_last_date:
+                skipped += 1
+                continue
+            filtered.append(row)
+
+        if skipped > 0 and filtered:
+            # Re-check: does the new opening balance match GnuCash now?
+            new_oc = extract_opening_closing(filtered)
+            new_diff = abs(gc_balance - new_oc["opening_balance"])
+            if new_diff <= 0.02:
+                return {
+                    "ok": True,
+                    "message": (
+                        f"Scenario A: {skipped} entries already in GnuCash (dated ≤ {gc_last_date}) — skipped.\n"
+                        f"Opening balance now matches: GnuCash={gc_balance:.2f}, "
+                        f"Statement (after skip)={new_oc['opening_balance']:.2f}"
+                    ),
+                    "rows_skipped": skipped,
+                    "filtered_rows": filtered,
+                    "gnucash_balance": gc_balance,
+                    "statement_opening": new_oc["opening_balance"],
+                }
+
+    # Scenario B or C — gap we can't resolve
+    return {
+        "ok": False,
+        "message": (
+            f"OPENING BALANCE MISMATCH: GnuCash ({gc['account_name']}) "
+            f"shows {gc_balance:.2f} but statement opens at {stmt_opening:.2f} "
+            f"(diff={diff:.2f}).\n"
+            f"Possible causes: (B) prior statement entries were omitted, "
+            f"or (C) there's a data error. Please investigate manually."
+        ),
+        "rows_skipped": 0,
+        "filtered_rows": canonical_rows,
+        "gnucash_balance": gc_balance,
+        "statement_opening": stmt_opening,
+    }
+
+
+_NORMALISE_PROMPT = """\
+You are a data normalisation assistant. Your job is to map the columns of a bank
+statement CSV to a fixed canonical schema.
+
+Canonical columns (in order):
+  Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency
+
+The user's CSV has these headers:
+{headers}
+
+Here are the first few sample rows so you can see the data format:
+{sample}
+
+Rules:
+- Return ONLY a valid JSON object — no markdown, no explanation, no code fences.
+- Map each canonical column name to the best-matching header from the user's CSV.
+- If there is no reasonable match for a canonical column, map it to null.
+- "Deposit" and "Withdrawal" are credit and debit amounts respectively. They may
+  appear as a single "Amount" column with sign — if so, map both to that column
+  and include a "sign_convention" key: "positive_is_deposit" or "negative_is_deposit".
+- Do not invent column names; only use names that appear verbatim in the headers list.
+
+Example response:
+{
+  "Date": "Txn Date",
+  "Transaction ID": "Ref No / Cheque No",
+  "Description": "Narration",
+  "Account": null,
+  "Deposit": "Credit",
+  "Withdrawal": "Debit",
+  "Balance": "Balance (INR)",
+  "Currency": null
+}
+"""
+
+
+def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
+    """
+    Read a CSV or XLS/XLSX file and return (headers, sample_rows).
+    sample_rows is at most 5 data rows.
+    """
+    p = Path(file_path)
+    suffix = p.suffix.lower()
+
+    if suffix in (".xls", ".xlsx"):
+        if suffix == ".xls":
+            import xlrd
+            wb = xlrd.open_workbook(str(p))
+            ws = wb.sheet_by_index(0)
+            rows = []
+            for r in range(ws.nrows):
+                row = []
+                for c in range(ws.ncols):
+                    cell = ws.cell(r, c)
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        import xlrd as _x
+                        dt = _x.xldate_as_datetime(cell.value, wb.datemode)
+                        row.append(dt.strftime("%d/%m/%Y"))
+                    elif cell.ctype == xlrd.XL_CELL_NUMBER:
+                        v = cell.value
+                        row.append(str(int(v)) if v == int(v) else str(v))
+                    elif cell.ctype == xlrd.XL_CELL_EMPTY:
+                        row.append("")
+                    else:
+                        row.append(str(cell.value).strip())
+                rows.append(row)
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), data_only=True)
+            ws = wb.active
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append([str(c) if c is not None else "" for c in row])
+
+        if not rows:
+            return [], []
+        headers = rows[0]
+        sample = rows[1:6]
+        return headers, sample
+
+    else:  # CSV
+        with open(file_path, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh)
+            rows = list(reader)
+        if not rows:
+            return [], []
+        headers = rows[0]
+        sample = rows[1:6]
+        return headers, sample
+
+
+def _normalise_to_canonical(
+    input_file: str,
+    output_path: str,
+    bank_name: str,
+    config_path: str,
+    model_override: str,
+) -> None:
+    """
+    LLM-assisted column normalisation: maps arbitrary CSV/XLS to the canonical
+    8-column schema and writes the result to output_path.
+    """
+    agents_root = Path(__file__).resolve().parent.parent
+    if str(agents_root) not in sys.path:
+        sys.path.insert(0, str(agents_root))
+    from agents.base_agent import run_direct  # noqa: E402
+
+    headers, sample = _read_csv_or_xls(input_file)
+    if not headers:
+        raise ValueError(f"Could not read any data from {input_file}")
+
+    headers_str = json.dumps(headers)
+    sample_str = "\n".join(
+        "  " + ", ".join(f"{h}={v}" for h, v in zip(headers, row))
+        for row in sample
+    )
+
+    prompt = _NORMALISE_PROMPT.format(headers=headers_str, sample=sample_str)
+    system = (
+        f"You are normalising a {bank_name} bank statement CSV to canonical format. "
+        "Output ONLY raw JSON — no markdown, no explanation."
+    )
+
+    raw = run_direct(
+        user_message=prompt,
+        system_prompt=system,
+        config_path=config_path,
+        model_override=model_override,
+    )
+
+    # Strip accidental markdown fences if the LLM adds them
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    mapping = json.loads(raw.strip())
+
+    sign_convention = mapping.pop("sign_convention", None)
+
+    # Re-read full file
+    all_headers, _ = _read_csv_or_xls(input_file)
+    p = Path(input_file)
+    if p.suffix.lower() in (".xls", ".xlsx"):
+        # Re-read all rows
+        if p.suffix.lower() == ".xls":
+            import xlrd
+            wb = xlrd.open_workbook(str(p))
+            ws = wb.sheet_by_index(0)
+            all_rows = []
+            for r in range(1, ws.nrows):  # skip header
+                row = []
+                for c in range(ws.ncols):
+                    cell = ws.cell(r, c)
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
+                        row.append(dt.strftime("%d/%m/%Y"))
+                    elif cell.ctype == xlrd.XL_CELL_NUMBER:
+                        v = cell.value
+                        row.append(str(int(v)) if v == int(v) else str(v))
+                    elif cell.ctype == xlrd.XL_CELL_EMPTY:
+                        row.append("")
+                    else:
+                        row.append(str(cell.value).strip())
+                all_rows.append(row)
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(str(p), data_only=True)
+            ws = wb.active
+            all_rows = []
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i == 0:
+                    continue
+                all_rows.append([str(c) if c is not None else "" for c in row])
+    else:
+        with open(input_file, newline="", encoding="utf-8-sig") as fh:
+            reader = csv.reader(fh)
+            data_rows = list(reader)
+        all_rows = data_rows[1:]  # skip header
+
+    col_idx = {h: i for i, h in enumerate(all_headers)}
+
+    def _get(row, col_name):
+        if col_name is None:
+            return ""
+        idx = col_idx.get(col_name)
+        if idx is None or idx >= len(row):
+            return ""
+        return row[idx]
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(output_path, "w", newline="", encoding="utf-8") as out:
+        writer = csv.writer(out)
+        writer.writerow(CANONICAL_COLS)
+        for row in all_rows:
+            # Handle single-amount-column case
+            deposit_src = mapping.get("Deposit")
+            withdrawal_src = mapping.get("Withdrawal")
+            deposit_val = _get(row, deposit_src)
+            withdrawal_val = _get(row, withdrawal_src)
+
+            if deposit_src and deposit_src == withdrawal_src and sign_convention:
+                # Same source column — split by sign
+                try:
+                    amt = float(deposit_val.replace(",", "") or "0")
+                except ValueError:
+                    amt = 0.0
+                if sign_convention == "positive_is_deposit":
+                    deposit_val = str(amt) if amt > 0 else ""
+                    withdrawal_val = str(abs(amt)) if amt < 0 else ""
+                else:  # negative_is_deposit
+                    deposit_val = str(abs(amt)) if amt < 0 else ""
+                    withdrawal_val = str(amt) if amt > 0 else ""
+
+            out_row = [
+                _get(row, mapping.get("Date")),
+                _get(row, mapping.get("Transaction ID")),
+                _get(row, mapping.get("Description")),
+                _get(row, mapping.get("Account")),
+                deposit_val,
+                withdrawal_val,
+                _get(row, mapping.get("Balance")),
+                _get(row, mapping.get("Currency")) or "INR",
+            ]
+            writer.writerow(out_row)
+
+
+def run(
+    bank: str,
+    statement_files: str,
+    gnucash_file: str,
+    output_path: str,
+    config_path: str = None,
+    model_override: str = None,
+) -> str:
+    """
+    Run the full GnuCash import pipeline.
+
+    Args:
+        bank:            Bank name — one of SUPPORTED_BANKS.
+        statement_files: Path or comma-separated paths to uploaded statement file(s).
+                         XLS for ICICI; PDF(s) for BoB / HSBC;
+                         CSV or XLS/XLSX for HDFC / Other Bank.
+        gnucash_file:    Path to .gnucash book (must be closed in GnuCash).
+        output_path:     Path for the final mapped CSV.
+        config_path:     Passed through to sub-skills and LLM calls.
+        model_override:  Passed through to sub-skills and LLM calls.
+
+    Returns:
+        Human-readable summary string for the UI.
+    """
+    agents_root = Path(__file__).resolve().parent.parent
+    if str(agents_root) not in sys.path:
+        sys.path.insert(0, str(agents_root))
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    bank = (bank or "").strip()
+    if bank not in SUPPORTED_BANKS:
+        return (
+            f"❌ Unknown bank **{bank!r}**.\n\n"
+            f"Supported banks: {', '.join(SUPPORTED_BANKS)}"
+        )
+
+    log_lines = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        canonical_path = str(tmp_path / "canonical.csv")
+
+        # ── Step 1 + 2: Bank extraction → canonical CSV ───────────────────────
+
+        if bank == "ICICI":
+            log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
+            from skill_icici.agent import run as icici_run  # noqa: E402
+            icici_run(
+                statement_files=statement_files,
+                output_path=canonical_path,
+                config_path=config_path,
+                model_override=model_override,
+            )
+
+        elif bank == "Bank of Baroda":
+            bob_raw = str(tmp_path / "bob_raw.csv")
+            log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
+            from skill_bob.agent import run as bob_run  # noqa: E402
+            bob_run(
+                pdf_path=statement_files,
+                output_path=bob_raw,
+                config_path=config_path,
+                model_override=model_override,
+            )
+            log_lines.append("**Step 2** — Bank of Baroda: converting to canonical format")
+            from adapter_bob.agent import run as adapt_bob  # noqa: E402
+            adapt_bob(
+                input_file=bob_raw,
+                output_path=canonical_path,
+                config_path=config_path,
+                model_override=model_override,
+            )
+
+        elif bank == "HSBC":
+            hsbc_xlsx = str(tmp_path / "hsbc_raw.xlsx")
+            work_dir = str(tmp_path / "hsbc_work")
+            log_lines.append("**Step 1** — HSBC: extracting PDFs to Excel")
+            from skill_hsbc.agent import run as hsbc_run  # noqa: E402
+            hsbc_run(
+                pdf_dir=statement_files,
+                work_dir=work_dir,
+                output_path=hsbc_xlsx,
+                config_path=config_path,
+                model_override=model_override,
+            )
+            log_lines.append("**Step 2** — HSBC: converting to canonical format")
+            from adapter_hsbc.agent import run as adapt_hsbc  # noqa: E402
+            adapt_hsbc(
+                input_file=hsbc_xlsx,
+                output_path=canonical_path,
+                config_path=config_path,
+                model_override=model_override,
+            )
+
+        elif bank == "HDFC":
+            input_file = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
+            suffix = Path(input_file).suffix.lower()
+            if suffix == ".pdf":
+                log_lines.append("**Step 1** — HDFC: OCR scanning PDF statement")
+                log_lines.append("**Step 2** — HDFC: parsing transactions to canonical format")
+                from skill_hdfc.agent import run as hdfc_run  # noqa: E402
+                hdfc_run(
+                    pdf_path=input_file,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            else:
+                # CSV/XLS fallback
+                log_lines.append("**Step 1** — HDFC: reading CSV/XLS statement")
+                log_lines.append("**Step 2** — HDFC: LLM normalising columns → canonical schema")
+                _normalise_to_canonical(
+                    input_file=input_file,
+                    output_path=canonical_path,
+                    bank_name=bank,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+
+        elif bank == "Other Bank (CSV)":
+            input_file = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
+            log_lines.append("**Step 1** — Other Bank: reading CSV/XLS statement")
+            log_lines.append("**Step 2** — Other Bank: LLM normalising columns → canonical schema")
+            _normalise_to_canonical(
+                input_file=input_file,
+                output_path=canonical_path,
+                bank_name=bank,
+                config_path=config_path,
+                model_override=model_override,
+            )
+
+        # ── Balance verification on canonical CSV ─────────────────────────────
+        # Read the canonical CSV back for balance checks
+        with open(canonical_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            canonical_rows = list(reader)
+
+        # Running balance check (Intervention 2)
+        running = verify_running_balance(canonical_rows)
+        if running["ok"]:
+            log_lines.append(
+                f"Running balance: OK ({running['opening_balance']:.2f} → "
+                f"{running['closing_balance']:.2f})"
+            )
+        else:
+            log_lines.append(
+                f"Running balance: {running['mismatches']} mismatch(es)"
+            )
+
+        # ── Opening balance reconciliation with GnuCash (Intervention 1) ──
+        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank)
+        log_lines.append(f"**Balance check** — {recon['message']}")
+
+        if recon["rows_skipped"] > 0:
+            log_lines.append(
+                f"Skipped {recon['rows_skipped']} duplicate entries "
+                f"already in GnuCash"
+            )
+            # Rewrite canonical CSV with filtered rows
+            with open(canonical_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=CANONICAL_COLS)
+                writer.writeheader()
+                writer.writerows(recon["filtered_rows"])
+            canonical_rows = recon["filtered_rows"]
+
+        if not recon["ok"]:
+            # Flag the error but still produce output — let user decide
+            log_lines.append(
+                "⚠️ Proceeding with account mapping despite balance mismatch — "
+                "review the output carefully."
+            )
+
+        # ── Step 3: Account mapping ───────────────────────────────────────────
+        if bank == "ICICI":
+            step_n = 2
+        elif bank in CSV_BANKS:
+            step_n = 3
+        else:
+            step_n = 3
+
+        log_lines.append(
+            f"**Step {step_n}** — GnuCash: mapping accounts from "
+            f"`{Path(gnucash_file).name}`"
+        )
+        from skill_gnucash_account_mapper.agent import run as mapper_run  # noqa: E402
+        mapping_result = mapper_run(
+            gnucash_file=gnucash_file,
+            canonical_csv=canonical_path,
+            output_path=output_path,
+            config_path=config_path,
+            model_override=model_override,
+        )
+
+        # ── Final closing balance verification (Intervention 3) ──────────
+        # Read the final output CSV and verify closing balance matches
+        # the canonical CSV's closing balance (source of truth)
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                final_rows = list(csv.DictReader(f))
+            closing_check = verify_closing_balance(
+                final_rows,
+                expected_closing=running["closing_balance"],
+            )
+            log_lines.append(f"**Final check** — {closing_check['message']}")
+        except Exception as e:
+            log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
+
+    steps_summary = "\n".join(f"✓ {line}" for line in log_lines)
+    return (
+        f"## {bank} → GnuCash pipeline complete\n\n"
+        f"{steps_summary}\n\n"
+        f"---\n\n"
+        f"{mapping_result}\n\n"
+        f"**Next:** open GnuCash → File → Import → Import CSV → select the downloaded file."
+    )
