@@ -61,16 +61,24 @@ _MAX_FILE_COUNT: int = 20                          # max files per run
 # Shared helpers (same as the old hand-coded tabs).
 # ---------------------------------------------------------------------------
 
-def _refresh_models() -> list[str]:
+_models_cache: list[str] | None = None
+
+
+def _refresh_models(*, use_cache: bool = False) -> list[str]:
+    global _models_cache
+    if use_cache and _models_cache is not None:
+        return list(_models_cache)
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
     res = _health.check(ep)
     if res.ok and res.models:
-        return list(res.models)
+        _models_cache = list(res.models)
+        return list(_models_cache)
     fallback = ep.get("default_model")
-    return [fallback] if fallback else []
+    _models_cache = [fallback] if fallback else []
+    return list(_models_cache)
 
 
 def _check_native_binaries(skill: SkillInfo) -> str | None:
@@ -449,7 +457,7 @@ def render(skill: SkillInfo) -> None:
                 input_components.append(comp)
 
             # Model dropdown (always present).
-            initial_models = _refresh_models()
+            initial_models = _refresh_models(use_cache=True)
             model_dd = gr.Dropdown(
                 label="Model",
                 choices=initial_models,

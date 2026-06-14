@@ -13,6 +13,9 @@ Phase 4A: tabs are now auto-generated from agents/*/skill.yaml via the
 skill registry (agents.registry) and the generic tab builder (ui.tabs._generic).
 No more hand-coded per-skill tab files.
 
+Phase 4B: tabs are grouped by category (banks, credit_card, 26as, gnucash,
+utilities). Groups with 2+ skills render as nested sub-tabs.
+
 Public surface:
     build_app(launch: bool = False)      — construct the Gradio Blocks object.
     main()                               — bind to 127.0.0.1 on a free port,
@@ -94,13 +97,53 @@ def build_app(launch: bool = False) -> gr.Blocks:
     """
     skills = _discover_skills()
 
+    # Prime the model-list cache once (avoids a 2-second health-check timeout
+    # per skill tab — see _generic._refresh_models).
+    tab_generic._refresh_models()
+
+    # ── Grouped navigation ──────────────────────────────────────────────────
+    # Ordered list of (category_key, tab_label). Skills within each group
+    # appear as sub-tabs; a group with exactly one skill renders flat (no nesting).
+    # Skills whose category is not in GROUP_ORDER appear as flat top-level tabs.
+    from collections import defaultdict  # noqa: PLC0415
+
+    GROUP_ORDER = [
+        ("banks",       "Banks"),
+        ("credit_card", "Credit Card"),
+        ("26as",        "26AS"),
+        ("gnucash",     "GnuCash"),
+        ("utilities",   "Other"),
+    ]
+    _known_cats = {k for k, _ in GROUP_ORDER}
+
+    _grouped = defaultdict(list)
+    for _s in skills:
+        _grouped[_s.category].append(_s)
+
     with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
         with gr.Tabs():
             with gr.Tab("Home"):
                 tab_home.render(skills=skills)
-            for skill in skills:
-                with gr.Tab(skill.name):
-                    tab_generic.render(skill)
+
+            for _cat_key, _cat_label in GROUP_ORDER:
+                _cat_skills = _grouped.get(_cat_key, [])
+                if not _cat_skills:
+                    continue
+                with gr.Tab(_cat_label):
+                    if len(_cat_skills) == 1:
+                        tab_generic.render(_cat_skills[0])
+                    else:
+                        with gr.Tabs():
+                            for _skill in _cat_skills:
+                                with gr.Tab(_skill.display_name):
+                                    tab_generic.render(_skill)
+
+            # Fallback: uncategorised skills render as flat top-level tabs
+            for _skill in skills:
+                if _skill.category not in _known_cats:
+                    with gr.Tab(_skill.display_name):
+                        tab_generic.render(_skill)
+
             with gr.Tab("History"):
                 tab_history.render()
             with gr.Tab("Settings"):
