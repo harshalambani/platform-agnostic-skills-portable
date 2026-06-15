@@ -236,6 +236,9 @@ def parse_transaction_line(line_words, cols: ColumnMap) -> Optional[Row]:
                 withdrawal = _clean_amount(text)
             elif x1 <= cols.deposits_right + 2:
                 deposit = _clean_amount(text)
+            else:
+                # Past deposit zone → must be the balance column.
+                balance = _clean_amount(text)
             continue
 
         # Everything else falls into narration.
@@ -277,7 +280,8 @@ def parse_opening_balance(line_words, cols: ColumnMap) -> Optional[Row]:
     narration_tokens = []
     ob_balance = ""
     for w in line_words[1:]:
-        if AMOUNT_RE.match(w["text"]) and w["x0"] >= cols.balance_left - 5:
+        if AMOUNT_RE.match(w["text"]) and w["x1"] > cols.deposits_right + 2:
+            # Amount past deposit zone → balance column
             ob_balance = _clean_amount(w["text"])
         elif not AMOUNT_RE.match(w["text"]) and w["x0"] < cols.balance_left - 5:
             narration_tokens.append(w["text"])
