@@ -1,15 +1,14 @@
-# skill.yaml — CC Transactions skill manifest
+# skill.yaml — Credit Card Transactions skill manifest
 
 name: "CC Transactions"
-display_name: "CC Transactions — Extract to Excel"
+display_name: "Credit Card — Transactions"
 description: >
   Scan a folder of organized credit card PDFs (output of the CC Sort skill),
   apply bank-specific parsing rules, and produce a consolidated Excel workbook
   with all transactions plus a summary sheet.
-category: "financial"
+category: "credit_card"
 version: "1.0.0"
 
-# This skill calls the script directly — no LLM loop needed.
 mode: "agent"
 entry_point: "agent:run"
 

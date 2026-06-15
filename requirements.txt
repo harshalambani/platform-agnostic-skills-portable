@@ -19,6 +19,7 @@ pytesseract>=0.3.10           # Tesseract Python wrapper (HSBC OCR)
 
 # --- Spreadsheets ---
 openpyxl>=3.1.0
+xlrd>=1.2.0                 # BIFF .xls reader (ICICI statements; avoids LibreOffice)
 pandas>=2.2.0
 
 # --- Misc ---

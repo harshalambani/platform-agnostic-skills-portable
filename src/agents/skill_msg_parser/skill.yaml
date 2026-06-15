@@ -7,7 +7,7 @@ description: >
   Parse .msg (Outlook) or .eml files and extract structured fields:
   sender, date, subject, body text, and attachment list.
   No LLM required — pure deterministic extraction.
-category: "general"
+category: "utilities"
 version: "1.0.0"
 
 # Execution mode: "direct" — no LLM, pure extraction.

@@ -8,7 +8,7 @@ description: >
   Paste or type your text, specify source and target languages,
   and get the translation back. Works with local models via Ollama
   — no cloud API required.
-category: "general"
+category: "utilities"
 version: "1.0.0"
 
 # Execution mode: "direct" — prompt → LLM → response. No tools needed.

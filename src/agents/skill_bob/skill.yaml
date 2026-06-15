@@ -1,11 +1,11 @@
 # skill.yaml — BoB skill manifest
 
 name: "BoB"
-display_name: "BoB — Bank of Baroda to CSV"
+display_name: "Bank of Baroda"
 description: >
   Parse a Bank of Baroda transaction-statement PDF into a flat CSV of rows.
   Handles multi-page table overflow without column-header re-banner.
-category: "financial"
+category: "banks"
 version: "1.0.0"
 
 mode: "agent"

@@ -15,7 +15,7 @@ The portable schema lives at Data\\settings\\config.yaml and has the shape:
       local_ollama:
         provider: ollama
         base_url: http://localhost:11434
-        default_model: gemma4
+        default_model: gemma4:12b
         temperature: 0.0
       ...
 
@@ -24,7 +24,7 @@ The legacy schema expected by agents.base_agent.load_model is:
     provider: ollama
     ollama:
       base_url: http://localhost:11434
-      default_model: gemma4
+      default_model: gemma4:12b
       temperature: 0.0
       models: {...}            # optional
     openai_compatible:

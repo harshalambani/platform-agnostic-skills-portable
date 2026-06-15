@@ -1,12 +1,12 @@
-# skill.yaml — CC Sort skill manifest
+# skill.yaml — Credit Card Sort skill manifest
 
 name: "CC Sort"
-display_name: "CC Sort — Extract & Organize CC PDFs"
+display_name: "Credit Card — Sort PDFs"
 description: >
   Extract PDFs from Outlook emails (.msg) and organize credit card statement
   PDFs by bank and card type. Supports encrypted PDFs with multiple passwords.
   Auto-detects bank from filename (Axis, HDFC, YES, SBM, ICICI).
-category: "financial"
+category: "credit_card"
 version: "1.0.0"
 
 mode: "agent"

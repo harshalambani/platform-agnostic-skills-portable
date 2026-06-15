@@ -1,13 +1,13 @@
 # skill.yaml — HSBC skill manifest
 
 name: "HSBC"
-display_name: "HSBC — Bank Statements to Excel"
+display_name: "HSBC"
 description: >
   Consolidate one or more HSBC bank-statement PDFs into a clean Excel workbook
   with extracted transaction IDs, separate transaction dates, scrubbed
   descriptions, and an Extra Information column. Scanned pages flow through
   Tesseract OCR; text-extractable pages skip OCR automatically.
-category: "financial"
+category: "banks"
 version: "1.0.0"
 
 mode: "agent"
@@ -19,8 +19,6 @@ inputs:
     label: "Folder containing HSBC statement PDF(s)"
     required: true
 
-# HSBC's run() has extra args (work_dir, title) that the generic runner
-# handles automatically — work_dir is a temp dir, title has a default.
 run_args:
   pdf_dir: "{inputs.pdf_dir}"
   work_dir: "{work_dir}"

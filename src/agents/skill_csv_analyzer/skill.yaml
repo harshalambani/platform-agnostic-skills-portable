@@ -8,7 +8,7 @@ description: >
   the data structure, runs pandas operations via tool calls, and returns
   a Markdown answer with cited numbers. Requires a model that supports
   function calling (e.g. llama3.1, qwen3, gemma4 via Ollama).
-category: "general"
+category: "utilities"
 version: "1.0.0"
 
 # Execution mode: "agent" — LangGraph ReAct with tool-calling.
