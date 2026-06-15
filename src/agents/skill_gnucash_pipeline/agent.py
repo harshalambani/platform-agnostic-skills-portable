@@ -672,29 +672,36 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
-            _emit_progress(1, f"HSBC: extracting PDFs to Excel")
+            # If input is a directory (staged uploads), use it as pdf_dir;
+            # if it's a single file, use its parent directory.
+            hsbc_src = Path(hsbc_input)
+            pdf_dir_for_hsbc = str(hsbc_src) if hsbc_src.is_dir() else str(hsbc_src.parent)
+
+            _emit_progress(1, "HSBC: extracting PDFs to Excel (direct)")
             log_lines.append("**Step 1** — HSBC: extracting PDFs to Excel")
             try:
-                from skill_hsbc.agent import run as hsbc_run  # noqa: E402
-                hsbc_run(
-                    pdf_dir=hsbc_input,
-                    work_dir=work_dir,
-                    output_path=hsbc_xlsx,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                # Bypass the LangGraph agent — call the pipeline tool directly.
+                # HSBC extraction is pure Python (OCR + parse), no LLM needed.
+                from skill_hsbc.tools import run_hsbc_pipeline  # noqa: E402
+                hsbc_result = run_hsbc_pipeline.invoke({
+                    "pdf_dir": pdf_dir_for_hsbc,
+                    "work_dir": work_dir,
+                    "output_path": hsbc_xlsx,
+                    "title": "HSBC Statement",
+                })
+                log.info("HSBC pipeline result: %s", hsbc_result[:200] if hsbc_result else "empty")
             except Exception as e:
                 log.error("HSBC extraction failed: %s", e, exc_info=True)
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ HSBC skill raised an exception:\n```\n{e}\n```"
+                    f"❌ HSBC extraction failed:\n```\n{e}\n```"
                 )
             # Check intermediate output before proceeding to adapter
             if not Path(hsbc_xlsx).is_file():
                 return (
                     f"## {bank} → extraction produced no output\n\n"
-                    f"❌ The HSBC extraction skill did not create the intermediate Excel file.\n\n"
-                    f"Check that your model supports tool/function calling."
+                    f"❌ The HSBC pipeline did not create the Excel file.\n\n"
+                    f"**Pipeline result:** {hsbc_result}"
                 )
             _emit_progress(2, "HSBC: converting to canonical format")
             log_lines.append("**Step 2** — HSBC: converting to canonical format")
