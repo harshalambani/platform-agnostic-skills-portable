@@ -13,10 +13,40 @@ import csv
 import json
 import re
 import sys
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Progress helper — push events to Gradio streaming UI
+# ---------------------------------------------------------------------------
+
+def _emit_mapper_progress(message: str) -> None:
+    """Push a mapper progress event to the UI streaming queue.
+
+    The runner (ui/_runner.py) sets the queue via ``agents.base_agent``,
+    so we must import from the same dotted path — otherwise Python treats
+    it as a different module object with a separate threading.local().
+    Falls back to the bare ``base_agent`` import for CLI / test usage.
+    """
+    q = None
+    try:
+        from agents.base_agent import get_progress_queue  # noqa: E402
+        q = get_progress_queue()
+    except ImportError:
+        try:
+            from base_agent import get_progress_queue  # noqa: E402
+            q = get_progress_queue()
+        except Exception:
+            pass
+    except Exception:
+        pass
+    if q is not None:
+        q.put({"step": 5, "type": "pipeline", "snippet": f"mapper: {message}"})
+    print(f"[mapper] {message}")
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +146,93 @@ def _build_llm_prompt(
     return "\n".join(parts)
 
 
+_LLM_BATCH_SIZE = 5          # rows per LLM call — small batches finish faster
+_LLM_TIMEOUT_SECONDS = 60    # per-batch timeout (not total)
+
+
+def _parse_llm_json(text: str) -> Optional[list]:
+    """Extract a JSON array from an LLM response, tolerating markdown fences."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines)
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                pass
+    return None
+
+
+def _llm_batch(
+    rows: List[Dict],
+    account_tree: List[str],
+    example_mappings: List[Dict],
+    config_path: str,
+    model_override: str,
+    run_direct_fn,
+) -> Dict[int, Dict]:
+    """Send one batch of rows to the LLM and return validated results."""
+    prompt = _build_llm_prompt(rows, account_tree, example_mappings)
+
+    response = None
+    error = None
+
+    def _call():
+        nonlocal response, error
+        try:
+            response = run_direct_fn(
+                user_message=prompt,
+                system_prompt=_LLM_SYSTEM_PROMPT,
+                config_path=config_path,
+                model_override=model_override,
+            )
+        except Exception as e:
+            error = e
+
+    thread = threading.Thread(target=_call, daemon=True)
+    thread.start()
+    thread.join(timeout=_LLM_TIMEOUT_SECONDS)
+
+    if thread.is_alive():
+        _emit_mapper_progress(f"  batch timed out after {_LLM_TIMEOUT_SECONDS}s")
+        return {}
+    if error:
+        _emit_mapper_progress(f"  batch error: {error}")
+        return {}
+    if not response:
+        _emit_mapper_progress("  batch: empty response")
+        return {}
+
+    mappings_list = _parse_llm_json(response)
+    if mappings_list is None:
+        _emit_mapper_progress("  batch: could not parse JSON")
+        return {}
+
+    account_set = set(account_tree)
+    result = {}
+    for item in mappings_list:
+        if not isinstance(item, dict):
+            continue
+        row_num = item.get("row")
+        account = item.get("account", "")
+        reason = item.get("reason", "LLM mapping")
+        if not row_num:
+            continue
+        if account and account not in account_set:
+            _emit_mapper_progress(f"  row {row_num}: unknown account {account!r}, skipped")
+            continue
+        result[row_num] = {"account": account, "reason": reason}
+    return result
+
+
 def llm_fallback_mapping(
     unmatched_rows: List[Dict],
     account_tree: List[str],
@@ -126,12 +243,8 @@ def llm_fallback_mapping(
     """
     Use the LLM to map rows that the rules pass couldn't match.
 
-    Args:
-        unmatched_rows: List of dicts with 'row', 'description', 'withdrawal', 'deposit'
-        account_tree:   List of full account paths from GnuCash
-        example_mappings: Successfully matched rows for context
-        config_path:    Path to config.yaml
-        model_override: Optional model override
+    Sends rows in small batches (_LLM_BATCH_SIZE) so each LLM call is
+    fast enough for local models. Reports per-batch progress to the UI.
 
     Returns:
         Dict mapping row_number -> {'account': str, 'reason': str}
@@ -139,63 +252,41 @@ def llm_fallback_mapping(
     if not unmatched_rows:
         return {}
 
-    from base_agent import run_direct  # noqa: E402
-
-    prompt = _build_llm_prompt(unmatched_rows, account_tree, example_mappings)
-    print(f"[mapper-llm] Sending {len(unmatched_rows)} unmatched rows to LLM")
-
     try:
-        response = run_direct(
-            user_message=prompt,
-            system_prompt=_LLM_SYSTEM_PROMPT,
+        from agents.base_agent import run_direct  # noqa: E402
+    except ImportError:
+        from base_agent import run_direct  # noqa: E402
+
+    total = len(unmatched_rows)
+    batches = [
+        unmatched_rows[i:i + _LLM_BATCH_SIZE]
+        for i in range(0, total, _LLM_BATCH_SIZE)
+    ]
+    _emit_mapper_progress(
+        f"LLM fallback: {total} rows in {len(batches)} batch(es) "
+        f"of {_LLM_BATCH_SIZE} (timeout {_LLM_TIMEOUT_SECONDS}s each)"
+    )
+
+    all_results: Dict[int, Dict] = {}
+    for batch_num, batch in enumerate(batches, 1):
+        row_ids = ", ".join(str(r["row"]) for r in batch)
+        _emit_mapper_progress(f"LLM batch {batch_num}/{len(batches)} — rows {row_ids}")
+
+        batch_result = _llm_batch(
+            rows=batch,
+            account_tree=account_tree,
+            example_mappings=example_mappings,
             config_path=config_path,
             model_override=model_override,
+            run_direct_fn=run_direct,
         )
-    except Exception as e:
-        print(f"[mapper-llm] LLM call failed: {e}")
-        return {}
+        all_results.update(batch_result)
+        mapped_so_far = sum(1 for v in all_results.values() if v.get("account"))
+        _emit_mapper_progress(f"  batch {batch_num} done — {mapped_so_far}/{total} mapped so far")
 
-    # Parse JSON from response — handle markdown fences
-    text = response.strip()
-    if text.startswith("```"):
-        # Strip ```json ... ```
-        lines = text.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        text = "\n".join(lines)
-
-    try:
-        mappings_list = json.loads(text)
-    except json.JSONDecodeError:
-        # Try to find JSON array in the response
-        start = text.find("[")
-        end = text.rfind("]")
-        if start >= 0 and end > start:
-            try:
-                mappings_list = json.loads(text[start:end + 1])
-            except json.JSONDecodeError:
-                print(f"[mapper-llm] Could not parse LLM response as JSON")
-                return {}
-        else:
-            print(f"[mapper-llm] No JSON array found in LLM response")
-            return {}
-
-    # Validate accounts against the tree
-    account_set = set(account_tree)
-    result = {}
-    for item in mappings_list:
-        row_num = item.get("row")
-        account = item.get("account", "")
-        reason = item.get("reason", "LLM mapping")
-        if not row_num:
-            continue
-        if account and account not in account_set:
-            print(f"[mapper-llm] Row {row_num}: LLM suggested unknown account {account!r}, skipping")
-            continue
-        result[row_num] = {"account": account, "reason": reason}
-
-    matched = sum(1 for v in result.values() if v["account"])
-    print(f"[mapper-llm] LLM mapped {matched}/{len(unmatched_rows)} rows")
-    return result
+    matched = sum(1 for v in all_results.values() if v.get("account"))
+    _emit_mapper_progress(f"LLM fallback complete: {matched}/{total} rows mapped")
+    return all_results
 
 
 # ---------------------------------------------------------------------------
@@ -266,11 +357,11 @@ def map_accounts(
                 'reason': reason,
             })
 
-    print(
-        f"[mapper] High: {confidence_counts['high']}  "
-        f"Medium: {confidence_counts['medium']}  "
-        f"Low: {confidence_counts['low']}  "
-        f"No match: {confidence_counts['none']}"
+    _emit_mapper_progress(
+        f"rules pass: High={confidence_counts['high']} "
+        f"Med={confidence_counts['medium']} "
+        f"Low={confidence_counts['low']} "
+        f"None={confidence_counts['none']}"
     )
 
     # Write mapped CSV
@@ -393,7 +484,7 @@ def run(
     bank_key = _BANK_KEY_MAP.get(bank_name) if bank_name else None
 
     # Step 1: Extract historical mappings from .gnucash
-    print(f"[mapper] Step 1 — extracting mappings from {Path(gnucash_file).name}")
+    _emit_mapper_progress(f"extracting history from {Path(gnucash_file).name}")
     extractor_output = parse_gnucash_file(gnucash_file)
 
     # Collect ALL account paths (all banks) before filtering — needed for LLM fallback
@@ -409,32 +500,29 @@ def run(
         bank_mappings = all_mappings.get(bank_key, [])
         extractor_output['mappings'] = {bank_key: bank_mappings}
         mapping_count = len(bank_mappings)
-        print(f"[mapper] Filtered to {bank_key}: {mapping_count} historical pairs")
+        _emit_mapper_progress(f"filtered to {bank_key}: {mapping_count} historical pairs")
     else:
         mapping_count = sum(
             len(v) for v in extractor_output.get('mappings', {}).values()
         )
-        print(f"[mapper] Extracted {mapping_count} historical description→account pairs (all banks)")
+        _emit_mapper_progress(f"extracted {mapping_count} pairs (all banks)")
 
     # Step 2: Generate rules YAML from extractor output
-    # Use lower threshold (freq≥1) for the target bank — every historical
-    # transaction is relevant context for the same account.
-    print(f"[mapper] Step 2 — generating rules (bank={bank_key or 'all'}, recency-weighted)")
+    _emit_mapper_progress(f"generating rules (bank={bank_key or 'all'})")
     rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3)
     all_rules: List[dict] = []
     for bank_rules in rules_by_bank.values():
         all_rules.extend(bank_rules)
     rule_count = len(all_rules)
-    print(f"[mapper] Generated {rule_count} rules")
+    _emit_mapper_progress(f"generated {rule_count} rules")
 
     yaml_content = generate_yaml(all_rules)
     rules_path = out_path.with_name(out_path.stem + "_mapping_rules.yaml")
     rules_path.write_text(yaml_content, encoding='utf-8')
-    print(f"[mapper] Rules saved to {rules_path.name}")
 
     # Step 3: Apply rules to canonical CSV
     report_path = out_path.with_name(out_path.stem + "_confidence.txt")
-    print(f"[mapper] Step 3 — applying rules to {Path(canonical_csv).name}")
+    _emit_mapper_progress(f"applying rules to {Path(canonical_csv).name}")
     result = map_accounts(canonical_csv, str(rules_path), str(out_path), str(report_path))
 
     # Step 4: LLM fallback for unmatched rows
@@ -443,7 +531,7 @@ def run(
     llm_mapped_count = 0
 
     if unmatched_count > 0 and config_path:
-        print(f"[mapper] Step 4 — LLM fallback for {unmatched_count} unmatched rows")
+        _emit_mapper_progress(f"LLM fallback starting for {unmatched_count} unmatched rows")
 
         # Read mapped CSV to find unmatched rows + collect examples
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
@@ -500,16 +588,16 @@ def run(
                         writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
                         writer.writeheader()
                         writer.writerows(mapped_rows)
-                    print(f"[mapper] LLM pass: {llm_mapped_count} additional rows mapped")
+                    _emit_mapper_progress(f"LLM pass: {llm_mapped_count} additional rows mapped")
 
                     # Update confidence counts
                     result['confidence_counts']['none'] -= llm_mapped_count
                     result['confidence_counts']['llm'] = llm_mapped_count
     else:
         if unmatched_count == 0:
-            print(f"[mapper] All rows matched by rules — no LLM fallback needed")
+            _emit_mapper_progress("all rows matched by rules — no LLM needed")
         elif not config_path:
-            print(f"[mapper] No LLM config — skipping fallback pass")
+            _emit_mapper_progress("no LLM config — skipping fallback")
 
     counts = result['confidence_counts']
     total = result['total_rows']
