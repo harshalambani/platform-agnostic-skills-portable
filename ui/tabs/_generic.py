@@ -61,24 +61,29 @@ _MAX_FILE_COUNT: int = 20                          # max files per run
 # Shared helpers (same as the old hand-coded tabs).
 # ---------------------------------------------------------------------------
 
-_models_cache: list[str] | None = None
+_choices_cache: list[tuple[str, str]] | None = None
 
 
-def _refresh_models(*, use_cache: bool = False) -> list[str]:
-    global _models_cache
-    if use_cache and _models_cache is not None:
-        return list(_models_cache)
+def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
+    """Return (display_label, raw_name) pairs with capability badges.
+
+    Display labels look like 'gemma4:12b (tools)' or 'llama3.2:3b (text-only)'.
+    The *value* sent to the runner is the plain model name.
+    """
+    global _choices_cache
+    if use_cache and _choices_cache is not None:
+        return list(_choices_cache)
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
-    res = _health.check(ep)
-    if res.ok and res.models:
-        _models_cache = list(res.models)
-        return list(_models_cache)
+    choices = _health.get_model_choices(ep)
+    if choices:
+        _choices_cache = choices
+        return list(_choices_cache)
     fallback = ep.get("default_model")
-    _models_cache = [fallback] if fallback else []
-    return list(_models_cache)
+    _choices_cache = [(fallback, fallback)] if fallback else []
+    return list(_choices_cache)
 
 
 def _check_native_binaries(skill: SkillInfo) -> str | None:
@@ -457,11 +462,12 @@ def render(skill: SkillInfo) -> None:
                 input_components.append(comp)
 
             # Model dropdown (always present).
-            initial_models = _refresh_models(use_cache=True)
+            # Choices are (display_label, raw_name) tuples with capability badges.
+            initial_choices = _refresh_models(use_cache=True)
             model_dd = gr.Dropdown(
                 label="Model",
-                choices=initial_models,
-                value=initial_models[0] if initial_models else None,
+                choices=initial_choices,
+                value=initial_choices[0][1] if initial_choices else None,
                 allow_custom_value=True,
                 interactive=True,
             )

@@ -16,16 +16,17 @@ from .. import _health
 from .. import _runner
 
 
-def _refresh_models() -> list[str]:
+def _refresh_models() -> list[tuple[str, str]]:
+    """Return (display_label, raw_name) pairs with capability badges."""
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
-    res = _health.check(ep)
-    if res.ok and res.models:
-        return list(res.models)
+    choices = _health.get_model_choices(ep)
+    if choices:
+        return choices
     fallback = ep.get("default_model")
-    return [fallback] if fallback else []
+    return [(fallback, fallback)] if fallback else []
 
 
 def _run_26as(pdf_file, model_choice):
@@ -143,10 +144,10 @@ def render() -> None:
     with gr.Row():
         with gr.Column(scale=1):
             pdf_upload = gr.File(label="Form 26AS PDF", file_types=[".pdf"], type="filepath")
-            initial_models = _refresh_models()
+            initial_choices = _refresh_models()
             model_dd = gr.Dropdown(
-                label="Model", choices=initial_models,
-                value=initial_models[0] if initial_models else None,
+                label="Model", choices=initial_choices,
+                value=initial_choices[0][1] if initial_choices else None,
                 allow_custom_value=True, interactive=True,
             )
             refresh_models_btn = gr.Button("Refresh model list", variant="secondary")

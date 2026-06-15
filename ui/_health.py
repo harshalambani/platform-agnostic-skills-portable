@@ -2,13 +2,38 @@
 ui/_health.py — endpoint health check used by the Home tab and the 26AS
 tab's pre-run guard. Matches the contract sketched in spec §8.2 (single GET
 against /api/tags or /v1/models with a 2-second timeout).
+
+Also provides LLM capability detection: queries Ollama /api/show per model
+to determine tool-calling support (checks for {{ .Tools }} in the model
+template). Results are cached to avoid repeated queries.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import logging
+from dataclasses import dataclass, field
 from typing import Any
 from urllib import error, request
 import json
+
+_log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Data classes
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ModelInfo:
+    """Per-model metadata including capability flags."""
+    name: str
+    supports_tools: bool = False       # True if template includes .Tools
+    parameter_size: str = ""           # e.g. "12B", "3B"
+    family: str = ""                   # e.g. "gemma", "llama"
+
+    @property
+    def display_label(self) -> str:
+        """Dropdown label: 'model_name (tools)' or 'model_name (text-only)'."""
+        tag = "tools" if self.supports_tools else "text-only"
+        return f"{self.name} ({tag})"
 
 
 @dataclass(frozen=True)
@@ -17,7 +42,24 @@ class HealthResult:
     status: str   # "ok", "slow", "unreachable"
     detail: str
     models: tuple[str, ...] = ()
+    model_infos: tuple[ModelInfo, ...] = ()
 
+
+# ---------------------------------------------------------------------------
+# Capability cache  (survives across tab refreshes within one app session)
+# ---------------------------------------------------------------------------
+
+_capability_cache: dict[str, ModelInfo] = {}
+
+
+def clear_capability_cache() -> None:
+    """Reset the cache (e.g. when the user switches endpoints)."""
+    _capability_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# HTTP helpers
+# ---------------------------------------------------------------------------
 
 def _get_json(url: str, timeout: float = 2.0) -> dict[str, Any]:
     req = request.Request(url, headers={"User-Agent": "PA-Skills-Portable/health"})
@@ -25,11 +67,99 @@ def _get_json(url: str, timeout: float = 2.0) -> dict[str, Any]:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
+def _post_json(url: str, payload: dict, timeout: float = 3.0) -> dict[str, Any]:
+    """POST JSON and return parsed response."""
+    data = json.dumps(payload).encode("utf-8")
+    req = request.Request(
+        url, data=data, method="POST",
+        headers={
+            "User-Agent": "PA-Skills-Portable/health",
+            "Content-Type": "application/json",
+        },
+    )
+    with request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8", errors="replace"))
+
+
+# ---------------------------------------------------------------------------
+# Tool-calling detection
+# ---------------------------------------------------------------------------
+
+def _check_ollama_tool_support(base_url: str, model_name: str) -> ModelInfo:
+    """Query /api/show for *model_name* and return a ModelInfo."""
+    if model_name in _capability_cache:
+        return _capability_cache[model_name]
+
+    supports_tools = False
+    param_size = ""
+    family = ""
+
+    try:
+        body = _post_json(
+            f"{base_url}/api/show",
+            {"name": model_name},
+            timeout=3.0,
+        )
+        template = body.get("template", "")
+        supports_tools = ".Tools" in template
+
+        details = body.get("details") or {}
+        param_size = details.get("parameter_size", "")
+        family = details.get("family", "")
+        families = details.get("families") or []
+        if not family and families:
+            family = families[0]
+    except Exception:  # noqa: BLE001
+        _log.debug("Could not query /api/show for %s", model_name)
+
+    info = ModelInfo(
+        name=model_name,
+        supports_tools=supports_tools,
+        parameter_size=param_size,
+        family=family,
+    )
+    _capability_cache[model_name] = info
+    return info
+
+
+def _openai_model_info(model_id: str) -> ModelInfo:
+    """OpenAI-compatible endpoints: assume tool support (most do)."""
+    if model_id in _capability_cache:
+        return _capability_cache[model_id]
+    info = ModelInfo(name=model_id, supports_tools=True)
+    _capability_cache[model_id] = info
+    return info
+
+
+# ---------------------------------------------------------------------------
+# Public: enriched model list
+# ---------------------------------------------------------------------------
+
+def get_model_choices(endpoint: dict[str, Any]) -> list[tuple[str, str]]:
+    """Return Gradio-compatible (label, value) pairs with capability badges.
+
+    Each entry is (display_label, raw_model_name) so the dropdown shows
+    'model (tools)' but the value passed to the runner is the plain name.
+    """
+    result = check(endpoint)
+    if not result.ok or not result.model_infos:
+        # Fallback — no enrichment available
+        fallback = endpoint.get("default_model")
+        if fallback:
+            return [(fallback, fallback)]
+        return []
+    return [(mi.display_label, mi.name) for mi in result.model_infos]
+
+
+# ---------------------------------------------------------------------------
+# Main health check
+# ---------------------------------------------------------------------------
+
 def check(endpoint: dict[str, Any]) -> HealthResult:
     """
     Probe a single endpoint and return a HealthResult.
 
-    For Ollama: GET <base_url>/api/tags.
+    For Ollama: GET <base_url>/api/tags, then POST /api/show per model.
     For OpenAI-compatible: GET <base_url>/models.
     """
     provider = endpoint.get("provider")
@@ -57,12 +187,16 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
         # the Settings tab.  Nothing is silently swallowed.
         return HealthResult(False, "unreachable", f"{type(e).__name__}: {e}")
 
-    # Extract model list for the picker.
+    # Extract model list and enrich with capabilities.
     if provider == "ollama":
         tags = body.get("models") or []
         names = tuple(m.get("name", "") for m in tags if isinstance(m, dict))
+        infos = tuple(_check_ollama_tool_support(base, n) for n in names)
     else:
         data = body.get("data") or []
         names = tuple(m.get("id", "") for m in data if isinstance(m, dict))
+        infos = tuple(_openai_model_info(n) for n in names)
 
-    return HealthResult(True, "ok", f"OK — {len(names)} model(s).", models=names)
+    return HealthResult(
+        True, "ok", f"OK — {len(names)} model(s).", models=names, model_infos=infos,
+    )
