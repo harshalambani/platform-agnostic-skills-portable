@@ -201,19 +201,29 @@ def map_accounts(
 # PA Skills UI entry point
 # ---------------------------------------------------------------------------
 
+# Map pipeline bank labels to extractor bank keys
+_BANK_KEY_MAP = {
+    'Bank of Baroda': 'BoB',
+    'HDFC': 'HDFC',
+    'HSBC': 'HSBC',
+    'ICICI': 'ICICI',
+}
+
+
 def run(
     gnucash_file: str,
     canonical_csv: str,
     output_path: str,
     config_path: str = None,
     model_override: str = None,
+    bank_name: str = None,
 ) -> str:
     """
     Run the full account-mapping pipeline from the PA Skills UI.
 
     Chains:
         1. skill_gnucash_xml_extractor  — parse .gnucash → description→account history
-        2. skill_gnucash_mapping_generator — build YAML rules (freq≥3, recency-weighted)
+        2. skill_gnucash_mapping_generator — build YAML rules from same bank's history
         3. map_accounts()               — apply rules to canonical CSV
 
     Args:
@@ -222,6 +232,9 @@ def run(
         output_path:    Path for the mapped output CSV.
         config_path:    Unused (no LLM required).
         model_override: Unused (no LLM required).
+        bank_name:      Pipeline bank label (e.g. "Bank of Baroda"). When set,
+                        rules are generated ONLY from that bank's historical
+                        transactions — not from other banks.
 
     Returns:
         Human-readable result string for the UI.
@@ -237,17 +250,31 @@ def run(
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Resolve bank key for filtering
+    bank_key = _BANK_KEY_MAP.get(bank_name) if bank_name else None
+
     # Step 1: Extract historical mappings from .gnucash
     print(f"[mapper] Step 1 — extracting mappings from {Path(gnucash_file).name}")
     extractor_output = parse_gnucash_file(gnucash_file)
-    mapping_count = sum(
-        len(v) for v in extractor_output.get('mappings', {}).values()
-    )
-    print(f"[mapper] Extracted {mapping_count} historical description→account pairs")
+
+    if bank_key:
+        # Filter to only the importing bank's historical transactions
+        all_mappings = extractor_output.get('mappings', {})
+        bank_mappings = all_mappings.get(bank_key, [])
+        extractor_output['mappings'] = {bank_key: bank_mappings}
+        mapping_count = len(bank_mappings)
+        print(f"[mapper] Filtered to {bank_key}: {mapping_count} historical pairs")
+    else:
+        mapping_count = sum(
+            len(v) for v in extractor_output.get('mappings', {}).values()
+        )
+        print(f"[mapper] Extracted {mapping_count} historical description→account pairs (all banks)")
 
     # Step 2: Generate rules YAML from extractor output
-    print(f"[mapper] Step 2 — generating rules (freq≥3, recency-weighted)")
-    rules_by_bank = generate_rules(extractor_output)
+    # Use lower threshold (freq≥1) for the target bank — every historical
+    # transaction is relevant context for the same account.
+    print(f"[mapper] Step 2 — generating rules (bank={bank_key or 'all'}, recency-weighted)")
+    rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3)
     all_rules: List[dict] = []
     for bank_rules in rules_by_bank.values():
         all_rules.extend(bank_rules)
@@ -268,9 +295,10 @@ def run(
     total = result['total_rows']
     pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
 
+    bank_note = f" ({bank_key} only)" if bank_key else ""
     return (
         f"Mapped **{total} rows** using **{rule_count} rules** "
-        f"(derived from {mapping_count} historical transactions in .gnucash).\n\n"
+        f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).\n\n"
         f"**Confidence breakdown:**\n"
         f"- High: {counts['high']} ({pct(counts['high'])})\n"
         f"- Medium: {counts['medium']} ({pct(counts['medium'])})\n"

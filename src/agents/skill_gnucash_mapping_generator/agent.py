@@ -51,8 +51,15 @@ def extract_merchant_id(description: str) -> Optional[str]:
         return f".*{merchant_id}.*"
     return None
 
-def generate_rules(extractor_json: Dict[str, Any]) -> Dict[str, List[Dict]]:
-    """Generate rules from extractor JSON: freq >= 3 AND confidence > 0.5."""
+def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[str, List[Dict]]:
+    """Generate rules from extractor JSON.
+
+    Args:
+        extractor_json: Output from xml_extractor's parse_gnucash_file().
+        min_freq:       Minimum occurrence frequency to generate a rule.
+                        Default 3 for cross-bank; use 1 when filtering to
+                        the importing bank (every historical txn is relevant).
+    """
     rules = {
         '_global': [],
         'ICICI': [],
@@ -71,10 +78,11 @@ def generate_rules(extractor_json: Dict[str, Any]) -> Dict[str, List[Dict]]:
         for m in bank_mappings:
             freq = m.get('frequency', 0)
             last_date = m.get('last_date', '')
-            if freq < 3:
+            if freq < min_freq:
                 continue
             conf = confidence_score(freq, last_date)
-            if conf <= 0.5:
+            # For single-occurrence matches (min_freq=1), accept any positive score
+            if min_freq >= 3 and conf <= 0.5:
                 continue
             filtered.append(m)
 

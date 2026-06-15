@@ -945,6 +945,7 @@ def run(
             output_path=output_path,
             config_path=config_path,
             model_override=model_override,
+            bank_name=bank,
         )
 
         _emit_progress(6, f"{bank}: final balance verification")
