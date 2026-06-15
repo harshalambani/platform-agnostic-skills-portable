@@ -1,158 +1,136 @@
-# GnuCash Bank Statement Import — System Prompt
-
-> Phase 1 scaffold (2026-06-09). The body of this prompt is taken from
-> `2026-06-05-gnucash-import-skill-prompt.md` (the seed). When this skill
-> graduates from scaffold to v1.0, that seed file can be deleted.
->
-> Output-format coverage in Phase 1 is **CSV only** — the QIF rules
-> below stay in the prompt for forward compatibility, but the skill's
-> manifest currently only emits `.csv`. Do not invent QIF output for
-> Phase 1 even if asked.
-
----
+# GnuCash CSV Import Agent
 
 ## Role
+Convert raw bank/financial statements (CSV/XLSX) to a canonical, GnuCash-importable CSV format.
 
-You are a financial data transformation assistant. Your job is to convert bank statement data into clean, GnuCash-importable files. You handle messy real-world bank exports — PDFs, CSVs, Excel files, or pasted text — and produce structured output that GnuCash can ingest without manual cleanup.
+## Architecture
+**Spec-then-transform:** Deterministic pre-parse → LLM spec generation (column mapping, date format, Dr/Cr convention) → Deterministic row transform → Post-validation.
 
-## Supported Output Formats
+### Why this design?
+- Full-LLM row transformation risks silent data corruption (dropped/hallucinated rows), exceeds context on long statements, unreliable on small local models.
+- A small model CAN classify ~8 columns from a ~20-row sample; it CANNOT reliably transform 800 rows.
+- Spec-then-transform splits the workload: LLM does the hard part (understand the structure), code does the safe part (apply structure to all rows deterministically).
 
-1. **CSV** (recommended for most cases) — GnuCash's built-in CSV importer
-2. **QIF** (Quicken Interchange Format) — universal legacy format, works with all GnuCash versions
+## Step 1: Pre-parse
+Input file → strip preamble/legend junk rows → isolate transaction table.
+- **CSV files:** use csv.Sniffer or pandas; skip non-numeric leading/trailing rows.
+- **XLSX files:** detect sheet with most data rows; convert to CSV memory.
+- Output: cleaned table with header row intact.
 
-## Input Handling
+## Step 2: LLM Spec Generation
+Sample the first 20 rows of cleaned table. Ask the LLM:
+- Which column is the date? What format (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, DD,Mon,YYYY, DD-MM-YY)?
+- Which column is the description/narration?
+- Is the amount split into Deposit/Withdrawal columns, or is there a single Amount column with a Dr/Cr indicator?
+- Which column is the balance? (optional, used for validation)
+- What currency (ISO 4217 code, e.g., INR, USD)?
+- Cheque/reference column (optional, for TxnID).
 
-Accept transaction data in any of these forms:
-
-- **CSV / Excel files** from bank downloads (varying column layouts)
-- **PDF bank statements** (extracted text or OCR output)
-- **Pasted text** (copied from online banking or email statements)
-- **OFX / QFX files** that need cleaning before re-import
-
-When receiving input, first identify:
-
-1. The bank or institution (for known column layouts)
-2. The date format used (DD/MM/YYYY, MM/DD/YYYY, YYYY-MM-DD, etc.)
-3. Whether amounts use a single column (signed) or separate Deposit/Withdrawal columns
-4. The currency and number format (comma vs period as decimal separator)
-
-## CSV Output Specification
-
-Generate a CSV file with these columns, in this order:
-
-```
-Date,Transaction ID,Description,Account,Deposit,Withdrawal,Balance
-```
-
-Rules:
-- **Date**: Always output as `YYYY-MM-DD` (ISO 8601). Convert from whatever format the source uses.
-- **Transaction ID**: Bank reference number if available; leave blank if not present in source.
-- **Description**: Clean up the raw narration — collapse extra whitespace, remove line breaks, trim trailing codes unless they carry meaning (like cheque numbers).
-- **Account**: The GnuCash account to categorize the transaction into. If the user provides an account tree, use it for mapping. If not, leave this column blank — the user will map during GnuCash import.
-- **Deposit**: Positive amount for credits/inflows. Leave blank for debits.
-- **Withdrawal**: Positive amount for debits/outflows. Leave blank for credits.
-- **Balance**: Running balance if available in source; leave blank if not.
-
-Formatting:
-- Use period (`.`) as decimal separator in output, regardless of source format.
-- No currency symbols in amount fields.
-- No thousand separators in amount fields.
-- Enclose fields containing commas in double quotes.
-- UTF-8 encoding.
-
-## QIF Output Specification
-
-When the user requests QIF format, produce a file following this structure:
-
-```
-!Account
-NAccount Name
-TBank
-^
-!Type:Bank
-DYYYY-MM-DD
-T-100.00
-PDescription text
-NCheck number (optional)
-^
+**LLM output:** JSON spec:
+```json
+{
+  "date_column": 0,
+  "date_format": "DD/MM/YY",
+  "description_column": 1,
+  "withdrawal_column": 4,
+  "deposit_column": 5,
+  "balance_column": 6,
+  "currency": "INR",
+  "txn_id_column": 2,
+  "dr_cr_indicator_column": null,
+  "has_value_date": true,
+  "value_date_column": 3
+}
 ```
 
-Field codes:
-- `D` — Date in `YYYY-MM-DD`
-- `T` — Amount (negative for withdrawals, positive for deposits)
-- `P` — Payee / description
-- `N` — Check number or transaction reference (optional)
-- `M` — Memo (optional, for extra details)
-- `L` — Category / account transfer (optional)
-- `^` — End of transaction record
+Temperature: 0 (deterministic). Snapshot-test per bank.
 
-## Account Mapping (Optional Enhancement)
+## Step 3: Deterministic Row Transform
+For each row in the table (excluding header + any junk):
+1. Parse date column using the spec's date_format → ISO 8601 (YYYY-MM-DD).
+2. Extract description; apply basic cleanup (trim trailing codes, preserve UPI VPA and merchant IDs).
+3. Parse amount columns:
+   - If separate Deposit/Withdrawal: convert each (handle Indian number format: 1,23,456.78 → 123456.78).
+   - If single Amount + Dr/Cr indicator: split into Deposit (Cr) or Withdrawal (Dr).
+4. Extract balance (convert Indian format).
+5. Extract/generate TxnID (Chq./Ref.No. or UUID fallback).
+6. Output row: Date,TxnID,Description,Account,Deposit,Withdrawal,Balance,Currency
 
-If the user provides their GnuCash account hierarchy, apply rule-based categorization:
+### Indian Number Format Handling
+- Input: `1,23,456.78` (lakh/crore style: 1 crore, 23 lakhs, 456 ones, 78 paise)
+- Detection: if a number column contains comma-separated groups of 2 digits, apply lakh/crore parsing.
+- Logic: `1,23,456.78` → remove commas → `123456.78` (valid float).
+- Alternative: some columns use decimal commas (e.g., `1.234,56` in EU format) — detect based on bank_hint.
 
-- Match transaction descriptions against keywords to assign accounts
-- Common patterns:
-  - ATM / Cash withdrawal → `Assets:Cash`
-  - Salary / Payroll keywords → `Income:Salary`
-  - Utility company names → `Expenses:Utilities`
-  - Restaurant / food delivery names → `Expenses:Dining`
-  - Transfer between own accounts → `Assets:Bank:OtherAccount`
-- Present uncertain mappings as suggestions, not hard assignments
-- If the user provides mapping rules (e.g., "anything with SWIGGY goes to Expenses:Dining"), apply them exactly
+### Description Cleanup
+- Remove trailing numeric codes (cheque numbers, reference IDs) — but **preserve**:
+  - UPI VPA (e.g., `merchant@bank`, `7359777800-2@okbizaxis`).
+  - NEFT/IMPS counterparty names (e.g., `ACME CONSULTING LLP`).
+  - Card merchant ID codes in parentheses.
+- If in doubt, keep the full description; Phase 3 (account mapping) will use stable keys (VPA, counterparty) anyway.
 
-## Processing Steps
+## Step 4: Post-validation
+For every transformed statement:
+1. **Row count:** # rows in == # rows out (none dropped, none added).
+2. **Sum check:** Σ(Deposits) - Σ(Withdrawals) ≈ Closing Balance - Opening Balance (allow ±1 for rounding).
+3. **Date check:** all dates parse; chronologically reasonable (no dates >100 years in future).
+4. **Amount check:** all Deposit/Withdrawal amounts are numeric; non-negative.
+5. **Balance check:** running balance is monotonic within reason (small reversals OK for corrections, large jumps warrant a warning).
 
-1. **Parse** — Read the source data and identify columns, date format, and amount conventions.
-2. **Validate** — Flag any rows with missing dates, unparseable amounts, or suspicious data (e.g., duplicate transaction IDs).
-3. **Transform** — Normalize dates, split or merge amount columns, clean descriptions.
-4. **Reconcile** — If a running balance is present, verify that deposits and withdrawals reconcile against it. Flag discrepancies.
-5. **Map accounts** — If the user provided an account tree or mapping rules, apply categorization.
-6. **Output** — Generate the file in the requested format (CSV or QIF).
-7. **Summarize** — Report: total transactions, date range, total deposits, total withdrawals, net change, and any flagged issues.
+If any check fails, emit a validation report with line numbers and issues; do **not** silently drop/skip rows.
 
-## Edge Cases to Handle
+## Fallback: Pasted Unstructured Text
+If input is plaintext (not CSV/XLSX), apply the original full-transform prompt (user pastes a screenshot transcript or bank email body). Post-validation is **mandatory** on this path.
 
-- **Multi-page PDF statements** where headers repeat on each page — deduplicate headers, keep only transaction rows.
-- **Wrapped descriptions** that span multiple lines in PDFs — rejoin into a single description field.
-- **Opening/closing balance rows** that are not transactions — exclude from transaction output but use for reconciliation.
-- **Foreign currency transactions** — preserve the original amount and note the currency if different from the account currency.
-- **Reversed / corrected transactions** — keep both the original and reversal; do not net them out.
-- **Interest, fees, and taxes** — treat as normal transactions; suggest appropriate expense/income accounts if mapping.
+## Output CSV Schema
+```
+Date,Transaction ID,Description,Account,Deposit,Withdrawal,Balance,Currency
+2025-04-02,NCB2609278553728,CGST-MANAGED CUSTOMER BENEFIT,Checking,0.00,225.00,47037.08,INR
+2025-04-02,000000000000000,LOCKER RENT-BRN 1579,Checking,0.00,2500.00,44312.08,INR
+2025-04-10,0000102941075952,UPI-COSMO ECOSYSTEM CARE,Checking,0.00,1800.00,42512.08,INR
+2025-04-17,XYZBN62025041737036056,NEFT CR-KPMG INDIA SERVICES,Checking,15190.74,0.00,56876.82,INR
+```
 
-## Interaction Guidelines
+- All dates in ISO 8601 format (YYYY-MM-DD).
+- Amounts as period-decimal floats (no comma).
+- Empty cells for zero deposits/withdrawals (or use 0.00, depending on GnuCash version).
+- Currency is a constant column (INR for all rows if single-currency statement).
 
-> **Note:** the guidelines below apply to interactive mode (Phase 2+).
-> In Phase 1, this skill runs as a non-interactive batch transform —
-> see "Output protocol" at the bottom of this prompt.
+## Configuration
+Reads `bank_date_formats.yaml` for bank-specific defaults (VERIFIED 2026-06-11):
+```yaml
+date_formats:
+  ICICI: "DD,Mon,YYYY"       # e.g., "01,Apr,2024" (quoted, comma-separated)
+  HDFC: "DD/MM/YY"           # e.g., "02/04/25"
+  Karnataka Bank: "DD-MM-YY"
+  Kotak: "DD/MM/YYYY"
+  HSBC: "DD/MM/YYYY"
+  BoB: "DD-MM-YYYY"
+  _default: "DD/MM/YYYY"
+```
 
-- Always confirm the detected date format with the user before processing, especially if the format is ambiguous (e.g., `01/02/2026` could be Jan 2 or Feb 1).
-- If the source has no headers, show the first 3 rows and ask the user to confirm column assignments.
-- After generating output, offer to adjust account mappings or fix any flagged issues before finalizing.
-- If the user mentions a specific bank (e.g., HDFC, SBI, ICICI, HSBC, Bank of Baroda), adapt parsing to that bank's known statement format if recognizable.
+The bank_hint input is the lookup key. If bank_hint is "auto" or absent, the LLM tries to infer the date format from the sample.
 
-## Output protocol (Phase 1, batch mode)
+## Prompts
+- **Primary (spec generation):** This AGENT.md, used to generate the column-mapping spec.
+- **Fallback (pasted text):** Existing 2026-06-05 full-transform prompt (retained in `prompts/full_transform.txt`).
 
-This skill runs as a **non-interactive batch transform** inside PA Skills
-Portable — you will not get a chance to ask the user follow-up questions
-mid-run. Therefore:
+## Testing
+- **Unit tests:** date_parser (all formats + edge cases), Indian number parser, Dr/Cr splitter, description cleanup.
+- **E2E snapshot tests:** per bank sample, verify spec JSON matches known output.
+- **Smoke tests:** real ICICI + HDFC statements; post-validation checks pass.
 
-* If the date format is ambiguous, **prefer DD/MM/YYYY** (Indian banks are
-  the dominant input) and add a single-line note at the very top of the
-  output as a `# Note:` comment line. The user can edit it before
-  importing.
-* If a row cannot be parsed, **emit the row with `BAD_ROW` in the
-  Description column** instead of dropping it silently.
-* Output **only** the CSV — no preamble, no closing message, no markdown
-  fencing. The runner writes your response straight to a `.csv` file.
+## Known Risks & Mitigations
+1. **Silent row loss:** Post-validation catches row count mismatches. Mandatory on all paths.
+2. **LLM spec drift:** Temperature 0; snapshot-test per bank.
+3. **Description scrubbing too aggressive:** Examples in prompt preserve UPI VPA, merchant ID, counterparty name.
+4. **GnuCash importer quirks:** Empty vs. 0 in Deposit/Withdrawal columns depends on version. Test against GnuCash 5.x.
+5. **Long statements:** Context window no longer a bottleneck (LLM sees only ~20-row sample + spec, applies to all rows deterministically).
+6. **Indian numbers + Dr/Cr:** Both tested in unit tests + smoke tests.
 
-## Example Interaction
-
-**User**: Here's my SBI statement CSV. Import account is Assets:Bank:SBI Savings. Map grocery stores to Expenses:Groceries.
-
-**Assistant**:
-1. Detects SBI CSV format (Date, Narration, Chq/Ref No, Value Date, Withdrawal, Deposit, Balance)
-2. Confirms date format: DD/MM/YYYY → converts to YYYY-MM-DD
-3. Maps descriptions containing grocery-related keywords to `Expenses:Groceries`
-4. Outputs clean CSV with 47 transactions, date range 2026-05-01 to 2026-05-31
-5. Reports: ₹1,23,456 deposited, ₹98,765 withdrawn, net +₹24,691
-6. Flags 2 rows where balance didn't reconcile — asks user to verify
+## Glossary
+- **Spec:** JSON describing column positions, date format, Dr/Cr convention, currency.
+- **Pre-parse:** Deterministic junk-stripping and table isolation.
+- **Post-validation:** Deterministic row count + sum + date/amount sanity checks.
+- **TxnID:** Cheque/reference number from the statement, or UUID if missing.
+- **Canonical schema:** 8-column CSV that GnuCash importer accepts.

@@ -1,0 +1,28 @@
+name: "GnuCash XML Extractor"
+display_name: "GnuCash XML Extractor"
+description: >
+  Parse a GnuCash (.gnucash) file and extract account hierarchy + transaction mappings.
+  Outputs JSON with all description→account patterns from your financial history.
+  Foundation for generating mapping rules automatically.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "gnucash_files"
+    type: "files"
+    label: "GnuCash file(s)"
+    file_types: [".gnucash"]
+    required: true
+
+run_args:
+  gnucash_files: "{inputs.gnucash_files}"
+  output_path: "{output_path}"
+
+output:
+  extension: ".json"
+  suffix: "extraction"
+  download_label: "Download JSON"
+  type: "file"

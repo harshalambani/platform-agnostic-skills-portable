@@ -1,0 +1,28 @@
+name: "GnuCash Mapping Generator"
+display_name: "GnuCash Mapping Generator"
+description: >
+  Generate mapping rules (YAML) from extracted GnuCash data.
+  Creates categorized rules (by bank: ICICI, HDFC, HSBC, BoB) with confidence levels.
+  Ready to apply to new bank statements for automatic account assignment.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "extraction_json"
+    type: "files"
+    label: "Extraction JSON"
+    file_types: [".json"]
+    required: true
+
+run_args:
+  extraction_json: "{inputs.extraction_json}"
+  output_path: "{output_path}"
+
+output:
+  extension: ".yaml"
+  suffix: "mapping"
+  download_label: "Download YAML"
+  type: "file"

@@ -1,0 +1,35 @@
+name: "skill_hdfc"
+display_name: "HDFC"
+description: >
+  Convert HDFC Bank statements to GnuCash-importable CSV.
+  Supports scanned PDF (OCR via pypdfium2 + pytesseract) and
+  net-banking XLS/XLSX (pure Python, no external tools needed).
+  No LLM required.
+category: "banks"
+version: "1.1.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_path"
+    type: "file"
+    label: "HDFC statement (PDF, XLS, or XLSX)"
+    file_types: [".pdf", ".xls", ".xlsx"]
+    required: true
+
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "HDFC_canonical"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: ["tesseract"]   # PDF only; not needed for XLS/XLSX
+  python_packages: ["xlrd", "openpyxl", "pypdfium2", "pytesseract"]
+  external_tools: []

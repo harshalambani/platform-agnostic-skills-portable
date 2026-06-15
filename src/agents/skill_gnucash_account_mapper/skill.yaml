@@ -1,0 +1,43 @@
+# skill.yaml — GnuCash Account Mapper manifest
+
+name: "GnuCash Account Mapper"
+display_name: "GnuCash Account Mapper"
+description: >
+  Build account-mapping rules from your GnuCash book, then apply them to a canonical CSV.
+  Chains: XML extraction → recency-weighted rule generation → account mapping.
+  No LLM required — fully deterministic.
+  Output: mapped CSV (Account column pre-filled) + confidence report.
+  High-confidence rows import automatically in GnuCash; Low/No-match rows need manual assignment.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "gnucash_file"
+    type: "file"
+    label: "GnuCash book (.gnucash)"
+    file_types: [".gnucash"]
+    required: true
+  - name: "canonical_csv"
+    type: "file"
+    label: "Canonical CSV (from ICICI / HSBC / Bank of Baroda skill)"
+    file_types: [".csv"]
+    required: true
+
+run_args:
+  gnucash_file: "{inputs.gnucash_file}"
+  canonical_csv: "{inputs.canonical_csv}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "GnuCash_mapped"
+  download_label: "Download Mapped CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []

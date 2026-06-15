@@ -1,0 +1,37 @@
+# skill.yaml — ICICI skill manifest
+
+name: "ICICI"
+display_name: "ICICI"
+description: >
+  Convert ICICI Bank statement XLS downloads to GnuCash-importable CSV.
+  Hardcoded ICICI parsing — no LLM needed. Handles preamble/legend stripping,
+  DD,Mon,YYYY dates, description cleanup with reference number extraction
+  to cheque column, and running balance reconciliation.
+  Uses xlrd (pure Python) to read XLS — no LibreOffice required.
+category: "banks"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "statement_files"
+    type: "files"
+    label: "ICICI statement XLS file(s)"
+    file_types: [".xls"]
+    required: true
+
+run_args:
+  statement_files: "{inputs.statement_files}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "ICICI_GnuCash"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []

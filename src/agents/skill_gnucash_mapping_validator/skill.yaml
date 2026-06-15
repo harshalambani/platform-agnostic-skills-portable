@@ -1,0 +1,40 @@
+name: "GnuCash Mapping Validator"
+display_name: "GnuCash Mapping Validator"
+description: >
+  Test mapping rules against a bank statement to measure accuracy.
+  Validates that your rules correctly predict GnuCash accounts.
+  Run this before applying rules to production data.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "mapping_rules_json"
+    type: "files"
+    label: "Mapping Rules (JSON)"
+    file_types: [".json"]
+    required: true
+  - name: "extractor_json"
+    type: "files"
+    label: "Extraction JSON"
+    file_types: [".json"]
+    required: true
+  - name: "eval_statement"
+    type: "files"
+    label: "Bank Statement (CSV)"
+    file_types: [".csv"]
+    required: true
+
+run_args:
+  mapping_rules_json: "{inputs.mapping_rules_json}"
+  extractor_json: "{inputs.extractor_json}"
+  eval_statement: "{inputs.eval_statement}"
+  output_path: "{output_path}"
+
+output:
+  extension: ".txt"
+  suffix: "validation"
+  download_label: "Download Report"
+  type: "file"
