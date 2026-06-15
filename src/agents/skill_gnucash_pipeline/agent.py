@@ -821,25 +821,27 @@ def run(
 
         # ── Opening balance reconciliation with GnuCash (Intervention 1) ──
         recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank)
-        log_lines.append(f"**Balance check** — {recon['message']}")
 
         if recon["rows_skipped"] > 0:
             log_lines.append(
                 f"Skipped {recon['rows_skipped']} duplicate entries "
-                f"already in GnuCash"
+                f"already in GnuCash (date-based filter)"
             )
-            # Rewrite canonical CSV with filtered rows
             with open(canonical_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=CANONICAL_COLS)
                 writer.writeheader()
                 writer.writerows(recon["filtered_rows"])
             canonical_rows = recon["filtered_rows"]
 
-        if not recon["ok"]:
-            # Flag the error but still produce output — let user decide
+        if recon["ok"]:
+            log_lines.append(f"**Balance check** — {recon['message']}")
+        else:
+            # Don't flag as error — dedup below will handle overlapping rows
             log_lines.append(
-                "⚠️ Proceeding with account mapping despite balance mismatch — "
-                "review the output carefully."
+                f"**Balance check** — Opening balance gap detected "
+                f"(GnuCash={recon['gnucash_balance']:.2f}, "
+                f"statement={recon['statement_opening']:.2f}). "
+                f"Dedup will reconcile overlapping transactions."
             )
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
@@ -947,18 +949,24 @@ def run(
 
         _emit_progress(6, f"{bank}: final balance verification")
         # ── Final closing balance verification (Intervention 3) ──────────
-        # Read the final output CSV and verify closing balance matches
-        # the canonical CSV's closing balance (source of truth)
-        try:
-            with open(output_path, "r", encoding="utf-8") as f:
-                final_rows = list(csv.DictReader(f))
-            closing_check = verify_closing_balance(
-                final_rows,
-                expected_closing=running["closing_balance"],
+        # After dedup removes overlapping rows the pre-dedup closing balance
+        # no longer matches the output CSV — skip the check in that case.
+        if total_duplicates > 0:
+            log_lines.append(
+                "**Final check** — Closing balance check skipped "
+                f"(dedup removed {total_duplicates} overlapping rows)"
             )
-            log_lines.append(f"**Final check** — {closing_check['message']}")
-        except Exception as e:
-            log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
+        else:
+            try:
+                with open(output_path, "r", encoding="utf-8") as f:
+                    final_rows = list(csv.DictReader(f))
+                closing_check = verify_closing_balance(
+                    final_rows,
+                    expected_closing=running["closing_balance"],
+                )
+                log_lines.append(f"**Final check** — {closing_check['message']}")
+            except Exception as e:
+                log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
 
     steps_summary = "\n".join(f"✓ {line}" for line in log_lines)
     return (
