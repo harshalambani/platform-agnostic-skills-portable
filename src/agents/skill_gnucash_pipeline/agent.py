@@ -608,34 +608,56 @@ def run(
             _emit_progress(1, "Bank of Baroda: extracting PDFs to CSV (direct)")
             log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
             try:
-                # Bypass the LangGraph agent — call the extraction tool directly.
-                # The BoB extraction is pure Python (pdfplumber), no LLM needed.
-                from skill_bob.tools import extract_bob  # noqa: E402
-                tool_result = extract_bob.invoke({"pdf_path": bob_input, "output_path": bob_raw})
-                log.info("BoB extract_bob tool result: %s", tool_result)
+                # Bypass the LangGraph agent AND subprocess — call extraction
+                # functions directly for proper error tracebacks.
+                from skill_bob.scripts.extract_bob_statement import extract, write_csv as bob_write_csv  # noqa: E402
+
+                bob_src = Path(bob_input)
+                # If input is a directory (staged uploads), find PDFs inside
+                if bob_src.is_dir():
+                    bob_pdfs = sorted(bob_src.glob("*.pdf"))
+                    if not bob_pdfs:
+                        return (
+                            f"## {bank} → no PDFs found\n\n"
+                            f"❌ The staged upload directory contains no .pdf files:\n"
+                            f"`{bob_input}`"
+                        )
+                    # Extract all PDFs and merge rows
+                    all_bob_rows = []
+                    for pdf_file in bob_pdfs:
+                        log.info("BoB extracting: %s", pdf_file.name)
+                        all_bob_rows.extend(extract(pdf_file))
+                    bob_write_csv(all_bob_rows, Path(bob_raw))
+                    log.info("BoB direct extraction: %d rows from %d PDF(s) → %s",
+                             len(all_bob_rows), len(bob_pdfs), bob_raw)
+                else:
+                    bob_rows = extract(bob_src)
+                    bob_write_csv(bob_rows, Path(bob_raw))
+                    log.info("BoB direct extraction: %d rows → %s", len(bob_rows), bob_raw)
             except Exception as e:
                 log.error("BoB extraction failed: %s", e, exc_info=True)
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ Bank of Baroda extraction raised an exception:\n```\n{e}\n```"
+                    f"❌ Bank of Baroda extraction failed:\n```\n{e}\n```"
                 )
             # Check intermediate output before proceeding to adapter
             if not Path(bob_raw).is_file():
                 return (
                     f"## {bank} → extraction produced no output\n\n"
-                    f"❌ The BoB extraction tool did not create an intermediate CSV.\n\n"
-                    f"**Tool result:** {tool_result}"
+                    f"❌ The BoB extraction did not create an intermediate CSV."
                 )
             _emit_progress(2, "Bank of Baroda: converting to canonical format")
             log_lines.append("**Step 2** — Bank of Baroda: converting to canonical format")
             try:
-                from adapter_bob.agent import run as adapt_bob  # noqa: E402
-                adapt_bob(
-                    input_file=bob_raw,
-                    output_path=canonical_path,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                from adapter_bob.agent import adapt_bob_csv  # noqa: E402
+                adapt_result = adapt_bob_csv(bob_raw, canonical_path)
+                if not adapt_result.get("success") and not Path(canonical_path).is_file():
+                    return (
+                        f"## {bank} → canonical conversion failed\n\n"
+                        f"❌ BoB adapter error: {adapt_result.get('error', 'unknown')}\n\n"
+                        f"Issues: {adapt_result.get('issues', [])}"
+                    )
+                log.info("BoB adapter: %d→%d rows", adapt_result.get("rows_input", 0), adapt_result.get("rows_output", 0))
             except Exception as e:
                 log.error("BoB adapter failed: %s", e, exc_info=True)
                 return (

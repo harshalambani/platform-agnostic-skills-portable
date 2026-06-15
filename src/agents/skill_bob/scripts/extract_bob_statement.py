@@ -152,9 +152,10 @@ class Row:
     cheque: str
     withdrawal: str
     deposit: str
+    balance: str = ""
 
     def as_csv(self) -> list[str]:
-        return [self.date, self.narration, self.cheque, self.withdrawal, self.deposit]
+        return [self.date, self.narration, self.cheque, self.withdrawal, self.deposit, self.balance]
 
 
 def _expand_date(dd_mm_yy: str) -> str:
@@ -211,12 +212,15 @@ def parse_transaction_line(line_words, cols: ColumnMap) -> Optional[Row]:
     cheque = ""
     withdrawal = ""
     deposit = ""
+    balance = ""
 
     for w in line_words[1:]:
         x0, x1, text = w["x0"], w["x1"], w["text"]
 
-        # Skip balance column entirely.
+        # Balance column — capture it instead of skipping.
         if x0 >= cols.balance_left - 5:
+            if AMOUNT_RE.match(text):
+                balance = _clean_amount(text)
             continue
 
         # Cheque column — by x-range AND by looking like an integer.
@@ -232,9 +236,6 @@ def parse_transaction_line(line_words, cols: ColumnMap) -> Optional[Row]:
                 withdrawal = _clean_amount(text)
             elif x1 <= cols.deposits_right + 2:
                 deposit = _clean_amount(text)
-            else:
-                # Unlikely — probably the balance, ignore.
-                pass
             continue
 
         # Everything else falls into narration.
@@ -249,6 +250,7 @@ def parse_transaction_line(line_words, cols: ColumnMap) -> Optional[Row]:
         cheque=cheque,
         withdrawal=withdrawal,
         deposit=deposit,
+        balance=balance,
     )
 
 
@@ -272,11 +274,13 @@ def parse_opening_balance(line_words, cols: ColumnMap) -> Optional[Row]:
     if has_wd_or_dep:
         return None
 
-    narration_tokens = [
-        w["text"]
-        for w in line_words[1:]
-        if not AMOUNT_RE.match(w["text"]) and w["x0"] < cols.balance_left - 5
-    ]
+    narration_tokens = []
+    ob_balance = ""
+    for w in line_words[1:]:
+        if AMOUNT_RE.match(w["text"]) and w["x0"] >= cols.balance_left - 5:
+            ob_balance = _clean_amount(w["text"])
+        elif not AMOUNT_RE.match(w["text"]) and w["x0"] < cols.balance_left - 5:
+            narration_tokens.append(w["text"])
     narration = " ".join(narration_tokens).strip() or "Opening Balance"
     return Row(
         date=_expand_date(first["text"]),
@@ -284,6 +288,7 @@ def parse_opening_balance(line_words, cols: ColumnMap) -> Optional[Row]:
         cheque="",
         withdrawal="",
         deposit="",
+        balance=ob_balance,
     )
 
 
@@ -347,7 +352,7 @@ def write_csv(rows: list[Row], out_path: Path) -> None:
     with out_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(
-            ["Date", "Narration", "Cheque/Reference No.", "Withdrawal Amount", "Deposit Amount"]
+            ["DATE", "PARTICULARS", "CHQ.NO.", "WITHDRAWALS", "DEPOSITS", "BALANCE"]
         )
         for r in rows:
             w.writerow(r.as_csv())
