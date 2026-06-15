@@ -1,28 +1,9 @@
-name: "GnuCash Mapping Generator"
-display_name: "GnuCash Mapping Generator"
+# skill_gnucash_mapping_generator — internal pipeline step.
+# NOT registered as a UI skill — used programmatically by skill_gnucash_account_mapper.
+# To restore as a standalone tab, add: name, display_name, mode, entry_point fields.
+
 description: >
   Generate mapping rules (YAML) from extracted GnuCash data.
-  Creates categorized rules (by bank: ICICI, HDFC, HSBC, BoB) with confidence levels.
-  Ready to apply to new bank statements for automatic account assignment.
+  Creates categorized rules (by bank) with confidence levels.
 category: "gnucash"
 version: "1.0.0"
-
-mode: "direct"
-entry_point: "agent:run"
-
-inputs:
-  - name: "extraction_json"
-    type: "files"
-    label: "Extraction JSON"
-    file_types: [".json"]
-    required: true
-
-run_args:
-  extraction_json: "{inputs.extraction_json}"
-  output_path: "{output_path}"
-
-output:
-  extension: ".yaml"
-  suffix: "mapping"
-  download_label: "Download YAML"
-  type: "file"

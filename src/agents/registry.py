@@ -102,7 +102,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
     # Required fields.
     missing = [k for k in ("name", "display_name", "description", "mode", "entry_point") if k not in raw]
     if missing:
-        log.warning("Skipping %s: missing required fields: %s", path, missing)
+        log.debug("Skipping %s: missing required fields: %s", path, missing)
         return None
 
     # Parse inputs.
