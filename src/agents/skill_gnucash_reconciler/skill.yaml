@@ -1,7 +1,7 @@
 # skill.yaml — GnuCash Reconciler manifest
 
-name: "GnuCash Reconciler"
-display_name: "GnuCash Reconciler"
+name: "gnucash_reconciler"
+display_name: "Reconcile Statement"
 description: >
   Compare a canonical CSV against your GnuCash book before importing.
   Flags: duplicates (date+amount match), balance gaps, and missing transactions.

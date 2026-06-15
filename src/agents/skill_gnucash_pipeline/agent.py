@@ -567,10 +567,14 @@ def run(
         # ── Step 1 + 2: Bank extraction → canonical CSV ───────────────────────
 
         if bank == "ICICI":
+            icici_input = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
             log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
             from skill_icici.agent import run as icici_run  # noqa: E402
             icici_run(
-                statement_files=statement_files,
+                statement_files=icici_input,
                 output_path=canonical_path,
                 config_path=config_path,
                 model_override=model_override,
@@ -578,10 +582,14 @@ def run(
 
         elif bank == "Bank of Baroda":
             bob_raw = str(tmp_path / "bob_raw.csv")
+            bob_input = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
             log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
             from skill_bob.agent import run as bob_run  # noqa: E402
             bob_run(
-                pdf_path=statement_files,
+                pdf_path=bob_input,
                 output_path=bob_raw,
                 config_path=config_path,
                 model_override=model_override,
@@ -598,10 +606,14 @@ def run(
         elif bank == "HSBC":
             hsbc_xlsx = str(tmp_path / "hsbc_raw.xlsx")
             work_dir = str(tmp_path / "hsbc_work")
+            hsbc_input = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
             log_lines.append("**Step 1** — HSBC: extracting PDFs to Excel")
             from skill_hsbc.agent import run as hsbc_run  # noqa: E402
             hsbc_run(
-                pdf_dir=statement_files,
+                pdf_dir=hsbc_input,
                 work_dir=work_dir,
                 output_path=hsbc_xlsx,
                 config_path=config_path,
@@ -657,6 +669,16 @@ def run(
                 bank_name=bank,
                 config_path=config_path,
                 model_override=model_override,
+            )
+
+        # ── Verify extraction produced output ────────────────────────────────
+        if not Path(canonical_path).is_file():
+            steps_summary = "\n".join(f"✓ {line}" for line in log_lines)
+            return (
+                f"## {bank} → extraction failed\n\n"
+                f"{steps_summary}\n\n"
+                f"❌ Bank extraction did not produce a canonical CSV.\n"
+                f"Check the console log for errors from the {bank} skill."
             )
 
         # ── Balance verification on canonical CSV ─────────────────────────────
