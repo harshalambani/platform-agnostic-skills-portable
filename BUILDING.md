@@ -225,4 +225,10 @@ that PyInstaller can't detect statically.
 `paskills.spec` and rebuild. See also `webui.py`'s `sys.stdout`/`sys.stderr`
 redirect for the `None`-stream pitfall.
 
-**Launcher Generat
+**Launcher Generator not found:** It's self-hosted at
+`bundling/launcher-gen/2.2.4/`. If this path is missing, run `git lfs pull`.
+
+## Historical notes
+
+The date-stamped build notes from earlier phases are archived in
+`docs/history/` for reference. This document supersedes all of them.
