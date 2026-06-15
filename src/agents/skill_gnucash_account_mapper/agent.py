@@ -10,6 +10,7 @@ Public surface:
 """
 
 import csv
+import json
 import re
 import sys
 from pathlib import Path
@@ -57,6 +58,144 @@ def match_rule(
                     return account, confidence, pattern, reason
 
     return None, 'none', None, 'No pattern match'
+
+
+# ---------------------------------------------------------------------------
+# LLM fallback for unmatched rows
+# ---------------------------------------------------------------------------
+
+_LLM_SYSTEM_PROMPT = """\
+You are a GnuCash account-mapping assistant. Given bank transaction descriptions
+and a list of GnuCash accounts, assign the most likely account to each transaction.
+
+Rules:
+- Use ONLY accounts from the provided list. Never invent accounts.
+- Match based on semantic meaning, not exact text. For example:
+  "Int.Pd:" or "CREDIT INTEREST" → Bank Interest
+  "NACHMU-MUMBAI/ACHCR/<company>" → look up the company in the account list
+  "MIN BAL CHRGS" → Bank Service Charge
+  "Opening Balance" → leave blank (skip)
+- If a transaction clearly maps to a dividend account, use the specific company
+  dividend sub-account if one exists, otherwise use "Dividend - Other Shares".
+- If truly uncertain, leave account blank rather than guess wrong.
+
+Respond with ONLY a JSON array. Each element: {"row": <row_number>, "account": "<full_account_path>", "reason": "<brief_reason>"}
+For skipped rows: {"row": <row_number>, "account": "", "reason": "skip"}
+No markdown, no explanation outside the JSON."""
+
+
+def _build_llm_prompt(
+    unmatched: List[Dict],
+    account_tree: List[str],
+    example_mappings: List[Dict],
+) -> str:
+    """Build a compact prompt for the LLM fallback pass."""
+    parts = []
+
+    # Account tree (leaf accounts only — skip intermediate nodes)
+    parts.append("=== GNUCASH ACCOUNTS ===")
+    for acct in account_tree:
+        parts.append(acct)
+
+    # Example mappings from the rules pass (gives the LLM context)
+    if example_mappings:
+        parts.append("\n=== EXAMPLE MAPPINGS (from rules pass) ===")
+        for ex in example_mappings[:15]:
+            parts.append(f"  {ex['description']!r} -> {ex['account']}")
+
+    # Unmatched rows
+    parts.append("\n=== UNMATCHED TRANSACTIONS (assign accounts) ===")
+    for item in unmatched:
+        amt_info = ""
+        if item.get('withdrawal'):
+            amt_info = f" [withdrawal: {item['withdrawal']}]"
+        elif item.get('deposit'):
+            amt_info = f" [deposit: {item['deposit']}]"
+        parts.append(f"  Row {item['row']}: {item['description']!r}{amt_info}")
+
+    return "\n".join(parts)
+
+
+def llm_fallback_mapping(
+    unmatched_rows: List[Dict],
+    account_tree: List[str],
+    example_mappings: List[Dict],
+    config_path: str,
+    model_override: str = None,
+) -> Dict[int, Dict]:
+    """
+    Use the LLM to map rows that the rules pass couldn't match.
+
+    Args:
+        unmatched_rows: List of dicts with 'row', 'description', 'withdrawal', 'deposit'
+        account_tree:   List of full account paths from GnuCash
+        example_mappings: Successfully matched rows for context
+        config_path:    Path to config.yaml
+        model_override: Optional model override
+
+    Returns:
+        Dict mapping row_number -> {'account': str, 'reason': str}
+    """
+    if not unmatched_rows:
+        return {}
+
+    from base_agent import run_direct  # noqa: E402
+
+    prompt = _build_llm_prompt(unmatched_rows, account_tree, example_mappings)
+    print(f"[mapper-llm] Sending {len(unmatched_rows)} unmatched rows to LLM")
+
+    try:
+        response = run_direct(
+            user_message=prompt,
+            system_prompt=_LLM_SYSTEM_PROMPT,
+            config_path=config_path,
+            model_override=model_override,
+        )
+    except Exception as e:
+        print(f"[mapper-llm] LLM call failed: {e}")
+        return {}
+
+    # Parse JSON from response — handle markdown fences
+    text = response.strip()
+    if text.startswith("```"):
+        # Strip ```json ... ```
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines)
+
+    try:
+        mappings_list = json.loads(text)
+    except json.JSONDecodeError:
+        # Try to find JSON array in the response
+        start = text.find("[")
+        end = text.rfind("]")
+        if start >= 0 and end > start:
+            try:
+                mappings_list = json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                print(f"[mapper-llm] Could not parse LLM response as JSON")
+                return {}
+        else:
+            print(f"[mapper-llm] No JSON array found in LLM response")
+            return {}
+
+    # Validate accounts against the tree
+    account_set = set(account_tree)
+    result = {}
+    for item in mappings_list:
+        row_num = item.get("row")
+        account = item.get("account", "")
+        reason = item.get("reason", "LLM mapping")
+        if not row_num:
+            continue
+        if account and account not in account_set:
+            print(f"[mapper-llm] Row {row_num}: LLM suggested unknown account {account!r}, skipping")
+            continue
+        result[row_num] = {"account": account, "reason": reason}
+
+    matched = sum(1 for v in result.values() if v["account"])
+    print(f"[mapper-llm] LLM mapped {matched}/{len(unmatched_rows)} rows")
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +396,13 @@ def run(
     print(f"[mapper] Step 1 — extracting mappings from {Path(gnucash_file).name}")
     extractor_output = parse_gnucash_file(gnucash_file)
 
+    # Collect ALL account paths (all banks) before filtering — needed for LLM fallback
+    all_account_paths = set()
+    for bank_maps in extractor_output.get('mappings', {}).values():
+        for m in bank_maps:
+            if m.get('account'):
+                all_account_paths.add(m['account'])
+
     if bank_key:
         # Filter to only the importing bank's historical transactions
         all_mappings = extractor_output.get('mappings', {})
@@ -288,22 +434,98 @@ def run(
 
     # Step 3: Apply rules to canonical CSV
     report_path = out_path.with_name(out_path.stem + "_confidence.txt")
-    print(f"[mapper] Step 3 — applying mapping to {Path(canonical_csv).name}")
+    print(f"[mapper] Step 3 — applying rules to {Path(canonical_csv).name}")
     result = map_accounts(canonical_csv, str(rules_path), str(out_path), str(report_path))
+
+    # Step 4: LLM fallback for unmatched rows
+    # Re-read the mapped CSV to find rows with no account assigned
+    unmatched_count = result['confidence_counts'].get('none', 0)
+    llm_mapped_count = 0
+
+    if unmatched_count > 0 and config_path:
+        print(f"[mapper] Step 4 — LLM fallback for {unmatched_count} unmatched rows")
+
+        # Read mapped CSV to find unmatched rows + collect examples
+        with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
+            mapped_rows = list(csv.DictReader(f))
+
+        unmatched_for_llm = []
+        example_mappings = []
+        for i, row in enumerate(mapped_rows, 1):
+            desc = row.get('Description') or row.get('Narration') or ''
+            acct = row.get('Account', '')
+            conf = row.get('Confidence', 'none')
+            if conf == 'none' or not acct:
+                unmatched_for_llm.append({
+                    'row': i,
+                    'description': desc,
+                    'withdrawal': row.get('Withdrawal', ''),
+                    'deposit': row.get('Deposit', ''),
+                })
+            elif conf in ('high', 'medium'):
+                example_mappings.append({'description': desc, 'account': acct})
+
+        # Use the full account tree collected before bank filtering
+        account_set = set(all_account_paths)
+        for ex in example_mappings:
+            if ex.get('account'):
+                account_set.add(ex['account'])
+        account_list = sorted(account_set)
+
+        if account_list and unmatched_for_llm:
+            llm_results = llm_fallback_mapping(
+                unmatched_rows=unmatched_for_llm,
+                account_tree=account_list,
+                example_mappings=example_mappings,
+                config_path=config_path,
+                model_override=model_override,
+            )
+
+            # Apply LLM results back to the mapped CSV
+            if llm_results:
+                for i, row in enumerate(mapped_rows):
+                    row_num = i + 1
+                    if row_num in llm_results:
+                        llm_info = llm_results[row_num]
+                        if llm_info['account']:
+                            row['Account'] = llm_info['account']
+                            row['Confidence'] = 'llm'
+                            row['MatchReason'] = f"LLM: {llm_info['reason']}"
+                            llm_mapped_count += 1
+
+                # Rewrite the mapped CSV
+                if llm_mapped_count > 0:
+                    headers_out = list(mapped_rows[0].keys())
+                    with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
+                        writer.writeheader()
+                        writer.writerows(mapped_rows)
+                    print(f"[mapper] LLM pass: {llm_mapped_count} additional rows mapped")
+
+                    # Update confidence counts
+                    result['confidence_counts']['none'] -= llm_mapped_count
+                    result['confidence_counts']['llm'] = llm_mapped_count
+    else:
+        if unmatched_count == 0:
+            print(f"[mapper] All rows matched by rules — no LLM fallback needed")
+        elif not config_path:
+            print(f"[mapper] No LLM config — skipping fallback pass")
 
     counts = result['confidence_counts']
     total = result['total_rows']
     pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
 
     bank_note = f" ({bank_key} only)" if bank_key else ""
+    llm_note = f" + LLM fallback mapped {llm_mapped_count}" if llm_mapped_count else ""
     return (
         f"Mapped **{total} rows** using **{rule_count} rules** "
-        f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).\n\n"
+        f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{llm_note}\n\n"
         f"**Confidence breakdown:**\n"
-        f"- High: {counts['high']} ({pct(counts['high'])})\n"
-        f"- Medium: {counts['medium']} ({pct(counts['medium'])})\n"
-        f"- Low: {counts['low']} ({pct(counts['low'])})\n"
-        f"- No match: {counts['none']} ({pct(counts['none'])})\n\n"
+        f"- High: {counts.get('high', 0)} ({pct(counts.get('high', 0))})\n"
+        f"- Medium: {counts.get('medium', 0)} ({pct(counts.get('medium', 0))})\n"
+        f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
+        f"- LLM: {counts.get('llm', 0)} ({pct(counts.get('llm', 0))})\n"
+        f"- No match: {counts.get('none', 0)} ({pct(counts.get('none', 0))})\n\n"
         f"**Files produced:**\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
         f"- `{report_path.name}` — confidence report (review Low/No-match rows)\n"
