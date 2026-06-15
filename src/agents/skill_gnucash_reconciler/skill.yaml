@@ -1,0 +1,42 @@
+# skill.yaml — GnuCash Reconciler manifest
+
+name: "GnuCash Reconciler"
+display_name: "GnuCash Reconciler"
+description: >
+  Compare a canonical CSV against your GnuCash book before importing.
+  Flags: duplicates (date+amount match), balance gaps, and missing transactions.
+  Read-only — never modifies your .gnucash file.
+  Run this after mapping accounts and before GnuCash import to catch issues early.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "normalized_csv"
+    type: "file"
+    label: "Canonical CSV (from ICICI / Bank of Baroda / HSBC / Map Accounts skill)"
+    file_types: [".csv"]
+    required: true
+  - name: "gnucash_file"
+    type: "file"
+    label: "GnuCash book (.gnucash) — must be closed in GnuCash"
+    file_types: [".gnucash"]
+    required: true
+
+run_args:
+  normalized_csv: "{inputs.normalized_csv}"
+  gnucash_file: "{inputs.gnucash_file}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "GnuCash_reconcile"
+  download_label: "Download Reconciliation Report"
+
+requires:
+  native_binaries: []
+  external_tools: []

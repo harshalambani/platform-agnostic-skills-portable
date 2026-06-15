@@ -30,6 +30,10 @@ from agents.balance_utils import (
     format_balance_summary,
     _safe_float,
 )
+from agents.skill_gnucash_reconciler.agent import (
+    parse_gnucash_for_reconcile,
+    reconcile,
+)
 
 log = logging.getLogger(__name__)
 
@@ -695,6 +699,86 @@ def run(
                 "⚠️ Proceeding with account mapping despite balance mismatch — "
                 "review the output carefully."
             )
+
+        # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
+        # Compare canonical CSV against GnuCash book to flag duplicates
+        log_lines.append("**Duplicate check** — comparing against GnuCash book")
+
+        try:
+            # Parse GnuCash file to get existing transactions
+            gnucash_data = parse_gnucash_for_reconcile(gnucash_file)
+
+            # Convert canonical_rows to reconcile format
+            # (canonical_rows are already dicts with 'Date', 'Deposit', 'Withdrawal' keys)
+            reconcile_rows = []
+            for idx, row in enumerate(canonical_rows, 1):
+                try:
+                    deposit = _safe_float(row.get('Deposit', 0))
+                    withdrawal = _safe_float(row.get('Withdrawal', 0))
+                    reconcile_rows.append({
+                        'row_num': idx,
+                        'date': row.get('Date', ''),
+                        'description': row.get('Description', ''),
+                        'deposit': deposit,
+                        'withdrawal': withdrawal,
+                    })
+                except (ValueError, KeyError):
+                    reconcile_rows.append({
+                        'row_num': idx,
+                        'date': row.get('Date', ''),
+                        'description': row.get('Description', ''),
+                        'deposit': 0.0,
+                        'withdrawal': 0.0,
+                    })
+
+            # Run reconciliation
+            report, dedup_summary = reconcile(reconcile_rows, gnucash_data)
+
+            matched_count = dedup_summary.get('matched', 0)
+            duplicate_count = dedup_summary.get('duplicates', 0)
+            new_count = dedup_summary.get('new', 0)
+            total_duplicates = matched_count + duplicate_count
+
+            # Filter to keep only "New" rows
+            new_rows = [
+                canonical_rows[i] for i, r in enumerate(report)
+                if r.get('status') == 'New'
+            ]
+
+            # Edge case: all rows are duplicates
+            if total_duplicates > 0 and new_count == 0:
+                return (
+                    f"## {bank} → GnuCash pipeline — all transactions already in GnuCash\n\n"
+                    f"✓ Duplicate check — All {len(canonical_rows)} transaction(s) are already "
+                    f"in your GnuCash book. Nothing to import.\n\n"
+                    f"---\n\n"
+                    f"**Next:** If you expected new transactions, check that:\n"
+                    f"1. Your GnuCash file is current\n"
+                    f"2. Your bank statement covers the right period\n"
+                    f"3. Transactions match by date + amount (GnuCash matching logic)"
+                )
+
+            # Rewrite canonical CSV with only new rows
+            if total_duplicates > 0:
+                log_lines.append(
+                    f"✓ Duplicate check — {total_duplicates} already in GnuCash "
+                    f"(removed), {new_count} new (will be mapped)"
+                )
+                with open(canonical_path, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=CANONICAL_COLS)
+                    writer.writeheader()
+                    writer.writerows(new_rows)
+                canonical_rows = new_rows
+            else:
+                log_lines.append(
+                    f"✓ Duplicate check — {new_count} new transactions (none in GnuCash)"
+                )
+
+        except Exception as e:
+            log_lines.append(
+                f"⚠️ Duplicate check skipped — {e}. Proceeding with all rows."
+            )
+            log.warning(f"Duplicate detection failed: {e}")
 
         # ── Step 3: Account mapping ───────────────────────────────────────────
         if bank == "ICICI":

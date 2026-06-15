@@ -1,0 +1,56 @@
+# skill.yaml — GnuCash Import Pipeline manifest
+
+name: "gnucash_pipeline"
+display_name: "Import Statement"
+description: >
+  End-to-end import pipeline: upload a raw bank statement and your GnuCash book,
+  get back a GnuCash-ready mapped CSV in one click. No intermediate steps.
+  Supports ICICI (XLS), Bank of Baroda (PDF), HSBC (PDF), HDFC (CSV/XLS),
+  and any other bank via CSV upload with LLM-assisted column normalisation.
+  Chain: bank extraction → canonical format → account mapping.
+category: "gnucash"
+version: "1.1.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "bank"
+    type: "select"
+    label: "Bank"
+    required: true
+    options:
+      - "ICICI"
+      - "Bank of Baroda"
+      - "HSBC"
+      - "HDFC"
+      - "Other Bank (CSV)"
+
+  - name: "statement_files"
+    type: "files"
+    label: "Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other"
+    file_types: [".xls", ".xlsx", ".pdf", ".csv"]
+    required: true
+
+  - name: "gnucash_file"
+    type: "file"
+    label: "GnuCash book (.gnucash) — must be closed in GnuCash"
+    file_types: [".gnucash"]
+    required: true
+
+run_args:
+  bank: "{inputs.bank}"
+  statement_files: "{inputs.statement_files}"
+  gnucash_file: "{inputs.gnucash_file}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "GnuCash_import_ready"
+  download_label: "Download Import-Ready CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []
