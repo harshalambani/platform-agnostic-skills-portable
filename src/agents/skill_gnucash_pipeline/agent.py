@@ -605,23 +605,28 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
-            _emit_progress(1, f"Bank of Baroda: extracting PDFs to CSV")
+            _emit_progress(1, "Bank of Baroda: extracting PDFs to CSV (direct)")
             log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
             try:
-                from skill_bob.agent import run as bob_run  # noqa: E402
-                bob_run(
-                    pdf_path=bob_input,
-                    output_path=bob_raw,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                # Bypass the LangGraph agent — call the extraction tool directly.
+                # The BoB extraction is pure Python (pdfplumber), no LLM needed.
+                from skill_bob.tools import extract_bob  # noqa: E402
+                tool_result = extract_bob.invoke({"pdf_path": bob_input, "output_path": bob_raw})
+                log.info("BoB extract_bob tool result: %s", tool_result)
             except Exception as e:
                 log.error("BoB extraction failed: %s", e, exc_info=True)
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ Bank of Baroda skill raised an exception:\n```\n{e}\n```"
+                    f"❌ Bank of Baroda extraction raised an exception:\n```\n{e}\n```"
                 )
-            _emit_progress(2, f"Bank of Baroda: converting to canonical format")
+            # Check intermediate output before proceeding to adapter
+            if not Path(bob_raw).is_file():
+                return (
+                    f"## {bank} → extraction produced no output\n\n"
+                    f"❌ The BoB extraction tool did not create an intermediate CSV.\n\n"
+                    f"**Tool result:** {tool_result}"
+                )
+            _emit_progress(2, "Bank of Baroda: converting to canonical format")
             log_lines.append("**Step 2** — Bank of Baroda: converting to canonical format")
             try:
                 from adapter_bob.agent import run as adapt_bob  # noqa: E402
@@ -662,7 +667,14 @@ def run(
                     f"## {bank} → extraction error\n\n"
                     f"❌ HSBC skill raised an exception:\n```\n{e}\n```"
                 )
-            _emit_progress(2, f"HSBC: converting to canonical format")
+            # Check intermediate output before proceeding to adapter
+            if not Path(hsbc_xlsx).is_file():
+                return (
+                    f"## {bank} → extraction produced no output\n\n"
+                    f"❌ The HSBC extraction skill did not create the intermediate Excel file.\n\n"
+                    f"Check that your model supports tool/function calling."
+                )
+            _emit_progress(2, "HSBC: converting to canonical format")
             log_lines.append("**Step 2** — HSBC: converting to canonical format")
             try:
                 from adapter_hsbc.agent import run as adapt_hsbc  # noqa: E402
