@@ -37,6 +37,17 @@ from agents.skill_gnucash_reconciler.agent import (
 
 log = logging.getLogger(__name__)
 
+
+def _emit_progress(step: int, message: str) -> None:
+    """Push a progress event to the UI streaming queue (if active)."""
+    try:
+        from agents.base_agent import get_progress_queue
+        q = get_progress_queue()
+        if q is not None:
+            q.put({"step": step, "type": "pipeline", "snippet": message})
+    except Exception:
+        pass  # queue not available — running outside UI
+
 # GnuCash XML namespaces
 _NS = {
     'gnc': '{http://www.gnucash.org/XML/gnc}',
@@ -571,14 +582,22 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            _emit_progress(1, f"ICICI: extracting statement to canonical CSV")
             log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
-            from skill_icici.agent import run as icici_run  # noqa: E402
-            icici_run(
-                statement_files=icici_input,
-                output_path=canonical_path,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            try:
+                from skill_icici.agent import run as icici_run  # noqa: E402
+                icici_run(
+                    statement_files=icici_input,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            except Exception as e:
+                log.error("ICICI extraction failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → extraction error\n\n"
+                    f"❌ ICICI skill raised an exception:\n```\n{e}\n```"
+                )
 
         elif bank == "Bank of Baroda":
             bob_raw = str(tmp_path / "bob_raw.csv")
@@ -586,22 +605,38 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            _emit_progress(1, f"Bank of Baroda: extracting PDFs to CSV")
             log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
-            from skill_bob.agent import run as bob_run  # noqa: E402
-            bob_run(
-                pdf_path=bob_input,
-                output_path=bob_raw,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            try:
+                from skill_bob.agent import run as bob_run  # noqa: E402
+                bob_run(
+                    pdf_path=bob_input,
+                    output_path=bob_raw,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            except Exception as e:
+                log.error("BoB extraction failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → extraction error\n\n"
+                    f"❌ Bank of Baroda skill raised an exception:\n```\n{e}\n```"
+                )
+            _emit_progress(2, f"Bank of Baroda: converting to canonical format")
             log_lines.append("**Step 2** — Bank of Baroda: converting to canonical format")
-            from adapter_bob.agent import run as adapt_bob  # noqa: E402
-            adapt_bob(
-                input_file=bob_raw,
-                output_path=canonical_path,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            try:
+                from adapter_bob.agent import run as adapt_bob  # noqa: E402
+                adapt_bob(
+                    input_file=bob_raw,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            except Exception as e:
+                log.error("BoB adapter failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → canonical conversion error\n\n"
+                    f"❌ BoB adapter raised an exception:\n```\n{e}\n```"
+                )
 
         elif bank == "HSBC":
             hsbc_xlsx = str(tmp_path / "hsbc_raw.xlsx")
@@ -610,23 +645,39 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            _emit_progress(1, f"HSBC: extracting PDFs to Excel")
             log_lines.append("**Step 1** — HSBC: extracting PDFs to Excel")
-            from skill_hsbc.agent import run as hsbc_run  # noqa: E402
-            hsbc_run(
-                pdf_dir=hsbc_input,
-                work_dir=work_dir,
-                output_path=hsbc_xlsx,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            try:
+                from skill_hsbc.agent import run as hsbc_run  # noqa: E402
+                hsbc_run(
+                    pdf_dir=hsbc_input,
+                    work_dir=work_dir,
+                    output_path=hsbc_xlsx,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            except Exception as e:
+                log.error("HSBC extraction failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → extraction error\n\n"
+                    f"❌ HSBC skill raised an exception:\n```\n{e}\n```"
+                )
+            _emit_progress(2, f"HSBC: converting to canonical format")
             log_lines.append("**Step 2** — HSBC: converting to canonical format")
-            from adapter_hsbc.agent import run as adapt_hsbc  # noqa: E402
-            adapt_hsbc(
-                input_file=hsbc_xlsx,
-                output_path=canonical_path,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            try:
+                from adapter_hsbc.agent import run as adapt_hsbc  # noqa: E402
+                adapt_hsbc(
+                    input_file=hsbc_xlsx,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                )
+            except Exception as e:
+                log.error("HSBC adapter failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → canonical conversion error\n\n"
+                    f"❌ HSBC adapter raised an exception:\n```\n{e}\n```"
+                )
 
         elif bank == "HDFC":
             input_file = (
@@ -635,19 +686,55 @@ def run(
             )
             suffix = Path(input_file).suffix.lower()
             if suffix == ".pdf":
+                _emit_progress(1, f"HDFC: OCR scanning PDF statement")
                 log_lines.append("**Step 1** — HDFC: OCR scanning PDF statement")
+                _emit_progress(2, f"HDFC: parsing transactions to canonical format")
                 log_lines.append("**Step 2** — HDFC: parsing transactions to canonical format")
-                from skill_hdfc.agent import run as hdfc_run  # noqa: E402
-                hdfc_run(
-                    pdf_path=input_file,
-                    output_path=canonical_path,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                try:
+                    from skill_hdfc.agent import run as hdfc_run  # noqa: E402
+                    hdfc_run(
+                        pdf_path=input_file,
+                        output_path=canonical_path,
+                        config_path=config_path,
+                        model_override=model_override,
+                    )
+                except Exception as e:
+                    log.error("HDFC extraction failed: %s", e, exc_info=True)
+                    return (
+                        f"## {bank} → extraction error\n\n"
+                        f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                    )
             else:
                 # CSV/XLS fallback
+                _emit_progress(1, f"HDFC: reading CSV/XLS statement")
                 log_lines.append("**Step 1** — HDFC: reading CSV/XLS statement")
+                _emit_progress(2, f"HDFC: LLM normalising columns → canonical schema")
                 log_lines.append("**Step 2** — HDFC: LLM normalising columns → canonical schema")
+                try:
+                    _normalise_to_canonical(
+                        input_file=input_file,
+                        output_path=canonical_path,
+                        bank_name=bank,
+                        config_path=config_path,
+                        model_override=model_override,
+                    )
+                except Exception as e:
+                    log.error("HDFC normalisation failed: %s", e, exc_info=True)
+                    return (
+                        f"## {bank} → normalisation error\n\n"
+                        f"❌ HDFC column normalisation raised an exception:\n```\n{e}\n```"
+                    )
+
+        elif bank == "Other Bank (CSV)":
+            input_file = (
+                statement_files[0] if isinstance(statement_files, list)
+                else statement_files.split(",")[0].strip()
+            )
+            _emit_progress(1, f"Other Bank: reading CSV/XLS statement")
+            log_lines.append("**Step 1** — Other Bank: reading CSV/XLS statement")
+            _emit_progress(2, f"Other Bank: LLM normalising columns → canonical schema")
+            log_lines.append("**Step 2** — Other Bank: LLM normalising columns → canonical schema")
+            try:
                 _normalise_to_canonical(
                     input_file=input_file,
                     output_path=canonical_path,
@@ -655,21 +742,12 @@ def run(
                     config_path=config_path,
                     model_override=model_override,
                 )
-
-        elif bank == "Other Bank (CSV)":
-            input_file = (
-                statement_files[0] if isinstance(statement_files, list)
-                else statement_files.split(",")[0].strip()
-            )
-            log_lines.append("**Step 1** — Other Bank: reading CSV/XLS statement")
-            log_lines.append("**Step 2** — Other Bank: LLM normalising columns → canonical schema")
-            _normalise_to_canonical(
-                input_file=input_file,
-                output_path=canonical_path,
-                bank_name=bank,
-                config_path=config_path,
-                model_override=model_override,
-            )
+            except Exception as e:
+                log.error("Other Bank normalisation failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → normalisation error\n\n"
+                    f"❌ Column normalisation raised an exception:\n```\n{e}\n```"
+                )
 
         # ── Verify extraction produced output ────────────────────────────────
         if not Path(canonical_path).is_file():
@@ -682,6 +760,7 @@ def run(
             )
 
         # ── Balance verification on canonical CSV ─────────────────────────────
+        _emit_progress(3, f"{bank}: verifying balances")
         # Read the canonical CSV back for balance checks
         with open(canonical_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -724,6 +803,7 @@ def run(
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
         # Compare canonical CSV against GnuCash book to flag duplicates
+        _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
         log_lines.append("**Duplicate check** — comparing against GnuCash book")
 
         try:
@@ -810,6 +890,7 @@ def run(
         else:
             step_n = 3
 
+        _emit_progress(5, f"{bank}: mapping accounts from {Path(gnucash_file).name}")
         log_lines.append(
             f"**Step {step_n}** — GnuCash: mapping accounts from "
             f"`{Path(gnucash_file).name}`"
@@ -823,6 +904,7 @@ def run(
             model_override=model_override,
         )
 
+        _emit_progress(6, f"{bank}: final balance verification")
         # ── Final closing balance verification (Intervention 3) ──────────
         # Read the final output CSV and verify closing balance matches
         # the canonical CSV's closing balance (source of truth)

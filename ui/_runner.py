@@ -96,6 +96,9 @@ def _format_event(event: dict, elapsed: int) -> str:
         return f"**Step {step}** — LLM responded."
     elif etype == "llm_start":
         return f"**Step {step}** — LLM is thinking…"
+    elif etype == "pipeline":
+        snippet = event.get("snippet", "")
+        return f"**Step {step}** — {snippet}" if snippet else f"**Step {step}** — pipeline ({elapsed}s)"
     else:
         return f"**Step {step}** — {etype} ({elapsed}s)"
 
