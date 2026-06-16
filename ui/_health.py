@@ -31,8 +31,11 @@ class ModelInfo:
 
     @property
     def display_label(self) -> str:
-        """Dropdown label: 'model_name (tools)' or 'model_name (text-only)'."""
+        """Dropdown label: 'model_name (12B, tools)' or 'model_name (3B, text-only)'."""
         tag = "tools" if self.supports_tools else "text-only"
+        size = self.parameter_size.strip()
+        if size:
+            return f"{self.name} ({size}, {tag})"
         return f"{self.name} ({tag})"
 
 

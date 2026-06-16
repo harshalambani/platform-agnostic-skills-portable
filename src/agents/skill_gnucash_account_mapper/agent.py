@@ -21,6 +21,24 @@ import yaml
 
 
 # ---------------------------------------------------------------------------
+# Account path helpers
+# ---------------------------------------------------------------------------
+
+_ROOT_PREFIX = "Root Account:"
+
+
+def _strip_root(account_path: str) -> str:
+    """Remove the 'Root Account:' prefix that GnuCash XML exports include.
+
+    GnuCash's CSV importer expects paths starting from the first real
+    level (e.g. 'Income:Bank Interest'), not 'Root Account:Income:Bank Interest'.
+    """
+    if account_path.startswith(_ROOT_PREFIX):
+        return account_path[len(_ROOT_PREFIX):]
+    return account_path
+
+
+# ---------------------------------------------------------------------------
 # Progress helper — push events to Gradio streaming UI
 # ---------------------------------------------------------------------------
 
@@ -400,7 +418,7 @@ def map_accounts(
         account, confidence, pattern, reason = match_rule(description, all_rules)
 
         mapped_row = row.copy()
-        mapped_row['Account'] = account or ''
+        mapped_row['Account'] = _strip_root(account) if account else ''
         mapped_row['Confidence'] = confidence
         mapped_row['MatchReason'] = reason
 
@@ -411,7 +429,7 @@ def map_accounts(
             manual_review.append({
                 'row': row_num,
                 'description': description[:60],
-                'assigned_account': account,
+                'assigned_account': _strip_root(account) if account else '',
                 'confidence': confidence,
                 'reason': reason,
             })
@@ -609,7 +627,7 @@ def run(
             deposit = row.get('Deposit', '')
             match = smart_pattern_match(desc, account_list, withdrawal, deposit)
             if match is not None:
-                row['Account'] = match['account']
+                row['Account'] = _strip_root(match['account']) if match['account'] else ''
                 row['Confidence'] = 'smart'
                 row['MatchReason'] = f"Smart: {match['reason']}"
                 if match['account']:
@@ -653,7 +671,7 @@ def run(
                 for i, row in enumerate(mapped_rows):
                     row_num = i + 1
                     if row_num in llm_results and llm_results[row_num].get('account'):
-                        row['Account'] = llm_results[row_num]['account']
+                        row['Account'] = _strip_root(llm_results[row_num]['account'])
                         row['Confidence'] = 'llm'
                         row['MatchReason'] = f"LLM: {llm_results[row_num]['reason']}"
                         llm_mapped_count += 1
