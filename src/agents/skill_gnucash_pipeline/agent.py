@@ -751,12 +751,18 @@ def run(
                 log_lines.append("**Step 2** — HDFC: parsing transactions to canonical format")
                 try:
                     from skill_hdfc.agent import run as hdfc_run  # noqa: E402
-                    hdfc_run(
+                    hdfc_result = hdfc_run(
                         pdf_path=input_file,
                         output_path=canonical_path,
                         config_path=config_path,
                         model_override=model_override,
                     )
+                    # hdfc_run returns an error string (starting with ❌) on failure
+                    if hdfc_result and "❌" in str(hdfc_result):
+                        return (
+                            f"## {bank} → extraction error\n\n"
+                            f"{hdfc_result}"
+                        )
                 except Exception as e:
                     log.error("HDFC extraction failed: %s", e, exc_info=True)
                     return (
