@@ -156,12 +156,17 @@ def smart_pattern_match(
                 return {"account": acct, "reason": "Bank interest pattern"}
         return None
 
-    # 3. Service charges: "MIN BAL CHRGS", "SERVICE CHARGE", "MAINTENANCE CHRG"
-    if re.search(r'MIN\s*BAL\s*CHRGS|SERVICE\s*CHARGE?|MAINT.*CHRG|ANNUAL\s*FEE|SMS\s*CHRG', desc_upper):
+    # 3. Service charges: "MIN BAL CHRGS", "SERVICE CHARGE", "MAINTENANCE CHRG", "SMS Charges"
+    if re.search(r'MIN\s*BAL\s*CHRGS|SERVICE\s*CHARGE?|MAINT.*CHRG|ANNUAL\s*FEE|SMS\s*CH(RG|ARGE)', desc_upper):
         for acct in account_tree:
             if "Bank Service Charge" in acct or "Service Charge" in acct:
                 return {"account": acct, "reason": "Bank service charge pattern"}
         return None
+
+    # 3b. Cash withdrawal/deposit: "BY CASH", "CASH DEPOSIT", "CASH WDL"
+    if re.search(r'^BY\s+CASH$|^CASH\s+(DEPOSIT|WDL|WITHDRAWAL)|^CASH\s+W/D', desc_upper):
+        # Cash transactions → Expenses:Other or manual review
+        return {"account": "", "reason": "Cash transaction — manual review"}
 
     # 4. NACH/ACH Dividends: "NACHMU-MUMBAI/ACHCR/<company>"
     nach_match = re.match(r'NACHMU[- ].*?/ACHCR/(.+)', description, re.IGNORECASE)

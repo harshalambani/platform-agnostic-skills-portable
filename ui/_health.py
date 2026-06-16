@@ -85,6 +85,55 @@ def _post_json(url: str, payload: dict, timeout: float = 3.0) -> dict[str, Any]:
 # Tool-calling detection
 # ---------------------------------------------------------------------------
 
+def _detect_tool_support(body: dict[str, Any]) -> bool:
+    """Detect tool-calling support from an Ollama /api/show response.
+
+    Checks multiple signals in priority order so that every model family
+    is covered regardless of Ollama version:
+
+        1. ``capabilities`` list  (Ollama ≥0.6)  — definitive, all models.
+        2. ``model_info`` dict    (Ollama ≥0.5)  — some builds expose
+           ``general.tools`` or a ``tokenizer.ggml.tokens`` list that
+           contains ``<tool_call>`` / ``<|tool▁call|>`` markers.
+        3. Template inspection    (all versions)  — scan the Go template
+           (``{{ .Tools }}``) or Jinja chat template
+           (``{% if tools %}``, ``{%- if tools -%}``, etc.) for tool
+           directives.  Covers llama3.x, qwen2/3, gemma3/4, mistral,
+           phi3/4, command-r, deepseek-v2/v3, and others.
+    """
+    # --- Signal 1: capabilities list (most reliable) ---
+    capabilities = body.get("capabilities") or []
+    if capabilities:
+        return "tools" in capabilities
+
+    # --- Signal 2: model_info metadata ---
+    model_info = body.get("model_info") or {}
+    # Some Ollama builds set "general.tools" = true
+    if model_info.get("general.tools"):
+        return True
+    # Check for tool-call special tokens in the tokenizer vocabulary
+    tokens = model_info.get("tokenizer.ggml.tokens") or []
+    _TOOL_TOKENS = {"<tool_call>", "<|tool▁call|>", "<|tool_call|>",
+                    "<function_call>", "<|plugin|>", "<|tools|>",
+                    "<tools>", "</tool_call>", "<|endoftool|>"}
+    if isinstance(tokens, list) and any(t in _TOOL_TOKENS for t in tokens):
+        return True
+
+    # --- Signal 3: template string inspection ---
+    template = body.get("template", "")
+    if template:
+        # Go template syntax (llama2, older models):
+        #   {{ .Tools }}  {{- .Tools }}  {{ if .Tools }}
+        if ".Tools" in template:
+            return True
+        # Jinja template syntax (gemma3/4, qwen2/3, mistral, phi, deepseek, etc.):
+        #   {% if tools %}  {%- if tools -%}  {% if tools is defined %}
+        if "if tools" in template:
+            return True
+
+    return False
+
+
 def _check_ollama_tool_support(base_url: str, model_name: str) -> ModelInfo:
     """Query /api/show for *model_name* and return a ModelInfo."""
     if model_name in _capability_cache:
@@ -100,8 +149,7 @@ def _check_ollama_tool_support(base_url: str, model_name: str) -> ModelInfo:
             {"name": model_name},
             timeout=3.0,
         )
-        template = body.get("template", "")
-        supports_tools = ".Tools" in template
+        supports_tools = _detect_tool_support(body)
 
         details = body.get("details") or {}
         param_size = details.get("parameter_size", "")
