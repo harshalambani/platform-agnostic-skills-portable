@@ -38,6 +38,26 @@ def _strip_root(account_path: str) -> str:
     return account_path
 
 
+_SUSPENSE_DEFAULT = "Liabilities:Suspense"
+
+
+def _find_suspense_account(account_tree: List[str]) -> str:
+    """Find a Suspense account in the tree, or return a sensible default.
+
+    Searches for existing accounts named Suspense, Unclassified, or
+    Imbalance in the user's GnuCash book (after stripping Root Account:).
+    Falls back to 'Assets:Suspense' which GnuCash will auto-create on import.
+    """
+    # Try common names in priority order
+    for keyword in ("Suspense", "Unclassified", "Imbalance"):
+        for acct in account_tree:
+            clean = _strip_root(acct)
+            leaf = clean.rsplit(":", 1)[-1] if ":" in clean else clean
+            if leaf.lower() == keyword.lower():
+                return clean
+    return _SUSPENSE_DEFAULT
+
+
 # ---------------------------------------------------------------------------
 # Progress helper — push events to Gradio streaming UI
 # ---------------------------------------------------------------------------
@@ -685,16 +705,36 @@ def run(
 
         # Rewrite CSV if anything changed
         if smart_mapped_count > 0 or llm_mapped_count > 0:
-            headers_out = list(mapped_rows[0].keys())
-            with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
-                writer.writeheader()
-                writer.writerows(mapped_rows)
             _emit_mapper_progress(
-                f"CSV updated: +{smart_mapped_count} smart, +{llm_mapped_count} LLM"
+                f"pattern/LLM pass: +{smart_mapped_count} smart, +{llm_mapped_count} LLM"
             )
     else:
         _emit_mapper_progress("all rows matched by rules — no fallback needed")
+
+    # --- Step 5: Suspense pass — assign remaining unmapped rows ---
+    # Find a Suspense account in the tree, or use a sensible default.
+    suspense_acct = _find_suspense_account(account_list)
+    suspense_count = 0
+    for row in mapped_rows:
+        acct = row.get('Account', '')
+        conf = row.get('Confidence', 'none')
+        if not acct or conf == 'none':
+            row['Account'] = suspense_acct
+            row['Confidence'] = 'suspense'
+            row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
+            suspense_count += 1
+    if suspense_count > 0:
+        result['confidence_counts']['none'] -= suspense_count
+        result['confidence_counts']['suspense'] = suspense_count
+        _emit_mapper_progress(f"suspense pass: {suspense_count} rows -> {suspense_acct}")
+
+    # --- Always rewrite CSV (Root Account prefix was stripped) ---
+    headers_out = list(mapped_rows[0].keys())
+    with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
+        writer.writeheader()
+        writer.writerows(mapped_rows)
+    _emit_mapper_progress(f"CSV written: {len(mapped_rows)} rows")
 
     counts = result['confidence_counts']
     total = result['total_rows']
@@ -717,7 +757,7 @@ def run(
         f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
         f"- Smart: {counts.get('smart', 0)} ({pct(counts.get('smart', 0))})\n"
         f"- LLM: {counts.get('llm', 0)} ({pct(counts.get('llm', 0))})\n"
-        f"- No match: {counts.get('none', 0)} ({pct(counts.get('none', 0))})\n\n"
+        f"- Suspense: {counts.get('suspense', 0)} ({pct(counts.get('suspense', 0))})\n\n"
         f"**Files produced:**\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
         f"- `{report_path.name}` — confidence report (review Low/No-match rows)\n"
