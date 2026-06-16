@@ -185,11 +185,19 @@ def render() -> None:
                 allow_custom_value=True, interactive=True,
             )
             refresh_models_btn = gr.Button("Refresh model list", variant="secondary")
-            run_btn = gr.Button("Run", variant="primary")
+            with gr.Row():
+                run_btn = gr.Button("Run", variant="primary")
+                stop_btn = gr.Button("Stop", variant="stop")
 
         with gr.Column(scale=2):
             result_md = gr.Markdown("_Awaiting input._", min_height=200)
             download = gr.DownloadButton(label="Download Excel", visible=False, variant="primary")
 
     refresh_models_btn.click(fn=lambda: gr.update(choices=_refresh_models()), outputs=model_dd)
+
+    def _handle_stop():
+        _runner.request_cancel()
+        return "**Cancelled** — stopping after current step."
+
+    stop_btn.click(fn=_handle_stop, outputs=result_md)
     run_btn.click(fn=_run_hsbc, inputs=[pdf_upload, model_dd], outputs=[result_md, download])

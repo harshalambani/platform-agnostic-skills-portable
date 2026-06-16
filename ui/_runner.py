@@ -9,6 +9,13 @@ Two runners:
 
 Both are generators consumed with ``yield from`` — the pattern forwards
 yields to Gradio AND surfaces the worker's return value.
+
+Cancellation:
+
+    cancel_event     — threading.Event, set by the Stop button.
+    is_cancelled()   — check from any thread (workers, mappers, LLM calls).
+    request_cancel() — called by the Gradio Stop button handler.
+    reset_cancel()   — cleared at the start of each run.
 """
 from __future__ import annotations
 
@@ -16,6 +23,33 @@ import queue
 import threading
 import time
 from typing import Any, Callable
+
+
+# ---------------------------------------------------------------------------
+# Cancellation support
+# ---------------------------------------------------------------------------
+
+_cancel_event = threading.Event()
+
+
+def is_cancelled() -> bool:
+    """Check if the current run has been cancelled (thread-safe)."""
+    return _cancel_event.is_set()
+
+
+def request_cancel() -> None:
+    """Signal cancellation (called by the Stop button)."""
+    _cancel_event.set()
+
+
+def reset_cancel() -> None:
+    """Clear the cancellation flag (called at start of each run)."""
+    _cancel_event.clear()
+
+
+class CancelledError(Exception):
+    """Raised when a run is cancelled by the user."""
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +164,7 @@ def run_with_streaming(
     """
     from agents.base_agent import set_progress_queue
 
+    reset_cancel()
     progress_q: queue.Queue = queue.Queue()
     result: dict[str, Any] = {}
 
@@ -138,6 +173,8 @@ def run_with_streaming(
         set_progress_queue(progress_q)
         try:
             result["value"] = work()
+        except CancelledError:
+            result["cancelled"] = True
         except BaseException as e:  # noqa: BLE001
             result["error"] = e
         finally:
@@ -202,6 +239,8 @@ def run_with_streaming(
 
         time.sleep(poll_interval)
 
+    if result.get("cancelled"):
+        return "__CANCELLED__"
     if "error" in result:
         raise result["error"]
     return result.get("value")

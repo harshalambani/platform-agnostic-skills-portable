@@ -339,6 +339,11 @@ def _make_run_handler(skill: SkillInfo):
             ), gr.update(visible=False)
             return
 
+        # -- Handle cancellation --
+        if agent_reply == "__CANCELLED__":
+            yield add("**Cancelled** — run was stopped by user."), gr.update(visible=False)
+            return
+
         # -- Verify output --
         yield add("**Verifying output…**"), gr.update(visible=False)
 
@@ -472,7 +477,9 @@ def render(skill: SkillInfo) -> None:
                 interactive=True,
             )
             refresh_models_btn = gr.Button("Refresh model list", variant="secondary")
-            run_btn = gr.Button("Run", variant="primary")
+            with gr.Row():
+                run_btn = gr.Button("Run", variant="primary")
+                stop_btn = gr.Button("Stop", variant="stop", visible=True)
 
         with gr.Column(scale=2):
             result_md = gr.Markdown("_Awaiting input._", min_height=200)
@@ -486,6 +493,13 @@ def render(skill: SkillInfo) -> None:
         fn=lambda: gr.update(choices=_refresh_models()),
         outputs=model_dd,
     )
+
+    def _handle_stop():
+        from .. import _runner
+        _runner.request_cancel()
+        return "**Cancelled** — stopping after current step."
+
+    stop_btn.click(fn=_handle_stop, outputs=result_md)
 
     handler = _make_run_handler(skill)
     run_btn.click(
