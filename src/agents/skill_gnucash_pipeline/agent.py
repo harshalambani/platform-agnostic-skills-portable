@@ -59,6 +59,22 @@ _NS = {
     'cmdty': '{http://www.gnucash.org/XML/cmdty}',
 }
 
+def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
+    """If *path_or_dir* is a directory (staged uploads), return the first
+    matching file inside it; otherwise return the path unchanged."""
+    p = Path(path_or_dir)
+    if p.is_dir():
+        for ext in extensions:
+            matches = sorted(p.glob(f"*{ext}"))
+            if matches:
+                return str(matches[0])
+        # Fall back to any file at all
+        children = sorted(p.iterdir())
+        if children:
+            return str(children[0])
+    return path_or_dir
+
+
 # Banks with dedicated extraction skills
 DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]
 # Banks that go through the generic CSV normalisation path
@@ -582,6 +598,7 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            icici_input = _resolve_single_file(icici_input, (".xls", ".xlsx"))
             _emit_progress(1, f"ICICI: extracting statement to canonical CSV")
             log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
             try:
@@ -725,6 +742,7 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            input_file = _resolve_single_file(input_file, (".csv", ".xls", ".xlsx", ".pdf"))
             suffix = Path(input_file).suffix.lower()
             if suffix == ".pdf":
                 _emit_progress(1, f"HDFC: OCR scanning PDF statement")
@@ -771,6 +789,7 @@ def run(
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
+            input_file = _resolve_single_file(input_file, (".csv", ".xls", ".xlsx"))
             _emit_progress(1, f"Other Bank: reading CSV/XLS statement")
             log_lines.append("**Step 1** — Other Bank: reading CSV/XLS statement")
             _emit_progress(2, f"Other Bank: LLM normalising columns → canonical schema")
