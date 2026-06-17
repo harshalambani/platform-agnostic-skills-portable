@@ -234,6 +234,60 @@ def smart_pattern_match(
     if re.search(r'SER[A-Z]{3}-.*?/', description):
         return {"account": "", "reason": "Inter-bank self transfer — manual review"}
 
+    # 8. Cheque paid — only match if we can identify the payee account;
+    #    otherwise fall through to LLM.
+    if re.search(r'CHQ\s*PAID|CHEQUE\s*PAID|CHQ\s*CLG|CHEQUE\s*CLEARING', desc_upper):
+        if re.search(r'PPF|PROVIDENT\s*FUND', desc_upper):
+            for acct in account_tree:
+                if "PPF" in acct or "Provident Fund" in acct:
+                    return {"account": acct, "reason": "Cheque to PPF account"}
+        if re.search(r'TAXBOND|TAX\s*BOND|NSC|KVP|GOV.?\s*BOND', desc_upper):
+            for acct in account_tree:
+                if any(k in acct for k in ("Tax Bond", "Investment", "Bond", "NSC")):
+                    return {"account": acct, "reason": "Cheque for tax bond / govt investment"}
+        if re.search(r'ICICI\s*HOME|HDFC\s*HOME|HOME\s*FIN|HOUSING\s*LOAN|HOME\s*LOAN', desc_upper):
+            for acct in account_tree:
+                if any(k in acct for k in ("Home Loan", "Housing Loan", "Mortgage")):
+                    return {"account": acct, "reason": "Cheque for home loan EMI"}
+        # No recognisable payee — let LLM try
+        # (falls through to return None)
+
+    # 9. Cheque return / bounce — genuinely unclassifiable, skip LLM
+    if re.search(r'CHQ\s*RET|CHEQUE\s*RETURN|CHQ\s*BOUNCE|INWARD\s*RETURN', desc_upper):
+        return {"account": "", "reason": "Cheque return/bounce — manual review"}
+
+    # 10-11. IMPS / UPI / FT — only match if we can identify the account
+    if re.search(r'IMPS|UPI', desc_upper):
+        if re.search(r'ICICI\s*HOME|HDFC\s*HOME|HOME\s*FIN|HOUSING\s*LOAN', desc_upper):
+            for acct in account_tree:
+                if any(k in acct for k in ("Home Loan", "Housing Loan", "Mortgage")):
+                    return {"account": acct, "reason": "IMPS for home loan"}
+        # No recognisable payee — let LLM try
+
+    # 12. Loan EMI / auto-debit — match only if account found
+    if re.search(r'EMI|LOAN\s*REPAY|HOME\s*LOAN|AUTO\s*DEBIT.*LOAN', desc_upper):
+        for acct in account_tree:
+            if any(k in acct for k in ("Home Loan", "Loan", "EMI", "Mortgage")):
+                return {"account": acct, "reason": "Loan EMI / auto-debit"}
+
+    # 13. Insurance premium — match only if account found
+    if re.search(r'LIC\s*OF\s*INDIA|INSURANCE\s*PREM|LIFE\s*INSURANCE|GEN.*INSURANCE|HEALTH.*INSUR', desc_upper):
+        for acct in account_tree:
+            if "Insurance" in acct:
+                return {"account": acct, "reason": "Insurance premium"}
+
+    # 14. Tax payment — match only if account found
+    if re.search(r'ADVANCE\s*TAX|SELF\s*ASSESS.*TAX|INCOME\s*TAX|TDS\s*PAYMENT|CHALLAN', desc_upper):
+        for acct in account_tree:
+            if any(k in acct for k in ("Income Tax", "Tax", "Advance Tax")):
+                return {"account": acct, "reason": "Tax payment"}
+
+    # 15. Salary / pension — match only if account found
+    if re.search(r'SALARY|PENSION|PAY\s*CREDIT', desc_upper):
+        for acct in account_tree:
+            if any(k in acct for k in ("Salary", "Pension", "Employment")):
+                return {"account": acct, "reason": "Salary/pension credit"}
+
     return None
 
 
@@ -241,7 +295,8 @@ def smart_pattern_match(
 # LLM fallback — direct Ollama /api/chat (bypasses LangChain)
 # ---------------------------------------------------------------------------
 
-_LLM_TIMEOUT_SECONDS = 45    # per-row timeout
+_LLM_TIMEOUT_SECONDS = 60      # per-row timeout (after model is warm)
+_LLM_WARMUP_TIMEOUT  = 180     # first call loads model into VRAM — needs longer
 
 _LLM_SYSTEM_PROMPT = """\
 You are a GnuCash account classifier. Given ONE bank transaction and a list of accounts, reply with ONLY the full account path. If unsure, reply SKIP.
@@ -260,7 +315,7 @@ def _resolve_ollama_config(config_path: str, model_override: str = None) -> Tupl
     return base_url, model
 
 
-def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 45.0) -> Optional[str]:
+def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
     """Call Ollama /api/chat directly. Returns the assistant reply or None."""
     from urllib import request as _req, error as _err
 
@@ -271,7 +326,7 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
             {"role": "user", "content": user},
         ],
         "stream": False,
-        "options": {"temperature": 0.0},
+        "options": {"temperature": 0.0, "num_predict": 120},
     }).encode("utf-8")
 
     req = _req.Request(
@@ -313,6 +368,18 @@ def llm_fallback_mapping(
 
     total = len(unmatched_rows)
     _emit_mapper_progress(f"LLM fallback: {total} rows, one at a time ({_LLM_TIMEOUT_SECONDS}s each)")
+
+    # ── Warm up the model (cold start loads weights into VRAM) ───────────
+    _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
+    warmup_reply = _ollama_chat(
+        base_url, model,
+        "Reply OK.", "ping",
+        timeout=_LLM_WARMUP_TIMEOUT,
+    )
+    if warmup_reply is None:
+        _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
+        return {}
+    _emit_mapper_progress(f"LLM warm-up OK — model loaded")
 
     # Build compact account list for the prompt
     acct_list = "\n".join(account_tree)
@@ -544,6 +611,7 @@ def run(
     config_path: str = None,
     model_override: str = None,
     bank_name: str = None,
+    gnucash_bank_account: str = None,
 ) -> str:
     """
     Run the full account-mapping pipeline from the PA Skills UI.
@@ -554,14 +622,18 @@ def run(
         3. map_accounts()               — apply rules to canonical CSV
 
     Args:
-        gnucash_file:   Path to .gnucash book (gzipped XML format).
-        canonical_csv:  Path to canonical 8-col CSV (from ICICI/HSBC/BoB/HDFC skills).
-        output_path:    Path for the mapped output CSV.
-        config_path:    Unused (no LLM required).
-        model_override: Unused (no LLM required).
-        bank_name:      Pipeline bank label (e.g. "Bank of Baroda"). When set,
-                        rules are generated ONLY from that bank's historical
-                        transactions — not from other banks.
+        gnucash_file:        Path to .gnucash book (gzipped XML format).
+        canonical_csv:       Path to canonical 8-col CSV (from ICICI/HSBC/BoB/HDFC skills).
+        output_path:         Path for the mapped output CSV.
+        config_path:         Unused (no LLM required).
+        model_override:      Unused (no LLM required).
+        bank_name:           Pipeline bank label (e.g. "Bank of Baroda"). When set,
+                             rules are generated ONLY from that bank's historical
+                             transactions — not from other banks.
+        gnucash_bank_account: Full GnuCash account path for the bank (e.g.
+                             "Assets:Current Assets:Cash and Bank:HDFC Bank - ...").
+                             When set, the output CSV uses GnuCash-compatible columns:
+                             Account = bank account, Transfer Account = category.
 
     Returns:
         Human-readable result string for the UI.
@@ -728,8 +800,49 @@ def run(
         result['confidence_counts']['suspense'] = suspense_count
         _emit_mapper_progress(f"suspense pass: {suspense_count} rows -> {suspense_acct}")
 
+    # --- Restructure columns for GnuCash import ---
+    # GnuCash CSV import column mapping (from the user's perspective):
+    #   Account              = the category/split account (e.g. Income:Bank Interest)
+    #   Transfer Account     = the bank account (e.g. Assets:…:HDFC Bank - …)
+    #   Transfer Amount Negated = deposit  (money in  → negative from category's view)
+    #   Transfer Amount      = withdrawal (money out → positive from category's view)
+    # "Account" already holds the category from mapping — just add the rest.
+    if gnucash_bank_account:
+        _emit_mapper_progress(f"restructuring columns for GnuCash (bank={gnucash_bank_account[:40]}…)")
+        for row in mapped_rows:
+            # Account stays as-is (category)
+            row['Transfer Account'] = gnucash_bank_account
+            # Rename Deposit → Transfer Amount Negated, Withdrawal → Transfer Amount
+            row['Transfer Amount Negated'] = row.pop('Deposit', '')
+            row['Transfer Amount'] = row.pop('Withdrawal', '')
+
     # --- Always rewrite CSV (Root Account prefix was stripped) ---
-    headers_out = list(mapped_rows[0].keys())
+    # Build ordered header list:
+    #   - Transfer Account right after Account
+    #   - Transfer Amount Negated / Transfer Amount where Deposit / Withdrawal were
+    raw_keys = list(mapped_rows[0].keys())
+    # Remap keys that were renamed so they appear in the original position
+    _POS_MAP = {
+        'Transfer Account': None,        # handled specially (after Account)
+        'Transfer Amount Negated': None,  # handled specially (after Deposit slot)
+        'Transfer Amount': None,          # handled specially (after Withdrawal slot)
+    }
+    if 'Transfer Account' in raw_keys:
+        headers_out = []
+        for k in raw_keys:
+            if k in _POS_MAP:
+                continue  # skip — will be inserted at correct position
+            headers_out.append(k)
+            if k == 'Account':
+                headers_out.append('Transfer Account')
+        # Transfer Amount Negated/Amount go where Deposit/Withdrawal were
+        # (they're no longer in raw_keys since pop removed them; insert before Balance)
+        if 'Transfer Amount Negated' in raw_keys:
+            bal_idx = headers_out.index('Balance') if 'Balance' in headers_out else len(headers_out)
+            headers_out.insert(bal_idx, 'Transfer Amount')
+            headers_out.insert(bal_idx, 'Transfer Amount Negated')
+    else:
+        headers_out = raw_keys
     with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
         writer.writeheader()

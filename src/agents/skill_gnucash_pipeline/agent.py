@@ -249,7 +249,7 @@ def _reconcile_opening_balance(
         return {
             "ok": True,
             "message": (
-                f"Opening balance matches GnuCash ({gc['account_name']}): "
+                f"Opening balance matches GnuCash: "
                 f"GnuCash={gc_balance:.2f}, Statement={stmt_opening:.2f}"
             ),
             "rows_skipped": 0,
@@ -817,11 +817,11 @@ def run(
 
         # ── Verify extraction produced output ────────────────────────────────
         if not Path(canonical_path).is_file():
-            steps_summary = "\n".join(f"✓ {line}" for line in log_lines)
+            steps_summary = "\n".join(f"🟢 {line}" for line in log_lines)
             return (
                 f"## {bank} → extraction failed\n\n"
                 f"{steps_summary}\n\n"
-                f"❌ Bank extraction did not produce a canonical CSV.\n"
+                f"🔴 Bank extraction did not produce a canonical CSV.\n"
                 f"Check the console log for errors from the {bank} skill."
             )
 
@@ -872,7 +872,6 @@ def run(
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
         # Compare canonical CSV against GnuCash book to flag duplicates
         _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
-        log_lines.append("**Duplicate check** — comparing against GnuCash book")
 
         try:
             # Parse GnuCash file to get existing transactions
@@ -919,7 +918,7 @@ def run(
             if total_duplicates > 0 and new_count == 0:
                 return (
                     f"## {bank} → GnuCash pipeline — all transactions already in GnuCash\n\n"
-                    f"✓ Duplicate check — All {len(canonical_rows)} transaction(s) are already "
+                    f"Duplicate check — All {len(canonical_rows)} transaction(s) are already "
                     f"in your GnuCash book. Nothing to import.\n\n"
                     f"---\n\n"
                     f"**Next:** If you expected new transactions, check that:\n"
@@ -931,7 +930,7 @@ def run(
             # Rewrite canonical CSV with only new rows
             if total_duplicates > 0:
                 log_lines.append(
-                    f"✓ Duplicate check — {total_duplicates} already in GnuCash "
+                    f"Duplicate check — {total_duplicates} already in GnuCash "
                     f"(removed), {new_count} new (will be mapped)"
                 )
                 with open(canonical_path, "w", newline="", encoding="utf-8") as f:
@@ -941,7 +940,7 @@ def run(
                 canonical_rows = new_rows
             else:
                 log_lines.append(
-                    f"✓ Duplicate check — {new_count} new transactions (none in GnuCash)"
+                    f"Duplicate check — {new_count} new transactions (none in GnuCash)"
                 )
 
         except Exception as e:
@@ -949,6 +948,18 @@ def run(
                 f"⚠️ Duplicate check skipped — {e}. Proceeding with all rows."
             )
             log.warning(f"Duplicate detection failed: {e}")
+
+        # ── Resolve GnuCash bank account path (for CSV Account column) ────
+        gc_info = _get_gnucash_account_balance(gnucash_file, bank)
+        gnucash_bank_account = ""
+        if gc_info["found"]:
+            raw_path = gc_info["account_name"]
+            # Strip "Root Account:" prefix — GnuCash CSV importer doesn't want it
+            if raw_path.startswith("Root Account:"):
+                gnucash_bank_account = raw_path[len("Root Account:"):]
+            else:
+                gnucash_bank_account = raw_path
+            log_lines.append(f"Bank account: `{gnucash_bank_account}`")
 
         # ── Step 3: Account mapping ───────────────────────────────────────────
         if bank == "ICICI":
@@ -971,6 +982,7 @@ def run(
             config_path=config_path,
             model_override=model_override,
             bank_name=bank,
+            gnucash_bank_account=gnucash_bank_account,
         )
 
         _emit_progress(6, f"{bank}: final balance verification")
@@ -994,7 +1006,23 @@ def run(
             except Exception as e:
                 log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
 
-    steps_summary = "\n".join(f"✓ {line}" for line in log_lines)
+    # Color-code each log line: green = OK, amber = warning, red = error
+    _WARN_KEYS = ("mismatch", "gap detected", "skipped", "⚠", "warning")
+    _ERR_KEYS = ("❌", "error", "failed", "could not")
+
+    formatted_lines = []
+    for line in log_lines:
+        # Strip markdown bold for cleaner one-line display
+        clean = line.replace("**", "")
+        low = clean.lower()
+        if any(k in low for k in _ERR_KEYS):
+            formatted_lines.append(f"🔴 {clean}")
+        elif any(k in low for k in _WARN_KEYS):
+            formatted_lines.append(f"🟡 {clean}")
+        else:
+            formatted_lines.append(f"🟢 {clean}")
+
+    steps_summary = "  \n".join(formatted_lines)  # MD line break (two spaces + \n)
     return (
         f"## {bank} → GnuCash pipeline complete\n\n"
         f"{steps_summary}\n\n"
