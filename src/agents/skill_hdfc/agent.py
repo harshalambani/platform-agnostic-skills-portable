@@ -54,12 +54,20 @@ def _clean_amount(s: str) -> str:
         return s
 
 
-def _dd_mm_yy_to_full(d: str) -> str:
-    """Convert DD/MM/YY → DD/MM/YYYY (HDFC uses 2-digit years)."""
-    if len(d) == 8 and d[2] == '/' and d[5] == '/':
-        parts = d.split('/')
-        return f"{parts[0]}/{parts[1]}/20{parts[2]}"
-    return d  # already full or unexpected format
+def _normalise_date(d: str) -> str:
+    """Normalise HDFC dates to ISO YYYY-MM-DD.
+
+    Input formats:
+        DD/MM/YY   (8 chars, PDF OCR)
+        DD/MM/YYYY (10 chars, XLS export)
+    """
+    parts = d.strip().split('/')
+    if len(parts) != 3:
+        return d  # unexpected — return as-is
+    dd, mm, yy = parts[0], parts[1], parts[2]
+    if len(yy) == 2:
+        yy = f"20{yy}"
+    return f"{yy}-{mm}-{dd}"
 
 
 # ── PDF path ─────────────────────────────────────────────────────────────────
@@ -142,6 +150,20 @@ def _parse_pdf_transactions(ocr_text: str) -> list:
     return transactions
 
 
+def _clean_ocr_desc(desc: str) -> str:
+    """Remove common OCR artifacts from HDFC scanned-statement descriptions."""
+    # Strip trailing pipe + special chars (column-separator noise)
+    desc = re.sub(r'[\|]+\s*[—–_\-\s]*$', '', desc)
+    # Strip trailing ' 0' (adjacent zero-column bleed)
+    desc = re.sub(r'\s+0$', '', desc)
+    # Strip embedded balance fragments like "0.00 3,443.00 46,988.00"
+    desc = re.sub(r'\s+\d[\d,]*\.\d{2}\s+\d[\d,]*\.\d{2}\s+\d[\d,]*\.\d{2}', '', desc)
+    # Collapse runs of pipes/spaces
+    desc = re.sub(r'\s*\|\s*', ' ', desc)
+    # Final cleanup
+    return re.sub(r'\s+', ' ', desc).strip(' -|')
+
+
 def _build_pdf_txn(current: dict, text: str, m_tail) -> dict:
     ref_no = m_tail.group(1)
     withdrawal = _clean_amount(m_tail.group(3))
@@ -152,9 +174,10 @@ def _build_pdf_txn(current: dict, text: str, m_tail) -> dict:
     ref_idx  = text.rfind(ref_no)
     raw_desc = text[pipe_idx:ref_idx].strip() if ref_idx > pipe_idx else ''
     desc = re.sub(r'\s+', ' ', raw_desc).strip(' -')
+    desc = _clean_ocr_desc(desc)
 
     return {
-        'Date': _dd_mm_yy_to_full(current['date']),
+        'Date': _normalise_date(current['date']),
         'Transaction ID': ref_no,
         'Description': desc,
         'Account': '',
@@ -170,6 +193,7 @@ def _build_pdf_txn(current: dict, text: str, m_tail) -> dict:
 # HDFC XLS header columns (net-banking download format)
 _HDFC_XLS_COLS = {
     'date':        ['date'],
+    'value_date':  ['value dt', 'value date', 'val date', 'val dt'],
     'narration':   ['narration', 'description', 'particulars'],
     'nature':      ['nature of exp', 'nature', 'remarks'],
     'ref':         ['chq./ref.no.', 'chq/ref no', 'ref no', 'cheque no', 'reference no'],
@@ -273,12 +297,15 @@ def _parse_xls_transactions(rows: list) -> list:
         if col.get(required) is None:
             raise ValueError(f"Required column '{required}' not found in header: {rows[header_idx]}")
 
+    # Prefer Value Date over transaction Date when available
+    date_col = col['value_date'] if col.get('value_date') is not None else col['date']
+
     transactions = []
     for row in rows[header_idx + 1:]:
         # Stop at empty rows or summary rows
         if not row or not str(row[0]).strip():
             continue
-        date_raw = str(row[col['date']]).strip()
+        date_raw = str(row[date_col]).strip()
         if not re.match(r'^\d{2}/\d{2}/\d{2,4}$', date_raw):
             continue  # Not a data row (totals, blank, etc.)
 
@@ -299,7 +326,7 @@ def _parse_xls_transactions(rows: list) -> list:
         ref_clean = ref.lstrip('0') or ref  # preserve '0' if all zeros
 
         transactions.append({
-            'Date': _dd_mm_yy_to_full(date_raw),
+            'Date': _normalise_date(date_raw),
             'Transaction ID': ref_clean,
             'Description': desc,
             'Account': '',

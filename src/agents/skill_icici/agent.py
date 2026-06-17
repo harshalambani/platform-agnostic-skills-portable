@@ -511,8 +511,10 @@ def transform_icici_statement(xls_path: str, output_path: str) -> Dict[str, Any]
     issues = []
 
     for i, row in enumerate(data_rows):
-        # Parse date — use Transaction Date (col 3), not Value Date (col 2)
-        date_str = parse_icici_date(row[COL_TXN_DATE])
+        # Parse date — prefer Value Date (col 2) over Transaction Date (col 3)
+        date_str = parse_icici_date(row[COL_VALUE_DATE])
+        if not date_str:
+            date_str = parse_icici_date(row[COL_TXN_DATE])
         if not date_str:
             issues.append(f"Row {i+1}: failed to parse date '{row[COL_TXN_DATE]}'")
             continue

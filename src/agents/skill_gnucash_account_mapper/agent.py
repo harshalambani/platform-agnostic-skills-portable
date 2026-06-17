@@ -802,45 +802,38 @@ def run(
 
     # --- Restructure columns for GnuCash import ---
     # GnuCash CSV import column mapping (from the user's perspective):
-    #   Account              = the category/split account (e.g. Income:Bank Interest)
-    #   Transfer Account     = the bank account (e.g. Assets:…:HDFC Bank - …)
-    #   Transfer Amount Negated = deposit  (money in  → negative from category's view)
-    #   Transfer Amount      = withdrawal (money out → positive from category's view)
+    #   Account                    = the category/split account (e.g. Income:Bank Interest)
+    #   Transfer Account           = the bank account (e.g. Assets:…:HDFC Bank - …)
+    #   Deposit - Amount Negated   = deposit  (maps to GnuCash "Amount Negated")
+    #   Withdrawal - Amount        = withdrawal (maps to GnuCash "Amount")
     # "Account" already holds the category from mapping — just add the rest.
     if gnucash_bank_account:
         _emit_mapper_progress(f"restructuring columns for GnuCash (bank={gnucash_bank_account[:40]}…)")
         for row in mapped_rows:
             # Account stays as-is (category)
             row['Transfer Account'] = gnucash_bank_account
-            # Rename Deposit → Transfer Amount Negated, Withdrawal → Transfer Amount
-            row['Transfer Amount Negated'] = row.pop('Deposit', '')
-            row['Transfer Amount'] = row.pop('Withdrawal', '')
+            # Rename Deposit/Withdrawal — keep original word, append GnuCash type
+            row['Deposit - Amount Negated'] = row.pop('Deposit', '')
+            row['Withdrawal - Amount'] = row.pop('Withdrawal', '')
 
     # --- Always rewrite CSV (Root Account prefix was stripped) ---
     # Build ordered header list:
     #   - Transfer Account right after Account
-    #   - Transfer Amount Negated / Transfer Amount where Deposit / Withdrawal were
+    #   - Renamed deposit/withdrawal columns where originals were (before Balance)
     raw_keys = list(mapped_rows[0].keys())
-    # Remap keys that were renamed so they appear in the original position
-    _POS_MAP = {
-        'Transfer Account': None,        # handled specially (after Account)
-        'Transfer Amount Negated': None,  # handled specially (after Deposit slot)
-        'Transfer Amount': None,          # handled specially (after Withdrawal slot)
-    }
+    _REPOSITION = {'Transfer Account', 'Deposit - Amount Negated', 'Withdrawal - Amount'}
     if 'Transfer Account' in raw_keys:
         headers_out = []
         for k in raw_keys:
-            if k in _POS_MAP:
-                continue  # skip — will be inserted at correct position
+            if k in _REPOSITION:
+                continue  # will be inserted at correct position
             headers_out.append(k)
             if k == 'Account':
                 headers_out.append('Transfer Account')
-        # Transfer Amount Negated/Amount go where Deposit/Withdrawal were
-        # (they're no longer in raw_keys since pop removed them; insert before Balance)
-        if 'Transfer Amount Negated' in raw_keys:
+        if 'Deposit - Amount Negated' in raw_keys:
             bal_idx = headers_out.index('Balance') if 'Balance' in headers_out else len(headers_out)
-            headers_out.insert(bal_idx, 'Transfer Amount')
-            headers_out.insert(bal_idx, 'Transfer Amount Negated')
+            headers_out.insert(bal_idx, 'Withdrawal - Amount')
+            headers_out.insert(bal_idx, 'Deposit - Amount Negated')
     else:
         headers_out = raw_keys
     with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
