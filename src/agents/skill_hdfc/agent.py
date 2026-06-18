@@ -124,7 +124,7 @@ def _parse_pdf_pdfplumber(pdf_path):
     pdf = pdfplumber.open(pdf_path)
     all_lines = []
     for page in pdf.pages:
-        text = page.extract_text() or ""
+        text = page.extract_text(x_tolerance=1) or ""
         for line in text.split("\n"):
             stripped = line.strip()
             if stripped:
