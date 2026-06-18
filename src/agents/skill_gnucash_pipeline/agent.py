@@ -75,6 +75,42 @@ def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
     return path_or_dir
 
 
+def _write_sidecar(canonical_path: str, bank: str, source: str,
+                   opening: float, closing: float, row_count: int) -> None:
+    """Write a _summary.json sidecar next to the canonical CSV.
+
+    The pipeline reads this at final-verification time to obtain an
+    independent (or at least explicit) expected closing balance instead
+    of the tautological last-row value.
+    """
+    sidecar = Path(canonical_path).with_suffix(".csv_summary.json")
+    try:
+        data = {
+            "bank": bank,
+            "source": source,          # "statement_summary" or "derived"
+            "opening_balance": opening,
+            "closing_balance": closing,
+            "row_count": row_count,
+        }
+        with open(sidecar, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        log.info("Wrote sidecar summary: %s", sidecar)
+    except Exception as e:
+        log.warning("Could not write sidecar summary: %s", e)
+
+
+def _read_sidecar(canonical_path: str) -> dict | None:
+    """Read the _summary.json sidecar if it exists."""
+    sidecar = Path(canonical_path).with_suffix(".csv_summary.json")
+    if sidecar.is_file():
+        try:
+            with open(sidecar, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            log.warning("Could not read sidecar summary: %s", e)
+    return None
+
+
 # Banks with dedicated extraction skills
 DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]
 # Banks that go through the generic CSV normalisation path
@@ -675,6 +711,11 @@ def run(
                         f"Issues: {adapt_result.get('issues', [])}"
                     )
                 log.info("BoB adapter: %d→%d rows", adapt_result.get("rows_input", 0), adapt_result.get("rows_output", 0))
+                # Write sidecar summary (derived — BoB has no independent statement summary yet)
+                _write_sidecar(canonical_path, "Bank of Baroda", "derived",
+                               adapt_result.get("opening_balance", 0),
+                               adapt_result.get("closing_balance", 0),
+                               adapt_result.get("rows_output", 0))
             except Exception as e:
                 log.error("BoB adapter failed: %s", e, exc_info=True)
                 return (
@@ -723,13 +764,24 @@ def run(
             _emit_progress(2, "HSBC: converting to canonical format")
             log_lines.append("**Step 2** — HSBC: converting to canonical format")
             try:
-                from adapter_hsbc.agent import run as adapt_hsbc  # noqa: E402
-                adapt_hsbc(
-                    input_file=hsbc_xlsx,
-                    output_path=canonical_path,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                from adapter_hsbc.agent import adapt_hsbc_xlsx  # noqa: E402
+                try:
+                    import pandas  # noqa: F401
+                    from adapter_hsbc.agent import adapt_hsbc_xlsx_pandas  # noqa: E402
+                    hsbc_adapt_result = adapt_hsbc_xlsx_pandas(hsbc_xlsx, canonical_path)
+                except ImportError:
+                    hsbc_adapt_result = adapt_hsbc_xlsx(hsbc_xlsx, canonical_path)
+                if not hsbc_adapt_result.get("success") and not Path(canonical_path).is_file():
+                    return (
+                        f"## {bank} → canonical conversion failed\n\n"
+                        f"❌ HSBC adapter error: {hsbc_adapt_result.get('error', 'unknown')}\n\n"
+                        f"Issues: {hsbc_adapt_result.get('issues', [])}"
+                    )
+                # Write sidecar summary (derived — HSBC has no independent statement summary yet)
+                _write_sidecar(canonical_path, "HSBC", "derived",
+                               hsbc_adapt_result.get("opening_balance", 0),
+                               hsbc_adapt_result.get("closing_balance", 0),
+                               hsbc_adapt_result.get("rows_output", 0))
             except Exception as e:
                 log.error("HSBC adapter failed: %s", e, exc_info=True)
                 return (
@@ -998,11 +1050,32 @@ def run(
             try:
                 with open(output_path, "r", encoding="utf-8") as f:
                     final_rows = list(csv.DictReader(f))
+
+                # Read sidecar for an independent expected closing balance
+                sidecar = _read_sidecar(canonical_path)
+                if sidecar and "closing_balance" in sidecar:
+                    expected_closing = sidecar["closing_balance"]
+                    source_label = sidecar.get("source", "unknown")
+                else:
+                    expected_closing = running["closing_balance"]
+                    source_label = "derived"
+
                 closing_check = verify_closing_balance(
                     final_rows,
-                    expected_closing=running["closing_balance"],
+                    expected_closing=expected_closing,
                 )
-                log_lines.append(f"**Final check** — {closing_check['message']}")
+
+                if source_label == "statement_summary":
+                    tag = "VERIFIED (independent)"
+                elif source_label == "derived":
+                    tag = "OK (derived — no independent source)"
+                else:
+                    tag = f"OK ({source_label})"
+
+                if closing_check.get("ok"):
+                    log_lines.append(f"**Final check** — Closing balance {tag}: {closing_check['message']}")
+                else:
+                    log_lines.append(f"**Final check** — ❌ {closing_check['message']}")
             except Exception as e:
                 log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
 

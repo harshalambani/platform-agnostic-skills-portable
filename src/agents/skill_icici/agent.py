@@ -774,6 +774,27 @@ def run(
     if len(csv_parts) > 1:
         _merge_csvs(csv_parts, Path(output_path))
 
+    # Write sidecar summary JSON for pipeline's balance verification
+    # ICICI closing_balance is derived from last row (no independent statement summary)
+    sidecar_path = Path(output_path).with_suffix(".csv_summary.json")
+    try:
+        # Use the last successful result's balances
+        last_ob = result.get('opening_balance', 0) if result else 0
+        last_cb = result.get('closing_balance', 0) if result else 0
+        last_rows = result.get('rows_output', 0) if result else 0
+        sidecar_data = {
+            "bank": "ICICI",
+            "source": "derived",
+            "opening_balance": last_ob,
+            "closing_balance": last_cb,
+            "row_count": last_rows,
+        }
+        with open(sidecar_path, "w", encoding="utf-8") as sf:
+            json.dump(sidecar_data, sf, indent=2)
+        logger.info("Wrote sidecar summary: %s", sidecar_path)
+    except Exception as e:
+        logger.warning("Could not write sidecar summary: %s", e)
+
     summary = (
         f"Complete - processed {len(xls_files)} file(s), "
         f"produced {len(csv_parts)} CSV(s).\n\n"
