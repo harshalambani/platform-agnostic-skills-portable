@@ -43,3 +43,15 @@ desktop.ini
 
 CmdResult/
 Error/
+
+# --- User data (personal bank statements, GnuCash books, outputs) ---
+Data/
+ICICI/
+outputs/
+
+# --- Bundling logs ---
+bundling/launcher-gen/*/Data/
+
+# --- Ad-hoc test scripts ---
+*-test.py
+*-test-*.py
