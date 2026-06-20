@@ -59,6 +59,7 @@ from ui.tabs import home as tab_home  # noqa: E402
 from ui.tabs import _generic as tab_generic  # noqa: E402
 from ui.tabs import settings as tab_settings  # noqa: E402
 from ui.tabs import history as tab_history  # noqa: E402
+from ui.tabs import gnucash_review as tab_gnucash_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
 from ui import _update  # noqa: E402
 
@@ -130,7 +131,15 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 if not _cat_skills:
                     continue
                 with gr.Tab(_cat_label):
-                    if len(_cat_skills) == 1:
+                    # GnuCash group always uses sub-tabs (skill tabs + Review)
+                    if _cat_key == "gnucash":
+                        with gr.Tabs():
+                            for _skill in _cat_skills:
+                                with gr.Tab(_skill.display_name):
+                                    tab_generic.render(_skill)
+                            with gr.Tab("Review Mappings"):
+                                tab_gnucash_review.render()
+                    elif len(_cat_skills) == 1:
                         tab_generic.render(_cat_skills[0])
                     else:
                         with gr.Tabs():

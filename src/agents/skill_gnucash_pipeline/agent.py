@@ -1101,5 +1101,5 @@ def run(
         f"{steps_summary}\n\n"
         f"---\n\n"
         f"{mapping_result}\n\n"
-        f"**Next:** open GnuCash → File → Import → Import CSV → select the downloaded file."
+        f"**Next:** check the **Review Mappings** tab to verify/correct account assignments, then import into GnuCash."
     )

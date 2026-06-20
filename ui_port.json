@@ -1,6 +1,6 @@
 {
-  "port": 57426,
-  "url": "http://127.0.0.1:57426",
-  "version": "0.2.0+dirty",
-  "commit": "0c51191"
+  "port": 55849,
+  "url": "http://127.0.0.1:55849",
+  "version": "1.0.0+dirty",
+  "commit": "211e32b"
 }

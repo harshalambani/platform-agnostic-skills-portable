@@ -28,15 +28,25 @@ class ModelInfo:
     supports_tools: bool = False       # True if template includes .Tools
     parameter_size: str = ""           # e.g. "12B", "3B"
     family: str = ""                   # e.g. "gemma", "llama"
+    file_size_bytes: int = 0           # model file size from /api/tags
 
     @property
     def display_label(self) -> str:
-        """Dropdown label: 'model_name (12B, tools)' or 'model_name (3B, text-only)'."""
+        """Dropdown label: 'model_name (5.1B, 3.2GB, tools)'."""
         tag = "tools" if self.supports_tools else "text-only"
+        parts: list[str] = []
         size = self.parameter_size.strip()
         if size:
-            return f"{self.name} ({size}, {tag})"
-        return f"{self.name} ({tag})"
+            parts.append(size)
+        if self.file_size_bytes > 0:
+            gb = self.file_size_bytes / (1024 ** 3)
+            if gb >= 1.0:
+                parts.append(f"{gb:.1f}GB")
+            else:
+                mb = self.file_size_bytes / (1024 ** 2)
+                parts.append(f"{mb:.0f}MB")
+        parts.append(tag)
+        return f"{self.name} ({', '.join(parts)})"
 
 
 @dataclass(frozen=True)
@@ -137,7 +147,8 @@ def _detect_tool_support(body: dict[str, Any]) -> bool:
     return False
 
 
-def _check_ollama_tool_support(base_url: str, model_name: str) -> ModelInfo:
+def _check_ollama_tool_support(base_url: str, model_name: str,
+                               file_size: int = 0) -> ModelInfo:
     """Query /api/show for *model_name* and return a ModelInfo."""
     if model_name in _capability_cache:
         return _capability_cache[model_name]
@@ -168,6 +179,7 @@ def _check_ollama_tool_support(base_url: str, model_name: str) -> ModelInfo:
         supports_tools=supports_tools,
         parameter_size=param_size,
         family=family,
+        file_size_bytes=file_size,
     )
     _capability_cache[model_name] = info
     return info
@@ -241,8 +253,15 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
     # Extract model list and enrich with capabilities.
     if provider == "ollama":
         tags = body.get("models") or []
-        names = tuple(m.get("name", "") for m in tags if isinstance(m, dict))
-        infos = tuple(_check_ollama_tool_support(base, n) for n in names)
+        model_sizes: dict[str, int] = {}
+        for m in tags:
+            if isinstance(m, dict):
+                model_sizes[m.get("name", "")] = m.get("size", 0)
+        names = tuple(model_sizes.keys())
+        infos = tuple(
+            _check_ollama_tool_support(base, n, file_size=model_sizes.get(n, 0))
+            for n in names
+        )
     else:
         data = body.get("data") or []
         names = tuple(m.get("id", "") for m in data if isinstance(m, dict))

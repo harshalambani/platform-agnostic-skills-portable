@@ -95,6 +95,13 @@ def _candidate_roots() -> tuple[Path | None, Path | None, Path | None, str]:
     return (PROJECT_ROOT / "vendor" / "tesseract", PROJECT_ROOT / "vendor" / "poppler", PROJECT_ROOT / "vendor" / "qpdf", "source")
 
 
+# Well-known system install paths for Tesseract (checked when vendor/ is empty).
+_SYSTEM_TESS_PATHS = [
+    Path(r"C:\Program Files\Tesseract-OCR"),
+    Path(r"C:\Program Files (x86)\Tesseract-OCR"),
+]
+
+
 def native_status() -> NativeStatus:
     """Inspect-only resolver. Does not mutate os.environ."""
     tess_root, popp_root, qpdf_root, mode = _candidate_roots()
@@ -104,6 +111,25 @@ def native_status() -> NativeStatus:
     tessdata = (tess_root / "tessdata") if tess_root else None
     if tessdata is not None and not tessdata.is_dir():
         tessdata = None
+
+    # ── Fallback: system-installed Tesseract (dev machines without vendor/) ──
+    if tess_exe is None and mode == "source":
+        for sys_path in _SYSTEM_TESS_PATHS:
+            candidate = sys_path / "tesseract.exe"
+            if candidate.is_file():
+                tess_exe = candidate
+                sys_tessdata = sys_path / "tessdata"
+                if sys_tessdata.is_dir():
+                    tessdata = sys_tessdata
+                break
+        # Last resort: shutil.which (covers custom installs on PATH)
+        if tess_exe is None:
+            found = shutil.which("tesseract")
+            if found:
+                tess_exe = Path(found)
+                sys_tessdata = tess_exe.parent / "tessdata"
+                if sys_tessdata.is_dir():
+                    tessdata = sys_tessdata
     pop_bin = (popp_root / "bin") if popp_root else None
     if pop_bin is not None and not pop_bin.is_dir():
         pop_bin = None
@@ -157,9 +183,11 @@ def ensure_native_path() -> NativeStatus:
         os.environ["PATH"] = os.pathsep.join(parts + ([existing] if existing else []))
 
     if status.tessdata_dir is not None:
-        # TESSDATA_PREFIX should point to the folder *containing* tessdata/, per Tesseract
-        # convention. Some forks expect the folder itself — set both for safety.
-        os.environ["TESSDATA_PREFIX"] = str(status.tessdata_dir.parent)
+        # Tesseract 5.x expects TESSDATA_PREFIX to be the folder that directly
+        # contains *.traineddata files (i.e. the tessdata/ dir itself).
+        # Older 3.x/4.x expected the *parent* of tessdata/.  We set to the
+        # tessdata dir itself — works with 5.x and UB-Mannheim portable builds.
+        os.environ["TESSDATA_PREFIX"] = str(status.tessdata_dir)
 
     # Configure pytesseract too, in case any skill code uses it.
     if status.tesseract_exe is not None:

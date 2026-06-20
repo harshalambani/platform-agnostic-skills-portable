@@ -74,6 +74,11 @@ def adapt_bob_csv(input_csv: str, output_csv: str) -> Dict[str, Any]:
 
             txn_id = str(bob_row.get('CHQ.NO.', '')).strip() or ''
             description = str(bob_row.get('PARTICULARS', '')).strip()
+
+            # Skip synthetic "Opening Balance" row (no real transaction)
+            if 'opening balance' in description.lower():
+                continue
+
             withdrawal = parse_indian_number(bob_row.get('WITHDRAWALS', '0'))
             deposit = parse_indian_number(bob_row.get('DEPOSITS', '0'))
             balance = parse_indian_number(bob_row.get('BALANCE', '0'))

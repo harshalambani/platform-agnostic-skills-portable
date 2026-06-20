@@ -288,7 +288,158 @@ def smart_pattern_match(
             if any(k in acct for k in ("Salary", "Pension", "Employment")):
                 return {"account": acct, "reason": "Salary/pension credit"}
 
+    # 16. Self cheque / cash withdrawal (various formats: SELF 1579-CHQ PAID, SELF - CHQ PAID, etc.)
+    if re.search(r'SELF[\s/]*(?:\d+[\s\-]*)?(?:\-\s*)?CHQ\s*PAID', desc_upper):
+        for acct in account_tree:
+            if acct.endswith(":Cash") or (":Cash and Bank:Cash" in acct):
+                return {"account": acct, "reason": "Self cheque / cash withdrawal"}
+
+    # 17. Cheque book charges
+    if re.search(r'CH(EQUE|Q)\s*B(OO)?K\s*CH(RG|GS|ARGE)', desc_upper):
+        for acct in account_tree:
+            if "Bank Charges" in acct or "Bank Service" in acct:
+                return {"account": acct, "reason": "Cheque book charges"}
+
     return None
+
+
+# ---------------------------------------------------------------------------
+# Historical prefix matching — deterministic fuzzy match via description prefix
+# ---------------------------------------------------------------------------
+
+def _historical_prefix_match(
+    desc: str,
+    historical_mappings: List[Dict],
+) -> Optional[Dict]:
+    """Match by stripping trailing reference numbers and comparing prefixes.
+
+    Bank narrations like 'BAJAJ FINANCE -5150102' differ from historical
+    'BAJAJ FINANCE -808693' only in the reference number.  Stripping the
+    trailing digits and comparing the prefix catches these deterministically.
+    Falls back to keyword matching against account leaf names.
+    """
+    def _norm(s: str) -> str:
+        import re as _re
+        s = s.strip().upper()
+        s = _re.sub(r'[-\s]*\d{5,}.*$', '', s)           # trailing ref numbers
+        s = _re.sub(r'[-\s]*\d{2}-\d{2}-\d{4}.*$', '', s)  # trailing dates
+        return s.strip().rstrip('-').strip()
+
+    norm_desc = _norm(desc)
+    if len(norm_desc) < 6:
+        return None
+
+    best_account = None
+    best_score = 0
+    best_freq = 0
+
+    for m in historical_mappings:
+        hist_norm = _norm(m['description'])
+        if len(hist_norm) < 6:
+            continue
+        freq = m.get('frequency', 1)
+
+        if norm_desc == hist_norm:
+            score = len(norm_desc) * 2
+        elif len(norm_desc) >= 10 and len(hist_norm) >= 10:
+            # Character-level prefix overlap
+            common = 0
+            for a, b in zip(norm_desc, hist_norm):
+                if a == b:
+                    common += 1
+                else:
+                    break
+            if common >= 10:
+                score = common
+            else:
+                continue
+        else:
+            continue
+
+        if score > best_score or (score == best_score and freq > best_freq):
+            best_score = score
+            best_freq = freq
+            best_account = m['account']
+
+    if best_account:
+        return {"account": best_account, "reason": f"Prefix match ({norm_desc[:30]})"}
+
+    # Fallback: keyword match — description words vs. account leaf names
+    _STOP = {'MICR', 'PAID', 'NEFT', 'IMPS', 'INCL', 'FROM', 'WITH',
+             'BANK', 'TRAN', 'INWARD', 'TRANSFER', 'CLEARING', 'MUMBAI'}
+    desc_words = set(re.findall(r'[A-Z]{4,}', desc.upper())) - _STOP
+
+    seen: set = set()
+    for m in historical_mappings:
+        acct = m['account']
+        if acct in seen:
+            continue
+        seen.add(acct)
+        leaf = acct.rsplit(':', 1)[-1] if ':' in acct else acct
+        leaf_words = set(re.findall(r'[A-Za-z]{4,}', leaf.upper()))
+        common = desc_words & leaf_words
+        if common and max(len(w) for w in common) >= 5:
+            return {"account": acct, "reason": f"Keyword match ({', '.join(sorted(common))})"}
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# LLM retry with focused prompt (fewer account groups)
+# ---------------------------------------------------------------------------
+
+def _retry_with_focused_prompt(
+    desc: str,
+    amt_info: str,
+    historical_mappings: List[Dict],
+    base_url: str,
+    model: str,
+) -> Optional[str]:
+    """Retry LLM with a shorter prompt containing only the most relevant groups."""
+    from collections import defaultdict
+
+    desc_upper = desc.upper()
+    desc_words = set(re.findall(r'[A-Z]{3,}', desc_upper))
+
+    groups: Dict[str, list] = defaultdict(list)
+    for m in historical_mappings:
+        groups[m['account']].append((m['description'], m.get('frequency', 1)))
+
+    scored = []
+    for acct, descs in groups.items():
+        score = 0
+        for d, freq in descs:
+            d_words = set(re.findall(r'[A-Z]{3,}', d.upper()))
+            overlap = desc_words & d_words
+            score += sum(len(w) for w in overlap) * freq
+        if score > 0:
+            scored.append((score, acct, descs))
+
+    scored.sort(reverse=True)
+    top = scored[:3]
+    if not top:
+        return None
+
+    lines = []
+    for _, acct, descs in top:
+        descs.sort(key=lambda x: x[1], reverse=True)
+        lines.append(f"\n{acct}:")
+        for d, freq in descs[:5]:
+            freq_note = f" (x{freq})" if freq > 1 else ""
+            lines.append(f"  - {d}{freq_note}")
+
+    grouped_text = "\n".join(lines)
+    user_prompt = (
+        f"Most likely accounts for this transaction:{grouped_text}\n\n"
+        f"Transaction: {desc}{amt_info}\n"
+        f"Account:"
+    )
+
+    reply = _ollama_chat(base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
+                         timeout=_LLM_TIMEOUT_SECONDS)
+    if reply:
+        _emit_mapper_progress(f"  -> (retry matched)")
+    return reply
 
 
 # ---------------------------------------------------------------------------
@@ -299,11 +450,46 @@ _LLM_TIMEOUT_SECONDS = 60      # per-row timeout (after model is warm)
 _LLM_WARMUP_TIMEOUT  = 180     # first call loads model into VRAM — needs longer
 
 _LLM_SYSTEM_PROMPT = """\
-You are a GnuCash account classifier. Given ONE bank transaction and a list of accounts, reply with ONLY the full account path. If unsure, reply SKIP.
+You are a bank transaction classifier for GnuCash. You match new transactions to accounts by comparing them with known historical patterns.
 Rules:
-- Use ONLY accounts from the list. Never invent accounts.
-- Reply with the account path on a single line, nothing else.
-- If the transaction is ambiguous, reply SKIP."""
+- Use ONLY accounts from the provided patterns. Never invent accounts.
+- Match by similarity: shared keywords, payee names, reference numbers, transaction types.
+- Bank descriptions often abbreviate or truncate — e.g. "SELF1579-CHQPAID" is similar to "SELF-CHQPAID".
+- Reply with the FULL account path on a single line, nothing else.
+- If no pattern is similar enough, reply SKIP."""
+
+
+def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_info: str) -> str:
+    """Build a structured prompt with historical patterns grouped by account."""
+    from collections import defaultdict
+    groups: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
+    for m in historical_mappings:
+        groups[m['account']].append((m['description'], m.get('frequency', 1)))
+
+    # Sort groups by total frequency (most common accounts first)
+    sorted_groups = sorted(
+        groups.items(),
+        key=lambda kv: sum(f for _, f in kv[1]),
+        reverse=True,
+    )
+
+    lines = []
+    for acct, descs in sorted_groups:
+        descs.sort(key=lambda x: x[1], reverse=True)
+        lines.append(f"\n{acct}:")
+        for d, freq in descs[:8]:
+            freq_note = f" (x{freq})" if freq > 1 else ""
+            lines.append(f"  - {d}{freq_note}")
+        if len(descs) > 8:
+            lines.append(f"  ... and {len(descs) - 8} more")
+
+    grouped_text = "\n".join(lines)
+
+    return (
+        f"Known historical patterns grouped by account:{grouped_text}\n\n"
+        f"Transaction: {desc}{amt_info}\n"
+        f"Account:"
+    )
 
 
 def _resolve_ollama_config(config_path: str, model_override: str = None) -> Tuple[str, str]:
@@ -350,12 +536,14 @@ def llm_fallback_mapping(
     example_mappings: List[Dict],
     config_path: str,
     model_override: str = None,
+    historical_mappings: List[Dict] = None,
 ) -> Dict[int, Dict]:
     """
     Use the LLM to classify rows one at a time via direct Ollama API.
 
-    Strategy: one row per call with a tiny prompt → fast local inference.
-    Each call has a 45s timeout. Bypasses LangChain entirely.
+    Strategy: one row per call with a structured prompt that groups
+    historical GnuCash patterns by account, turning classification into
+    pattern matching rather than cold reasoning.
     """
     if not unmatched_rows or not config_path:
         return {}
@@ -367,7 +555,10 @@ def llm_fallback_mapping(
         return {}
 
     total = len(unmatched_rows)
-    _emit_mapper_progress(f"LLM fallback: {total} rows, one at a time ({_LLM_TIMEOUT_SECONDS}s each)")
+    hist_count = len(historical_mappings) if historical_mappings else 0
+    _emit_mapper_progress(
+        f"LLM fallback: {total} rows, {hist_count} historical examples, model={model}"
+    )
 
     # ── Warm up the model (cold start loads weights into VRAM) ───────────
     _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
@@ -379,20 +570,15 @@ def llm_fallback_mapping(
     if warmup_reply is None:
         _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
         return {}
-    _emit_mapper_progress(f"LLM warm-up OK — model loaded")
+    _emit_mapper_progress("LLM warm-up OK — model loaded")
 
-    # Build compact account list for the prompt
-    acct_list = "\n".join(account_tree)
+    # Build the set of valid accounts from historical mappings (preferred)
+    # or fall back to full account tree
+    if historical_mappings:
+        account_set = {m['account'] for m in historical_mappings if m.get('account')}
+    else:
+        account_set = set(account_tree)
 
-    # Build a few example lines from rules-matched rows
-    example_lines = ""
-    if example_mappings:
-        examples = example_mappings[:5]
-        example_lines = "\nExamples:\n" + "\n".join(
-            f"  {ex['description']} -> {ex['account']}" for ex in examples
-        )
-
-    account_set = set(account_tree)
     result: Dict[int, Dict] = {}
 
     for i, row in enumerate(unmatched_rows, 1):
@@ -409,36 +595,56 @@ def llm_fallback_mapping(
         desc = row["description"]
         amt_info = ""
         if row.get("deposit"):
-            amt_info = f" [deposit]"
+            amt_info = " [deposit]"
         elif row.get("withdrawal"):
-            amt_info = f" [withdrawal]"
+            amt_info = " [withdrawal]"
 
-        user_prompt = (
-            f"Accounts:\n{acct_list}\n{example_lines}\n\n"
-            f"Transaction: {desc}{amt_info}\n"
-            f"Account:"
-        )
+        # Build prompt — use grouped historical patterns if available,
+        # otherwise fall back to flat account list + thin examples
+        if historical_mappings:
+            user_prompt = _build_historical_prompt(historical_mappings, desc, amt_info)
+        else:
+            acct_list = "\n".join(account_tree)
+            example_lines = ""
+            if example_mappings:
+                examples = example_mappings[:5]
+                example_lines = "\nExamples:\n" + "\n".join(
+                    f"  {ex['description']} -> {ex['account']}" for ex in examples
+                )
+            user_prompt = (
+                f"Accounts:\n{acct_list}\n{example_lines}\n\n"
+                f"Transaction: {desc}{amt_info}\n"
+                f"Account:"
+            )
 
         _emit_mapper_progress(f"LLM row {i}/{total}: {desc[:40]}")
 
         reply = _ollama_chat(base_url, model, _LLM_SYSTEM_PROMPT, user_prompt, timeout=_LLM_TIMEOUT_SECONDS)
+
         if not reply:
-            continue
+            # Retry with focused prompt — top 3 account groups by keyword overlap
+            if historical_mappings:
+                reply = _retry_with_focused_prompt(
+                    desc, amt_info, historical_mappings,
+                    base_url, model,
+                )
+            if not reply:
+                continue
 
         answer = reply.strip().split("\n")[0].strip()  # first line only
         if answer.upper() == "SKIP" or not answer:
-            _emit_mapper_progress(f"  -> SKIP")
+            _emit_mapper_progress(f"  -> SKIP ({answer!r})")
             result[row_num] = {"account": "", "reason": "LLM: skip"}
             continue
 
-        # Validate against account tree
+        # Validate against known accounts
         if answer in account_set:
             _emit_mapper_progress(f"  -> {answer}")
-            result[row_num] = {"account": answer, "reason": f"LLM: matched"}
+            result[row_num] = {"account": answer, "reason": "LLM: matched"}
         else:
-            # Try partial match — LLM might omit "Root Account:" prefix
+            # Try partial match — LLM might omit prefix or truncate
             matched_acct = None
-            for acct in account_tree:
+            for acct in account_set:
                 if acct.endswith(answer) or answer in acct:
                     matched_acct = acct
                     break
@@ -644,7 +850,12 @@ def run(
         sys.path.insert(0, str(agents_root))
 
     from skill_gnucash_xml_extractor.agent import parse_gnucash_file          # noqa: E402
-    from skill_gnucash_mapping_generator.agent import generate_rules, generate_yaml  # noqa: E402
+    from skill_gnucash_mapping_generator.agent import generate_rules         # noqa: E402
+    from skill_gnucash_account_mapper.persistent_rules import (              # noqa: E402
+        merge_auto_rules, load_overrides, match_overrides,
+        migrate_legacy_overrides, rules_path as persistent_rules_path,
+        save_rules, load_rules,
+    )
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -663,36 +874,101 @@ def run(
             if m.get('account'):
                 all_account_paths.add(m['account'])
 
+    # Save historical mappings for LLM few-shot context
+    historical_pairs_for_llm: List[Dict] = []
+
     if bank_key:
         # Filter to only the importing bank's historical transactions
         all_mappings = extractor_output.get('mappings', {})
         bank_mappings = all_mappings.get(bank_key, [])
         extractor_output['mappings'] = {bank_key: bank_mappings}
         mapping_count = len(bank_mappings)
+        historical_pairs_for_llm = bank_mappings
         _emit_mapper_progress(f"filtered to {bank_key}: {mapping_count} historical pairs")
     else:
         mapping_count = sum(
             len(v) for v in extractor_output.get('mappings', {}).values()
         )
+        # Flatten all banks for LLM context when no specific bank
+        for bank_maps in extractor_output.get('mappings', {}).values():
+            historical_pairs_for_llm.extend(bank_maps)
         _emit_mapper_progress(f"extracted {mapping_count} pairs (all banks)")
 
-    # Step 2: Generate rules YAML from extractor output
+    # Step 1.5: Migrate legacy _account_overrides.yaml if present
+    migrated = migrate_legacy_overrides(gnucash_file, config_path)
+    if migrated:
+        _emit_mapper_progress(f"migrated {migrated} legacy overrides into unified rules")
+
+    # Step 2: Generate rules from extractor output + merge into persistent YAML
     _emit_mapper_progress(f"generating rules (bank={bank_key or 'all'})")
     rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3)
     all_rules: List[dict] = []
     for bank_rules in rules_by_bank.values():
         all_rules.extend(bank_rules)
     rule_count = len(all_rules)
-    _emit_mapper_progress(f"generated {rule_count} rules")
+    _emit_mapper_progress(f"generated {rule_count} new rules")
 
-    yaml_content = generate_yaml(all_rules)
-    rules_path = out_path.with_name(out_path.stem + "_mapping_rules.yaml")
-    rules_path.write_text(yaml_content, encoding='utf-8')
+    # Merge into single persistent YAML alongside .gnucash file
+    merged = merge_auto_rules(gnucash_file, rules_by_bank, config_path)
+    merged_total = sum(len(v) for v in merged.values())
+    _emit_mapper_progress(f"persistent rules: {merged_total} total (in {persistent_rules_path(gnucash_file, config_path).name})")
+
+    # Write merged rules to a temp file for map_accounts() (expects a file path)
+    import tempfile
+    rules_tmp = Path(tempfile.mktemp(suffix="_mapping_rules.yaml"))
+    # map_accounts expects {BankKey: [rules...]} format — write merged (minus _overrides)
+    rules_for_mapper = {k: v for k, v in merged.items() if k != "_overrides"}
+    import yaml as _yaml
+    rules_tmp.write_text(
+        _yaml.dump(rules_for_mapper, default_flow_style=False, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+
+    # Load user overrides (if any) for this GnuCash file
+    overrides = load_overrides(gnucash_file, config_path)
+    if overrides:
+        _emit_mapper_progress(f"loaded {len(overrides)} user overrides")
 
     # Step 3: Apply rules to canonical CSV
     report_path = out_path.with_name(out_path.stem + "_confidence.txt")
     _emit_mapper_progress(f"applying rules to {Path(canonical_csv).name}")
-    result = map_accounts(canonical_csv, str(rules_path), str(out_path), str(report_path))
+    result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path))
+
+    # Clean up temp rules file
+    try:
+        rules_tmp.unlink()
+    except OSError:
+        pass
+
+    # Step 3.5: User overrides pass (highest priority) ─────────────────────
+    # Override pass runs on ALL rows (including matched ones) since overrides
+    # are meant to correct any wrong mapping, not just fill gaps.
+    override_count = 0
+    if overrides:
+        _emit_mapper_progress(f"applying {len(overrides)} user overrides")
+        with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
+            mapped_rows = list(csv.DictReader(f))
+
+        for i, row in enumerate(mapped_rows):
+            desc = row.get('Description') or row.get('Narration') or ''
+            acct, reason = match_overrides(desc, overrides)
+            if acct:
+                row['Account'] = _strip_root(acct) if acct.startswith('Root Account:') else acct
+                row['Confidence'] = 'override'
+                row['MatchReason'] = f"Override: {reason}"
+                override_count += 1
+                _emit_mapper_progress(f"  row {i+1}: override matched -> {acct.rsplit(':', 1)[-1] if ':' in acct else acct}")
+
+        if override_count > 0:
+            result['confidence_counts']['override'] = override_count
+            _emit_mapper_progress(f"override pass: {override_count} rows matched")
+
+            # Rewrite CSV with overrides applied
+            raw_keys = list(mapped_rows[0].keys())
+            with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=raw_keys)
+                writer.writeheader()
+                writer.writerows(mapped_rows)
 
     # Step 4: Smart pattern pass + LLM fallback for unmatched rows
     unmatched_count = result['confidence_counts'].get('none', 0)
@@ -718,6 +994,8 @@ def run(
             withdrawal = row.get('Withdrawal', '')
             deposit = row.get('Deposit', '')
             match = smart_pattern_match(desc, account_list, withdrawal, deposit)
+            if match is None and historical_pairs_for_llm:
+                match = _historical_prefix_match(desc, historical_pairs_for_llm)
             if match is not None:
                 row['Account'] = _strip_root(match['account']) if match['account'] else ''
                 row['Confidence'] = 'smart'
@@ -740,14 +1018,14 @@ def run(
             desc = row.get('Description') or row.get('Narration') or ''
             acct = row.get('Account', '')
             conf = row.get('Confidence', 'none')
-            if (conf == 'none' or not acct) and conf != 'smart':
+            if (conf == 'none' or not acct) and conf not in ('smart', 'override'):
                 still_unmatched.append({
                     'row': i,
                     'description': desc,
                     'withdrawal': row.get('Withdrawal', ''),
                     'deposit': row.get('Deposit', ''),
                 })
-            elif acct and conf in ('high', 'medium', 'smart'):
+            elif acct and conf in ('high', 'medium', 'smart', 'override'):
                 example_mappings.append({'description': desc, 'account': acct})
 
         if still_unmatched and config_path:
@@ -758,6 +1036,7 @@ def run(
                 example_mappings=example_mappings,
                 config_path=config_path,
                 model_override=model_override,
+                historical_mappings=historical_pairs_for_llm,
             )
             if llm_results:
                 for i, row in enumerate(mapped_rows):
@@ -804,24 +1083,21 @@ def run(
     # GnuCash CSV import column mapping (from the user's perspective):
     #   Account                    = the category/split account (e.g. Income:Bank Interest)
     #   Transfer Account           = the bank account (e.g. Assets:…:HDFC Bank - …)
-    #   Deposit - Amount Negated   = deposit  (maps to GnuCash "Amount Negated")
-    #   Withdrawal - Amount        = withdrawal (maps to GnuCash "Amount")
+    #   Deposit                    = deposit amount
+    #   Withdrawal                 = withdrawal amount
     # "Account" already holds the category from mapping — just add the rest.
     if gnucash_bank_account:
         _emit_mapper_progress(f"restructuring columns for GnuCash (bank={gnucash_bank_account[:40]}…)")
         for row in mapped_rows:
             # Account stays as-is (category)
             row['Transfer Account'] = gnucash_bank_account
-            # Rename Deposit/Withdrawal — keep original word, append GnuCash type
-            row['Deposit - Amount Negated'] = row.pop('Deposit', '')
-            row['Withdrawal - Amount'] = row.pop('Withdrawal', '')
 
     # --- Always rewrite CSV (Root Account prefix was stripped) ---
     # Build ordered header list:
     #   - Transfer Account right after Account
     #   - Renamed deposit/withdrawal columns where originals were (before Balance)
     raw_keys = list(mapped_rows[0].keys())
-    _REPOSITION = {'Transfer Account', 'Deposit - Amount Negated', 'Withdrawal - Amount'}
+    _REPOSITION = {'Transfer Account', 'Deposit', 'Withdrawal'}
     if 'Transfer Account' in raw_keys:
         headers_out = []
         for k in raw_keys:
@@ -830,10 +1106,10 @@ def run(
             headers_out.append(k)
             if k == 'Account':
                 headers_out.append('Transfer Account')
-        if 'Deposit - Amount Negated' in raw_keys:
+        if 'Deposit' in raw_keys:
             bal_idx = headers_out.index('Balance') if 'Balance' in headers_out else len(headers_out)
-            headers_out.insert(bal_idx, 'Withdrawal - Amount')
-            headers_out.insert(bal_idx, 'Deposit - Amount Negated')
+            headers_out.insert(bal_idx, 'Withdrawal')
+            headers_out.insert(bal_idx, 'Deposit')
     else:
         headers_out = raw_keys
     with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
@@ -859,30 +1135,10 @@ def run(
         f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{extra}\n\n"
         f"**Confidence breakdown:**\n"
         f"- High: {counts.get('high', 0)} ({pct(counts.get('high', 0))})\n"
-        f"- Medium: {counts.get('medium', 0)} ({pct(counts.get('medium', 0))})\n"
         f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
         f"- Smart: {counts.get('smart', 0)} ({pct(counts.get('smart', 0))})\n"
         f"- LLM: {counts.get('llm', 0)} ({pct(counts.get('llm', 0))})\n"
-        f"- Suspense: {counts.get('suspense', 0)} ({pct(counts.get('suspense', 0))})\n\n"
-        f"**Files produced:**\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
         f"- `{report_path.name}` — confidence report (review Low/No-match rows)\n"
-        f"- `{rules_path.name}` — generated mapping rules (human-editable YAML)"
+        f"- `{persistent_rules_path(gnucash_file, config_path).name}` — persistent mapping rules (alongside .gnucash)"
     )
-
-
-# ---------------------------------------------------------------------------
-# CLI shim
-# ---------------------------------------------------------------------------
-
-if __name__ == '__main__':
-    canonical_csv = sys.argv[1] if len(sys.argv) > 1 else None
-    mapping_yaml  = sys.argv[2] if len(sys.argv) > 2 else None
-    output_csv    = sys.argv[3] if len(sys.argv) > 3 else None
-    output_report = sys.argv[4] if len(sys.argv) > 4 else None
-
-    if not all([canonical_csv, mapping_yaml, output_csv, output_report]):
-        print("Usage: python agent.py <canonical_csv> <mapping.yaml> <output_csv> <output_report>")
-        sys.exit(1)
-
-    map_accounts(canonical_csv, mapping_yaml, output_csv, output_report)
