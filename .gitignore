@@ -46,12 +46,16 @@ Error/
 
 # --- User data (personal bank statements, GnuCash books, outputs) ---
 Data/
+!Data/.gitkeep
 ICICI/
 outputs/
+!outputs/.gitkeep
 
 # --- Bundling logs ---
 bundling/launcher-gen/*/Data/
 
-# --- Ad-hoc test scripts ---
-*-test.py
-*-test-*.py
+# --- Ad-hoc dated planning / test files at repo root ---
+2026-*.md
+2026-*.py
+HDFC_BUILD_PLAN.md
+PHASE3_USAGE_GUIDE.md
