@@ -170,6 +170,13 @@ _REVIEW_HTML = r"""
 #review-app .conf-suspense { color: #f87171; font-weight: 600; }
 #review-app .conf-none     { color: #f87171; }
 
+#review-app .contra-badge {
+  display: inline-block; font-size: 10px; padding: 1px 5px;
+  border-radius: 3px; margin-left: 4px;
+  background: #7c2d12; color: #fdba74; font-weight: 600;
+}
+#review-app .contra-badge.high { background: #991b1b; color: #fca5a5; }
+
 #review-app .changed-marker { color: #a78bfa; font-weight: bold; margin-left: 4px; }
 
 /* Account search dropdown */
@@ -218,6 +225,7 @@ _REVIEW_HTML = r"""
       <option value="override">Override</option>
       <option value="medium">Medium</option>
       <option value="high">High</option>
+      <option value="contra">Contra</option>
     </select>
     <span class="spacer"></span>
     <span class="stats" id="rv-stats"></span>
@@ -436,7 +444,12 @@ _REVIEW_HTML = r"""
     }
 
     // Filter
-    let filtered = filterConf ? rows.filter(r => (r.Confidence||'').toLowerCase() === filterConf) : rows;
+    let filtered;
+    if (filterConf === 'contra') {
+      filtered = rows.filter(r => !!r._contra);
+    } else {
+      filtered = filterConf ? rows.filter(r => (r.Confidence||'').toLowerCase() === filterConf) : rows;
+    }
     // Column text filters
     for (const [col, q] of Object.entries(colFilters)) {
       if (!q) continue;
@@ -475,6 +488,10 @@ _REVIEW_HTML = r"""
         } else if (c.key === 'Account' && r._changed) {
           td.innerHTML = val + '<span class="changed-marker"> *</span>';
           td.title = 'Changed from: ' + r._origAccount;
+        } else if (c.key === 'MatchReason' && r._contra) {
+          td.innerHTML = val + '<span class="contra-badge ' + (r._contra_conf || '') +
+            '" title="' + r._contra + '">CONTRA</span>';
+          td.title = r._contra;
         } else {
           td.textContent = val;
           td.title = val;
@@ -560,6 +577,28 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
     accounts = _extract_account_tree(str(gc_p))
     if not accounts:
         accounts = sorted({r.get("Account", "") for r in rows if r.get("Account")})
+
+    # Load contra sidecar if it exists
+    contra_path = csv_p.with_suffix('.contra.json')
+    contra_flags = {}
+    if contra_path.is_file():
+        try:
+            with open(contra_path, "r", encoding="utf-8") as cf:
+                raw = json.load(cf)
+                # Keys are stringified row indices → convert for lookup
+                contra_flags = {str(k): v for k, v in raw.items()}
+        except Exception:
+            pass
+
+    # Merge contra info into rows
+    for i, row in enumerate(rows):
+        ci = contra_flags.get(str(i))
+        if ci:
+            row['_contra'] = ci.get('reason', 'Possible contra')
+            row['_contra_conf'] = ci.get('confidence', 'medium')
+        else:
+            row['_contra'] = ''
+            row['_contra_conf'] = ''
 
     # Build HTML with data embedded
     html = _REVIEW_HTML

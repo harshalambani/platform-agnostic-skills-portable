@@ -33,6 +33,7 @@ from agents.balance_utils import (
 from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
     reconcile,
+    detect_contra_entries,
 )
 
 log = logging.getLogger(__name__)
@@ -925,6 +926,7 @@ def run(
         # Compare canonical CSV against GnuCash book to flag duplicates
         _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
 
+        gnucash_data = None  # set here so contra detection can use it even if dup-check fails
         try:
             # Parse GnuCash file to get existing transactions
             gnucash_data = parse_gnucash_for_reconcile(gnucash_file)
@@ -1013,6 +1015,35 @@ def run(
                 gnucash_bank_account = raw_path
             log_lines.append(f"Bank account: `{gnucash_bank_account}`")
 
+        # ── Contra detection (cross-bank transfer matching) ──────────────────
+        contra_flags: dict[int, dict] = {}  # row_idx → contra info
+        try:
+            if gnucash_bank_account and gnucash_data:
+                contras = detect_contra_entries(
+                    canonical_rows, gnucash_data, gnucash_bank_account
+                )
+                if contras:
+                    for c in contras:
+                        contra_flags[c["row_idx"]] = c
+                    high = sum(1 for c in contras if c["confidence"] == "high")
+                    med = len(contras) - high
+                    parts = []
+                    if high:
+                        parts.append(f"{high} high-confidence")
+                    if med:
+                        parts.append(f"{med} medium-confidence")
+                    log_lines.append(
+                        f"Contra check — {len(contras)} possible cross-bank "
+                        f"transfer(s) detected ({', '.join(parts)}). "
+                        f"Review in **Review Mappings** tab."
+                    )
+                    _emit_progress(4, f"{bank}: {len(contras)} contra(s) flagged")
+                else:
+                    log_lines.append("Contra check — no cross-bank transfers detected")
+        except Exception as e:
+            log.warning(f"Contra detection failed: {e}")
+            log_lines.append(f"⚠️ Contra check skipped — {e}")
+
         # ── Step 3: Account mapping ───────────────────────────────────────────
         if bank == "ICICI":
             step_n = 2
@@ -1036,6 +1067,16 @@ def run(
             bank_name=bank,
             gnucash_bank_account=gnucash_bank_account,
         )
+
+        # Write contra flags sidecar (if any) alongside the output CSV
+        if contra_flags:
+            contra_sidecar = Path(output_path).with_suffix('.contra.json')
+            try:
+                import json as _json
+                with open(contra_sidecar, 'w', encoding='utf-8') as cf:
+                    _json.dump(contra_flags, cf, indent=2, default=str)
+            except Exception as e:
+                log.warning(f"Could not write contra sidecar: {e}")
 
         _emit_progress(6, f"{bank}: final balance verification")
         # ── Final closing balance verification (Intervention 3) ──────────

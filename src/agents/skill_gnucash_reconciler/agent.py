@@ -8,9 +8,10 @@ Flags: duplicates, balance gaps, missing transactions.
 import json
 import csv
 import gzip
+import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 import xml.etree.ElementTree as ET
 import logging
@@ -229,6 +230,177 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
         summary['actions'].append("No balance gaps detected")
 
     return report, summary
+
+
+# ============================================================================
+# CONTRA DETECTION (cross-bank transfer matching)
+# ============================================================================
+
+_REF_PATTERNS = [
+    # NEFT ref: "NEFT CR-SBIN0000TBU-..." or "NEFT-N123-..."
+    re.compile(r'NEFT[\s\-]*(?:CR|DR)?[\s\-]*([A-Z]{4}\d{7,})', re.IGNORECASE),
+    # IMPS ref: "IMPS-123456789012-..." or "IMPS/P2A/123456789"
+    re.compile(r'IMPS[\s\-/]*(?:P2[AP][\s\-/]*)?(\d{9,})', re.IGNORECASE),
+    # RTGS ref: "RTGS-UTIBR..."
+    re.compile(r'RTGS[\s\-]*([A-Z]{4}[A-Z0-9]{10,})', re.IGNORECASE),
+    # FT-CR / FT-DR: "FT - CR 0063210001791..."
+    re.compile(r'FT[\s\-]*(?:CR|DR)[\s\-]*(\d{10,})', re.IGNORECASE),
+]
+
+
+def _extract_transfer_refs(description: str) -> set:
+    """Extract NEFT/IMPS/RTGS/FT reference IDs from a transaction description."""
+    refs = set()
+    for pat in _REF_PATTERNS:
+        for m in pat.finditer(description):
+            refs.add(m.group(1).upper())
+    return refs
+
+
+def _parse_date(date_str: str) -> Optional[datetime]:
+    """Parse a date string (YYYY-MM-DD or DD/MM/YYYY) into a datetime."""
+    if not date_str:
+        return None
+    try:
+        if '/' in date_str:
+            parts = date_str.split('/')
+            if len(parts) == 3:
+                d, m, y = parts
+                if len(y) == 2:
+                    y = '20' + y
+                return datetime(int(y), int(m), int(d))
+        return datetime.strptime(date_str[:10], '%Y-%m-%d')
+    except (ValueError, IndexError):
+        return None
+
+
+def detect_contra_entries(
+    csv_rows: List[Dict],
+    gnucash_data: Dict,
+    target_bank_account: str,
+    date_tolerance: int = 2,
+) -> List[Dict]:
+    """
+    Detect cross-bank contra entries (transfers that appear in both banks).
+
+    For each CSV row, searches GnuCash transactions in OTHER bank accounts
+    for an opposite-sign match within ±date_tolerance days.
+
+    Args:
+        csv_rows:   Canonical CSV rows with Date, Description, Deposit, Withdrawal.
+        gnucash_data:  Output from parse_gnucash_for_reconcile() (no account filter).
+        target_bank_account:  Full path of the bank being imported (e.g.
+                              "Assets:Current Assets:Cash and Bank:HDFC Bank - 15791...")
+        date_tolerance:  Days of tolerance for date matching (default 2).
+
+    Returns:
+        List of dicts, one per contra match found:
+        {
+            "row_idx": int,          # 0-based index into csv_rows
+            "contra_account": str,   # GnuCash account path of the other side
+            "contra_amount": float,  # Amount in the other account
+            "contra_date": str,      # Date of the GnuCash transaction
+            "confidence": str,       # "high" (ref match) or "medium" (amount+date only)
+            "reason": str,           # Human-readable explanation
+        }
+    """
+    if not csv_rows or not gnucash_data.get('transactions'):
+        return []
+
+    # Build index of GnuCash transactions in OTHER accounts:
+    # key = (date_str, rounded_amount) → list of {account, date, amount}
+    # We only care about bank/asset accounts, not expense/income
+    target_lower = target_bank_account.lower() if target_bank_account else ""
+
+    other_txns = []
+    for txn in gnucash_data['transactions']:
+        acct = txn.get('account', '')
+        # Skip transactions in the target bank account (those are dup-check territory)
+        if acct.lower() == target_lower:
+            continue
+        # Only consider bank/asset accounts as contra sources
+        acct_lower = acct.lower()
+        if not any(kw in acct_lower for kw in ('bank', 'cash', 'asset', 'current')):
+            continue
+        other_txns.append(txn)
+
+    if not other_txns:
+        return []
+
+    # Index by (date, opposite_amount) for fast lookup
+    # Also build a date-range index for ±tolerance matching
+    gc_by_date_amt = defaultdict(list)
+    for txn in other_txns:
+        dt = _parse_date(txn['date'])
+        if dt:
+            amt = round(txn['amount'], 2)
+            gc_by_date_amt[(txn['date'], amt)].append(txn)
+
+    contras = []
+
+    for idx, row in enumerate(csv_rows):
+        deposit = float(row.get('Deposit', 0) or 0)
+        withdrawal = float(row.get('Withdrawal', 0) or 0)
+        csv_amount = deposit - withdrawal  # +ve = deposit, -ve = withdrawal
+        if csv_amount == 0:
+            continue
+
+        # We're looking for the OPPOSITE sign in another account
+        # CSV deposit (+10000) → look for GnuCash withdrawal (-10000) in other bank
+        contra_amount = round(-csv_amount, 2)
+        csv_date = _parse_date(row.get('Date', ''))
+        if not csv_date:
+            continue
+
+        csv_refs = _extract_transfer_refs(row.get('Description', ''))
+
+        best_match = None
+        best_confidence = None
+
+        # Search within date tolerance
+        for day_offset in range(0, date_tolerance + 1):
+            for delta in ([timedelta(days=0)] if day_offset == 0
+                          else [timedelta(days=day_offset), timedelta(days=-day_offset)]):
+                check_date = (csv_date + delta).strftime('%Y-%m-%d')
+                key = (check_date, contra_amount)
+                candidates = gc_by_date_amt.get(key, [])
+
+                for cand in candidates:
+                    # Check if ref numbers match (high confidence)
+                    if csv_refs:
+                        cand_refs = _extract_transfer_refs(
+                            cand.get('description', '')
+                        )
+                        if csv_refs & cand_refs:
+                            best_match = cand
+                            best_confidence = "high"
+                            break
+
+                    # Amount + date match (medium confidence)
+                    if best_match is None:
+                        best_match = cand
+                        best_confidence = "medium"
+
+                if best_confidence == "high":
+                    break
+            if best_confidence == "high":
+                break
+
+        if best_match:
+            direction = "from" if csv_amount > 0 else "to"
+            contras.append({
+                "row_idx": idx,
+                "contra_account": best_match['account'],
+                "contra_amount": best_match['amount'],
+                "contra_date": best_match['date'],
+                "confidence": best_confidence,
+                "reason": (
+                    f"Likely transfer {direction} {best_match['account'].split(':')[-1]} "
+                    f"({best_match['date']}, ₹{abs(best_match['amount']):,.2f})"
+                ),
+            })
+
+    return contras
 
 
 # ============================================================================
