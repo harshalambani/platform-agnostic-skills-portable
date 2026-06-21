@@ -450,43 +450,88 @@ _LLM_TIMEOUT_SECONDS = 60      # per-row timeout (after model is warm)
 _LLM_WARMUP_TIMEOUT  = 180     # first call loads model into VRAM — needs longer
 
 _LLM_SYSTEM_PROMPT = """\
-You are a bank transaction classifier for GnuCash. You match new transactions to accounts by comparing them with known historical patterns.
+You are a bank transaction classifier for GnuCash. Given a list of accounts with example transactions, pick the best matching account for a new transaction.
+
 Rules:
-- Use ONLY accounts from the provided patterns. Never invent accounts.
+- Use ONLY accounts from the provided list. NEVER invent or combine account paths.
 - Match by similarity: shared keywords, payee names, reference numbers, transaction types.
 - Bank descriptions often abbreviate or truncate — e.g. "SELF1579-CHQPAID" is similar to "SELF-CHQPAID".
-- Reply with the FULL account path on a single line, nothing else.
-- If no pattern is similar enough, reply SKIP."""
+- Reply with the FULL account path EXACTLY as shown, on a single line, nothing else.
+- If no account is similar enough, reply SKIP.
+
+Examples of correct replies:
+  Transaction: NEFT CR-SBIN0000TBU-ITDTAX REFUND -> Expenses:Income Tax Refund
+  Transaction: ACH C- MMFSL INT-0000000IW07 -> Income:Interest on FD
+  Transaction: UPI-SWIGGY-Q1234@YBL -> Expenses:Food and Dining
+  Transaction: SELF - CHQ PAID -> Assets:Current Assets:Cash and Bank:Cash
+
+WRONG (never do this):
+  Income:Assets:Current Assets:Cash and Bank:SELF 1579-CHQ PAID  <-- invented path with description mixed in"""
+
+
+def _score_account_relevance(
+    groups: Dict[str, List[Tuple[str, int]]],
+    desc: str,
+) -> List[Tuple[float, str, List[Tuple[str, int]]]]:
+    """Score account groups by keyword overlap with the transaction description.
+
+    Returns a sorted list of (score, account_path, descriptions) — highest first.
+    """
+    desc_words = set(re.findall(r'[A-Z]{2,}', desc.upper()))
+    scored = []
+    for acct, descs in groups.items():
+        score = 0.0
+        for d, freq in descs:
+            d_words = set(re.findall(r'[A-Z]{2,}', d.upper()))
+            overlap = desc_words & d_words
+            score += sum(len(w) for w in overlap) * freq
+        scored.append((score, acct, descs))
+    scored.sort(reverse=True)
+    return scored
 
 
 def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_info: str) -> str:
-    """Build a structured prompt with historical patterns grouped by account."""
+    """Build a focused prompt with only the most relevant accounts.
+
+    Instead of dumping all 200+ examples (which overwhelms small models),
+    pre-filter to the top 12 accounts by keyword overlap with the transaction.
+    """
     from collections import defaultdict
     groups: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
     for m in historical_mappings:
         groups[m['account']].append((m['description'], m.get('frequency', 1)))
 
-    # Sort groups by total frequency (most common accounts first)
-    sorted_groups = sorted(
+    # Score and rank accounts by relevance to this transaction
+    scored = _score_account_relevance(groups, desc)
+
+    # Take top 12 accounts (mix of relevant + high-frequency fallbacks)
+    top_relevant = scored[:10]
+    # Also include top 2 by frequency that aren't already included
+    top_names = {acct for _, acct, _ in top_relevant}
+    freq_sorted = sorted(
         groups.items(),
         key=lambda kv: sum(f for _, f in kv[1]),
         reverse=True,
     )
+    for acct, descs in freq_sorted:
+        if acct not in top_names:
+            top_relevant.append((0, acct, descs))
+            top_names.add(acct)
+        if len(top_relevant) >= 12:
+            break
 
     lines = []
-    for acct, descs in sorted_groups:
-        descs.sort(key=lambda x: x[1], reverse=True)
+    for _, acct, descs in top_relevant:
+        descs_sorted = sorted(descs, key=lambda x: x[1], reverse=True)
         lines.append(f"\n{acct}:")
-        for d, freq in descs[:8]:
+        for d, freq in descs_sorted[:5]:
             freq_note = f" (x{freq})" if freq > 1 else ""
             lines.append(f"  - {d}{freq_note}")
-        if len(descs) > 8:
-            lines.append(f"  ... and {len(descs) - 8} more")
 
     grouped_text = "\n".join(lines)
 
     return (
-        f"Known historical patterns grouped by account:{grouped_text}\n\n"
+        f"Candidate accounts with example transactions:{grouped_text}\n\n"
         f"Transaction: {desc}{amt_info}\n"
         f"Account:"
     )
@@ -528,6 +573,32 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
     except Exception as e:  # noqa: BLE001
         _emit_mapper_progress(f"  Ollama error: {e}")
         return None
+
+
+def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
+    """Validate an LLM answer against known accounts.
+
+    Returns the matched account path (exact or partial) or None.
+    """
+    if not answer:
+        return None
+    # Exact match
+    if answer in account_set:
+        return answer
+    # Partial match — LLM might omit prefix or truncate
+    for acct in account_set:
+        if acct.endswith(answer) or answer in acct:
+            return acct
+    # Strip common hallucination prefixes (e.g. "Account: Expenses:...")
+    for prefix in ("Account:", "->", "account:"):
+        if answer.startswith(prefix):
+            cleaned = answer[len(prefix):].strip()
+            if cleaned in account_set:
+                return cleaned
+            for acct in account_set:
+                if acct.endswith(cleaned) or cleaned in acct:
+                    return acct
+    return None
 
 
 def llm_fallback_mapping(
@@ -638,21 +709,25 @@ def llm_fallback_mapping(
             continue
 
         # Validate against known accounts
-        if answer in account_set:
-            _emit_mapper_progress(f"  -> {answer}")
-            result[row_num] = {"account": answer, "reason": "LLM: matched"}
+        matched_acct = _validate_llm_answer(answer, account_set)
+
+        if not matched_acct and historical_mappings:
+            # First answer was garbage — retry with focused prompt
+            _emit_mapper_progress(f"  -> invalid ({answer[:40]!r}), retrying focused…")
+            retry_reply = _retry_with_focused_prompt(
+                desc, amt_info, historical_mappings,
+                base_url, model,
+            )
+            if retry_reply:
+                retry_answer = retry_reply.strip().split("\n")[0].strip()
+                if retry_answer.upper() != "SKIP" and retry_answer:
+                    matched_acct = _validate_llm_answer(retry_answer, account_set)
+
+        if matched_acct:
+            _emit_mapper_progress(f"  -> {matched_acct}")
+            result[row_num] = {"account": matched_acct, "reason": "LLM: matched"}
         else:
-            # Try partial match — LLM might omit prefix or truncate
-            matched_acct = None
-            for acct in account_set:
-                if acct.endswith(answer) or answer in acct:
-                    matched_acct = acct
-                    break
-            if matched_acct:
-                _emit_mapper_progress(f"  -> {matched_acct} (partial)")
-                result[row_num] = {"account": matched_acct, "reason": "LLM: partial match"}
-            else:
-                _emit_mapper_progress(f"  -> unknown: {answer!r}")
+            _emit_mapper_progress(f"  -> unknown: {answer!r}")
 
     matched = sum(1 for v in result.values() if v.get("account"))
     _emit_mapper_progress(f"LLM fallback complete: {matched}/{total} rows mapped")
