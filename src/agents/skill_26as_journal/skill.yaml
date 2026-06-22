@@ -1,0 +1,44 @@
+# skill.yaml — 26AS TDS Journal skill manifest
+# Read by the skill registry (agents/registry.py) at startup.
+
+name: "26AS Journal"
+display_name: "Journal"
+description: >
+  Create GnuCash TDS journal entries from a 26AS Convert workbook and your
+  .gnucash file. One balanced transaction per Part I deductor (Interest /
+  Dividend / Partnership), with credit accounts matched to your chart of
+  accounts and unmatched ones routed to Suspense for review.
+category: "26as"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "xlsx_path"
+    type: "output_file"
+    label: "26AS workbook (Convert output)"
+    match: "*-26AS.xlsx"
+    file_types: [".xlsx"]
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash file"
+    file_types: [".gnucash"]
+    required: true
+
+run_args:
+  xlsx_path: "{inputs.xlsx_path}"
+  gnucash_path: "{inputs.gnucash_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "tds-journals"
+  download_label: "Download Journal CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []

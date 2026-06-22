@@ -32,7 +32,7 @@ Reference numbers are extracted from descriptions into the Cheque Number column:
 |--------|---------|---------|
 | MMT/IMPS/REF/... | REF → cheque | MMT/IMPS/409222854999/On account → cheque=409222854999, desc=On account |
 | NEFT-REF-... | REF → cheque | NEFT-CITIN24449621398-MANIPAL... → cheque=CITIN24449621398 |
-| RTGS-REF-... | REF → cheque | RTGS-HSBCR2202403...-MR HARSH... → cheque=HSBCR2202403... |
+| RTGS-REF-... | REF → cheque | RTGS-XYZBA2202403...-MR JOHN... → cheque=XYZBA2202403... |
 | UPI/REF/... | REF → cheque, strip trailing bank hash (/ICI.../AXI...), drop NA/ | |
 | BIL/ONL/REF/... | REF → cheque | |
 | BIL/INFT/REF/... | REF → cheque | |

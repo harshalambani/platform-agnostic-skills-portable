@@ -8,24 +8,31 @@
 
 active_endpoint: local_ollama
 
+# ── Default model (single knob) ─────────────────────────────────────────────
+# This is THE default LLM for every endpoint below. Change it here once and it
+# applies everywhere. An endpoint can still override it by setting its own
+# `default_model:` line. Use the exact tag your server exposes (e.g. the name
+# from `ollama list`).
+default_model: gemma4:e2b
+
 endpoints:
   local_ollama:
     provider: ollama
     base_url: http://localhost:11434
-    default_model: gemma4:12b
     temperature: 0.0
+    # inherits default_model: gemma4:e2b
 
   lan_ollama:
     provider: ollama
     base_url: http://192.168.1.50:11434
-    default_model: gemma4:12b
     temperature: 0.0
+    # inherits default_model: gemma4:e2b
 
   openai_compatible:
     provider: openai_compatible
     base_url: http://localhost:8000/v1
     api_key: not-needed
-    default_model: gemma-4
+    default_model: gemma-4   # override example — remove to inherit the default
     temperature: 0.0
 
 # Where skill outputs land (relative to %PAL:DataDir% in frozen builds,

@@ -45,7 +45,7 @@ Row,Date,Description,Status,Details
 1,2025-04-02,CGST BENEFIT,Match,"Found in Assets:Checking"
 2,2025-04-02,LOCKER RENT,Match,"Found in Assets:Checking"
 3,2025-04-10,UPI-CRED CLUB,New,"Not in GnuCash (1 alternative: Low confidence)"
-4,2025-04-17,NEFT-KPMG,Match,"Found in Assets:Checking"
+4,2025-04-17,NEFT-ACME,Match,"Found in Assets:Checking"
 ```
 
 **summary.json:**

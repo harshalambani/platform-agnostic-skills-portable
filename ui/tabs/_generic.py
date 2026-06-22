@@ -64,6 +64,25 @@ _MAX_FILE_COUNT: int = 20                          # max files per run
 _choices_cache: list[tuple[str, str]] | None = None
 
 
+def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[str]:
+    """List files in the output dir for an 'output_file' picker, newest first.
+
+    Uses the input's `match` glob (e.g. '*-26AS.xlsx') when given, otherwise
+    falls back to '*<ext>' for each declared file type. Mirrors the Mapped-CSV
+    picker on the GnuCash Review tab so prior-step outputs are easy to pick.
+    """
+    try:
+        out_dir = _config.output_dir()
+    except Exception:
+        return []
+    patterns = [match] if match else ([f"*{ext}" for ext in file_types] or ["*"])
+    found: set = set()
+    for pat in patterns:
+        found.update(out_dir.glob(pat))
+    files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
+    return [str(p) for p in files[:30]]
+
+
 def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
     """Return (display_label, raw_name) pairs with capability badges.
 
@@ -81,9 +100,22 @@ def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
     if choices:
         _choices_cache = choices
         return list(_choices_cache)
-    fallback = ep.get("default_model")
+    fallback = _config.default_model_for(ep, cfg)
     _choices_cache = [(fallback, fallback)] if fallback else []
     return list(_choices_cache)
+
+
+def _default_model_value(choices: list[tuple[str, str]]):
+    """Pre-select the configured default model when it is among the available
+    models, so a fresh tab defaults to the config.yaml `default_model` knob
+    rather than whatever model happens to be listed first."""
+    if not choices:
+        return None
+    cfg = _config.load_portable_config()
+    ep = (cfg.get("endpoints") or {}).get(cfg.get("active_endpoint", "")) or {}
+    want = _config.default_model_for(ep, cfg)
+    values = [v for _, v in choices]
+    return want if want in values else choices[0][1]
 
 
 def _check_native_binaries(skill: SkillInfo) -> str | None:
@@ -157,8 +189,8 @@ def _make_run_handler(skill: SkillInfo):
         input_map: dict[str, str] = {}
         for i, inp_def in enumerate(skill.inputs):
             val = input_values[i] if i < len(input_values) else None
-            if inp_def.type == "file":
-                if val is None:
+            if inp_def.type in ("file", "output_file"):
+                if val is None or (isinstance(val, str) and not val.strip()):
                     yield add(f"Warning: please provide: {inp_def.label}"), gr.update(visible=False)
                     return
                 fpath = Path(val.name if hasattr(val, "name") else val)
@@ -435,6 +467,7 @@ def render(skill: SkillInfo) -> None:
         with gr.Column(scale=1):
             # Build input components from skill.inputs.
             input_components = []
+            output_pickers = []   # (dropdown, refresh_btn, match, file_types)
             for inp in skill.inputs:
                 if inp.type == "file":
                     comp = gr.File(
@@ -442,6 +475,21 @@ def render(skill: SkillInfo) -> None:
                         file_types=list(inp.file_types) if inp.file_types else None,
                         type="filepath",
                     )
+                elif inp.type == "output_file":
+                    # Pick a prior-step output from the outputs folder, with a
+                    # refresh button — same UX as the Review-Mappings CSV picker.
+                    _choices = _scan_output_files(inp.match, tuple(inp.file_types))
+                    with gr.Row():
+                        comp = gr.Dropdown(
+                            label=inp.label,
+                            choices=_choices,
+                            value=_choices[0] if _choices else None,
+                            allow_custom_value=True,
+                            interactive=True,
+                            scale=5,
+                        )
+                        _rbtn = gr.Button("↻", scale=0, min_width=40)
+                    output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
                 elif inp.type == "files":
                     comp = gr.File(
                         label=inp.label,
@@ -472,7 +520,7 @@ def render(skill: SkillInfo) -> None:
             model_dd = gr.Dropdown(
                 label="Model",
                 choices=initial_choices,
-                value=initial_choices[0][1] if initial_choices else None,
+                value=_default_model_value(initial_choices),
                 allow_custom_value=True,
                 interactive=True,
             )
@@ -493,6 +541,13 @@ def render(skill: SkillInfo) -> None:
         fn=lambda: gr.update(choices=_refresh_models()),
         outputs=model_dd,
     )
+
+    # Wire each output-folder picker's refresh button to re-scan the outputs dir.
+    for _comp, _rbtn, _match, _fts in output_pickers:
+        _rbtn.click(
+            fn=lambda m=_match, f=_fts: gr.update(choices=_scan_output_files(m, f)),
+            outputs=_comp,
+        )
 
     def _handle_stop():
         from .. import _runner

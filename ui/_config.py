@@ -287,7 +287,23 @@ def active_endpoint_name() -> str:
 # Bridge to the legacy load_model() contract.
 # ---------------------------------------------------------------------------
 
-def _legacy_from_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
+def default_model_for(endpoint: dict[str, Any], cfg: dict[str, Any] | None = None) -> str:
+    """Resolve an endpoint's effective default model.
+
+    Single knob: a top-level ``default_model`` in config.yaml is the default for
+    every endpoint. An endpoint may override it with its own ``default_model``.
+    So you change the default LLM in ONE place (top-level) and it applies to
+    every endpoint that doesn't override it.
+    """
+    own = (endpoint.get("default_model") or "").strip()
+    if own:
+        return own
+    cfg = cfg if cfg is not None else load_portable_config()
+    return (cfg.get("default_model") or "").strip()
+
+
+def _legacy_from_endpoint(endpoint: dict[str, Any],
+                          default_model_fallback: str = "") -> dict[str, Any]:
     """
     Convert a single endpoint block from the portable schema into the
     flat shape that base_agent.load_model expects.
@@ -298,7 +314,7 @@ def _legacy_from_endpoint(endpoint: dict[str, Any]) -> dict[str, Any]:
 
     common = {
         "base_url": endpoint["base_url"],
-        "default_model": endpoint.get("default_model", ""),
+        "default_model": (endpoint.get("default_model") or "").strip() or default_model_fallback,
         "temperature": float(endpoint.get("temperature", 0.0)),
     }
     if provider == "openai_compatible":
@@ -335,7 +351,7 @@ def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
     if name not in endpoints:
         raise KeyError(f"Endpoint '{name}' not found in portable config.")
 
-    legacy = _legacy_from_endpoint(endpoints[name])
+    legacy = _legacy_from_endpoint(endpoints[name], cfg.get("default_model", ""))
 
     # Write into a per-process temp dir so concurrent skill runs don't collide.
     # The dir is registered for deletion on process exit so the API key does

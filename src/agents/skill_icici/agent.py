@@ -369,8 +369,8 @@ def _transform_upi(cheque: str, has_existing_cheque: bool, remarks: str) -> Tupl
     1. Numeric-first: UPI/309897586014/NA/avadhclubslimit//ICI5af2dd7f90
        → cheque=309897586014, desc=avadhclubslimit (drop NA/, strip trailing hash)
 
-    2. VPA-first: UPI/johndoe-1/xfer to self/SBM BANK (INDIA/900012345678/AXI34ca...
-       → cheque=900012345678, desc=johndoe-1/xfer to self/SBM BANK (INDIA
+    2. VPA-first: UPI/johndoe-1/xfer to self/EXAMPLE BANK (INDIA/900012345678/AXI34ca...
+       → cheque=900012345678, desc=johndoe-1/xfer to self/EXAMPLE BANK (INDIA
 
     3. Numeric-first with desc after: UPI/409393425102/cred/credclub@icici/ICICI Bank/MN
        → cheque=409393425102, desc=cred/credclub@icici/ICICI Bank/MN

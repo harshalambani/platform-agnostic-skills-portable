@@ -326,6 +326,50 @@ def is_empty_part(body: str) -> bool:
     return "No Transactions Present" in body
 
 
+def reconcile_part_i(deductors: list[P1Deductor]) -> list[dict]:
+    """Compare each deductor's transaction sub-total against the total the 26AS
+    prints in its header row.
+
+    The 26AS header line for every deductor carries a Total Amount Paid/Credited,
+    Total Tax Deducted and Total TDS Deposited. Those are the document's own
+    authoritative figures. The Excel sub-total is the sum of the transaction
+    rows we parsed. If the two disagree, either a transaction row was dropped or
+    duplicated during parsing, or the 26AS itself is internally inconsistent —
+    either way the user needs to know.
+
+    Returns one dict per deductor whose computed sub-total differs from its
+    header total in any of the three fields (empty list == everything ties out).
+    Comparison is to the paisa (rounded to 2 dp) to avoid float noise.
+    """
+    mismatches: list[dict] = []
+    for d in deductors:
+        comp_amt = round(sum(t.amount for t in d.txns), 2)
+        comp_tax = round(sum(t.tax for t in d.txns), 2)
+        comp_tds = round(sum(t.tds for t in d.txns), 2)
+        diffs = []
+        for field_name, header_val, comp_val in (
+            ("Amount Paid/Credited", round(d.tot_amt, 2), comp_amt),
+            ("Tax Deducted", round(d.tot_tax, 2), comp_tax),
+            ("TDS Deposited", round(d.tot_tds, 2), comp_tds),
+        ):
+            if header_val != comp_val:
+                diffs.append({
+                    "field": field_name,
+                    "header_total": header_val,
+                    "computed_subtotal": comp_val,
+                    "difference": round(comp_val - header_val, 2),
+                })
+        if diffs:
+            mismatches.append({
+                "sr": d.sr,
+                "name": d.name,
+                "tan": d.tan,
+                "txns": len(d.txns),
+                "fields": diffs,
+            })
+    return mismatches
+
+
 # -------------------- xlsx building --------------------
 
 PART_DEFS = {
@@ -508,7 +552,16 @@ def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
                 r += 1
             txn_end = r - 1
 
-            # Sub-total row for this deductor
+            # Sub-total row for this deductor.
+            # Write COMPUTED NUMERIC VALUES (not =SUM formulas): openpyxl never
+            # caches a formula's result, so a bare =SUM reads back as blank in
+            # any data_only consumer (the app preview, pandas, etc.). Summing in
+            # Python guarantees a real number everywhere. It also makes a
+            # zero-transaction deductor show 0 cleanly instead of a broken
+            # backwards SUM range — and the reconciliation step then flags it.
+            sub_amt = sum(t.amount for t in d.txns)
+            sub_tax = sum(t.tax for t in d.txns)
+            sub_tds = sum(t.tds for t in d.txns)
             sub_row = r
             subtotal_rows.append(sub_row)
             label = f"Sub-total — {d.name}  (txns: {len(d.txns)})"
@@ -516,10 +569,8 @@ def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
             ws.cell(row=sub_row, column=2, value=label)
             ws.merge_cells(start_row=sub_row, start_column=2,
                            end_row=sub_row, end_column=12)
-            for col in (13, 14, 15):
-                col_letter = get_column_letter(col)
-                ws.cell(row=sub_row, column=col,
-                        value=f"=SUM({col_letter}{txn_start}:{col_letter}{txn_end})")
+            for col, val in ((13, sub_amt), (14, sub_tax), (15, sub_tds)):
+                ws.cell(row=sub_row, column=col, value=val)
             for c in range(1, ncols + 1):
                 cell = ws.cell(row=sub_row, column=c)
                 cell.fill = SUBTOTAL_FILL
@@ -535,14 +586,16 @@ def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
             ws.row_dimensions[sub_row].height = 20
             r += 1
 
-        # Grand Total
+        # Grand Total — computed numeric values (sum of every transaction;
+        # equals the sum of the deductor sub-totals, without double-counting).
         if subtotal_rows:
+            grand_amt = sum(t.amount for d in deductors for t in d.txns)
+            grand_tax = sum(t.tax for d in deductors for t in d.txns)
+            grand_tds = sum(t.tds for d in deductors for t in d.txns)
             tot_row = r
             ws.cell(row=tot_row, column=2, value="GRAND TOTAL (all deductors)")
-            for col in (13, 14, 15):
-                col_letter = get_column_letter(col)
-                refs = ",".join(f"{col_letter}{sr}" for sr in subtotal_rows)
-                ws.cell(row=tot_row, column=col, value=f"=SUM({refs})")
+            for col, val in ((13, grand_amt), (14, grand_tax), (15, grand_tds)):
+                ws.cell(row=tot_row, column=col, value=val)
             for c in range(1, ncols + 1):
                 cell = ws.cell(row=tot_row, column=c)
                 cell.fill = GRAND_FILL
@@ -606,10 +659,17 @@ def build_part_viii(ws, a: Assessee, rows: list[P8Row]) -> None:
         if len(rows) > 1:
             tot_row = r
             ws.cell(row=tot_row, column=2, value="GRAND TOTAL (all deductees)")
-            for col in (6, 7, 8, 15, 16):
-                col_letter = get_column_letter(col)
-                ws.cell(row=tot_row, column=col,
-                        value=f"=SUM({col_letter}{first_txn_row}:{col_letter}{last_txn_row})")
+            # Computed numeric values, not =SUM (which reads back blank in any
+            # data_only consumer because openpyxl doesn't cache formula results).
+            col_totals = {
+                6: sum(x.tot_txn_amt for x in rows),
+                7: sum(x.tot_tds for x in rows),
+                8: sum(x.tot_other for x in rows),
+                15: sum(x.tds_deposited for x in rows),
+                16: sum(x.other_deposited for x in rows),
+            }
+            for col, val in col_totals.items():
+                ws.cell(row=tot_row, column=col, value=val)
             for c in range(1, ncols + 1):
                 cell = ws.cell(row=tot_row, column=c)
                 cell.fill = GRAND_FILL
@@ -673,12 +733,19 @@ def run(pdf_path: Path, out_path: Path) -> dict:
             build_empty_part(ws, assessee, title)
     wb.save(out_path)
 
+    recon_mismatches = reconcile_part_i(p1)
+
     stats = {
         "assessee": vars(assessee),
         "part_i_deductors": len(p1),
         "part_i_transactions": sum(len(d.txns) for d in p1),
         "part_viii_rows": len(p8),
         "output": str(out_path),
+        "reconciliation": {
+            "deductors_checked": len(p1),
+            "deductors_ok": len(p1) - len(recon_mismatches),
+            "mismatches": recon_mismatches,
+        },
     }
     return stats
 
@@ -697,6 +764,25 @@ def main(argv: list[str]) -> int:
     print(f"Part I: {stats['part_i_deductors']} deductors, "
           f"{stats['part_i_transactions']} transactions")
     print(f"Part VIII: {stats['part_viii_rows']} rows")
+
+    # Reconciliation: computed sub-totals vs the totals the 26AS prints.
+    recon = stats["reconciliation"]
+    mismatches = recon["mismatches"]
+    if not mismatches:
+        print(f"Reconciliation: {recon['deductors_ok']}/"
+              f"{recon['deductors_checked']} deductors OK — all sub-totals "
+              f"match the 26AS header totals.")
+    else:
+        print(f"Reconciliation: {recon['deductors_ok']}/"
+              f"{recon['deductors_checked']} deductors OK — "
+              f"{len(mismatches)} MISMATCH(es) below:")
+        for m in mismatches:
+            print(f"  ! Sr.{m['sr']} {m['name']} (TAN {m['tan']}, "
+                  f"{m['txns']} txns):")
+            for f in m["fields"]:
+                print(f"      {f['field']}: 26AS={f['header_total']:,.2f}  "
+                      f"computed={f['computed_subtotal']:,.2f}  "
+                      f"diff={f['difference']:+,.2f}")
     print(f"Saved: {stats['output']}")
     return 0
 

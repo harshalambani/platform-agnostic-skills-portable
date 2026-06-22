@@ -2,7 +2,7 @@
 # This file is read by the skill registry (agents/registry.py) at startup.
 
 name: "26AS"
-display_name: "26AS"
+display_name: "Convert"
 description: >
   Convert an Indian Income Tax Form 26AS (TRACES Annual Tax Statement) into
   a single Excel workbook with one sheet per Part. Per-deductor sub-totals

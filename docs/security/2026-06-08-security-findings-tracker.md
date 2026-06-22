@@ -146,14 +146,53 @@ Verification: 7/7 static checks pass (sandbox run).
 
 **Mitigation documented:** a `SECURITY NOTE (finding #10)` comment was added to `calculate_md5()` and a `# noqa: S324` annotation added to the `hashlib.md5()` call, explicitly flagging this as a non-security boundary. Any future promotion to a security check must replace MD5 with SHA-256 or stronger.
 
-## Open questions (need dynamic verification)
+## Open questions — RESOLVED 2026-06-22
 
-1. Gradio 6 file router behavior — confirm `allowed_paths` does not permit `..` traversal out of `output_dir` at runtime (relates to #5).
-2. Update banner link — `download_url` comes from the GitHub API response and is rendered as Markdown; low risk since it is the project's own repo, but confirm no attacker-controlled link injection (relates to #9/update path).
+1. **Gradio 6 file router traversal** — ✅ VERIFIED SAFE. `download_staging_dir()` uses `tempfile.mkdtemp()` (random path), `.resolve()` called before passing to `allowed_paths`. Source containment via `is_relative_to()` in `_generic.py`. Copy target uses `out_path.name` (filename only). No traversal possible.
+
+2. **Update banner link injection** — ✅ FIXED (finding #12). Added `https://github.com/` prefix validation. See fix notes below.
+
+## Findings added 2026-06-22
+
+| # | Severity | Finding | Affected location | Status |
+|---|----------|---------|-------------------|--------|
+| 11 | Medium | XSS via innerHTML — Review Mappings tab uses `innerHTML` for account names, MatchReason, and contra badges without HTML escaping. Crafted GnuCash account names or LLM-hallucinated paths containing `<script>` or event handlers would execute in the browser. | `ui/tabs/gnucash_review.py` (5 innerHTML sites) | **FIXED** 2026-06-22 |
+| 12 | Low | Update URL not validated — `download_url` from GitHub API rendered as Markdown link without domain validation. Defence-in-depth against repo compromise or API response tampering. | `ui/_update.py` `_do_check()` | **FIXED** 2026-06-22 |
+
+### Finding #11 — FIXED 2026-06-22
+
+Added `esc()` helper function (HTML entity escaping: `&`, `<`, `>`, `"`) to the Review Mappings JavaScript. All five `innerHTML` assignment sites now pass values through `esc()` before insertion:
+
+- Account picker dropdown: `leaf` and `path` segments
+- Confidence badge: `val` (confidence level)
+- Account column (changed marker): `val` (account path)
+- MatchReason column (contra badge): `val` (reason text), `r._contra_conf` (class name), `r._contra` (title attribute)
+
+The default rendering path already used `textContent` (safe). Only the special-case paths with decorative HTML (badges, markers) were vulnerable.
+
+### Finding #12 — FIXED 2026-06-22
+
+Added URL prefix validation after receiving `html_url` from the GitHub API. If the URL does not start with `https://github.com/`, it is replaced with the hardcoded releases page URL for the project's own repo. This prevents rendering an attacker-controlled URL as a download link if the API response is tampered (e.g., via repo compromise + release manipulation).
+
+## PII audit 2026-06-22
+
+Full rescan of all git-tracked files for personal data. Six locations found and anonymised:
+
+| File | Data replaced | Replacement |
+|------|--------------|-------------|
+| `src/agents/skill_icici/agent.py:372-373` | UPI VPA `johndoe-1`, account `900012345678`, `SBM BANK (INDIA)` | `johndoe-1`, `900012345678`, `EXAMPLE BANK (INDIA)` |
+| `src/agents/skill_gnucash_import/test_transforms.py:80` | `JOHN DOE`, `ACME CONSULTING LLP`, `XYZB0001234` | `JOHN DOE`, `ACME CONSULTING LLP`, `XYZB0001234` |
+| `src/agents/skill_gnucash_account_mapper/AGENT.md` | `MyFinances2425.gnucash`, `ACME CONSULTING LLP` (3 occurrences) | `MyFinances2425.gnucash`, `ACME CONSULTING LLP` |
+| `src/agents/skill_gnucash_reconciler/AGENT.md` | `MyFinances2425.gnucash`, `NEFT-KPMG` | `MyFinances2425.gnucash`, `NEFT-ACME` |
+| `src/agents/skill_gnucash_import/AGENT.md` | `ACME CONSULTING LLP`, NEFT ref `KKBKN6...` | `ACME CONSULTING LLP`, `XYZBN6...` |
+| `src/agents/skill_icici/AGENT.md:35` | `MR HARSH...` | `MR JOHN...` |
+
+**Not anonymised (acceptable):** GitHub username `harshalambani` in repo URLs, `_REPO` constant, and README badges — these are the public project owner identity, not private PII. Email `harshal.subscribe@hotmail.com` in build notes — git config email, expected in a public repo.
+
+**Bug fix:** `pyproject.toml` and `bundling/templates/appinfo.ini.tmpl` had wrong GitHub URLs (`harshal/` instead of `harshalambani/`). Corrected.
 
 ## Suggested sequencing
 
-1. **MP-01** and **MP-02** first (both High, both code-execution).
-2. Then #3 and #5 (medium, ship-blocking for a distributed binary).
-3. #4, #6, #7 as a hardening batch.
-4. #8, #9, #10 as cleanup.
+All 12 findings are now resolved. Suggested next:
+- Run `git filter-repo` to scrub the anonymised PII from commit history (same process as the 2026-06-20 scrub)
+- Phase 7 docs/polish

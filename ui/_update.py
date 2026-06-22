@@ -91,6 +91,12 @@ def _do_check() -> None:
         latest_tag = data.get("tag_name", "")
         html_url = data.get("html_url", "")
 
+        # SECURITY (finding #12): validate the download URL points to GitHub.
+        # Defence-in-depth: if the repo is compromised or the API response is
+        # tampered, we don't want to render an arbitrary URL as a download link.
+        if html_url and not html_url.startswith("https://github.com/"):
+            html_url = f"https://github.com/{_REPO}/releases"
+
         current = _parse_version(_buildinfo.VERSION)
         latest = _parse_version(latest_tag)
 

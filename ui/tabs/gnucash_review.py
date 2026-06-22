@@ -257,6 +257,15 @@ _REVIEW_HTML = r"""
   const GNUCASH_FILE = %%GNUCASH_FILE_JSON%%;
   const CSV_PATH = %%CSV_PATH_JSON%%;
 
+  // SECURITY (finding #11): escape HTML entities before innerHTML insertion.
+  // Prevents XSS via crafted GnuCash account names, MatchReason text, or
+  // any other field that might contain user/LLM-generated content.
+  function esc(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
   // Column config: key, label, sortable
   const COLS = [
     {key: 'Date', label: 'Date', sort: true},
@@ -322,7 +331,7 @@ _REVIEW_HTML = r"""
       const parts = a.split(':');
       const leaf = parts[parts.length - 1];
       const path = parts.slice(0, -1).join(':');
-      div.innerHTML = '<span class="acct-leaf">' + leaf + '</span> <span class="acct-path">' + path + '</span>';
+      div.innerHTML = '<span class="acct-leaf">' + esc(leaf) + '</span> <span class="acct-path">' + esc(path) + '</span>';
       div.onclick = () => { selectedAccount = a; acctSearch.value = a; acctDD.classList.remove('open'); };
       acctDD.appendChild(div);
     });
@@ -483,14 +492,14 @@ _REVIEW_HTML = r"""
         let val = r[c.key] || '';
         if (c.key === 'Confidence') {
           const cls = 'conf-' + (val||'none').toLowerCase();
-          td.innerHTML = '<span class="' + cls + '">' + val + '</span>';
+          td.innerHTML = '<span class="' + cls + '">' + esc(val) + '</span>';
           if (r._changed) td.innerHTML += '<span class="changed-marker">*</span>';
         } else if (c.key === 'Account' && r._changed) {
-          td.innerHTML = val + '<span class="changed-marker"> *</span>';
+          td.innerHTML = esc(val) + '<span class="changed-marker"> *</span>';
           td.title = 'Changed from: ' + r._origAccount;
         } else if (c.key === 'MatchReason' && r._contra) {
-          td.innerHTML = val + '<span class="contra-badge ' + (r._contra_conf || '') +
-            '" title="' + r._contra + '">CONTRA</span>';
+          td.innerHTML = esc(val) + '<span class="contra-badge ' + esc(r._contra_conf || '') +
+            '" title="' + esc(r._contra) + '">CONTRA</span>';
           td.title = r._contra;
         } else {
           td.textContent = val;
