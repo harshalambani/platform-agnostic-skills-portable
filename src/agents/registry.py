@@ -64,6 +64,7 @@ class SkillRequires:
     """External dependency declarations."""
     native_binaries: tuple[str, ...] = ()   # e.g. ("tesseract", "poppler")
     external_tools: tuple[str, ...] = ()    # e.g. ("qpdf",)
+    llm: bool = True                        # False = deterministic, no LLM endpoint needed
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
     requires = SkillRequires(
         native_binaries=tuple(req_raw.get("native_binaries") or ()),
         external_tools=tuple(req_raw.get("external_tools") or ()),
+        llm=bool(req_raw.get("llm", True)),
     )
 
     # Derive package name from directory.

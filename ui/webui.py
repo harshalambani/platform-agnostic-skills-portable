@@ -84,6 +84,53 @@ code, .prose code, .markdown code, .gradio-container code {
     font-family: "JetBrains Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
     font-size: 0.92em;
 }
+
+/* ── Readable file names / paths ──────────────────────────────────────────
+   Selected values in dropdowns + text inputs and the uploaded-file name were
+   rendering low-contrast on the dark theme. Force them to the bright body
+   colour so file names and paths are clearly legible. */
+.gradio-container input[type="text"],
+.gradio-container textarea,
+.gradio-container .wrap-inner input,
+.gradio-container [data-testid="dropdown"] input,
+.gradio-container [data-testid="dropdown"] .single-select,
+.gradio-container .secondary-wrap input {
+    color: #F5F5F5 !important;
+}
+/* Uploaded-file component (gr.File): the file name lives in a <table>; the
+   first/odd row uses --table-odd-background-fill which the theme leaves light,
+   so light filename text was invisible on a light row. Force the rows dark with
+   light text + a visible (blue) download/size link. */
+.gradio-container .file-preview tbody > tr,
+.gradio-container .file-preview tbody > tr:nth-child(odd),
+.gradio-container .file-preview tbody > tr:nth-child(2n) {
+    background: #262626 !important;
+}
+.gradio-container .file-preview,
+.gradio-container .file-preview .filename,
+.gradio-container .file-preview .filename .stem,
+.gradio-container .file-preview .filename .ext {
+    color: #F5F5F5 !important;
+}
+.gradio-container .file-preview .download > a {
+    color: #60A5FA !important;
+}
+
+/* ── RAG status colouring for the run-result panel ────────────────────────
+   Applied by _colorize_status() in ui/tabs/_generic.py. Makes success /
+   warning / error states obvious at a glance across every skill tab. */
+.gradio-container .rag-ok {
+    color: #10B981 !important;
+    font-weight: 600;
+}
+.gradio-container .rag-warn {
+    color: #F59E0B !important;
+    font-weight: 600;
+}
+.gradio-container .rag-error {
+    color: #EF4444 !important;
+    font-weight: 600;
+}
 """
 
 
@@ -115,7 +162,12 @@ def build_app(launch: bool = False) -> gr.Blocks:
         ("gnucash",     "GnuCash"),
         ("utilities",   "Other"),
     ]
-    _known_cats = {k for k, _ in GROUP_ORDER}
+    # "krc" has no top-level GROUP_ORDER entry of its own — it's nested as a
+    # "KRChoksey" sub-tab inside "gnucash" (see below). Exclude it here too,
+    # otherwise the fallback loop at the end of this function (for skills
+    # whose category isn't in _known_cats) renders it a second time as a
+    # flat top-level tab.
+    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc"}
 
     _grouped = defaultdict(list)
     for _s in skills:
@@ -127,19 +179,47 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 tab_home.render(skills=skills)
 
             for _cat_key, _cat_label in GROUP_ORDER:
+                # 26AS is no longer a top-level tab — it's nested under GnuCash.
+                if _cat_key == "26as":
+                    continue
+
                 _cat_skills = _grouped.get(_cat_key, [])
+
+                # GnuCash is a container: a "Banks" sub-tab (statement import +
+                # Review Mappings) and a "26AS" sub-tab (Convert + Journal).
+                if _cat_key == "gnucash":
+                    with gr.Tab(_cat_label):
+                        with gr.Tabs():
+                            with gr.Tab("Banks"):
+                                with gr.Tabs():
+                                    for _skill in _cat_skills:
+                                        with gr.Tab(_skill.display_name):
+                                            tab_generic.render(_skill)
+                                    with gr.Tab("Review Mappings"):
+                                        tab_gnucash_review.render()
+                            with gr.Tab("26AS"):
+                                with gr.Tabs():
+                                    for _skill in _grouped.get("26as", []):
+                                        with gr.Tab(_skill.display_name):
+                                            tab_generic.render(_skill)
+                            with gr.Tab("KRChoksey"):
+                                with gr.Tabs():
+                                    # Order the KRChoksey sub-tabs by workflow
+                                    # (Part I -> II -> III), not alphabetically.
+                                    _krc_order = {"KRChoksey": 0, "Reconcile": 1,
+                                                  "GnuCash Import": 2}
+                                    for _skill in sorted(
+                                        _grouped.get("krc", []),
+                                        key=lambda s: _krc_order.get(s.display_name, 99),
+                                    ):
+                                        with gr.Tab(_skill.display_name):
+                                            tab_generic.render(_skill)
+                    continue
+
                 if not _cat_skills:
                     continue
                 with gr.Tab(_cat_label):
-                    # GnuCash group always uses sub-tabs (skill tabs + Review)
-                    if _cat_key == "gnucash":
-                        with gr.Tabs():
-                            for _skill in _cat_skills:
-                                with gr.Tab(_skill.display_name):
-                                    tab_generic.render(_skill)
-                            with gr.Tab("Review Mappings"):
-                                tab_gnucash_review.render()
-                    elif len(_cat_skills) == 1:
+                    if len(_cat_skills) == 1:
                         tab_generic.render(_cat_skills[0])
                     else:
                         with gr.Tabs():

@@ -407,3 +407,28 @@ def download_staging_dir() -> Path:
 
         atexit.register(_cleanup_dl)
     return _DOWNLOAD_STAGING_DIR
+
+
+def open_in_file_manager(path) -> bool:
+    """
+    Open a file or folder in the OS file manager. Server-side: in the portable
+    app the Gradio server runs on the user's own machine, so this opens the
+    location locally. If a file path is given, its containing folder's file
+    manager is opened. Best-effort; returns True if a launch was attempted.
+    """
+    import os
+    import sys
+    import subprocess
+    from pathlib import Path as _P
+    p = _P(path)
+    target = p if p.exists() else p.parent
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.run(["open", str(target)], check=False)
+        else:
+            subprocess.run(["xdg-open", str(target)], check=False)
+        return True
+    except Exception:
+        return False

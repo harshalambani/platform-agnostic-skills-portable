@@ -153,6 +153,12 @@ def render() -> None:
         f"**Output directory:** `{_config.output_dir()}`"
     )
 
+    _open_out_btn = gr.Button("Open output folder", variant="secondary")
+    _open_out_btn.click(
+        fn=lambda: _config.open_in_file_manager(_config.output_dir()),
+        inputs=None, outputs=None,
+    )
+
     # -----------------------------------------------------------------------
     # Section 1: Active endpoint selector.
     # -----------------------------------------------------------------------

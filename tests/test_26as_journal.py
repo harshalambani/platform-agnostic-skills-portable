@@ -206,6 +206,7 @@ def test_csv_roundtrips_and_balances():
         for row in csv.DictReader(f):
             tid = row["Transaction ID"]
             assert tid.strip(), "every split row must carry the Transaction ID"
+            assert tid.startswith("2526-"), f"Transaction ID needs FY prefix: {tid}"
             assert row["Date"].strip(), "every split row must carry the Date"
             assert row["Amount"].strip(), "every split row must carry an Amount"
             txns.setdefault(tid, 0.0)

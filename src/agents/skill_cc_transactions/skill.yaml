@@ -9,7 +9,7 @@ description: >
 category: "credit_card"
 version: "1.0.0"
 
-mode: "agent"
+mode: "direct"
 entry_point: "agent:run"
 
 inputs:
@@ -32,3 +32,4 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+  llm: false

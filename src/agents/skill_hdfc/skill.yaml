@@ -33,3 +33,4 @@ requires:
   native_binaries: ["tesseract"]   # PDF only; not needed for XLS/XLSX
   python_packages: ["xlrd", "openpyxl", "pypdfium2", "pytesseract"]
   external_tools: []
+  llm: false

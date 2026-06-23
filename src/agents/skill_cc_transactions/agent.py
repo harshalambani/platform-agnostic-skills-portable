@@ -11,7 +11,6 @@ the subprocess → pa_skills.exe → shim roundtrip.
 import sys
 from pathlib import Path
 
-from agents.base_agent import build_agent
 
 SCRIPT = Path(__file__).parent / "scripts" / "create_cc_transaction_list.py"
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
@@ -82,6 +81,7 @@ def run_with_agent(
     Use run() for normal operation.
     """
     from agents.skill_cc_transactions.tools import extract_cc_transactions, check_pdftotext_available
+    from agents.base_agent import build_agent
 
     tools = [extract_cc_transactions, check_pdftotext_available]
     agent = build_agent(tools, SYSTEM_PROMPT, config_path, model_override)

@@ -41,3 +41,4 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+  llm: false

@@ -1,0 +1,56 @@
+# skill.yaml — KR Choksey Bills reconciliation skill manifest (Part II).
+# Read by the skill registry (agents/registry.py) at startup.
+# Renders as a second "Reconcile" sub-tab under GnuCash > KRChoksey
+# (any skill with category "krc" is nested there automatically).
+
+name: "KRC Reconcile"
+display_name: "Reconcile"
+description: >
+  Reconcile KR Choksey contract notes (SLBM confirmation memos + equity trade
+  notes) against the Part I Simplified Ledger workbook. Matches each bill to a
+  ledger movement by amount, corroborates by settlement number (from the Part I
+  References sheet), flags bank pay-in/out as unreconciled pending the GnuCash
+  bank import, and flags any settlement movement that has no contract note.
+  Produces a workbook with Bills, Trade Lines, and Reconciliation sheets.
+category: "krc"
+version: "1.1.0"
+
+# Direct mode — deterministic, no LLM. Guarantees the output file is written
+# (and therefore the download button appears).
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "ledger_xlsx"
+    type: "output_file"
+    label: "Part I Simplified Ledger workbook"
+    match: "*-KRC-Ledger.xlsx"
+    file_types: [".xlsx"]
+    required: true
+  - name: "cn_dir"
+    type: "files"
+    label: "Contract Notes (SLBM memos + trade notes)"
+    file_types: [".pdf"]
+    required: true
+  - name: "password"
+    type: "text"
+    label: "PDF password (account holder's PAN)"
+    required: true
+
+run_args:
+  cn_dir: "{inputs.cn_dir}"
+  ledger_xlsx: "{inputs.ledger_xlsx}"
+  password: "{inputs.password}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "KRC-Bills-Recon"
+  download_label: "Download Excel"
+
+requires:
+  native_binaries: []
+  external_tools: ["qpdf"]
+  llm: false

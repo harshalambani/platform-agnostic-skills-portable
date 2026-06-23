@@ -411,6 +411,19 @@ def journal_date() -> str:
     return _dt.date(_dt.date.today().year, 3, 31).isoformat()
 
 
+def fy_prefix(fy: str) -> str:
+    """Compact financial-year prefix for Transaction IDs: '2025-26' -> '2526'.
+
+    Keeps Transaction IDs unique across years (next year's TDSJ01 would
+    otherwise collide). Falls back to the journal date's FY when fy is blank
+    (31-March of year Y closes FY (Y-1)-(Y))."""
+    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
+    if m:
+        return m.group(1)[2:] + m.group(2)
+    y = _dt.date.today().year
+    return f"{(y - 1) % 100:02d}{y % 100:02d}"
+
+
 def _fmt(x: float) -> str:
     return f"{x:.2f}" if x else ""
 
@@ -425,10 +438,11 @@ def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
         # convention: Debit = positive, Credit = negative; per transaction the
         # Amounts sum to zero. (If a given build of GnuCash imports the signs
         # reversed, map this column to "Amount (Negated)" instead.)
-        w.writerow(["Date", "Transaction ID", "Description", "Account",
+        w.writerow(["Date", "Transaction ID", "Number", "Description", "Account",
                     "Amount", "Currency"])
+        fy_pfx = fy_prefix(fy)
         for j in journals:
-            txn_id = f"TDSJ{j.sr:02d}"
+            txn_id = f"{fy_pfx}-TDSJ{j.sr:02d}"
             desc = f"TDS FY {fy} - {j.deductor} (Sec {j.section_label})" if fy \
                 else f"TDS - {j.deductor} (Sec {j.section_label})"
             # Repeat Date / Transaction ID / Description on EVERY split row.
@@ -437,7 +451,8 @@ def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
             # continuation rows — blank rows show up as parse errors.
             for s in j.splits:
                 signed = round(s.debit - s.credit, 2)   # Dr +, Cr -
-                w.writerow([date, txn_id, desc, s.account,
+                # Number duplicates Transaction ID -> GnuCash visible Num field.
+                w.writerow([date, txn_id, txn_id, desc, s.account,
                             f"{signed:.2f}", CURRENCY])
 
 

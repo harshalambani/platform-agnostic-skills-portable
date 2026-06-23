@@ -1,0 +1,45 @@
+# skill.yaml — KR Choksey ledger-simplification skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+# Rendered in the UI as the "KRChoksey" sub-tab nested under the "GnuCash" group.
+
+name: "KRC Ledger"
+display_name: "KRChoksey"
+description: >
+  Simplify a KR Choksey broker annual ledger statement PDF: decrypt with the
+  account holder's PAN, reconstruct the ledger table, drop broker-internal
+  segment-to-segment transfer entries, and produce a single-sheet "Simplified
+  Ledger" Excel workbook whose running balance ties out to the statement's
+  own printed closing balance.
+category: "krc"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_path"
+    type: "file"
+    label: "KR Choksey Ledger Statement PDF"
+    file_types: [".pdf"]
+    required: true
+  - name: "password"
+    type: "text"
+    label: "PDF password (account holder's PAN)"
+    required: true
+
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  password: "{inputs.password}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "KRC-Ledger"
+  download_label: "Download Excel"
+
+requires:
+  native_binaries: []
+  external_tools: ["qpdf"]
+  llm: false

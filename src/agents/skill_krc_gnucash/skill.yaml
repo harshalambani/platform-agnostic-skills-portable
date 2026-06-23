@@ -1,0 +1,48 @@
+# skill.yaml — KR Choksey -> GnuCash (Part III) manifest.
+# Renders as a third sub-tab under GnuCash > KRChoksey (category "krc").
+
+name: "KRC GnuCash"
+display_name: "GnuCash Import"
+description: >
+  Convert the Part II KR Choksey "Bills" workbook into importable GnuCash
+  multi-split CSVs: Purchase (Dr security / Cr broker, with share quantity),
+  SLBM (Dr broker / Cr Income from SLBS), and Sale (Dr broker / Cr security at
+  FIFO cost basis / Cr Long & Short Term Capital Gain). FIFO cost basis and the
+  long-term holding threshold come from the .gnucash book and an editable config
+  in Data/settings/. Outputs Purchase.csv, SLBM.csv, Sale.csv.
+category: "krc"
+version: "1.0.0"
+
+# Deterministic — no LLM.
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "bills_xlsx"
+    type: "output_file"
+    label: "Part II Bills workbook"
+    match: "*-KRC-Bills-Recon.xlsx"
+    file_types: [".xlsx"]
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (.gnucash)"
+    file_types: [".gnucash"]
+    required: true
+
+run_args:
+  bills_xlsx: "{inputs.bills_xlsx}"
+  gnucash_path: "{inputs.gnucash_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  type: "directory"
+  suffix: "KRC-GnuCash"
+  download_label: "Open output folder"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false

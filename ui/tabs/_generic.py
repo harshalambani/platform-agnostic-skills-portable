@@ -64,12 +64,13 @@ _MAX_FILE_COUNT: int = 20                          # max files per run
 _choices_cache: list[tuple[str, str]] | None = None
 
 
-def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[str]:
+def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[str, str]]:
     """List files in the output dir for an 'output_file' picker, newest first.
 
-    Uses the input's `match` glob (e.g. '*-26AS.xlsx') when given, otherwise
-    falls back to '*<ext>' for each declared file type. Mirrors the Mapped-CSV
-    picker on the GnuCash Review tab so prior-step outputs are easy to pick.
+    Returns (label, value) pairs where the label is the file NAME (so the
+    dropdown shows the name, not a long truncated path) and the value is the
+    full path passed to the skill. Uses the input's `match` glob (e.g.
+    '*-26AS.xlsx') when given, otherwise '*<ext>' for each declared file type.
     """
     try:
         out_dir = _config.output_dir()
@@ -80,7 +81,7 @@ def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[str]:
     for pat in patterns:
         found.update(out_dir.glob(pat))
     files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
-    return [str(p) for p in files[:30]]
+    return [(p.name, str(p)) for p in files[:30]]
 
 
 def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
@@ -155,6 +156,42 @@ def _check_external_tools(skill: SkillInfo) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# RAG colouring for run-status output.
+#
+# Wraps status lines in coloured <div> blocks so the result panel makes
+# success / warning / error states obvious at a glance (green / amber / red).
+# Only lines that clearly signal a state are recoloured; ordinary progress
+# lines and the agent reply keep the default colour. Applied to every skill
+# tab via add()/tick() in the run handler.
+# ---------------------------------------------------------------------------
+
+def _colorize_status(md: str) -> str:
+    out: list[str] = []
+    for ln in md.split("\n"):
+        s = ln.strip()
+        low = s.lower()
+        if not s:
+            out.append(ln)
+            continue
+        if low.startswith("error:") or low.startswith("security error:"):
+            out.append(f'<div class="rag-error">⛔ {s}</div>')
+        elif low.startswith("warning:"):
+            out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>')
+        elif "**cancelled**" in low or low.startswith("cancelled"):
+            out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>')
+        elif (s.startswith("### Done") or s.startswith("### ✓") or s.startswith("✓")
+              or low.startswith("ok —") or low.startswith("ok -")
+              or "all balanced" in low or "complete" in low):
+            txt = s.lstrip("#").replace("**", "").strip()
+            if txt.startswith("✓"):
+                txt = txt[1:].strip()
+            out.append(f'<div class="rag-ok">✅ {txt}</div>')
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
 
@@ -173,14 +210,14 @@ def _make_run_handler(skill: SkillInfo):
 
         def add(line: str) -> str:
             log.append(line)
-            return "\n\n".join(log)
+            return _colorize_status("\n\n".join(log))
 
         def tick(line: str) -> str:
             if log and log[-1].startswith("**Running** —"):
                 log[-1] = line
             else:
                 log.append(line)
-            return "\n\n".join(log)
+            return _colorize_status("\n\n".join(log))
 
         # -- Step 1: validate inputs --
         yield add("**Validating inputs…**"), gr.update(visible=False)
@@ -270,25 +307,34 @@ def _make_run_handler(skill: SkillInfo):
             yield add(tool_err), gr.update(visible=False)
             return
 
-        # -- Step 3: check LLM endpoint --
-        yield add("**Checking LLM endpoint…**"), gr.update(visible=False)
-
+        # -- Step 3: resolve endpoint config (always; needed later for
+        #    materialize_legacy_config), then health-check it only for skills
+        #    that actually use an LLM. --
         cfg = _config.load_portable_config()
         endpoints = cfg.get("endpoints") or {}
         active = cfg.get("active_endpoint", "")
         ep = endpoints.get(active) or {}
-        health = _health.check(ep)
-        if not health.ok:
-            yield add(
-                f"Error: endpoint '{active}' is {health.status}: {health.detail}. "
-                "Fix in Data\\settings\\config.yaml and Refresh on the Home tab."
-            ), gr.update(visible=False)
-            return
 
-        yield add(
-            f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
-            "First call may take 30–60s while the model loads."
-        ), gr.update(visible=False)
+        if skill.requires.llm:
+            yield add("**Checking LLM endpoint…**"), gr.update(visible=False)
+
+            health = _health.check(ep)
+            if not health.ok:
+                yield add(
+                    f"Error: endpoint '{active}' is {health.status}: {health.detail}. "
+                    "Fix in Data\\settings\\config.yaml and Refresh on the Home tab."
+                ), gr.update(visible=False)
+                return
+
+            yield add(
+                f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
+                "First call may take 30–60s while the model loads."
+            ), gr.update(visible=False)
+        else:
+            # Deterministic skill — no LLM endpoint required; run fully offline.
+            yield add(
+                "**Running** — deterministic skill (no LLM required)."
+            ), gr.update(visible=False)
 
         # -- Build output path --
         out_dir = _config.output_dir()
@@ -445,6 +491,28 @@ def _make_run_handler(skill: SkillInfo):
 # Public: render a tab for a given skill.
 # ---------------------------------------------------------------------------
 
+def _open_output_folder(suffix: str, is_dir_output: bool):
+    """
+    Open the relevant output location in the OS file manager. Directory-output
+    skills open their most recent result subfolder; file-output skills open the
+    outputs root (where the dated output file is saved).
+    """
+    base = _config.output_dir()
+    target = base
+    if is_dir_output and base.is_dir():
+        try:
+            matches = sorted(
+                (q for q in base.glob(f"*-{suffix}") if q.is_dir()),
+                key=lambda q: q.stat().st_mtime,
+            )
+            if matches:
+                target = matches[-1]
+        except Exception:
+            pass
+    _config.open_in_file_manager(target)
+    return None
+
+
 def render(skill: SkillInfo) -> None:
     """
     Render a complete Gradio tab body for the given skill.
@@ -464,7 +532,9 @@ def render(skill: SkillInfo) -> None:
     gr.Markdown("\n".join(banner_parts))
 
     with gr.Row():
-        with gr.Column(scale=1):
+        # Inputs get equal width with the results pane so long output-file
+        # picker filenames (e.g. the Part I ledger) fit without truncation.
+        with gr.Column(scale=2):
             # Build input components from skill.inputs.
             input_components = []
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
@@ -483,7 +553,7 @@ def render(skill: SkillInfo) -> None:
                         comp = gr.Dropdown(
                             label=inp.label,
                             choices=_choices,
-                            value=_choices[0] if _choices else None,
+                            value=_choices[0][1] if _choices else None,
                             allow_custom_value=True,
                             interactive=True,
                             scale=5,
@@ -536,6 +606,13 @@ def render(skill: SkillInfo) -> None:
                 visible=False,
                 variant="primary",
             )
+            # Every result tab gets a button to open the output location in
+            # the file manager (directory skills -> their result folder;
+            # file skills -> the outputs folder holding the dated file).
+            open_folder_btn = gr.Button(
+                "Open output folder",
+                variant=("primary" if skill.output.type == "directory" else "secondary"),
+            )
 
     refresh_models_btn.click(
         fn=lambda: gr.update(choices=_refresh_models()),
@@ -561,4 +638,10 @@ def render(skill: SkillInfo) -> None:
         fn=handler,
         inputs=input_components + [model_dd],
         outputs=[result_md, download],
+    )
+
+    open_folder_btn.click(
+        fn=lambda _s=skill.output.suffix, _d=(skill.output.type == "directory"):
+            _open_output_folder(_s, _d),
+        inputs=None, outputs=None,
     )

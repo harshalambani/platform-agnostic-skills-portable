@@ -28,8 +28,12 @@ from ui import _config as _config_mod
 # Output-folder CSV scanner
 # ---------------------------------------------------------------------------
 
-def _scan_import_ready_csvs() -> list[str]:
-    """Find *GnuCash_import_ready.csv files in the output dir, newest first."""
+def _scan_import_ready_csvs() -> list[tuple[str, str]]:
+    """Find *GnuCash_import_ready.csv files in the output dir, newest first.
+
+    Returns (label, value) pairs: label is the file NAME (so the dropdown shows
+    the name rather than a long truncated path), value is the full path.
+    """
     try:
         out_dir = _config_mod.output_dir()
     except Exception:
@@ -39,7 +43,7 @@ def _scan_import_ready_csvs() -> list[str]:
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    return [str(p) for p in csvs[:20]]
+    return [(p.name, str(p)) for p in csvs[:20]]
 
 
 # ---------------------------------------------------------------------------
@@ -763,7 +767,7 @@ def render() -> None:
         csv_dropdown = gr.Dropdown(
             label="Mapped CSV",
             choices=initial_csvs,
-            value=initial_csvs[0] if initial_csvs else None,
+            value=initial_csvs[0][1] if initial_csvs else None,
             allow_custom_value=True,
             scale=4,
         )

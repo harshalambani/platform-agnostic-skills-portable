@@ -248,6 +248,11 @@ def render() -> None:
 
     with gr.Row():
         refresh_btn = gr.Button("Refresh", variant="secondary")
+        _open_out_btn = gr.Button("Open output folder", variant="secondary")
+    _open_out_btn.click(
+        fn=lambda: _config.open_in_file_manager(_config.output_dir()),
+        inputs=None, outputs=None,
+    )
 
     gr.Markdown("---\n\n**Actions** — type or paste a filename from the table above:")
 

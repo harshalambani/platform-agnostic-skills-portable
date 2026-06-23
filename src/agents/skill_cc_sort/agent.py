@@ -1,19 +1,14 @@
 """
-agent.py - Extract and Sort CC PDFs LangGraph agent (v3.0).
+agent.py - Extract and Sort CC PDFs — DIRECT mode, no LLM.
 
-Frozen-mode note: this skill calls a Python script directly (Step 2).
-In frozen mode sys.executable is pa_skills.exe, so we use runpy.run_path()
-to avoid re-launching the entire exe as a child process. In source mode
-we keep the normal subprocess.run() approach.
+Frozen-mode note: in frozen mode sys.executable is pa_skills.exe, so we use
+runpy.run_path() to avoid re-launching the entire exe as a child process; in
+source mode we use subprocess. Pre-flight dependency checks are deterministic
+(no language model).
 """
+import shutil
 import sys
 from pathlib import Path
-
-from agents.base_agent import build_agent
-from agents.skill_cc_sort.tools import check_qpdf_available, check_extract_msg_available
-
-SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
-TOOLS = [check_qpdf_available, check_extract_msg_available]
 
 SCRIPT = Path(__file__).parent / "scripts" / "extract_sort_cc_pdfs.py"
 
@@ -51,45 +46,35 @@ def run(
     model_override: str = None,
 ) -> str:
     """
-    Run the CC Sort agent and return the final response.
-
-    Strategy: use the LLM only for pre-flight checks (qpdf, extract-msg).
-    Call the script directly with exact paths to avoid LLM path substitution bugs.
-
-    Args:
-        input_folder:   Folder containing MSG files and/or raw PDFs.
-        output_folder:  Folder where organized output will be created.
-        password:       Decryption password(s), comma-separated. Empty = auto-detect.
-        config_path:    Path to config.yaml.
-        model_override: Optional model name, e.g. 'gemma4', 'llama3.1'.
+    Decrypt + sort raw CC PDFs/MSGs into organized folders under output_folder.
+    Direct mode — no LLM. config_path / model_override accepted for interface
+    compatibility and ignored.
     """
-    # Step 1: pre-flight checks via LLM agent
-    agent = build_agent(TOOLS, SYSTEM_PROMPT, config_path, model_override)
-    check_result = agent.invoke({
-        "messages": [(
-            "user",
-            "Check that qpdf and extract-msg are both available. "
-            "Report OK or what needs to be installed."
-        )]
-    })
-    check_summary = check_result["messages"][-1].content
-    print(f"[Pre-flight] {check_summary}")
+    # Deterministic pre-flight checks (qpdf is also checked by the framework).
+    if shutil.which("qpdf") is None:
+        return "ERROR: qpdf not found on PATH. Install qpdf and retry."
+    notes = []
+    try:
+        import extract_msg  # noqa: F401
+    except Exception:
+        notes.append("Note: extract-msg not importable — .msg inputs will be "
+                     "skipped; PDFs are still processed.")
 
-    # Step 2: call the script directly with exact paths (no LLM involvement).
-    # Uses runpy in frozen mode to avoid subprocess → pa_skills.exe → shim overhead.
     args = [input_folder, output_folder]
     if password:
         args.append(password)
 
     print(f"\n[Running] {SCRIPT.name} {' '.join(args)}\n")
     rc = _run_script(SCRIPT, args)
-
     if rc != 0:
         return f"Sort failed with exit code {rc}. Check output above for details."
 
-    return (
+    msg = (
         f"Sort completed successfully.\n"
         f"Input:  {input_folder}\n"
         f"Output: {output_folder}\n"
         f"Check the Decrypted_PDFs_Correct/ folder in the output location."
     )
+    if notes:
+        msg += "\n\n" + "\n".join(notes)
+    return msg
