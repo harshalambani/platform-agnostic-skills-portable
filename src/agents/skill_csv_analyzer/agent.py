@@ -9,10 +9,16 @@ from __future__ import annotations
 from pathlib import Path
 
 from agents.base_agent import build_agent
-from agents.skill_csv_analyzer.tools import describe_csv, query_csv
+from agents.skill_csv_analyzer.tools import (
+    aggregate_csv,
+    describe_csv,
+    filter_count_csv,
+    sort_head_csv,
+    value_counts_csv,
+)
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
-TOOLS = [describe_csv, query_csv]
+TOOLS = [describe_csv, aggregate_csv, value_counts_csv, filter_count_csv, sort_head_csv]
 
 
 def run(
@@ -50,8 +56,9 @@ def run(
             f"Analyse this CSV file and answer my question.\n\n"
             f"**CSV file:** {csv_path}\n"
             f"**Question:** {question}\n\n"
-            f"Start by calling describe_csv to understand the data, "
-            f"then use query_csv to answer the question."
+            f"Start by calling describe_csv to understand the data, then use "
+            f"aggregate_csv, value_counts_csv, filter_count_csv, or sort_head_csv "
+            f"to answer the question."
         )]
     })
 

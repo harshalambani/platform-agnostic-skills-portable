@@ -384,7 +384,8 @@ class TestCSVAnalyzerSafety:
             str(FIXTURES / "sales.csv"),
             filters=[{"column": "region", "op": "in", "value": ["North", "South"]}],
         )
-        assert "5 of 10" in result
+        # region in [North, South]: rows 1,2,3,5,7,10 = 6 rows
+        assert "6 of 10" in result
 
     def test_filter_count_empty_filters_rejected(self):
         result = self.filter_count_csv(str(FIXTURES / "sales.csv"), filters=[])
