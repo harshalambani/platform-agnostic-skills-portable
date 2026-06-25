@@ -16,20 +16,32 @@ your data local.
 
 ## Skills
 
-| Skill | Mode | What it does |
-|-------|------|--------------|
-| 26AS — Form 26AS to Excel | agent | Parse Indian tax Form 26AS PDF → structured Excel workbook |
-| BoB — Bank of Baroda to CSV | agent | Parse BoB statement PDFs → clean transaction CSV |
-| CC Sort — Extract & Organize CC PDFs | agent | Sort credit-card statement PDFs by bank/issuer, extract from .msg |
-| CC Transactions — Extract to Excel | agent | Extract transaction tables from CC statement PDFs → Excel |
-| CSV Data Analyzer | agent | Ask natural-language questions about any CSV file |
-| HSBC — Bank Statements to Excel | agent | OCR + parse HSBC statement PDFs → reconciled Excel workbook |
-| MSG / Email Parser | direct | Parse .msg or .eml → structured JSON (sender, date, body, attachments) |
-| Document Summarizer | direct | Summarise any PDF or text file → Markdown |
-| Text Translator | direct | Translate text between languages via LLM |
+16 skills are exposed in the UI (a further 6 internal pipeline steps run only
+as part of GnuCash Import — see [src/agents](src/agents)).
+
+| Skill | Mode | LLM | What it does |
+|-------|------|-----|--------------|
+| Bank of Baroda → CSV | direct | no | Parse BoB statement PDFs → clean transaction CSV |
+| HDFC → GnuCash CSV | direct | no | Convert HDFC statements (scanned PDF or net-banking XLS/XLSX) → GnuCash-importable CSV |
+| HSBC → Excel | agent | yes | OCR + parse HSBC statement PDFs → reconciled Excel workbook |
+| ICICI → GnuCash CSV | agent | yes | Convert ICICI XLS statement downloads → GnuCash-importable CSV |
+| CC Sort — Extract & Organize | direct | no | Sort credit-card statement PDFs by bank/issuer, extract from .msg |
+| CC Transactions → Excel | direct | no | Extract transaction tables from sorted CC PDFs → consolidated Excel |
+| GnuCash Import | agent | yes | End-to-end: bank statement + GnuCash book → mapped, import-ready CSV in one step |
+| 26AS → Excel (Convert) | direct | no | Parse Indian tax Form 26AS PDF → structured Excel workbook |
+| 26AS Journal | agent | yes | Build GnuCash TDS journal entries from a 26AS workbook + your .gnucash file |
+| KRChoksey Ledger | direct | no | Simplify a KR Choksey broker ledger PDF into a tied-out "Simplified Ledger" workbook |
+| KRChoksey GnuCash Import | direct | no | Convert KR Choksey Bills workbook → GnuCash multi-split CSVs (Purchase/SLBM/Sale) |
+| KRChoksey Reconcile | direct | no | Reconcile KR Choksey contract notes against the Simplified Ledger |
+| CSV Data Analyzer | agent | yes | Ask natural-language questions about any CSV file |
+| Document Summarizer | direct | yes | Summarise any PDF or text file → Markdown |
+| MSG / Email Parser | direct | no | Parse .msg or .eml → structured JSON (sender, date, body, attachments) |
+| Text Translator | direct | yes | Translate text between languages via LLM |
 
 **Agent-mode** skills use an LLM with tool-calling for multi-step reasoning.
-**Direct-mode** skills send a single prompt (or do pure extraction with no LLM).
+**Direct-mode** skills send a single prompt (or do pure extraction). The
+**LLM** column shows which skills currently require a model connection —
+HSBC and ICICI are next in line to go fully offline (see CHANGELOG).
 
 ## Quick start — end user
 

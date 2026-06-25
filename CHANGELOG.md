@@ -4,6 +4,20 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] — 2026-06-25
+
+### Fixed
+- **README skills table** — was stale at 9 skills from the 1.0.0 release;
+  now lists all 16 user-facing skills (KRChoksey ledger/import/reconcile,
+  HDFC, GnuCash Import pipeline, 26AS Journal, ICICI added since), grouped
+  to match the UI, with accurate mode and LLM-requirement columns.
+
+### Verified
+- Frozen-build smoke test against current `main` (sha `9158ed5`): rebuilt
+  `pa_skills.exe` from source, launched it, confirmed HTTP 200 on the
+  Gradio root and all 16 skill tabs present in the served UI tree. No
+  regressions found.
+
 ## [1.0.0] — 2026-06-04
 
 ### Added
