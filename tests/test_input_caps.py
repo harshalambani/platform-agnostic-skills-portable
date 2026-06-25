@@ -84,7 +84,7 @@ def _make_minimal_skill(input_type: str = "files") -> Any:
         extension=".xlsx",
         download_label="Download",
     )
-    requires = SimpleNamespace(native_binaries=[], external_tools=[])
+    requires = SimpleNamespace(native_binaries=[], external_tools=[], llm=True)
     skill = SimpleNamespace(
         name="test_skill",
         display_name="Test Skill",

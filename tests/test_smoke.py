@@ -82,7 +82,7 @@ def test_skill_cc_transactions_imports():
 # ---------------------------------------------------------------------------
 
 def test_registry_discovers_all_skills():
-    """Registry must find all 8 skills via skill.yaml manifests."""
+    """Registry must find all 16 skills via skill.yaml manifests."""
     from agents.registry import discover
     skills = discover(refresh=True)
     names = {s.name for s in skills}
@@ -98,14 +98,14 @@ def test_registry_discovers_all_skills():
     assert "CSV Analyzer" in names
     # Phase 6 skill
     assert "MSG Parser" in names
-    assert len(skills) == 9
+    assert len(skills) == 16
 
 
 def test_registry_get_by_name():
     from agents.registry import get
     skill = get("26AS")
     assert skill is not None
-    assert skill.mode == "agent"
+    assert skill.mode == "direct"
     assert skill.entry_point == "agent:run"
 
 

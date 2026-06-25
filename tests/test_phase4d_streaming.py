@@ -196,90 +196,43 @@ class TestRunWithStreaming:
 
 
 # ===========================================================================
-# 4. _StreamingAgentWrapper tests (mocked LangGraph agent)
+# 4. Progress-event reporting (post-refactor API)
 # ===========================================================================
+#
+# NOTE: `_StreamingAgentWrapper` (a generic class that wrapped a LangGraph
+# agent's `.stream()` output and translated it into progress-queue events)
+# was removed from agents.base_agent in the "unified agent/skill.yaml/tools.py
+# structure" refactor (commit 3a1b12c). There is no longer a single generic
+# wrapper to test: individual agent-mode skills now call
+# `get_progress_queue().put({...})` directly from their own agent.py (see
+# src/agents/skill_gnucash_pipeline/agent.py and
+# src/agents/skill_gnucash_account_mapper/agent.py for examples). That
+# call-a-queue-directly contract is exactly what TestProgressQueue and
+# TestRunWithStreaming above already cover; there's no generic wrapper class
+# left to exercise here.
 
-class TestStreamingAgentWrapper:
-    """Test the wrapper with a mock agent that simulates LangGraph .stream()."""
 
-    def _make_wrapper(self):
-        from agents.base_agent import _StreamingAgentWrapper
+class TestProgressQueuePutContract:
+    """
+    Verify the now-canonical "skill pushes its own progress dict" contract:
+    any code holding the active progress queue (via get_progress_queue())
+    can push a dict event that run_with_streaming/_format_event can render.
+    """
+
+    def test_skill_can_push_pipeline_event(self):
+        from agents.base_agent import set_progress_queue, get_progress_queue
+        from ui._runner import _format_event
 
         q = queue.Queue()
+        set_progress_queue(q)
+        try:
+            qq = get_progress_queue()
+            assert qq is not None
+            qq.put({"step": 1, "type": "pipeline", "snippet": "doing work"})
+        finally:
+            set_progress_queue(None)
 
-        # Build a mock agent whose .stream() yields LangGraph-style chunks.
-        mock_agent = MagicMock()
-
-        # Simulate: agent thinks → calls tool → tool returns → agent answers
-        ai_msg_with_tool = MagicMock()
-        ai_msg_with_tool.tool_calls = [{"name": "describe_csv", "args": {"csv_path": "test.csv"}}]
-        ai_msg_with_tool.content = ""
-
-        tool_result_msg = MagicMock()
-        tool_result_msg.name = "describe_csv"
-        tool_result_msg.content = "4 columns, 20 rows"
-
-        ai_msg_final = MagicMock()
-        ai_msg_final.tool_calls = []
-        ai_msg_final.content = "The data has 4 columns and 20 rows."
-
-        mock_agent.stream.return_value = [
-            {"agent": {"messages": [ai_msg_with_tool]}},
-            {"tools": {"messages": [tool_result_msg]}},
-            {"agent": {"messages": [ai_msg_final]}},
-        ]
-
-        # Disable get_state to test fallback path.
-        mock_agent.get_state.side_effect = Exception("no checkpointer")
-
-        wrapper = _StreamingAgentWrapper(mock_agent, q)
-        return wrapper, q, mock_agent
-
-    def test_invoke_pushes_events(self):
-        wrapper, q, mock_agent = self._make_wrapper()
-        result = wrapper.invoke({"messages": [("user", "test")]})
-
-        # Drain the queue.
-        events = []
-        while not q.empty():
-            events.append(q.get_nowait())
-
-        types = [e["type"] for e in events]
-        assert "tool_call" in types
-        assert "tool_result" in types
-        assert "llm_response" in types
-
-    def test_invoke_calls_stream(self):
-        wrapper, q, mock_agent = self._make_wrapper()
-        wrapper.invoke({"messages": [("user", "test")]})
-        mock_agent.stream.assert_called_once()
-
-    def test_tool_call_event_has_name(self):
-        wrapper, q, _ = self._make_wrapper()
-        wrapper.invoke({"messages": [("user", "test")]})
-
-        events = []
-        while not q.empty():
-            events.append(q.get_nowait())
-
-        tc_events = [e for e in events if e["type"] == "tool_call"]
-        assert len(tc_events) == 1
-        assert tc_events[0]["tool"] == "describe_csv"
-
-    def test_tool_result_event_has_snippet(self):
-        wrapper, q, _ = self._make_wrapper()
-        wrapper.invoke({"messages": [("user", "test")]})
-
-        events = []
-        while not q.empty():
-            events.append(q.get_nowait())
-
-        tr_events = [e for e in events if e["type"] == "tool_result"]
-        assert len(tr_events) == 1
-        assert "4 columns" in tr_events[0]["snippet"]
-
-    def test_getattr_proxies_to_agent(self):
-        """Wrapper should proxy unknown attributes to the real agent."""
-        wrapper, _, mock_agent = self._make_wrapper()
-        mock_agent.some_prop = "hello"
-        assert wrapper.some_prop == "hello"
+        event = q.get_nowait()
+        md = _format_event(event, elapsed=3)
+        assert "doing work" in md
+        assert "Step 1" in md

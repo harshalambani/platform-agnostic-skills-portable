@@ -46,9 +46,9 @@ class TestRegistryDiscovery:
         self.skills = {s.name: s for s in discover(refresh=True)}
 
     @pytest.mark.parametrize("name,mode,category", [
-        ("summarize", "direct", "general"),
-        ("translate", "direct", "general"),
-        ("CSV Analyzer", "agent", "general"),
+        ("summarize", "direct", "utilities"),
+        ("translate", "direct", "utilities"),
+        ("CSV Analyzer", "agent", "utilities"),
     ])
     def test_skill_discovered(self, name, mode, category):
         assert name in self.skills, f"{name} not discovered"

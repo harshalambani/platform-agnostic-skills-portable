@@ -97,7 +97,7 @@ def dispatcher_ns():
     """Namespace with _bundled_scripts_root and _maybe_dispatch_script loaded."""
     source = WEBUI_PATH.read_text(encoding="utf-8")
     extracted = _extract_dispatcher_source(source)
-    ns: dict[str, Any] = {}
+    ns: dict[str, Any] = {"__file__": str(WEBUI_PATH)}
     exec(compile(extracted, "webui_extracted.py", "exec"), ns)
     assert "_bundled_scripts_root" in ns, "Failed to extract _bundled_scripts_root"
     assert "_maybe_dispatch_script" in ns, "Failed to extract _maybe_dispatch_script"
