@@ -69,5 +69,14 @@ def make_theme() -> gr.themes.Base:
         button_secondary_text_color="#F5F5F5",
         color_accent="#3B82F6",
         color_accent_soft="#1E3A8A",
+        # gr.Dataframe (e.g. the History tab table) otherwise keeps Gradio's
+        # light-mode row defaults (table_even_background_fill="white",
+        # table_odd_background_fill="*neutral_50") — near-invisible against
+        # body_text_color forced to near-white above. Same class of bug
+        # already patched for gr.File's preview table in webui.py's APP_CSS.
+        table_even_background_fill="#171717",
+        table_odd_background_fill="#0A0A0A",
+        table_border_color="#262626",
+        table_text_color="#F5F5F5",
     )
     return theme
