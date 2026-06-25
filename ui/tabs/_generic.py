@@ -21,6 +21,7 @@ Supported input types (declared in skill.yaml):
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import traceback
@@ -352,6 +353,10 @@ def _make_run_handler(skill: SkillInfo):
             # (takes last component only — avoids embedding full paths in filename).
             p = Path(primary_input)
             stem = p.stem if p.suffix else p.name
+            # If the chosen input is itself a prior run output (output_file
+            # picker), it already carries a "YYYY-MM-DD-HHMMSS-" stamp; strip it
+            # so we don't double-stamp and bloat the path.
+            stem = re.sub(r"^\d{4}-\d{2}-\d{2}-\d{6}-", "", stem)
             out_path = out_dir / f"{stamp}-{stem}-{skill.output.suffix}{skill.output.extension}"
 
         # -- Materialise legacy config --

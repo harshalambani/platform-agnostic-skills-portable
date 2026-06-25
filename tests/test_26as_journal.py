@@ -111,10 +111,51 @@ def test_match_no_candidate_goes_suspense():
 
 
 def test_generic_interest_on_fd_never_a_credit_match():
-    """The fixed generic 'Interest on FD' must never be returned as a credit match."""
+    """The generic FD-interest account must never be returned as a credit match."""
+    fd = m.find_generic_fd_account(_accounts())
     for name in ("BANK OF BARODA", "SOME RANDOM FD HOLDER"):
-        acct, *_ = m.match_credit_account(name, "A", _accounts())
-        assert acct != m.ACC_INTEREST_ON_FD
+        acct, _c, _b, cands = m.match_credit_account(name, "A", _accounts(), fd)
+        assert acct != fd
+        assert fd not in cands
+
+
+def test_find_generic_fd_account_variants():
+    """The generic FD account is fuzzy-found regardless of its exact name, and a
+    deductor-specific '... - FD' account is NOT mistaken for the generic one."""
+    def acc(p):
+        return m.Account(p, p.split(":")[-1], "INCOME")
+    # Harshal-style
+    assert m.find_generic_fd_account([acc("Income:Interest Income:Interest on FD"),
+                                      acc("Income:Interest Income:Interest on BOB - FD")]) \
+        == "Income:Interest Income:Interest on FD"
+    # Vaikunth-style ('Interest on Fixed Deposit') + specific accounts present
+    fd = m.find_generic_fd_account([
+        acc("Income:Interest Income:Interest on Fixed Deposit"),
+        acc("Income:Interest Income:Interest on HDFC - FD"),
+        acc("Income:Interest Income:Interest on ICICI Bank - FD"),
+    ])
+    assert fd == "Income:Interest Income:Interest on Fixed Deposit"
+    # No FD account at all -> None (caller falls back to the canonical name)
+    assert m.find_generic_fd_account([acc("Income:Interest Income:Interest on Bonds")]) is None
+
+
+def test_category_a_debit_uses_fuzzy_found_fd_account():
+    """Category A's second debit posts to the chart's actual FD account, even
+    when it isn't literally named 'Interest on FD'."""
+    def acc(p, t="INCOME"):
+        return m.Account(p, p.split(":")[-1], t)
+    accts = [
+        acc("Income:Interest Income:Interest on Fixed Deposit"),
+        acc("Income:Interest Income:Interest on HDFC - FD"),
+        acc("Expense:TDS on Interest", "EXPENSE"),
+        acc("Liabilities:Suspense", "LIABILITY"),
+    ]
+    d = _deductor(2, "HDFC BANK LIMITED", "193", 18023.06, 0.0)
+    j = m.build_journals([d], accts)[0]
+    debit_accts = {s.account for s in j.splits if s.debit}
+    assert "Income:Interest Income:Interest on Fixed Deposit" in debit_accts
+    assert j.credit_account == "Income:Interest Income:Interest on HDFC - FD"
+    assert j.balanced
 
 
 # ---------------------------------------------------------------------------

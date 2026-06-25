@@ -254,32 +254,68 @@ def _acronym(tokens: list[str]) -> str:
     return "".join(t[0] for t in tokens if t)
 
 
-def _candidates_for(category: str, accounts: list[Account]) -> list[Account]:
-    """Income accounts in the relevant subtree (leaves only — has a parent path)."""
+# Tokens that are generic to a fixed-deposit interest account (i.e. NOT a
+# bank/entity name). Used to tell the generic 'Interest on FD' account apart
+# from deductor-specific ones like 'Interest on BOB - FD'.
+FD_NOISE = {"INTEREST", "ON", "FROM", "INCOME", "RECEIVED", "EARNED", "OTHER",
+            "THE", "A", "OF", "FD", "FIXED", "DEPOSIT", "DEPOSITS"}
+
+
+def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
+    """Deterministically locate the GENERIC fixed-deposit interest income
+    account — the Category-A second debit ('Interest on FD' in the spec).
+
+    Its exact name varies per book: 'Interest on FD', 'Interest on Fixed
+    Deposit', 'FD Interest', 'Interest on Fixed Deposits', etc. We fuzzy-match:
+    an INCOME account under an interest subtree that mentions FD / Fixed Deposit
+    and carries NO specific bank/entity token (a specific token means it's a
+    deductor account like 'Interest on BOB - FD', not the generic one)."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.type != "INCOME" or "interest" not in a.path.lower():
+            continue
+        toks = _tokens(a.leaf)
+        tokset = set(toks)
+        has_fd = ("FD" in tokset) or ({"FIXED", "DEPOSIT"} <= tokset)
+        if not has_fd:
+            continue
+        entity = {t for t in toks if t not in FD_NOISE and len(t) > 1}
+        if entity:
+            continue  # deductor-specific (e.g. 'Interest on BOB - FD')
+        # If several generic candidates, prefer the shortest (simplest) leaf.
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
+def _candidates_for(category: str, accounts: list[Account],
+                    fd_exclude: str = "") -> list[Account]:
+    """Income accounts in the relevant subtree. Subtree match is case-insensitive
+    and lenient (handles 'Interest Income', 'Interest Received', 'Dividend
+    Income', 'Dividend - Shares', etc.). The generic FD account (fd_exclude) is
+    never offered as a credit candidate, so a deductor can't land a debit and
+    credit on the same account."""
     out = []
     for a in accounts:
         if a.type != "INCOME":
             continue
-        p = a.path
-        if category == "A" and "Interest Income" in p:
-            # Never offer the fixed generic debit account as a credit candidate,
-            # or a deductor could land a debit and credit on the same account.
-            if a.path == ACC_INTEREST_ON_FD:
+        pl = a.path.lower()
+        if category == "A" and "interest" in pl:
+            if fd_exclude and a.path == fd_exclude:
                 continue
             out.append(a)
-        elif category == "B" and "Dividend" in p:
+        elif category == "B" and "dividend" in pl:
             out.append(a)
-        elif category == "C" and "Remuneration" in p:
+        elif category == "C" and "remuneration" in pl:
             out.append(a)
-    # Keep only leaf-ish accounts (exclude the bare parent like "Income:Dividend - Shares"
-    # when it has children) — but harmless to keep; scoring handles it.
     return out
 
 
 def match_credit_account(deductor: str, category: str,
-                         accounts: list[Account]) -> tuple[Optional[str], str, str, list]:
+                         accounts: list[Account],
+                         fd_account: str = "") -> tuple[Optional[str], str, str, list]:
     """Return (account_path|None, confidence, basis, candidate_paths)."""
-    cands = _candidates_for(category, accounts)
+    cands = _candidates_for(category, accounts, fd_account)
     cand_paths = [c.path for c in cands]
     if not cands:
         return None, "Suspense", "no income accounts in category subtree", []
@@ -352,6 +388,11 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
     LLM-fallback path to resolve deductors the deterministic matcher sent to
     Suspense. An override always wins over the deterministic choice."""
     overrides = overrides or {}
+    # The generic FD-interest debit account ('Interest on FD' in the spec) is
+    # fuzzy-found from the actual chart, since its name varies per book
+    # ('Interest on Fixed Deposit', etc.). Falls back to the canonical name
+    # (surfaced under 'accounts to create') only if no FD account exists.
+    fd_account = find_generic_fd_account(accounts) or ACC_INTEREST_ON_FD
     journals = []
     for d in deductors:
         cat, label = categorize(d.sections)
@@ -369,7 +410,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             journals.append(j)
             continue
 
-        acct, conf, basis, cands = match_credit_account(d.name, cat, accounts)
+        acct, conf, basis, cands = match_credit_account(d.name, cat, accounts, fd_account)
         j.candidates = cands
         if d.sr in overrides and overrides[d.sr]:
             credit_acc = overrides[d.sr]
@@ -387,7 +428,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
         if cat == "A":
             j.splits = [
                 Split(ACC_TDS_INTEREST, debit=a),
-                Split(ACC_INTEREST_ON_FD, debit=round(c - a, 2)),
+                Split(fd_account, debit=round(c - a, 2)),
                 Split(credit_acc, credit=c),
             ]
         elif cat == "B":

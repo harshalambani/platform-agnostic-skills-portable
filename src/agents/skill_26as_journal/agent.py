@@ -13,11 +13,12 @@ from agents.base_agent import build_agent
 from agents.skill_26as_journal.tools import (
     apply_journal_overrides,
     build_tds_journals,
-    verify_journal_csv,
 )
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
-TOOLS = [build_tds_journals, apply_journal_overrides, verify_journal_csv]
+# build/apply verify their own output, so there is no separate verify tool for
+# the model to call with a (possibly garbled) path.
+TOOLS = [build_tds_journals, apply_journal_overrides]
 
 
 def run(
