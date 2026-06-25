@@ -1,0 +1,81 @@
+# skill_parser_generator — internal developer tool, NOT a UI skill.
+#
+# This is a DEV-TIME skill: it creates / corrects / edits the embedded fuzzy
+# deterministic parsers that live under src/agents/skill_<X>/scripts/. It is
+# never shipped to end users and must not appear as a tab in the Gradio UI.
+#
+# HOW IT STAYS HIDDEN (same mechanism as adapter_bob / adapter_hsbc):
+#   registry._parse_manifest() requires name, display_name, mode, entry_point.
+#   With any of those absent it returns None and the skill is skipped, so
+#   webui.py never renders a tab for it. The four gating fields below are kept
+#   COMMENTED OUT on purpose.
+#
+# SESSION B (implementation) — to register this as a real (still dev-only)
+# entry point, uncomment the four fields below. Wiring it into the UI is a
+# separate, deliberate step (it would still need a category webui.py handles).
+#
+#   name: "Parser Generator"
+#   display_name: "Parser Generator"
+#   mode: "agent"
+#   entry_point: "agent:run"
+
+description: >
+  DEV-TIME tool. Create, correct, or edit the project's embedded fuzzy
+  deterministic parsers (src/agents/skill_<X>/scripts/parse_<format>.py).
+  Template-based: fills format-specific blanks into a shared parser skeleton
+  (column x0 ranges, fuzzy row-boundary detection, a self-verifying balance
+  oracle, and the 0/1/2 exit-code contract). Invoked MANUALLY by a developer
+  when an existing parser's tie-out fails (the oracle exits 2: recomputed
+  closing balance != the statement's printed closing balance). LLM-supported,
+  but every result must pass the quality gate before it is committed.
+version: "1.1.0-dev"
+category: "dev"
+
+# --- Design contract (the four decisions locked for v1.1 Session A) ---------
+#
+# 1. CODE LOCATION  generated/edited parsers are written to
+#                   src/agents/skill_<X>/scripts/parse_<format>.py
+#                   (matches the existing convention: parse_tsv.py,
+#                   parse_krc_ledger.py, extract_bob_statement.py, ...).
+#
+# 2. TRIGGER        MANUAL ONLY, on tie-out failure. A developer runs this
+#                   after a parser exits 2. There is no automatic hook.
+#
+# 3. QUALITY GATE   before the edited parser may be committed it must:
+#                     a) AST-validate  (ast.parse succeeds — no syntax errors)
+#                     b) lint          (project linter, advisory + hard-fail set)
+#                     c) re-run tie-out (the parser's own oracle exits 0)
+#                   Fail any step => do not commit; report the diff + failure.
+#
+# 4. APPROACH       TEMPLATE-BASED (fill-in-the-blank), NOT freeform LLM code.
+#                   The LLM proposes only the format-specific blanks (column
+#                   geometry, regexes, row-boundary rules, internal-transfer
+#                   markers); the skeleton's control flow and oracle are fixed.
+#
+# --- Inputs / run_args / output (Session B fills the run wiring) ------------
+# Sketch only this session; uncomment + finalise alongside agent:run in B.
+#
+#   inputs:
+#     - name: "parser_path"
+#       type: "file"
+#       label: "Failing parser script (parse_<format>.py)"
+#       file_types: [".py"]
+#       required: true
+#     - name: "sample_input"
+#       type: "file"
+#       label: "Sample input the parser fails to tie out"
+#       required: true
+#     - name: "tieout_target"
+#       type: "text"
+#       label: "Expected closing balance / tie-out reference"
+#       required: false
+#
+#   output:
+#     extension: ".py"
+#     suffix: "parser"
+#     download_label: "Download corrected parser"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: true
