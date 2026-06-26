@@ -10,9 +10,11 @@
 #   webui.py never renders a tab for it. The four gating fields below are kept
 #   COMMENTED OUT on purpose.
 #
-# SESSION B (implementation) — to register this as a real (still dev-only)
-# entry point, uncomment the four fields below. Wiring it into the UI is a
-# separate, deliberate step (it would still need a category webui.py handles).
+# Session B is IMPLEMENTED, but this stays UI-hidden on purpose: it is a
+# dev-time tool, launched from its CLI (python -m agents.skill_parser_generator),
+# not a Gradio tab. To expose it as a real (still dev-only) entry point, uncomment
+# the four fields below - a separate, deliberate step that would also need a
+# category webui.py handles.
 #
 #   name: "Parser Generator"
 #   display_name: "Parser Generator"

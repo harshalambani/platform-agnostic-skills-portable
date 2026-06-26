@@ -1,8 +1,9 @@
 # Parser Generator Agent (DEV-TIME)
 
-> **Status: SKELETON (v1.1 Session A — design only).** The tools described
-> below are *planned*; they are implemented in Session B. `agent.py` currently
-> ships an empty `TOOLS` list. Do not assume any tool here is callable yet.
+> **Status: IMPLEMENTED (v1.1 Session B).** The deterministic tools below live
+> in `tools.py` and are wired into `agent.py`. Invoke the skill from its dev
+> CLI: `python -m agents.skill_parser_generator --help`. Still UI-hidden and
+> never shipped to end users.
 
 ## Role
 Help a developer **create, correct, or edit** the project's embedded *fuzzy
@@ -67,12 +68,25 @@ skill.**
    commit on your own — a green gate is a precondition for a developer commit,
    not a licence to push.
 
-## Planned tools (Session B implements these in `tools.py`)
-- `validate_parser(parser_path)` — AST-parse + lint; returns problems or OK.
-- `run_tieout(parser_path, sample_input, tieout_target=None)` — execute the
-  parser, capture the exit code, surface the recomputed vs. printed balance.
-- `apply_template_edit(parser_path, blanks)` — fill named blanks into the
-  parser template and write the result back (then re-gate).
+## Tools (`tools.py`)
+- `extract_blanks(parser_path)` — list the editable blank constants (column x0
+  ranges, regexes, boilerplate/transfer markers) and their current values.
+  These are the **only** things you may change. Call it first.
+- `validate_parser(parser_path)` — gate steps 1+2: `ast.parse` then `ruff
+  check`; returns OK or the syntax/lint problems.
+- `apply_template_edit(parser_path, blanks)` — rewrite the *value* of one or
+  more named blank constants of an existing parser (AST-located, so the oracle
+  and control flow are unreachable), then re-validate. `blanks` maps
+  `CONSTANT_NAME` → new value as Python source, e.g.
+  `{"COLUMN_X0": "{'debit': (410, 440), ...}"}`.
+- `create_parser_from_template(output_path, blanks)` — fill blanks into the
+  shared skeleton (`templates/parser_template.py`) and write a new
+  `parse_<format>.py`. `output_path` is enforced to the locked layout. The
+  oracle + exit contract come pre-baked; the `extract_rows`/`write_output`
+  bodies still need implementing afterward.
+- `run_tieout(parser_path, args)` — gate step 3: run the parser with its CLI
+  `args` and report the exit code (0 pass / 1 error / 2 mismatch), surfacing the
+  recomputed-vs-printed balance lines. Success requires exit 0.
 
 ## Non-negotiables
 - Never rewrite the parser's oracle or exit-code contract — only the blanks.
