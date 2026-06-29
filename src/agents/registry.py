@@ -194,6 +194,24 @@ def discover(*, refresh: bool = False) -> list[SkillInfo]:
     return list(_cache)
 
 
+def discover_parser_scripts() -> list[Path]:
+    """
+    Return the project's embedded parser scripts - src/agents/*/scripts/
+    parse_*.py and extract_*.py - sorted by path.
+
+    Used by the Parser Generator tab to offer a pick-list of the known parsers
+    (the "known universe"). Scans the same agents root discovery uses, so it
+    works in both source and frozen mode.
+    """
+    if not _AGENTS_ROOT.is_dir():
+        return []
+    found: set[Path] = set()
+    for scripts_dir in _AGENTS_ROOT.glob("*/scripts"):
+        for pattern in ("parse_*.py", "extract_*.py"):
+            found.update(scripts_dir.glob(pattern))
+    return sorted(found)
+
+
 def get(name: str) -> SkillInfo | None:
     """Look up a skill by name (case-insensitive)."""
     name_lower = name.lower()
