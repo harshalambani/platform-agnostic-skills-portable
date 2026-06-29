@@ -133,7 +133,58 @@ cd "C:\Users\inabm\Documents\Cowork Playground\platform-agnostic-skills-portable
 
 ---
 
-## 6. Creating a new parser - what you still do by hand
+## 6. Managing the existing parsers
+
+The parsers already in the project are the "known universe" the **Parser**
+dropdown lists. They are **not** uniform: each format has its own CLI arguments
+and its own set of blanks, and only some implement the full tie-out oracle. Use
+this table to fill the tab fields correctly when you Fix one.
+
+| Parser (dropdown entry) | What it does | Tie-out args (its CLI signature) | Tie-out exit 2? | Tunable blanks |
+|---|---|---|:--:|---|
+| `skill_krc / parse_krc_ledger.py` | KR Choksey broker ledger -> Simplified Ledger xlsx | `<pdf> <password> <out.xlsx>` | **Yes** | 19 - column x0 ranges (`VNO_X0`..`DRCR_X0`), row/segment regexes, boilerplate + transfer markers |
+| `skill_hsbc / parse_tsv.py` | HSBC statement TSV -> cleaned JSON | `--work-dir <dir> [--out cleaned.json]` | No | 9 - column-right positions (`DEFAULT_*_RIGHT`, `NUM_FRAGMENT_*`), money/date regexes |
+| `skill_bob / extract_bob_statement.py` | Bank of Baroda PDF -> CSV | `<input.pdf> <out.csv>` | No | 5 - `DATE_RE`, `AMOUNT_RE`, `FOOTER_MARKERS`, `INCLUDE_OPENING_BALANCE`, `BASELINE_TOL` |
+| `skill_26as / extract_26as_to_xlsx.py` | Form 26AS PDF -> multi-sheet xlsx | `<input.pdf> <output.xlsx>` | No | field/section regexes (`DEDUCTOR_RX`, `TXN_RX`, `PART_DEFS`, `*_RE`) - **plus many openpyxl styling constants to leave alone** |
+| `skill_cc_sort / extract_sort_cc_pdfs.py` | Sort / route credit-card PDFs | `<in_folder> [out_folder] [password] [flags]` | No | none (a sorter, not a coordinate parser) |
+| `skill_krc_recon / parse_krc_bills.py` | KR Choksey contract-note reconcile | `<cn_dir> <ledger_xlsx> <password> <out_xlsx>` | No | none externalised |
+
+### What this means in practice
+
+- **The exit-2 "Fix" trigger only fully applies to `parse_krc_ledger.py` today.**
+  It is the one parser with the self-verifying balance oracle, so `run_tieout`
+  gets a clean `0` (pass) / `2` (mismatch) signal. For the others the tool still
+  helps you *edit a blank and validate the result*, but the tie-out step just
+  reports whatever exit code that parser uses (usually `0`/`1`) - so treat "Fix"
+  on them as "tune a blank, re-run, and check the output by eye".
+- **`extract_blanks` lists every `UPPER_CASE` constant, not only the
+  parsing-relevant ones.** The oracle and control flow are protected (they are
+  functions, never blanks), but among *constants* the tool cannot tell a column
+  band from a font. On `extract_26as_to_xlsx.py`, only the regex / `PART_DEFS`
+  blanks are parsing logic - the `*_FILL`, `*_FONT`, `BORDER`, `THIN` constants
+  are spreadsheet styling. Target only the format-relevant blanks.
+- **`skill_cc_sort` and `skill_krc_recon` expose no blanks** - they aren't the
+  coordinate-and-regex shape this tool is built around, so there is little for it
+  to do there.
+
+### Maintenance workflow: a bank changed its statement layout
+
+1. **Reproduce.** Run the parser on the new statement - the `gate` CLI subcommand
+   is quickest; it shows the validate result and the parser's exit code/output.
+2. **Inspect the blanks.** `blanks <parser>` (CLI) or the agent's `extract_blanks`;
+   note the column bands / regexes / markers most likely affected (a shifted
+   column is the usual cause).
+3. **Fix one blank at a time.** In the tab, pick the parser, set **Task = Fix**,
+   put its CLI args in **Tie-out args**, and describe the symptom in **Notes**.
+   The agent edits only the blank and re-validates.
+4. **Re-run and confirm.** For `parse_krc_ledger.py`, require tie-out **exit 0**.
+   For the others, re-run and verify the output is correct by inspection.
+5. **Run the skill's tests, then commit yourself:**
+   `.venv\Scripts\python.exe -m pytest tests/ --ignore=tests/test_api_key_encryption.py`
+
+---
+
+## 7. Creating a new parser - what you still do by hand
 
 `Create` fills the template's blanks and gives you a syntactically valid file
 with the **oracle and exit contract already correct**. But two function bodies
@@ -147,7 +198,7 @@ a finished parser for an unseen layout.
 
 ---
 
-## 7. Safety notes
+## 8. Safety notes
 
 - **No silent commits.** The tool edits files and reports; you commit.
 - **Blanks only.** The oracle and exit contract cannot be edited through this
@@ -158,7 +209,7 @@ a finished parser for an unseen layout.
 
 ---
 
-## 8. Tools under the hood (for reference)
+## 9. Tools under the hood (for reference)
 
 | Tool | Role |
 |------|------|
