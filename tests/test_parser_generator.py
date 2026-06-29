@@ -26,14 +26,31 @@ TEMPLATE = PKG / "templates" / "parser_template.py"
 
 
 # --------------------------------------------------------------------------
-# UI-hidden guarantee
+# UI registration (exposed as the "Parser Generator" dev tab)
 # --------------------------------------------------------------------------
 
-def test_skill_stays_hidden_from_ui():
+def test_skill_is_discovered():
     from agents.registry import discover
 
-    pkgs = {s.package for s in discover(refresh=True)}
-    assert "agents.skill_parser_generator" not in pkgs
+    skills = {s.name: s for s in discover(refresh=True)}
+    assert "Parser Generator" in skills
+    s = skills["Parser Generator"]
+    assert s.package == "agents.skill_parser_generator"
+    assert s.mode == "agent"
+    assert s.entry_point == "agent:run_ui"
+    # category "dev" is intentionally outside webui's known groups, so the
+    # fallback renders it as a flat top-level tab.
+    assert s.category == "dev"
+
+
+def test_ui_entry_point_loads():
+    from agents.registry import discover, load_run_function
+
+    skill = next(s for s in discover(refresh=True) if s.name == "Parser Generator")
+    fn = load_run_function(skill)
+    assert callable(fn)
+    # run_ui guards an empty path without touching the LLM.
+    assert fn("Fix a failing parser", "").startswith("Error")
 
 
 # --------------------------------------------------------------------------

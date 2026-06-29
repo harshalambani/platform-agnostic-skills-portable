@@ -60,3 +60,58 @@ def run(
     agent = build_agent(TOOLS, SYSTEM_PROMPT, config_path, model_override)
     result = agent.invoke({"messages": [("user", instruction)]})
     return result["messages"][-1].content
+
+
+def run_ui(
+    task: str,
+    parser_path: str,
+    parser_args: str = "",
+    notes: str = "",
+    output_path: str = "",
+    config_path: str = "config.yaml",
+    model_override: str | None = None,
+) -> str:
+    """
+    UI entry point (skill.yaml entry_point: agent:run_ui).
+
+    Builds a concrete instruction from the Parser Generator tab's fields, drives
+    the agent via run(), saves the report into the run's output directory, and
+    returns the report for the tab to display. The structured fields keep the
+    powered-by-LLM step honest: the tab still only edits blanks and runs the
+    gate via the deterministic tools.
+    """
+    task_l = (task or "").lower()
+    parser_path = (parser_path or "").strip()
+    parser_args = (parser_args or "").strip()
+    notes = (notes or "").strip()
+
+    if not parser_path:
+        return "Error: please provide a parser path."
+
+    if "creat" in task_l:
+        instruction = (
+            f"Create a new parser at {parser_path} for this statement format: "
+            f"{notes or '(name it via FORMAT_NAME)'}. Call "
+            "create_parser_from_template to fill FORMAT_NAME and any blanks you "
+            "can infer, then validate_parser the result. Tell me clearly that the "
+            "extract_rows and write_output bodies are stubs that still need "
+            "implementing by hand. Do not commit."
+        )
+    else:
+        instruction = (
+            f"The parser at {parser_path} failed its tie-out (exit 2)."
+            + (f" Symptom / expected balance: {notes}." if notes else "")
+            + " Use extract_blanks to list the editable blanks, fix only the "
+            "wrong blank constant(s) with apply_template_edit, then re-run the "
+            f"tie-out with run_tieout (args: {parser_args or '<none provided>'}). "
+            "Report the change you made and the gate result; do not claim "
+            "success unless run_tieout reports exit 0. Do not commit."
+        )
+
+    report = run(instruction, config_path=config_path, model_override=model_override)
+
+    if output_path:
+        out_dir = Path(output_path)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "parser-generator-report.md").write_text(report, encoding="utf-8")
+    return report

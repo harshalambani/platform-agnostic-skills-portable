@@ -1,81 +1,64 @@
-# skill_parser_generator — internal developer tool, NOT a UI skill.
+# skill.yaml - Parser Generator (DEV-TIME) manifest.
 #
-# This is a DEV-TIME skill: it creates / corrects / edits the embedded fuzzy
-# deterministic parsers that live under src/agents/skill_<X>/scripts/. It is
-# never shipped to end users and must not appear as a tab in the Gradio UI.
+# A dev-time tool that creates / corrects / edits the embedded fuzzy
+# deterministic parsers under src/agents/skill_<X>/scripts/. Exposed in the UI
+# as its own top-level "Parser Generator" tab: category "dev" is not in
+# webui.py's GROUP_ORDER/_known_cats, so the fallback loop renders it as a flat
+# top-level tab (no webui.py change needed). It is still a developer tool, not
+# an end-user feature - keep it that way.
 #
-# HOW IT STAYS HIDDEN (same mechanism as adapter_bob / adapter_hsbc):
-#   registry._parse_manifest() requires name, display_name, mode, entry_point.
-#   With any of those absent it returns None and the skill is skipped, so
-#   webui.py never renders a tab for it. The four gating fields below are kept
-#   COMMENTED OUT on purpose.
-#
-# Session B is IMPLEMENTED, but this stays UI-hidden on purpose: it is a
-# dev-time tool, launched from its CLI (python -m agents.skill_parser_generator),
-# not a Gradio tab. To expose it as a real (still dev-only) entry point, uncomment
-# the four fields below - a separate, deliberate step that would also need a
-# category webui.py handles.
-#
-#   name: "Parser Generator"
-#   display_name: "Parser Generator"
-#   mode: "agent"
-#   entry_point: "agent:run"
+# It can also be driven from the command line (deterministic, no LLM):
+#   python -m agents.skill_parser_generator --help
 
+name: "Parser Generator"
+display_name: "Parser Generator"
 description: >
   DEV-TIME tool. Create, correct, or edit the project's embedded fuzzy
   deterministic parsers (src/agents/skill_<X>/scripts/parse_<format>.py).
-  Template-based: fills format-specific blanks into a shared parser skeleton
-  (column x0 ranges, fuzzy row-boundary detection, a self-verifying balance
-  oracle, and the 0/1/2 exit-code contract). Invoked MANUALLY by a developer
-  when an existing parser's tie-out fails (the oracle exits 2: recomputed
-  closing balance != the statement's printed closing balance). LLM-supported,
-  but every result must pass the quality gate before it is committed.
-version: "1.1.0-dev"
+  Template-based: the model may only fill the format-specific blanks (column x0
+  ranges, regexes, row-boundary and skip rules); the balance oracle and the
+  0/1/2 exit contract are off-limits. Use the "Fix" task when a parser's tie-out
+  fails (oracle exits 2); use "Create" to scaffold a new parser from the shared
+  template. Every result must pass the quality gate (validate -> tie-out exit 0)
+  before you commit it. See docs/Parser-Generator-Guide.md.
 category: "dev"
+version: "1.1.0"
 
-# --- Design contract (the four decisions locked for v1.1 Session A) ---------
-#
-# 1. CODE LOCATION  generated/edited parsers are written to
-#                   src/agents/skill_<X>/scripts/parse_<format>.py
-#                   (matches the existing convention: parse_tsv.py,
-#                   parse_krc_ledger.py, extract_bob_statement.py, ...).
-#
-# 2. TRIGGER        MANUAL ONLY, on tie-out failure. A developer runs this
-#                   after a parser exits 2. There is no automatic hook.
-#
-# 3. QUALITY GATE   before the edited parser may be committed it must:
-#                     a) AST-validate  (ast.parse succeeds — no syntax errors)
-#                     b) lint          (project linter, advisory + hard-fail set)
-#                     c) re-run tie-out (the parser's own oracle exits 0)
-#                   Fail any step => do not commit; report the diff + failure.
-#
-# 4. APPROACH       TEMPLATE-BASED (fill-in-the-blank), NOT freeform LLM code.
-#                   The LLM proposes only the format-specific blanks (column
-#                   geometry, regexes, row-boundary rules, internal-transfer
-#                   markers); the skeleton's control flow and oracle are fixed.
-#
-# --- Inputs / run_args / output (Session B fills the run wiring) ------------
-# Sketch only this session; uncomment + finalise alongside agent:run in B.
-#
-#   inputs:
-#     - name: "parser_path"
-#       type: "file"
-#       label: "Failing parser script (parse_<format>.py)"
-#       file_types: [".py"]
-#       required: true
-#     - name: "sample_input"
-#       type: "file"
-#       label: "Sample input the parser fails to tie out"
-#       required: true
-#     - name: "tieout_target"
-#       type: "text"
-#       label: "Expected closing balance / tie-out reference"
-#       required: false
-#
-#   output:
-#     extension: ".py"
-#     suffix: "parser"
-#     download_label: "Download corrected parser"
+mode: "agent"
+entry_point: "agent:run_ui"
+
+inputs:
+  - name: "task"
+    type: "select"
+    label: "Task"
+    options: ["Fix a failing parser", "Create a new parser"]
+    required: true
+  - name: "parser_path"
+    type: "text"
+    label: "Parser path (the failing parse_<format>.py to fix, or the new path to create)"
+    required: true
+  - name: "parser_args"
+    type: "text"
+    label: "Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf PASSWORD out.xlsx')"
+    required: false
+  - name: "notes"
+    type: "text"
+    label: "Notes (Fix: the symptom / expected closing balance; Create: the format / FORMAT_NAME)"
+    required: false
+
+run_args:
+  task: "{inputs.task}"
+  parser_path: "{inputs.parser_path}"
+  parser_args: "{inputs.parser_args}"
+  notes: "{inputs.notes}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  type: "directory"
+  suffix: "parser-gen"
+  download_label: "Download report"
 
 requires:
   native_binaries: []

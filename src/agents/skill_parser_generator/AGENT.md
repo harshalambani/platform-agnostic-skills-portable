@@ -1,9 +1,10 @@
 # Parser Generator Agent (DEV-TIME)
 
 > **Status: IMPLEMENTED (v1.1 Session B).** The deterministic tools below live
-> in `tools.py` and are wired into `agent.py`. Invoke the skill from its dev
-> CLI: `python -m agents.skill_parser_generator --help`. Still UI-hidden and
-> never shipped to end users.
+> in `tools.py` and are wired into `agent.py`. Exposed as the top-level
+> **Parser Generator** UI tab (entry point `agent:run_ui`) and runnable from the
+> dev CLI: `python -m agents.skill_parser_generator --help`. A developer tool -
+> not an end-user feature. Usage guide: `docs/Parser-Generator-Guide.md`.
 
 ## Role
 Help a developer **create, correct, or edit** the project's embedded *fuzzy

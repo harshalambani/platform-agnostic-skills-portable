@@ -98,7 +98,9 @@ def test_registry_discovers_all_skills():
     assert "CSV Analyzer" in names
     # Phase 6 skill
     assert "MSG Parser" in names
-    assert len(skills) == 16
+    # v1.1 dev-time skill (exposed as a top-level tab)
+    assert "Parser Generator" in names
+    assert len(skills) == 17
 
 
 def test_registry_get_by_name():
