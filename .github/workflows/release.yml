@@ -144,7 +144,7 @@ jobs:
       # 5. Upload zip as build artifact (useful for debugging)
       # ------------------------------------------------------------------
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PASkillsPortable_${{ env.VERSION }}
           path: dist/PASkillsPortable_*.zip
