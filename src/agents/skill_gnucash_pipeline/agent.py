@@ -30,6 +30,10 @@ from agents.balance_utils import (
     format_balance_summary,
     _safe_float,
 )
+from agents.canonical_io import (
+    write_sidecar as _ci_write_sidecar,
+    read_sidecar as _ci_read_sidecar,
+)
 from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
     reconcile,
@@ -83,33 +87,15 @@ def _write_sidecar(canonical_path: str, bank: str, source: str,
     The pipeline reads this at final-verification time to obtain an
     independent (or at least explicit) expected closing balance instead
     of the tautological last-row value.
+
+    Thin wrapper over the shared ``canonical_io`` tail.
     """
-    sidecar = Path(canonical_path).with_suffix(".csv_summary.json")
-    try:
-        data = {
-            "bank": bank,
-            "source": source,          # "statement_summary" or "derived"
-            "opening_balance": opening,
-            "closing_balance": closing,
-            "row_count": row_count,
-        }
-        with open(sidecar, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        log.info("Wrote sidecar summary: %s", sidecar)
-    except Exception as e:
-        log.warning("Could not write sidecar summary: %s", e)
+    _ci_write_sidecar(canonical_path, bank, source, opening, closing, row_count)
 
 
 def _read_sidecar(canonical_path: str) -> dict | None:
-    """Read the _summary.json sidecar if it exists."""
-    sidecar = Path(canonical_path).with_suffix(".csv_summary.json")
-    if sidecar.is_file():
-        try:
-            with open(sidecar, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            log.warning("Could not read sidecar summary: %s", e)
-    return None
+    """Read the _summary.json sidecar if it exists (shared canonical_io tail)."""
+    return _ci_read_sidecar(canonical_path)
 
 
 # Banks with dedicated extraction skills
