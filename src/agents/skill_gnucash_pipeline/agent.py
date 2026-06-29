@@ -4,10 +4,12 @@ GnuCash Import Pipeline
 End-to-end: raw bank statement → GnuCash-ready mapped CSV.
 
 Chain:
-  1. Bank extraction   (skill_icici / skill_bob / skill_hsbc / generic CSV normaliser)
-  2. Canonical convert (adapter_bob / adapter_hsbc; ICICI already outputs canonical;
-                        HDFC + Other Bank use LLM-assisted column normalisation)
-  3. Account mapping   (skill_gnucash_account_mapper)
+  1. Bank parse → canonical (BankSkill.parse() for ICICI / BoB / HSBC, each of
+                  which extracts AND maps to the canonical schema via the shared
+                  canonical_io tail; HDFC + Other Bank use LLM-assisted column
+                  normalisation; HSBC still runs its OCR pipeline to an enriched
+                  workbook first, which HSBCSkill.parse() then maps)
+  2. Account mapping   (skill_gnucash_account_mapper)
 
 Public surface:
     run() — PA Skills UI entry point.
@@ -31,7 +33,6 @@ from agents.balance_utils import (
     _safe_float,
 )
 from agents.canonical_io import (
-    write_sidecar as _ci_write_sidecar,
     read_sidecar as _ci_read_sidecar,
 )
 from agents.skill_gnucash_reconciler.agent import (
@@ -78,19 +79,6 @@ def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
         if children:
             return str(children[0])
     return path_or_dir
-
-
-def _write_sidecar(canonical_path: str, bank: str, source: str,
-                   opening: float, closing: float, row_count: int) -> None:
-    """Write a _summary.json sidecar next to the canonical CSV.
-
-    The pipeline reads this at final-verification time to obtain an
-    independent (or at least explicit) expected closing balance instead
-    of the tautological last-row value.
-
-    Thin wrapper over the shared ``canonical_io`` tail.
-    """
-    _ci_write_sidecar(canonical_path, bank, source, opening, closing, row_count)
 
 
 def _read_sidecar(canonical_path: str) -> dict | None:
@@ -624,14 +612,13 @@ def run(
             icici_input = _resolve_single_file(icici_input, (".xls", ".xlsx"))
             _emit_progress(1, f"ICICI: extracting statement to canonical CSV")
             log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
+            # ICICISkill.parse() writes the canonical CSV (byte-identical to the
+            # former run() path) plus the sidecar via the shared canonical_io tail.
             try:
-                from skill_icici.agent import run as icici_run  # noqa: E402
-                icici_run(
-                    statement_files=icici_input,
-                    output_path=canonical_path,
-                    config_path=config_path,
-                    model_override=model_override,
-                )
+                from skill_icici.agent import ICICISkill  # noqa: E402
+                icici_result = ICICISkill().parse(icici_input, output_path=canonical_path)
+                log.info("ICICI skill: %d canonical rows (balance_ok=%s)",
+                         icici_result.row_count, icici_result.balance_check.ok)
             except Exception as e:
                 log.error("ICICI extraction failed: %s", e, exc_info=True)
                 return (
@@ -640,74 +627,33 @@ def run(
                 )
 
         elif bank == "Bank of Baroda":
-            bob_raw = str(tmp_path / "bob_raw.csv")
             bob_input = (
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
-            _emit_progress(1, "Bank of Baroda: extracting PDFs to CSV (direct)")
-            log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to CSV")
+            _emit_progress(1, "Bank of Baroda: extracting PDFs to canonical CSV")
+            log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to canonical CSV")
+            # skill_bob.BoBSkill.parse() extracts the PDF table AND maps it to the
+            # canonical schema (the former adapter_bob step is folded in), writing
+            # the canonical CSV + sidecar via the shared canonical_io tail.
             try:
-                # Bypass the LangGraph agent AND subprocess — call extraction
-                # functions directly for proper error tracebacks.
-                from skill_bob.scripts.extract_bob_statement import extract, write_csv as bob_write_csv  # noqa: E402
+                from skill_bob.agent import BoBSkill  # noqa: E402
 
                 bob_src = Path(bob_input)
-                # If input is a directory (staged uploads), find PDFs inside
-                if bob_src.is_dir():
-                    bob_pdfs = sorted(bob_src.glob("*.pdf"))
-                    if not bob_pdfs:
-                        return (
-                            f"## {bank} → no PDFs found\n\n"
-                            f"❌ The staged upload directory contains no .pdf files:\n"
-                            f"`{bob_input}`"
-                        )
-                    # Extract all PDFs and merge rows
-                    all_bob_rows = []
-                    for pdf_file in bob_pdfs:
-                        log.info("BoB extracting: %s", pdf_file.name)
-                        all_bob_rows.extend(extract(pdf_file))
-                    bob_write_csv(all_bob_rows, Path(bob_raw))
-                    log.info("BoB direct extraction: %d rows from %d PDF(s) → %s",
-                             len(all_bob_rows), len(bob_pdfs), bob_raw)
-                else:
-                    bob_rows = extract(bob_src)
-                    bob_write_csv(bob_rows, Path(bob_raw))
-                    log.info("BoB direct extraction: %d rows → %s", len(bob_rows), bob_raw)
+                if bob_src.is_dir() and not sorted(bob_src.glob("*.pdf")):
+                    return (
+                        f"## {bank} → no PDFs found\n\n"
+                        f"❌ The staged upload directory contains no .pdf files:\n"
+                        f"`{bob_input}`"
+                    )
+                bob_result = BoBSkill().parse(bob_src, output_path=canonical_path)
+                log.info("BoB skill: %d canonical rows (balance_ok=%s)",
+                         bob_result.row_count, bob_result.balance_check.ok)
             except Exception as e:
                 log.error("BoB extraction failed: %s", e, exc_info=True)
                 return (
                     f"## {bank} → extraction error\n\n"
                     f"❌ Bank of Baroda extraction failed:\n```\n{e}\n```"
-                )
-            # Check intermediate output before proceeding to adapter
-            if not Path(bob_raw).is_file():
-                return (
-                    f"## {bank} → extraction produced no output\n\n"
-                    f"❌ The BoB extraction did not create an intermediate CSV."
-                )
-            _emit_progress(2, "Bank of Baroda: converting to canonical format")
-            log_lines.append("**Step 2** — Bank of Baroda: converting to canonical format")
-            try:
-                from adapter_bob.agent import adapt_bob_csv  # noqa: E402
-                adapt_result = adapt_bob_csv(bob_raw, canonical_path)
-                if not adapt_result.get("success") and not Path(canonical_path).is_file():
-                    return (
-                        f"## {bank} → canonical conversion failed\n\n"
-                        f"❌ BoB adapter error: {adapt_result.get('error', 'unknown')}\n\n"
-                        f"Issues: {adapt_result.get('issues', [])}"
-                    )
-                log.info("BoB adapter: %d→%d rows", adapt_result.get("rows_input", 0), adapt_result.get("rows_output", 0))
-                # Write sidecar summary (derived — BoB has no independent statement summary yet)
-                _write_sidecar(canonical_path, "Bank of Baroda", "derived",
-                               adapt_result.get("opening_balance", 0),
-                               adapt_result.get("closing_balance", 0),
-                               adapt_result.get("rows_output", 0))
-            except Exception as e:
-                log.error("BoB adapter failed: %s", e, exc_info=True)
-                return (
-                    f"## {bank} → canonical conversion error\n\n"
-                    f"❌ BoB adapter raised an exception:\n```\n{e}\n```"
                 )
 
         elif bank == "HSBC":
@@ -750,25 +696,14 @@ def run(
                 )
             _emit_progress(2, "HSBC: converting to canonical format")
             log_lines.append("**Step 2** — HSBC: converting to canonical format")
+            # HSBCSkill.parse() maps the enriched workbook to the canonical
+            # schema (folds in the former adapter_hsbc, with the column-mapping
+            # bug fixed) and writes the canonical CSV + sidecar.
             try:
-                from adapter_hsbc.agent import adapt_hsbc_xlsx  # noqa: E402
-                try:
-                    import pandas  # noqa: F401
-                    from adapter_hsbc.agent import adapt_hsbc_xlsx_pandas  # noqa: E402
-                    hsbc_adapt_result = adapt_hsbc_xlsx_pandas(hsbc_xlsx, canonical_path)
-                except ImportError:
-                    hsbc_adapt_result = adapt_hsbc_xlsx(hsbc_xlsx, canonical_path)
-                if not hsbc_adapt_result.get("success") and not Path(canonical_path).is_file():
-                    return (
-                        f"## {bank} → canonical conversion failed\n\n"
-                        f"❌ HSBC adapter error: {hsbc_adapt_result.get('error', 'unknown')}\n\n"
-                        f"Issues: {hsbc_adapt_result.get('issues', [])}"
-                    )
-                # Write sidecar summary (derived — HSBC has no independent statement summary yet)
-                _write_sidecar(canonical_path, "HSBC", "derived",
-                               hsbc_adapt_result.get("opening_balance", 0),
-                               hsbc_adapt_result.get("closing_balance", 0),
-                               hsbc_adapt_result.get("rows_output", 0))
+                from skill_hsbc.agent import HSBCSkill  # noqa: E402
+                hsbc_result = HSBCSkill().parse(hsbc_xlsx, output_path=canonical_path)
+                log.info("HSBC skill: %d canonical rows (balance_ok=%s)",
+                         hsbc_result.row_count, hsbc_result.balance_check.ok)
             except Exception as e:
                 log.error("HSBC adapter failed: %s", e, exc_info=True)
                 return (

@@ -15,14 +15,19 @@ import csv
 import json
 import logging
 import re
+import tempfile
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents.balance_utils import format_balance_summary as _fmt_bal
+from agents.bank_contract import BankResult
+from agents.canonical_io import run_balance_check, write_sidecar
 
 logger = logging.getLogger(__name__)
+
+BANK_KEY = "icici"
 
 # ============================================================================
 # CONSTANTS — ICICI XLS layout
@@ -813,6 +818,100 @@ def _merge_csvs(parts: list, output: Path) -> None:
                     if idx > 0 and line_no == 0:
                         continue
                     out.write(line)
+
+
+# ============================================================================
+# BankSkill implementation
+# ============================================================================
+#
+# ICICI already emits the canonical schema, so this is the lowest-risk
+# conformance: parse() reuses the unchanged transform_icici_statement writer
+# (keeping the canonical CSV byte-for-byte identical) and layers the shared
+# BankResult / balance-check / sidecar tail on top.
+
+
+def _read_canonical_csv(path: str | Path) -> list[dict]:
+    """Read a canonical 8-column CSV back into a list of row dicts."""
+    with open(path, "r", encoding="utf-8") as f:
+        return [dict(r) for r in csv.DictReader(f)]
+
+
+class ICICISkill:
+    """ICICI parser implementing the ``BankSkill`` protocol."""
+
+    bank_key = BANK_KEY
+
+    def detect(self, path: str | Path) -> float:
+        """Confidence that ``path`` is an ICICI XLS statement download."""
+        p = Path(path)
+        if p.suffix.lower() not in (".xls", ".xlsx"):
+            return 0.0
+        try:
+            rows = convert_xls_to_csv(str(p))
+        except Exception:  # noqa: BLE001 — detection must never raise
+            return 0.0
+        head = " ".join(
+            str(c) for row in rows[: PREAMBLE_ROWS + 2] for c in row
+        ).upper()
+        # The ICICI XLS download has a distinctive data-header row; these tokens
+        # together don't appear in the BoB/HSBC layouts.
+        if "VALUE DATE" in head and "TRANSACTION REMARKS" in head:
+            return 0.9
+        return 0.0
+
+    def parse(self, path: str | Path, output_path: str | Path | None = None) -> BankResult:
+        """Parse an ICICI XLS (or directory of XLS) into a canonical BankResult."""
+        src = Path(path)
+        if src.is_dir():
+            xls_files = sorted(src.glob("*.xls")) + sorted(src.glob("*.xlsx"))
+        else:
+            xls_files = [src]
+        if not xls_files:
+            raise FileNotFoundError(f"No ICICI .xls file(s) found at: {path}")
+
+        warnings: list[str] = []
+
+        with tempfile.TemporaryDirectory(prefix="pa-skills-icici-parse-") as tmp:
+            tmp_path = Path(tmp)
+            # Write the canonical CSV with the unchanged transform writer so the
+            # bytes match the pre-refactor output exactly.
+            target = Path(output_path) if output_path is not None else tmp_path / "canonical.csv"
+            if len(xls_files) == 1:
+                result = transform_icici_statement(str(xls_files[0]), str(target))
+                warnings.extend(result.get("issues", []))
+            else:
+                parts = []
+                for i, xls in enumerate(xls_files):
+                    part = tmp_path / f"part_{i}.csv"
+                    result = transform_icici_statement(str(xls), str(part))
+                    warnings.extend(result.get("issues", []))
+                    parts.append(part)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _merge_csvs(parts, target)
+
+            rows = _read_canonical_csv(target)
+
+        balance_check = run_balance_check(rows)
+
+        sidecar_path = None
+        if output_path is not None:
+            sidecar_path = write_sidecar(
+                output_path, "ICICI", "derived",
+                balance_check.opening_balance, balance_check.closing_balance,
+                len(rows),
+            )
+
+        return BankResult(
+            rows=rows,
+            bank_key=BANK_KEY,
+            account_label="ICICI",
+            currency="INR",
+            opening_balance=balance_check.opening_balance,
+            closing_balance=balance_check.closing_balance,
+            balance_check=balance_check,
+            sidecar_path=sidecar_path,
+            warnings=warnings,
+        )
 
 
 # ============================================================================
