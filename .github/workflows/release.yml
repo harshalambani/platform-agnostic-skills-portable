@@ -36,7 +36,7 @@ jobs:
       # 1. Checkout with LFS (vendor/ + launcher-gen binaries via LFS)
       # ------------------------------------------------------------------
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           lfs: true
           fetch-depth: 0     # full history so git-describe finds tags
