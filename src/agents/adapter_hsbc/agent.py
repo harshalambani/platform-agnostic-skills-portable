@@ -8,7 +8,6 @@ Input:  skill_hsbc .xlsx workbook (enriched with transaction data)
 Output: Canonical 8-column CSV: Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency
 """
 
-import csv
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -18,6 +17,7 @@ from agents.balance_utils import (
     verify_running_balance,
     format_balance_summary,
 )
+from agents.canonical_io import write_canonical_csv
 
 log = logging.getLogger(__name__)
 
@@ -190,18 +190,9 @@ def adapt_hsbc_xlsx_pandas(input_xlsx: str, output_csv: str) -> Dict[str, Any]:
         for d in running["details"]:
             issues.append(f"Balance: {d}")
 
-    # Write output CSV
+    # Write output CSV (shared canonical-IO tail)
     try:
-        output_path = Path(output_csv)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with open(output_csv, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'Date', 'Transaction ID', 'Description', 'Account',
-                'Deposit', 'Withdrawal', 'Balance', 'Currency'
-            ])
-            writer.writeheader()
-            writer.writerows(canonical_rows)
+        write_canonical_csv(canonical_rows, output_csv)
     except Exception as e:
         return {
             'success': False,
