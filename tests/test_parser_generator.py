@@ -16,8 +16,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+for _p in (str(SRC), str(ROOT)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from agents.skill_parser_generator import tools  # noqa: E402
 
@@ -51,6 +52,38 @@ def test_ui_entry_point_loads():
     assert callable(fn)
     # run_ui guards an empty path without touching the LLM.
     assert fn("Fix a failing parser", "").startswith("Error")
+
+
+def test_parser_path_uses_dynamic_picker():
+    from agents.registry import discover
+
+    skill = next(s for s in discover(refresh=True) if s.name == "Parser Generator")
+    inp = {i.name: i for i in skill.inputs}["parser_path"]
+    assert inp.type == "parser_file"
+
+
+def test_discover_parser_scripts_finds_known_parsers():
+    from agents.registry import discover_parser_scripts
+
+    names = {p.name for p in discover_parser_scripts()}
+    # A representative sample of the project's embedded parsers.
+    assert "parse_krc_ledger.py" in names
+    assert "extract_bob_statement.py" in names
+    # All results live under a skill's scripts/ dir and match the naming rule.
+    for p in discover_parser_scripts():
+        assert p.parent.name == "scripts"
+        assert p.name.startswith(("parse_", "extract_"))
+
+
+def test_parser_picker_choices_built_for_ui():
+    from ui.tabs._generic import _scan_parser_files
+
+    choices = _scan_parser_files()
+    assert choices, "expected at least one parser in the pick-list"
+    # (label, path) pairs; label is 'skill_dir / filename'.
+    label, path = choices[0]
+    assert " / " in label
+    assert path.endswith(".py")
 
 
 # --------------------------------------------------------------------------

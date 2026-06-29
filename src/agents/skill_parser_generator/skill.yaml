@@ -34,8 +34,8 @@ inputs:
     options: ["Fix a failing parser", "Create a new parser"]
     required: true
   - name: "parser_path"
-    type: "text"
-    label: "Parser path (the failing parse_<format>.py to fix, or the new path to create)"
+    type: "parser_file"
+    label: "Parser (pick a known parser to Fix, or type a new path to Create)"
     required: true
   - name: "parser_args"
     type: "text"

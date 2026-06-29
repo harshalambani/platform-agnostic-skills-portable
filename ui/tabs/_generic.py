@@ -85,6 +85,22 @@ def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[st
     return [(p.name, str(p)) for p in files[:30]]
 
 
+def _scan_parser_files() -> list[tuple[str, str]]:
+    """(label, path) pairs of the project's embedded parsers for a 'parser_file'
+    picker. Label is 'skill_dir / filename'; value is the full path. Used by the
+    Parser Generator tab so 'Fix' can pick a known parser instead of typing it.
+    """
+    try:
+        from agents.registry import discover_parser_scripts
+    except Exception:
+        return []
+    pairs = []
+    for p in discover_parser_scripts():
+        skill_dir = p.parent.parent.name
+        pairs.append((f"{skill_dir} / {p.name}", str(p)))
+    return pairs
+
+
 def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
     """Return (display_label, raw_name) pairs with capability badges.
 
@@ -292,7 +308,7 @@ def _make_run_handler(skill: SkillInfo):
                     input_map[inp_def.name] = ""
                 else:
                     input_map[inp_def.name] = str(val).strip()
-            elif inp_def.type == "select":
+            elif inp_def.type in ("select", "parser_file"):
                 input_map[inp_def.name] = str(val or "").strip()
             else:  # text
                 input_map[inp_def.name] = str(val or "").strip()
@@ -543,6 +559,7 @@ def render(skill: SkillInfo) -> None:
             # Build input components from skill.inputs.
             input_components = []
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
+            parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             for inp in skill.inputs:
                 if inp.type == "file":
                     comp = gr.File(
@@ -572,6 +589,22 @@ def render(skill: SkillInfo) -> None:
                         file_count="multiple",
                         type="filepath",
                     )
+                elif inp.type == "parser_file":
+                    # Dropdown of the project's known parsers, with a refresh
+                    # button. allow_custom_value=True so "Create a new parser"
+                    # can still type a brand-new path that isn't on disk yet.
+                    _pchoices = _scan_parser_files()
+                    with gr.Row():
+                        comp = gr.Dropdown(
+                            label=inp.label,
+                            choices=_pchoices,
+                            value=None,
+                            allow_custom_value=True,
+                            interactive=True,
+                            scale=5,
+                        )
+                        _pbtn = gr.Button("↻", scale=0, min_width=40)
+                    parser_pickers.append((comp, _pbtn))
                 elif inp.type == "select":
                     comp = gr.Dropdown(
                         label=inp.label,
@@ -628,6 +661,13 @@ def render(skill: SkillInfo) -> None:
     for _comp, _rbtn, _match, _fts in output_pickers:
         _rbtn.click(
             fn=lambda m=_match, f=_fts: gr.update(choices=_scan_output_files(m, f)),
+            outputs=_comp,
+        )
+
+    # Wire each parser picker's refresh button to re-scan the parser tree.
+    for _comp, _pbtn in parser_pickers:
+        _pbtn.click(
+            fn=lambda: gr.update(choices=_scan_parser_files()),
             outputs=_comp,
         )
 

@@ -79,7 +79,7 @@ Open the **Parser Generator** tab. Fields:
 | Field | What to enter |
 |-------|---------------|
 | **Task** | `Fix a failing parser` or `Create a new parser`. |
-| **Parser path** | Fix: the path to the failing `parse_<format>.py`. Create: the new path to write (must be `src/agents/skill_<X>/scripts/parse_<format>.py`). |
+| **Parser** | A dropdown of the project's known parsers (with a ↻ refresh). Fix: pick the failing `parse_<format>.py`. Create: type a brand-new path (must be `src/agents/skill_<X>/scripts/parse_<format>.py`) - the field accepts custom values. |
 | **Tie-out args** | *(Fix only)* the parser's own CLI arguments, used to re-run the tie-out - e.g. `statement.pdf MYPASSWORD out.xlsx`. |
 | **Notes** | Fix: the symptom or the expected closing balance. Create: the format / `FORMAT_NAME`. |
 | **Model** | Your configured LLM (Ollama or OpenAI-compatible). Required - this tab uses the agent. |
