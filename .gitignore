@@ -54,6 +54,9 @@ outputs/
 # --- Bundling logs ---
 bundling/launcher-gen/*/Data/
 
+# --- Runtime artifacts (written by the app at launch, not source) ---
+ui_port.json
+
 # --- Ad-hoc dated planning / test files at repo root ---
 2026-*.md
 2026-*.py
