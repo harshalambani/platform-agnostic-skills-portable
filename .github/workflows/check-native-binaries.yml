@@ -14,6 +14,7 @@ on:
   workflow_dispatch:        # manual trigger
 
 permissions:
+  contents: read      # required for actions/checkout to read a private repo
   issues: write
 
 jobs:
