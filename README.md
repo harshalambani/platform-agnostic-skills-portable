@@ -69,8 +69,7 @@ py -3.13 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 
-# 3. Run the Gradio UI (connects to local Ollama on :11434 by default)
-cd src
+# 3. Run the Gradio UI (from the repo root — webui.py adds src/ to sys.path)
 python -m ui.webui
 ```
 
@@ -172,10 +171,34 @@ Settings tab — no manual YAML editing needed.
    - `direct` — single prompt → LLM → response (or pure extraction, no LLM)
    - `agent` — multi-step LangGraph agent with tools
 
-4. Run tests to confirm discovery: `python -m pytest ../tests/test_smoke.py -v`
+4. Add a `help:` block to `skill.yaml` (overview, inputs, steps, outputs, tips,
+   troubleshooting) and run `python scripts/gen_docs.py`. This powers the
+   in-app Help and the user guide — see
+   [docs/dev/help-block-schema.md](docs/dev/help-block-schema.md). The coverage
+   test fails if a UI skill ships without help.
+
+5. Run tests to confirm discovery: `python -m pytest ../tests/test_smoke.py -v`
 
 See any existing skill directory (e.g., `skill_summarize/` for direct mode,
 `skill_csv_analyzer/` for agent mode) as a template.
+
+## Documentation & help
+
+User-facing help and developer docs are generated from a single source: the
+`help:` block in each skill's `skill.yaml`. One command rebuilds everything:
+
+```powershell
+python scripts\gen_docs.py          # regenerate; --check fails if stale (CI)
+```
+
+- **End users:** in-app **Help** tab and a collapsible help panel on every skill
+  tab; per-skill guides in [docs/user-guide/](docs/user-guide/); and a
+  self-contained [docs/USER-GUIDE.html](docs/USER-GUIDE.html) bundled with the
+  portable package.
+- **Developers:** [help-block-schema.md](docs/dev/help-block-schema.md) (the
+  schema), [editing-help.md](docs/dev/editing-help.md) (how to change help), and
+  the auto-generated [skills-reference.md](docs/dev/skills-reference.md)
+  (every UI skill + the internal pipeline steps).
 
 ## CI / CD
 

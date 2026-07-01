@@ -756,8 +756,10 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
 # Gradio tab renderer
 # ---------------------------------------------------------------------------
 
-def render() -> None:
-    """Render the Review Mappings tab. Must be called inside gr.Tab()."""
+def render(container_tab=None) -> None:
+    """Render the Review Mappings tab. Must be called inside gr.Tab(). Pass that
+    gr.Tab as ``container_tab`` so the Mapped-CSV picker re-scans and auto-selects
+    the newest import-ready CSV whenever the tab is opened."""
 
     gr.Markdown("## Review & Edit Account Mappings\n\nSelect a mapped CSV and GnuCash book, then click Load.")
 
@@ -785,6 +787,15 @@ def render() -> None:
         inputs=[],
         outputs=[csv_dropdown],
     )
+
+    # On tab open, re-scan and auto-select the newest import-ready CSV so a file
+    # just produced by a bank/KRChoksey step is picked up without manual refresh.
+    if container_tab is not None:
+        def _rescan_newest():
+            choices = _scan_import_ready_csvs()
+            return gr.update(choices=choices,
+                             value=(choices[0][1] if choices else None))
+        container_tab.select(fn=_rescan_newest, inputs=[], outputs=[csv_dropdown])
 
     review_html = gr.HTML(value="<p><em>Load a CSV to begin reviewing.</em></p>")
 

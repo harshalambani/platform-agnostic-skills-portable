@@ -34,3 +34,43 @@ output:
 requires:
   native_binaries: ["tesseract", "poppler"]
   external_tools: []
+
+help:
+  overview: >
+    Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel
+    workbook: it OCRs scanned pages (Tesseract + Poppler) while skipping pages
+    that already have text, extracts the transaction ID, splits out the
+    transaction date, scrubs the description, and adds an Extra Information column
+    plus a Summary sheet.
+  when_to_use: >
+    Use this when you have one or more HSBC statement PDFs (savings or Premier)
+    and want a single tidy, reconciled spreadsheet. For account-mapped output
+    into GnuCash, use GnuCash Import and choose HSBC instead.
+  inputs:
+    - name: "pdf_dir"
+      tooltip: "A folder containing one or more HSBC statement PDFs."
+      accepts: "A folder of HSBC PDF statements."
+      gotchas: >
+        Select the folder, not a single PDF. Scanned PDFs are OCR'd, so the run
+        takes longer and needs Tesseract + Poppler (bundled in the frozen build).
+  steps:
+    - "Put your HSBC PDFs in one folder."
+    - "Select that folder."
+    - "Click Run — OCR may take a minute on scanned statements."
+    - "Download the Excel workbook."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-HSBC.xlsx"
+        tooltip: >
+          A reconciled workbook: one row per transaction with extracted
+          transaction ID, separate transaction date, scrubbed description and an
+          Extra Information column, plus a Summary sheet that ties the totals out.
+  tips: >
+    Check the Summary sheet first — if its totals reconcile, the extraction is
+    sound. This skill is on the roadmap to go fully offline (no LLM).
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "Currently HSBC uses an LLM step. Start Ollama or set an endpoint in Settings."
+    - problem: "OCR output is poor or missing."
+      fix: "Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans."

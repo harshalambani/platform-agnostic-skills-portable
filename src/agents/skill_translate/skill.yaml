@@ -76,3 +76,41 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    Translates text between languages using your configured LLM, and saves the
+    translation as a text file.
+  when_to_use: >
+    Use this for quick text translation. Pick 'auto' as the source language to
+    let the model detect it.
+  inputs:
+    - name: "text"
+      tooltip: "The text you want translated."
+      accepts: "Free text."
+      gotchas: "Paste the text directly; this translates text, not files."
+    - name: "source_lang"
+      tooltip: "The language of your text, or 'auto' to detect."
+      accepts: "auto, English, Hindi, Spanish, French, German, Japanese, Chinese, Arabic, Portuguese, Russian."
+      gotchas: "Leave on 'auto' if unsure."
+    - name: "target_lang"
+      tooltip: "The language to translate into."
+      accepts: "English, Hindi, Spanish, French, German, Japanese, Chinese, Arabic, Portuguese, Russian."
+      gotchas: "Required — choose the output language."
+  steps:
+    - "Paste the text."
+    - "Set source (or 'auto') and target language."
+    - "Click Run and download the translation."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-translation.txt"
+        tooltip: "The translated text in the target language."
+  tips: >
+    Translation quality depends on the model you have connected — a larger model
+    generally handles nuance and less-common languages better.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This skill needs an LLM. Start Ollama or set an endpoint in Settings."
+    - problem: "Output mixes languages or is off."
+      fix: "Set the source language explicitly instead of 'auto', or try a larger model."

@@ -42,12 +42,12 @@ else:
 class SkillInput:
     """One input field declared in skill.yaml."""
     name: str
-    type: str           # "file", "files", "directory", "text", "select", "output_file"
+    type: str
     label: str
     file_types: tuple[str, ...] = ()
     required: bool = True
-    options: tuple[str, ...] = ()   # choices for type="select"
-    match: str = ""                 # glob for type="output_file" (e.g. "*-26AS.xlsx")
+    options: tuple[str, ...] = ()
+    match: str = ""
 
 
 @dataclass(frozen=True)
@@ -56,15 +56,60 @@ class SkillOutput:
     extension: str = ".txt"
     suffix: str = "output"
     download_label: str = "Download"
-    type: str = "file"          # "file" or "directory"
+    type: str = "file"
 
 
 @dataclass(frozen=True)
 class SkillRequires:
     """External dependency declarations."""
-    native_binaries: tuple[str, ...] = ()   # e.g. ("tesseract", "poppler")
-    external_tools: tuple[str, ...] = ()    # e.g. ("qpdf",)
-    llm: bool = True                        # False = deterministic, no LLM endpoint needed
+    native_binaries: tuple[str, ...] = ()
+    external_tools: tuple[str, ...] = ()
+    llm: bool = True
+
+
+@dataclass(frozen=True)
+class SkillHelpInput:
+    """Per-input help authored in the manifest's help: block."""
+    name: str
+    tooltip: str = ""
+    accepts: str = ""
+    gotchas: str = ""
+
+
+@dataclass(frozen=True)
+class SkillHelpOutputFile:
+    """One output file/artifact described in the help: block."""
+    name: str
+    tooltip: str = ""
+
+
+@dataclass(frozen=True)
+class SkillHelpFix:
+    """One troubleshooting entry (problem -> fix)."""
+    problem: str
+    fix: str = ""
+
+
+@dataclass(frozen=True)
+class SkillHelp:
+    """
+    Optional authored help — single source of truth for the user guide, the
+    standalone HTML, and the in-app inline panel + Help tab + tooltips.
+    File types, suffix, native deps and llm flag are read from existing
+    manifest keys, never duplicated here.
+    """
+    overview: str = ""
+    when_to_use: str = ""
+    inputs: tuple[SkillHelpInput, ...] = ()
+    steps: tuple[str, ...] = ()
+    output_folder: str = "Data/outputs/"
+    output_files: tuple[SkillHelpOutputFile, ...] = ()
+    tips: str = ""
+    troubleshooting: tuple[SkillHelpFix, ...] = ()
+
+    def is_empty(self) -> bool:
+        return not (self.overview or self.when_to_use or self.inputs or self.steps
+                    or self.output_files or self.tips or self.troubleshooting)
 
 
 @dataclass(frozen=True)
@@ -75,19 +120,68 @@ class SkillInfo:
     description: str
     category: str
     version: str
-    mode: str                   # "agent" or "direct"
-    entry_point: str            # e.g. "agent:run"
+    mode: str
+    entry_point: str
     inputs: tuple[SkillInput, ...]
     run_args: dict[str, str]
     output: SkillOutput
     requires: SkillRequires
-    package: str                # e.g. "agents.skill_26as"
-    manifest_path: Path         # absolute path to skill.yaml
+    package: str
+    manifest_path: Path
+    help: SkillHelp | None = None
 
 
 # ---------------------------------------------------------------------------
 # Parsing.
 # ---------------------------------------------------------------------------
+
+def _parse_help(raw: Any) -> SkillHelp | None:
+    """Parse an optional help: block. Returns None when absent/empty."""
+    if not isinstance(raw, dict):
+        return None
+
+    h_inputs = []
+    for inp in raw.get("inputs") or []:
+        if not isinstance(inp, dict) or "name" not in inp:
+            continue
+        h_inputs.append(SkillHelpInput(
+            name=inp["name"],
+            tooltip=(inp.get("tooltip") or "").strip(),
+            accepts=(inp.get("accepts") or "").strip(),
+            gotchas=(inp.get("gotchas") or "").strip(),
+        ))
+
+    out_raw = raw.get("outputs") or {}
+    h_files = []
+    for f in out_raw.get("files") or []:
+        if not isinstance(f, dict) or "name" not in f:
+            continue
+        h_files.append(SkillHelpOutputFile(
+            name=f["name"],
+            tooltip=(f.get("tooltip") or "").strip(),
+        ))
+
+    h_fixes = []
+    for t in raw.get("troubleshooting") or []:
+        if not isinstance(t, dict) or "problem" not in t:
+            continue
+        h_fixes.append(SkillHelpFix(
+            problem=str(t["problem"]).strip(),
+            fix=(t.get("fix") or "").strip(),
+        ))
+
+    block = SkillHelp(
+        overview=(raw.get("overview") or "").strip(),
+        when_to_use=(raw.get("when_to_use") or "").strip(),
+        inputs=tuple(h_inputs),
+        steps=tuple(str(s).strip() for s in (raw.get("steps") or [])),
+        output_folder=(out_raw.get("folder") or "Data/outputs/").strip(),
+        output_files=tuple(h_files),
+        tips=(raw.get("tips") or "").strip(),
+        troubleshooting=tuple(h_fixes),
+    )
+    return None if block.is_empty() else block
+
 
 def _parse_manifest(path: Path) -> SkillInfo | None:
     """Parse a single skill.yaml. Returns None on validation failure."""
@@ -101,13 +195,11 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         log.warning("Skipping %s: top-level is not a mapping", path)
         return None
 
-    # Required fields.
     missing = [k for k in ("name", "display_name", "description", "mode", "entry_point") if k not in raw]
     if missing:
         log.debug("Skipping %s: missing required fields: %s", path, missing)
         return None
 
-    # Parse inputs.
     inputs = []
     for inp in raw.get("inputs") or []:
         inputs.append(SkillInput(
@@ -120,7 +212,6 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             match=inp.get("match", ""),
         ))
 
-    # Parse output.
     out_raw = raw.get("output") or {}
     output = SkillOutput(
         extension=out_raw.get("extension", ".txt"),
@@ -129,7 +220,6 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         type=out_raw.get("type", "file"),
     )
 
-    # Parse requires.
     req_raw = raw.get("requires") or {}
     requires = SkillRequires(
         native_binaries=tuple(req_raw.get("native_binaries") or ()),
@@ -137,7 +227,8 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         llm=bool(req_raw.get("llm", True)),
     )
 
-    # Derive package name from directory.
+    help_block = _parse_help(raw.get("help"))
+
     skill_dir = path.parent
     package = f"agents.{skill_dir.name}"
 
@@ -155,6 +246,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         requires=requires,
         package=package,
         manifest_path=path,
+        help=help_block,
     )
 
 
@@ -166,10 +258,7 @@ _cache: list[SkillInfo] | None = None
 
 
 def discover(*, refresh: bool = False) -> list[SkillInfo]:
-    """
-    Scan agents/*/skill.yaml and return all valid skills, sorted by
-    display_name. Results are cached; pass refresh=True to re-scan.
-    """
+    """Scan agents/*/skill.yaml; cached, sorted by display_name."""
     global _cache
     if _cache is not None and not refresh:
         return list(_cache)
@@ -195,14 +284,7 @@ def discover(*, refresh: bool = False) -> list[SkillInfo]:
 
 
 def discover_parser_scripts() -> list[Path]:
-    """
-    Return the project's embedded parser scripts - src/agents/*/scripts/
-    parse_*.py and extract_*.py - sorted by path.
-
-    Used by the Parser Generator tab to offer a pick-list of the known parsers
-    (the "known universe"). Scans the same agents root discovery uses, so it
-    works in both source and frozen mode.
-    """
+    """Return embedded parser scripts (parse_*.py / extract_*.py)."""
     if not _AGENTS_ROOT.is_dir():
         return []
     found: set[Path] = set()
@@ -226,12 +308,7 @@ def get(name: str) -> SkillInfo | None:
 # ---------------------------------------------------------------------------
 
 def load_run_function(skill: SkillInfo) -> Callable[..., Any]:
-    """
-    Import the skill's entry_point and return the callable.
-
-    entry_point is "module:function", e.g. "agent:run" resolves to
-    agents.skill_<name>.agent.run().
-    """
+    """Import the skill's entry_point and return the callable."""
     module_part, func_name = skill.entry_point.split(":", 1)
     full_module = f"{skill.package}.{module_part}"
     mod = importlib.import_module(full_module)

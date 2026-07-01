@@ -54,3 +54,45 @@ requires:
   native_binaries: []
   external_tools: ["qpdf"]
   llm: false
+
+help:
+  overview: >
+    Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM
+    memos and trade notes) against the Part I Simplified Ledger and produces a
+    "Bills" workbook. Runs fully offline (deterministic, no LLM).
+  when_to_use: >
+    Run this second, after "KRChoksey" (Part I). Its Bills workbook is the input
+    to "GnuCash Import" (Part III).
+  inputs:
+    - name: "ledger_xlsx"
+      tooltip: "The Part I Simplified Ledger — pick it from the list of prior outputs."
+      accepts: "Excel (.xlsx) matching *-KRC-Ledger.xlsx."
+      gotchas: "Run Part I first; the picker only lists Ledger workbooks from earlier runs."
+    - name: "cn_dir"
+      tooltip: "The contract-note PDFs — SLBM memos plus trade notes."
+      accepts: "PDF (.pdf) — one or many contract notes."
+      gotchas: "Include every contract note for the period so the reconciliation is complete."
+    - name: "password"
+      tooltip: "The PDF password — the account holder's PAN."
+      accepts: "Text — the account holder's PAN."
+      gotchas: "Decryption uses qpdf (bundled in the frozen build)."
+  steps:
+    - "Pick the Part I Simplified Ledger from the dropdown."
+    - "Select all the contract-note PDFs."
+    - "Enter the PDF password (PAN)."
+    - "Click Run and download the Bills workbook."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-KRC-Bills-Recon.xlsx"
+        tooltip: >
+          The reconciled Bills workbook tying contract notes to the ledger. This
+          is the file you pick in the GnuCash Import (Part III) tab.
+  tips: >
+    A complete set of contract notes is what makes Part II tie out — missing
+    notes show up as unmatched bills.
+  troubleshooting:
+    - problem: "Some bills are unmatched."
+      fix: "A contract note is probably missing for the period. Add it and re-run."
+    - problem: "PDF won't open."
+      fix: "Check the PAN password and that qpdf is available in source mode."

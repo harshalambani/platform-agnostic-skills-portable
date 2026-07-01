@@ -4,6 +4,24 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Help system, single-source-of-truth.** Every skill's user help now lives in
+  a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
+  tooltips/formats/gotchas, steps, per-output-file interpretation, tips,
+  troubleshooting). One generator, `scripts/gen_docs.py`, renders it to per-skill
+  guides in `docs/user-guide/`, a bundled standalone `docs/USER-GUIDE.html`, and
+  the developer `docs/dev/skills-reference.md`.
+- **In-app help.** A collapsible "How to use — formats & output" panel on every
+  skill tab, a central **Help** tab, and two-tier tooltips (native `info=` helper
+  text on inputs; `title=` hover on each output file). All read the `help:` block
+  live via `agents.registry` (new `SkillHelp` model) — see `ui/_help.py`.
+- **Docs.** `docs/dev/help-block-schema.md` and `docs/dev/editing-help.md`;
+  `USER-GUIDE.html` bundled into the frozen package via `paskills.spec`.
+- **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
+  the generated docs are stale (`gen_docs.py --check`).
+
 ## [1.0.1] — 2026-06-25
 
 ### Fixed

@@ -35,3 +35,42 @@ requires:
   native_binaries: []
   external_tools: []
   llm: false
+
+help:
+  overview: >
+    Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured
+    Excel workbook with one sheet per Part (Part I through Part X) and inline
+    per-deductor sub-totals, so TDS, TCS, advance tax, self-assessment tax and
+    refunds are each laid out as a clean, sortable table. Runs fully offline.
+  when_to_use: >
+    Use this when you have your 26AS PDF from the TRACES portal and want it as
+    Excel to review or reconcile against your ITR. To then post the TDS into
+    GnuCash as journal entries, run "26AS Journal" on the workbook this produces.
+    Do not use it for AIS or TIS — those are different documents.
+  inputs:
+    - name: "pdf_path"
+      tooltip: "Your Form 26AS PDF, exactly as downloaded from TRACES."
+      accepts: "PDF (.pdf) — a single TRACES-issued 26AS."
+      gotchas: >
+        Must be the genuine 26AS (PAN like ABCDE1234F, parts labelled PART-I to
+        PART-X). AIS / TIS PDFs have a different layout and will not parse here.
+  steps:
+    - "Pick your 26AS PDF."
+    - "Click Run — it processes offline in a few seconds."
+    - "Open the Excel workbook and use the per-Part sheets."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-26AS.xlsx"
+        tooltip: >
+          One worksheet per Part (I–X). Each transaction is a flat row; each
+          deductor block ends with a sub-total row so you can tie figures back
+          to the source statement without re-adding them.
+  tips: >
+    Amounts are kept verbatim from the statement (no rounding). Cross-check the
+    Part I TDS total against the TDS you are claiming in your return.
+  troubleshooting:
+    - problem: "Sheets are empty or the text is garbled."
+      fix: "The PDF is a scan. Re-download the text 26AS from TRACES; this skill does not OCR."
+    - problem: "Columns look wrong / parts are missing."
+      fix: "The file is likely an AIS or TIS, not a 26AS. Use the correct 26AS PDF."

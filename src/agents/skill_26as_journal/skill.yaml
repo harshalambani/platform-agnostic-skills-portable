@@ -42,3 +42,43 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    Builds GnuCash TDS journal entries from a 26AS workbook plus your GnuCash
+    book. It reads Part I of the workbook, matches each deductor to one of your
+    accounts (deterministic fuzzy match first, LLM fallback for the hard cases),
+    and writes a balanced journal CSV ready to import.
+  when_to_use: >
+    Use this after "26AS Convert", when you want the TDS recorded in GnuCash as
+    journal entries instead of typing each one by hand.
+  inputs:
+    - name: "xlsx_path"
+      tooltip: "The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs."
+      accepts: "Excel (.xlsx) matching *-26AS.xlsx."
+      gotchas: "Run 26AS Convert first; the picker only shows workbooks from earlier runs."
+    - name: "gnucash_path"
+      tooltip: "Your GnuCash book — used only to read account names for matching."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Close the book in GnuCash before running so the file is not locked. It is never modified."
+  steps:
+    - "Pick the 26AS workbook from the dropdown of prior outputs."
+    - "Select your .gnucash book (make sure GnuCash has it closed)."
+    - "Click Run; review any deductors flagged as unmatched."
+    - "Import the CSV into GnuCash: File > Import > Import Transactions from CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-tds-journals.csv"
+        tooltip: >
+          One balanced journal transaction per TDS entry (every transaction's
+          amounts sum to zero), debiting the TDS receivable / asset account and
+          crediting the income account, ready for GnuCash CSV import.
+  tips: >
+    Entries whose deductor could not be matched to an account are flagged so you
+    can fix the account name in your book (or add the missing account) and re-run.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings)."
+    - problem: "A deductor was assigned the wrong account."
+      fix: "Rename/add the account in GnuCash so its name is closer to the deductor, then re-run."

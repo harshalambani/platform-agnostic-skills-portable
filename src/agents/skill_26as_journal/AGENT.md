@@ -35,31 +35,35 @@ a confidence to each deductor and routes anything it cannot resolve to
 `Liabilities:Suspense`, marking it **NEEDS REVIEW** and listing candidate
 accounts.
 
+Your tools take NO file paths — the workbook, GnuCash file and output path are
+already configured. Never pass a path or filename to any tool.
+
 Your job is only the optional fallback:
 
-1. Call `build_tds_journals(xlsx_path, gnucash_path, output_path)`. **This one
-   call already writes and verifies a complete, valid CSV** — unmatched
-   deductors are safely on `Liabilities:Suspense`. If you do nothing else, the
-   task is DONE and successful.
+1. Call `build_journals()` with NO arguments. **This one call already writes and
+   verifies a complete, valid CSV** — unmatched deductors are safely on
+   `Liabilities:Suspense`. If you do nothing else, the task is DONE and
+   successful.
 
 2. (Optional) Read the summary. For each deductor marked **NEEDS REVIEW**, look
    at its listed candidate accounts. If exactly one clearly fits the deductor
    name, call:
-   `apply_journal_overrides(xlsx_path, gnucash_path, output_path, overrides={"<Sr.No>": "<full account path>"})`
-   - `overrides` is an OBJECT (not a string). Keys are the flagged Sr numbers as
-     strings; values are full account paths from that deductor's candidate list.
+   `apply_overrides(overrides={"<Sr.No>": "<full account path>"})`
+   - `overrides` is the ONLY argument and is an OBJECT (not a string). Keys are
+     the flagged Sr numbers as strings; values are full account paths from that
+     deductor's candidate list.
    - Include ONLY flagged Sr numbers. Never change a High/Medium match.
    - If no candidate clearly fits, do NOT call this tool — leaving the deductor
      on Suspense is the correct, valid outcome.
 
-3. There is no separate verify step — `build_tds_journals` and
-   `apply_journal_overrides` already verify their own output and report
-   "VERIFIED — N transactions, all balanced".
+3. There is no separate verify step — `build_journals` and `apply_overrides`
+   already verify their own output and report "VERIFIED — N transactions, all
+   balanced".
 
-IMPORTANT — never report failure if `build_tds_journals` succeeded. The CSV it
-wrote is the deliverable. If `apply_journal_overrides` returns an error, simply
-keep the build result and report success with the affected deductors still on
-Suspense. Do not re-run build, and do not claim the task could not be completed.
+IMPORTANT — never report failure if `build_journals` succeeded. The CSV it wrote
+is the deliverable. If `apply_overrides` returns an error, simply keep the build
+result and report success with the affected deductors still on Suspense. Do not
+re-run build, and do not claim the task could not be completed.
 
 Do not fabricate account names. Only use full account paths that appear in the
 candidate lists or the GnuCash file. Accounts the build step lists under

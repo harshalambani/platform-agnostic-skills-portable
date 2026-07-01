@@ -1,24 +1,21 @@
 """
-agent.py — 26AS TDS Journal LangGraph agent.
+agent.py — 26AS TDS Journal agent.
 
-Deterministic-first: the builder does fuzzy account matching with a Suspense
-fallback. The agent's only job is the LLM-fallback step — resolving any
-deductor the matcher flagged NEEDS REVIEW by picking from its candidate
-accounts — then verifying the result. On a clean match (nothing flagged) the
-agent simply builds and verifies.
+The file paths are bound here, into closure tools, so the LLM never has to
+pass a path (small local models garble long Windows paths). The model only:
+  1. calls build_journals()  — no arguments,
+  2. optionally calls apply_overrides(overrides={...}) — account picks only.
+The deterministic builder always writes a valid, balanced CSV; the override
+step is pure polish.
 """
 from pathlib import Path
 
+from langchain_core.tools import tool
+
 from agents.base_agent import build_agent
-from agents.skill_26as_journal.tools import (
-    apply_journal_overrides,
-    build_tds_journals,
-)
+from agents.skill_26as_journal import tools as T
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
-# build/apply verify their own output, so there is no separate verify tool for
-# the model to call with a (possibly garbled) path.
-TOOLS = [build_tds_journals, apply_journal_overrides]
 
 
 def run(
@@ -28,26 +25,47 @@ def run(
     config_path: str = "config.yaml",
     model_override: str = None,
 ) -> str:
-    """
-    Build GnuCash TDS journals from a 26AS Convert workbook + a .gnucash file.
+    """Build GnuCash TDS journals from a 26AS Convert workbook + a .gnucash file.
 
-    Args:
-        xlsx_path:      Path to the 26AS workbook produced by the Convert tab.
-        gnucash_path:   Path to the user's .gnucash file (for account matching).
-        output_path:    Path where the journal .csv should be saved.
-        config_path:    Path to config.yaml.
-        model_override: Optional model name overriding default_model.
+    Paths are captured in the closure tools below, so the model cannot mistype
+    them — it only chooses accounts for the NEEDS REVIEW deductors.
     """
-    agent = build_agent(TOOLS, SYSTEM_PROMPT, config_path, model_override)
+
+    @tool
+    def build_journals() -> str:
+        """Build the GnuCash TDS journal CSV. Takes NO arguments — the workbook,
+        GnuCash file and output path are already configured. Writes and verifies
+        the CSV and lists any NEEDS REVIEW deductors with their candidate
+        accounts. Call this first."""
+        return T.run_build(xlsx_path, gnucash_path, output_path)
+
+    @tool
+    def apply_overrides(overrides: dict) -> str:
+        """Optional. Resolve the NEEDS REVIEW deductors. `overrides` is the ONLY
+        argument: an OBJECT mapping the deductor Sr.No (as a string) to a chosen
+        full account path, e.g. {"2": "Income:Interest Income:Interest on HDFC - FD"}.
+        Use only Sr numbers flagged NEEDS REVIEW and account paths from their
+        candidate lists; omit any you are unsure about (leaving them on Suspense
+        is correct). Do not pass any file paths."""
+        return T.run_apply(xlsx_path, gnucash_path, output_path, overrides)
+
+    agent = build_agent([build_journals, apply_overrides], SYSTEM_PROMPT,
+                        config_path, model_override)
     result = agent.invoke({
         "messages": [(
             "user",
-            f"Create GnuCash TDS journals.\n"
-            f"26AS workbook: {xlsx_path}\n"
-            f"GnuCash file:  {gnucash_path}\n"
-            f"Output CSV:    {output_path}\n"
-            f"Build the journals, resolve any NEEDS REVIEW deductors from their "
-            f"candidate accounts (leave on Suspense if none fit), then verify."
+            "Create the GnuCash TDS journals. Call build_journals() first. If it "
+            "reports NEEDS REVIEW deductors and a candidate clearly fits, call "
+            "apply_overrides with your picks; otherwise you are done. Then report "
+            "the saved CSV, how many matched vs. went to Suspense, and any "
+            "accounts to create."
         )]
     })
+    # Return a SINGLE deterministic summary computed from the output files, not
+    # the model's free-text narration — a small local model mislabels the counts
+    # (and mistypes the filename), which contradicts the real numbers. The LLM's
+    # only job was to make the apply_overrides tool calls; its prose is dropped.
+    summary = T.final_summary(output_path, gnucash_path)
+    if summary:
+        return summary
     return result["messages"][-1].content

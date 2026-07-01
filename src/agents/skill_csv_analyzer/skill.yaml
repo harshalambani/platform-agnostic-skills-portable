@@ -48,3 +48,39 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    Ask a plain-English question about any CSV and get a written answer with the
+    numbers worked out. The agent loads the file, reasons over the rows, and
+    returns a short Markdown report.
+  when_to_use: >
+    Use this for quick, ad-hoc analysis ("average revenue by region?", "which
+    month had the most refunds?") without writing spreadsheet formulas. For a
+    formatted spreadsheet deliverable, use Excel directly instead.
+  inputs:
+    - name: "csv_path"
+      tooltip: "The CSV file you want to ask about."
+      accepts: "CSV (.csv) with a header row."
+      gotchas: "A clear header row gives much better answers. Very large files may be sampled."
+    - name: "question"
+      tooltip: "Your question in plain language."
+      accepts: "Free text."
+      gotchas: "One focused question per run works best; ask follow-ups as new runs."
+  steps:
+    - "Pick your CSV file."
+    - "Type your question."
+    - "Click Run and read (or download) the Markdown answer."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-analysis.md"
+        tooltip: "A Markdown write-up answering your question, including the figures the agent computed."
+  tips: >
+    Treat the answer as a first pass — spot-check any number that drives a
+    decision, since the model reasons over the data rather than running fixed formulas.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This skill needs an LLM. Start Ollama or configure an endpoint in Settings."
+    - problem: "Answer seems to ignore part of the data."
+      fix: "Large CSVs may be sampled; narrow the file or the question and re-run."
