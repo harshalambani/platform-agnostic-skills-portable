@@ -42,3 +42,34 @@ requires:
   native_binaries: []
   external_tools: []
   llm: false
+
+help:
+  overview: >
+    Parses an Outlook .msg or standard .eml email into structured JSON: sender,
+    date, subject, body text and the list of attachments. Pure deterministic
+    extraction — no LLM, fully offline.
+  when_to_use: >
+    Use this when you need an email's fields as data (for a script, a record, or
+    further processing) rather than reading it in a mail client.
+  inputs:
+    - name: "file_path"
+      tooltip: "The email file to parse."
+      accepts: "Outlook .msg or RFC-822 .eml — one file."
+      gotchas: "Provide the email file itself; this does not connect to a mailbox."
+  steps:
+    - "Select the .msg or .eml file."
+    - "Click Run."
+    - "Download the JSON."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-email-parsed.json"
+        tooltip: >
+          Structured JSON with sender, date, subject, body text and an
+          attachments list — easy to read into any script or tool.
+  tips: >
+    Attachments are listed (names), so you can see what was enclosed without
+    opening the mail.
+  troubleshooting:
+    - problem: "Body text looks empty."
+      fix: "Some HTML-only emails store the body differently; check the JSON fields — the text may be under the HTML body."

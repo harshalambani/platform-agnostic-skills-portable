@@ -43,3 +43,40 @@ requires:
   native_binaries: []
   external_tools: ["qpdf"]
   llm: false
+
+help:
+  overview: >
+    Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey
+    broker ledger-statement PDF into a clean, tied-out "Simplified Ledger"
+    Excel workbook. Runs fully offline (deterministic, no LLM).
+  when_to_use: >
+    Run this first of the three KRChoksey sub-tabs. Its workbook is the input to
+    "Reconcile" (Part II), which in turn feeds "GnuCash Import" (Part III).
+  inputs:
+    - name: "pdf_path"
+      tooltip: "Your KR Choksey annual ledger statement PDF."
+      accepts: "PDF (.pdf) — the ledger statement."
+      gotchas: "The PDF is password-protected; you must supply the password below."
+    - name: "password"
+      tooltip: "The PDF password — the account holder's PAN."
+      accepts: "Text — the account holder's PAN."
+      gotchas: "Decryption uses qpdf (bundled in the frozen build; on PATH for source mode)."
+  steps:
+    - "Select the KR Choksey ledger statement PDF."
+    - "Enter the PDF password (the account holder's PAN)."
+    - "Click Run and download the Simplified Ledger workbook."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-KRC-Ledger.xlsx"
+        tooltip: >
+          The Simplified Ledger: the annual statement re-laid as a clean,
+          tied-out workbook. This is the file you pick in the Reconcile (Part II) tab.
+  tips: >
+    Run the three KRChoksey tabs in order — Ledger, then Reconcile, then GnuCash
+    Import. Each later tab picks this output from a dropdown of prior runs.
+  troubleshooting:
+    - problem: "Run fails opening the PDF."
+      fix: "Check the password is the correct PAN. Ensure qpdf is available in source mode."
+    - problem: "Rows look incomplete."
+      fix: "Confirm you selected the full annual ledger statement, not a single contract note."

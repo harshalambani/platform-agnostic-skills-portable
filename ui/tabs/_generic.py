@@ -33,6 +33,7 @@ import gradio as gr
 
 from .. import _config
 from .. import _health
+from .. import _help
 from .. import _runner
 
 if TYPE_CHECKING:
@@ -534,11 +535,13 @@ def _open_output_folder(suffix: str, is_dir_output: bool):
     return None
 
 
-def render(skill: SkillInfo) -> None:
+def render(skill: SkillInfo, container_tab=None) -> None:
     """
     Render a complete Gradio tab body for the given skill.
 
-    Must be called inside a `with gr.Tab(...)` context.
+    Must be called inside a `with gr.Tab(...)` context. Pass that gr.Tab as
+    ``container_tab`` so output-file pickers re-scan and auto-select the newest
+    matching file whenever the tab is opened (picks up a prior step's output).
     """
     # Banner: description + native binary status.
     desc = skill.description.strip()
@@ -551,6 +554,12 @@ def render(skill: SkillInfo) -> None:
             banner_parts.append("\n\n_Native binaries missing — see Run button error for details._")
 
     gr.Markdown("\n".join(banner_parts))
+
+    # Inline help panel (collapsible) — reads the skill's help: block.
+    _help.render_inline(skill)
+
+    # Per-input helper text (Tier-1 tooltips) from the help: block.
+    _info = _help.input_info_map(skill)
 
     with gr.Row():
         # Inputs get equal width with the results pane so long output-file
@@ -566,6 +575,7 @@ def render(skill: SkillInfo) -> None:
                         label=inp.label,
                         file_types=list(inp.file_types) if inp.file_types else None,
                         type="filepath",
+                        **_help.maybe_info(gr.File, _info.get(inp.name)),
                     )
                 elif inp.type == "output_file":
                     # Pick a prior-step output from the outputs folder, with a
@@ -579,6 +589,7 @@ def render(skill: SkillInfo) -> None:
                             allow_custom_value=True,
                             interactive=True,
                             scale=5,
+                            **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                         )
                         _rbtn = gr.Button("↻", scale=0, min_width=40)
                     output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
@@ -588,6 +599,7 @@ def render(skill: SkillInfo) -> None:
                         file_types=list(inp.file_types) if inp.file_types else None,
                         file_count="multiple",
                         type="filepath",
+                        **_help.maybe_info(gr.File, _info.get(inp.name)),
                     )
                 elif inp.type == "parser_file":
                     # Dropdown of the project's known parsers, with a refresh
@@ -602,6 +614,7 @@ def render(skill: SkillInfo) -> None:
                             allow_custom_value=True,
                             interactive=True,
                             scale=5,
+                            **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                         )
                         _pbtn = gr.Button("↻", scale=0, min_width=40)
                     parser_pickers.append((comp, _pbtn))
@@ -612,14 +625,19 @@ def render(skill: SkillInfo) -> None:
                         value=inp.options[0] if inp.options else None,
                         allow_custom_value=True,
                         interactive=True,
+                        **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                     )
                 elif inp.type == "directory":
                     comp = gr.Textbox(
                         label=inp.label,
                         placeholder="Paste full folder path here",
+                        **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
                     )
                 else:  # text
-                    comp = gr.Textbox(label=inp.label)
+                    comp = gr.Textbox(
+                        label=inp.label,
+                        **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                    )
                 input_components.append(comp)
 
             # Model dropdown (always present).
@@ -670,6 +688,18 @@ def render(skill: SkillInfo) -> None:
             fn=lambda: gr.update(choices=_scan_parser_files()),
             outputs=_comp,
         )
+
+    # When this tab is (re)opened, re-scan each output-file picker and
+    # auto-select the newest match — picks up a prior step's fresh output.
+    if container_tab is not None:
+        for _comp, _rbtn, _match, _fts in output_pickers:
+            def _rescan_newest(m=_match, f=_fts):
+                choices = _scan_output_files(m, f)
+                return gr.update(
+                    choices=choices,
+                    value=(choices[0][1] if choices else None),
+                )
+            container_tab.select(fn=_rescan_newest, inputs=[], outputs=[_comp])
 
     def _handle_stop():
         from .. import _runner

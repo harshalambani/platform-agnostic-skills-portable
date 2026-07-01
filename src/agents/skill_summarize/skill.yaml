@@ -42,3 +42,34 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    Summarises any PDF or text file into a concise Markdown summary using your
+    configured LLM.
+  when_to_use: >
+    Use this for a quick readable summary of a document — a report, a long text
+    file, a contract. For asking specific questions of tabular data, use CSV
+    Data Analyzer instead.
+  inputs:
+    - name: "file_path"
+      tooltip: "The document to summarise."
+      accepts: "PDF (.pdf) or text (.txt, .md, .csv, .log, .json, .xml, .html) — one file."
+      gotchas: "Scanned (image-only) PDFs have no extractable text and will summarise poorly; use a text PDF."
+  steps:
+    - "Pick the document."
+    - "Click Run."
+    - "Read or download the Markdown summary."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-summary.md"
+        tooltip: "A Markdown summary capturing the document's main points."
+  tips: >
+    Very long documents may be condensed heavily — for a specific section, point
+    the skill at just that text.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This skill needs an LLM. Start Ollama or set an endpoint in Settings."
+    - problem: "Summary is thin or generic."
+      fix: "The PDF may be a scan with no text layer. Use a text-based document."

@@ -33,3 +33,35 @@ requires:
   native_binaries: []
   external_tools: []
   llm: false
+
+help:
+  overview: >
+    Reads the organised credit-card PDFs from the CC Sort step and extracts every
+    transaction table into one consolidated Excel workbook — one row per
+    transaction across all cards. Runs fully offline.
+  when_to_use: >
+    Use this as the second step, right after "CC Sort". It expects the decrypted,
+    sorted folder that CC Sort produced, not raw statement files.
+  inputs:
+    - name: "pdf_dir"
+      tooltip: "The Decrypted_PDFs_Correct/ folder created by CC Sort."
+      accepts: "A folder of decrypted statement PDFs."
+      gotchas: "Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder."
+  steps:
+    - "Run CC Sort first if you have not already."
+    - "Select the Decrypted_PDFs_Correct/ folder."
+    - "Click Run and download the Excel."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-CC-Transactions.xlsx"
+        tooltip: >
+          One consolidated sheet of transactions across all sorted statements,
+          with date, description and amount columns extracted from each card's
+          table.
+  tips: >
+    Because the PDFs are already grouped by issuer, the consolidated sheet keeps
+    cards together — handy for per-card filtering in Excel.
+  troubleshooting:
+    - problem: "Few or no transactions extracted."
+      fix: "You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from CC Sort."

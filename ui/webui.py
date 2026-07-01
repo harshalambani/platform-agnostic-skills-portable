@@ -45,6 +45,26 @@ import socket
 import sys
 from pathlib import Path
 
+# ── Managed warnings ─────────────────────────────────────────────────────────
+# Known/triaged warnings we have decided to handle. Each is (substring, reason).
+# Managed warnings are LOGGED to the warnings file (tagged "[MANAGED: ...]") but
+# kept OFF the console, so the command window stays clean while the log keeps a
+# full, clearly-labelled record. New/unknown warnings are tagged "[UNMANAGED]"
+# and still surface live on the console. Add entries here as warnings are
+# triaged.
+_MANAGED_WARNINGS: list[tuple[str, str]] = [
+    ("HTTP_422_UNPROCESSABLE_ENTITY",
+     "Gradio 6.x references Starlette's deprecated HTTP_422_UNPROCESSABLE_ENTITY; "
+     "harmless, pending an upstream Gradio fix"),
+]
+
+
+def _managed_note(message: str) -> str | None:
+    for sub, note in _MANAGED_WARNINGS:
+        if sub in message:
+            return note
+    return None
+
 import gradio as gr
 
 # Make `src/` importable when running in source mode (mirrors PyInstaller layout)
@@ -59,8 +79,10 @@ from ui.tabs import home as tab_home  # noqa: E402
 from ui.tabs import _generic as tab_generic  # noqa: E402
 from ui.tabs import settings as tab_settings  # noqa: E402
 from ui.tabs import history as tab_history  # noqa: E402
+from ui.tabs import help as tab_help  # noqa: E402
 from ui.tabs import gnucash_review as tab_gnucash_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
+from ui import _help as _help_mod  # noqa: E402
 from ui import _update  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
@@ -133,6 +155,76 @@ code, .prose code, .markdown code, .gradio-container code {
 }
 """
 
+# Append the in-app help tooltip/output styling (single source: ui/_help.py).
+APP_CSS = APP_CSS + _help_mod.HELP_CSS
+
+
+def _setup_warning_log() -> Path | None:
+    """Capture Python warnings to a rotating log file so a whole run session's
+    warnings can be collected and shared for troubleshooting/suppression.
+
+    File: Data/logs/warnings.log, capped at 10 MB with one rollover backup
+    (warnings.log.1), UTF-8, timestamped. Every line is tagged "[MANAGED: ...]"
+    (known/triaged) or "[UNMANAGED]" (new). Managed warnings are logged but kept
+    off the console; unmanaged ones are logged AND printed live. Returns the log
+    path (or None if it couldn't be set up).
+    """
+    import logging
+    from logging.handlers import RotatingFileHandler
+
+    class _TagFilter(logging.Filter):
+        """Annotate each record as managed/unmanaged. Never drops a record."""
+        def filter(self, record):
+            note = _managed_note(record.getMessage())
+            record.is_managed = note is not None
+            record.managed_tag = f"[MANAGED: {note}]" if note else "[UNMANAGED]"
+            return True
+
+    class _DropManaged(logging.Filter):
+        """Console-only: hide managed warnings (known noise)."""
+        def filter(self, record):
+            return not getattr(record, "is_managed", False)
+
+    try:
+        from ui import _config as _cfg
+        logs_dir = _cfg.output_dir().parent / "logs"
+    except Exception:
+        logs_dir = PROJECT_ROOT / "Data" / "logs"
+    try:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    log_path = logs_dir / "warnings.log"
+    wlog = logging.getLogger("py.warnings")
+    # Idempotent — don't stack handlers if build_app is called more than once.
+    if not any(getattr(h, "_pa_warnlog", False) for h in wlog.handlers):
+        tag = _TagFilter()
+
+        # File: every warning, tagged.
+        fh = RotatingFileHandler(
+            log_path, maxBytes=10 * 1024 * 1024, backupCount=1,
+            encoding="utf-8", delay=True,
+        )
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(managed_tag)s %(name)s: %(message)s"))
+        fh.addFilter(tag)
+        fh._pa_warnlog = True  # type: ignore[attr-defined]
+
+        # Console: unmanaged warnings only (managed = known noise, file-only).
+        ch = logging.StreamHandler(sys.stderr)
+        ch.setFormatter(logging.Formatter("%(managed_tag)s %(message)s"))
+        ch.addFilter(tag)          # sets the tag first
+        ch.addFilter(_DropManaged())  # then drops managed
+        ch._pa_warnlog = True  # type: ignore[attr-defined]
+
+        wlog.addHandler(fh)
+        wlog.addHandler(ch)
+        wlog.setLevel(logging.WARNING)
+        wlog.propagate = False     # we own the handlers; avoid double output
+        logging.captureWarnings(True)
+    return log_path
+
 
 def build_app(launch: bool = False) -> gr.Blocks:
     """
@@ -143,6 +235,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 policy (127.0.0.1, free port, no public share, no analytics).
                 When False, returns the unlaunched object — used by tests.
     """
+    _setup_warning_log()
     skills = _discover_skills()
 
     # Prime the model-list cache once (avoids a 2-second health-check timeout
@@ -193,15 +286,15 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             with gr.Tab("Banks"):
                                 with gr.Tabs():
                                     for _skill in _cat_skills:
-                                        with gr.Tab(_skill.display_name):
-                                            tab_generic.render(_skill)
-                                    with gr.Tab("Review Mappings"):
-                                        tab_gnucash_review.render()
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
+                                    with gr.Tab("Review Mappings") as _rt:
+                                        tab_gnucash_review.render(container_tab=_rt)
                             with gr.Tab("26AS"):
                                 with gr.Tabs():
                                     for _skill in _grouped.get("26as", []):
-                                        with gr.Tab(_skill.display_name):
-                                            tab_generic.render(_skill)
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
                             with gr.Tab("KRChoksey"):
                                 with gr.Tabs():
                                     # Order the KRChoksey sub-tabs by workflow
@@ -212,27 +305,29 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                         _grouped.get("krc", []),
                                         key=lambda s: _krc_order.get(s.display_name, 99),
                                     ):
-                                        with gr.Tab(_skill.display_name):
-                                            tab_generic.render(_skill)
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
                     continue
 
                 if not _cat_skills:
                     continue
-                with gr.Tab(_cat_label):
+                with gr.Tab(_cat_label) as _ct:
                     if len(_cat_skills) == 1:
-                        tab_generic.render(_cat_skills[0])
+                        tab_generic.render(_cat_skills[0], container_tab=_ct)
                     else:
                         with gr.Tabs():
                             for _skill in _cat_skills:
-                                with gr.Tab(_skill.display_name):
-                                    tab_generic.render(_skill)
+                                with gr.Tab(_skill.display_name) as _t:
+                                    tab_generic.render(_skill, container_tab=_t)
 
             # Fallback: uncategorised skills render as flat top-level tabs
             for _skill in skills:
                 if _skill.category not in _known_cats:
-                    with gr.Tab(_skill.display_name):
-                        tab_generic.render(_skill)
+                    with gr.Tab(_skill.display_name) as _t:
+                        tab_generic.render(_skill, container_tab=_t)
 
+            with gr.Tab("Help"):
+                tab_help.render(skills=skills)
             with gr.Tab("History"):
                 tab_history.render()
             with gr.Tab("Settings"):

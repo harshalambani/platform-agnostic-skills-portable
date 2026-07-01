@@ -54,3 +54,51 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    The one-click, end-to-end importer: upload a raw bank statement and your
+    GnuCash book and get back a GnuCash-ready, account-mapped CSV — no
+    intermediate steps. It chains bank extraction, conversion to canonical
+    format, and account mapping for you.
+  when_to_use: >
+    Use this when your goal is to get transactions into GnuCash. Use the
+    individual bank skills (BoB, HDFC, etc.) instead only when you want the
+    extracted CSV without account mapping.
+  inputs:
+    - name: "bank"
+      tooltip: "Which bank the statement is from — this picks the right extractor."
+      accepts: "One of: ICICI, Bank of Baroda, HSBC, HDFC, Other Bank (CSV)."
+      gotchas: "Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help."
+    - name: "statement_files"
+      tooltip: "The statement file(s), matching the bank you chose."
+      accepts: "XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other."
+      gotchas: "File type must match the selected bank, or extraction will fail."
+    - name: "gnucash_file"
+      tooltip: "Your GnuCash book — used to learn your accounts and map transactions."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Must be closed in GnuCash so the file is not locked. It is read only, never modified."
+  steps:
+    - "Choose the bank."
+    - "Upload the matching statement file(s)."
+    - "Select your .gnucash book (closed in GnuCash)."
+    - "Click Run, then import the resulting CSV via File > Import in GnuCash."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-GnuCash_import_ready.csv"
+        tooltip: >
+          The statement converted to canonical columns AND mapped to your GnuCash
+          accounts (based on your book's history), ready to import directly — no
+          manual categorising.
+  tips: >
+    Account mapping learns from your existing GnuCash history, so the more you
+    have categorised before, the better the auto-mapping. Review a few rows after
+    import the first time.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "Mapping (and 'Other Bank' normalisation) uses an LLM. Start Ollama or set an endpoint in Settings."
+    - problem: "Extraction fails immediately."
+      fix: "The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both."
+    - problem: "Some rows mapped to the wrong account."
+      fix: "Fix them in GnuCash after import; future runs learn from the correction."

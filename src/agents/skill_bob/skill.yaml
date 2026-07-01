@@ -36,3 +36,61 @@ requires:
   native_binaries: []
   external_tools: []
   llm: false
+
+# ---------------------------------------------------------------------------
+# help: — single source of truth for the user guide, the standalone HTML, and
+# the in-app inline panel / Help tab / tooltips. Edit here, then run
+# `python scripts/gen_docs.py`. See docs/dev/help-block-schema.md.
+# ---------------------------------------------------------------------------
+help:
+  overview: >
+    Turns one or more Bank of Baroda transaction-statement PDFs into a single
+    flat CSV — one row per transaction. Runs fully offline (no LLM, no internet)
+    and correctly stitches tables that overflow across pages without repeating
+    the column header, so a transaction that wraps from the bottom of one page
+    to the top of the next is captured as a single clean row.
+  when_to_use: >
+    Use this when you have BoB account statements as PDFs and want them as a
+    tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import
+    pipeline (choose "Bank of Baroda" there to do extraction + account mapping
+    in one step instead). This skill is extraction only — it does not categorise
+    or assign accounts.
+  inputs:
+    - name: "pdf_path"
+      tooltip: "Your BoB statement PDF(s). You can select several at once."
+      accepts: "PDF (.pdf) — one or many, in any order."
+      gotchas: >
+        Use the bank's original text PDF, not a photo/scan. Password-protected
+        PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.
+  steps:
+    - "Click the input and pick one or more Bank of Baroda statement PDFs."
+    - "Click Run — it processes offline in a few seconds."
+    - "Download the CSV, or open it from the outputs folder (see below)."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-BoB.csv"
+        tooltip: >
+          One row per transaction with columns: Date, Particulars, Cheque No.,
+          Withdrawals, Deposits, Balance. Rows are in statement order; multi-page
+          transactions are merged so no row is split.
+  tips: >
+    The running balance carries straight from the statement — if the final
+    Balance matches your passbook, the extraction tied out. Re-run with more
+    PDFs to append additional periods (each run writes a new timestamped file).
+    Columns are kept verbatim from the statement so amounts are not rounded or
+    reformatted.
+  troubleshooting:
+    - problem: "The output CSV is empty or has very few rows."
+      fix: >
+        The PDF is probably a scanned image, not a text PDF. Re-download the
+        original statement from BoB net-banking, or run it through an OCR step
+        first. This skill does not OCR.
+    - problem: "Run fails saying the PDF could not be opened."
+      fix: >
+        The PDF is password-protected. Unlock it (open in a viewer, print/save
+        as a new unprotected PDF) and try again.
+    - problem: "Closing balance in the CSV does not match my passbook."
+      fix: >
+        Check you included every page/period and that no statement was selected
+        twice. Each run lists rows in statement order so you can scan for a gap.

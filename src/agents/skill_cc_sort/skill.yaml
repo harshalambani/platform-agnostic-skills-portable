@@ -38,3 +38,43 @@ requires:
   native_binaries: []
   external_tools: ["qpdf"]
   llm: false
+
+help:
+  overview: >
+    Takes a messy folder of credit-card statements and organises it: it pulls
+    PDF attachments out of Outlook .msg emails, decrypts password-protected PDFs
+    (via qpdf), and sorts everything by bank/issuer into a clean folder tree.
+    Runs fully offline.
+  when_to_use: >
+    Use this as the first step when you have a pile of statement emails and PDFs
+    from several cards. Once sorted, run "CC Transactions" on the decrypted
+    folder to extract the actual transactions.
+  inputs:
+    - name: "input_folder"
+      tooltip: "A folder containing your .msg emails and/or statement PDFs (subfolders are fine)."
+      accepts: "A folder of .msg and/or .pdf files."
+      gotchas: "Point at the folder itself, not an individual file."
+    - name: "password"
+      tooltip: "Password(s) for protected PDFs. Leave blank to auto-try common patterns."
+      accepts: "Text — one password, or several comma-separated. Optional."
+      gotchas: "If decryption fails, supply the exact password here; auto-detect only covers common formats."
+  steps:
+    - "Select the folder holding your statement emails / PDFs."
+    - "Optionally enter PDF password(s); leave blank to auto-detect."
+    - "Click Run, then open the output folder."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)"
+        tooltip: >
+          Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to
+          feed into CC Transactions — alongside copies sorted by issuer. Use the
+          "Open output folder" button to browse it.
+  tips: >
+    This step never reads transaction amounts; it only unlocks and organises.
+    The folder it produces is the exact input the CC Transactions skill expects.
+  troubleshooting:
+    - problem: "A PDF stays locked / is skipped."
+      fix: "Enter its password in the password box (comma-separate multiple) and re-run."
+    - problem: "Source-mode run fails on decryption."
+      fix: "qpdf must be on PATH in source mode; the frozen build bundles it."

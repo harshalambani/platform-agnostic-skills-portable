@@ -35,3 +35,39 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+
+help:
+  overview: >
+    Converts ICICI net-banking statement downloads (the .xls files) into a
+    GnuCash-importable CSV in canonical columns.
+  when_to_use: >
+    Use this for the .xls statements ICICI lets you download from net-banking.
+    To also map rows to GnuCash accounts in one step, use GnuCash Import and
+    choose ICICI instead.
+  inputs:
+    - name: "statement_files"
+      tooltip: "One or more ICICI .xls statement downloads."
+      accepts: "Excel 97-2003 (.xls) — one or many."
+      gotchas: >
+        Use the original .xls export from ICICI net-banking. If you re-saved it
+        as .xlsx, export a fresh .xls — the layout this skill expects is the
+        net-banking .xls.
+  steps:
+    - "Download your statement(s) as .xls from ICICI net-banking."
+    - "Select the file(s)."
+    - "Click Run and download the CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-ICICI_GnuCash.csv"
+        tooltip: >
+          The statement in canonical date / description / amount / balance
+          columns — the same shape every bank skill emits, ready for the GnuCash
+          account-mapping pipeline.
+  tips: >
+    Selecting several months at once produces one combined CSV in statement order.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "ICICI currently uses an LLM step. Start Ollama or set an endpoint in Settings."
+    - problem: "Parsing fails or columns are off."
+      fix: "Confirm it is the genuine net-banking .xls, not a converted/edited copy."
