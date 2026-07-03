@@ -100,6 +100,21 @@ def _extract_account_tree(gnucash_file: str) -> list[str]:
 # HTML/JS template for the interactive review table
 # ---------------------------------------------------------------------------
 
+
+def _js_json(value) -> str:
+    """json.dumps that is safe to embed inside an inline <script> element.
+
+    Plain json.dumps does not escape "<", so a value containing "</script>"
+    can break out of the surrounding script tag and inject markup.
+    """
+    return (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
 _REVIEW_HTML = r"""
 <style>
 #review-app {
@@ -615,10 +630,10 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
 
     # Build HTML with data embedded
     html = _REVIEW_HTML
-    html = html.replace("%%DATA_JSON%%", json.dumps(rows))
-    html = html.replace("%%ACCOUNTS_JSON%%", json.dumps(accounts))
-    html = html.replace("%%GNUCASH_FILE_JSON%%", json.dumps(str(gc_p)))
-    html = html.replace("%%CSV_PATH_JSON%%", json.dumps(str(csv_p)))
+    html = html.replace("%%DATA_JSON%%", _js_json(rows))
+    html = html.replace("%%ACCOUNTS_JSON%%", _js_json(accounts))
+    html = html.replace("%%GNUCASH_FILE_JSON%%", _js_json(str(gc_p)))
+    html = html.replace("%%CSV_PATH_JSON%%", _js_json(str(csv_p)))
     return html
 
 
