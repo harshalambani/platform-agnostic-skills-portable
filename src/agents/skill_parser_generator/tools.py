@@ -78,14 +78,49 @@ def constant_spans(source: str) -> dict[str, tuple[int, int]]:
     return spans
 
 
+# Node types a literal blank value is allowed to be built from. Anything else
+# (Call, Attribute, Name, BinOp, comprehensions, imports, ...) means the "value"
+# is actually code, not data - reject it so an LLM can never smuggle a
+# side-effecting expression into a spliced-and-executed parser.
+_LITERAL_NODE_TYPES = (
+    ast.Expression,
+    ast.Constant,
+    ast.Tuple,
+    ast.List,
+    ast.Dict,
+    ast.Set,
+    ast.Load,
+)
+
+
+def _contains_non_literal_code(value_src: str) -> bool:
+    """True if `value_src` parses as a Python expression containing anything
+    other than literal data - a Call, Name, Attribute, import, etc. Values
+    that fail to parse at all are *not* flagged here; that SyntaxError is
+    surfaced later by the whole-file splice-and-parse check instead, so
+    genuinely malformed edits keep raising SyntaxError as before."""
+    try:
+        tree = ast.parse(value_src, mode="eval")
+    except SyntaxError:
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, _LITERAL_NODE_TYPES):
+            continue
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            continue
+        return True
+    return False
+
+
 def rewrite_constants(source: str, new_values: dict[str, str]) -> str:
     """
     Replace the value of each named constant with new RHS source text.
 
     `new_values` maps CONSTANT_NAME -> replacement source (e.g. "(525, 555)").
-    Raises KeyError listing any names that are not editable constants, and
-    SyntaxError if the result does not parse. Splices from the end backwards so
-    earlier offsets stay valid.
+    Raises KeyError listing any names that are not editable constants,
+    ValueError if a replacement value is not a pure literal (see
+    `_is_pure_literal`), and SyntaxError if the result does not parse.
+    Splices from the end backwards so earlier offsets stay valid.
     """
     spans = constant_spans(source)
     unknown = [k for k in new_values if k not in spans]
@@ -93,6 +128,12 @@ def rewrite_constants(source: str, new_values: dict[str, str]) -> str:
         raise KeyError(
             f"not editable blank constant(s): {', '.join(sorted(unknown))}; "
             f"valid blanks: {', '.join(sorted(spans))}"
+        )
+    non_literal = [k for k, v in new_values.items() if _contains_non_literal_code(v)]
+    if non_literal:
+        raise ValueError(
+            f"blank value(s) are not plain literal data (constants may only be "
+            f"literals - no calls, names, or attributes): {', '.join(sorted(non_literal))}"
         )
     out = source
     for name in sorted(new_values, key=lambda k: spans[k][0], reverse=True):
@@ -193,6 +234,8 @@ def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
         new_src = rewrite_constants(src, norm)
     except KeyError as e:
         return f"ERROR: {e.args[0]}"
+    except ValueError as e:
+        return f"ERROR: {e.args[0]}"
     except SyntaxError as e:
         return f"ERROR: edit produced invalid Python: line {e.lineno}: {e.msg}"
     p.write_text(new_src, encoding="utf-8")
@@ -248,6 +291,8 @@ def create_parser_from_template_impl(output_path: str, blanks: dict | str) -> st
     try:
         new_src = rewrite_constants(tmpl, norm) if norm else tmpl
     except KeyError as e:
+        return f"ERROR: {e.args[0]}"
+    except ValueError as e:
         return f"ERROR: {e.args[0]}"
     except SyntaxError as e:
         return f"ERROR: filled template is invalid Python: line {e.lineno}: {e.msg}"

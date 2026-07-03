@@ -142,6 +142,34 @@ def test_rewrite_rejects_syntax_breaking_edit():
         tools.rewrite_constants(SAMPLE, {"BALANCE_X0": "(520, "})
 
 
+def test_rewrite_rejects_non_literal_blank_value():
+    # A crafted "value" that runs code on splice-and-exec must never reach
+    # run_tieout_impl's subprocess execution.
+    with pytest.raises(ValueError):
+        tools.rewrite_constants(
+            SAMPLE, {"BALANCE_X0": "__import__('os').system('x')"}
+        )
+
+
+def test_apply_template_edit_rejects_non_literal_blank(tmp_path):
+    p = tmp_path / "parse_x.py"
+    p.write_text(SAMPLE, encoding="utf-8")
+    msg = tools.apply_template_edit_impl(
+        str(p), {"BALANCE_X0": "__import__('os').system('x')"}
+    )
+    assert msg.startswith("ERROR")
+    assert p.read_text(encoding="utf-8") == SAMPLE  # unchanged, never reaches disk
+
+
+def test_create_parser_from_template_rejects_non_literal_blank(tmp_path):
+    out = tmp_path / "agents" / "skill_demo" / "scripts" / "parse_demo.py"
+    msg = tools.create_parser_from_template_impl(
+        str(out), {"FORMAT_NAME": "__import__('os').system('x')"}
+    )
+    assert msg.startswith("ERROR")
+    assert not out.exists()
+
+
 # --------------------------------------------------------------------------
 # validate_parser
 # --------------------------------------------------------------------------
