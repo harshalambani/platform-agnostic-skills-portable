@@ -51,6 +51,7 @@ import shutil
 import string
 import subprocess
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -541,21 +542,34 @@ def _pull_agents_git(cfg: dict, log: _Log) -> Path:
             log.warn(f"git fetch failed ({exc!r}); using stale cache")
             clone_ok = True  # stale but usable
     else:
-        # Fresh clone
+        # Fresh clone. Retry a few times — hosted CI runners hit transient
+        # GitHub/network blips, and with no cache to fall back on a single-shot
+        # failure aborts the whole release build.
         cache_dir.mkdir(parents=True, exist_ok=True)
-        log.info(f"cloning {url}  (ref={ref})")
-        try:
-            subprocess.run(
-                ["git", "clone", "--depth", "1", "--branch", ref, url, str(cache_dir)],
-                check=True, capture_output=True, timeout=300,
-            )
-            clone_ok = True
-            log.info("clone complete")
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
-            log.err(f"git clone failed: {exc!r}")
-            # If there's a partial clone, clean it up
-            if cache_dir.exists():
-                shutil.rmtree(cache_dir, ignore_errors=True)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            log.info(f"cloning {url}  (ref={ref}) [attempt {attempt}/{max_attempts}]")
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--branch", ref, url, str(cache_dir)],
+                    check=True, capture_output=True, timeout=300,
+                )
+                clone_ok = True
+                log.info("clone complete")
+                break
+            except FileNotFoundError as exc:
+                # git binary missing — retrying will not help.
+                log.err(f"git not found: {exc!r}")
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                log.warn(f"git clone attempt {attempt}/{max_attempts} failed: {exc!r}")
+                # Clean up any partial clone before retrying.
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                if attempt < max_attempts:
+                    backoff = 2 ** attempt  # 2s, then 4s
+                    log.info(f"retrying in {backoff}s...")
+                    time.sleep(backoff)
 
     if not clone_ok:
         log.err("upstream unreachable and no cached clone available")
