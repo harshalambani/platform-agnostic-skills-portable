@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import html
 import sys
-from datetime import date
 from pathlib import Path
 
 import yaml
@@ -368,7 +367,10 @@ def build() -> dict[Path, str]:
     skills = registry.discover(refresh=True)
     views = [skill_view(s) for s in skills]
     internal = internal_steps()
-    version_note = (f"Generated {date.today().isoformat()} from skill manifests · "
+    # NB: no generation date here — stamping date.today() made the committed
+    # HTML "stale" every day after commit, breaking the docs-freshness check
+    # non-deterministically. Keep the note deterministic (counts only).
+    version_note = (f"Generated from skill manifests · "
                     f"{len(views)} UI skills, {len(internal)} internal steps.")
 
     out: dict[Path, str] = {}
