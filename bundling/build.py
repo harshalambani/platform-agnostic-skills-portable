@@ -96,6 +96,16 @@ LAUNCHER_GEN_HINTS = (
 )
 LAUNCHER_GEN_EXE = "PortableApps.comLauncherGenerator.exe"
 
+# PortableApps.com Installer — turns the staging tree into an installable
+# <AppID>_<version>.paf.exe. Vendored under bundling/installer so CI can build it.
+INSTALLER_HINTS = (
+    PROJECT_ROOT / "bundling" / "installer" / "3.9.16",
+    Path(r"C:\PortableApps\PortableApps.comInstaller"),
+    Path(r"C:\PortableApps"),
+)
+INSTALLER_EXE = "PortableApps.comInstaller.exe"
+HELP_HTML_TMPL = TEMPLATES_DIR / "help.html"
+
 
 # ---------------------------------------------------------------------------
 # Pretty logging.
@@ -763,6 +773,14 @@ def step9_copy_defaults(log: _Log) -> None:
     count = sum(1 for _ in dest.rglob("*") if _.is_file())
     log.ok(f"DefaultData copied -> {dest.relative_to(PROJECT_ROOT)} ({count} files)")
 
+    # help.html at the app root is required by the PortableApps.com Installer and
+    # is good to ship in the zip too.
+    if HELP_HTML_TMPL.is_file():
+        shutil.copy2(HELP_HTML_TMPL, STAGING / "help.html")
+        log.ok("help.html copied -> staging/help.html")
+    else:
+        log.warn(f"no help.html template at {HELP_HTML_TMPL} - installer step will fail")
+
 
 def _find_launcher_generator(override: str | None, log: _Log) -> Path | None:
     def _from(p: Path) -> Path | None:
@@ -793,6 +811,42 @@ def _find_launcher_generator(override: str | None, log: _Log) -> Path | None:
         return Path(on_path)
 
     for hint in LAUNCHER_GEN_HINTS:
+        c = _from(hint)
+        if c is not None:
+            return c
+
+    return None
+
+
+def _find_installer(override: str | None, log: _Log) -> Path | None:
+    def _from(p: Path) -> Path | None:
+        if p.is_file() and p.name.lower() == INSTALLER_EXE.lower():
+            return p
+        if p.is_dir():
+            direct = p / INSTALLER_EXE
+            if direct.is_file():
+                return direct
+            for found in p.rglob(INSTALLER_EXE):
+                return found
+        return None
+
+    if override:
+        c = _from(Path(override))
+        if c is not None:
+            return c
+        log.warn(f"--installer path did not resolve: {override}")
+
+    env_val = os.environ.get("PASKILLS_INSTALLER")
+    if env_val:
+        c = _from(Path(env_val))
+        if c is not None:
+            return c
+
+    on_path = shutil.which(INSTALLER_EXE)
+    if on_path:
+        return Path(on_path)
+
+    for hint in INSTALLER_HINTS:
         c = _from(hint)
         if c is not None:
             return c
@@ -887,6 +941,64 @@ def step11_zip(version: str, log: _Log, *, launcher_ok: bool) -> Path | None:
     return out
 
 
+def step12_installer(args: argparse.Namespace, log: _Log, *, launcher_ok: bool) -> Path | None:
+    """
+    Build an installable PASkillsPortable_<version>.paf.exe from staging/ using
+    the PortableApps.com Installer, and move it into dist/.
+
+    Runs last (after the zip) because the installer writes a log into the source
+    tree; keeping it last leaves the zip's contents clean.
+    """
+    log.step(12, "Build .paf.exe installer")
+
+    if args.skip_installer:
+        log.info("--skip-installer set; no .paf.exe built")
+        return None
+    if not launcher_ok:
+        log.warn("launcher wrapper missing - skipping installer")
+        return None
+    if platform.system() != "Windows":
+        log.warn("PortableApps.com Installer is a Windows .exe; skipping on this platform.")
+        return None
+
+    inst = _find_installer(args.installer, log)
+    if inst is None:
+        log.warn("PortableApps.comInstaller.exe not found.")
+        log.warn("  Expected vendored at bundling/installer/3.9.16/, or pass --installer <path>.")
+        log.warn("  Skipping; no .paf.exe produced.")
+        return None
+    if not (STAGING / "help.html").is_file():
+        log.err("staging/help.html missing - the installer requires it (see step 9).")
+        return None
+
+    log.info(f"using installer: {inst}")
+
+    # The installer emits <AppID>_<version>.paf.exe into the parent of the source
+    # folder (PROJECT_ROOT, since the source is staging/).
+    before = set(PROJECT_ROOT.glob("*.paf.exe"))
+    res = subprocess.run([str(inst), str(STAGING)], cwd=PROJECT_ROOT, check=False)
+    if res.returncode != 0:
+        log.warn(f"installer exited {res.returncode}")
+
+    produced = sorted(set(PROJECT_ROOT.glob("*.paf.exe")) - before)
+    if not produced:
+        log.err("installer produced no .paf.exe")
+        inst_log = inst.parent / "Data" / "PortableApps.comInstallerLog.txt"
+        if inst_log.is_file():
+            log.warn(f"see installer log: {inst_log}")
+        return None
+
+    paf = produced[-1]
+    DIST.mkdir(parents=True, exist_ok=True)
+    dest = DIST / paf.name
+    if dest.exists():
+        dest.unlink()
+    shutil.move(str(paf), str(dest))
+    mb = dest.stat().st_size / (1024 * 1024)
+    log.ok(f"wrote {dest.relative_to(PROJECT_ROOT)}  ({mb:.1f} MiB)")
+    return dest
+
+
 # ---------------------------------------------------------------------------
 # Main.
 # ---------------------------------------------------------------------------
@@ -908,6 +1020,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--skip-launcher",
         action="store_true",
         help="Don't invoke the launcher generator (also skips the zip step).",
+    )
+    p.add_argument(
+        "--installer",
+        metavar="PATH",
+        help="Path to PortableApps.comInstaller.exe (or its folder). Otherwise "
+             "PASKILLS_INSTALLER env var, PATH, and standard install hints are searched.",
+    )
+    p.add_argument(
+        "--skip-installer",
+        action="store_true",
+        help="Don't build the installable .paf.exe.",
     )
     p.add_argument(
         "--clean",
@@ -950,11 +1073,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.skip_launcher:
         log.step(10, "Invoke PortableApps Launcher Generator - skipped (--skip-launcher)")
         log.step(11, "Zip staging -> dist - skipped (no launcher)")
+        log.step(12, "Build .paf.exe installer - skipped (no launcher)")
         launcher_ok = False
         zip_path: Path | None = None
+        paf_path: Path | None = None
     else:
         launcher_ok = step10_launcher_gen(args, log)
         zip_path = step11_zip(version, log, launcher_ok=launcher_ok)
+        paf_path = step12_installer(args, log, launcher_ok=launcher_ok)
 
     log.ok(f"build complete (version {version}, sha {sha})")
     log.info(f"Frozen output: {STAGING / 'App' / 'PASkills' / 'pa_skills.exe'}")
@@ -962,6 +1088,8 @@ def main(argv: list[str] | None = None) -> int:
         log.info(f"Wrapper:       {STAGING / 'PASkillsPortable.exe'}")
     if zip_path is not None:
         log.info(f"Release zip:   {zip_path}")
+    if paf_path is not None:
+        log.info(f"Installer:     {paf_path}")
     return 0
 
 

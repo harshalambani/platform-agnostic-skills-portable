@@ -19,6 +19,10 @@ env/
 build/
 staging/
 dist/
+# The PortableApps.com Installer emits <AppID>_<version>.paf.exe into the repo
+# root before build.py moves it into dist/; ignore any stray root artifact so an
+# interrupted build never leaves a committable one behind.
+/*.paf.exe
 *.spec.bak
 
 # --- PyInstaller ---

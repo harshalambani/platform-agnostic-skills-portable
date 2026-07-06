@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PA Skills Portable - Help</title>
+<style>
+  body { font-family: "Segoe UI", Tahoma, sans-serif; max-width: 720px;
+         margin: 2em auto; padding: 0 1em; color: #1f2328; line-height: 1.5; }
+  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
+  h2 { font-size: 1.15em; margin-top: 1.6em; border-bottom: 1px solid #d0d7de;
+       padding-bottom: 0.2em; }
+  code { background: #f0f1f2; padding: 0.1em 0.35em; border-radius: 4px; }
+  .muted { color: #57606a; }
+  a { color: #0969da; }
+</style>
+</head>
+<body>
+  <h1>PA Skills Portable</h1>
+  <p class="muted">LLM-powered PDF and bank-statement processing skills, packaged portably.</p>
+
+  <h2>Launching</h2>
+  <p>Run <code>PASkillsPortable.exe</code>. The app starts a local web UI and,
+     unless disabled, opens it in your browser at
+     <code>http://127.0.0.1:&lt;port&gt;</code>. The chosen port is written to
+     <code>ui_port.json</code> next to the executable.</p>
+
+  <h2>What it does</h2>
+  <p>PA Skills converts bank statements (ICICI, HDFC, HSBC, Bank of Baroda and
+     more) and tax documents into clean, canonical CSVs, and helps map them into
+     GnuCash. Everything runs locally on your machine.</p>
+
+  <h2>Language models (optional)</h2>
+  <p>Deterministic skills (statement parsing, canonical conversion) need no LLM.
+     Skills that use a model read their endpoint from <code>config.yaml</code>
+     (default: a local Ollama server). No data leaves your machine unless you
+     configure a remote endpoint yourself.</p>
+
+  <h2>Data &amp; settings</h2>
+  <p>Your settings and outputs live under the app's <code>Data</code> folder, so
+     the app stays self-contained and portable across machines.</p>
+
+  <h2>More</h2>
+  <p>Documentation and source:
+     <a href="https://github.com/harshalambani/platform-agnostic-skills-portable">
+     github.com/harshalambani/platform-agnostic-skills-portable</a>.</p>
+</body>
+</html>

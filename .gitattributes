@@ -27,3 +27,8 @@ vendor/** filter=lfs diff=lfs merge=lfs -text
 *.pdf       binary
 *.xlsx      binary
 *.docx      binary
+
+# Vendored PortableApps.com Installer tool (NSIS + 7zip + graphics). Track the
+# whole tree via LFS like vendor/, so its .bmp/.ico/etc. binaries don't bloat
+# regular git history. Placed last so it wins precedence for files under it.
+bundling/installer/** filter=lfs diff=lfs merge=lfs -text
