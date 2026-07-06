@@ -3,8 +3,9 @@
 Tracking issue: **#40** — "wrap the app in a native window (pywebview) for
 intuitive one-click quit". Ships alongside #43 (v2 icon refresh).
 
-Status: decisions locked; **Phase A (source prototype) complete & verified
-2026-07-06**. Phase B (frozen build) next.
+Status: decisions locked; **Phase A (source prototype) + Phase B (frozen build)
+complete & verified 2026-07-06**. Phase C (UX/branding) + Phase D (fallback/CI)
+next.
 
 ---
 
@@ -89,11 +90,16 @@ browser-open + Exit-button behavior** — never hard-fail the launch.
 
 - Add deps: `pywebview`, `pythonnet` (+ `clr_loader`). pywebview ships
   PyInstaller hooks; pythonnet/clr needs its loader bundled.
+  ✅ **Done in Phase B** — both ship entry-point PyInstaller hooks that are
+  auto-discovered; the only spec change needed was adding `webview` + `clr` to
+  `hiddenimports` (lazy imports) + `collect_submodules("webview")`.
 - Bundle `WebView2Loader.dll` and the `Microsoft.Web.WebView2.*` managed assembly.
+  ✅ **Verified bundled** — the hooks carry them plus `WebBrowserInterop.*` and
+  the pythonnet runtime; no manual DLL vendoring required.
 - Expect a **bundle-size increase**; `--onedir` already, so no onefile extraction
   cost.
 - **De-risk early:** the frozen build is the riskiest part — prototype the frozen
-  build in Phase B before polishing UX.
+  build in Phase B before polishing UX. ✅ **Done — risk cleared.**
 
 ---
 
@@ -135,8 +141,24 @@ browser-open + Exit-button behavior** — never hard-fail the launch.
   declaring them in `requirements.txt` + frozen hooks is Phase B. Known cosmetic:
   benign asyncio `WinError 10054` teardown traces on close (invisible in the frozen
   `console=False` build) — tidy in Phase C. No packaging yet.
-- **B — Frozen build:** spec/hooks for pywebview + pythonnet; build + run the
-  onedir exe with a real window. Highest-risk step — do it early.
+- **B — Frozen build:** ✅ **DONE (2026-07-06).** `pywebview` + `pythonnet`
+  added to `requirements.txt` + `pyproject.toml`; `requirements-lock.txt`
+  regenerated (uv, hashed — pulls in `clr-loader`, `cffi`). `paskills.spec`:
+  `webview` + `clr` added to `hiddenimports` (the app imports them lazily, so
+  static analysis misses them — this triggers their bundled PyInstaller hooks),
+  plus `collect_submodules("webview")` so the runtime-selected backend
+  (`webview.platforms.winforms`/`edgechromium`) resolves. Verified against the
+  onedir exe: the WebView2 managed DLLs (`Microsoft.Web.WebView2.*`,
+  `WebView2Loader.dll` x64/x86/arm64, `WebBrowserInterop.*`) and pythonnet's
+  `Python.Runtime.dll` + `clr_loader/ClrLoader.dll` are bundled;
+  default launch opens a **real WebView2 window** (confirmed via spawned
+  `msedgewebview2.exe` children — pythonnet/clr loads fine when frozen);
+  closing the window (WM_CLOSE) exits the process **cleanly, exit code 0, no
+  orphan `pa_skills.exe`**, and the WebView2 children self-reap to baseline
+  within ~2s (no leak); headless (`PA_SKILLS_NO_BROWSER=1`) still serves HTTP
+  200 with the window OFF (CI compat-check path intact). The only hook warning
+  is a benign `webview.platforms.android` (needs an `android` module — n/a on
+  Windows).
 - **C — UX + branding:** window title + `appicon.ico` (#43); demote/remove the
   Exit button (keep it only in browser-fallback mode); update PA Launcher notes.
 - **D — Fallback + CI:** implement the env-flag gating; keep the compat-check

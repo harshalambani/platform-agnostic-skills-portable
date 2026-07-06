@@ -43,6 +43,9 @@ dependencies = [
     "gradio>=6.0,<7.0",
     "pyyaml>=6.0",
     "python-dotenv>=1.0.0",
+    # Native window (v2, #40): pywebview + pythonnet/clr WebView2 backend.
+    "pywebview>=6.0,<7.0",
+    "pythonnet>=3.0,<4.0",
 ]
 
 [project.optional-dependencies]

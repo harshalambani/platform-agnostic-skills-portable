@@ -61,17 +61,34 @@ hiddenimports = [
     "langchain_core.tools",
     # MSG parser dependency (local import inside _parse_msg).
     "extract_msg",
+    # Native window (v2, #40). ui/webui.py imports these LAZILY (inside
+    # _run_native_window / _native_window_available), so PyInstaller's static
+    # analysis never sees them and their bundled hooks (collect the WebView2
+    # managed DLLs + pythonnet runtime) would not fire. Declaring them here
+    # pulls them into the graph. pywebview loads its Windows backend
+    # (winforms/edgechromium) by name at runtime — collect_submodules below
+    # grabs every webview.platforms.* module so the backend import resolves.
+    "clr",
+    "webview",
 ]
 
 # ---------------------------------------------------------------------------
 # Packages with data files / dynamic imports PyInstaller misses on its own.
 # collect_all() returns (datas, binaries, hiddenimports) for each.
 # ---------------------------------------------------------------------------
-from PyInstaller.utils.hooks import collect_all  # noqa: E402
+from PyInstaller.utils.hooks import collect_all, collect_submodules  # noqa: E402
 
 _extra_datas = []
 _extra_binaries = []
 _extra_hiddenimports = []
+
+# pywebview picks its backend via importlib at runtime (webview.platforms.*),
+# which static analysis can't follow. Pull in every submodule so whichever
+# backend the WebView2/EdgeChromium runtime selects is present in the bundle.
+try:
+    hiddenimports += collect_submodules("webview")
+except Exception as _e:
+    print(f"[paskills.spec] collect_submodules('webview') skipped: {_e}")
 
 for _pkg in (
     "gradio",
