@@ -39,16 +39,18 @@ from ui._config import (
 # ---------------------------------------------------------------------------
 # Real-DPAPI opt-in gate
 # ---------------------------------------------------------------------------
-# Tests that invoke CryptProtectData for real (via encrypt_api_key on Windows)
-# heap-corrupt the interpreter on GitHub-hosted Windows runners and some
-# sandboxes — a Windows fatal exception 0xc0000374 that takes down the whole
-# pytest process, turning the entire suite red. They still pass on a real
-# desktop, so gate them behind an explicit opt-in rather than dropping the
-# coverage entirely:  set PA_SKILLS_TEST_DPAPI=1 to run them.
+# These tests invoke CryptProtectData for real (via encrypt_api_key on Windows).
+# They used to be gated behind PA_SKILLS_TEST_DPAPI=1 because the DPAPI wrapper
+# heap-corrupted the interpreter (0xc0000374) and took down the whole pytest
+# process. That crash was a bug in the wrapper — the DATA_BLOB.pbData field was
+# typed c_char_p, so LocalFree() freed a Python-owned copy instead of DPAPI's
+# buffer — and is now fixed (pbData is POINTER(c_char)). With the crash gone we
+# run these by default on Windows so a regression is caught; still skipped on
+# non-Windows, where DPAPI does not exist. An explicit PA_SKILLS_SKIP_DPAPI=1
+# escape hatch remains for constrained environments.
 _skip_real_dpapi = pytest.mark.skipif(
-    sys.platform != "win32" or os.environ.get("PA_SKILLS_TEST_DPAPI") != "1",
-    reason="Real DPAPI call; set PA_SKILLS_TEST_DPAPI=1 on a Windows desktop to run "
-           "(heap-corrupts hosted runners/sandboxes)",
+    sys.platform != "win32" or os.environ.get("PA_SKILLS_SKIP_DPAPI") == "1",
+    reason="Real DPAPI call; requires Windows (set PA_SKILLS_SKIP_DPAPI=1 to force-skip)",
 )
 
 
