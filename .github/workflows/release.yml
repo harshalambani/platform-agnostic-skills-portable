@@ -8,11 +8,13 @@
 #   2. Installs Python 3.13.
 #   3. Runs `python bundling/build.py` with --skip-pull (agents/ is
 #      already committed in the repo) to produce the frozen exe,
-#      PortableApps wrapper, and release zip.
-#   4. Creates a GitHub Release and attaches the zip.
+#      PortableApps wrapper, release zip, and the installable .paf.exe.
+#   4. Creates a GitHub Release and attaches both the .paf.exe installer
+#      and the .zip.
 #
-# The Launcher Generator is bundled in bundling/launcher-gen/2.2.4/
-# so CI no longer needs to download it from portableapps.com.
+# The Launcher Generator (bundling/launcher-gen/2.2.4/) and the
+# PortableApps.com Installer (bundling/installer/3.9.16/) are both bundled
+# in-repo, so CI never needs to download tooling from portableapps.com.
 #
 # The build pulls agents/ from the published upstream repo
 # (github.com/harshalambani/platform-agnostic-skills) via git clone.
@@ -148,7 +150,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: PASkillsPortable_${{ env.VERSION }}
-          path: dist/PASkillsPortable_*.zip
+          path: |
+            dist/PASkillsPortable_*.paf.exe
+            dist/PASkillsPortable_*.zip
           if-no-files-found: error
 
       # ------------------------------------------------------------------
@@ -161,12 +165,19 @@ jobs:
           name: PA Skills Portable ${{ env.VERSION }}
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          files: dist/PASkillsPortable_*.zip
+          files: |
+            dist/PASkillsPortable_*.paf.exe
+            dist/PASkillsPortable_*.zip
           generate_release_notes: true
           body: |
             ## PA Skills Portable ${{ env.VERSION }}
 
-            Download `PASkillsPortable_${{ env.VERSION }}.zip`, extract it,
-            and double-click `PASkillsPortable.exe` to launch.
+            **Recommended:** download `PASkillsPortable_${{ env.VERSION }}.paf.exe`
+            and run it — the PortableApps.com installer sets the app up in the
+            location you choose, then launch it with `PASkillsPortable.exe`.
+
+            **Alternative (no installer):** download
+            `PASkillsPortable_${{ env.VERSION }}.zip`, extract it anywhere, and
+            double-click `PASkillsPortable.exe`.
 
             Built from commit ${{ github.sha }}.
