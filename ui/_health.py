@@ -74,8 +74,15 @@ def clear_capability_cache() -> None:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
-def _get_json(url: str, timeout: float = 2.0) -> dict[str, Any]:
-    req = request.Request(url, headers={"User-Agent": "PA-Skills-Portable/health"})
+def _get_json(url: str, timeout: float = 2.0, api_key: str | None = None) -> dict[str, Any]:
+    headers = {"User-Agent": "PA-Skills-Portable/health"}
+    # Authenticated OpenAI-compatible hosts (OpenAI, Groq, Together, ...) require
+    # a Bearer token on GET /models. Without it they answer 401, which the
+    # Settings tab would otherwise surface as "unreachable" even for a valid key.
+    # The "" / "not-needed" sentinels (local Ollama, keyless gateways) send nothing.
+    if api_key and api_key not in ("", "not-needed"):
+        headers["Authorization"] = f"Bearer {api_key}"
+    req = request.Request(url, headers=headers)
     with request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
@@ -238,7 +245,15 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
         return HealthResult(False, "unreachable", f"Unknown provider '{provider}'.")
 
     try:
-        body = _get_json(url, timeout=2.0)
+        if provider == "openai_compatible":
+            # Decrypt the stored key (config holds "dpapi:"/"plain:" ciphertext)
+            # so the health probe authenticates the same way generation does.
+            from . import _config
+            raw_key = endpoint.get("api_key", "")
+            key = _config.decrypt_api_key(raw_key) if raw_key else ""
+            body = _get_json(url, timeout=2.0, api_key=key)
+        else:
+            body = _get_json(url, timeout=2.0)
     except error.URLError as e:
         return HealthResult(False, "unreachable", f"{type(e).__name__}: {e.reason}")
     except TimeoutError:
