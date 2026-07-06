@@ -595,7 +595,16 @@ def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
         return
 
     cfg = _parse_sources_toml(SOURCES_TOML).get("upstream", {})
-    kind = cfg.get("kind", "local")
+    kind = cfg.get("kind", "vendored")
+
+    # "vendored": agents/ already live in src/agents (the repo is the source of
+    # truth). Do nothing — no clone, no overwrite. This is the default so that a
+    # plain `build.py` never reaches for the retired upstream repo and never
+    # clobbers the in-repo agents.
+    if kind in ("vendored", "none"):
+        log.info(f"kind='{kind}'; agents/ vendored in src/agents — nothing to pull")
+        return
+
     includes = cfg.get("include", ["**/*.py", "**/*.md", "**/*.yaml"])
     excludes = cfg.get("exclude", ["**/__pycache__/**", "**/*.pyc"])
 
@@ -604,7 +613,8 @@ def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
     elif kind == "git":
         source_dir = _pull_agents_git(cfg, log)
     else:
-        log.err(f"sources.toml: unknown kind '{kind}' (expected 'local' or 'git')")
+        log.err(f"sources.toml: unknown kind '{kind}' "
+                "(expected 'vendored', 'local', or 'git')")
         sys.exit(1)
 
     count = _sync_agents(source_dir, SRC_AGENTS, includes, excludes, log)
