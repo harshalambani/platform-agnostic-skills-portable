@@ -180,4 +180,22 @@ jobs:
             `PASkillsPortable_${{ env.VERSION }}.zip`, extract it anywhere, and
             double-click `PASkillsPortable.exe`.
 
+            ### Windows SmartScreen / Smart App Control
+
+            This build is not code-signed yet, so Windows 11 may warn or block
+            it on first run. On **SmartScreen** ("Windows protected your PC"),
+            click **More info -> Run anyway** (or run
+            `Unblock-File .\PASkillsPortable_${{ env.VERSION }}.paf.exe` in
+            PowerShell first). **Smart App Control** is stricter and has no
+            per-app override — if it blocks the app you'll need a PC without it,
+            or to turn it off in Windows Security. This is expected for an
+            unsigned build; the source and build are public in this repo.
+
+            ### Closing the app
+
+            Click **Exit** in the top-right of the UI, or just close the browser
+            window (the server stops itself a few seconds later). This gives a
+            clean shutdown so PortableApps.com won't report "did not close
+            correctly" or block your next upgrade.
+
             Built from commit ${{ github.sha }}.

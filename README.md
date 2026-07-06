@@ -56,6 +56,32 @@ HSBC and ICICI are next in line to go fully offline (see CHANGELOG).
 
 No Python install required. No admin rights. No registry changes.
 
+**Closing the app:** click the **Exit** button in the top-right of the UI (or
+just close the browser window — the server shuts itself down a few seconds
+after the tab closes). This ensures a clean exit so PortableApps.com does not
+report "did not close correctly" or block a later upgrade.
+
+### Windows SmartScreen / SmartApp Control
+
+The download is not code-signed yet, so Windows 11 may warn or block it the
+first time you run it:
+
+- **SmartScreen** ("Windows protected your PC"): click **More info -> Run
+  anyway**. You can also pre-clear the file in PowerShell before running:
+  ```powershell
+  cd "C:\path\to\download"
+  Unblock-File .\PASkillsPortable_<version>.paf.exe
+  ```
+- **Smart App Control** (a stricter Windows 11 mode, on by default on some new
+  PCs): it blocks all unsigned apps and has no per-app "Run anyway". If it
+  blocks the app, either use a PC without Smart App Control, or turn Smart App
+  Control off in **Windows Security -> App & browser control -> Smart App
+  Control** (note: turning it back **on** later requires a Windows reset, so
+  only do this if you understand the trade-off).
+
+This warning is expected for a new, unsigned build and does not indicate the
+app is unsafe — the source and build are public in this repo.
+
 ## Quick start — developer (source mode)
 
 ```powershell
