@@ -3,7 +3,8 @@
 Tracking issue: **#40** — "wrap the app in a native window (pywebview) for
 intuitive one-click quit". Ships alongside #43 (v2 icon refresh).
 
-Status: **design — awaiting approval before code.**
+Status: decisions locked; **Phase A (source prototype) complete & verified
+2026-07-06**. Phase B (frozen build) next.
 
 ---
 
@@ -121,8 +122,19 @@ browser-open + Exit-button behavior** — never hard-fail the launch.
 
 ## 7. Phased plan
 
-- **A — Source prototype:** server-thread + pywebview window in dev mode; verify
-  window-close → clean process exit (atexit runs). No packaging yet.
+- **A — Source prototype:** ✅ **DONE (2026-07-06).** server-thread + pywebview
+  window in dev mode; verified window-close → clean process exit with the atexit
+  API-key wipe firing (harness: build_app in window mode → auto-close window →
+  exit 0 + atexit sentinel present). Implemented in `ui/webui.py`:
+  `_resolve_launch_mode()` (headless / browser / window), `_native_window_available()`
+  + `_webview2_runtime_present()` (WebView2 registry pre-check), `_run_native_window()`
+  (Gradio launched `prevent_thread_lock=True`, `webview.start()` on the main thread,
+  `_terminate_process()` on close), silent browser fallback, Exit button gated off in
+  window mode, `--no-window` / `PA_SKILLS_NO_WINDOW` escape hatch. pywebview/pythonnet
+  are **soft deps** (lazy, feature-detected — the app falls back to browser if absent);
+  declaring them in `requirements.txt` + frozen hooks is Phase B. Known cosmetic:
+  benign asyncio `WinError 10054` teardown traces on close (invisible in the frozen
+  `console=False` build) — tidy in Phase C. No packaging yet.
 - **B — Frozen build:** spec/hooks for pywebview + pythonnet; build + run the
   onedir exe with a real window. Highest-risk step — do it early.
 - **C — UX + branding:** window title + `appicon.ico` (#43); demote/remove the

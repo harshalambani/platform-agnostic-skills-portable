@@ -340,23 +340,38 @@ def build_app(launch: bool = False) -> gr.Blocks:
     for _s in skills:
         _grouped[_s.category].append(_s)
 
+    # Presentation mode decides the header + quit affordance. Resolve it BEFORE
+    # constructing the Blocks so the Exit button is gated correctly: in native-
+    # window mode closing the window quits, so the header Exit button is removed;
+    # in browser/headless mode it stays (the only deterministic quit path). The
+    # window/browser fallback is decided up front (WebView2 pre-check) so a
+    # later fallback never leaves a windowless UI without an Exit button.
+    mode = _resolve_launch_mode() if launch else "browser"
+    window_mode = mode == "window"
+
     with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
-        # Header: app title + an always-visible Exit button so the user has a
-        # deterministic way to stop the windowless server (see shutdown
-        # coordinator above). The message row stays hidden until Exit is clicked.
+        # Header. In browser/headless mode we add an always-visible Exit button
+        # (the deterministic way to stop the windowless server — see shutdown
+        # coordinator above) plus the tab-close shutdown wiring. In native-window
+        # mode the OS window owns the lifecycle: closing it quits the process, so
+        # the Exit button and the tab-close grace timer are both omitted (a webview
+        # navigation must not arm a shutdown).
         with gr.Row():
             gr.Markdown(f"### {APP_TITLE}")
-            _exit_btn = gr.Button("Exit", variant="stop", scale=0, min_width=90)
-        _exit_msg = gr.Markdown(visible=False)
+            if not window_mode:
+                _exit_btn = gr.Button("Exit", variant="stop", scale=0, min_width=90)
 
-        def _on_exit_click_ui():
-            return gr.update(value=_on_exit_click(), visible=True)
+        if not window_mode:
+            _exit_msg = gr.Markdown(visible=False)
 
-        _exit_btn.click(fn=_on_exit_click_ui, inputs=None, outputs=[_exit_msg])
-        # A page load (initial or reload) cancels any pending browser-close
-        # shutdown; closing the tab arms it after a short grace window.
-        app.load(fn=_cancel_pending_shutdown, inputs=None, outputs=None)
-        app.unload(lambda: _schedule_shutdown(_UNLOAD_GRACE_SECONDS))
+            def _on_exit_click_ui():
+                return gr.update(value=_on_exit_click(), visible=True)
+
+            _exit_btn.click(fn=_on_exit_click_ui, inputs=None, outputs=[_exit_msg])
+            # A page load (initial or reload) cancels any pending browser-close
+            # shutdown; closing the tab arms it after a short grace window.
+            app.load(fn=_cancel_pending_shutdown, inputs=None, outputs=None)
+            app.unload(lambda: _schedule_shutdown(_UNLOAD_GRACE_SECONDS))
 
         with gr.Tabs():
             with gr.Tab("Home"):
@@ -438,16 +453,25 @@ def build_app(launch: bool = False) -> gr.Blocks:
         except Exception:
             allowed = []
 
+        # In window mode, launch non-blocking (prevent_thread_lock=True) so the
+        # Gradio server runs on a background thread and the main thread is free to
+        # own the native-window GUI message pump. In browser/headless mode we keep
+        # the historical blocking launch. inbrowser only fires in browser mode
+        # (never headless, never window — the webview opens the URL itself).
         app.launch(
             server_name="127.0.0.1",
             server_port=port,
             share=False,
-            inbrowser=os.environ.get("PA_SKILLS_NO_BROWSER") != "1",
+            inbrowser=mode == "browser",
+            prevent_thread_lock=window_mode,
             quiet=False,
             theme=_theme.make_theme(),
             css=APP_CSS,
             allowed_paths=allowed,
         )
+        if window_mode:
+            url = f"http://127.0.0.1:{port}"
+            _run_native_window(url)  # blocks until the window closes, then exits
     return app
 
 
@@ -492,6 +516,157 @@ def _write_port_file(port: int) -> None:
         ),
         encoding="utf-8",
     )
+
+
+# ---------------------------------------------------------------------------
+# Native window (v2 — one-click quit). See
+# docs/history/2026-07-06-PHASE-V2-NATIVE-WINDOW-PLAN.md (#40).
+#
+# The frozen app is otherwise a windowless Gradio server. In native-window mode
+# the Gradio server runs on a background thread (prevent_thread_lock=True) and a
+# pywebview window (WebView2 backend on Windows) hosts the URL on the main
+# thread; closing the window quits the process in one click. If the native
+# window is unavailable we silently fall back to the browser + Exit-button flow.
+# ---------------------------------------------------------------------------
+
+def _resolve_launch_mode() -> str:
+    """Decide how to present the UI: 'headless', 'browser', or 'window'.
+
+    - PA_SKILLS_NO_BROWSER=1 -> 'headless': server only, no window, no browser.
+      This is the CI compat-check smoke-test path (it HTTP-GETs the port URL);
+      the native window MUST be off here.
+    - PA_SKILLS_NO_WINDOW=1  -> 'browser': today's browser + Exit-button flow
+      (debug escape hatch, forces browser mode even when a window is available).
+    - otherwise               -> 'window' if a native window is available, else
+      'browser' (silent fallback — no install prompt).
+    """
+    if os.environ.get("PA_SKILLS_NO_BROWSER") == "1":
+        return "headless"
+    if os.environ.get("PA_SKILLS_NO_WINDOW") == "1":
+        return "browser"
+    return "window" if _native_window_available() else "browser"
+
+
+def _native_window_available() -> bool:
+    """True if we can host the UI in a pywebview + WebView2 native window.
+
+    Gated to Windows for v2 (WebView2 backend). Requires both the pywebview
+    package to import and the WebView2 runtime to be installed. Deciding this up
+    front (rather than discovering it when the window fails to open) lets the
+    window/browser choice — and therefore the Exit-button gating — be correct
+    before the Blocks are built.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import webview  # noqa: F401,PLC0415
+    except Exception:
+        return False
+    return _webview2_runtime_present()
+
+
+def _webview2_runtime_present() -> bool:
+    """True if the Evergreen/standalone WebView2 runtime is installed.
+
+    pywebview's EdgeChromium backend needs the WebView2 runtime, which ships with
+    Windows 11 and current Edge but can be absent on older Windows 10. Check the
+    runtime's registered version ("pv") under the EdgeUpdate client GUID across
+    the per-machine (HKLM, incl. the 32-bit registry view) and per-user (HKCU)
+    install locations.
+    """
+    import winreg  # noqa: PLC0415
+
+    guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    locations = [
+        (winreg.HKEY_LOCAL_MACHINE,
+         rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_LOCAL_MACHINE,
+         rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_CURRENT_USER,
+         rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+    ]
+    for root, path in locations:
+        try:
+            with winreg.OpenKey(root, path) as key:
+                pv, _ = winreg.QueryValueEx(key, "pv")
+                if pv and pv not in ("", "0.0.0.0"):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
+def _window_icon_path() -> str | None:
+    """Absolute path to appicon.ico for the native window title bar, or None.
+
+    Frozen builds may bundle the icon under sys._MEIPASS; source mode reads it
+    from bundling/icons/. Ships with the v2 icon refresh (#43).
+    """
+    candidates: list[Path] = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(Path(meipass) / "appicon.ico")
+        candidates.append(Path(meipass) / "bundling" / "icons" / "appicon.ico")
+    candidates.append(PROJECT_ROOT / "bundling" / "icons" / "appicon.ico")
+    for c in candidates:
+        try:
+            if c.is_file():
+                return str(c)
+        except OSError:
+            continue
+    return None
+
+
+def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
+    """Poll *url* until it responds (or *timeout* s elapse). Returns readiness.
+
+    prevent_thread_lock=True returns before uvicorn is necessarily accepting
+    connections, so give the background server a moment before pointing the
+    window at it — otherwise the window can load an error page on a cold start.
+    """
+    import time  # noqa: PLC0415
+    import urllib.request  # noqa: PLC0415
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=2) as resp:  # noqa: S310
+                if resp.status < 500:
+                    return True
+        except Exception:
+            time.sleep(0.25)
+    return False
+
+
+def _run_native_window(url: str) -> None:
+    """Host *url* in a native window on the main thread; quit when it closes.
+
+    webview.start() runs the GUI message pump and blocks until every window is
+    closed, then we route through _terminate_process() so the atexit wipe of the
+    decrypted-API-key %TEMP% dirs always runs. If the window fails to open at
+    runtime (rare — _native_window_available() pre-checks the WebView2 runtime),
+    fall back to opening the browser and keeping the already-running server alive
+    rather than stranding the user. Phase D hardens this fallback + CI wiring.
+    """
+    import webview  # noqa: PLC0415
+
+    _wait_for_server(url)
+    try:
+        webview.create_window(APP_TITLE, url, width=1200, height=820)
+        icon = _window_icon_path()
+        if icon:
+            webview.start(icon=icon)
+        else:
+            webview.start()
+    except Exception:
+        import webbrowser  # noqa: PLC0415
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        threading.Event().wait()  # keep the background server thread alive
+        return
+    _terminate_process()
 
 
 # ---------------------------------------------------------------------------
@@ -589,10 +764,15 @@ def main(argv: list[str] | None = None) -> int:
         return rc
 
     parser = argparse.ArgumentParser(prog="ui.webui", description="Launch the PA Skills Portable UI.")
-    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open the browser.")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="Headless: server only, no window and no browser (CI smoke test).")
+    parser.add_argument("--no-window", action="store_true",
+                        help="Force browser mode (today's Exit-button flow) instead of the native window.")
     args = parser.parse_args(raw_argv)
     if args.no_browser:
         os.environ["PA_SKILLS_NO_BROWSER"] = "1"
+    if args.no_window:
+        os.environ["PA_SKILLS_NO_WINDOW"] = "1"
     build_app(launch=True)
     return 0
 
