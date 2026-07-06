@@ -73,7 +73,8 @@ jobs:
           python bundling/build.py `
             --version "0.0.0-compat-check" `
             --allow-dirty `
-            --skip-venv
+            --skip-venv `
+            --skip-pull
 
       # ----------------------------------------------------------------
       # 6. Smoke test frozen exe
