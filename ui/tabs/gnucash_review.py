@@ -15,7 +15,6 @@ import csv
 import gzip
 import json
 import re
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -680,13 +679,14 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
         return "No changes to save.", gr.update(visible=False)
 
     # ── Save overrides YAML ──
-    # Ensure agents path is importable
-    agents_root = Path(__file__).resolve().parent.parent.parent / "src" / "agents"
-    if str(agents_root) not in sys.path:
-        sys.path.insert(0, str(agents_root))
-
     try:
-        from skill_gnucash_account_mapper.persistent_rules import (
+        # Import via the `agents` package so it resolves in both source and
+        # frozen (PyInstaller) builds. The old bare-name import relied on
+        # inserting <repo>/src/agents into sys.path, which is a no-op in the
+        # frozen app — there the tree lives at _MEIPASS/agents, not
+        # _MEIPASS/src/agents — so saving overrides failed with
+        # "No module named 'skill_gnucash_account_mapper'".
+        from agents.skill_gnucash_account_mapper.persistent_rules import (
             load_overrides,
             rules_path,
             save_overrides_batch,
