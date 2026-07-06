@@ -243,7 +243,9 @@ def render() -> None:
         datatype=["str", "str", "str", "str"],
         interactive=False,
         wrap=True,
-        row_count=(0, "dynamic"),
+        # Gradio 6 API: initial rows via row_count, min/max via row_limits.
+        # Omitting row_limits keeps the old (0, "dynamic") unconstrained behavior.
+        row_count=0,
     )
 
     with gr.Row():
