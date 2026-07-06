@@ -76,35 +76,66 @@ _PLAIN_PREFIX = "plain:"
 _SENTINELS = {"", "not-needed"}
 
 
-def _dpapi_encrypt(plaintext: str) -> str:
-    """
-    Encrypt *plaintext* with Windows DPAPI (user context) and return a
-    base64-encoded ciphertext string.  Raises RuntimeError on failure.
-    Only call this on Windows (sys.platform == "win32").
-    """
-    class _BLOB(ctypes.Structure):
-        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.c_char_p)]
+class _DATA_BLOB(ctypes.Structure):
+    # pbData MUST be POINTER(c_char), NOT c_char_p.  Reading a c_char_p struct
+    # field makes ctypes auto-marshal the memory into a *new* Python bytes copy,
+    # so `blob_out.pbData` would hand LocalFree() a pointer to a Python-owned
+    # buffer instead of DPAPI's LocalAlloc'd block — freeing that corrupts the
+    # process heap (STATUS_HEAP_CORRUPTION, 0xC0000374) and crashes the app the
+    # moment a key is saved.  POINTER(c_char) returns the raw pointer, so both
+    # string_at() and LocalFree() operate on the real ciphertext buffer.
+    _fields_ = [("cbData", ctypes.c_ulong),
+                ("pbData", ctypes.POINTER(ctypes.c_char))]
 
-    data = plaintext.encode("utf-8")
-    blob_in = _BLOB(len(data), data)
-    blob_out = _BLOB()
 
-    ok = ctypes.windll.crypt32.CryptProtectData(
+def _local_free(ptr) -> None:
+    """Free a DPAPI-allocated buffer via LocalFree, passing the true pointer."""
+    lf = ctypes.windll.kernel32.LocalFree
+    lf.argtypes = [ctypes.c_void_p]
+    lf.restype = ctypes.c_void_p
+    lf(ctypes.cast(ptr, ctypes.c_void_p))
+
+
+def _dpapi_crypt(func, data: bytes, err_label: str, err_hint: str) -> bytes:
+    """
+    Shared plumbing for CryptProtectData / CryptUnprotectData.
+
+    *data* is the input bytes; returns the output buffer bytes.  Raises
+    RuntimeError on API failure.  Only call this on Windows.
+    """
+    func.restype = ctypes.c_int
+    # Keep the input buffer alive for the duration of the call.
+    buf = ctypes.create_string_buffer(data, len(data))
+    blob_in = _DATA_BLOB(len(data), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char)))
+    blob_out = _DATA_BLOB()
+
+    ok = func(
         ctypes.byref(blob_in),
         None, None, None, None,
         0,
         ctypes.byref(blob_out),
     )
     if not ok:
-        raise RuntimeError(
-            f"CryptProtectData failed (err={ctypes.GetLastError()}). "
-            "The API key could not be encrypted."
-        )
+        raise RuntimeError(f"{err_label} failed (err={ctypes.GetLastError()}). {err_hint}")
     try:
-        raw = ctypes.string_at(blob_out.pbData, blob_out.cbData)
-        return base64.b64encode(raw).decode("ascii")
+        return ctypes.string_at(blob_out.pbData, blob_out.cbData)
     finally:
-        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+        _local_free(blob_out.pbData)
+
+
+def _dpapi_encrypt(plaintext: str) -> str:
+    """
+    Encrypt *plaintext* with Windows DPAPI (user context) and return a
+    base64-encoded ciphertext string.  Raises RuntimeError on failure.
+    Only call this on Windows (sys.platform == "win32").
+    """
+    raw = _dpapi_crypt(
+        ctypes.windll.crypt32.CryptProtectData,
+        plaintext.encode("utf-8"),
+        "CryptProtectData",
+        "The API key could not be encrypted.",
+    )
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _dpapi_decrypt(b64: str) -> str:
@@ -112,29 +143,14 @@ def _dpapi_decrypt(b64: str) -> str:
     Decrypt a base64-encoded DPAPI ciphertext back to the original string.
     Raises RuntimeError on failure.  Only call this on Windows.
     """
-    class _BLOB(ctypes.Structure):
-        _fields_ = [("cbData", ctypes.c_ulong), ("pbData", ctypes.c_char_p)]
-
-    raw = base64.b64decode(b64)
-    blob_in = _BLOB(len(raw), raw)
-    blob_out = _BLOB()
-
-    ok = ctypes.windll.crypt32.CryptUnprotectData(
-        ctypes.byref(blob_in),
-        None, None, None, None,
-        0,
-        ctypes.byref(blob_out),
+    raw = _dpapi_crypt(
+        ctypes.windll.crypt32.CryptUnprotectData,
+        base64.b64decode(b64),
+        "CryptUnprotectData",
+        "The API key could not be decrypted — it may have been encrypted by "
+        "a different Windows user account.",
     )
-    if not ok:
-        raise RuntimeError(
-            f"CryptUnprotectData failed (err={ctypes.GetLastError()}). "
-            "The API key could not be decrypted — it may have been encrypted by "
-            "a different Windows user account."
-        )
-    try:
-        return ctypes.string_at(blob_out.pbData, blob_out.cbData).decode("utf-8")
-    finally:
-        ctypes.windll.kernel32.LocalFree(blob_out.pbData)
+    return raw.decode("utf-8")
 
 
 def encrypt_api_key(plaintext: str) -> str:
