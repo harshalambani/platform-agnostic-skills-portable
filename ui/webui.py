@@ -39,10 +39,12 @@ if _sys.stderr is None:
     _sys.stderr = open(_os.devnull, "w", encoding="utf-8")
 
 import argparse
+import atexit
 import json
 import os
 import socket
 import sys
+import threading
 from pathlib import Path
 
 # ── Managed warnings ─────────────────────────────────────────────────────────
@@ -159,6 +161,78 @@ code, .prose code, .markdown code, .gradio-container code {
 APP_CSS = APP_CSS + _help_mod.HELP_CSS
 
 
+# ---------------------------------------------------------------------------
+# Clean shutdown coordinator.
+#
+# The frozen build is a windowless Gradio server (console=False), so there is
+# no OS window to close and closing the browser tab does NOT stop the process.
+# Left running, pa_skills.exe lingers until it's force-killed, and the
+# PortableApps Launcher (WaitForProgram=true) then reports "did not close
+# correctly" and blocks upgrades.
+#
+# Fix: exit the process when the user closes the browser (Blocks.unload) after a
+# short grace window so an ordinary reload/navigation doesn't kill the server —
+# a fresh page load cancels the pending shutdown. An explicit "Exit" button in
+# the header gives a deterministic manual path.
+#
+# Note: this targets the single-user local workflow. With multiple browser tabs
+# open, closing one starts the grace timer; the Exit button is the reliable way
+# to quit in that case.
+# ---------------------------------------------------------------------------
+
+_UNLOAD_GRACE_SECONDS = 3.0     # tab close -> wait this long -> exit (reload cancels)
+_EXIT_BUTTON_DELAY = 0.8        # let the "shutting down" message render before exit
+
+_shutdown_lock = threading.Lock()
+_shutdown_timer: threading.Timer | None = None
+
+
+def _terminate_process() -> None:
+    """Run registered atexit handlers, then hard-exit with code 0.
+
+    atexit._run_exitfuncs() fires the temp-dir cleanup registered by
+    ui._config (which wipes the %TEMP% legacy-config dirs holding decrypted
+    API keys) BEFORE we os._exit — os._exit alone would skip atexit and leave
+    those files behind. Exit code 0 lets the PA Launcher record a clean close.
+    """
+    try:
+        atexit._run_exitfuncs()
+    except Exception:
+        pass
+    os._exit(0)
+
+
+def _cancel_pending_shutdown() -> None:
+    """Cancel a scheduled shutdown — called on every page load, so a reload or
+    reconnect keeps the server alive."""
+    global _shutdown_timer
+    with _shutdown_lock:
+        if _shutdown_timer is not None:
+            _shutdown_timer.cancel()
+            _shutdown_timer = None
+
+
+def _schedule_shutdown(delay: float) -> None:
+    """(Re)arm a one-shot timer that terminates the process after *delay* s."""
+    global _shutdown_timer
+    with _shutdown_lock:
+        if _shutdown_timer is not None:
+            _shutdown_timer.cancel()
+        _shutdown_timer = threading.Timer(delay, _terminate_process)
+        _shutdown_timer.daemon = True
+        _shutdown_timer.start()
+
+
+def _on_exit_click() -> str:
+    """Header 'Exit' button handler — arm a near-immediate shutdown and tell the
+    user they can close the window."""
+    _schedule_shutdown(_EXIT_BUTTON_DELAY)
+    return (
+        "### PA Skills is shutting down\n\n"
+        "You can close this browser window now."
+    )
+
+
 def _setup_warning_log() -> Path | None:
     """Capture Python warnings to a rotating log file so a whole run session's
     warnings can be collected and shared for troubleshooting/suppression.
@@ -267,6 +341,23 @@ def build_app(launch: bool = False) -> gr.Blocks:
         _grouped[_s.category].append(_s)
 
     with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
+        # Header: app title + an always-visible Exit button so the user has a
+        # deterministic way to stop the windowless server (see shutdown
+        # coordinator above). The message row stays hidden until Exit is clicked.
+        with gr.Row():
+            gr.Markdown(f"### {APP_TITLE}")
+            _exit_btn = gr.Button("Exit", variant="stop", scale=0, min_width=90)
+        _exit_msg = gr.Markdown(visible=False)
+
+        def _on_exit_click_ui():
+            return gr.update(value=_on_exit_click(), visible=True)
+
+        _exit_btn.click(fn=_on_exit_click_ui, inputs=None, outputs=[_exit_msg])
+        # A page load (initial or reload) cancels any pending browser-close
+        # shutdown; closing the tab arms it after a short grace window.
+        app.load(fn=_cancel_pending_shutdown, inputs=None, outputs=None)
+        app.unload(lambda: _schedule_shutdown(_UNLOAD_GRACE_SECONDS))
+
         with gr.Tabs():
             with gr.Tab("Home"):
                 tab_home.render(skills=skills)
