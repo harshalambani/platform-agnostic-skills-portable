@@ -3,9 +3,11 @@
 Tracking issue: **#40** — "wrap the app in a native window (pywebview) for
 intuitive one-click quit". Ships alongside #43 (v2 icon refresh).
 
-Status: decisions locked; **Phase A (source prototype) + Phase B (frozen build)
-complete & verified 2026-07-06**. Phase C (UX/branding) + Phase D (fallback/CI)
-next.
+Status: decisions locked; **Phases A-D complete & verified 2026-07-06.** The
+Phase A prototype front-loaded the Phase C code (window title, appicon.ico
+consumption, Exit-button gating) and the Phase D env-gating + silent fallback;
+Phase B confirmed them frozen. Remaining threads are cross-branch / operational
+(merge #43 icon artwork; optional full-pipeline build run) - see §7.
 
 ---
 
@@ -159,11 +161,28 @@ browser-open + Exit-button behavior** — never hard-fail the launch.
   200 with the window OFF (CI compat-check path intact). The only hook warning
   is a benign `webview.platforms.android` (needs an `android` module — n/a on
   Windows).
-- **C — UX + branding:** window title + `appicon.ico` (#43); demote/remove the
-  Exit button (keep it only in browser-fallback mode); update PA Launcher notes.
-- **D — Fallback + CI:** implement the env-flag gating; keep the compat-check
-  smoke test on the headless (`PA_SKILLS_NO_BROWSER`) path; add a window-mode
-  manual test to the release checklist.
+- **C — UX + branding:** ✅ **DONE (2026-07-06)** — landed in the Phase A code
+  and verified frozen in Phase B. Window title = `APP_TITLE` on
+  `webview.create_window(...)`; `appicon.ico` fed to `webview.start(icon=...)`
+  via `_window_icon_path()` (resolves the bundled `sys._MEIPASS` copy when
+  frozen, `bundling/icons/` in source); the header **Exit** button + tab-close
+  grace timer are gated off in window mode (`if not window_mode`, `webui.py:361`)
+  and kept only in browser/headless mode. **The new artwork itself lives on the
+  sibling branch `feat/v2-icon-refresh` (#43, commit `fe5812b`) — real 95 KB
+  multi-res `appicon.ico` + PNG set, not yet merged to main.** On this branch
+  `bundling/icons/appicon.ico` is still the 786-byte placeholder; the icon code
+  reads whichever `appicon.ico` is present, so the real artwork lights up
+  automatically once #43 and this branch both land on main.
+- **D — Fallback + CI:** ✅ **DONE (2026-07-06).** Env-flag gating implemented in
+  `_resolve_launch_mode()` (`PA_SKILLS_NO_BROWSER`→headless, `PA_SKILLS_NO_WINDOW`
+  →browser, else window). Silent WebView2 fallback in `_run_native_window()`
+  (try `create_window`/`start`, except → `webbrowser.open` + keep the bg server
+  thread alive). Both CI workflows keep the smoke test on the headless path:
+  `compat-check.yml:91` and `release.yml:95` set `PA_SKILLS_NO_BROWSER=1`, so the
+  runner never tries to open a GUI window (verified). Window-mode is
+  GUI-only and can't run on the headless CI runner, so it stays a **manual**
+  pre-release check (build onedir → launch → confirm titled WebView2 window →
+  close → exit 0, no orphan `pa_skills.exe`) — exercised end-to-end in Phase B.
 
 ---
 
