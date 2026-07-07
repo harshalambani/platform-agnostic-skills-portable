@@ -34,6 +34,7 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
             acc_id = None
             acc_name = None
             acc_parent = None
+            acc_type = None
             for child in elem:
                 if child.tag.endswith('}id'):
                     acc_id = child.text
@@ -41,8 +42,15 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                     acc_name = child.text
                 elif child.tag.endswith('}parent'):
                     acc_parent = child.text
+                elif child.tag.endswith('}type'):
+                    # GnuCash account type: BANK, CASH, ASSET, INCOME, EXPENSE, ...
+                    acc_type = child.text
             if acc_id and acc_name:
-                accounts[acc_id] = {'name': acc_name, 'parent_id': acc_parent}
+                accounts[acc_id] = {
+                    'name': acc_name,
+                    'parent_id': acc_parent,
+                    'type': acc_type,
+                }
 
     # Build account paths
     def get_path(acc_id: str) -> str:
@@ -66,6 +74,8 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
         if elem.tag.endswith('transaction'):
             date_posted = None
             splits_data = []
+            txn_desc = ''
+            txn_num = ''
 
             for child in elem:
                 if child.tag.endswith('}date-posted'):
@@ -74,28 +84,43 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                         date_elem = child.find('date')
                     if date_elem is not None:
                         date_posted = date_elem.text
+                elif child.tag.endswith('}description'):
+                    txn_desc = child.text or ''
+                elif child.tag.endswith('}num'):
+                    # Transaction number — cheque no. or transfer reference
+                    txn_num = child.text or ''
                 elif child.tag.endswith('}splits'):
                     for split_elem in child:
                         if split_elem.tag.endswith('split') or split_elem.tag == 'split':
                             split_acc = None
                             split_value = None
+                            split_memo = ''
                             for sp_child in split_elem:
                                 if sp_child.tag.endswith('}account'):
                                     split_acc = sp_child.text
                                 elif sp_child.tag.endswith('}value'):
                                     split_value = sp_child.text
+                                elif sp_child.tag.endswith('}memo'):
+                                    split_memo = sp_child.text or ''
                             if split_acc and split_value:
-                                splits_data.append((split_acc, split_value))
+                                splits_data.append((split_acc, split_value, split_memo))
 
             if date_posted and splits_data:
                 # Filter by account if specified
                 if target_acc_ids:
-                    splits_data = [(acc, val) for acc, val in splits_data if acc in target_acc_ids]
+                    splits_data = [
+                        (acc, val, memo) for acc, val, memo in splits_data
+                        if acc in target_acc_ids
+                    ]
 
                 if splits_data:
                     try:
                         txn_date = datetime.strptime(date_posted[:19], '%Y-%m-%d %H:%M:%S')
-                        for acc_id, amount_str in splits_data:
+                        # Transaction-level description + number, available on
+                        # every split, so contra reference-matching (NEFT/IMPS/
+                        # RTGS/cheque no.) has something to match against.
+                        base_desc = ' '.join(p for p in (txn_desc, txn_num) if p)
+                        for acc_id, amount_str, split_memo in splits_data:
                             # Parse fraction format
                             if '/' in amount_str:
                                 parts = amount_str.split('/')
@@ -104,10 +129,12 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                                 amount = float(amount_str)
 
                             acc_path = accounts[acc_id]['path'] if acc_id in accounts else acc_id
+                            desc = ' '.join(p for p in (base_desc, split_memo) if p)
                             transactions.append({
                                 'date': txn_date.strftime('%Y-%m-%d'),
                                 'amount': amount,
                                 'account': acc_path,
+                                'description': desc,
                             })
                     except Exception as e:
                         logger.warning(f"Failed to parse transaction: {e}")
@@ -274,6 +301,29 @@ def _parse_date(date_str: str) -> Optional[datetime]:
         return None
 
 
+def _norm_account_path(path: str) -> str:
+    """Lowercase an account path and drop a leading 'Root Account:' prefix so
+    paths from different sources (with/without the prefix) compare equal."""
+    p = (path or "").lower()
+    prefix = "root account:"
+    return p[len(prefix):] if p.startswith(prefix) else p
+
+
+def _is_bank_account(acc: Dict) -> bool:
+    """True if a parsed GnuCash account is a bank account for contra purposes.
+
+    A contra transfer can only settle in another bank account, so we accept an
+    account when GnuCash types it BANK or CASH, or when it lives under a
+    'Cash and Bank' branch of the tree (covers books that model bank accounts
+    as plain ASSET accounts). Investments, receivables, income, expense, etc.
+    are all rejected.
+    """
+    acct_type = (acc.get('type') or '').upper()
+    if acct_type in ('BANK', 'CASH'):
+        return True
+    return 'cash and bank' in (acc.get('path') or '').lower()
+
+
 def detect_contra_entries(
     csv_rows: List[Dict],
     gnucash_data: Dict,
@@ -307,20 +357,35 @@ def detect_contra_entries(
     if not csv_rows or not gnucash_data.get('transactions'):
         return []
 
-    # Build index of GnuCash transactions in OTHER accounts:
-    # key = (date_str, rounded_amount) → list of {account, date, amount}
-    # We only care about bank/asset accounts, not expense/income
-    target_lower = target_bank_account.lower() if target_bank_account else ""
+    # A contra (cross-bank transfer) can only land in another *bank* account.
+    # Build the set of account paths that qualify as bank accounts, using the
+    # GnuCash account type (BANK/CASH) OR membership in a "Cash and Bank"
+    # branch of the tree. This replaces the old loose keyword match on
+    # ('bank','cash','asset','current'), which also matched investments,
+    # receivables and every other account under Assets: — the false-positive
+    # source. See parse_gnucash_for_reconcile() for the 'type'/'path' fields.
+    bank_paths = {
+        acc['path']
+        for acc in gnucash_data.get('accounts', {}).values()
+        if 'path' in acc and _is_bank_account(acc)
+    }
+    if not bank_paths:
+        # No account metadata (older parse) — nothing we can trust as a bank.
+        return []
+
+    # Normalise the target bank path for exclusion. gnucash_bank_account is
+    # passed with the "Root Account:" prefix stripped, but transaction account
+    # paths keep it — normalise both sides so the target is actually excluded.
+    target_norm = _norm_account_path(target_bank_account)
 
     other_txns = []
     for txn in gnucash_data['transactions']:
         acct = txn.get('account', '')
-        # Skip transactions in the target bank account (those are dup-check territory)
-        if acct.lower() == target_lower:
+        # Skip transactions in the target bank account (dup-check territory)
+        if _norm_account_path(acct) == target_norm:
             continue
-        # Only consider bank/asset accounts as contra sources
-        acct_lower = acct.lower()
-        if not any(kw in acct_lower for kw in ('bank', 'cash', 'asset', 'current')):
+        # Only real bank accounts can be the other side of a transfer
+        if acct not in bank_paths:
             continue
         other_txns.append(txn)
 
@@ -388,14 +453,20 @@ def detect_contra_entries(
 
         if best_match:
             direction = "from" if csv_amount > 0 else "to"
+            # high (reference/cheque match) => confirmed, safe to auto-book as a
+            # bank-to-bank transfer. medium (amount+date only) => possible, a
+            # hint the user reviews; it never overrides the mapper's account.
+            status = "confirmed" if best_confidence == "high" else "possible"
+            verb = "Transfer" if status == "confirmed" else "Possible transfer"
             contras.append({
                 "row_idx": idx,
                 "contra_account": best_match['account'],
                 "contra_amount": best_match['amount'],
                 "contra_date": best_match['date'],
                 "confidence": best_confidence,
+                "status": status,
                 "reason": (
-                    f"Likely transfer {direction} {best_match['account'].split(':')[-1]} "
+                    f"{verb} {direction} {best_match['account'].split(':')[-1]} "
                     f"({best_match['date']}, ₹{abs(best_match['amount']):,.2f})"
                 ),
             })
