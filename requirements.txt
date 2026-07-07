@@ -29,3 +29,12 @@ python-dotenv>=1.0.0
 
 # --- Web UI ---
 gradio>=6.0,<7.0              # Gradio 6.x; API differs from 4.x (theme/css live on launch(), show_api removed)
+
+# --- Native window (v2) ---
+# pywebview hosts the Gradio URL in a WebView2 window for one-click quit (#40).
+# pythonnet/clr is pywebview's Windows/EdgeChromium backend bridge. Both ship
+# PyInstaller hooks (auto-discovered via entry points). The app imports them
+# lazily and degrades to browser mode if the WebView2 runtime is absent, so
+# they are hard build deps but soft runtime deps.
+pywebview>=6.0,<7.0
+pythonnet>=3.0,<4.0

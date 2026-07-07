@@ -143,6 +143,7 @@ anyio==4.13.0 \
     # via
     #   gradio
     #   httpx
+    #   langsmith
     #   openai
     #   starlette
 attrs==26.1.0 \
@@ -204,6 +205,10 @@ beautifulsoup4==4.13.5 \
     --hash=sha256:5e70131382930e7c3de33450a2f54a63d5e4b19386eab43a5b34d594268f3695 \
     --hash=sha256:642085eaa22233aceadff9c69651bc51e8bf3f874fb6d7104ece2beb24b47c4a
     # via extract-msg
+bottle==0.13.4 \
+    --hash=sha256:045684fbd2764eac9cdeb824861d1551d113e8b683d8d26e296898d3dd99a12e \
+    --hash=sha256:787e78327e12b227938de02248333d788cfe45987edca735f8f88e03472c3f47
+    # via pywebview
 brotli==1.2.0 \
     --hash=sha256:022426c9e99fd65d9475dce5c195526f04bb8be8907607e27e747893f6ee3e24 \
     --hash=sha256:072e7624b1fc4d601036ab3f4f27942ef772887e876beff0301d261210bca97f \
@@ -398,7 +403,9 @@ cffi==2.0.0 \
     --hash=sha256:fc33c5141b55ed366cfaad382df24fe7dcbc686de5be719b207bb248e3053dc5 \
     --hash=sha256:fc7de24befaeae77ba923797c7c87834c73648a05a4bde34b3b7e5588973a453 \
     --hash=sha256:fe562eb1a64e67dd297ccc4f5addea2501664954f2692b69a76449ec7913ecbf
-    # via cryptography
+    # via
+    #   clr-loader
+    #   cryptography
 charset-normalizer==3.4.7 \
     --hash=sha256:007d05ec7321d12a40227aae9e2bc6dca73f3cb21058999a1df9e193555a9dcc \
     --hash=sha256:03853ed82eeebbce3c2abfdbc98c96dc205f32a79627688ac9a27370ea61a49c \
@@ -538,6 +545,10 @@ click==8.4.0 \
     # via
     #   typer
     #   uvicorn
+clr-loader==0.3.1 \
+    --hash=sha256:2e073e9aaf49d1ae2f56ecba27987ad5fb68be4bcd9dd34a5bed8f0e4e128366 \
+    --hash=sha256:cbad189de20d202a7d621956b0fc38049e13c9bf7ca2923441eff725cd121aa1
+    # via pythonnet
 colorama==0.4.6 \
     --hash=sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44 \
     --hash=sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6
@@ -605,7 +616,9 @@ cryptography==49.0.0 \
 distro==1.9.0 \
     --hash=sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed \
     --hash=sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2
-    # via openai
+    # via
+    #   langsmith
+    #   openai
 easygui==0.98.3 \
     --hash=sha256:33498710c68b5376b459cd3fc48d1d1f33822139eb3ed01defbc0528326da3ba \
     --hash=sha256:d653ff79ee1f42f63b5a090f2f98ce02335d86ad8963b3ce2661805cafe99a04
@@ -1891,6 +1904,9 @@ propcache==0.5.2 \
     # via
     #   aiohttp
     #   yarl
+proxy-tools==0.1.0 \
+    --hash=sha256:ccb3751f529c047e2d8a58440d86b205303cf0fe8146f784d1cbcd94f0a28010
+    # via pywebview
 pycparser==3.0 \
     --hash=sha256:600f49d217304a5902ac3c37e1281c9fe94e4d0489de643a9504c5cdfdfc6b29 \
     --hash=sha256:b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992
@@ -2091,10 +2107,21 @@ python-multipart==0.0.32 \
     --hash=sha256:be54b7f3fa167bb83e4fcd936b887b708f4e57fe75911c02aebf53efaf8d938e \
     --hash=sha256:ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
     # via gradio
+pythonnet==3.1.0 \
+    --hash=sha256:698dd88edc198819ad63b624a6ebe76208c7b46e4fe13626f65e484f0358d6ba \
+    --hash=sha256:7b34c382905d10a371509ffafd64cae0416305c28817738a9cd138336f4e9991 \
+    --hash=sha256:7bdd4de03df3547a48122a3989265c8b31d5be0d19dadffa009eec7df8085e0b
+    # via
+    #   -r requirements.txt
+    #   pywebview
 pytz==2026.2 \
     --hash=sha256:04156e608bee23d3792fd45c94ae47fae1036688e75032eea2e3bf0323d1f126 \
     --hash=sha256:0e60b47b29f21574376f218fe21abc009894a2321ea16c6754f3cad6eb7cdd6a
     # via gradio
+pywebview==6.2.1 \
+    --hash=sha256:71b7136752e40824655304d938efb62014218d1a90bd8e87e1cbdb1ce9c466af \
+    --hash=sha256:9d07275f53894ab4d5e2e0e996227193e7187dec276d9b624dccbce029216b46
+    # via -r requirements.txt
 pyyaml==6.0.3 \
     --hash=sha256:00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \
     --hash=sha256:0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a \
@@ -2335,7 +2362,9 @@ six==1.17.0 \
 sniffio==1.3.1 \
     --hash=sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2 \
     --hash=sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc
-    # via openai
+    # via
+    #   langsmith
+    #   openai
 soupsieve==2.8.4 \
     --hash=sha256:e121fd02e975c695e4e9e8774a5ee35d74714b59307868dcc5319ad2d9e3328e \
     --hash=sha256:e7e6b0769c8f51ed59acab6e994b00621096cfb1c640a7509295987388fbaf65
@@ -2506,9 +2535,11 @@ typing-extensions==4.15.0 \
     #   huggingface-hub
     #   langchain-core
     #   langchain-protocol
+    #   langsmith
     #   openai
     #   pydantic
     #   pydantic-core
+    #   pywebview
     #   sqlalchemy
     #   typing-inspection
 typing-inspection==0.4.2 \
@@ -2716,7 +2747,9 @@ websockets==15.0.1 \
     --hash=sha256:f29d80eb9a9263b8d109135351caf568cc3f80b9928bccde535c235de55c22d9 \
     --hash=sha256:f7a866fbc1e97b5c617ee4116daaa09b722101d4a3c170c787450ba409f9736f \
     --hash=sha256:fcd5cf9e305d7b8338754470cf69cf81f420459dbae8a3b40cee57417f4614a7
-    # via langgraph-sdk
+    # via
+    #   langgraph-sdk
+    #   langsmith
 win-unicode-console==0.5 \
     --hash=sha256:d4142d4d56d46f449d6f00536a73625a871cba040f0bc1a2e305a04578f07d1e
     # via pcodedmp
