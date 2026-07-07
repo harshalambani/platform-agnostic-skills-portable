@@ -98,6 +98,52 @@ class TestWebUIServingConfig:
 
 
 # ---------------------------------------------------------------------------
+# 1b. Native-window downloads must be enabled (else every DownloadButton is a
+#     silent no-op inside the WebView2 window — pywebview cancels downloads
+#     unless settings['ALLOW_DOWNLOADS'] is True).
+# ---------------------------------------------------------------------------
+
+class TestNativeWindowDownloads:
+
+    def _source(self) -> str:
+        return WEBUI_PATH.read_text(encoding="utf-8")
+
+    def test_run_native_window_enables_downloads(self):
+        """_run_native_window must turn on downloads before starting the window,
+        or all six gr.DownloadButtons are dead in the native window."""
+        source = self._source()
+        assert "ALLOW_DOWNLOADS" in source, (
+            "webui.py must set webview.settings['ALLOW_DOWNLOADS'] = True — "
+            "pywebview cancels downloads by default, killing every DownloadButton"
+        )
+        # The enable step must be wired into the native-window launch path.
+        assert "_enable_native_downloads()" in source, (
+            "_run_native_window must call _enable_native_downloads()"
+        )
+
+    def test_enable_downloads_actually_sets_flag(self):
+        """When pywebview is importable, the helper must flip the real flag."""
+        try:
+            import webview  # noqa: PLC0415
+        except Exception:
+            import pytest  # noqa: PLC0415
+            pytest.skip("pywebview not installed (CI minimal deps)")
+
+        # Load the helper from webui without triggering a full Gradio import
+        # chain: exec the module in a namespace is heavy, so import the package.
+        ui_path = str(ROOT)
+        if ui_path not in sys.path:
+            sys.path.insert(0, ui_path)
+        src = str(ROOT / "src")
+        if src not in sys.path:
+            sys.path.insert(0, src)
+        webview.settings["ALLOW_DOWNLOADS"] = False  # start from the unsafe default
+        from ui.webui import _enable_native_downloads  # noqa: PLC0415
+        _enable_native_downloads()
+        assert webview.settings["ALLOW_DOWNLOADS"] is True
+
+
+# ---------------------------------------------------------------------------
 # 2. Functional checks on _config.download_staging_dir()
 # ---------------------------------------------------------------------------
 

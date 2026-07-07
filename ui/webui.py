@@ -638,6 +638,25 @@ def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
     return False
 
 
+def _enable_native_downloads() -> None:
+    """Allow file downloads in the WebView2 native window.
+
+    pywebview's EdgeChromium backend cancels every download unless
+    ``settings['ALLOW_DOWNLOADS']`` is True — and it defaults to False. With it
+    off, clicking any ``gr.DownloadButton`` (Download corrected CSV, Download
+    Excel/CSV, History download, every generated-skill output) is a silent no-op
+    in the native window: the file never reaches the user's Downloads folder.
+    Turning it on makes WebView2 pop a native Save-As dialog (defaulting to
+    Downloads) for all of them. No-op if pywebview isn't importable — the browser
+    fallback downloads natively and is unaffected.
+    """
+    try:
+        import webview  # noqa: PLC0415
+        webview.settings['ALLOW_DOWNLOADS'] = True
+    except Exception:  # noqa: BLE001 — pywebview optional; browser path unaffected
+        pass
+
+
 def _run_native_window(url: str) -> None:
     """Host *url* in a native window on the main thread; quit when it closes.
 
@@ -650,6 +669,7 @@ def _run_native_window(url: str) -> None:
     """
     import webview  # noqa: PLC0415
 
+    _enable_native_downloads()
     _wait_for_server(url)
     try:
         webview.create_window(APP_TITLE, url, width=1200, height=820)
