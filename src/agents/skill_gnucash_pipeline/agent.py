@@ -982,6 +982,19 @@ def run(
             else:
                 gnucash_bank_account = raw_path
             log_lines.append(f"Bank account: `{gnucash_bank_account}`")
+        else:
+            # No matching bank account in the .gnucash book. This quietly turns
+            # off three things, so say so plainly rather than leaving the user to
+            # wonder why this bank's output looks reduced: (1) Transfer Account is
+            # left blank, (2) cross-bank transfer (contra) detection is skipped,
+            # (3) the opening-balance reconciliation check is skipped.
+            log_lines.append(
+                f"⚠️ **Couldn't find a '{bank}' bank account in the GnuCash book.** "
+                f"Transfer Account is left blank, and cross-bank transfer (contra) "
+                f"detection and the opening-balance check are skipped. To enable them, "
+                f"add or rename a bank-typed account in your `.gnucash` that matches "
+                f"'{bank}' (e.g. `Assets:…:Cash and Bank:{bank} - <account-number>`)."
+            )
 
         # ── Contra detection (cross-bank transfer matching) ──────────────────
         contra_flags: dict[int, dict] = {}  # row_idx → contra info

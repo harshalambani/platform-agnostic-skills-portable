@@ -1178,32 +1178,28 @@ def run(
     #   Deposit                    = deposit amount
     #   Withdrawal                 = withdrawal amount
     # "Account" already holds the category from mapping — just add the rest.
+    #
+    # Transfer Account is ALWAYS emitted so the output shape is invariant: when
+    # the bank account resolved it holds the bank path; when it didn't (bank not
+    # found in the .gnucash book), it's a visible blank cell rather than a
+    # silently-dropped column. That keeps every bank's import-ready CSV the same
+    # 11-column shape in the same order.
     if gnucash_bank_account:
         _emit_mapper_progress(f"restructuring columns for GnuCash (bank={gnucash_bank_account[:40]}…)")
-        for row in mapped_rows:
-            # Account stays as-is (category)
-            row['Transfer Account'] = gnucash_bank_account
+    else:
+        _emit_mapper_progress(
+            "restructuring columns for GnuCash "
+            "(bank account unresolved — Transfer Account left blank)"
+        )
+    for row in mapped_rows:
+        # Account stays as-is (category); Transfer Account = the bank side.
+        row['Transfer Account'] = gnucash_bank_account or ''
 
     # --- Always rewrite CSV (Root Account prefix was stripped) ---
-    # Build ordered header list:
-    #   - Transfer Account right after Account
-    #   - Renamed deposit/withdrawal columns where originals were (before Balance)
-    raw_keys = list(mapped_rows[0].keys())
-    _REPOSITION = {'Transfer Account', 'Deposit', 'Withdrawal'}
-    if 'Transfer Account' in raw_keys:
-        headers_out = []
-        for k in raw_keys:
-            if k in _REPOSITION:
-                continue  # will be inserted at correct position
-            headers_out.append(k)
-            if k == 'Account':
-                headers_out.append('Transfer Account')
-        if 'Deposit' in raw_keys:
-            bal_idx = headers_out.index('Balance') if 'Balance' in headers_out else len(headers_out)
-            headers_out.insert(bal_idx, 'Withdrawal')
-            headers_out.insert(bal_idx, 'Deposit')
-    else:
-        headers_out = raw_keys
+    # Order via the shared import-ready schema so this write and the
+    # Review-Mappings re-save produce byte-identical column layouts.
+    from agents.canonical_io import order_import_ready_headers  # noqa: PLC0415
+    headers_out = order_import_ready_headers(mapped_rows[0].keys())
     with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
         writer.writeheader()

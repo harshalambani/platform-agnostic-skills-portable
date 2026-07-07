@@ -31,14 +31,14 @@ from agents.balance_utils import (
     verify_closing_balance,
     format_balance_summary,
 )
+from agents.canonical_io import CANONICAL_FIELDS
 
 log = logging.getLogger(__name__)
 
 
-CANONICAL_COLS = [
-    "Date", "Transaction ID", "Description", "Account",
-    "Deposit", "Withdrawal", "Balance", "Currency",
-]
+# Single source of truth for the canonical schema lives in canonical_io; keep
+# the local name as an alias so existing references don't churn.
+CANONICAL_COLS = list(CANONICAL_FIELDS)
 
 
 def _clean_amount(s):
