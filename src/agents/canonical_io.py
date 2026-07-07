@@ -38,8 +38,47 @@ CANONICAL_FIELDS: tuple[str, ...] = (
     "Currency",
 )
 
+# The GnuCash import-ready schema: the canonical 8 columns plus the three the
+# account mapper adds (Transfer Account = the bank account, Confidence +
+# MatchReason = review metadata), in a FIXED order. Single source of truth so
+# the mapper write and the Review-Mappings re-save produce byte-identical column
+# layouts regardless of which bank/code path built the file. ``Transfer Account``
+# sits right after ``Account`` (GnuCash convention: Account = the category split,
+# Transfer Account = the bank side).
+IMPORT_READY_FIELDS: tuple[str, ...] = (
+    "Date",
+    "Transaction ID",
+    "Description",
+    "Account",
+    "Transfer Account",
+    "Deposit",
+    "Withdrawal",
+    "Balance",
+    "Currency",
+    "Confidence",
+    "MatchReason",
+)
+
 # Suffix of the per-statement summary sidecar written next to a canonical CSV.
 SIDECAR_SUFFIX = ".csv_summary.json"
+
+
+def order_import_ready_headers(present_keys) -> list[str]:
+    """Return header names ordered by the import-ready schema.
+
+    Every field in :data:`IMPORT_READY_FIELDS` that appears in ``present_keys``
+    is emitted first, in schema order; any remaining keys (unknown extras, e.g.
+    a future column or a hand-added one from the Review tab) follow in their
+    original relative order so nothing is ever dropped. Callers that always
+    populate the full schema get a stable, uniform layout; callers with a subset
+    get the same order minus the absent columns.
+    """
+    present = list(present_keys)
+    present_set = set(present)
+    ordered = [f for f in IMPORT_READY_FIELDS if f in present_set]
+    known = set(IMPORT_READY_FIELDS)
+    extras = [k for k in present if k not in known]
+    return ordered + extras
 
 
 def write_canonical_csv(rows: list[dict], output_path: str | Path) -> Path:

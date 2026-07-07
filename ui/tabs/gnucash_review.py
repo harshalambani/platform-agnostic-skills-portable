@@ -813,17 +813,25 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
     if all_rows and csv_path:
         try:
             csv_p = Path(csv_path)
-            # Preserve original CSV column order by reading existing header
+            # Normalize to the shared import-ready column order so a re-saved CSV
+            # matches the mapper's layout (Transfer Account right after Account,
+            # not appended last). Single source of truth in canonical_io. Falls
+            # back to preserving the original header + appending new keys if the
+            # shared schema helper can't be imported.
             try:
-                with open(csv_p, "r", encoding="utf-8", errors="replace") as rf:
-                    original_headers = csv.DictReader(rf).fieldnames or []
-                headers = list(original_headers)
-                # Add any new keys from payload that aren't in original
-                payload_keys = set(all_rows[0].keys())
-                for k in payload_keys - set(headers):
-                    headers.append(k)
+                from agents.canonical_io import order_import_ready_headers
+                headers = order_import_ready_headers(all_rows[0].keys())
             except Exception:
-                headers = list(all_rows[0].keys())
+                try:
+                    with open(csv_p, "r", encoding="utf-8", errors="replace") as rf:
+                        original_headers = csv.DictReader(rf).fieldnames or []
+                    headers = list(original_headers)
+                    # Add any new keys from payload that aren't in original
+                    payload_keys = set(all_rows[0].keys())
+                    for k in payload_keys - set(headers):
+                        headers.append(k)
+                except Exception:
+                    headers = list(all_rows[0].keys())
             with open(csv_p, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
                 writer.writeheader()

@@ -31,13 +31,67 @@ from agents import balance_utils
 from agents.bank_contract import BalanceCheck
 from agents.canonical_io import (
     CANONICAL_FIELDS,
+    IMPORT_READY_FIELDS,
     SIDECAR_SUFFIX,
     derive_opening_closing,
+    order_import_ready_headers,
     read_sidecar,
     run_balance_check,
     write_canonical_csv,
     write_sidecar,
 )
+
+
+# ---------------------------------------------------------------------------
+# Import-ready schema (the post-mapper 11-column layout) + ordering helper.
+# ---------------------------------------------------------------------------
+
+def test_import_ready_fields_shape():
+    """The import-ready schema is the canonical 8 plus Transfer Account (right
+    after Account) and the two mapper metadata columns, in a fixed order."""
+    assert IMPORT_READY_FIELDS == (
+        "Date", "Transaction ID", "Description", "Account", "Transfer Account",
+        "Deposit", "Withdrawal", "Balance", "Currency", "Confidence", "MatchReason",
+    )
+    # Transfer Account sits immediately after Account (GnuCash convention).
+    assert IMPORT_READY_FIELDS.index("Transfer Account") == \
+        IMPORT_READY_FIELDS.index("Account") + 1
+    # It is a superset of the canonical schema (same names, order preserved).
+    assert [f for f in IMPORT_READY_FIELDS if f in CANONICAL_FIELDS] == list(CANONICAL_FIELDS)
+
+
+def test_order_import_ready_full_schema():
+    """A full-schema row (shuffled) is reordered to the exact schema order."""
+    shuffled = ["MatchReason", "Deposit", "Account", "Date", "Transfer Account",
+                "Withdrawal", "Description", "Transaction ID", "Balance",
+                "Currency", "Confidence"]
+    assert order_import_ready_headers(shuffled) == list(IMPORT_READY_FIELDS)
+
+
+def test_order_import_ready_subset_keeps_order():
+    """A subset (e.g. no Transfer Account) keeps schema order minus the absentee."""
+    keys = ["Confidence", "Date", "Account", "Description", "Deposit",
+            "Withdrawal", "Balance", "Currency", "Transaction ID", "MatchReason"]
+    assert order_import_ready_headers(keys) == [
+        "Date", "Transaction ID", "Description", "Account",
+        "Deposit", "Withdrawal", "Balance", "Currency", "Confidence", "MatchReason",
+    ]
+
+
+def test_order_import_ready_unknown_keys_trail():
+    """Unknown extras are never dropped — they trail in original relative order."""
+    keys = ["Account", "Date", "ZZZ Custom", "Deposit", "AAA Extra"]
+    out = order_import_ready_headers(keys)
+    # Known ones first, in schema order; unknowns last, in their original order.
+    assert out == ["Date", "Account", "Deposit", "ZZZ Custom", "AAA Extra"]
+
+
+def test_order_import_ready_is_pure():
+    """Helper must not mutate the caller's sequence."""
+    keys = ["Deposit", "Account", "Date"]
+    snapshot = list(keys)
+    order_import_ready_headers(keys)
+    assert keys == snapshot
 
 
 def _row(date, txn, desc, dep, wdl, bal):

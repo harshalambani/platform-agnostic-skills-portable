@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.balance_utils import format_balance_summary as _fmt_bal
 from agents.bank_contract import BankResult
-from agents.canonical_io import run_balance_check, write_sidecar
+from agents.canonical_io import CANONICAL_FIELDS, run_balance_check, write_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -566,11 +566,11 @@ def transform_icici_statement(xls_path: str, output_path: str) -> Dict[str, Any]
 
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
-        # Canonical 8-column schema for Phase 3/4/6 consumption
-        writer.writerow([
-            'Date', 'Transaction ID', 'Description', 'Account',
-            'Deposit', 'Withdrawal', 'Balance', 'Currency'
-        ])
+        # Canonical 8-column schema for Phase 3/4/6 consumption — header sourced
+        # from the single canonical_io definition so it can't drift from the
+        # other bank skills. Row values below are written positionally in the
+        # same order.
+        writer.writerow(list(CANONICAL_FIELDS))
         for row in transformed:
             writer.writerow([
                 row['date'], row['txn_id'], row['description'], row['account'],
