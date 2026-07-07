@@ -176,6 +176,12 @@ _REVIEW_HTML = r"""
 #review-app tbody tr:hover { background: #1a2744; }
 #review-app tbody tr.selected { background: #1e3a5f; }
 #review-app tbody tr.selected:hover { background: #254a73; }
+/* Contra (cross-bank transfer) rows — highlighted so they can't be missed
+   even without filtering. Selection still wins visually. */
+#review-app tbody tr.contra-row { background: #3a1d1d; }
+#review-app tbody tr.contra-row:hover { background: #4a2626; }
+#review-app tbody tr.contra-row.selected { background: #1e3a5f; }
+#review-app tbody tr.contra-row td:first-child { border-left: 3px solid #f87171; }
 #review-app tbody td { padding: 5px 8px; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
 
 /* Confidence badges — bright on dark */
@@ -194,6 +200,14 @@ _REVIEW_HTML = r"""
   background: #7c2d12; color: #fdba74; font-weight: 600;
 }
 #review-app .contra-badge.high { background: #991b1b; color: #fca5a5; }
+
+/* Prominent "jump to contras" button — only shown when contras exist. */
+#review-app .contra-alert-btn {
+  background: #7f1d1d; color: #fecaca; border: 1px solid #b91c1c;
+  font-weight: 600;
+}
+#review-app .contra-alert-btn:hover { background: #991b1b; }
+#review-app .contra-alert-btn.active { background: #dc2626; color: #fff; }
 
 #review-app .changed-marker { color: #a78bfa; font-weight: bold; margin-left: 4px; }
 
@@ -245,6 +259,7 @@ _REVIEW_HTML = r"""
       <option value="high">High</option>
       <option value="contra">Contra</option>
     </select>
+    <button id="rv-show-contra" class="contra-alert-btn" style="display:none"></button>
     <span class="spacer"></span>
     <span class="stats" id="rv-stats"></span>
   </div>
@@ -329,7 +344,33 @@ _REVIEW_HTML = r"""
   sortDirBtn.onclick = () => { sortAsc = !sortAsc; sortDirBtn.textContent = sortAsc ? '↑ Asc' : '↓ Desc'; renderTable(); };
 
   // ── Filter ──
-  document.getElementById('rv-filter-conf').onchange = (e) => { filterConf = e.target.value; renderTable(); };
+  const filterConfDD = document.getElementById('rv-filter-conf');
+  filterConfDD.onchange = (e) => { filterConf = e.target.value; syncContraBtn(); renderTable(); };
+
+  // ── Contra surfacing ──
+  // Count flagged cross-bank transfers and, when present, show a prominent
+  // toggle button so they can be isolated in one click (the small inline
+  // badge alone is easy to miss, and gets clipped in a narrow Reason cell).
+  const contraCount = rows.filter(r => !!r._contra).length;
+  const showContraBtn = document.getElementById('rv-show-contra');
+  function syncContraBtn() {
+    if (contraCount === 0) return;
+    const on = filterConf === 'contra';
+    showContraBtn.classList.toggle('active', on);
+    showContraBtn.textContent = on
+      ? ('✕ Showing ' + contraCount + ' contra' + (contraCount === 1 ? '' : 's'))
+      : ('⚠ Show ' + contraCount + ' contra' + (contraCount === 1 ? '' : 's'));
+  }
+  if (contraCount > 0) {
+    showContraBtn.style.display = '';
+    showContraBtn.onclick = () => {
+      filterConf = (filterConf === 'contra') ? '' : 'contra';
+      filterConfDD.value = filterConf;
+      syncContraBtn();
+      renderTable();
+    };
+    syncContraBtn();
+  }
 
   // ── Account search ──
   const acctSearch = document.getElementById('rv-acct-search');
@@ -503,12 +544,19 @@ _REVIEW_HTML = r"""
     filtered.forEach(r => {
       const tr = document.createElement('tr');
       if (selected.has(r._idx)) tr.classList.add('selected');
+      if (r._contra) tr.classList.add('contra-row');
       tr.dataset.idx = r._idx;
 
       COLS.forEach(c => {
         const td = document.createElement('td');
         let val = r[c.key] || '';
-        if (c.key === 'Confidence') {
+        if (c.key === 'Date' && r._contra) {
+          // Badge on the leftmost cell so it is never clipped by the Reason
+          // column's max-width/ellipsis. title carries the match explanation.
+          td.innerHTML = '<span class="contra-badge ' + esc(r._contra_conf || '') +
+            '" title="' + esc(r._contra) + '">CONTRA</span> ' + esc(val);
+          td.title = r._contra;
+        } else if (c.key === 'Confidence') {
           const cls = 'conf-' + (val||'none').toLowerCase();
           td.innerHTML = '<span class="' + cls + '">' + esc(val) + '</span>';
           if (r._changed) td.innerHTML += '<span class="changed-marker">*</span>';
@@ -535,7 +583,8 @@ _REVIEW_HTML = r"""
     const stats = document.getElementById('rv-stats');
     stats.textContent = filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '');
+      (changed ? ' | ' + changed + ' changed' : '') +
+      (contraCount ? ' | ⚠ ' + contraCount + ' contra' : '');
 
     // Re-focus the filter input that was being typed in
     if (activeFilterCol) {
