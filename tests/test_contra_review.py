@@ -85,3 +85,15 @@ def test_review_template_carries_contra_visibility_hooks():
     assert "contra-row" in tmpl
     assert "c.key === 'Date' && r._contra" in tmpl
     assert "contraCount" in tmpl
+    # Confirmed vs possible distinction must be wired into the template.
+    assert "_contra_status" in tmpl
+    assert "contraLabel" in tmpl
+    assert "TRANSFER" in tmpl and "POSSIBLE" in tmpl
+
+
+def test_loader_derives_status_when_sidecar_omits_it(tmp_path):
+    """Older sidecars carry only 'confidence'; the loader must derive the
+    confirmed/possible status (medium -> possible)."""
+    csv_p = _make_csv_with_sidecar(tmp_path)
+    html = gr_review._load_review_data(str(csv_p), str(csv_p))
+    assert '"_contra_status": "possible"' in html or "'_contra_status': 'possible'" in html

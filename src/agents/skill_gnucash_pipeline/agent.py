@@ -86,6 +86,53 @@ def _read_sidecar(canonical_path: str) -> dict | None:
     return _ci_read_sidecar(canonical_path)
 
 
+def _apply_confirmed_contras(output_path: str, contra_flags: dict) -> int:
+    """Re-map the Account of confirmed contras to their counterparty bank.
+
+    A confirmed contra (status == "confirmed", i.e. a reference-matched
+    cross-bank transfer) must post against the other bank rather than the
+    category the mapper guessed. Possible contras are left untouched. Mutates
+    ``contra_flags`` in place to record the mapper's original account
+    (``mapped_account``) and what was applied (``applied_account``), and
+    rewrites ``output_path`` only when at least one row changed.
+
+    contra_flags keys are 0-based row indices into the output CSV (the mapper
+    preserves canonical order 1:1). Returns the number of rows re-mapped.
+    """
+    confirmed = {
+        int(idx): c for idx, c in contra_flags.items()
+        if isinstance(c, dict) and c.get("status") == "confirmed"
+    }
+    if not confirmed:
+        return 0
+
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+
+    remapped = 0
+    for idx, c in confirmed.items():
+        if not (0 <= idx < len(rows)):
+            continue
+        bank_acct = c.get("contra_account", "") or ""
+        if bank_acct.startswith("Root Account:"):
+            bank_acct = bank_acct[len("Root Account:"):]
+        if not bank_acct:
+            continue
+        c["mapped_account"] = rows[idx].get("Account", "")
+        c["applied_account"] = bank_acct
+        rows[idx]["Account"] = bank_acct
+        remapped += 1
+
+    if remapped:
+        with open(output_path, "w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    return remapped
+
+
 # Banks with dedicated extraction skills
 DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]
 # Banks that go through the generic CSV normalisation path
@@ -946,15 +993,15 @@ def run(
                 if contras:
                     for c in contras:
                         contra_flags[c["row_idx"]] = c
-                    high = sum(1 for c in contras if c["confidence"] == "high")
-                    med = len(contras) - high
+                    confirmed = sum(1 for c in contras if c["confidence"] == "high")
+                    possible = len(contras) - confirmed
                     parts = []
-                    if high:
-                        parts.append(f"{high} high-confidence")
-                    if med:
-                        parts.append(f"{med} medium-confidence")
+                    if confirmed:
+                        parts.append(f"{confirmed} confirmed (account set to bank)")
+                    if possible:
+                        parts.append(f"{possible} possible")
                     log_lines.append(
-                        f"Contra check — {len(contras)} possible cross-bank "
+                        f"Contra check — {len(contras)} cross-bank "
                         f"transfer(s) detected ({', '.join(parts)}). "
                         f"Review in **Review Mappings** tab."
                     )
@@ -988,6 +1035,25 @@ def run(
             bank_name=bank,
             gnucash_bank_account=gnucash_bank_account,
         )
+
+        # ── Apply confirmed contras to the mapped output ────────────────────
+        # For confirmed (high-confidence, reference-matched) transfers, book the
+        # row against the counterparty bank instead of whatever category the
+        # mapper guessed — a genuine bank-to-bank transfer must not land in
+        # income/expense/investment. Possible (medium) contras are left alone:
+        # they stay a review hint and keep the mapper's account. contra row_idx
+        # is 0-based into canonical_rows, which the mapper preserves 1:1.
+        if contra_flags:
+            try:
+                remapped = _apply_confirmed_contras(output_path, contra_flags)
+                if remapped:
+                    log_lines.append(
+                        f"Contra — booked {remapped} confirmed transfer(s) "
+                        f"to the counterparty bank account."
+                    )
+            except Exception as e:
+                log.warning(f"Could not apply confirmed contras: {e}")
+                log_lines.append(f"⚠️ Contra remap skipped — {e}")
 
         # Write contra flags sidecar (if any) alongside the output CSV
         if contra_flags:

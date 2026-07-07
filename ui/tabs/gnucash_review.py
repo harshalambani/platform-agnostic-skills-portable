@@ -177,11 +177,17 @@ _REVIEW_HTML = r"""
 #review-app tbody tr.selected { background: #1e3a5f; }
 #review-app tbody tr.selected:hover { background: #254a73; }
 /* Contra (cross-bank transfer) rows — highlighted so they can't be missed
-   even without filtering. Selection still wins visually. */
-#review-app tbody tr.contra-row { background: #3a1d1d; }
-#review-app tbody tr.contra-row:hover { background: #4a2626; }
+   even without filtering. Selection still wins visually.
+   confirmed = auto-booked to the counterparty bank (green accent);
+   possible  = amount+date hint, mapper's account kept (amber accent). */
+#review-app tbody tr.contra-row { background: #3a2a1d; }
+#review-app tbody tr.contra-row:hover { background: #4a3626; }
 #review-app tbody tr.contra-row.selected { background: #1e3a5f; }
-#review-app tbody tr.contra-row td:first-child { border-left: 3px solid #f87171; }
+#review-app tbody tr.contra-row td:first-child { border-left: 3px solid #facc15; }
+#review-app tbody tr.contra-row.confirmed { background: #16281d; }
+#review-app tbody tr.contra-row.confirmed:hover { background: #1e3a2a; }
+#review-app tbody tr.contra-row.confirmed.selected { background: #1e3a5f; }
+#review-app tbody tr.contra-row.confirmed td:first-child { border-left: 3px solid #4ade80; }
 #review-app tbody td { padding: 5px 8px; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
 
 /* Confidence badges — bright on dark */
@@ -199,7 +205,9 @@ _REVIEW_HTML = r"""
   border-radius: 3px; margin-left: 4px;
   background: #7c2d12; color: #fdba74; font-weight: 600;
 }
-#review-app .contra-badge.high { background: #991b1b; color: #fca5a5; }
+/* possible = amber hint; confirmed = green (booked to the bank). */
+#review-app .contra-badge.possible  { background: #7c2d12; color: #fdba74; }
+#review-app .contra-badge.confirmed { background: #14532d; color: #86efac; }
 
 /* Prominent "jump to contras" button — only shown when contras exist. */
 #review-app .contra-alert-btn {
@@ -352,14 +360,25 @@ _REVIEW_HTML = r"""
   // toggle button so they can be isolated in one click (the small inline
   // badge alone is easy to miss, and gets clipped in a narrow Reason cell).
   const contraCount = rows.filter(r => !!r._contra).length;
+  const possibleCount = rows.filter(r => r._contra_status === 'possible').length;
+  const confirmedCount = rows.filter(r => r._contra_status === 'confirmed').length;
   const showContraBtn = document.getElementById('rv-show-contra');
+  function contraSummary() {
+    // e.g. "2 confirmed, 1 possible" / "3 possible" / "1 transfer"
+    const parts = [];
+    if (confirmedCount) parts.push(confirmedCount + ' confirmed');
+    if (possibleCount) parts.push(possibleCount + ' possible');
+    return parts.length ? parts.join(', ')
+      : (contraCount + ' transfer' + (contraCount === 1 ? '' : 's'));
+  }
   function syncContraBtn() {
     if (contraCount === 0) return;
     const on = filterConf === 'contra';
     showContraBtn.classList.toggle('active', on);
     showContraBtn.textContent = on
-      ? ('✕ Showing ' + contraCount + ' contra' + (contraCount === 1 ? '' : 's'))
-      : ('⚠ Show ' + contraCount + ' contra' + (contraCount === 1 ? '' : 's'));
+      ? ('✕ Showing transfers (' + contraSummary() + ')')
+      : ('⚠ ' + contraCount + ' cross-bank transfer' + (contraCount === 1 ? '' : 's')
+         + ' (' + contraSummary() + ')');
   }
   if (contraCount > 0) {
     showContraBtn.style.display = '';
@@ -544,8 +563,15 @@ _REVIEW_HTML = r"""
     filtered.forEach(r => {
       const tr = document.createElement('tr');
       if (selected.has(r._idx)) tr.classList.add('selected');
-      if (r._contra) tr.classList.add('contra-row');
+      if (r._contra) {
+        tr.classList.add('contra-row');
+        if (r._contra_status) tr.classList.add(r._contra_status);
+      }
       tr.dataset.idx = r._idx;
+
+      // confirmed => booked to bank (green "TRANSFER"); possible => amber hint.
+      const contraStatus = r._contra_status || 'possible';
+      const contraLabel = contraStatus === 'confirmed' ? 'TRANSFER' : 'POSSIBLE';
 
       COLS.forEach(c => {
         const td = document.createElement('td');
@@ -553,8 +579,8 @@ _REVIEW_HTML = r"""
         if (c.key === 'Date' && r._contra) {
           // Badge on the leftmost cell so it is never clipped by the Reason
           // column's max-width/ellipsis. title carries the match explanation.
-          td.innerHTML = '<span class="contra-badge ' + esc(r._contra_conf || '') +
-            '" title="' + esc(r._contra) + '">CONTRA</span> ' + esc(val);
+          td.innerHTML = '<span class="contra-badge ' + esc(contraStatus) +
+            '" title="' + esc(r._contra) + '">' + contraLabel + '</span> ' + esc(val);
           td.title = r._contra;
         } else if (c.key === 'Confidence') {
           const cls = 'conf-' + (val||'none').toLowerCase();
@@ -564,8 +590,8 @@ _REVIEW_HTML = r"""
           td.innerHTML = esc(val) + '<span class="changed-marker"> *</span>';
           td.title = 'Changed from: ' + r._origAccount;
         } else if (c.key === 'MatchReason' && r._contra) {
-          td.innerHTML = esc(val) + '<span class="contra-badge ' + esc(r._contra_conf || '') +
-            '" title="' + esc(r._contra) + '">CONTRA</span>';
+          td.innerHTML = esc(val) + '<span class="contra-badge ' + esc(contraStatus) +
+            '" title="' + esc(r._contra) + '">' + contraLabel + '</span>';
           td.title = r._contra;
         } else {
           td.textContent = val;
@@ -584,7 +610,7 @@ _REVIEW_HTML = r"""
     stats.textContent = filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
       (changed ? ' | ' + changed + ' changed' : '') +
-      (contraCount ? ' | ⚠ ' + contraCount + ' contra' : '');
+      (contraCount ? ' | ⚠ ' + contraSummary() + ' transfer' : '');
 
     // Re-focus the filter input that was being typed in
     if (activeFilterCol) {
@@ -666,15 +692,23 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
         except Exception:
             pass
 
-    # Merge contra info into rows
+    # Merge contra info into rows. status is "confirmed" (high-confidence,
+    # reference-matched, and the Account has already been booked to the
+    # counterparty bank) or "possible" (amount+date only — a review hint that
+    # left the mapper's account untouched).
     for i, row in enumerate(rows):
         ci = contra_flags.get(str(i))
         if ci:
             row['_contra'] = ci.get('reason', 'Possible contra')
             row['_contra_conf'] = ci.get('confidence', 'medium')
+            row['_contra_status'] = ci.get(
+                'status',
+                'confirmed' if ci.get('confidence') == 'high' else 'possible',
+            )
         else:
             row['_contra'] = ''
             row['_contra_conf'] = ''
+            row['_contra_status'] = ''
 
     # Build HTML with data embedded
     html = _REVIEW_HTML
