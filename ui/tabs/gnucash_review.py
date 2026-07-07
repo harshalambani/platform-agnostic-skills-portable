@@ -814,7 +814,9 @@ def render(container_tab=None) -> None:
 
     review_html = gr.HTML(value="<p><em>Load a CSV to begin reviewing.</em></p>")
 
-    save_btn = gr.Button("Save & Export", variant="primary")
+    with gr.Row():
+        save_btn = gr.Button("Save & Export", variant="primary")
+        reset_btn = gr.Button("Reset", variant="secondary")
     save_result = gr.Markdown("")
     download_file = gr.DownloadButton(
         label="Download corrected CSV", visible=False, variant="primary",
@@ -837,4 +839,26 @@ def render(container_tab=None) -> None:
         inputs=[_payload_box],
         outputs=[save_result, download_file],
         js="(x) => window._rvSavePayload || ''",
+    )
+
+    # ── Reset: clear the loaded review + logs, reset pickers to defaults.
+    # Leaves output files (CSVs, contra sidecars) on disk untouched. Also
+    # clears the pending-save payload so a stale edit set can't be re-saved.
+    def _handle_reset_review():
+        choices = _scan_import_ready_csvs()
+        return (
+            gr.update(choices=choices, value=(choices[0][1] if choices else None)),
+            gr.update(value=None),                                   # gnucash_file
+            "<p><em>Load a CSV to begin reviewing.</em></p>",        # review_html
+            "",                                                       # save_result
+            gr.update(visible=False, value=None),                    # download_file
+            "",                                                       # _payload_box
+        )
+
+    reset_btn.click(
+        fn=_handle_reset_review,
+        inputs=[],
+        outputs=[csv_dropdown, gnucash_file, review_html, save_result,
+                 download_file, _payload_box],
+        js="() => { window._rvSavePayload = ''; }",
     )
