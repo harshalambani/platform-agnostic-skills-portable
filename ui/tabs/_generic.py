@@ -654,6 +654,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             with gr.Row():
                 run_btn = gr.Button("Run", variant="primary")
                 stop_btn = gr.Button("Stop", variant="stop", visible=True)
+                reset_btn = gr.Button("Reset", variant="secondary")
 
         with gr.Column(scale=2):
             result_md = gr.Markdown("_Awaiting input._", min_height=200)
@@ -707,6 +708,48 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         return "**Cancelled** — stopping after current step."
 
     stop_btn.click(fn=_handle_stop, outputs=result_md)
+
+    # ── Reset: clear on-screen state + logs, reset input pickers to defaults.
+    # Does NOT touch output files on disk — only the current tab's UI state.
+    def _reset_output_picker(m, f):
+        choices = _scan_output_files(m, f)
+        return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+    # One reset spec per input, in the same order as input_components, so the
+    # click handler can return updates that line up with the outputs list.
+    reset_specs: list = []  # (component, reset_update_callable)
+    for _inp, _comp in zip(skill.inputs, input_components):
+        if _inp.type in ("file", "files"):
+            reset_specs.append((_comp, lambda: gr.update(value=None)))
+        elif _inp.type == "output_file":
+            reset_specs.append((
+                _comp,
+                lambda m=_inp.match, f=tuple(_inp.file_types): _reset_output_picker(m, f),
+            ))
+        elif _inp.type == "parser_file":
+            reset_specs.append((_comp, lambda: gr.update(value=None)))
+        elif _inp.type == "select":
+            reset_specs.append((
+                _comp,
+                lambda o=(_inp.options[0] if _inp.options else None): gr.update(value=o),
+            ))
+        else:  # directory, text
+            reset_specs.append((_comp, lambda: gr.update(value="")))
+
+    def _handle_reset():
+        from .. import _runner
+        _runner.reset_cancel()
+        updates = [
+            gr.update(value="_Awaiting input._"),   # result_md
+            gr.update(visible=False, value=None),   # download
+        ]
+        updates.extend(fn() for _c, fn in reset_specs)
+        return tuple(updates)
+
+    reset_btn.click(
+        fn=_handle_reset,
+        outputs=[result_md, download] + [_c for _c, _fn in reset_specs],
+    )
 
     handler = _make_run_handler(skill)
     run_btn.click(
