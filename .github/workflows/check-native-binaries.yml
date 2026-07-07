@@ -78,25 +78,45 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass the findings as a shell variable, NOT via ${{ }} interpolation.
+          # The value contains markdown backticks; injecting it into the script
+          # text would make bash run e.g. `5.4.0` as a command. Referenced as
+          # "$UPDATES" below, the backticks stay literal.
+          UPDATES: ${{ env.UPDATES }}
         run: |
-          # Check if an open issue already exists
-          existing=$(gh issue list --label "native-binary-update" --state open --limit 1 --json number --jq '.[0].number' 2>/dev/null || echo "")
+          set -euo pipefail
+
+          # Ensure the labels exist (idempotent). Without this, a repo that has
+          # never had these labels makes `gh issue create --label` fail with
+          # "could not add label: ... not found" and the whole job goes red.
+          gh label create native-binary-update --color 0e8a16 \
+            --description "Vendored native binary has a newer upstream release" 2>/dev/null || true
+          gh label create dependencies --color 0366d6 \
+            --description "Dependency updates" 2>/dev/null || true
+
+          # Skip if a tracking issue is already open.
+          existing=$(gh issue list --label native-binary-update --state open \
+            --limit 1 --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ -n "$existing" ]; then
             echo "Issue #$existing already open — skipping."
             exit 0
           fi
 
+          # Build the body from "$UPDATES" (a shell variable). Variable values
+          # are never rescanned for command substitution, so its backticks are
+          # emitted literally. printf keeps the escaped backticks below literal.
+          {
+            printf '%s\n\n' "The following vendored native binaries have newer releases:"
+            printf '%s\n\n' "$UPDATES"
+            printf '%s\n'   "**To update:**"
+            printf '%s\n'   "1. Edit \`bundling/binaries.toml\` with the new version + URL"
+            printf '%s\n'   "2. Run \`python bundling/refresh_binaries.py --target <name>\`"
+            printf '%s\n'   "3. Paste the new SHA256 into \`binaries.toml\`"
+            printf '%s\n\n' "4. Re-run to verify, then commit the updated \`vendor/\` directory"
+            printf '%s\n'   "_This issue was opened automatically by the check-native-binaries workflow._"
+          } > issue-body.md
+
           gh issue create \
             --title "Native binary updates available" \
-            --label "native-binary-update,dependencies" \
-            --body "The following vendored native binaries have newer releases:
-
-          ${{ env.UPDATES }}
-
-          **To update:**
-          1. Edit \`bundling/binaries.toml\` with the new version + URL
-          2. Run \`python bundling/refresh_binaries.py --target <name>\`
-          3. Paste the new SHA256 into \`binaries.toml\`
-          4. Re-run to verify, then commit the updated \`vendor/\` directory
-
-          _This issue was opened automatically by the check-native-binaries workflow._"
+            --label native-binary-update,dependencies \
+            --body-file issue-body.md
