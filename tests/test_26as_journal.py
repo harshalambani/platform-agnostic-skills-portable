@@ -273,3 +273,73 @@ def test_end_to_end():
     assert out.exists()
     assert stats["balanced_all"]
     assert stats["deductors"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# apply_overrides graceful degradation
+#
+# A weak tool-calling model sometimes invokes apply_overrides with no arguments.
+# When `overrides` is a REQUIRED tool parameter, strict endpoints (e.g. Groq)
+# reject the whole request with HTTP 400 `tool_use_failed` before the tool body
+# ever runs. These tests pin the fix: `overrides` is optional in the tool schema,
+# and a None / empty payload normalizes to a harmless no-op.
+# ---------------------------------------------------------------------------
+
+TOOLS = SRC / "agents" / "skill_26as_journal" / "tools.py"
+
+
+def _load_tools():
+    if str(SRC) not in sys.path:
+        sys.path.insert(0, str(SRC))
+    spec = importlib.util.spec_from_file_location("t26as_tools", TOOLS)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+tl = _load_tools()
+
+
+@pytest.mark.parametrize("value", [None, "", "   ", {}])
+def test_normalize_overrides_empty_is_noop(value):
+    assert tl._normalize_overrides(value) == {}
+
+
+def test_normalize_overrides_dict_passthrough_stringifies_keys():
+    assert tl._normalize_overrides({2: "Income:Interest Income:Interest on FD"}) == {
+        "2": "Income:Interest Income:Interest on FD"}
+
+
+def test_normalize_overrides_drops_falsy_values():
+    assert tl._normalize_overrides({"2": "Income:X", "3": "", "4": None}) == {"2": "Income:X"}
+
+
+def test_normalize_overrides_parses_json_string():
+    assert tl._normalize_overrides('{"2": "Income:X"}') == {"2": "Income:X"}
+
+
+def test_normalize_overrides_bad_string_returns_error():
+    out = tl._normalize_overrides("not an object")
+    assert isinstance(out, str) and out.startswith("ERROR")
+
+
+def test_run_apply_none_is_noop_and_touches_nothing():
+    # Dummy, nonexistent paths: run_apply must short-circuit on the empty
+    # override BEFORE it ever reads the workbook or rebuilds the CSV.
+    missing = str(Path(tempfile.gettempdir()) / "does-not-exist-26as.csv")
+    out = tl.run_apply(missing, missing, missing, None)
+    assert out == "No overrides supplied; the existing CSV is unchanged and valid."
+    assert not Path(missing).exists()
+
+
+def test_apply_overrides_tool_param_is_optional():
+    """The real tool schema must NOT list `overrides` as required — that is what
+    prevents strict endpoints from 400-ing an argument-less call."""
+    from agents.skill_26as_journal.agent import _make_tools
+
+    tools = {t.name: t for t in _make_tools("x.xlsx", "y.gnucash", "z.csv")}
+    schema = tools["apply_overrides"].args_schema.model_json_schema()
+    assert "overrides" in schema.get("properties", {}), "param must still exist"
+    assert "overrides" not in schema.get("required", []), \
+        "overrides must be optional so a no-arg tool call is accepted, not 400'd"
