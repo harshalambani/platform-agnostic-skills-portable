@@ -63,8 +63,13 @@ def _verify(csv_path: str) -> str:
 
 
 def _normalize_overrides(overrides) -> "dict | str":
-    """Accept overrides as a dict (object) OR a JSON / python-dict string, and
-    return {str(sr): account_path}, or an error string."""
+    """Accept overrides as a dict (object), a JSON / python-dict string, or
+    None, and return {str(sr): account_path}, or an error string. A missing /
+    None / empty payload normalizes to {} — a no-op — because some tool-calling
+    models invoke this with no arguments, which must degrade gracefully rather
+    than hard-fail the run."""
+    if overrides is None:
+        return {}
     if isinstance(overrides, str):
         s = overrides.strip()
         if not s:
