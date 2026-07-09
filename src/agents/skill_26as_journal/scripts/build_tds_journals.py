@@ -119,6 +119,7 @@ class Account:
     path: str          # full path WITHOUT "Root Account:" prefix
     leaf: str
     type: str
+    special: bool = False  # placeholder/hidden/etc. — not a valid post target
 
 
 @dataclass
@@ -198,6 +199,44 @@ def parse_part_i(xlsx_path: Path) -> tuple[list[Deductor], str]:
 
 # -------------------- gnucash account parsing --------------------
 
+# GnuCash marks "special account types" via KVP slots on the account element.
+# Such accounts are NOT valid posting targets and must never be offered as a
+# credit-account candidate (a placeholder header like 'Income:Interest Income'
+# cannot receive splits directly; a hidden account is retired). These keys are
+# the boolean 'true'/'false' slots; 'opening-balance' is handled separately as
+# an 'equity-type' string slot.
+#
+# This list is a SELF-CONTAINED mirror of agents.gnucash_accounts.BOOL_FLAG_KEYS
+# — this script runs as a stand-alone subprocess and cannot rely on `agents`
+# being importable in a frozen child. tests/test_gnucash_accounts.py asserts the
+# two lists stay identical so they never drift.
+SPECIAL_BOOL_FLAG_KEYS = ("placeholder", "hidden", "tax-related",
+                          "auto-interest-transfer")
+_SPECIAL_TRUE_VALUES = frozenset({"true", "t", "1", "yes", "y"})
+_EQUITY_TYPE_KEY = "equity-type"
+_OPENING_BALANCE_VALUE = "opening-balance"
+
+
+def _account_is_special(acc_el: ET.Element, ns: dict) -> bool:
+    """True if a <gnc:account> element carries any special-type flag slot."""
+    slots = acc_el.find("act:slots", ns)
+    if slots is None:
+        return False
+    for slot in list(slots):                       # direct <slot> children only
+        key = value = ""
+        for child in slot:
+            local = child.tag.rsplit("}", 1)[-1]
+            if local == "key":
+                key = (child.text or "").strip()
+            elif local == "value":
+                value = (child.text or "").strip()
+        if key in SPECIAL_BOOL_FLAG_KEYS and value.lower() in _SPECIAL_TRUE_VALUES:
+            return True
+        if key == _EQUITY_TYPE_KEY and value.lower() == _OPENING_BALANCE_VALUE:
+            return True
+    return False
+
+
 def load_accounts(gnucash_path: Path) -> list[Account]:
     raw = gnucash_path.read_bytes()
     data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
@@ -210,26 +249,28 @@ def load_accounts(gnucash_path: Path) -> list[Account]:
         aid = a.find("act:id", ns).text
         typ = a.find("act:type", ns).text
         par = a.find("act:parent", ns)
-        by_id[aid] = (name, par.text if par is not None else None, typ)
+        by_id[aid] = (name, par.text if par is not None else None, typ,
+                      _account_is_special(a, ns))
 
     def full_path(aid):
         parts = []
         cur = aid
         while cur and cur in by_id:
-            n, p, _ = by_id[cur]
+            n, p, _t, _s = by_id[cur]
             parts.append(n)
             cur = p
         return list(reversed(parts))
 
     accounts = []
-    for aid, (name, _p, typ) in by_id.items():
+    for aid, (name, _p, typ, special) in by_id.items():
         parts = full_path(aid)
         # Drop the root account name ("Root Account") from the path.
         if parts and parts[0].lower().startswith("root"):
             parts = parts[1:]
         if not parts:
             continue
-        accounts.append(Account(path=":".join(parts), leaf=parts[-1], type=typ))
+        accounts.append(Account(path=":".join(parts), leaf=parts[-1], type=typ,
+                                special=special))
     return accounts
 
 
@@ -272,6 +313,8 @@ def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
     deductor account like 'Interest on BOB - FD', not the generic one)."""
     best: Optional[Account] = None
     for a in accounts:
+        if a.special:
+            continue  # placeholder/hidden — not a valid post target
         if a.type != "INCOME" or "interest" not in a.path.lower():
             continue
         toks = _tokens(a.leaf)
@@ -297,6 +340,8 @@ def _candidates_for(category: str, accounts: list[Account],
     credit on the same account."""
     out = []
     for a in accounts:
+        if a.special:
+            continue  # placeholder/hidden — never a credit candidate
         if a.type != "INCOME":
             continue
         pl = a.path.lower()
