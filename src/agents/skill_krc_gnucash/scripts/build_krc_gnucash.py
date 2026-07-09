@@ -109,6 +109,34 @@ def shift_months_back(d: date, n: int) -> date:
 
 
 # ---------- gnucash book ----------
+# GnuCash "special account types" (KVP slots) are NOT valid posting targets and
+# must never be offered as a security-match candidate: a placeholder is a header
+# account, a hidden account is a delisted/retired holding. These are the boolean
+# 'true' slots; 'opening-balance' is an 'equity-type' string slot.
+#
+# Self-contained mirror of agents.gnucash_accounts.BOOL_FLAG_KEYS (this script
+# runs as a stand-alone subprocess). tests/test_gnucash_accounts.py guards the
+# two lists against drift.
+SPECIAL_BOOL_FLAG_KEYS = ("placeholder", "hidden", "tax-related",
+                          "auto-interest-transfer")
+_SPECIAL_TRUE_VALUES = ("true", "t", "1", "yes", "y")
+
+
+def _is_special(account_xml):
+    """True if a <gnc:account> XML block carries any special-type flag slot."""
+    for mm in re.finditer(
+        r"<slot:key>(.*?)</slot:key>\s*<slot:value[^>]*>(.*?)</slot:value>",
+        account_xml, re.S,
+    ):
+        key = mm.group(1).strip()
+        val = mm.group(2).strip().lower()
+        if key in SPECIAL_BOOL_FLAG_KEYS and val in _SPECIAL_TRUE_VALUES:
+            return True
+        if key == "equity-type" and val == "opening-balance":
+            return True
+    return False
+
+
 def load_book(gnucash_path):
     raw = Path(gnucash_path).read_bytes()
     xml = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
@@ -118,7 +146,8 @@ def load_book(gnucash_path):
         name = (re.search(r"<act:name>(.*?)</act:name>", a) or [None, ""])[1]
         typ = (re.search(r"<act:type>(.*?)</act:type>", a) or [None, ""])[1]
         par = (re.search(r"<act:parent[^>]*>(.*?)</act:parent>", a) or [None, None])[1]
-        acc[gid] = {"name": _unescape(name), "typ": typ, "par": par}
+        acc[gid] = {"name": _unescape(name), "typ": typ, "par": par,
+                    "special": _is_special(a)}
 
     def path(g):
         parts = []
@@ -388,7 +417,10 @@ def main():
     cfg, cfg_path = load_config(config_yaml)
     acc, paths, stock_guids, holdings = load_book(gnucash_path)
     global _stock_paths
-    _stock_paths = [paths[g] for g in stock_guids]
+    # Match candidates exclude placeholder/hidden STOCK/MUTUAL accounts (not
+    # valid post targets). FIFO holdings (stock_guids) are left whole so a
+    # since-hidden holding's prior lots still feed cost-basis calculations.
+    _stock_paths = [paths[g] for g in stock_guids if not acc[g]["special"]]
     bills = load_bills(bills_xlsx)
 
     purchases, slbm, sales, review = build_entries(bills, cfg, paths, holdings)

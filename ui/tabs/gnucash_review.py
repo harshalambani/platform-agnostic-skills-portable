@@ -12,10 +12,8 @@ Supports:
 from __future__ import annotations
 
 import csv
-import gzip
 import json
 import re
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import gradio as gr
@@ -49,50 +47,23 @@ def _scan_import_ready_csvs() -> list[tuple[str, str]]:
 # GnuCash account tree extraction (lightweight — no full parse)
 # ---------------------------------------------------------------------------
 
-# XML namespaces used by GnuCash
-_NS = {
-    "gnc":   "{http://www.gnucash.org/XML/gnc}",
-    "act":   "{http://www.gnucash.org/XML/act}",
-}
-
-
 def _extract_account_tree(gnucash_file: str) -> list[str]:
-    """Extract all account full-paths from a .gnucash file."""
+    """Extract the user-pickable account full-paths from a .gnucash file.
+
+    Placeholder / hidden / other "special type" accounts are excluded: they are
+    not valid posting targets, so offering them in the review dropdown would let
+    a user assign a transaction to an account GnuCash then refuses on import.
+    Delegates to the shared placeholder-aware reader
+    (``agents.gnucash_accounts``).
+    """
     try:
-        with gzip.open(gnucash_file, "rt", encoding="utf-8") as f:
-            tree = ET.parse(f)
+        from agents.gnucash_accounts import load_accounts, postable_accounts
+        accounts = postable_accounts(load_accounts(gnucash_file))
     except Exception:
         return []
-
-    root = tree.getroot()
-    acc_map: dict[str, dict] = {}
-    for acc in root.findall(f'.//{_NS["gnc"]}account'):
-        aid = acc.findtext(f'{_NS["act"]}id', "")
-        aname = acc.findtext(f'{_NS["act"]}name', "")
-        parent_el = acc.find(f'{_NS["act"]}parent')
-        parent_id = parent_el.text if parent_el is not None else None
-        acc_map[aid] = {"name": aname, "parent_id": parent_id}
-
-    def _full_path(aid: str) -> str:
-        parts: list[str] = []
-        visited: set[str] = set()
-        while aid and aid in acc_map and aid not in visited:
-            visited.add(aid)
-            parts.append(acc_map[aid]["name"])
-            aid = acc_map[aid]["parent_id"]
-        return ":".join(reversed(parts))
-
-    paths = sorted(
-        {_full_path(aid) for aid in acc_map if acc_map[aid]["name"]},
-    )
-    # Strip "Root Account:" prefix
-    cleaned = []
-    for p in paths:
-        if p.startswith("Root Account:"):
-            p = p[len("Root Account:"):]
-        if p and ":" in p:  # skip the root itself and single-level
-            cleaned.append(p)
-    return cleaned
+    # Only multi-level paths are pickable (skip the root and top-level groups),
+    # matching the historical behaviour of this picker.
+    return sorted({a.path for a in accounts if a.path and ":" in a.path})
 
 
 # ---------------------------------------------------------------------------

@@ -966,6 +966,26 @@ def run(
             if m.get('account'):
                 all_account_paths.add(m['account'])
 
+    # Drop "special type" accounts (placeholder / hidden / etc.) from the
+    # candidate set. History can only contain postable accounts, so this mainly
+    # removes an account that was posted to and LATER hidden — GnuCash would
+    # reject a new posting to it. Placeholders can't appear in history at all.
+    try:
+        from agents.gnucash_accounts import read_special_paths  # noqa: PLC0415
+        special_paths = read_special_paths(gnucash_file)
+        if special_paths:
+            before = len(all_account_paths)
+            all_account_paths = {
+                p for p in all_account_paths if _strip_root(p) not in special_paths
+            }
+            dropped = before - len(all_account_paths)
+            if dropped:
+                _emit_mapper_progress(
+                    f"excluded {dropped} placeholder/hidden account(s) from candidates"
+                )
+    except Exception as e:  # noqa: BLE001 — never let flag-filtering break mapping
+        _emit_mapper_progress(f"special-account filter skipped: {e}")
+
     # Save historical mappings for LLM few-shot context
     historical_pairs_for_llm: List[Dict] = []
 

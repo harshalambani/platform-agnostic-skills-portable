@@ -110,6 +110,74 @@ def test_match_no_candidate_goes_suspense():
     assert acct is None and conf == "Suspense"
 
 
+# ---------------------------------------------------------------------------
+# Placeholder / hidden accounts are never valid credit candidates (the bug:
+# 'Income:Interest Income' is a GnuCash placeholder and cannot be posted to).
+# ---------------------------------------------------------------------------
+
+def test_placeholder_parent_excluded_from_candidates():
+    accts = [
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income:Interest on HDFC - FD",
+                  "Interest on HDFC - FD", "INCOME"),
+    ]
+    paths = [c.path for c in m._candidates_for("A", accts)]
+    assert "Income:Interest Income" not in paths          # placeholder header
+    assert "Income:Interest Income:Interest on HDFC - FD" in paths
+
+
+def test_placeholder_only_interest_account_routes_to_suspense():
+    """If the ONLY category-A account is the placeholder parent, the deductor
+    must go to Suspense — never post directly to the placeholder."""
+    accts = [m.Account("Income:Interest Income", "Interest Income", "INCOME",
+                       special=True)]
+    acct, conf, basis, cands = m.match_credit_account("HDFC BANK LIMITED", "A", accts)
+    assert acct is None and conf == "Suspense"
+    assert cands == []
+
+
+def test_hidden_account_never_matched():
+    """A hidden (retired) account must not be offered even if the name matches."""
+    accts = [
+        m.Account("Income:Interest Income:Interest on Old Bank",
+                  "Interest on Old Bank", "INCOME", special=True),
+        m.Account("Income:Interest Income:Interest on HDFC - FD",
+                  "Interest on HDFC - FD", "INCOME"),
+    ]
+    acct, conf, basis, cands = m.match_credit_account("OLD BANK", "A", accts)
+    assert "Income:Interest Income:Interest on Old Bank" not in cands
+    assert acct != "Income:Interest Income:Interest on Old Bank"
+
+
+def test_special_account_not_taken_as_generic_fd():
+    """A placeholder/hidden FD account must not be picked as the generic FD
+    debit account either."""
+    def acc(p, special=False):
+        return m.Account(p, p.split(":")[-1], "INCOME", special=special)
+    accts = [
+        acc("Income:Interest Income:Interest on FD", special=True),   # placeholder
+        acc("Income:Interest Income:Interest on Fixed Deposit"),      # real generic
+    ]
+    assert m.find_generic_fd_account(accts) == \
+        "Income:Interest Income:Interest on Fixed Deposit"
+
+
+def test_build_journals_places_placeholder_only_deductor_on_suspense():
+    """End-to-end at the journal level: a deductor whose category has only a
+    placeholder account lands its credit split on Suspense and is flagged."""
+    accts = [
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
+        m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
+    ]
+    d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0)
+    journals = m.build_journals([d], accts)
+    j = journals[0]
+    assert j.credit_account == "Liabilities:Suspense"
+    assert j.needs_review is True
+    assert j.balanced
+
+
 def test_generic_interest_on_fd_never_a_credit_match():
     """The generic FD-interest account must never be returned as a credit match."""
     fd = m.find_generic_fd_account(_accounts())
