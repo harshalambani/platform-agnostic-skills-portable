@@ -13,7 +13,7 @@ description: >
   bank import, and flags any settlement movement that has no contract note.
   Produces a workbook with Bills, Trade Lines, and Reconciliation sheets.
 category: "krc"
-version: "1.1.0"
+version: "1.2.0"
 
 # Direct mode — deterministic, no LLM. Guarantees the output file is written
 # (and therefore the download button appears).
