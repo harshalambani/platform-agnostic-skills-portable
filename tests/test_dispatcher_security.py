@@ -29,7 +29,7 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -285,6 +285,29 @@ class TestDispatcherAcceptsBundled:
 
         assert rc == 42, f"Expected exit code 42, got {rc}"
 
+    def test_script_exception_is_caught_not_propagated(self, dispatcher_ns, tmp_path):
+        """An unhandled exception in the dispatched script must be caught and
+        converted to a non-zero exit — NOT propagated. In a windowed frozen
+        build a propagated exception pops a modal 'Unhandled exception in
+        script' dialog and blocks until dismissed, which hangs the parent's
+        subprocess.run() and leaves the UI stuck on 'Running…'."""
+        scripts_root = tmp_path / "agents"
+        scripts_root.mkdir()
+        bundled = scripts_root / "crashing_script.py"
+        bundled.write_text("pass\n")
+
+        saved_root = dispatcher_ns["_bundled_scripts_root"]
+        try:
+            dispatcher_ns["_bundled_scripts_root"] = lambda: scripts_root.resolve()
+            with patch("runpy.run_path",
+                       side_effect=ValueError("invalid literal for int() with base 10: 'Sr 7'")):
+                # Must NOT raise; must return a non-zero exit code.
+                rc = dispatcher_ns["_maybe_dispatch_script"]([str(bundled)])
+        finally:
+            dispatcher_ns["_bundled_scripts_root"] = saved_root
+
+        assert rc == 1, f"Unhandled script exception should yield rc=1, got {rc}"
+
 
 # ---------------------------------------------------------------------------
 # 4. _bundled_scripts_root() resolves correctly in source vs frozen mode
@@ -362,3 +385,22 @@ class TestWebUISourceContainment:
         assert 'getattr(sys, "_MEIPASS"' in source or "getattr(sys, '_MEIPASS'" in source, (
             "sys._MEIPASS must be accessed via getattr to be safe in source mode"
         )
+
+    def test_dispatch_catches_unhandled_exceptions(self):
+        """The dispatcher must catch non-SystemExit exceptions so a crashing
+        bundled script can't pop PyInstaller's modal dialog and hang the parent."""
+        source = WEBUI_PATH.read_text()
+        assert "except BaseException" in source, (
+            "dispatcher must catch BaseException from runpy so a script crash "
+            "exits cleanly instead of surfacing PyInstaller's modal error dialog"
+        )
+
+    def test_console_suppression_present_and_wired(self):
+        """The console-window suppression helper must exist, be called from
+        main(), and use CREATE_NO_WINDOW."""
+        source = WEBUI_PATH.read_text()
+        assert "def _suppress_console_windows" in source
+        assert "_suppress_console_windows()" in source, (
+            "_suppress_console_windows must be called (from main())"
+        )
+        assert "CREATE_NO_WINDOW" in source

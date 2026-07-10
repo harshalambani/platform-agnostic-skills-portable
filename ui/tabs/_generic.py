@@ -450,7 +450,9 @@ def _make_run_handler(skill: SkillInfo):
         if skill.output.type == "directory":
             if not out_path.is_dir() or not any(out_path.iterdir()):
                 yield add(
-                    f"Warning: no output produced at {out_path}.\n\n"
+                    f"Error: the run did not finish successfully — no output "
+                    f"was produced at {out_path}. Check the details below, fix "
+                    f"the input, and run again.\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
                 ), gr.update(visible=False)
                 return
@@ -464,7 +466,9 @@ def _make_run_handler(skill: SkillInfo):
         else:
             if not out_path.is_file():
                 yield add(
-                    f"Warning: no output file at {out_path}.\n\n"
+                    f"Error: the run did not finish successfully — no output "
+                    f"file was produced, so there is nothing to download. "
+                    f"Check the details below, fix the input, and run again.\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
                 ), gr.update(visible=False)
                 return
