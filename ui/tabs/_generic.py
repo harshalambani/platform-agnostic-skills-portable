@@ -18,6 +18,10 @@ Supported input types (declared in skill.yaml):
                    values typed by the user.
   - "directory"  → paste a folder path (gr.Textbox)
   - "text"       → free-text input (gr.Textbox)
+  - "password"   → masked free-text input (gr.Textbox, type="password").
+                   Shoulder-surfing protection only — the value is passed as
+                   a run arg, not stored at rest. Use for secrets that aren't
+                   already covered by the Settings-tab API key.
 """
 from __future__ import annotations
 
@@ -646,6 +650,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     comp = gr.Textbox(
                         label=inp.label,
                         placeholder="Paste full folder path here",
+                        **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                    )
+                elif inp.type == "password":
+                    comp = gr.Textbox(
+                        label=inp.label,
+                        type="password",
                         **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
                     )
                 else:  # text

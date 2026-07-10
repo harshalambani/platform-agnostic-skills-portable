@@ -18,7 +18,7 @@ inputs:
     label: "Input folder (MSG files and/or PDFs)"
     required: true
   - name: "password"
-    type: "text"
+    type: "password"
     label: "PDF password(s), comma-separated (or leave blank for auto-detect)"
     required: false
 
