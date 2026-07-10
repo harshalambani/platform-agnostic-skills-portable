@@ -1,0 +1,142 @@
+# skill.yaml -- Intercompany Reconciliation manifest.
+# Read by the skill registry (agents/registry.py) at startup and rendered as a
+# tab under the "gnucash" category.
+
+name: "gnucash_intercompany"
+display_name: "Intercompany Reco"
+description: >
+  Reconcile the accounts two people keep for each other across two GnuCash books
+  (e.g. Vaikunth <-> Kiran). Finds each person's contra account(s) in the other's
+  book, carries forward the opening balance, matches the current financial year's
+  movements (equal-and-opposite amount, within a date tolerance, bank account
+  numbers as a tie-breaker), and for any unmatched item hunts the other book for
+  a probable mis-posting. Read-only -- never modifies your .gnucash files.
+  Produces an Excel workbook: Summary, Matched, and Exceptions per side.
+category: "gnucash"
+version: "1.0.0"
+
+# Direct mode -- deterministic, no LLM. Guarantees the workbook is written
+# (and the download button appears).
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "book_a"
+    type: "file"
+    label: "First person's GnuCash book (.gnucash) -- must be closed in GnuCash"
+    file_types: [".gnucash"]
+    required: true
+  - name: "book_b"
+    type: "file"
+    label: "Second person's GnuCash book (.gnucash) -- must be closed in GnuCash"
+    file_types: [".gnucash"]
+    required: true
+  - name: "period"
+    type: "select"
+    label: "Reconciliation period (Indian FY = 1 Apr to 31 Mar)"
+    required: true
+    options:
+      - "Auto (detect FY from filenames)"
+      - "FY 2025-26"
+      - "FY 2024-25"
+      - "FY 2023-24"
+      - "FY 2026-27"
+      - "Calendar Year 2025"
+      - "Calendar Year 2026"
+      - "Custom date range (use dates below)"
+  - name: "custom_start"
+    type: "text"
+    label: "Custom start date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "custom_end"
+    type: "text"
+    label: "Custom end date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "date_tolerance"
+    type: "text"
+    label: "Date tolerance in days for matching in-transit items (default 7)"
+    required: false
+
+run_args:
+  book_a: "{inputs.book_a}"
+  book_b: "{inputs.book_b}"
+  period: "{inputs.period}"
+  custom_start: "{inputs.custom_start}"
+  custom_end: "{inputs.custom_end}"
+  date_tolerance: "{inputs.date_tolerance}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "Intercompany-Recon"
+  download_label: "Download Reconciliation Workbook"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Reconciles the contra accounts two people keep for each other across their
+    two GnuCash books. It matches the current financial year's movements, carries
+    the opening balance forward, and for every unmatched item searches the other
+    book for a probable mis-posting -- then writes an Excel reconciliation
+    statement. Fully offline and deterministic (no LLM); read-only on your books.
+  when_to_use: >
+    Run at year-end (or before filing) to confirm that what one person's book
+    shows as due to/from the other agrees with the other person's book -- and to
+    catch entries one side recorded that the other missed or mis-posted.
+  inputs:
+    - name: "book_a"
+      tooltip: "The first person's GnuCash book."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Close it in GnuCash first so the file is not locked. It is read only, never modified."
+    - name: "book_b"
+      tooltip: "The second person's GnuCash book -- the counter-party."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Each person's own name in the OTHER book's account tree is how contra accounts are found. 'X HUF' is treated as a different entity from 'X'."
+    - name: "period"
+      tooltip: "Which period to reconcile. Indian financial year runs 1 Apr to 31 Mar."
+      accepts: "A FY, a calendar year, Auto, or a custom date range."
+      gotchas: "'Auto' reads the FY from the file names (e.g. ...2526 -> FY 2025-26)."
+    - name: "custom_start"
+      tooltip: "Start date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "custom_end"
+      tooltip: "End date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "date_tolerance"
+      tooltip: "How many days apart two entries can be and still match (in-transit items)."
+      accepts: "A whole number of days. Default 7."
+      gotchas: "Raise it if payments take longer to appear in the other person's book."
+  steps:
+    - "Pick both people's .gnucash books (closed in GnuCash)."
+    - "Choose the reconciliation period (or leave on Auto)."
+    - "Optionally adjust the date tolerance."
+    - "Click Run and download the reconciliation workbook."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Intercompany-Recon.xlsx"
+        tooltip: >
+          The reconciliation statement: a Summary (opening, movements, closing,
+          and the balance difference), a Matched sheet pairing both books'
+          entries, and an Exceptions sheet per side listing unmatched items with
+          probable mis-postings found in the other book.
+  tips: >
+    If the balance ties but exceptions remain, those items usually net to zero
+    (a give-and-take one side recorded and the other did not) -- still worth
+    fixing. Descriptions mentioning 'HUF' against an individual's contra account
+    signal an entry that belongs in the HUF book instead.
+  troubleshooting:
+    - problem: "No contra account found."
+      fix: "The other person's name must appear in an account name in each book. Rename the account to include their name, then re-run."
+    - problem: "An item shows 'No candidate found in the other book'."
+      fix: "The other person genuinely never recorded it, OR it belongs to a related entity (e.g. an HUF) whose book was not the one you loaded."
+    - problem: "Too many unmatched items that clearly correspond."
+      fix: "Increase the date tolerance -- the payments are landing in the other book more than a week apart."
