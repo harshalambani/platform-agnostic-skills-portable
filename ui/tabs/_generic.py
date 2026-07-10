@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING
 import gradio as gr
 
 from .. import _config
+from .. import _filedialog
 from .. import _health
 from .. import _help
 from .. import _runner
@@ -573,14 +574,19 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             input_components = []
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
+            browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             for inp in skill.inputs:
                 if inp.type == "file":
-                    comp = gr.File(
-                        label=inp.label,
-                        file_types=list(inp.file_types) if inp.file_types else None,
-                        type="filepath",
-                        **_help.maybe_info(gr.File, _info.get(inp.name)),
-                    )
+                    with gr.Row():
+                        comp = gr.File(
+                            label=inp.label,
+                            file_types=list(inp.file_types) if inp.file_types else None,
+                            type="filepath",
+                            scale=5,
+                            **_help.maybe_info(gr.File, _info.get(inp.name)),
+                        )
+                        _brbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    browse_buttons.append((_brbtn, comp, inp, False))
                 elif inp.type == "output_file":
                     # Pick a prior-step output from the outputs folder, with a
                     # refresh button — same UX as the Review-Mappings CSV picker.
@@ -598,13 +604,17 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         _rbtn = gr.Button("↻", scale=0, min_width=40)
                     output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
                 elif inp.type == "files":
-                    comp = gr.File(
-                        label=inp.label,
-                        file_types=list(inp.file_types) if inp.file_types else None,
-                        file_count="multiple",
-                        type="filepath",
-                        **_help.maybe_info(gr.File, _info.get(inp.name)),
-                    )
+                    with gr.Row():
+                        comp = gr.File(
+                            label=inp.label,
+                            file_types=list(inp.file_types) if inp.file_types else None,
+                            file_count="multiple",
+                            type="filepath",
+                            scale=5,
+                            **_help.maybe_info(gr.File, _info.get(inp.name)),
+                        )
+                        _brbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    browse_buttons.append((_brbtn, comp, inp, True))
                 elif inp.type == "parser_file":
                     # Dropdown of the project's known parsers, with a refresh
                     # button. allow_custom_value=True so "Create a new parser"
@@ -693,6 +703,31 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             fn=lambda: gr.update(choices=_scan_parser_files()),
             outputs=_comp,
         )
+
+    # Wire each "Browse…" button to the native OS file picker. It opens at the
+    # box's remembered folder, validates the picks (extension + size, since the
+    # browser filter and upload-staging caps are bypassed), sets the file box,
+    # and remembers the folder for next time. Additive: drag-drop still works.
+    for _brbtn, _fcomp, _inp, _multiple in browse_buttons:
+        _box_key = f"{skill.name}.{_inp.name}"
+        _fts = tuple(_inp.file_types) if _inp.file_types else ()
+
+        def _browse(bk=_box_key, mult=_multiple, fts=_fts, label=_inp.label):
+            valid, warnings = _filedialog.pick_files(
+                bk,
+                multiple=mult,
+                file_types=fts,
+                max_size_bytes=_MAX_UPLOAD_SIZE_BYTES,
+                title=f"Select file{'s' if mult else ''} — {label}",
+            )
+            for w in warnings:
+                gr.Warning(w)
+            if not valid:
+                # Cancelled, or every pick was rejected — keep the current value.
+                return gr.update()
+            return gr.update(value=(valid if mult else valid[0]))
+
+        _brbtn.click(fn=_browse, inputs=[], outputs=[_fcomp])
 
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.
