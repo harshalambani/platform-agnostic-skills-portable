@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — PA Skills Portable</title>
+<meta name="description" content="Privacy policy for PA Skills Portable, a local portable desktop application for document processing.">
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #5a6572;
+    --accent: #2563eb;
+    --card: #f7f8fa;
+    --border: #e3e6ea;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --fg: #e7eaee;
+      --muted: #9aa4b2;
+      --accent: #6ea8fe;
+      --card: #171a21;
+      --border: #262b34;
+    }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 48px 22px 96px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 8px; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .app { color: var(--muted); font-size: 0.95rem; margin: 0; }
+  .updated { color: var(--muted); font-size: 0.85rem; margin: 10px 0 0; }
+  h2 { font-size: 1.15rem; margin: 40px 0 10px; letter-spacing: -0.005em; }
+  p, li { color: var(--fg); }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  ul { padding-left: 1.25rem; }
+  li { margin: 6px 0; }
+  code {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+    font-size: 0.88em;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .tldr {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin: 26px 0 8px;
+  }
+  .tldr strong { color: var(--fg); }
+  footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 0.85rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Privacy Policy</h1>
+    <p class="app">PA Skills Portable &mdash; a local, portable desktop application</p>
+    <p class="updated">Last updated: 10 July 2026</p>
+  </header>
+
+  <div class="tldr">
+    <strong>Short version:</strong> The App runs entirely on your own computer. The
+    developer operates no server, no account system, and no analytics. The App does
+    not collect, transmit, sell, or share your personal information. The only time
+    your data leaves your machine is if <em>you</em> choose to connect the App to an
+    external AI (LLM) endpoint &mdash; and even then it goes directly from your
+    computer to that provider, never to the developer.
+  </div>
+
+  <h2>1. Who this policy is from</h2>
+  <p>
+    PA Skills Portable (&ldquo;the App&rdquo;) is an independent, non-commercial
+    project distributed as source and as a portable build on GitHub. It is not
+    operated as a hosted service. There is no company, no login, and no user
+    database behind it.
+  </p>
+
+  <h2>2. The App runs locally</h2>
+  <p>
+    The App is a self-contained portable package. It requires no installation, no
+    administrator rights, and makes no changes to the Windows registry. When you
+    launch it, it starts a local web interface that is reachable
+    <strong>only from your own computer</strong> (<code>http://127.0.0.1</code>).
+    Your files are read, processed, and written back on your machine, to folders
+    you choose.
+  </p>
+
+  <h2>3. Information the App does <em>not</em> collect</h2>
+  <ul>
+    <li>The App has <strong>no telemetry, analytics, tracking, or crash reporting.</strong></li>
+    <li>The App does <strong>not</strong> create accounts and does <strong>not</strong>
+      ask for names, addresses, passwords, or payment information.</li>
+    <li>The developer receives <strong>no</strong> copy of your documents, your
+      extracted data, your settings, or any usage information. There is no server to
+      receive it.</li>
+  </ul>
+
+  <h2>4. Data you provide, and where it stays</h2>
+  <ul>
+    <li><strong>Documents and files</strong> you select (for example bank statements,
+      PDFs, spreadsheets, emails) are processed locally and remain on your computer.</li>
+    <li><strong>Settings</strong> &mdash; including any AI endpoint URL, model name, and
+      API key you enter &mdash; are stored <strong>only</strong> in a local
+      configuration file on your machine (<code>Data/settings/config.yaml</code>) so
+      the App can reconnect next time. They are not transmitted to the developer.
+      This file is stored in plain text on your own device; keep your machine secured
+      accordingly.</li>
+    <li><strong>PDF passwords</strong> you type to open protected files are used
+      in-memory for that operation and are not saved.</li>
+  </ul>
+
+  <h2>5. Optional AI (LLM) processing &mdash; the one time data leaves your machine</h2>
+  <p>
+    Some skills use a Large Language Model. <strong>No AI model is bundled with the
+    App</strong> &mdash; you choose and connect one yourself:
+  </p>
+  <ul>
+    <li>If you use a <strong>local</strong> model (for example
+      <a href="https://ollama.com" rel="noopener">Ollama</a> running on your own
+      computer), your data never leaves your machine.</li>
+    <li>If you configure an <strong>external</strong> OpenAI-compatible or other
+      third-party AI endpoint, then for those skills the relevant content (the text or
+      data being processed, plus your instruction) is sent <strong>directly from your
+      computer to that provider</strong> so it can return a result. It does
+      <strong>not</strong> pass through the developer. That provider's handling of the
+      data is governed by <strong>its own</strong> privacy policy and terms &mdash;
+      please review them. You remain in control of which endpoint, if any, you
+      connect.</li>
+  </ul>
+
+  <h2>6. No third-party sharing, ads, or sale of data</h2>
+  <p>
+    The App contains no advertising, no third-party trackers, and no data brokers.
+    The developer does not sell, rent, or share your information &mdash; because the
+    developer never receives it.
+  </p>
+
+  <h2>7. Security</h2>
+  <p>
+    Because processing is local, your data's security is primarily governed by the
+    security of your own device. The developer recommends running the App only on a
+    computer you trust and control, and safeguarding any local configuration file
+    that contains API keys.
+  </p>
+
+  <h2>8. Children's privacy</h2>
+  <p>
+    The App is a general-purpose productivity tool and is not directed at children.
+  </p>
+
+  <h2>9. Changes to this policy</h2>
+  <p>
+    This policy may be updated as the App evolves. The current version, with its
+    &ldquo;Last updated&rdquo; date, is always available at this page's URL.
+  </p>
+
+  <h2>10. Contact</h2>
+  <p>
+    Questions about this policy or the App can be raised on the project's GitHub
+    page:
+    <a href="https://github.com/harshalambani/platform-agnostic-skills-portable" rel="noopener">github.com/harshalambani/platform-agnostic-skills-portable</a>.
+  </p>
+
+  <footer>
+    PA Skills Portable is free and open. This page is the canonical privacy
+    statement for the application.
+  </footer>
+</div>
+</body>
+</html>
