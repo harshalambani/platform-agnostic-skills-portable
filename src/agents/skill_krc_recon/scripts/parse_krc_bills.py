@@ -407,24 +407,24 @@ def apportion_charges(bills, trade_lines):
     for b in bills:
         if b["type"] != "TRADE" or b.get("net_amount") is None:
             continue
-        lns = [l for l in by_cn.get(b["cn_no"], []) if l.get("net_amount") is not None]
+        lns = [leg for leg in by_cn.get(b["cn_no"], []) if leg.get("net_amount") is not None]
         if not lns:
             continue
-        for l in lns:
-            l["signed_gross"] = round((-1 if l["bs"] == "BUY" else 1) * abs(l["net_amount"]), 4)
+        for leg in lns:
+            leg["signed_gross"] = round((-1 if leg["bs"] == "BUY" else 1) * abs(leg["net_amount"]), 4)
         bill_net = round(b["net_amount"] * (1 if b["direction"].startswith("Receiv") else -1), 2)
-        gross_sum = sum(l["signed_gross"] for l in lns)
+        gross_sum = sum(leg["signed_gross"] for leg in lns)
         total_charge = gross_sum - bill_net
-        turnover = sum(abs(l["signed_gross"]) for l in lns) or 1.0
-        for l in lns[:-1]:
-            c = round(total_charge * abs(l["signed_gross"]) / turnover, 2)
-            l["apportioned_charge"] = c
-            l["net_balanced"] = round(l["signed_gross"] - c, 2)
-        prev = sum(l["net_balanced"] for l in lns[:-1])
+        turnover = sum(abs(leg["signed_gross"]) for leg in lns) or 1.0
+        for leg in lns[:-1]:
+            c = round(total_charge * abs(leg["signed_gross"]) / turnover, 2)
+            leg["apportioned_charge"] = c
+            leg["net_balanced"] = round(leg["signed_gross"] - c, 2)
+        prev = sum(leg["net_balanced"] for leg in lns[:-1])
         last = lns[-1]
         last["net_balanced"] = round(bill_net - prev, 2)
         last["apportioned_charge"] = round(last["signed_gross"] - last["net_balanced"], 2)
-        net_sum = round(sum(l["net_balanced"] for l in lns), 2)
+        net_sum = round(sum(leg["net_balanced"] for leg in lns), 2)
         checks.append((b["cn_no"], net_sum, bill_net, abs(net_sum - bill_net) < 0.005))
     return checks
 
@@ -568,20 +568,20 @@ def main() -> int:
     # Bill-level quantity (trading volume): net signed for trades
     # (BUY +, SELL -); gross lent volume for SLBM (borrow+return nets to 0).
     for b in bills:
-        lns = [l for l in trade_lines
-               if l["cn_no"] == b["cn_no"] and l.get("quantity") is not None]
+        lns = [leg for leg in trade_lines
+               if leg["cn_no"] == b["cn_no"] and leg.get("quantity") is not None]
         if not lns:
             b["quantity"] = None
         elif b["type"] == "SLBM":
             # lent volume = one-side total (borrow == return); use the larger
             # side so borrow-only and round-trip memos both report correctly.
-            pos = sum(l["quantity"] for l in lns if l["quantity"] > 0)
-            neg = sum(-l["quantity"] for l in lns if l["quantity"] < 0)
+            pos = sum(leg["quantity"] for leg in lns if leg["quantity"] > 0)
+            neg = sum(-leg["quantity"] for leg in lns if leg["quantity"] < 0)
             b["quantity"] = max(pos, neg) or None
         else:
             b["quantity"] = sum(
-                abs(l["quantity"]) if l.get("bs") == "BUY" else -abs(l["quantity"])
-                for l in lns)
+                abs(leg["quantity"]) if leg.get("bs") == "BUY" else -abs(leg["quantity"])
+                for leg in lns)
 
     settlements, utrs = load_references(ledger_xlsx)
     led_rows = load_simplified(ledger_xlsx)
