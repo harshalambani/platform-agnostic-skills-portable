@@ -118,6 +118,32 @@ _PB_FOOTER_RE = re.compile(
 )
 
 
+def _build_pb_txn(date_str, rest, m_tail, cont):
+    """Build a transaction dict from one pdfplumber-parsed line.
+
+    "Date" is emitted as the Value Dt (m_tail.group(2)), falling back to the
+    leading posting date only when the value date is blank/unparseable —
+    HDFC statements have distinct posting and value dates (e.g. cheque
+    clearing) and downstream balance/dedup logic keys on this field.
+    """
+    ref = m_tail.group(1)
+    ref_pos = rest.rfind(ref)
+    desc = rest[:ref_pos].strip() if ref_pos > 0 else ""
+    full_desc = (desc + " " + " ".join(cont)).strip() if cont else desc
+    value_date = _normalise_date(m_tail.group(2)) if m_tail.group(2) else ""
+    posting_date = _normalise_date(date_str)
+    return {
+        "Date": value_date or posting_date,
+        "Transaction ID": ref,
+        "Description": full_desc,
+        "Account": "",
+        "Deposit": _clean_amount(m_tail.group(4)),
+        "Withdrawal": _clean_amount(m_tail.group(3)),
+        "Balance": m_tail.group(5).replace(",", ""),
+        "Currency": "INR",
+    }
+
+
 def _parse_pdf_pdfplumber(pdf_path):
     import pdfplumber
 
@@ -150,9 +176,6 @@ def _parse_pdf_pdfplumber(pdf_path):
             rest = m_date.group(2)
             m_tail = _PB_TAIL_RE.search(rest)
             if m_tail:
-                ref = m_tail.group(1)
-                ref_pos = rest.rfind(ref)
-                desc = rest[:ref_pos].strip() if ref_pos > 0 else ""
                 cont = []
                 j = i + 1
                 while j < len(all_lines):
@@ -167,17 +190,7 @@ def _parse_pdf_pdfplumber(pdf_path):
                         continue
                     cont.append(nl)
                     j += 1
-                full_desc = (desc + " " + " ".join(cont)).strip() if cont else desc
-                transactions.append({
-                    "Date": _normalise_date(date_str),
-                    "Transaction ID": ref,
-                    "Description": full_desc,
-                    "Account": "",
-                    "Deposit": _clean_amount(m_tail.group(4)),
-                    "Withdrawal": _clean_amount(m_tail.group(3)),
-                    "Balance": m_tail.group(5).replace(",", ""),
-                    "Currency": "INR",
-                })
+                transactions.append(_build_pb_txn(date_str, rest, m_tail, cont))
                 i = j
                 continue
         i += 1
@@ -261,6 +274,12 @@ def _clean_ocr_desc(desc):
 
 
 def _build_pdf_txn(current, text, m_tail):
+    """Build a transaction dict from one OCR-parsed line.
+
+    "Date" is emitted as the Value Dt (m_tail.group(2)), falling back to the
+    leading posting date (current["date"]) only when the value date is
+    blank/unparseable — same rationale as _build_pb_txn for the pdfplumber path.
+    """
     ref_no = m_tail.group(1)
     withdrawal = _clean_amount(m_tail.group(3))
     deposit = _clean_amount(m_tail.group(4))
@@ -274,8 +293,10 @@ def _build_pdf_txn(current, text, m_tail):
         raw_desc = ""
     desc = re.sub(r'\s+', " ", raw_desc).strip(" -")
     desc = _clean_ocr_desc(desc)
+    value_date = _normalise_date(m_tail.group(2)) if m_tail.group(2) else ""
+    posting_date = _normalise_date(current["date"])
     return {
-        "Date": _normalise_date(current["date"]),
+        "Date": value_date or posting_date,
         "Transaction ID": ref_no,
         "Description": desc,
         "Account": "",
