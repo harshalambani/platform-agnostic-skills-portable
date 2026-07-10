@@ -185,7 +185,7 @@ def load_book(gnucash_path):
     # holdings keyed by full account path
     holdings = {}
     for g, ls in lots.items():
-        rem = [l for l in ls if l[1] > 0]
+        rem = [lot for lot in ls if lot[1] > 0]
         if rem:
             holdings[paths[g]] = rem
     return acc, paths, stock_guids, holdings
@@ -315,7 +315,7 @@ def build_entries(bills, cfg, paths, holdings):
                                   f"book a FIFO sale; re-run Reconcile or fix the "
                                   f"Quantity in the Bills workbook")); continue
             lots = holdings.get(sec_path, [])
-            avail = sum(l[1] for l in lots)
+            avail = sum(lot[1] for lot in lots)
             if avail < q:
                 review.append((b, f"insufficient FIFO lots for sale of {b['security']} "
                                   f"(need {float(q)}, have {float(avail)})")); continue
