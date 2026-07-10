@@ -39,6 +39,7 @@ from .. import _config
 from .. import _filedialog
 from .. import _health
 from .. import _help
+from .. import _review_csv
 from .. import _runner
 
 if TYPE_CHECKING:
@@ -462,9 +463,24 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(visible=False)
                 return
             out_abs = str(out_path.resolve())
+
+            # -- Surface any Review.csv the skill dropped in its output dir --
+            # Generic across skills (not KRC-specific): any directory-output
+            # skill that writes a "Review.csv" of rows it couldn't fully
+            # process gets it rendered inline here instead of only a buried
+            # agent-reply line. See ui/_review_csv.py.
+            review_section = ""
+            review_csv_path = _review_csv.find_review_csv(out_path)
+            if review_csv_path is not None:
+                try:
+                    review_section = _review_csv.render_review_section_html(review_csv_path)
+                except Exception:
+                    review_section = ""
+
             msg = add(
                 f"### Done\n\n"
                 f"**Output folder:** {out_abs}\n\n"
+                f"{review_section}"
                 f"---\n\n**Agent reply:**\n\n{agent_reply}"
             )
             yield msg, gr.update(visible=False)
