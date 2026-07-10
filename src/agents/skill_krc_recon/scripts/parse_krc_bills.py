@@ -57,6 +57,25 @@ def last_num_on_line(line):
     return num(nums[-1]) if nums else None
 
 
+# Broker's own legal name — never a traded security. Guards the anchored
+# security fallback below from grabbing the letterhead.
+_BROKER_NAME_TOKENS = ("KRCHOKSEY", "PRIVATE LIMITED")
+
+
+def anchored_securities(t):
+    """Recover equity security name(s) from the trade-line's economic shape:
+    the company name printed immediately before the Buy/Sell flag, quantity and
+    rate (e.g. '... RAMCO CEMENTS LIMITED S 250 993.0000'). This survives the
+    text-extraction garbling seen on forced square-off notes, whose rotated
+    'Remark' column collides the 16-digit order number with the trade time and
+    wraps the ISIN-anchored name across lines — so both the equity-header parse
+    and the order-number trade-line parse miss it. Excludes the broker's own
+    letterhead name (which never precedes a Buy/Sell + qty + rate)."""
+    names = sorted({m.group(1).strip() for m in re.finditer(
+        r"([A-Z][A-Z&. ]*?(?:LTD|LIMITED))\s+[BS]\s+\d+\s+[\d.]+", t)})
+    return [n for n in names if not any(tok in n for tok in _BROKER_NAME_TOKENS)]
+
+
 def decrypt(pdf, pw, out):
     r = subprocess.run(["qpdf", f"--password={pw}", "--decrypt", pdf, out],
                        capture_output=True, text=True)
@@ -167,6 +186,13 @@ def parse_trade(t, fname):
         line_secs = sorted({ln["security"] for ln in lines if ln["security"]})
         if line_secs:
             rec["security"] = ", ".join(line_secs)
+    # Last resort: recover the name from the trade line's economic shape (name
+    # before Buy/Sell + qty + rate). Handles square-off notes where the two
+    # parses above both miss (see anchored_securities).
+    if not rec["security"]:
+        anc = anchored_securities(t)
+        if anc:
+            rec["security"] = ", ".join(anc)
     return rec, lines
 
 
@@ -218,6 +244,10 @@ def parse_trade_old(t, fname):
     if (not rec["security"]) and lines:
         secs = sorted({ln["security"] for ln in lines if ln["security"]})
         rec["security"] = ", ".join(secs) if secs else None
+    if not rec["security"]:
+        anc = anchored_securities(t)
+        if anc:
+            rec["security"] = ", ".join(anc)
     return rec, lines
 
 
@@ -377,12 +407,17 @@ def write_workbook(out_path, bills, trade_lines, recon, unmatched, diag):
              "Security", "Quantity", "Direction", "Brokerage/Lending Fees", "Processing",
              "CGST", "SGST", "IGST", "STT", "Stamp", "Net/Bill Amount"]
     ws.append(bcols)
+    sec_col = bcols.index("Security") + 1
+    missing_fill = PatternFill("solid", fgColor="FFF2CC")  # amber: fill me in
     for b in sorted(bills, key=lambda x: x["date"] or ""):
         ws.append([b["cn_no"], b["type"], b["file"], b["date"], b["settlement"],
                    b.get("payinout"), b["security"], b.get("quantity"), b["direction"],
                    b.get("brokerage") or b.get("lending_fees"), b.get("processing"),
                    b.get("cgst"), b.get("sgst"), b.get("igst"), b.get("stt"),
                    b.get("stamp"), b["net_amount"]])
+        # Highlight a blank Security cell so the user can spot & fill it by hand.
+        if not b.get("security"):
+            ws.cell(ws.max_row, sec_col).fill = missing_fill
     style_header(ws, len(bcols))
     for i, w in enumerate([9, 7, 26, 11, 13, 20, 16, 10, 16, 18, 12, 9, 9, 7, 9, 8, 15], 1):
         ws.column_dimensions[ws.cell(1, i).column_letter].width = w
@@ -465,15 +500,20 @@ def main() -> int:
         print(f"ERROR: no PDF contract notes in {cn_dir}", file=sys.stderr)
         return 1
 
-    bills, trade_lines = [], []
+    bills, trade_lines, skipped = [], [], []
     for pdf in pdfs:
+        name = Path(pdf).name
         try:
             rec, lines = parse_cn(pdf, pw)
-        except RuntimeError as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
+        except Exception as e:  # noqa: BLE001 — one bad note must not sink the batch
+            # Decryption or parse failure on a single note: record it and carry
+            # on so the workbook is still produced for every note that did parse.
+            skipped.append((name, str(e)))
+            print(f"WARNING: could not parse {name}: {e}", file=sys.stderr)
+            continue
         if rec.get("net_amount") is None:
-            print(f"WARNING: could not read a bill amount from {Path(pdf).name}; skipped.",
+            skipped.append((name, "no bill amount found"))
+            print(f"WARNING: could not read a bill amount from {name}; skipped.",
                   file=sys.stderr)
             continue
         bills.append(rec)
@@ -516,6 +556,7 @@ def main() -> int:
     write_workbook(out_xlsx, bills, trade_lines, recon, unmatched, diag)
 
     review = [r for r in recon if str(r["match"]).startswith("REVIEW")]
+    missing_sec = [b for b in bills if not b.get("security")]
     print(f"Bills parsed: {len(bills)}  | trade lines: {len(trade_lines)}")
     print(f"Ledger rows: {len(led_rows)}")
     print(f"Matched bills: {len(matched)}/{len(bills)}  "
@@ -524,6 +565,14 @@ def main() -> int:
     print(f"Bills total: {diag['bills_total']:.2f}  | matched ledger total: "
           f"{diag['matched_total']:.2f}  | "
           f"{'OK' if abs(diag['bills_total'] - diag['matched_total']) < 0.02 else 'MISMATCH'}")
+    if missing_sec:
+        cns = ", ".join(str(b["cn_no"]) for b in missing_sec)
+        print(f"Bills with unparsed security (blank in the workbook — fill the "
+              f"Security column manually): {len(missing_sec)} — CN {cns}")
+    if skipped:
+        print(f"Contract notes skipped (not in the workbook): {len(skipped)}")
+        for nm, why in skipped:
+            print(f"  SKIPPED: {nm} — {why}")
     if unmatched:
         for b in unmatched:
             print(f"  UNMATCHED BILL: CN {b['cn_no']} {b['type']} {b['net_amount']}")
@@ -540,7 +589,10 @@ def main() -> int:
                 print(f"  APPORTION OFF: CN {cn} lines sum {snet} != bill net {bnet}")
     print(f"Wrote reconciliation workbook to {out_xlsx}")
 
-    return 0 if (not unmatched and not review) else 2
+    # The workbook is always written above; a non-zero code only signals that
+    # some rows need a human look (unmatched/review), a note was skipped, or a
+    # security couldn't be parsed and needs filling in by hand.
+    return 0 if not (unmatched or review or missing_sec or skipped) else 2
 
 
 if __name__ == "__main__":
