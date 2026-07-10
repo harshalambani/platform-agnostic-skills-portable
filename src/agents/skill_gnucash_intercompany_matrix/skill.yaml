@@ -1,0 +1,124 @@
+# skill.yaml -- Intercompany Matrix manifest (OPTIONAL roll-up).
+# Reconciles every pair among N GnuCash books into one workbook.
+# The pairwise "Intercompany Reco" skill remains the primary two-book tool;
+# this is an optional all-family overview built on the same engine.
+
+name: "gnucash_intercompany_matrix"
+display_name: "Intercompany Matrix"
+description: >
+  Optional all-family roll-up: reconcile EVERY pair among several GnuCash books
+  in one run (e.g. Vaikunth, Kiran, Khyati, Vaikunth-HUF). Produces a single
+  workbook with an owner-by-owner difference grid, a per-pair summary, and a
+  consolidated exceptions list. Reuses the pairwise Intercompany Reco engine.
+  Read-only -- never modifies your .gnucash files.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "books"
+    type: "files"
+    label: "GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash"
+    file_types: [".gnucash"]
+    required: true
+  - name: "period"
+    type: "select"
+    label: "Reconciliation period (Indian FY = 1 Apr to 31 Mar)"
+    required: true
+    options:
+      - "Auto (detect FY from filenames)"
+      - "FY 2025-26"
+      - "FY 2024-25"
+      - "FY 2023-24"
+      - "FY 2026-27"
+      - "Calendar Year 2025"
+      - "Calendar Year 2026"
+      - "Custom date range (use dates below)"
+  - name: "custom_start"
+    type: "text"
+    label: "Custom start date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "custom_end"
+    type: "text"
+    label: "Custom end date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "date_tolerance"
+    type: "text"
+    label: "Date tolerance in days for matching in-transit items (default 7)"
+    required: false
+
+run_args:
+  books: "{inputs.books}"
+  period: "{inputs.period}"
+  custom_start: "{inputs.custom_start}"
+  custom_end: "{inputs.custom_end}"
+  date_tolerance: "{inputs.date_tolerance}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "Intercompany-Matrix"
+  download_label: "Download Matrix Workbook"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    An optional roll-up over the pairwise Intercompany Reco: it reconciles every
+    unordered pair among the books you select and rolls them into one workbook --
+    a colour-coded owner-by-owner difference grid, a per-pair summary, and one
+    consolidated exceptions list. Same deterministic engine, read-only on your
+    books.
+  when_to_use: >
+    Run at year-end to see, at a glance, which family members' books agree and
+    which do not -- instead of running the two-book reconciliation for every
+    combination by hand.
+  inputs:
+    - name: "books"
+      tooltip: "Two or more people's GnuCash books."
+      accepts: "GnuCash files (.gnucash)."
+      gotchas: "Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Vaikunth vs Vaikunth-HUF is its own pair."
+    - name: "period"
+      tooltip: "Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar."
+      accepts: "A FY, a calendar year, Auto, or a custom date range."
+      gotchas: "'Auto' reads the FY from the file names; use a fixed FY if the names disagree."
+    - name: "custom_start"
+      tooltip: "Start date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "custom_end"
+      tooltip: "End date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "date_tolerance"
+      tooltip: "How many days apart two entries can be and still match."
+      accepts: "A whole number of days. Default 7."
+      gotchas: "Applies to every pair in the matrix."
+  steps:
+    - "Select all the .gnucash books to cross-reconcile (closed in GnuCash)."
+    - "Choose the period (or leave on Auto)."
+    - "Click Run and download the matrix workbook."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Intercompany-Matrix.xlsx"
+        tooltip: >
+          Matrix sheet (owner-by-owner difference grid, green ties / red out of
+          balance / grey n/a), Pairs sheet (balances and counts per pair), and
+          All Exceptions (every unmatched item across all pairs with the best
+          probable posting found in the other book).
+  tips: >
+    Start from the Matrix grid: any red cell is a pair to open. The All
+    Exceptions sheet is the single actionable to-do list across the whole family.
+  troubleshooting:
+    - problem: "A pair shows 'n/a'."
+      fix: "Those two books do not each keep an account named for the other. That is normal for people who do not transact."
+    - problem: "A pair is red (out of balance) with a large difference."
+      fix: "Open it in the two-book Intercompany Reco for full Matched / Exceptions detail, then fix the mis-postings it lists."
