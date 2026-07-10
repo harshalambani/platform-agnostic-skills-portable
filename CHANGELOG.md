@@ -22,6 +22,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
   the generated docs are stale (`gen_docs.py --check`).
 
+### Fixed
+- **HDFC — Value Dt now used on every input path.** HDFC statements carry
+  both a posting Date and a Value Dt; the canonical CSV's "Date" column
+  (which flows unchanged through balance checks, dedup, and account mapping)
+  now emits the Value Dt on the PDF text path (`skill_hdfc`) and the PDF OCR
+  path, matching the XLS/XLSX path which already preferred it. Falls back to
+  the posting date only when Value Dt is blank. Note: opening-balance
+  reconciliation and duplicate detection key on this field, so rows where
+  posting and value dates differ (e.g. cheque clearing) may now be bucketed
+  by a different date than before.
+- **ICICI — docstring corrected.** The module docstring wrongly claimed
+  ICICI used Transaction Date; the code already preferred Value Date
+  (falling back to Transaction Date only when blank). No behavior change —
+  documentation and a regression test now match the existing code.
+
 ## [1.0.1] — 2026-06-25
 
 ### Fixed

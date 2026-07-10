@@ -8,7 +8,8 @@ No LLM needed — deterministic parsing with known column layout.
 Input:  ICICI .xls file (BIFF format, downloaded from net banking)
 Output: Canonical 8-column CSV for Phase 3/4/6 consumption:
         Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency
-        (Uses Transaction Date, not Value Date; includes Balance for Phase 4 reconciliation)
+        (Uses Value Date, falling back to Transaction Date only when Value Date is
+        missing; includes Balance for Phase 4 reconciliation)
 """
 
 import csv
@@ -481,6 +482,51 @@ def is_data_row(row: List[str]) -> bool:
 
 
 # ============================================================================
+# PER-ROW TRANSFORM (factored out for unit testing)
+# ============================================================================
+
+def transform_row(row: List[str]) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
+    """Transform a single ICICI data row into a canonical row dict.
+
+    Returns (row_dict, None) on success, or (None, issue_message) if the
+    date could not be parsed. Prefers Value Date (col 2) over Transaction
+    Date (col 3), falling back to Transaction Date only when Value Date is
+    blank/unparseable.
+    """
+    date_str = parse_icici_date(row[COL_VALUE_DATE])
+    if not date_str:
+        date_str = parse_icici_date(row[COL_TXN_DATE])
+    if not date_str:
+        return None, f"failed to parse date '{row[COL_TXN_DATE]}'"
+
+    raw_cheque = str(row[COL_CHEQUE]).strip() if COL_CHEQUE < len(row) else '-'
+    raw_remarks = str(row[COL_REMARKS]).strip() if COL_REMARKS < len(row) else ''
+
+    cheque, remarks = transform_description(raw_cheque, raw_remarks)
+
+    if not remarks.strip():
+        for prefix, label in _PREFIX_LABELS:
+            if raw_remarks.startswith(prefix):
+                remarks = label
+                break
+
+    withdrawal = format_amount(str(row[COL_WITHDRAWAL])) if COL_WITHDRAWAL < len(row) else '0'
+    deposit = format_amount(str(row[COL_DEPOSIT])) if COL_DEPOSIT < len(row) else '0'
+    balance = format_amount(str(row[COL_BALANCE])) if COL_BALANCE < len(row) else '0'
+
+    return {
+        'date': date_str,
+        'txn_id': cheque if cheque and cheque != '-' else '',
+        'description': remarks,
+        'account': '',  # Empty — Phase 3 mapper fills this
+        'deposit': deposit,
+        'withdrawal': withdrawal,
+        'balance': balance,
+        'currency': 'INR',
+    }, None
+
+
+# ============================================================================
 # MAIN TRANSFORM PIPELINE
 # ============================================================================
 
@@ -516,43 +562,11 @@ def transform_icici_statement(xls_path: str, output_path: str) -> Dict[str, Any]
     issues = []
 
     for i, row in enumerate(data_rows):
-        # Parse date — prefer Value Date (col 2) over Transaction Date (col 3)
-        date_str = parse_icici_date(row[COL_VALUE_DATE])
-        if not date_str:
-            date_str = parse_icici_date(row[COL_TXN_DATE])
-        if not date_str:
-            issues.append(f"Row {i+1}: failed to parse date '{row[COL_TXN_DATE]}'")
+        row_dict, issue = transform_row(row)
+        if issue:
+            issues.append(f"Row {i+1}: {issue}")
             continue
-
-        # Get cheque and remarks
-        raw_cheque = str(row[COL_CHEQUE]).strip() if COL_CHEQUE < len(row) else '-'
-        raw_remarks = str(row[COL_REMARKS]).strip() if COL_REMARKS < len(row) else ''
-
-        # Transform description
-        cheque, remarks = transform_description(raw_cheque, raw_remarks)
-
-        # If description ended up empty, keep the transaction type prefix
-        if not remarks.strip():
-            for prefix, label in _PREFIX_LABELS:
-                if raw_remarks.startswith(prefix):
-                    remarks = label
-                    break
-
-        # Format amounts
-        withdrawal = format_amount(str(row[COL_WITHDRAWAL])) if COL_WITHDRAWAL < len(row) else '0'
-        deposit = format_amount(str(row[COL_DEPOSIT])) if COL_DEPOSIT < len(row) else '0'
-        balance = format_amount(str(row[COL_BALANCE])) if COL_BALANCE < len(row) else '0'
-
-        transformed.append({
-            'date': date_str,
-            'txn_id': cheque if cheque and cheque != '-' else '',
-            'description': remarks,
-            'account': '',  # Empty — Phase 3 mapper fills this
-            'deposit': deposit,
-            'withdrawal': withdrawal,
-            'balance': balance,
-            'currency': 'INR',
-        })
+        transformed.append(row_dict)
 
     logger.info(f"Transformed {len(transformed)} rows")
 
