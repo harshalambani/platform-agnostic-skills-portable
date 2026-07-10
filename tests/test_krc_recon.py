@@ -69,16 +69,46 @@ def test_square_off_note_recovers_security():
     assert rec["direction"] == "Receivable (Cr)"
 
 
-def test_legacy_paths_miss_on_this_layout():
+def test_structured_regex_misses_but_anchored_recovers():
     """Documents WHY the anchored fallback is needed: on the garbled layout the
-    header regex and the order-number trade-line regex both yield nothing."""
+    header regex and the order-number trade-line regex both yield nothing, so the
+    anchored recovery must step in and produce a trade line (with quantity)."""
     P = _load_parser()
     import re
     header = [m.group(1) for m in re.finditer(
         r"[A-Z]{2}\w{9,10}\s+([A-Z][A-Z .]+?(?:LTD|LIMITED)\.?)", SQUARE_OFF_TEXT)]
     assert header == []
+    # The structured (order-number/time) trade-line regex still matches nothing;
+    # the recovered line comes from the anchored fallback, not that regex.
+    structured = list(re.finditer(
+        r"(\d{16})\s+(\d{2}:\d{2}:\d{2})\s+(\d+)\s+(\d{2}:\d{2}:\d{2})", SQUARE_OFF_TEXT))
+    assert structured == []
     _rec, lines = P.parse_trade(SQUARE_OFF_TEXT, "x.pdf")
-    assert lines == []  # order-number/time collision -> no clean trade line
+    assert len(lines) == 1  # recovered by the anchored fallback
+
+
+def test_square_off_note_recovers_quantity():
+    """The regression this fix targets: the share quantity (and side) must be
+    recovered on a square-off note so Part III can book a FIFO sale. Before the
+    fix the trade line was missing entirely and the bill quantity was blank."""
+    P = _load_parser()
+    _rec, lines = P.parse_trade(SQUARE_OFF_TEXT, "CN_A027_Grp1_15963.PDF")
+    assert len(lines) == 1
+    leg = lines[0]
+    assert leg["security"] == "RAMCO CEMENTS LIMITED"
+    assert leg["bs"] == "SELL"
+    assert leg["quantity"] == 250.0
+    assert leg["rate"] == 993.0
+
+
+def test_anchored_trade_lines_excludes_broker_and_reads_side():
+    """The anchored leg recovery reads side/qty/rate and skips the broker's own
+    letterhead name (KRCHOKSEY ... PRIVATE LIMITED)."""
+    P = _load_parser()
+    legs = P.anchored_trade_lines(SQUARE_OFF_TEXT)
+    assert [leg["security"] for leg in legs] == ["RAMCO CEMENTS LIMITED"]
+    assert legs[0]["bs"] == "SELL"
+    assert legs[0]["quantity"] == 250.0
 
 
 def test_anchored_securities_excludes_broker():

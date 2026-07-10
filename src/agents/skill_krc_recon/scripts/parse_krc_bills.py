@@ -62,18 +62,50 @@ def last_num_on_line(line):
 _BROKER_NAME_TOKENS = ("KRCHOKSEY", "PRIVATE LIMITED")
 
 
+_ANCHOR_RE = re.compile(r"([A-Z][A-Z&. ]*?(?:LTD|LIMITED))\s+([BS])\s+(\d+)\s+([\d.]+)")
+
+
+def anchored_trade_lines(t):
+    """Recover trade legs — security, side, quantity, rate — from each trade
+    line's economic shape: the company name printed immediately before the
+    Buy/Sell flag, quantity and rate (e.g. '... RAMCO CEMENTS LIMITED S 250
+    993.0000'). This survives the text-extraction garbling seen on forced
+    square-off notes, whose rotated 'Remark' column collides the 16-digit order
+    number with the trade time and wraps the ISIN-anchored name across lines — so
+    both the equity-header parse and the order-number trade-line parse miss it.
+    Excludes the broker's own letterhead name (which never precedes a Buy/Sell +
+    qty + rate)."""
+    legs = []
+    for m in _ANCHOR_RE.finditer(t):
+        name = m.group(1).strip()
+        if any(tok in name for tok in _BROKER_NAME_TOKENS):
+            continue
+        legs.append({
+            "security": name,
+            "bs": "BUY" if m.group(2) == "B" else "SELL",
+            "quantity": num(m.group(3)),
+            "rate": num(m.group(4)),
+        })
+    return legs
+
+
 def anchored_securities(t):
-    """Recover equity security name(s) from the trade-line's economic shape:
-    the company name printed immediately before the Buy/Sell flag, quantity and
-    rate (e.g. '... RAMCO CEMENTS LIMITED S 250 993.0000'). This survives the
-    text-extraction garbling seen on forced square-off notes, whose rotated
-    'Remark' column collides the 16-digit order number with the trade time and
-    wraps the ISIN-anchored name across lines — so both the equity-header parse
-    and the order-number trade-line parse miss it. Excludes the broker's own
-    letterhead name (which never precedes a Buy/Sell + qty + rate)."""
-    names = sorted({m.group(1).strip() for m in re.finditer(
-        r"([A-Z][A-Z&. ]*?(?:LTD|LIMITED))\s+[BS]\s+\d+\s+[\d.]+", t)})
-    return [n for n in names if not any(tok in n for tok in _BROKER_NAME_TOKENS)]
+    """Distinct traded-security names recovered from the trade lines' economic
+    shape (see anchored_trade_lines). Kept as the security-name fallback."""
+    return sorted({leg["security"] for leg in anchored_trade_lines(t)})
+
+
+def _anchored_line(cn_no, leg):
+    """Build a standard trade-line dict from a recovered anchored leg. Used when
+    the structured trade-line regex found nothing (square-off / garbled notes),
+    so the bill still carries a share quantity for Part III's FIFO booking."""
+    return {
+        "cn_no": cn_no, "type": "TRADE", "security": leg["security"],
+        "series": None, "reversal_date": None,
+        "quantity": leg["quantity"], "rate": leg["rate"],
+        "net_rate": None, "proc_charge": None,
+        "net_amount": None, "bs": leg["bs"],
+    }
 
 
 def decrypt(pdf, pw, out):
@@ -180,6 +212,12 @@ def parse_trade(t, fname):
             "net_rate": num(m.group(9)), "proc_charge": None,
             "net_amount": num(m.group(10)), "bs": "BUY" if m.group(6) == "B" else "SELL",
         })
+    # Square-off / garbled notes: the structured trade-line regex above finds
+    # nothing (the order number collides with the trade time). Recover the legs
+    # from their economic shape so the bill still carries a share quantity —
+    # Part III (GnuCash Import) needs it to book a FIFO sale.
+    if not lines:
+        lines = [_anchored_line(rec["cn_no"], leg) for leg in anchored_trade_lines(t)]
     # Bill-level security: prefer the trade-annexure line items (robust) when the
     # equity-segment header parse missed the name (it wraps across PDF lines).
     if (not rec["security"]) and lines:
@@ -241,6 +279,10 @@ def parse_trade_old(t, fname):
             "net_amount": num(m.group(12)),  # signed Net Total
             "bs": "BUY" if m.group(6) == "BUY" else "SELL",
         })
+    # Square-off / garbled notes: recover legs (with quantity) from their
+    # economic shape when the structured trade-line regex found nothing.
+    if not lines:
+        lines = [_anchored_line(rec["cn_no"], leg) for leg in anchored_trade_lines(t)]
     if (not rec["security"]) and lines:
         secs = sorted({ln["security"] for ln in lines if ln["security"]})
         rec["security"] = ", ".join(secs) if secs else None
