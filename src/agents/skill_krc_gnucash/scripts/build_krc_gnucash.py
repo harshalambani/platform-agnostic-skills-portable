@@ -309,9 +309,14 @@ def build_entries(bills, cfg, paths, holdings):
         else:
             # Sale — FIFO cost basis + LTCG/STCG split
             q = abs(Fraction(str(qty))) if qty else Fraction(0)
+            if q == 0:
+                review.append((b, f"sale quantity could not be read from the contract "
+                                  f"note for {b['security']} (CN {b['cn_no']}) — cannot "
+                                  f"book a FIFO sale; re-run Reconcile or fix the "
+                                  f"Quantity in the Bills workbook")); continue
             lots = holdings.get(sec_path, [])
             avail = sum(l[1] for l in lots)
-            if q == 0 or avail < q:
+            if avail < q:
                 review.append((b, f"insufficient FIFO lots for sale of {b['security']} "
                                   f"(need {float(q)}, have {float(avail)})")); continue
             sale_dt = parse_date(dt)
