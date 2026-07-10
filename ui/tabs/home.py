@@ -64,7 +64,8 @@ def _build_skills_markdown(skills: list[SkillInfo]) -> str:
     for s in skills:
         desc = s.description.strip().split("\n")[0]  # first line only
         mode_badge = f"`{s.mode}`"
-        lines.append(f"- **{s.name}** — {desc} {mode_badge}")
+        llm_badge = "🧠 AI-powered" if s.requires.llm else "⚙️ Deterministic"
+        lines.append(f"- **{s.name}** — {desc} {mode_badge} `{llm_badge}`")
     return "\n".join(lines)
 
 

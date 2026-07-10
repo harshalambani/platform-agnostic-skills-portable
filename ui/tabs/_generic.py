@@ -550,7 +550,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     """
     # Banner: description + native binary status.
     desc = skill.description.strip()
-    banner_parts = [f"## {skill.display_name}\n\n{desc}"]
+    llm_badge = "🧠 AI-powered" if skill.requires.llm else "⚙️ Deterministic"
+    banner_parts = [f"## {skill.display_name}  `{llm_badge}`\n\n{desc}"]
     if skill.requires.native_binaries:
         native_err = _check_native_binaries(skill)
         if native_err is None:
