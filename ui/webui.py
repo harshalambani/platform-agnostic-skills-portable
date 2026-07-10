@@ -773,10 +773,55 @@ def _maybe_dispatch_script(argv: list[str]) -> int | None:
         return 0
     except SystemExit as e:
         return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
+    except BaseException:  # noqa: BLE001
+        # A bundled script raised an unhandled exception. In a windowed
+        # (console=False) PyInstaller build, letting it propagate pops a modal
+        # "Unhandled exception in script" dialog and BLOCKS this child until the
+        # user dismisses it — which hangs the parent's subprocess.run(), leaving
+        # the UI stuck on "Running…". Convert it to a clean non-zero exit with
+        # the traceback on stderr so the caller (_run_script) surfaces
+        # "ERROR: <traceback>" and the UI can report the failure immediately.
+        import traceback
+        traceback.print_exc()
+        return 1
+
+
+def _suppress_console_windows() -> None:
+    """Stop child processes from flashing a console window (Windows only).
+
+    In a windowed (console=False) frozen build the app has no console, so every
+    console-subsystem child — the deterministic scripts' external tools (qpdf,
+    pdftotext, tesseract) and each `sys.executable <script>` re-exec — briefly
+    pops a black console window. subprocess.run / check_output all construct a
+    subprocess.Popen, so adding CREATE_NO_WINDOW in Popen.__init__ (unless the
+    caller set creationflags) suppresses the flash everywhere at one wiring
+    point. Both the UI process and each re-exec'd child run through main(), so
+    the child's own grandchildren are covered too. No-op off Windows and
+    idempotent (guarded so repeated calls don't stack the wrapper)."""
+    if sys.platform != "win32":
+        return
+    import subprocess
+    flag = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    if not flag or getattr(subprocess.Popen, "_pa_no_window", False):
+        return
+    _orig_init = subprocess.Popen.__init__
+
+    def _init(self, *args, **kwargs):
+        if not kwargs.get("creationflags"):
+            kwargs["creationflags"] = flag
+        _orig_init(self, *args, **kwargs)
+
+    subprocess.Popen.__init__ = _init
+    subprocess.Popen._pa_no_window = True
 
 
 def main(argv: list[str] | None = None) -> int:
     raw_argv = list(argv) if argv is not None else sys.argv[1:]
+
+    # Suppress console-window flashes from every child process (see the
+    # function docstring). Done first so it also covers the frozen script
+    # dispatcher's grandchildren below.
+    _suppress_console_windows()
 
     # Frozen-mode script-runner shim — see _maybe_dispatch_script().
     rc = _maybe_dispatch_script(raw_argv)

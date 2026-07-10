@@ -612,7 +612,15 @@ def main(argv: list[str]) -> int:
     if len(argv) == 5:
         import json
         raw = json.loads(Path(argv[4]).read_text(encoding="utf-8"))
-        overrides = {int(k): v for k, v in raw.items()}
+        # Keys are deductor Sr numbers. Be tolerant of keys that carry extra
+        # text (a tool-calling model may echo the display label "Sr 7" rather
+        # than "7"): pull the digits out and skip any key with no number so a
+        # stray label never crashes the build with int("Sr 7").
+        overrides = {}
+        for k, v in raw.items():
+            m = re.search(r"\d+", str(k))
+            if m:
+                overrides[int(m.group(0))] = v
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
           f"deductors {stats['deductors']}  balanced_all {stats['balanced_all']}")

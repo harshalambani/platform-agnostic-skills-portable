@@ -387,6 +387,20 @@ def test_normalize_overrides_parses_json_string():
     assert tl._normalize_overrides('{"2": "Income:X"}') == {"2": "Income:X"}
 
 
+def test_normalize_overrides_extracts_number_from_label_keys():
+    # A tool-calling model often echoes the display label ("Sr 7") instead of
+    # the bare number. Normalize to the digits so the subprocess int() succeeds.
+    assert tl._normalize_overrides({"Sr 7": "Income:X"}) == {"7": "Income:X"}
+    assert tl._normalize_overrides({"sr7": "Income:X", " 2 ": "Income:Y"}) == {
+        "7": "Income:X", "2": "Income:Y"}
+
+
+def test_normalize_overrides_drops_keys_without_a_number():
+    # No number in the key -> can't resolve to a deductor Sr, so drop it rather
+    # than pass a key that would crash int() in the builder subprocess.
+    assert tl._normalize_overrides({"total": "Income:X"}) == {}
+
+
 def test_normalize_overrides_bad_string_returns_error():
     out = tl._normalize_overrides("not an object")
     assert isinstance(out, str) and out.startswith("ERROR")

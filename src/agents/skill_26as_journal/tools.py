@@ -11,6 +11,7 @@ import ast
 import csv
 import gzip
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -84,7 +85,18 @@ def _normalize_overrides(overrides) -> "dict | str":
                         '{"2": "Income:Interest Income:Interest on HDFC - FD"}.')
     if not isinstance(overrides, dict):
         return 'ERROR: overrides must be an object {sr: account_path}.'
-    return {str(k): v for k, v in overrides.items() if v}
+    # Keys are deductor Sr numbers. Tool-calling models frequently echo the
+    # display label ("Sr 7") or pass an int; normalize each key to the bare
+    # number so the builder can int() it, and drop any key with no number
+    # (rather than let it crash the subprocess with int("Sr 7")).
+    out: dict[str, str] = {}
+    for k, v in overrides.items():
+        if not v:
+            continue
+        m = re.search(r"\d+", str(k))
+        if m:
+            out[m.group(0)] = v
+    return out
 
 
 def run_build(xlsx_path: str, gnucash_path: str, output_path: str) -> str:
