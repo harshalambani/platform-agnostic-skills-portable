@@ -681,7 +681,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     )
                 input_components.append(comp)
 
-            # Model dropdown (always present).
+            # Model dropdown — only meaningful for LLM-powered skills; deterministic
+            # skills ignore model_override entirely, so hide it there.
             # Choices are (display_label, raw_name) tuples with capability badges.
             initial_choices = _refresh_models(use_cache=True)
             model_dd = gr.Dropdown(
@@ -690,8 +691,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 value=_default_model_value(initial_choices),
                 allow_custom_value=True,
                 interactive=True,
+                visible=skill.requires.llm,
             )
-            refresh_models_btn = gr.Button("Refresh model list", variant="secondary")
+            refresh_models_btn = gr.Button(
+                "Refresh model list", variant="secondary", visible=skill.requires.llm,
+            )
             with gr.Row():
                 run_btn = gr.Button("Run", variant="primary")
                 stop_btn = gr.Button("Stop", variant="stop", visible=True)
