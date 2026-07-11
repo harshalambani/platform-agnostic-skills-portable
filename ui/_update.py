@@ -59,8 +59,34 @@ class UpdateInfo:
     latest_tag: str = ""           # e.g. "v0.5.0"
     current_tag: str = ""          # e.g. "0.4.1"
     download_url: str = ""         # URL to the release page
+    asset_url: str = ""            # direct URL to the Windows portable asset, if found
     error: str = ""                # non-empty if the check failed
     checked: bool = False          # True once the check has completed
+
+
+def _pick_windows_asset(assets: list[dict]) -> str:
+    """Return the browser_download_url of the Windows portable asset, or ''.
+
+    Matches an .exe/.zip asset case-insensitively; prefers one whose name
+    also mentions 'win' or 'portable' when there's more than one candidate.
+    Returns '' if nothing matches, or if the picked URL doesn't point at
+    github.com (finding #12).
+    """
+    zips_and_exes = [
+        a for a in assets
+        if isinstance(a, dict) and a.get("name", "").lower().endswith((".exe", ".zip"))
+    ]
+    named = [
+        a for a in zips_and_exes
+        if re.search(r"win|portable", a.get("name", ""), re.IGNORECASE)
+    ]
+    pool = named or zips_and_exes
+    if not pool:
+        return ""
+    url = pool[0].get("browser_download_url", "")
+    if not url.startswith("https://github.com/"):
+        return ""
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +98,13 @@ _lock = threading.Lock()
 _started = False
 
 
-def _do_check() -> None:
-    """Run the GitHub API check (called in a background thread)."""
-    global _result
+def _fetch() -> UpdateInfo:
+    """Hit the GitHub API and build a fresh UpdateInfo. No shared state touched.
+
+    SECURITY NOTE (finding #9): all exceptions (including TLS/network failures)
+    are caught and returned as UpdateInfo.error — this must never raise, since
+    callers include a daemon background thread that must never crash the app.
+    """
     try:
         req = request.Request(
             _API_URL,
@@ -97,29 +127,49 @@ def _do_check() -> None:
         if html_url and not html_url.startswith("https://github.com/"):
             html_url = f"https://github.com/{_REPO}/releases"
 
+        asset_url = _pick_windows_asset(data.get("assets", []) or [])
+
         current = _parse_version(_buildinfo.VERSION)
         latest = _parse_version(latest_tag)
 
-        with _lock:
-            _result = UpdateInfo(
-                available=latest > current,
-                latest_tag=latest_tag,
-                current_tag=_buildinfo.VERSION,
-                download_url=html_url,
-                checked=True,
-            )
+        return UpdateInfo(
+            available=latest > current,
+            latest_tag=latest_tag,
+            current_tag=_buildinfo.VERSION,
+            download_url=html_url,
+            asset_url=asset_url,
+            checked=True,
+        )
 
     except Exception as e:  # noqa: BLE001 — intentional broad catch (finding #9)
-        # SECURITY NOTE (finding #9): all exceptions (including TLS/network failures)
-        # are stored in UpdateInfo.error, which is available via get_result().
-        # The update check runs in a daemon thread and must never crash the app;
-        # errors are surfaced to the caller, not silently dropped.
-        with _lock:
-            _result = UpdateInfo(
-                error=f"{type(e).__name__}: {e}",
-                current_tag=_buildinfo.VERSION,
-                checked=True,
-            )
+        return UpdateInfo(
+            error=f"{type(e).__name__}: {e}",
+            current_tag=_buildinfo.VERSION,
+            checked=True,
+        )
+
+
+def _do_check() -> None:
+    """Run the GitHub API check and cache the result (called in a background thread)."""
+    global _result
+    info = _fetch()
+    with _lock:
+        _result = info
+
+
+def check_now() -> UpdateInfo:
+    """Run a fresh, synchronous check (respects the same timeout), update the
+    cached singleton, and return the fresh result.
+
+    Unlike start_check(), this is not idempotent — call it from a "Check for
+    updates" button so the user gets a live result instead of whatever was
+    cached at process startup.
+    """
+    global _result
+    info = _fetch()
+    with _lock:
+        _result = info
+    return info
 
 
 def start_check() -> None:

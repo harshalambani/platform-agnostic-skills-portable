@@ -11,7 +11,7 @@ Tests verify:
   - Files within both limits stage successfully.
 
 Because _make_run_handler returns a generator, these tests call the handler
-directly and collect the yielded (markdown, download_update) pairs.
+directly and collect the yielded (markdown, download_update, path_update) tuples.
 """
 from __future__ import annotations
 
@@ -131,12 +131,12 @@ def test_count_cap_rejects_too_many_files(tmp_path):
 
     # The first non-"Validating" yield should be the count error.
     error_yields = [
-        (md, dl) for md, dl in results
+        (md, dl) for md, dl, *_ in results
         if "too many files" in md.lower() or "maximum is" in md.lower()
     ]
     assert error_yields, (
         f"Expected an 'too many files' error for {_MAX_FILE_COUNT + 1} files, "
-        f"got yields: {[md[:120] for md, _ in results]}"
+        f"got yields: {[md[:120] for md, *_ in results]}"
     )
 
 
@@ -153,7 +153,7 @@ def test_count_cap_accepts_max_files(tmp_path):
     results = _run_handler_to_list(skill, files, "model-x")
 
     error_yields = [
-        (md, dl) for md, dl in results
+        (md, dl) for md, dl, *_ in results
         if "too many files" in md.lower()
     ]
     assert not error_yields, (
@@ -194,12 +194,12 @@ def test_size_cap_rejects_oversized_file(tmp_path):
         results = _run_handler_to_list(skill, [_fake_file(big_file)], "model-x")
 
     error_yields = [
-        (md, dl) for md, dl in results
+        (md, dl) for md, dl, *_ in results
         if "too large" in md.lower() or "maximum is" in md.lower()
     ]
     assert error_yields, (
         f"Expected a 'too large' error for a {oversized}-byte file, "
-        f"got: {[md[:120] for md, _ in results]}"
+        f"got: {[md[:120] for md, *_ in results]}"
     )
 
 
@@ -213,11 +213,11 @@ def test_size_cap_accepts_normal_file(tmp_path):
     results = _run_handler_to_list(skill, [_fake_file(normal)], "model-x")
 
     error_yields = [
-        (md, dl) for md, dl in results
+        (md, dl) for md, dl, *_ in results
         if "too large" in md.lower()
     ]
     assert not error_yields, (
-        f"Unexpected size-error for a tiny file: {[md[:120] for md, _ in results]}"
+        f"Unexpected size-error for a tiny file: {[md[:120] for md, *_ in results]}"
     )
 
 
@@ -250,7 +250,7 @@ def test_count_checked_before_size(tmp_path):
     with patch.object(Path, "stat", always_oversized):
         results = _run_handler_to_list(skill, files, "model-x")
 
-    markdowns = [md for md, _ in results]
+    markdowns = [md for md, *_ in results]
     # Count error should appear; "too large" should NOT (count fires first and returns)
     assert any("too many files" in md.lower() for md in markdowns), markdowns
     assert not any("too large" in md.lower() for md in markdowns), markdowns

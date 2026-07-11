@@ -155,6 +155,15 @@ code, .prose code, .markdown code, .gradio-container code {
     color: #EF4444 !important;
     font-weight: 600;
 }
+
+/* ── Selectable result text ────────────────────────────────────────────────
+   WebView2 (native window) suppresses the right-click context menu, so
+   drag-select is the only way to copy result/log text there. Nothing here
+   sets user-select: none, but be explicit so it can't regress. */
+.gradio-container .prose,
+.gradio-container .markdown {
+    user-select: text !important;
+}
 """
 
 # Append the in-app help tooltip/output styling (single source: ui/_help.py).

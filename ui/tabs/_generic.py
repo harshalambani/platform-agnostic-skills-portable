@@ -244,7 +244,8 @@ def _make_run_handler(skill: SkillInfo):
             return _colorize_status("\n\n".join(log))
 
         # -- Step 1: validate inputs --
-        yield add("**Validating inputs…**"), gr.update(interactive=False, value=None)
+        # Clear any saved-path text left over from a prior run on this tab.
+        yield add("**Validating inputs…**"), gr.update(interactive=False, value=None), gr.update(value="")
 
         # Map positional args back to skill input names.
         input_map: dict[str, str] = {}
@@ -252,11 +253,11 @@ def _make_run_handler(skill: SkillInfo):
             val = input_values[i] if i < len(input_values) else None
             if inp_def.type in ("file", "output_file"):
                 if val is None or (isinstance(val, str) and not val.strip()):
-                    yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None)
+                    yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                     return
                 fpath = Path(val.name if hasattr(val, "name") else val)
                 if not fpath.is_file():
-                    yield add(f"Warning: file not found at {fpath}"), gr.update(interactive=False, value=None)
+                    yield add(f"Warning: file not found at {fpath}"), gr.update(interactive=False, value=None), gr.update()
                     return
                 input_map[inp_def.name] = str(fpath)
             elif inp_def.type == "files":
@@ -265,7 +266,7 @@ def _make_run_handler(skill: SkillInfo):
                 # a single directory path containing all uploaded files.
                 if val is None or (isinstance(val, list) and len(val) == 0):
                     if inp_def.required:
-                        yield add(f"Warning: please upload at least one file for: {inp_def.label}"), gr.update(interactive=False, value=None)
+                        yield add(f"Warning: please upload at least one file for: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                         return
                     input_map[inp_def.name] = ""
                 else:
@@ -276,7 +277,7 @@ def _make_run_handler(skill: SkillInfo):
                         yield add(
                             f"Error: too many files — received {len(file_list)}, "
                             f"maximum is {_MAX_FILE_COUNT} per run."
-                        ), gr.update(interactive=False, value=None)
+                        ), gr.update(interactive=False, value=None), gr.update()
                         return
 
                     stage_dir = Path(tempfile.mkdtemp(
@@ -297,20 +298,20 @@ def _make_run_handler(skill: SkillInfo):
                                 f"Error: file **{src.name}** is too large "
                                 f"({file_size // (1024 * 1024)} MB) — "
                                 f"maximum is {_MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)} MB per file."
-                            ), gr.update(interactive=False, value=None)
+                            ), gr.update(interactive=False, value=None), gr.update()
                             return
 
                         shutil.copy2(src, stage_dir / src.name)
                     staged_count = len(list(stage_dir.iterdir()))
                     if staged_count == 0:
-                        yield add(f"Warning: no valid files found for: {inp_def.label}"), gr.update(interactive=False, value=None)
+                        yield add(f"Warning: no valid files found for: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                         return
-                    yield add(f"Staged **{staged_count}** file(s) into temp directory."), gr.update(interactive=False, value=None)
+                    yield add(f"Staged **{staged_count}** file(s) into temp directory."), gr.update(interactive=False, value=None), gr.update()
                     input_map[inp_def.name] = str(stage_dir)
             elif inp_def.type == "directory":
                 if val is None or str(val).strip() == "":
                     if inp_def.required:
-                        yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None)
+                        yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                         return
                     input_map[inp_def.name] = ""
                 else:
@@ -323,12 +324,12 @@ def _make_run_handler(skill: SkillInfo):
         # -- Step 2: check dependencies --
         native_err = _check_native_binaries(skill)
         if native_err:
-            yield add(native_err), gr.update(interactive=False, value=None)
+            yield add(native_err), gr.update(interactive=False, value=None), gr.update()
             return
 
         tool_err = _check_external_tools(skill)
         if tool_err:
-            yield add(tool_err), gr.update(interactive=False, value=None)
+            yield add(tool_err), gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Step 3: resolve endpoint config (always; needed later for
@@ -340,25 +341,25 @@ def _make_run_handler(skill: SkillInfo):
         ep = endpoints.get(active) or {}
 
         if skill.requires.llm:
-            yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None)
+            yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None), gr.update()
 
             health = _health.check(ep)
             if not health.ok:
                 yield add(
                     f"Error: endpoint '{active}' is {health.status}: {health.detail}. "
                     "Fix in Data\\settings\\config.yaml and Refresh on the Home tab."
-                ), gr.update(interactive=False, value=None)
+                ), gr.update(interactive=False, value=None), gr.update()
                 return
 
             yield add(
                 f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
                 "First call may take 30–60s while the model loads."
-            ), gr.update(interactive=False, value=None)
+            ), gr.update(interactive=False, value=None), gr.update()
         else:
             # Deterministic skill — no LLM endpoint required; run fully offline.
             yield add(
                 "**Running** — deterministic skill (no LLM required)."
-            ), gr.update(interactive=False, value=None)
+            ), gr.update(interactive=False, value=None), gr.update()
 
         # -- Build output path --
         out_dir = _config.output_dir()
@@ -386,7 +387,7 @@ def _make_run_handler(skill: SkillInfo):
         try:
             legacy_cfg = _config.materialize_legacy_config(active)
         except Exception as e:
-            yield add(f"Error: config error: {e}"), gr.update(interactive=False, value=None)
+            yield add(f"Error: config error: {e}"), gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Import the run function --
@@ -394,7 +395,7 @@ def _make_run_handler(skill: SkillInfo):
             from agents.registry import load_run_function
             run_fn = load_run_function(skill)
         except Exception as e:
-            yield add(f"Error: failed to import {skill.entry_point} — {e}"), gr.update(interactive=False, value=None)
+            yield add(f"Error: failed to import {skill.entry_point} — {e}"), gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Build kwargs from skill.run_args template --
@@ -423,7 +424,7 @@ def _make_run_handler(skill: SkillInfo):
             if skill.mode == "agent":
                 # Agent-mode: use streaming runner for live progress.
                 def make_tuple(md: str):
-                    return (md, gr.update(interactive=False, value=None))
+                    return (md, gr.update(interactive=False, value=None), gr.update())
 
                 agent_reply = yield from _runner.run_with_streaming(
                     work, log, make_tuple,
@@ -433,7 +434,7 @@ def _make_run_handler(skill: SkillInfo):
                 def tick_factory(elapsed: int):
                     return (
                         tick(f"**Running** — still working ({elapsed}s elapsed)"),
-                        gr.update(interactive=False, value=None),
+                        gr.update(interactive=False, value=None), gr.update(),
                     )
 
                 agent_reply = yield from _runner.run_with_progress(work, tick_factory)
@@ -442,16 +443,16 @@ def _make_run_handler(skill: SkillInfo):
             yield add(
                 f"Error: run failed: {e}\n\n"
                 f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
-            ), gr.update(interactive=False, value=None)
+            ), gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Handle cancellation --
         if agent_reply == "__CANCELLED__":
-            yield add("**Cancelled** — run was stopped by user."), gr.update(interactive=False, value=None)
+            yield add("**Cancelled** — run was stopped by user."), gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Verify output --
-        yield add("**Verifying output…**"), gr.update(interactive=False, value=None)
+        yield add("**Verifying output…**"), gr.update(interactive=False, value=None), gr.update()
 
         if skill.output.type == "directory":
             if not out_path.is_dir() or not any(out_path.iterdir()):
@@ -460,7 +461,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"was produced at {out_path}. Check the details below, fix "
                     f"the input, and run again.\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
-                ), gr.update(interactive=False, value=None)
+                ), gr.update(interactive=False, value=None), gr.update()
                 return
             out_abs = str(out_path.resolve())
 
@@ -483,7 +484,7 @@ def _make_run_handler(skill: SkillInfo):
                 f"{review_section}"
                 f"---\n\n**Agent reply:**\n\n{agent_reply}"
             )
-            yield msg, gr.update(interactive=False, value=None)
+            yield msg, gr.update(interactive=False, value=None), gr.update(value=out_abs)
         else:
             if not out_path.is_file():
                 yield add(
@@ -491,7 +492,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"file was produced, so there is nothing to download. "
                     f"Check the details below, fix the input, and run again.\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
-                ), gr.update(interactive=False, value=None)
+                ), gr.update(interactive=False, value=None), gr.update()
                 return
 
             # --- Path containment + download staging (security: finding #5) ---
@@ -509,7 +510,7 @@ def _make_run_handler(skill: SkillInfo):
                         f"Security error: output path {resolved} is outside "
                         f"the expected output directory ({expected_root}). "
                         "Download aborted."
-                    ), gr.update(interactive=False, value=None)
+                    ), gr.update(interactive=False, value=None), gr.update()
                     return
                 staging = _config.download_staging_dir()
                 served_path = staging / out_path.name
@@ -518,7 +519,7 @@ def _make_run_handler(skill: SkillInfo):
             except Exception as e:
                 yield add(
                     f"Error: could not stage download file: {e}"
-                ), gr.update(interactive=False, value=None)
+                ), gr.update(interactive=False, value=None), gr.update()
                 return
             # --- end security block ---
 
@@ -529,7 +530,7 @@ def _make_run_handler(skill: SkillInfo):
                 f"Click **{skill.output.download_label}** below.\n\n"
                 f"---\n\n**Agent reply:**\n\n{agent_reply}"
             )
-            yield msg, gr.update(value=out_abs, interactive=True)
+            yield msg, gr.update(value=out_abs, interactive=True), gr.update(value=str(out_path.resolve()))
 
     return _run
 
@@ -681,7 +682,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     )
                 input_components.append(comp)
 
-            # Model dropdown (always present).
+            # Model dropdown — only meaningful for LLM-powered skills; deterministic
+            # skills ignore model_override entirely, so hide it there.
             # Choices are (display_label, raw_name) tuples with capability badges.
             initial_choices = _refresh_models(use_cache=True)
             model_dd = gr.Dropdown(
@@ -690,8 +692,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 value=_default_model_value(initial_choices),
                 allow_custom_value=True,
                 interactive=True,
+                visible=skill.requires.llm,
             )
-            refresh_models_btn = gr.Button("Refresh model list", variant="secondary")
+            refresh_models_btn = gr.Button(
+                "Refresh model list", variant="secondary", visible=skill.requires.llm,
+            )
             with gr.Row():
                 run_btn = gr.Button("Run", variant="primary")
                 stop_btn = gr.Button("Stop", variant="stop", visible=True)
@@ -711,6 +716,16 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 visible=True,
                 interactive=False,
                 variant="primary",
+            )
+            # WebView2 suppresses the native right-click Copy menu, so the
+            # saved path is otherwise uncopyable in the native window.
+            # Gradio's built-in copy button (show_copy_button) works there.
+            # Created empty and always mounted, same rationale as `download`.
+            path_tb = gr.Textbox(
+                label="Saved file path",
+                value="",
+                interactive=False,
+                buttons=["copy"],
             )
             # Every result tab gets a button to open the output location in
             # the file manager (directory skills -> their result folder;
@@ -816,20 +831,21 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         updates = [
             gr.update(value="_Awaiting input._"),   # result_md
             gr.update(interactive=False, value=None),   # download
+            gr.update(value=""),   # path_tb
         ]
         updates.extend(fn() for _c, fn in reset_specs)
         return tuple(updates)
 
     reset_btn.click(
         fn=_handle_reset,
-        outputs=[result_md, download] + [_c for _c, _fn in reset_specs],
+        outputs=[result_md, download, path_tb] + [_c for _c, _fn in reset_specs],
     )
 
     handler = _make_run_handler(skill)
     run_btn.click(
         fn=handler,
         inputs=input_components + [model_dd],
-        outputs=[result_md, download],
+        outputs=[result_md, download, path_tb],
     )
 
     open_folder_btn.click(
