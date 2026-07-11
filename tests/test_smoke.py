@@ -100,7 +100,10 @@ def test_registry_discovers_all_skills():
     assert "MSG Parser" in names
     # v1.1 dev-time skill (exposed as a top-level tab)
     assert "Parser Generator" in names
-    assert len(skills) == 17
+    # GnuCash intercompany reconciliation skills
+    assert "gnucash_intercompany" in names
+    assert "gnucash_intercompany_matrix" in names
+    assert len(skills) == 19
 
 
 def test_registry_get_by_name():
