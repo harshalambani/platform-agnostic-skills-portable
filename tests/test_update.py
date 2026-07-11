@@ -27,7 +27,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from ui._update import _parse_version, UpdateInfo, format_banner, _result
+from ui import _update
+from ui._update import _parse_version, _pick_windows_asset, UpdateInfo, format_banner, check_now, _result
 
 
 # ---------------------------------------------------------------------------
@@ -100,3 +101,132 @@ class TestFormatBanner:
             checked=True,
         )):
             assert format_banner() == ""
+
+
+# ---------------------------------------------------------------------------
+# _pick_windows_asset()
+# ---------------------------------------------------------------------------
+
+class TestPickWindowsAsset:
+    def test_matches_win_named_exe(self):
+        assets = [
+            {"name": "PASkillsPortable_0.5.0_win.exe",
+             "browser_download_url": "https://github.com/x/y/releases/download/v0.5.0/win.exe"},
+            {"name": "source.tar.gz",
+             "browser_download_url": "https://github.com/x/y/archive/v0.5.0.tar.gz"},
+        ]
+        assert _pick_windows_asset(assets) == (
+            "https://github.com/x/y/releases/download/v0.5.0/win.exe"
+        )
+
+    def test_matches_portable_named_zip(self):
+        assets = [
+            {"name": "PASkillsPortable_0.5.0.zip",
+             "browser_download_url": "https://github.com/x/y/releases/download/v0.5.0/portable.zip"},
+        ]
+        assert _pick_windows_asset(assets) != ""
+
+    def test_no_match_returns_empty(self):
+        assets = [
+            {"name": "source.tar.gz",
+             "browser_download_url": "https://github.com/x/y/archive/v0.5.0.tar.gz"},
+            {"name": "checksums.txt",
+             "browser_download_url": "https://github.com/x/y/releases/download/v0.5.0/checksums.txt"},
+        ]
+        assert _pick_windows_asset(assets) == ""
+
+    def test_empty_assets(self):
+        assert _pick_windows_asset([]) == ""
+
+    def test_tampered_url_rejected(self):
+        assets = [
+            {"name": "app_win.exe",
+             "browser_download_url": "https://evil.example.com/app_win.exe"},
+        ]
+        assert _pick_windows_asset(assets) == ""
+
+
+# ---------------------------------------------------------------------------
+# check_now()
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload: bytes):
+        self._payload = payload
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _fake_release_json(*, tag_name="v0.5.0", assets=None, html_url=None):
+    import json as _json
+    return _json.dumps({
+        "tag_name": tag_name,
+        "html_url": html_url if html_url is not None else f"https://github.com/x/y/releases/tag/{tag_name}",
+        "assets": assets or [],
+    }).encode("utf-8")
+
+
+class TestCheckNow:
+    def setup_method(self):
+        # Reset the cached singleton so tests don't leak state into each other.
+        _update._result = UpdateInfo()
+
+    def test_newer_version_available(self):
+        payload = _fake_release_json(
+            tag_name="v99.0.0",
+            assets=[{
+                "name": "app_win.exe",
+                "browser_download_url": "https://github.com/x/y/releases/download/v99.0.0/app_win.exe",
+            }],
+        )
+        with patch("ui._update.request.urlopen", return_value=_FakeResponse(payload)):
+            info = check_now()
+        assert info.checked
+        assert info.available
+        assert info.latest_tag == "v99.0.0"
+        assert info.asset_url == "https://github.com/x/y/releases/download/v99.0.0/app_win.exe"
+        # Cached singleton reflects the fresh result.
+        assert _update.get_result() == info
+
+    def test_same_version_not_available(self):
+        payload = _fake_release_json(tag_name=f"v{_update._buildinfo.VERSION.split('+')[0]}")
+        with patch("ui._update.request.urlopen", return_value=_FakeResponse(payload)):
+            info = check_now()
+        assert info.checked
+        assert not info.available
+
+    def test_no_matching_asset_leaves_asset_url_empty(self):
+        payload = _fake_release_json(tag_name="v99.0.0", assets=[
+            {"name": "source.tar.gz", "browser_download_url": "https://github.com/x/y/archive/v99.0.0.tar.gz"},
+        ])
+        with patch("ui._update.request.urlopen", return_value=_FakeResponse(payload)):
+            info = check_now()
+        assert info.asset_url == ""
+
+    def test_error_case_returns_safely(self):
+        with patch("ui._update.request.urlopen", side_effect=OSError("network down")):
+            info = check_now()
+        assert info.checked
+        assert info.error
+        assert not info.available
+
+    def test_tampered_html_url_falls_back(self):
+        payload = _fake_release_json(tag_name="v99.0.0", html_url="https://evil.example.com/fake")
+        with patch("ui._update.request.urlopen", return_value=_FakeResponse(payload)):
+            info = check_now()
+        assert info.download_url.startswith("https://github.com/")
+
+    def test_tampered_asset_url_falls_back_empty(self):
+        payload = _fake_release_json(tag_name="v99.0.0", assets=[
+            {"name": "app_win.exe", "browser_download_url": "https://evil.example.com/app_win.exe"},
+        ])
+        with patch("ui._update.request.urlopen", return_value=_FakeResponse(payload)):
+            info = check_now()
+        assert info.asset_url == ""

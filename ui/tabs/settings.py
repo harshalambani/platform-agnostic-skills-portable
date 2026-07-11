@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import gradio as gr
 
+from .. import _buildinfo
 from .. import _config
 from .. import _health
+from .. import _update
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +127,25 @@ def _switch_active(name: str) -> str:
     cfg["active_endpoint"] = name
     _config.write_portable_config(cfg)
     return f"Active endpoint switched to `{name}`."
+
+
+def _repo_url() -> str:
+    """The repo's github.com URL, derived from ui._update._REPO (single source)."""
+    return f"https://github.com/{_update._REPO}"
+
+
+def _check_for_updates() -> str:
+    """Run a fresh update check and render the result as Markdown."""
+    info = _update.check_now()
+    if info.error:
+        return "_Couldn't check for updates right now — you're offline or GitHub is unreachable._"
+    if not info.available:
+        return f"You're on the latest version ({info.current_tag})."
+    lines = [f"**Update available:** {info.latest_tag} (you have {info.current_tag})."]
+    if info.asset_url:
+        lines.append(f"[Download {info.latest_tag} for Windows →]({info.asset_url})")
+    lines.append(f"[View release notes / all downloads →]({info.download_url})")
+    return "\n\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -332,3 +353,23 @@ def render() -> None:
             ep_api_key, ep_temperature, ep_set_active,
         ],
     )
+
+    # -----------------------------------------------------------------------
+    # Section 3: About.
+    # -----------------------------------------------------------------------
+    from ..webui import APP_TITLE  # deferred: webui imports this module at load time
+
+    gr.Markdown("### About")
+
+    build_note = " (dirty build)" if _buildinfo.BUILD_DIRTY else ""
+    gr.Markdown(
+        f"**{APP_TITLE}** — LLM-powered document processing skills, packaged "
+        f"as a single portable folder.\n\n"
+        f"**Version:** {_buildinfo.VERSION}{build_note}\n\n"
+        f"_Commit {_buildinfo.COMMIT_SHA}, built {_buildinfo.BUILD_TIMESTAMP}_\n\n"
+        f"[Repository]({_repo_url()}) · [Releases]({_repo_url()}/releases)"
+    )
+
+    update_status = gr.Markdown("_Click Check for updates to see if a newer version is available._")
+    check_updates_btn = gr.Button("Check for updates", variant="secondary")
+    check_updates_btn.click(fn=_check_for_updates, outputs=[update_status])
