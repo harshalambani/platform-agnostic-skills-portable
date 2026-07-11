@@ -222,8 +222,8 @@ def _delete_and_refresh(filename: str) -> tuple[Any, ...]:
     return (
         _build_table_data(),
         _build_summary_markdown(),
-        "",                          # clear the filename input
-        gr.update(visible=False),    # hide download button
+        "",                                       # clear the filename input
+        gr.update(interactive=False, value=None), # disable download button
         "Deleted." if filename else "",
     )
 
@@ -264,9 +264,14 @@ def render() -> None:
             placeholder="e.g. 2026-06-03-143025-sales-analysis.md",
             scale=3,
         )
+        # Created visible=True/interactive=False rather than visible=False:
+        # Gradio 6's frontend does not reliably reveal a DownloadButton that
+        # starts hidden and is later toggled to visible=True. Toggling
+        # `interactive` instead keeps the component always mounted.
         download_btn = gr.DownloadButton(
             label="Download",
-            visible=False,
+            visible=True,
+            interactive=False,
             variant="primary",
             scale=1,
         )
@@ -287,8 +292,8 @@ def render() -> None:
     def _on_get(filename: str):
         path = _download_file(filename)
         if path:
-            return gr.update(value=path, visible=True), ""
-        return gr.update(visible=False), "File not found." if filename else ""
+            return gr.update(value=path, interactive=True), ""
+        return gr.update(interactive=False, value=None), "File not found." if filename else ""
 
     get_btn.click(
         fn=_on_get,
