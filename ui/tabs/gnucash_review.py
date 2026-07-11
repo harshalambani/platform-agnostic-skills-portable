@@ -815,7 +815,7 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
                 staging.mkdir(parents=True, exist_ok=True)
                 staged = staging / csv_p.name
                 shutil.copy2(csv_p, staged)
-                download_path = str(staged)
+                download_path = str(staged.resolve())
             except Exception:
                 download_path = str(csv_p)
         except Exception as e:
@@ -825,8 +825,8 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
 
     msg = f"✅ **Saved**\n\n{override_msg}\n\n{export_msg}"
     if download_path:
-        return msg, gr.update(value=download_path, visible=True)
-    return msg, gr.update(visible=False)
+        return msg, gr.update(value=download_path, interactive=True)
+    return msg, gr.update(interactive=False, value=None)
 
 
 # ---------------------------------------------------------------------------
@@ -880,8 +880,12 @@ def render(container_tab=None) -> None:
         save_btn = gr.Button("Save & Export", variant="primary")
         reset_btn = gr.Button("Reset", variant="secondary")
     save_result = gr.Markdown("")
+    # Created visible=True/interactive=False rather than visible=False:
+    # Gradio 6's frontend does not reliably reveal a DownloadButton that
+    # starts hidden and is later toggled to visible=True. Toggling
+    # `interactive` instead keeps the component always mounted.
     download_file = gr.DownloadButton(
-        label="Download corrected CSV", visible=False, variant="primary",
+        label="Download corrected CSV", visible=True, interactive=False, variant="primary",
     )
 
     # Real textbox (visible=True so it's in the DOM) hidden via CSS.
@@ -913,7 +917,7 @@ def render(container_tab=None) -> None:
             gr.update(value=None),                                   # gnucash_file
             "<p><em>Load a CSV to begin reviewing.</em></p>",        # review_html
             "",                                                       # save_result
-            gr.update(visible=False, value=None),                    # download_file
+            gr.update(interactive=False, value=None),                 # download_file
             "",                                                       # _payload_box
         )
 
