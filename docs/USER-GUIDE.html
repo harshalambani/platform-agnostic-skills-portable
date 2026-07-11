@@ -57,6 +57,8 @@ padding-top:14px}
 <a href="#skill_hsbc">HSBC</a>
 <a href="#skill_icici">ICICI</a>
 <a href="#skill_gnucash_pipeline">Import Statement</a>
+<a href="#skill_gnucash_intercompany_matrix">Intercompany Matrix</a>
+<a href="#skill_gnucash_intercompany">Intercompany Reco</a>
 <a href="#skill_26as_journal">Journal</a>
 <a href="#skill_krc">KRChoksey</a>
 <a href="#skill_msg_parser">MSG / Email Parser</a>
@@ -344,6 +346,65 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_gnucash_intercompany_matrix" class="skill">
+<h2>Intercompany Matrix <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">An optional roll-up over the pairwise Intercompany Reco: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.</p>
+<p class="whenuse"><b>When to use it.</b> Run at year-end to see, at a glance, which family members&#x27; books agree and which do not -- instead of running the two-book reconciliation for every combination by hand.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Two or more people&#x27;s GnuCash books. ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as &#x27;n/a&#x27;, not an error. &#x27;X HUF&#x27; is a separate entity from &#x27;X&#x27;, so Vaikunth vs Vaikunth-HUF is its own pair.">ℹ️</span><br><span class="fmt">accepts: GnuCash files (.gnucash).</span></li>
+<li><b>Reconciliation period (Indian FY = 1 Apr to 31 Mar)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar. ⚠️ &#x27;Auto&#x27; reads the FY from the file names; use a fixed FY if the names disagree.">ℹ️</span><br><span class="fmt">accepts: A FY, a calendar year, Auto, or a custom date range.</span></li>
+<li><b>Custom start date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="Start date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Custom end date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="End date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Date tolerance in days for matching in-transit items (default 7)</b> <em>(optional)</em> <span class="pa-tip" data-tip="How many days apart two entries can be and still match. ⚠️ Applies to every pair in the matrix.">ℹ️</span><br><span class="fmt">accepts: A whole number of days. Default 7.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Select all the .gnucash books to cross-reconcile (closed in GnuCash).</li>
+<li>Choose the period (or leave on Auto).</li>
+<li>Click Run and download the matrix workbook.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-Intercompany-Matrix.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Intercompany-Matrix.xlsx</code><span class="pa-tip" data-tip="Matrix sheet (owner-by-owner difference grid, green ties / red out of balance / grey n/a), Pairs sheet (balances and counts per pair), and All Exceptions (every unmatched item across all pairs with the best probable posting found in the other book).">ℹ️</span> — Matrix sheet (owner-by-owner difference grid, green ties / red out of balance / grey n/a), Pairs sheet (balances and counts per pair), and All Exceptions (every unmatched item across all pairs with the best probable posting found in the other book).</li>
+</ul>
+<h3>Tips</h3><p>Start from the Matrix grid: any red cell is a pair to open. The All Exceptions sheet is the single actionable to-do list across the whole family.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>A pair shows &#x27;n/a&#x27;.</td><td>Those two books do not each keep an account named for the other. That is normal for people who do not transact.</td></tr>
+<tr><td>A pair is red (out of balance) with a large difference.</td><td>Open it in the two-book Intercompany Reco for full Matched / Exceptions detail, then fix the mis-postings it lists.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_gnucash_intercompany" class="skill">
+<h2>Intercompany Reco <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Reconciles the contra accounts two people keep for each other across their two GnuCash books. It matches the current financial year&#x27;s movements, carries the opening balance forward, and for every unmatched item searches the other book for a probable mis-posting -- then writes an Excel reconciliation statement. Fully offline and deterministic (no LLM); read-only on your books.</p>
+<p class="whenuse"><b>When to use it.</b> Run at year-end (or before filing) to confirm that what one person&#x27;s book shows as due to/from the other agrees with the other person&#x27;s book -- and to catch entries one side recorded that the other missed or mis-posted.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>First person&#x27;s GnuCash book (.gnucash) -- must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="The first person&#x27;s GnuCash book. ⚠️ Close it in GnuCash first so the file is not locked. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Second person&#x27;s GnuCash book (.gnucash) -- must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="The second person&#x27;s GnuCash book -- the counter-party. ⚠️ Each person&#x27;s own name in the OTHER book&#x27;s account tree is how contra accounts are found. &#x27;X HUF&#x27; is treated as a different entity from &#x27;X&#x27;.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Reconciliation period (Indian FY = 1 Apr to 31 Mar)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which period to reconcile. Indian financial year runs 1 Apr to 31 Mar. ⚠️ &#x27;Auto&#x27; reads the FY from the file names (e.g. ...2526 -&gt; FY 2025-26).">ℹ️</span><br><span class="fmt">accepts: A FY, a calendar year, Auto, or a custom date range.</span></li>
+<li><b>Custom start date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="Start date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Custom end date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="End date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Date tolerance in days for matching in-transit items (default 7)</b> <em>(optional)</em> <span class="pa-tip" data-tip="How many days apart two entries can be and still match (in-transit items). ⚠️ Raise it if payments take longer to appear in the other person&#x27;s book.">ℹ️</span><br><span class="fmt">accepts: A whole number of days. Default 7.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick both people&#x27;s .gnucash books (closed in GnuCash).</li>
+<li>Choose the reconciliation period (or leave on Auto).</li>
+<li>Optionally adjust the date tolerance.</li>
+<li>Click Run and download the reconciliation workbook.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-Intercompany-Recon.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Intercompany-Recon.xlsx</code><span class="pa-tip" data-tip="The reconciliation statement: a Summary (opening, movements, closing, and the balance difference), a Matched sheet pairing both books&#x27; entries, and an Exceptions sheet per side listing unmatched items with probable mis-postings found in the other book.">ℹ️</span> — The reconciliation statement: a Summary (opening, movements, closing, and the balance difference), a Matched sheet pairing both books&#x27; entries, and an Exceptions sheet per side listing unmatched items with probable mis-postings found in the other book.</li>
+</ul>
+<h3>Tips</h3><p>If the balance ties but exceptions remain, those items usually net to zero (a give-and-take one side recorded and the other did not) -- still worth fixing. Descriptions mentioning &#x27;HUF&#x27; against an individual&#x27;s contra account signal an entry that belongs in the HUF book instead.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>No contra account found.</td><td>The other person&#x27;s name must appear in an account name in each book. Rename the account to include their name, then re-run.</td></tr>
+<tr><td>An item shows &#x27;No candidate found in the other book&#x27;.</td><td>The other person genuinely never recorded it, OR it belongs to a related entity (e.g. an HUF) whose book was not the one you loaded.</td></tr>
+<tr><td>Too many unmatched items that clearly correspond.</td><td>Increase the date tolerance -- the payments are landing in the other book more than a week apart.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_26as_journal" class="skill">
 <h2>Journal <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
 <p class="overview">Builds GnuCash TDS journal entries from a 26AS workbook plus your GnuCash book. It reads Part I of the workbook, matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import.</p>
@@ -499,7 +560,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 17 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 19 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];
