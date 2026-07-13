@@ -108,23 +108,26 @@ def _mapping_summary(
     endpoint) and a <output>-proposed-mappings.yaml snippet is written next
     to output_path, ready to review and paste into the mapping file.
     result_or_None is the ResolutionResult (needed for the Form16
-    cross-checks) when resolution ran at all, else None."""
+    cross-checks) when resolution ran at all, else None. loaded_entries is
+    the raw guid -> MappingEntry dict (Mapping Review sheet's Suggested-by
+    column needs the note/suggested_by_llm fields that ResolvedLeaf doesn't
+    carry), or None when mapping_file is absent/invalid."""
     if not mapping_file:
-        return ["Mapping: no mapping_file supplied -- skipped."], OK, None
+        return ["Mapping: no mapping_file supplied -- skipped."], OK, None, None
 
     known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
     try:
         loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
         result = mapping_engine.resolve_tree(tree, loaded)
     except configs.MappingValidationError as e:
-        return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None
+        return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None
     lines = [f"Mapping: {len(result.resolved)} leaf(ves) resolved, {len(result.unmapped)} unmapped."]
     for w in result.warnings:
         lines.append(f"  WARNING: {w}")
 
     if not result.blocked:
         lines.append("Mapping: OK -- every leaf resolved to a tag.")
-        return lines, OK, result
+        return lines, OK, result, loaded.entries
 
     lines.append("Mapping: BLOCKED-FOR-REVIEW -- unmapped accounts found:")
     for leaf in result.unmapped:
@@ -140,7 +143,7 @@ def _mapping_summary(
     else:
         lines.append("  (No LLM suggestions -- no endpoint configured, or the endpoint call failed.)")
 
-    return lines, BLOCKED_FOR_REVIEW, result
+    return lines, BLOCKED_FOR_REVIEW, result, loaded.entries
 
 
 def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) -> list[str]:
@@ -193,12 +196,13 @@ def _verify_summary(
 ):
     """Returns (summary_text, tree, book, failures, book_cross_check_results,
     resolution_result_or_None, form16_data_or_None, year_key_or_None,
-    status). `tree`/`failures` are None-safe placeholders when the HTML
-    itself failed to parse (summary_text starts with 'ERROR:')."""
+    status, mapping_entries_or_None). `tree`/`failures` are None-safe
+    placeholders when the HTML itself failed to parse (summary_text starts
+    with 'ERROR:')."""
     try:
         tree = parse_file(bs_html)
     except ValueError as e:
-        return f"ERROR: {e}", None, None, [], [], None, None, None, BLOCKED_FOR_REVIEW
+        return f"ERROR: {e}", None, None, [], [], None, None, None, BLOCKED_FOR_REVIEW, None
 
     failures = verify(tree)
     node_count = sum(1 for _ in tree.all_nodes())
@@ -230,7 +234,7 @@ def _verify_summary(
             lines.append(f"[FY {year_key}] {book_verify.summarize(book_cross_check)}")
 
     lines.append("")
-    mapping_lines, status, result = _mapping_summary(tree, mapping_file, output_path, config_path, model_override)
+    mapping_lines, status, result, mapping_entries = _mapping_summary(tree, mapping_file, output_path, config_path, model_override)
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
 
@@ -245,7 +249,7 @@ def _verify_summary(
             form16_error = str(e)
     lines.extend(_form16_summary(tree, form16_data, form16_error, resolved))
 
-    return "\n".join(lines), tree, book, failures, book_cross_check, result, form16_data, year_key, status
+    return "\n".join(lines), tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries
 
 
 def _write_stub_workbook(output_path: str, summary: str) -> None:
@@ -286,7 +290,7 @@ def _build_and_write_workbook(
     tree, book, result, form16_data, year_key: str | None, failures: list, book_cross_check: list,
     output_path: str, mapping_file: str | None, entity: "configs.EntityProfile",
     rules_dir: str, scrips_path: str, as26_workbook: str | None = None,
-    regime_override: str | None = None,
+    regime_override: str | None = None, mapping_entries: dict | None = None,
 ) -> list[str]:
     """Builds the full schedule model + formula-driven workbook (plan
     sections 2.2/3) when a resolved, unblocked mapping is available. Returns
@@ -337,6 +341,7 @@ def _build_and_write_workbook(
         failures, book_cross_check, form16_cross_check, result.unmapped,
         Path(mapping_file).name if mapping_file else "none",
         datetime.datetime.now().isoformat(timespec="seconds"), {},
+        result.resolved, mapping_entries,
     )
     lines = [
         f"Workbook: full schedule model built for {rules.year_label} (regime={regime}), "
@@ -433,7 +438,7 @@ def run(
     entity = _resolve_entity(mapping_file, entities_path, entity_key)
     effective_form16_pan = form16_pan if form16_pan is not None else (entity.pan or None)
 
-    summary, tree, book, failures, book_cross_check, result, form16_data, year_key, status = _verify_summary(
+    summary, tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries = _verify_summary(
         bs_html, book_file, mapping_file, form16_pdf, effective_form16_pan, output_path, config_path, model_override,
     )
 
@@ -453,7 +458,7 @@ def run(
 
     extra_lines = _build_and_write_workbook(
         tree, book, result, form16_data, year_key, failures, book_cross_check, output_path,
-        mapping_file, entity, rules_dir, scrips_path, as26_workbook, regime_override,
+        mapping_file, entity, rules_dir, scrips_path, as26_workbook, regime_override, mapping_entries,
     )
     if extra_lines:
         summary = summary + "\n\n" + "\n".join(extra_lines)

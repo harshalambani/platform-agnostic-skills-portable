@@ -1,0 +1,82 @@
+{
+  "ITR": {
+    "ITR2": {
+      "PartA_GEN1": {
+        "FilingStatus": {
+          "OptOutNewTaxRegime": "N"
+        }
+      },
+      "ScheduleS": {
+        "DeductionUnderSection16ia": 50000
+      },
+      "ScheduleOS": {
+        "IncOthThanOwnRaceHorse": {
+          "IntrstFrmSavingBank": 500,
+          "IntrstFrmTermDeposit": 2000,
+          "IntrstFrmIncmTaxRefund": 300,
+          "IntrstFrmOthers": 0,
+          "DividendGross": 750
+        }
+      },
+      "ScheduleVIA": {
+        "DeductUndChapVIA": {
+          "Section80C": 150000,
+          "TotalChapVIADeductions": 150000
+        }
+      },
+      "ScheduleCFL": {
+        "LossSummaryDtl": {
+          "CarryFwdLossSummary": []
+        }
+      },
+      "PartB-TI": {
+        "Salaries": 800000,
+        "IncomeFromHP": 0,
+        "CapGain": {
+          "ShortTerm": {
+            "TotalShortTerm": 5000
+          },
+          "LongTerm": {
+            "TotalLongTerm": 12000
+          },
+          "TotalCapGains": 17000
+        },
+        "IncFromOS": {
+          "TotIncFromOS": 3550
+        },
+        "GrossTotalIncome": 820550,
+        "DeductionsUnderScheduleVIA": 150000,
+        "TotalIncome": 670550
+      },
+      "PartB_TTI": {
+        "ComputationOfTaxLiability": {
+          "GrossTaxLiability": 45000,
+          "Rebate87A": 0,
+          "TotalSurcharge": 0,
+          "EducationCess": 1800,
+          "NetTaxLiability": 46800,
+          "IntrstPay": {
+            "IntrstPayUs234A": 0,
+            "IntrstPayUs234B": 500,
+            "IntrstPayUs234C": 200,
+            "LateFilingFee234F": 0,
+            "TotalIntrstPay": 700
+          }
+        },
+        "TaxPaid": {
+          "TaxesPaid": {
+            "AdvanceTax": 0,
+            "SelfAssessmentTax": 0,
+            "TCS": 0,
+            "TDS": 50000,
+            "TotalTaxesPaid": 50000
+          },
+          "BalTaxPayable": 0
+        },
+        "Refund": {
+          "RefundDue": 3200
+        }
+      }
+    }
+  }
+}

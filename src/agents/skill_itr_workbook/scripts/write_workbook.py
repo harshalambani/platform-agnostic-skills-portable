@@ -26,15 +26,58 @@ from __future__ import annotations
 from datetime import date
 
 from openpyxl import Workbook
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 
 import rules as rules_engine
 import schedules as sch
+import tags as tag_vocab
 
 INR_FORMAT = "#,##,##0.00"
 
 _MAX_SLAB_ROWS = 8
 _MAX_SURCHARGE_ROWS = 4
+
+_UNMAPPED_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+# Line label shown on the Mapping Review sheet's Destination column, one per
+# tag -- kept in sync BY HAND with the row labels write_*_sheet() above
+# actually writes for that tag's contribution (this sheet is a read-only
+# review surface; it doesn't reuse the writer functions' own row-label
+# strings since several tags feed into one summed row there).
+_TAG_LINE_LABEL: dict[str, str] = {
+    "SALARY_GROSS": "Gross salary (17(1)+17(2)+17(3))",
+    "BUS_REMUNERATION": "Partner/proprietor remuneration",
+    "BUS_EXPENSE": "Business expenses (net)",
+    "OS_INTEREST_SB": "Savings bank interest",
+    "OS_INTEREST_BANK": "Bank FD interest",
+    "OS_INTEREST_NBFC": "NBFC/HFC interest",
+    "OS_INTEREST_EPF_TAXABLE": "EPF taxable interest",
+    "OS_REFUND_INTEREST": "Interest on IT refund (taxable -- RULE-1)",
+    "OS_DIVIDEND": "Dividend income (gross)",
+    "OS_SLBS": "SLBS income",
+    "NONTAX_REFUND_PRINCIPAL": "IT refund principal (excluded, not income -- RULE-1)",
+    "CG_LT_CONTROL": "Books LTCG control total",
+    "CG_ST_CONTROL": "Books STCG control total",
+    "EXEMPT_PPF_INTEREST": "PPF interest",
+    "EXEMPT_10_2A": "Share of firm profit (s.10(2A))",
+    "HP_RENT": "Gross Annual Value (rent)",
+    "HP_MUNICIPAL_TAX": "Municipal taxes paid by owner",
+    "HP_INTEREST": "Interest on housing loan (s.24(b))",
+    "TAXPAID_ADV": "Advance tax",
+    "TAXPAID_SAT": "Self-assessment tax",
+    "TAXPAID_TDS_SALARY": "TDS on salary",
+    "TAXPAID_TDS_INTEREST": "TDS on interest",
+    "TAXPAID_TDS_DIVIDEND": "TDS on dividend",
+    "TAXPAID_TCS": "TCS",
+    "PERSONAL": "(non-deductible / non-taxable, shown for completeness only)",
+    "DED_80C_CANDIDATE": "80C candidate",
+    "DED_80D_CANDIDATE": "80D candidate",
+    "DED_80G_CANDIDATE": "80G candidate",
+    "EQUITY_CAPITAL": "(balancing figure)",
+    "TRADING": "(balancing figure)",
+}
+for _tag in tag_vocab.AL_TAGS:
+    _TAG_LINE_LABEL.setdefault(_tag, _tag)
 
 
 def _bold(cell) -> None:
@@ -672,6 +715,104 @@ def write_reconciliation_sheet(
 
 
 # ---------------------------------------------------------------------------
+# Mapping Review sheet
+# ---------------------------------------------------------------------------
+
+_REVIEW_HEADERS = [
+    "Account path", "FY amount", "Tag", "Destination", "Treatment", "Suggested-by", "Correction", "GUID",
+]
+
+
+def _suggested_by(guid: str, mapping_entries: dict | None) -> str:
+    """Best-effort provenance label for one resolved leaf. A leaf with no
+    entry of its own inherited its tag from an ancestor (mapping.py's
+    nearest-ancestor rule); a leaf WITH an entry is heuristic/llm/approved
+    depending on how that entry got there (bootstrap_mappings.py's
+    heuristic scratch script vs. an LLM suggestion vs. a human-approved
+    entry with neither marker)."""
+    if not mapping_entries or guid not in mapping_entries:
+        return "inherited"
+    entry = mapping_entries[guid]
+    if entry.suggested_by_llm:
+        return "llm"
+    if "heuristic" in (entry.note or "").lower():
+        return "heuristic"
+    return "approved"
+
+
+def _destination(tag: str) -> tuple:
+    meta = tag_vocab.TAGS.get(tag)
+    if meta is None:
+        return "?", tag, ""
+    return meta.target, _TAG_LINE_LABEL.get(tag, tag), meta.treatment
+
+
+def write_mapping_review_sheet(
+    wb: Workbook, tree, resolved: dict, unmapped: list, mapping_entries: dict | None = None,
+) -> None:
+    """One row per mapped leaf (plus a highlighted unmapped block at top),
+    grouped by destination sheet with a subtotal per group -- an
+    Excel-native surface for a non-technical reviewer to sanity-check every
+    mapping.yaml tag against the plain-English treatment it drives, and
+    record corrections for scripts/apply_mapping_corrections.py to apply
+    back to the mapping file."""
+    ws = wb.create_sheet("Mapping Review")
+    sw = _SheetWriter(ws)
+
+    guid_amount = {n.guid: (n.total or 0.0) for n in tree.all_nodes() if n.guid and not n.children}
+
+    def _header_row():
+        for col, h in enumerate(_REVIEW_HEADERS, start=1):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+
+    if unmapped:
+        sw.header(f"UNMAPPED ({len(unmapped)}) -- needs a mapping entry before a full workbook can build")
+        _header_row()
+        for leaf in unmapped:
+            row = sw.row
+            sw.cell(1, leaf.path)
+            sw.cell(2, leaf.total, number_format=INR_FORMAT)
+            sw.cell(3, "REPLACE_ME")
+            sw.cell(4, "(unresolved)")
+            sw.cell(5, "(unresolved -- pick a tag from tags.py)")
+            sw.cell(6, "unmapped")
+            sw.cell(7, None)
+            sw.cell(8, leaf.guid)
+            for col in range(1, 9):
+                ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
+            sw.row += 1
+        sw.blank()
+
+    groups: dict[str, list] = {}
+    for guid, rl in resolved.items():
+        target, _, _ = _destination(rl.tag)
+        groups.setdefault(target, []).append(rl)
+
+    for target in sorted(groups):
+        sw.header(f"Destination: {target}")
+        _header_row()
+        subtotal = 0.0
+        for rl in sorted(groups[target], key=lambda r: r.path):
+            _, line_label, treatment = _destination(rl.tag)
+            amount = guid_amount.get(rl.guid, 0.0)
+            subtotal += amount
+            sw.cell(1, rl.path)
+            sw.cell(2, amount, number_format=INR_FORMAT)
+            sw.cell(3, rl.tag)
+            sw.cell(4, f"{target} - {line_label}")
+            sw.cell(5, treatment)
+            sw.cell(6, _suggested_by(rl.guid, mapping_entries))
+            sw.cell(7, None)
+            sw.cell(8, rl.guid)
+            sw.row += 1
+        sw.cell(1, f"Subtotal -- {target}", bold=True)
+        sw.cell(2, subtotal, bold=True, number_format=INR_FORMAT)
+        sw.row += 1
+        sw.blank()
+
+
+# ---------------------------------------------------------------------------
 # Top-level orchestrator
 # ---------------------------------------------------------------------------
 
@@ -680,6 +821,7 @@ def write_workbook(
     entity, regime: str, year_key: str, form16_election: str | None,
     identity_failures: list, book_cross_check: list, form16_cross_check: list,
     unmapped: list, mapping_version: str, run_timestamp: str, input_hashes: dict,
+    resolved: dict | None = None, mapping_entries: dict | None = None,
 ) -> None:
     fy_end = date(int(year_key[:4]) + 1, 3, 31) if year_key else date.today()
 
@@ -712,5 +854,7 @@ def write_workbook(
         model.capital_gains.split_year_exemption_prorated, model.capital_gains.split_year_exemption_ratio,
         model.taxes_paid.as26_available, model.taxes_paid.tie_out_ok, model.taxes_paid.tie_out_conflicts,
     )
+
+    write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)
 
     wb.save(output_path)

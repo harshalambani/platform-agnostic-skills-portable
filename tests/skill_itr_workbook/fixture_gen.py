@@ -839,6 +839,24 @@ def build_syn_ind_form16_pdf(
     return _render_text_pdf(pages, password=password)
 
 
+def build_syn_ind_filed_return_pdf() -> bytes:
+    """Minimal synthetic filed-ITR acknowledgement/computation PDF -- text
+    layer only, label-anchored lines matching what filed_return.py's PDF
+    fallback looks for (Gross Total Income / Total Income / Net tax
+    liability / Refund). Numbers are independent of the JSON fixture."""
+    pages = [[
+        "INCOME TAX RETURN - COMPUTATION SHEET",
+        "PAN: SYNIND1234A   Assessment Year: 2025-26",
+        "",
+        "Gross Total Income ................................ 900000",
+        "Total Income ....................................... 750000",
+        "",
+        "Net tax liability .................................. 52000",
+        "Refund .............................................. 4100",
+    ]]
+    return _render_text_pdf(pages)
+
+
 if __name__ == "__main__":
     import gzip
     import pathlib

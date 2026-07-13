@@ -60,6 +60,7 @@ def built_workbook(tmp_path_factory):
     ww.write_workbook(
         str(out_path), tree, model, rules, user_rules, entity, "new", YEAR_KEY,
         form16.opted_out_115bac, [], [], [], result.unmapped, "v1", "2026-01-01T00:00:00", {},
+        result.resolved, loaded.entries,
     )
     return openpyxl.load_workbook(str(out_path)), model
 
@@ -74,6 +75,7 @@ def test_all_expected_sheets_present(built_workbook):
         "Rules", "Entity", "Salary", "BusinessPL", "HouseProperty", "ScheduleFA",
         "OtherSources", "CapitalGains", "ExemptIncome", "TaxesPaid", "Deductions",
         "ScheduleAL", "IS_Transcript", "BS_Transcript", "Computation", "Reconciliation",
+        "Mapping Review",
     }
     assert expected.issubset(set(wb.sheetnames))
 
