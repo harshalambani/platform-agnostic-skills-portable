@@ -36,6 +36,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ICICI used Transaction Date; the code already preferred Value Date
   (falling back to Transaction Date only when blank). No behavior change —
   documentation and a regression test now match the existing code.
+- **Intercompany skills moved out of GnuCash > Banks.** "Intercompany Reco"
+  and "Intercompany Matrix" are not bank-statement tools and were rendering
+  alongside statement-import skills under the Banks sub-tab. Both now use a
+  dedicated `category: "intercompany"` and render under a new
+  GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
+  only statement import + Review Mappings.
 
 ## [1.0.1] — 2026-06-25
 

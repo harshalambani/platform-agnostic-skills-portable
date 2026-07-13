@@ -11,7 +11,7 @@ description: >
   workbook with an owner-by-owner difference grid, a per-pair summary, and a
   consolidated exceptions list. Reuses the pairwise Intercompany Reco engine.
   Read-only -- never modifies your .gnucash files.
-category: "gnucash"
+category: "intercompany"
 version: "1.0.0"
 
 mode: "direct"
