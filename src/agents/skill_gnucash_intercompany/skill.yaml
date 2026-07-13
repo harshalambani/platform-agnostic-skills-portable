@@ -1,6 +1,6 @@
 # skill.yaml -- Intercompany Reconciliation manifest.
 # Read by the skill registry (agents/registry.py) at startup and rendered as a
-# tab under the "gnucash" category.
+# tab under the "intercompany" category.
 
 name: "gnucash_intercompany"
 display_name: "Intercompany Reco"
@@ -12,7 +12,7 @@ description: >
   numbers as a tie-breaker), and for any unmatched item hunts the other book for
   a probable mis-posting. Read-only -- never modifies your .gnucash files.
   Produces an Excel workbook: Summary, Matched, and Exceptions per side.
-category: "gnucash"
+category: "intercompany"
 version: "1.0.0"
 
 # Direct mode -- deterministic, no LLM. Guarantees the workbook is written

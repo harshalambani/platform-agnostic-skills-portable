@@ -338,12 +338,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
         ("gnucash",     "GnuCash"),
         ("utilities",   "Other"),
     ]
-    # "krc" has no top-level GROUP_ORDER entry of its own — it's nested as a
-    # "KRChoksey" sub-tab inside "gnucash" (see below). Exclude it here too,
-    # otherwise the fallback loop at the end of this function (for skills
-    # whose category isn't in _known_cats) renders it a second time as a
-    # flat top-level tab.
-    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc"}
+    # "krc" and "intercompany" have no top-level GROUP_ORDER entry of their
+    # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
+    # "Intercompany" sub-tab, both inside "gnucash" (see below). Exclude them
+    # here too, otherwise the fallback loop at the end of this function (for
+    # skills whose category isn't in _known_cats) renders them a second time
+    # as flat top-level tabs.
+    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany"}
 
     _grouped = defaultdict(list)
     for _s in skills:
@@ -394,7 +395,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 _cat_skills = _grouped.get(_cat_key, [])
 
                 # GnuCash is a container: a "Banks" sub-tab (statement import +
-                # Review Mappings) and a "26AS" sub-tab (Convert + Journal).
+                # Review Mappings), an "Intercompany" sub-tab (Reco + Matrix),
+                # and a "26AS" sub-tab (Convert + Journal).
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
@@ -405,6 +407,19 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                             tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review Mappings") as _rt:
                                         tab_gnucash_review.render(container_tab=_rt)
+                            with gr.Tab("Intercompany"):
+                                with gr.Tabs():
+                                    # Pairwise Reco is the primary tool per the
+                                    # skills' own manifests; Matrix is the
+                                    # optional all-family roll-up built on it.
+                                    _ic_order = {"Intercompany Reco": 0,
+                                                 "Intercompany Matrix": 1}
+                                    for _skill in sorted(
+                                        _grouped.get("intercompany", []),
+                                        key=lambda s: _ic_order.get(s.display_name, 99),
+                                    ):
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
                             with gr.Tab("26AS"):
                                 with gr.Tabs():
                                     for _skill in _grouped.get("26as", []):
