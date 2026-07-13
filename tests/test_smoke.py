@@ -103,7 +103,9 @@ def test_registry_discovers_all_skills():
     # GnuCash intercompany reconciliation skills
     assert "gnucash_intercompany" in names
     assert "gnucash_intercompany_matrix" in names
-    assert len(skills) == 19
+    # ITR Workbook scaffold (batch 1: eguile HTML parser + verification only)
+    assert "ITR Workbook" in names
+    assert len(skills) == 20
 
 
 def test_registry_get_by_name():

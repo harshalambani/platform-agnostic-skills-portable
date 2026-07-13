@@ -56,6 +56,7 @@ padding-top:14px}
 <a href="#skill_hdfc">HDFC</a>
 <a href="#skill_hsbc">HSBC</a>
 <a href="#skill_icici">ICICI</a>
+<a href="#skill_itr_workbook">ITR Workbook</a>
 <a href="#skill_gnucash_pipeline">Import Statement</a>
 <a href="#skill_gnucash_intercompany_matrix">Intercompany Matrix</a>
 <a href="#skill_gnucash_intercompany">Intercompany Reco</a>
@@ -318,6 +319,38 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Parsing fails or columns are off.</td><td>Confirm it is the genuine net-banking .xls, not a converted/edited copy.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_itr_workbook" class="skill">
+<h2>ITR Workbook <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Builds a formula-driven Indian ITR input workbook from a GnuCash &quot;Balance Sheet (eguile)&quot; HTML export (P&amp;L embedded via Retained Earnings). Always runs the full identity/reconciliation check suite (Imbalance == 0, Assets == Equity+Trading+Liabilities+Retained Earnings, every subtotal == sum of its children). Pick the Entity and Assessment Year from the dropdowns (populated from Data/itr/entities.yaml and Data/itr/rules/tax_rules_*.yaml); the selected AY must match the income year inferred from the HTML&#x27;s own as-of date, or the run hard-fails before any schedule build is attempted. If a matching .gnucash book is also supplied, runs a book&lt;-&gt;HTML cross-check per income/expense account. If an entity mapping is also supplied, resolves every leaf to a tag (nearest-ancestor); any unmapped account sets the run status to BLOCKED-FOR-REVIEW and writes a proposed-mappings snippet (with an LLM suggestion per account when an endpoint is configured) ready to paste into the mapping file. If a Form 16 PDF is also supplied, parses its Part B/Annexure-I salary computation, prints the employer TAN, the 115BAC(1A) opt-out election, and the form&#x27;s own internal consistency checks; an encrypted PDF is decrypted automatically using the selected entity&#x27;s PAN on file (no need to re-type it). When a mapping is also available, additionally cross-checks 17(1) gross salary against SALARY_GROSS and net tax payable against TAXPAID_TDS_SALARY. If a 26AS workbook is also supplied, ties out reported TDS by quarter and feeds the 234C dividend-quarter buckets. The Regime dropdown overrides the entity&#x27;s configured regime for this run only (leave blank to use the entity&#x27;s default for the selected AY). Marginal relief, surcharge caps, age-linked slabs/deductions, and every rate/cap/section referenced in the output are driven entirely from the Rules config for the selected year — nothing is hardcoded.</p>
+<p class="whenuse"><b>When to use it.</b> Use once book, mapping, and (optionally) Form 16 / 26AS inputs are ready for an entity and assessment year, to produce the standardized ITR input workbook for review or handoff to a CA. An unmapped account or a selected-AY/HTML-year mismatch blocks the run rather than silently misstating income.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Balance Sheet (eguile) HTML</b> <em>(required)</em> <span class="pa-tip" data-tip="The GnuCash &#x27;Balance Sheet (eguile)&#x27; HTML export, as-of 31 March. ⚠️ Must include the trailing &#x27;Imbalance Amount&#x27; row — a truncated export (copy interrupted) is rejected with a hard failure. The as-of date must match the selected Assessment Year, or the run hard-fails before building any schedules.">ℹ️</span><br><span class="fmt">accepts: HTML (.html), one file per entity.</span></li>
+<li><b>Entity</b> <em>(optional)</em> <span class="pa-tip" data-tip="Which entity (from Data/itr/entities.yaml) this run is for. ⚠️ Also supplies the PAN used to auto-decrypt an encrypted Form 16 — leave unset only for ad hoc/exploratory runs without a Form 16.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
+<li><b>Assessment Year</b> <em>(optional)</em> <span class="pa-tip" data-tip="The Assessment Year (income year) this workbook is for. ⚠️ Must agree with the income year inferred from the Balance Sheet HTML&#x27;s own as-of date, or the run hard-fails with a stub-only workbook.">ℹ️</span><br><span class="fmt">accepts: One of the years found under Data/itr/rules/, via dropdown.</span></li>
+<li><b>Regime (blank = use the entity&#x27;s configured regime)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Overrides the entity&#x27;s configured tax regime for this run only.">ℹ️</span><br><span class="fmt">accepts: &quot;new&quot;, &quot;old&quot;, or blank to use the entity&#x27;s configured regime.</span></li>
+<li><b>GnuCash book (optional, enables CG lots + dividend quarters)</b> <em>(optional)</em> <br><span class="fmt">accepts: .gnucash</span></li>
+<li><b>Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)</b> <em>(optional)</em> <br><span class="fmt">accepts: .yaml</span></li>
+<li><b>Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity&#x27;s PAN if encrypted)</b> <em>(optional)</em> <br><span class="fmt">accepts: .pdf, .PDF</span></li>
+<li><b>26AS workbook (optional, feeds TDS tie-out + 234C quarters)</b> <em>(optional)</em> <br><span class="fmt">accepts: .xlsx</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the Balance Sheet (eguile) HTML export.</li>
+<li>Select the Entity and Assessment Year from the dropdowns.</li>
+<li>Optionally supply the GnuCash book, entity mapping, Form 16 PDF, and/or 26AS workbook.</li>
+<li>Click Run to build the workbook and print the verification summary.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-ITR.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-ITR.xlsx</code><span class="pa-tip" data-tip="The full ITR input workbook, or a stub with an ERROR summary if the run was blocked.">ℹ️</span> — The full ITR input workbook, or a stub with an ERROR summary if the run was blocked.</li>
+</ul>
+<h3>Tips</h3><p>book_file runs the book&lt;-&gt;HTML cross-check. mapping_file runs the account-tag resolution; an unmapped account blocks the run and emits a proposed-mappings snippet next to the output file. form16_pdf runs the salary parse + internal consistency checks, plus the Book&lt;-&gt;Form16 cross-checks when mapping_file is also supplied; the decryption password is auto-derived from the selected entity&#x27;s PAN. as26_workbook ties out TDS by quarter and feeds 234C dividend-quarter bucketing. If the Entity/Assessment Year dropdowns look stale after editing entities.yaml or the rules config, use the refresh button beside them.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>&quot;file truncated -- re-export&quot; error.</td><td>The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash.</td></tr>
+<tr><td>&quot;ERROR: selected Assessment Year does not match&quot; and only a stub workbook is produced.</td><td>Pick the Assessment Year that matches the uploaded HTML&#x27;s as-of date, or upload the HTML for the selected year, then run again.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_gnucash_pipeline" class="skill">
 <h2>Import Statement <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
 <p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you.</p>
@@ -560,7 +593,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 19 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 20 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];

@@ -379,6 +379,15 @@ def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
     return legacy_path
 
 
+def data_root_dir() -> Path:
+    """Resolve the Data\\ root (parent of settings/, itr/, outputs/), the same
+    anchor used by output_dir() -- does not create it (callers that read
+    optional per-skill config subfolders should tolerate absence)."""
+    if PORTABLE_CONFIG_PATH.is_file() and PORTABLE_CONFIG_PATH != _DEFAULT_TEMPLATE:
+        return PORTABLE_CONFIG_PATH.parent.parent
+    return PROJECT_ROOT / "Data"
+
+
 def output_dir() -> Path:
     """Resolve the outputs folder; create it if absent."""
     cfg = load_portable_config()

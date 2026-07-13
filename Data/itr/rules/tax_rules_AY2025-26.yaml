@@ -1,0 +1,169 @@
+# =============================================================================
+# tax_rules_AY2025-26.yaml — versioned tax-rules config, ITR Workbook skill
+# Assessment Year 2025-26 (FY 2024-25, PY 01-04-2024 to 31-03-2025)
+#
+# STATUS: DRAFT — seeded 2026-07-12 by the planning session (OQ-10 dry run of the
+# research sub-skill). Requires Harshal's review before first build consumption.
+# Every figure carries a source tag; see sources: block at the end.
+#
+# Consumed by: scripts/rules.py. Dumped verbatim into the output workbook's
+# 'Rules' sheet so the CA sees exactly what was applied, with this version id.
+# =============================================================================
+meta:
+  ay: "2025-26"
+  fy: "2024-25"
+  version: "0.1-draft"
+  seeded: "2026-07-12"
+  status: "pending-review-harshal"
+  role: "regression-year"   # FY24-25 sample books + CA's filed returns = known-good
+                            # end-to-end test case; NOT the live filing year (that is
+                            # AY 2026-27 — see tax_rules_AY2026-27.yaml)
+  act: "1961"
+  year_label: "AY 2025-26 (FY 2024-25)"
+
+# -----------------------------------------------------------------------------
+# Regime blocks. status field on Entity sheet selects one; default = new (D4).
+# -----------------------------------------------------------------------------
+regimes:
+  new:                                   # s.115BAC(1A) — the default regime
+    slabs:                               # [src-1] same for individual (any age) & HUF
+      - {upto: 300000,  rate: 0.00}
+      - {upto: 700000,  rate: 0.05}
+      - {upto: 1000000, rate: 0.10}
+      - {upto: 1200000, rate: 0.15}
+      - {upto: 1500000, rate: 0.20}
+      - {upto: null,    rate: 0.30}
+    rebate_87a:                          # [src-1] resident INDIVIDUAL only (not HUF)
+      eligibility: "resident-individual"
+      max_total_income: 700000
+      max_rebate: 25000
+      marginal_relief: true              # relief where tax > (TI - 700000)
+    std_deduction_salary: 75000          # [src-1] raised from 50k by Finance (No.2) Act 2024
+    family_pension_deduction: 25000      # [src-1]
+    surcharge:                           # overall cap 25% in new regime [src-1]
+      bands:
+        - {above: 5000000,  rate: 0.10}
+        - {above: 10000000, rate: 0.15}
+        - {above: 20000000, rate: 0.25}
+      cap_on_cg_dividend: 0.15           # surcharge on 111A/112/112A/dividend capped 15%
+      marginal_relief: true
+    deductions_allowed:                  # everything else in Ch.VI-A is N/A [src-1]
+      - "80CCD(2)"                       # employer NPS, 14% of salary (FN2A-2024)
+      - "80CCH(2)"
+      - "80JJAA"
+    deductions_na_note: "Deductions sheet renders 'N/A under New regime' but stays visible for regime comparison (OQ-6)."
+
+  old:
+    slabs_by_age:                        # [src-2] resident age classes at any time in PY
+      general: &old_general              # also HUF
+        - {upto: 250000,  rate: 0.00}
+        - {upto: 500000,  rate: 0.05}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+      senior:                            # 60 <= age < 80
+        - {upto: 300000,  rate: 0.00}
+        - {upto: 500000,  rate: 0.05}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+      super_senior:                      # age >= 80
+        - {upto: 500000,  rate: 0.00}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+    huf_slabs: *old_general
+    rebate_87a:
+      eligibility: "resident-individual"
+      max_total_income: 500000
+      max_rebate: 12500
+      marginal_relief: false
+    std_deduction_salary: 50000          # [src-2]
+    surcharge:
+      bands:
+        - {above: 5000000,   rate: 0.10}
+        - {above: 10000000,  rate: 0.15}
+        - {above: 20000000,  rate: 0.25}
+        - {above: 50000000,  rate: 0.37}
+      cap_on_cg_dividend: 0.15
+      marginal_relief: true
+    vi_a_caps:                           # [src-2] flag-only candidates feed these
+      "80C_combined": 150000             # 80C+80CCC+80CCD(1)
+      "80CCD(1B)": 50000
+      "80D_self": 25000
+      "80D_self_senior": 50000
+      "80D_parents": 25000
+      "80D_parents_senior": 50000
+      "80D_preventive_sublimit": 5000
+      "80TTA": 10000                     # individual (<60) + HUF
+      "80TTB": 50000                     # resident senior individual; replaces 80TTA
+      "80G_qualifying_cap_pct_of_agti": 0.10
+
+# -----------------------------------------------------------------------------
+# Common to both regimes
+# -----------------------------------------------------------------------------
+common:
+  cess_rate: 0.04                        # Health & Education Cess on tax+surcharge
+
+  rounding:
+    total_income: {section: "288A", nearest: 10}
+    tax_payable_refund: {section: "288B", nearest: 10}
+
+  capital_gains:                         # [src-3] FY24-25 is a SPLIT year at 23-07-2024
+    split_date: "2024-07-23"             # rate chosen by TRANSFER (sale) date
+    s111a_stcg_equity_stt:
+      before_split: 0.15
+      on_after_split: 0.20
+    s112a_ltcg_equity_stt:
+      before_split: 0.10
+      on_after_split: 0.125
+      exemption_limit: 125000            # raised from 1L; applies to WHOLE FY24-25 [src-3]
+      grandfathering:
+        cutoff: "2018-01-31"
+        formula: "taxable = proceeds - MAX(cost, MIN(proceeds, FMV_31Jan2018))"
+        fmv_sources: ["bundled NSE bhavcopy 31-01-2018 (HIGH)", "bundled AMFI NAV 31-01-2018"]
+    s112_ltcg_other:
+      before_split: {rate: 0.20, indexation: true}
+      on_after_split: {rate: 0.125, indexation: false}
+      land_building_option_note: >
+        For land/building acquired before 23-07-2024, resident individuals/HUF may
+        opt for 20% with indexation if beneficial — CA decision cell, not automated.
+    holding_periods_after_split:
+      listed_securities_months: 12
+      all_other_assets_months: 24
+
+  house_property:                        # OQ-1 resolution
+    order: "GAV - municipal_taxes_paid_by_owner = NAV; less 30% of NAV u/s 24(a); less interest u/s 24(b)"
+    std_deduction_pct_of_nav: 0.30
+    letout_interest_cap: null            # uncapped for let-out (loss set-off cap 2L applies)
+    self_occupied_interest_cap: 200000
+
+  interest_234:
+    rate_per_month: 0.01
+    c_installments:                      # cumulative advance-tax milestones
+      - {due: "06-15", pct: 0.15}
+      - {due: "09-15", pct: 0.45}
+      - {due: "12-15", pct: 0.75}
+      - {due: "03-15", pct: 1.00}
+    c_dividend_cg_carveout: >
+      No 234C shortfall interest on dividend/CG arising after an installment date if
+      tax thereon is paid in remaining installments — this is WHY the OS sheet needs
+      receipt-date quarter buckets (D17: dates from 26AS workbook + book cross-check).
+
+  tds_sections:                          # 26AS Part I section-code classification used
+                                          # to attribute each transaction to a quarter-
+                                          # bucket category and to the TaxesPaid tie-out
+                                          # (CF5) — statutory section-number facts, not
+                                          # rates/caps, but still config-driven per rule.
+    dividend: ["194", "194K"]
+    interest: ["194A"]
+
+  schedule_al:
+    total_income_threshold: 10000000     # raised 50L -> 1cr from AY 2025-26 [src-4]
+    basis: "cost"
+
+# -----------------------------------------------------------------------------
+# Sources (research 2026-07-12; re-verify on review)
+# -----------------------------------------------------------------------------
+sources:
+  src-1: "New-regime slabs/rebate/std-deduction/surcharge-cap: incometaxindia.gov.in 87A FAQ; taxbuddy.com 115BAC guide; cleartax.in income-tax-slabs (AY25-26 section)"
+  src-2: "Old-regime slabs/caps: cleartax.in income-tax-slabs; tax2win.in section-87a"
+  src-3: "CG split-year rates: CBDT FAQ pib.gov.in PRID=2036604; tax2win.in 112A guide; calcphi.com 111A"
+  src-4: "Schedule AL threshold: incometaxindia.gov.in Schedule AL page; indiafilings.com ITR forms AY25-26"

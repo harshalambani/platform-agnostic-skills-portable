@@ -14,8 +14,11 @@ Supported input types (declared in skill.yaml):
                    Uploaded files are staged into a temp directory; the
                    input value passed to the skill is that directory path.
   - "select"    → dropdown with predefined choices (gr.Dropdown).
-                   Requires "options: [...]" in skill.yaml. Allows custom
-                   values typed by the user.
+                   Requires "options: [...]" in skill.yaml, OR
+                   "options_from: <key>" to resolve choices dynamically at
+                   render time (with a refresh button) — see
+                   _OPTIONS_FROM_RESOLVERS below. Allows custom values typed
+                   by the user either way.
   - "directory"  → paste a folder path (gr.Textbox)
   - "text"       → free-text input (gr.Textbox)
   - "password"   → masked free-text input (gr.Textbox, type="password").
@@ -90,6 +93,69 @@ def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[st
         found.update(out_dir.glob(pat))
     files = sorted(found, key=lambda p: p.stat().st_mtime, reverse=True)
     return [(p.name, str(p)) for p in files[:30]]
+
+
+def _options_from_itr_entities() -> list[tuple[str, str]]:
+    """(label, entity_key) pairs from Data/itr/entities.yaml, for the ITR
+    Workbook skill's `entity` dropdown (options_from: itr_entities). Reads
+    fresh on every call so entities.yaml edits show up on refresh without a
+    restart; gracefully empty when the file is absent (first run) or
+    malformed (caller keeps the dropdown usable via allow_custom_value)."""
+    path = _config.data_root_dir() / "itr" / "entities.yaml"
+    if not path.is_file():
+        return []
+    try:
+        import yaml
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            return []
+        return sorted(
+            (f"{key} ({fields_.get('status', '?')})" if isinstance(fields_, dict) else key, key)
+            for key, fields_ in raw.items()
+        )
+    except Exception:
+        return []
+
+
+def _options_from_itr_ay_years() -> list[tuple[str, str]]:
+    """(year_label, year_key) pairs from Data/itr/rules/tax_rules_*.yaml, for
+    the ITR Workbook skill's `ay` dropdown (options_from: itr_ay_years).
+    year_key is the canonical income-year key (e.g. "2025-26") used by
+    rules.load_rules() and the hard-fail year-mismatch check in agent.py."""
+    rules_dir = _config.data_root_dir() / "itr" / "rules"
+    if not rules_dir.is_dir():
+        return []
+    try:
+        import yaml
+        pairs = []
+        for p in sorted(rules_dir.glob("tax_rules_*.yaml")):
+            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
+            fy = meta.get("fy")
+            if fy:
+                pairs.append((meta.get("year_label", fy), fy))
+        # Newest year first (matches the plan's "default first option = live
+        # filing year" convention).
+        return sorted(pairs, key=lambda pair: pair[1], reverse=True)
+    except Exception:
+        return []
+
+
+# Named dynamic option sources for SkillInput.options_from. Keyed by the
+# string used in skill.yaml (`options_from: <key>`); each resolver returns
+# (label, value) pairs. Add an entry here whenever a new skill needs a
+# dropdown driven by a data file rather than a static `options:` list.
+_OPTIONS_FROM_RESOLVERS = {
+    "itr_entities": _options_from_itr_entities,
+    "itr_ay_years": _options_from_itr_ay_years,
+}
+
+
+def _resolve_options_from(key: str) -> list[tuple[str, str]]:
+    resolver = _OPTIONS_FROM_RESOLVERS.get(key)
+    if resolver is None:
+        return []
+    return resolver()
 
 
 def _scan_parser_files() -> list[tuple[str, str]]:
@@ -572,7 +638,16 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # Banner: description + native binary status.
     desc = skill.description.strip()
     llm_badge = "🧠 AI-powered" if skill.requires.llm else "⚙️ Deterministic"
-    banner_parts = [f"## {skill.display_name}  `{llm_badge}`\n\n{desc}"]
+    badges = f"`{llm_badge}`"
+    if skill.requires.network:
+        # Distinct from the LLM badge: its own emoji + a coloured pill (not
+        # just another backtick span) so an internet-calling skill is
+        # impossible to mistake for a local-only one at a glance.
+        badges += (
+            ' <span style="background:#e0f2fe;color:#075985;padding:2px 8px;'
+            'border-radius:6px;font-size:0.85em;">🌐 Network access</span>'
+        )
+    banner_parts = [f"## {skill.display_name}  {badges}\n\n{desc}"]
     if skill.requires.native_binaries:
         native_err = _check_native_binaries(skill)
         if native_err is None:
@@ -596,6 +671,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             input_components = []
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
+            dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             for inp in skill.inputs:
                 if inp.type == "file":
@@ -655,14 +731,29 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         _pbtn = gr.Button("↻", scale=0, min_width=40)
                     parser_pickers.append((comp, _pbtn))
                 elif inp.type == "select":
-                    comp = gr.Dropdown(
-                        label=inp.label,
-                        choices=list(inp.options),
-                        value=inp.options[0] if inp.options else None,
-                        allow_custom_value=True,
-                        interactive=True,
-                        **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
-                    )
+                    if inp.options_from:
+                        _dchoices = _resolve_options_from(inp.options_from)
+                        with gr.Row():
+                            comp = gr.Dropdown(
+                                label=inp.label,
+                                choices=_dchoices,
+                                value=_dchoices[0][1] if _dchoices else None,
+                                allow_custom_value=True,
+                                interactive=True,
+                                scale=5,
+                                **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
+                            )
+                            _dbtn = gr.Button("↻", scale=0, min_width=40)
+                        dynamic_pickers.append((comp, _dbtn, inp.options_from))
+                    else:
+                        comp = gr.Dropdown(
+                            label=inp.label,
+                            choices=list(inp.options),
+                            value=inp.options[0] if inp.options else None,
+                            allow_custom_value=True,
+                            interactive=True,
+                            **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
+                        )
                 elif inp.type == "directory":
                     comp = gr.Textbox(
                         label=inp.label,
@@ -754,6 +845,13 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             outputs=_comp,
         )
 
+    # Wire each options_from dropdown's refresh button to re-resolve its source.
+    for _comp, _dbtn, _key in dynamic_pickers:
+        _dbtn.click(
+            fn=lambda k=_key: gr.update(choices=_resolve_options_from(k)),
+            outputs=_comp,
+        )
+
     # Wire each "Browse…" button to the native OS file picker. It opens at the
     # box's remembered folder, validates the picks (extension + size, since the
     # browser filter and upload-staging caps are bypassed), sets the file box,
@@ -790,6 +888,10 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     value=(choices[0][1] if choices else None),
                 )
             container_tab.select(fn=_rescan_newest, inputs=[], outputs=[_comp])
+        for _comp, _dbtn, _key in dynamic_pickers:
+            def _rescan_options_from(k=_key):
+                return gr.update(choices=_resolve_options_from(k))
+            container_tab.select(fn=_rescan_options_from, inputs=[], outputs=[_comp])
 
     def _handle_stop():
         from .. import _runner
@@ -802,6 +904,10 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # Does NOT touch output files on disk — only the current tab's UI state.
     def _reset_output_picker(m, f):
         choices = _scan_output_files(m, f)
+        return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+    def _reset_options_from_picker(k):
+        choices = _resolve_options_from(k)
         return gr.update(choices=choices, value=(choices[0][1] if choices else None))
 
     # One reset spec per input, in the same order as input_components, so the
@@ -817,6 +923,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             ))
         elif _inp.type == "parser_file":
             reset_specs.append((_comp, lambda: gr.update(value=None)))
+        elif _inp.type == "select" and _inp.options_from:
+            reset_specs.append((
+                _comp,
+                lambda k=_inp.options_from: _reset_options_from_picker(k),
+            ))
         elif _inp.type == "select":
             reset_specs.append((
                 _comp,

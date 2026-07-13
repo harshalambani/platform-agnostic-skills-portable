@@ -16,7 +16,7 @@ from __future__ import annotations
 import importlib
 import logging
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -48,6 +48,8 @@ class SkillInput:
     required: bool = True
     options: tuple[str, ...] = ()
     match: str = ""
+    options_from: str = ""   # named dynamic option source (e.g. "itr_entities"),
+                              # resolved by the UI layer; empty = use static `options`
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,8 @@ class SkillRequires:
     native_binaries: tuple[str, ...] = ()
     external_tools: tuple[str, ...] = ()
     llm: bool = True
+    network: bool = False   # this skill makes outbound internet calls (surfaced
+                              # as a distinct UI badge from the LLM badge)
 
 
 @dataclass(frozen=True)
@@ -210,6 +214,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             required=inp.get("required", True),
             options=tuple(inp.get("options") or ()),
             match=inp.get("match", ""),
+            options_from=inp.get("options_from", ""),
         ))
 
     out_raw = raw.get("output") or {}
@@ -225,6 +230,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         native_binaries=tuple(req_raw.get("native_binaries") or ()),
         external_tools=tuple(req_raw.get("external_tools") or ()),
         llm=bool(req_raw.get("llm", True)),
+        network=bool(req_raw.get("network", False)),
     )
 
     help_block = _parse_help(raw.get("help"))

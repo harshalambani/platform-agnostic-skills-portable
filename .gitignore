@@ -49,14 +49,27 @@ CmdResult/
 Error/
 
 # --- User data (personal bank statements, GnuCash books, outputs) ---
-Data/
+# Data/ is real user data (PII) and stays untracked, EXCEPT the ITR
+# Workbook skill's rules registry and *.example.yaml config templates,
+# which are safe (no amounts/names/PANs) and meant to ship with the repo
+# (2026-07-12-itr-workbook-skill-plan.md section 4.2). Each ancestor
+# directory on the path to a kept file must be un-ignored explicitly --
+# git won't descend into an ignored directory to find a negated child.
+Data/*
 !Data/.gitkeep
+!Data/itr
+Data/itr/*
+!Data/itr/rules
+!Data/itr/*.example.yaml
+Data/itr/rules/*
+!Data/itr/rules/*.yaml
 ICICI/
 outputs/
 !outputs/.gitkeep
 
 # --- Bundling logs ---
 bundling/launcher-gen/*/Data/
+bundling/installer/*/Data/
 
 # --- Runtime artifacts (written by the app at launch, not source) ---
 ui_port.json

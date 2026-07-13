@@ -1,0 +1,161 @@
+# =============================================================================
+# tax_rules_AY2026-27.yaml — versioned tax-rules config, ITR Workbook skill
+# Assessment Year 2026-27 (FY 2025-26, PY 01-04-2025 to 31-03-2026)
+# *** THE LIVE FILING YEAR (as of July 2026) ***
+#
+# STATUS: DRAFT — seeded 2026-07-12 by the planning session. Requires Harshal's
+# review before first build consumption. Every figure carries a source tag.
+#
+# Companion file tax_rules_AY2025-26.yaml is retained as the REGRESSION year:
+# the FY24-25 sample books + the CA's filed returns are a known-good test case.
+# =============================================================================
+meta:
+  ay: "2026-27"
+  fy: "2025-26"
+  version: "0.1-draft"
+  seeded: "2026-07-12"
+  status: "pending-review-harshal"
+  role: "live-filing-year"
+  act: "1961"                            # LAST cycle under 1961-Act terminology (D19);
+  year_label: "AY 2026-27 (FY 2025-26)"  # from income year 2026-27: Income-tax Act 2025,
+                                         # files named tax_rules_TY<year>.yaml, label "Tax Year <year>"
+
+regimes:
+  new:                                   # s.115BAC(1A) — default (D4)
+    slabs:                               # [src-1] Finance Act 2025 restructure
+      - {upto: 400000,  rate: 0.00}
+      - {upto: 800000,  rate: 0.05}
+      - {upto: 1200000, rate: 0.10}
+      - {upto: 1600000, rate: 0.15}
+      - {upto: 2000000, rate: 0.20}
+      - {upto: 2400000, rate: 0.25}
+      - {upto: null,    rate: 0.30}
+    rebate_87a:                          # [src-1][src-2]
+      eligibility: "resident-individual" # NOT HUF
+      max_total_income: 1200000          # measured on income EXCLUDING special-rate income
+      max_rebate: 60000
+      excludes_special_rate_income: true # no rebate against 111A/112A/112 tax [src-2]
+      marginal_relief: true              # on normal-rate income only
+    std_deduction_salary: 75000          # [src-1] unchanged from FY24-25
+    family_pension_deduction: 25000
+    surcharge:
+      bands:
+        - {above: 5000000,  rate: 0.10}
+        - {above: 10000000, rate: 0.15}
+        - {above: 20000000, rate: 0.25}  # overall cap 25% in new regime
+      cap_on_cg_dividend: 0.15
+      marginal_relief: true
+    deductions_allowed: ["80CCD(2)", "80CCH(2)", "80JJAA"]
+    deductions_na_note: "Deductions sheet renders 'N/A under New regime' but stays visible for regime comparison (OQ-6)."
+
+  old:                                   # unchanged by Finance Act 2025 [src-1]
+    slabs_by_age:
+      general: &old_general
+        - {upto: 250000,  rate: 0.00}
+        - {upto: 500000,  rate: 0.05}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+      senior:
+        - {upto: 300000,  rate: 0.00}
+        - {upto: 500000,  rate: 0.05}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+      super_senior:
+        - {upto: 500000,  rate: 0.00}
+        - {upto: 1000000, rate: 0.20}
+        - {upto: null,    rate: 0.30}
+    huf_slabs: *old_general
+    rebate_87a: {eligibility: "resident-individual", max_total_income: 500000, max_rebate: 12500, marginal_relief: false}
+    std_deduction_salary: 50000
+    surcharge:
+      bands:
+        - {above: 5000000,   rate: 0.10}
+        - {above: 10000000,  rate: 0.15}
+        - {above: 20000000,  rate: 0.25}
+        - {above: 50000000,  rate: 0.37}
+      cap_on_cg_dividend: 0.15
+      marginal_relief: true
+    vi_a_caps:
+      "80C_combined": 150000
+      "80CCD(1B)": 50000
+      "80D_self": 25000
+      "80D_self_senior": 50000
+      "80D_parents": 25000
+      "80D_parents_senior": 50000
+      "80D_preventive_sublimit": 5000
+      "80TTA": 10000
+      "80TTB": 50000
+      "80G_qualifying_cap_pct_of_agti": 0.10
+
+common:
+  cess_rate: 0.04
+  rounding:
+    total_income: {section: "288A", nearest: 10}
+    tax_payable_refund: {section: "288B", nearest: 10}
+
+  capital_gains:                         # NO split year — post-23-07-2024 rates all FY [src-3]
+    split_date: null
+    s111a_stcg_equity_stt: {rate: 0.20}
+    s112a_ltcg_equity_stt:
+      rate: 0.125
+      exemption_limit: 125000
+      grandfathering:
+        cutoff: "2018-01-31"
+        formula: "taxable = proceeds - MAX(cost, MIN(proceeds, FMV_31Jan2018))"
+        fmv_sources: ["bundled NSE bhavcopy 31-01-2018 (HIGH)", "bundled AMFI NAV 31-01-2018"]
+    s112_ltcg_other:
+      rate: 0.125
+      indexation: false
+      land_building_option_note: >
+        Land/building acquired before 23-07-2024: resident individuals/HUF may opt
+        20% with indexation if beneficial — CA decision cell, not automated.
+    holding_periods: {listed_securities_months: 12, all_other_assets_months: 24}
+
+  other_sources:
+    nbfc_hfc_interest_separate: true     # ITR AY2026-27 requires NBFC/HFC interest
+                                         # reported separately from bank interest [src-4]
+    partner_194t:                        # NEW from 01-04-2025 [src-5]
+      note: >
+        Firm deducts 10% TDS on partner remuneration/interest above 20,000/yr.
+        E1's remuneration now arrives net of TDS — expect a 'TDS on Remuneration'
+        expense-account or 26AS Part I entries; TaxesPaid sheet must pick these up
+        and the 26AS tie-out will show the firm's TAN.
+      rate: 0.10
+      threshold: 20000
+
+  house_property:
+    order: "GAV - municipal_taxes_paid_by_owner = NAV; less 30% of NAV u/s 24(a); less interest u/s 24(b)"
+    std_deduction_pct_of_nav: 0.30
+    letout_interest_cap: null
+    self_occupied_interest_cap: 200000
+
+  interest_234:
+    rate_per_month: 0.01
+    c_installments:
+      - {due: "06-15", pct: 0.15}
+      - {due: "09-15", pct: 0.45}
+      - {due: "12-15", pct: 0.75}
+      - {due: "03-15", pct: 1.00}
+    c_dividend_cg_carveout: >
+      No 234C shortfall interest on dividend/CG arising after an installment date if
+      tax thereon is paid in remaining installments (receipt-date buckets from 26AS
+      workbook + book cross-check, D17).
+
+  tds_sections:                          # 26AS Part I section-code classification used
+                                          # to attribute each transaction to a quarter-
+                                          # bucket category and to the TaxesPaid tie-out
+                                          # (CF5) — statutory section-number facts, not
+                                          # rates/caps, but still config-driven per rule.
+    dividend: ["194", "194K"]
+    interest: ["194A"]
+
+  schedule_al:
+    total_income_threshold: 10000000     # verify against notified AY2026-27 ITR instructions at review
+    basis: "cost"
+
+sources:
+  src-1: "FY25-26 new-regime slabs/rebate/std-deduction: incometaxindia.gov.in 87A FAQ (F.Y 2025-26); cleartax.in income-tax-slabs; bajajfinserv.in income-tax-slabs"
+  src-2: "87A exclusion of special-rate income (111A/112A) + 60k mechanics: taxguru.in FY25-26 rebate/STCG articles; jmfinancialservices.in 87A-vs-CG; taxgarden.in 87A AY2026-27"
+  src-3: "Full-year post-split CG rates: CBDT FAQ pib.gov.in PRID=2036604 (rates apply to transfers on/after 23-07-2024, hence all of FY25-26)"
+  src-4: "NBFC/HFC interest separate reporting: businesstoday.in ITR-filing-2026 NBFC-HFC interest article"
+  src-5: "194T: cleartax.in section-194t; taxguru.in 194T articles (effective 01-04-2025)"

@@ -1,0 +1,18 @@
+# Starter mapping for the synthetic SYN-HUF fixture (committed, synthetic --
+# see fixture_gen.build_syn_huf_html/build_syn_huf_gnucash). Every leaf in
+# the HTML tree is tagged -- no HUF-specific tags needed (plan section 3.4).
+- guid: 511f41bc0d8587462fe40f7e8ce0d8fc
+  path: "Assets/Cash and Bank/Cash"
+  tag: AL_CASH_BANK
+- guid: 27c9cfd9b9232d5019e9b827c8591991
+  path: "Equity/Capital Account"
+  tag: EQUITY_CAPITAL
+- guid: d2be039e3964fe7d492463e4ef63bd35
+  path: "Income/Interest Income"
+  tag: OS_INTEREST_BANK
+- guid: ed10f46a6bd9514cde878abd28c2fe9c
+  path: "Income/Long Term Capital Gain"
+  tag: CG_LT_CONTROL
+- guid: 02cbfe4ecdfd793dcc15b99643465df8
+  path: "Expense/TDS on Interest"
+  tag: TAXPAID_TDS_INTEREST

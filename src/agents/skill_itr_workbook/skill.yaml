@@ -1,0 +1,193 @@
+# skill.yaml — ITR Workbook skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+#
+# Batch 1 of 7: scaffold only. This batch wires the eguile Balance Sheet HTML
+# parser and a verification summary.
+# Batch 2 of 7: when book_file is supplied, also parses the .gnucash book and
+# runs the book<->HTML cross-check (printed in the summary). CG-lot
+# reconstruction and 234C dividend bucketing exist as scripts (lots.py,
+# quarters.py) but are not yet surfaced on the output workbook -- that lands
+# with the workbook writer in a later batch (see
+# 2026-07-12-itr-workbook-skill-plan.md).
+# Batch 4 of 7: when form16_pdf is supplied, parses the TRACES Part B/
+# Annexure-I salary computation (parse_form16.py) and prints the employer
+# TAN, the 115BAC(1A) opt-out election, and the form's own internal
+# consistency checks. When a mapping_file is ALSO supplied, additionally
+# runs the two Book<->Form16 cross-checks (17(1) vs SALARY_GROSS,
+# net tax payable vs TAXPAID_TDS_SALARY).
+# Batch 7 of 7 (final): entity/ay/regime become dropdowns (options_from:
+# itr_entities / itr_ay_years, resolved live from Data/itr/entities.yaml and
+# Data/itr/rules/tax_rules_*.yaml -- see ui/tabs/_generic.py). form16_pan is
+# removed as a UI input: the entity dropdown already resolves a PAN
+# (entities.yaml), which agent.py now uses automatically to decrypt an
+# encrypted Form 16 -- no manual re-typing of a PAN that's already on file.
+# Selecting an `ay` that disagrees with the uploaded HTML's own inferred
+# income year is a hard failure (not a warning): a year mismatch is a real
+# misfiling risk, not a cosmetic one.
+
+name: "ITR Workbook"
+display_name: "ITR Workbook"
+description: >
+  Build a standardized, formula-driven Indian ITR input workbook from a
+  GnuCash "Balance Sheet (eguile)" HTML export (P&L embedded via Retained
+  Earnings) plus optional book, mapping, Form 16, and 26AS inputs. Runs the
+  full identity/reconciliation check suite every time; an unmapped account
+  blocks the run for review rather than silently misstating income.
+category: "itr"
+version: "0.7.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "bs_html"
+    type: "file"
+    label: "Balance Sheet (eguile) HTML"
+    file_types: [".html"]
+    required: true
+  - name: "entity"
+    type: "select"
+    label: "Entity"
+    options_from: "itr_entities"
+    required: false
+  - name: "ay"
+    type: "select"
+    label: "Assessment Year"
+    options_from: "itr_ay_years"
+    required: false
+  - name: "regime"
+    type: "select"
+    label: "Regime (blank = use the entity's configured regime)"
+    options: ["", "new", "old"]
+    required: false
+  - name: "book_file"
+    type: "file"
+    label: "GnuCash book (optional, enables CG lots + dividend quarters)"
+    file_types: [".gnucash"]
+    required: false
+  - name: "mapping_file"
+    type: "file"
+    label: "Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)"
+    file_types: [".yaml"]
+    required: false
+  - name: "form16_pdf"
+    type: "file"
+    label: "Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity's PAN if encrypted)"
+    file_types: [".pdf", ".PDF"]
+    required: false
+  - name: "as26_workbook"
+    type: "file"
+    label: "26AS workbook (optional, feeds TDS tie-out + 234C quarters)"
+    file_types: [".xlsx"]
+    required: false
+
+run_args:
+  bs_html: "{inputs.bs_html}"
+  entity_key: "{inputs.entity}"
+  ay: "{inputs.ay}"
+  regime_override: "{inputs.regime}"
+  book_file: "{inputs.book_file}"
+  mapping_file: "{inputs.mapping_file}"
+  form16_pdf: "{inputs.form16_pdf}"
+  as26_workbook: "{inputs.as26_workbook}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "ITR"
+  download_label: "Download ITR Workbook"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Builds a formula-driven Indian ITR input workbook from a GnuCash
+    "Balance Sheet (eguile)" HTML export (P&L embedded via Retained
+    Earnings). Always runs the full identity/reconciliation check suite
+    (Imbalance == 0, Assets == Equity+Trading+Liabilities+Retained
+    Earnings, every subtotal == sum of its children). Pick the Entity and
+    Assessment Year from the dropdowns (populated from Data/itr/entities.yaml
+    and Data/itr/rules/tax_rules_*.yaml); the selected AY must match the
+    income year inferred from the HTML's own as-of date, or the run hard-fails
+    before any schedule build is attempted. If a matching .gnucash book is
+    also supplied, runs a book<->HTML cross-check per income/expense account.
+    If an entity mapping is also supplied, resolves every leaf to a tag
+    (nearest-ancestor); any unmapped account sets the run status to
+    BLOCKED-FOR-REVIEW and writes a proposed-mappings snippet (with an LLM
+    suggestion per account when an endpoint is configured) ready to paste
+    into the mapping file. If a Form 16 PDF is also supplied, parses its
+    Part B/Annexure-I salary computation, prints the employer TAN, the
+    115BAC(1A) opt-out election, and the form's own internal consistency
+    checks; an encrypted PDF is decrypted automatically using the selected
+    entity's PAN on file (no need to re-type it). When a mapping is also
+    available, additionally cross-checks 17(1) gross salary against
+    SALARY_GROSS and net tax payable against TAXPAID_TDS_SALARY. If a 26AS
+    workbook is also supplied, ties out reported TDS by quarter and feeds
+    the 234C dividend-quarter buckets. The Regime dropdown overrides the
+    entity's configured regime for this run only (leave blank to use the
+    entity's default for the selected AY). Marginal relief, surcharge caps,
+    age-linked slabs/deductions, and every rate/cap/section referenced in
+    the output are driven entirely from the Rules config for the selected
+    year — nothing is hardcoded.
+  when_to_use: >
+    Use once book, mapping, and (optionally) Form 16 / 26AS inputs are
+    ready for an entity and assessment year, to produce the standardized
+    ITR input workbook for review or handoff to a CA. An unmapped account
+    or a selected-AY/HTML-year mismatch blocks the run rather than
+    silently misstating income.
+  inputs:
+    - name: "bs_html"
+      tooltip: "The GnuCash 'Balance Sheet (eguile)' HTML export, as-of 31 March."
+      accepts: "HTML (.html), one file per entity."
+      gotchas: >
+        Must include the trailing 'Imbalance Amount' row — a truncated
+        export (copy interrupted) is rejected with a hard failure. The
+        as-of date must match the selected Assessment Year, or the run
+        hard-fails before building any schedules.
+    - name: "entity"
+      tooltip: "Which entity (from Data/itr/entities.yaml) this run is for."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: >
+        Also supplies the PAN used to auto-decrypt an encrypted Form 16 —
+        leave unset only for ad hoc/exploratory runs without a Form 16.
+    - name: "ay"
+      tooltip: "The Assessment Year (income year) this workbook is for."
+      accepts: "One of the years found under Data/itr/rules/, via dropdown."
+      gotchas: >
+        Must agree with the income year inferred from the Balance Sheet
+        HTML's own as-of date, or the run hard-fails with a stub-only
+        workbook.
+    - name: "regime"
+      tooltip: "Overrides the entity's configured tax regime for this run only."
+      accepts: "\"new\", \"old\", or blank to use the entity's configured regime."
+  steps:
+    - "Pick the Balance Sheet (eguile) HTML export."
+    - "Select the Entity and Assessment Year from the dropdowns."
+    - "Optionally supply the GnuCash book, entity mapping, Form 16 PDF, and/or 26AS workbook."
+    - "Click Run to build the workbook and print the verification summary."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-ITR.xlsx"
+        tooltip: "The full ITR input workbook, or a stub with an ERROR summary if the run was blocked."
+  tips: >
+    book_file runs the book<->HTML cross-check. mapping_file runs the
+    account-tag resolution; an unmapped account blocks the run and emits
+    a proposed-mappings snippet next to the output file. form16_pdf runs
+    the salary parse + internal consistency checks, plus the Book<->Form16
+    cross-checks when mapping_file is also supplied; the decryption
+    password is auto-derived from the selected entity's PAN. as26_workbook
+    ties out TDS by quarter and feeds 234C dividend-quarter bucketing. If
+    the Entity/Assessment Year dropdowns look stale after editing
+    entities.yaml or the rules config, use the refresh button beside them.
+  troubleshooting:
+    - problem: "\"file truncated -- re-export\" error."
+      fix: "The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash."
+    - problem: "\"ERROR: selected Assessment Year does not match\" and only a stub workbook is produced."
+      fix: "Pick the Assessment Year that matches the uploaded HTML's as-of date, or upload the HTML for the selected year, then run again."

@@ -13,7 +13,7 @@ langchain-ollama>=0.2.0       # local / LAN Ollama (default)
 langchain-openai>=0.2.0       # OpenAI-compatible (vLLM, LM Studio, GPT-4o)
 
 # --- PDF / OCR ---
-pdfplumber>=0.11.0            # text-mode PDF parsing (BoB, 26AS)
+pdfplumber>=0.11.0            # text-mode PDF parsing (BoB, 26AS, Form16 -- password-protected via pdfplumber.open(password=))
 pypdfium2>=4.30.0             # raster fallback
 pytesseract>=0.3.10           # Tesseract Python wrapper (HSBC OCR)
 

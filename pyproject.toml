@@ -58,6 +58,7 @@ dev = [
     "pytest>=8.0",
     "pyflakes>=3.2",
     "ruff>=0.6",
+    "reportlab>=4.0.0",   # synthetic Form16 test-fixture PDF generation (ITR Workbook, tests only)
 ]
 
 [project.urls]
@@ -75,6 +76,9 @@ where = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "-q"
+markers = [
+    "local_samples: real-file smoke tests that only run when local sample data is present (never in CI)",
+]
 
 [tool.ruff]
 line-length = 100

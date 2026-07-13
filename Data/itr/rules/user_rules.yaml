@@ -1,0 +1,20 @@
+# =============================================================================
+# user_rules.yaml — Harshal's numbered RULES registry (canonical; see plan §4.2)
+# Each rule: statement, date, enforcement point, test. The output workbook's
+# 'Rules' sheet prints the IDs applied per run. A rule without an enforcement
+# point or test is flagged unimplemented by the build checklist.
+# =============================================================================
+- id: RULE-1
+  stated: "2026-07-12"
+  statement: "Interest charged on IT refund is taxable; the refund principal is not income."
+  enforcement: >
+    Mapping tags: OS_REFUND_INTEREST routes to OtherSources (taxable);
+    NONTAX_REFUND_PRINCIPAL is excluded from GTI with a visible zero-tax line.
+    Structurally supported by D16: principal and interest are booked to two
+    separate GnuCash accounts at entry (from the intimation email); a combined
+    account fails the mapping loudly.
+  test: >
+    Synthetic fixture includes a refund transaction with an interest component;
+    golden file asserts the OtherSources taxable line and the excluded principal
+    line both render.
+  status: "active"

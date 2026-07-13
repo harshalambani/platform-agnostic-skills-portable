@@ -1,0 +1,33 @@
+# =============================================================================
+# entities.example.yaml -- SYNTHETIC example of Data/itr/entities.yaml (plan
+# section 4.2). Copy this file to entities.yaml and fill in real profiles;
+# entities.yaml itself is user data and is gitignored (see .gitignore).
+# No real names/PANs/DOBs appear here -- SYN-IND and SYN-HUF match the
+# synthetic fixtures under tests/skill_itr_workbook/fixtures/.
+# =============================================================================
+SYN-IND:
+  name: "Synthetic Individual"
+  pan: "AAAAA0000A"
+  status: "Individual"
+  residency: "Resident"
+  dob: "1980-01-01"
+  address: "123 Example Street, Example City"
+  default_regime: "new"
+  regime_by_ay:
+    "2026-27": "new"
+    "2025-26": "old"
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []
+
+SYN-HUF:
+  name: "Synthetic HUF"
+  pan: "BBBBB1111B"
+  status: "HUF"
+  residency: "Resident"
+  doi: "1975-06-15"    # date of incorporation -- password material for docs like 26AS PDFs; never age-class input (CF6)
+  default_regime: "new"
+  extra_items:
+    bf_losses: []
+    clubbing_notes:
+      - "example: minor's interest income clubbed under s.64(1A) -- illustrative only"

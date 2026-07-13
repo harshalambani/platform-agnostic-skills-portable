@@ -36,7 +36,7 @@ def _make_password_skill():
         extension=".txt",
         download_label="Download",
     )
-    requires = SimpleNamespace(native_binaries=[], external_tools=[], llm=False)
+    requires = SimpleNamespace(native_binaries=[], external_tools=[], llm=False, network=False)
     return SimpleNamespace(
         name="test_password_skill",
         display_name="Test Password Skill",
