@@ -340,11 +340,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
     ]
     # "krc" and "intercompany" have no top-level GROUP_ORDER entry of their
     # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
-    # "Intercompany" sub-tab, both inside "gnucash" (see below). Exclude them
-    # here too, otherwise the fallback loop at the end of this function (for
+    # "Intercompany" sub-tab, both inside "gnucash" (see below). "itr" (ITR
+    # Workbook) is likewise nested as its own "ITR Workbook" sub-tab inside
+    # "gnucash" rather than getting a flat top-level tab. Exclude them here
+    # too, otherwise the fallback loop at the end of this function (for
     # skills whose category isn't in _known_cats) renders them a second time
     # as flat top-level tabs.
-    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany"}
+    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany", "itr"}
 
     _grouped = defaultdict(list)
     for _s in skills:
@@ -437,6 +439,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     ):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
+                            _itr_skills = _grouped.get("itr", [])
+                            if _itr_skills:
+                                with gr.Tab("ITR Workbook") as _t:
+                                    tab_generic.render(_itr_skills[0], container_tab=_t)
                     continue
 
                 if not _cat_skills:
