@@ -113,23 +113,37 @@ def test_blocked_mapping_writes_stub_not_full_workbook(tmp_path):
 
 
 def test_no_mapping_file_writes_stub(tmp_path):
+    """Defect B(ii): a mapping-less run (no entity selected either, so B(i)
+    auto-derive can't kick in) is a true cold start -- it must BLOCK for
+    review with a proposed-mappings snippet, never silently green an empty
+    stub."""
     html_path = tmp_path / "bs.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
     out_path = tmp_path / "out.xlsx"
     summary = agent.run(str(html_path), str(out_path))
+    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
     assert "Workbook: full schedule model built" not in summary
     wb = openpyxl.load_workbook(str(out_path))
     assert wb.sheetnames == ["Reconciliation"]
+    assert Path(str(out_path) + "-proposed-mappings.yaml").exists()
 
 
-def test_unknown_entity_key_falls_back_gracefully(tmp_path):
-    """No matching entities.yaml entry -- pipeline still builds (Individual/
-    new regime default) rather than crashing."""
-    summary, _ = _run_full(
+def test_unknown_entity_key_fails_loud(tmp_path):
+    """Defect A: an explicitly selected entity_key that isn't in
+    entities.yaml must fail loud (no silent UNKNOWN/Individual/new-regime
+    fallback) -- it names the resolved entities.yaml path and writes no
+    green stub."""
+    summary, out_path = _run_full(
         tmp_path, fixture_gen.build_syn_ind_html, fixture_gen.build_syn_ind_gnucash,
         FIXTURES / "syn_ind.mapping.yaml", "NO-SUCH-ENTITY",
     )
-    assert "Workbook: full schedule model built" in summary
+    assert "ERROR:" in summary
+    assert "NO-SUCH-ENTITY" in summary
+    assert str(ENTITIES_EXAMPLE.resolve()) in summary
+    assert "Workbook: full schedule model built" not in summary
+    assert "STATUS: OK" not in summary
+    wb = openpyxl.load_workbook(str(out_path))
+    assert wb.sheetnames == ["Reconciliation"]  # stub only, error text -- not a green run
 
 
 # ---------------------------------------------------------------------------

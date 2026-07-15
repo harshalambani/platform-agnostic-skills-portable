@@ -481,6 +481,12 @@ def _make_run_handler(skill: SkillInfo):
             val = val.replace("{config_path}", str(legacy_cfg))
             val = val.replace("{model_override}", model_choice or "")
             val = val.replace("{work_dir}", work_dir)
+            # Same Data\ anchor as data_root_dir() in both source and frozen
+            # builds -- lets a skill.yaml `run:` token resolve config
+            # subfolders (e.g. Data/itr/...) without baking in a CWD-relative
+            # "Data/" prefix that doubles up when the frozen Launcher already
+            # sets CWD to Data\ (see agent.py Batch 8 / defect A).
+            val = val.replace("{data_root}", str(_config.data_root_dir()))
             # Don't pass empty model_override — let the skill default.
             if param == "model_override" and val == "":
                 val = None

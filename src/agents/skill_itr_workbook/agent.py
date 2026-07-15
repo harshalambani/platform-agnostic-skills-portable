@@ -45,6 +45,18 @@ Form 16's decrypt password auto-derives from the resolved entity's PAN
 override). A selected `ay` that disagrees with the HTML's own inferred
 income year hard-fails the run rather than silently building against the
 wrong year's rules.
+Batch 8: entities_path/rules_dir/scrips_path are now anchored (by the UI's
+`{data_root}` run_args token, see ui/tabs/_generic.py) to the same data root
+ui/_config.data_root_dir() resolves in both source and frozen builds, fixing
+a frozen-build bug where the CWD-relative defaults doubled up as
+Data/Data/itr/... _resolve_entity() now fails loud (EntityResolutionError)
+when an explicitly selected entity_key can't be resolved, instead of
+silently substituting a generic UNKNOWN profile. A blank mapping_file with
+a selected entity now auto-derives that entity's
+<data_root>/itr/mappings/<entity>.mapping.yaml when it exists; true cold
+start (no mapping anywhere) now routes into the same BLOCKED-FOR-REVIEW +
+proposed-mappings-snippet flow as a partially mapped file, rather than
+silently reporting STATUS: OK on an empty one-sheet stub.
 """
 from __future__ import annotations
 
@@ -102,25 +114,33 @@ def _mapping_summary(
 ):
     """Resolve every HTML leaf to a tag via the supplied mapping file (plan
     sections 3.1, 4.1). Returns (summary_lines, status, result_or_None).
-    status is OK when mapping_file is absent (nothing to check yet) or every
-    leaf resolved; BLOCKED-FOR-REVIEW when any leaf is unmapped -- in which
-    case an LLM suggestion is attempted for each (degrades gracefully with no
-    endpoint) and a <output>-proposed-mappings.yaml snippet is written next
-    to output_path, ready to review and paste into the mapping file.
+    When mapping_file is blank (cold start -- no mapping supplied and none
+    could be auto-derived for the entity), resolution still runs against an
+    empty mapping so every leaf is treated as unmapped: this routes into the
+    same BLOCKED-FOR-REVIEW + proposed-mappings snippet flow as a partially
+    mapped file, rather than silently reporting OK with nothing built (a
+    mapping-less run must never green-light an empty stub). status is OK
+    only when every leaf actually resolved to a tag; BLOCKED-FOR-REVIEW
+    whenever any leaf is unmapped -- in which case an LLM suggestion is
+    attempted for each (degrades gracefully with no endpoint) and a
+    <output>-proposed-mappings.yaml snippet is written next to output_path,
+    ready to review and paste into the mapping file.
     result_or_None is the ResolutionResult (needed for the Form16
     cross-checks) when resolution ran at all, else None. loaded_entries is
     the raw guid -> MappingEntry dict (Mapping Review sheet's Suggested-by
     column needs the note/suggested_by_llm fields that ResolvedLeaf doesn't
-    carry), or None when mapping_file is absent/invalid."""
-    if not mapping_file:
-        return ["Mapping: no mapping_file supplied -- skipped."], OK, None, None
-
+    carry), or None when mapping_file is invalid."""
     known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
-    try:
-        loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
-        result = mapping_engine.resolve_tree(tree, loaded)
-    except configs.MappingValidationError as e:
-        return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None
+    cold_start = not mapping_file
+    if cold_start:
+        loaded = configs.MappingLoadResult(entries={}, warnings=[])
+    else:
+        try:
+            loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
+        except configs.MappingValidationError as e:
+            return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None
+
+    result = mapping_engine.resolve_tree(tree, loaded)
     lines = [f"Mapping: {len(result.resolved)} leaf(ves) resolved, {len(result.unmapped)} unmapped."]
     for w in result.warnings:
         lines.append(f"  WARNING: {w}")
@@ -129,6 +149,12 @@ def _mapping_summary(
         lines.append("Mapping: OK -- every leaf resolved to a tag.")
         return lines, OK, result, loaded.entries
 
+    if cold_start:
+        lines.insert(
+            0,
+            "Mapping: no mapping_file supplied and none found for this entity -- "
+            "cold start: treating every leaf as unmapped.",
+        )
     lines.append("Mapping: BLOCKED-FOR-REVIEW -- unmapped accounts found:")
     for leaf in result.unmapped:
         lines.append(f"  - {leaf.path} (FY total {leaf.total})")
@@ -239,7 +265,12 @@ def _verify_summary(
     lines.extend(mapping_lines)
 
     lines.append("")
-    resolved = result.resolved if result is not None else None
+    # The Book<->Form16 cross-check needs tags from an ACTUAL mapping file;
+    # a cold-start ResolutionResult (mapping_file blank, resolved against an
+    # empty mapping) is not one -- pass None so it reports "skipped" rather
+    # than a spurious 0-vs-Form16 MISMATCH for every tag nothing was ever
+    # supplied to resolve.
+    resolved = result.resolved if (result is not None and mapping_file) else None
     form16_data = None
     form16_error = None
     if form16_pdf:
@@ -263,26 +294,55 @@ def _write_stub_workbook(output_path: str, summary: str) -> None:
     wb.save(output_path)
 
 
+class EntityResolutionError(Exception):
+    """Raised by _resolve_entity when an explicitly selected entity_key
+    cannot be resolved (entities.yaml missing/unreadable, or the key isn't
+    in it). Fail-loud: a missing entity must never silently degrade to a
+    generic Individual/new-regime profile, since that would silently pick
+    the wrong regime/age band for the whole run."""
+
+
 def _resolve_entity(mapping_file: str | None, entities_path: str, entity_key: str | None) -> configs.EntityProfile:
     """Resolve the entity profile driving rules.py/schedules.py's regime and
     age-class decisions (and, since Batch 7, the Form16 decrypt PAN).
-    entity_key is normally the skill.yaml `entity` dropdown's value; when
-    omitted it defaults to the mapping file's stem
-    (Data/itr/mappings/<entity>.mapping.yaml convention), looked up in
-    entities.yaml. Falls back to a generic Individual/new-regime profile
-    when nothing resolves, so the pipeline degrades gracefully rather than
-    failing the run."""
+
+    entity_key is normally the skill.yaml `entity` dropdown's value -- an
+    explicit user selection. When it is set but cannot be resolved (the
+    entities.yaml at entities_path is missing/unreadable, or the key isn't
+    in it), this is fail-loud: EntityResolutionError is raised naming the
+    resolved path that was looked at, rather than silently substituting a
+    generic UNKNOWN/Individual/new-regime profile (which would silently
+    pick the wrong regime/age band for the run).
+
+    When entity_key is omitted, it defaults to the mapping file's stem
+    (Data/itr/mappings/<entity>.mapping.yaml convention) as a best-effort
+    lookup only -- not a user selection -- so an unresolved stem-derived
+    key still degrades gracefully to a generic profile rather than failing
+    a run where no entity was actually chosen."""
     key = entity_key or None   # the UI's select input sends "" when unset, not None
+    explicit = key is not None
     if key is None and mapping_file:
         key = Path(mapping_file).stem
         if key.endswith(".mapping"):
             key = key[: -len(".mapping")]
+
     try:
         entities = configs.load_entities(entities_path)
-        if key and key in entities:
-            return entities[key]
-    except (OSError, configs.ConfigValidationError):
-        pass
+    except (OSError, configs.ConfigValidationError) as e:
+        if explicit:
+            raise EntityResolutionError(
+                f"entity {key!r} could not be resolved: entities.yaml unreadable at "
+                f"{Path(entities_path).resolve()} ({e})"
+            ) from e
+        return configs.EntityProfile(key=key or "UNKNOWN", name=key or "Unknown", pan="", status="Individual")
+
+    if key and key in entities:
+        return entities[key]
+
+    if explicit:
+        raise EntityResolutionError(
+            f"entity {key!r} not found in {Path(entities_path).resolve()}"
+        )
     return configs.EntityProfile(key=key or "UNKNOWN", name=key or "Unknown", pan="", status="Individual")
 
 
@@ -435,12 +495,35 @@ def run(
     Reconciliation sheets, never silently reconciled. Falls back to
     book-date buckets and a skipped tie-out when omitted or unreadable.
     """
-    entity = _resolve_entity(mapping_file, entities_path, entity_key)
+    try:
+        entity = _resolve_entity(mapping_file, entities_path, entity_key)
+    except EntityResolutionError as e:
+        summary = f"ERROR: {e}"
+        _write_stub_workbook(output_path, summary)
+        return summary
+
+    auto_derived_note: str | None = None
+    if not mapping_file and entity_key:
+        # B(i): the entity dropdown never auto-attached the entity's own
+        # mapping file, so a mapping-less run for an entity that already has
+        # an approved mapping silently produced an empty stub. Default to
+        # <entities_path's data-root>/itr/mappings/<entity>.mapping.yaml
+        # when it exists, and proceed as if it had been supplied.
+        candidate = Path(entities_path).parent / "mappings" / f"{entity.key}.mapping.yaml"
+        if candidate.is_file():
+            mapping_file = str(candidate)
+            auto_derived_note = (
+                f"Mapping: auto-derived {candidate.name} for entity {entity.key!r} "
+                "(Entity mapping box was empty)."
+            )
+
     effective_form16_pan = form16_pan if form16_pan is not None else (entity.pan or None)
 
     summary, tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries = _verify_summary(
         bs_html, book_file, mapping_file, form16_pdf, effective_form16_pan, output_path, config_path, model_override,
     )
+    if auto_derived_note:
+        summary = auto_derived_note + "\n\n" + summary
 
     if tree is None:
         _write_stub_workbook(output_path, summary)
