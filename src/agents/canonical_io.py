@@ -121,13 +121,16 @@ def write_sidecar(
     opening: float,
     closing: float,
     row_count: int,
+    account_number: str | None = None,
 ) -> Path | None:
     """Write a ``*.csv_summary.json`` sidecar next to the canonical CSV.
 
     The GnuCash pipeline reads this at final-verification time to obtain an
     explicit expected closing balance instead of the tautological last-row value.
     ``source`` is "statement_summary" when the figure comes from the statement
-    itself, or "derived" when computed from the rows.
+    itself, or "derived" when computed from the rows. ``account_number``, when
+    an adapter can read one off the statement, lets the pipeline resolve the
+    matching GnuCash account by number instead of guessing from the bank name.
 
     Returns the sidecar path on success, or None if it could not be written.
     """
@@ -139,6 +142,7 @@ def write_sidecar(
             "opening_balance": opening,
             "closing_balance": closing,
             "row_count": row_count,
+            "account_number": account_number,
         }
         with open(sidecar, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)

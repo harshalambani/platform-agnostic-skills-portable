@@ -10,7 +10,7 @@ description: >
 category: "banks"
 version: "1.0.0"
 
-mode: "agent"
+mode: "direct"
 entry_point: "agent:run"
 
 inputs:
@@ -34,6 +34,7 @@ output:
 requires:
   native_binaries: ["tesseract", "poppler"]
   external_tools: []
+  llm: false
 
 help:
   overview: >

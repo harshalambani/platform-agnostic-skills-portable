@@ -3,7 +3,7 @@
 
 *Mode: agent · 🤖 needs an LLM endpoint*
 
-The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you.
+The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF's text layer is garbled.
 
 ## When to use it
 
@@ -20,6 +20,9 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used to learn your accounts and map transactions.
   - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
+- **PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID.
+  - Only used for HDFC when the statement PDF itself is password-protected.
+  - ⚠️ Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output.
 
 ## How to run
 
@@ -42,7 +45,7 @@ Files produced:
 
 ## Tips
 
-Account mapping learns from your existing GnuCash history, so the more you have categorised before, the better the auto-mapping. Review a few rows after import the first time.
+Account mapping learns from your existing GnuCash history, so the more you have categorised before, the better the auto-mapping. Review a few rows after import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export over a password-protected PDF when you have the choice — extraction is equally deterministic either way, but if HDFC ever hands you a PDF whose text layer is garbled (rare, seen on some re-downloaded statements), the skill auto-detects it and falls back to OCR, which is typically ~90%+ accurate rather than exact; re-check the running/closing balance in that case.
 
 ## Troubleshooting
 

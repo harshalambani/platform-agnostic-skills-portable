@@ -19,6 +19,7 @@ import csv
 import gzip
 import json
 import logging
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -27,7 +28,6 @@ from pathlib import Path
 
 from agents.balance_utils import (
     verify_running_balance,
-    verify_closing_balance,
     extract_opening_closing,
     format_balance_summary,
     _safe_float,
@@ -155,12 +155,28 @@ CANONICAL_COLS = [
 # GnuCash ledger balance extraction
 # ---------------------------------------------------------------------------
 
-def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
+def _normalize_digits(s: str | None) -> str:
+    """Strip everything but digits, e.g. for comparing account numbers that
+    may carry spaces/dashes/masking in either the statement or GnuCash."""
+    return "".join(c for c in (s or "") if c.isdigit())
+
+
+def _get_gnucash_account_balance(
+    gnucash_file: str, bank_name: str, account_number: str | None = None
+) -> dict:
     """
     Parse a .gnucash XML file and find the bank account's ledger balance.
 
-    Searches for an account whose name contains bank_name (case-insensitive)
-    under Assets, sums all transaction splits to compute the balance.
+    Candidate accounts are those whose name contains bank_name
+    (case-insensitive) under Assets. When ``account_number`` is supplied
+    (from statement metadata), it is normalised to digits and matched
+    against digits embedded in each candidate's account name (e.g.
+    "BOB - 760001001951") — this disambiguates multiple accounts at the
+    same bank and is preferred over a bare name match. If no account
+    number is given, or none of the candidates' digits match it, falls
+    back to the first name match and reports that in "match_warning" so
+    callers can surface it (a name-only match is a guess when there are
+    multiple accounts for the same bank).
 
     Returns:
         {
@@ -168,13 +184,17 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
             "account_name": str,
             "balance": float,
             "last_txn_date": str or None,  # YYYY-MM-DD
+            "match_warning": str or None,
         }
     """
     try:
         with gzip.open(gnucash_file, 'rt', encoding='utf-8') as f:
             tree = ET.parse(f)
     except Exception:
-        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+        return {
+            "found": False, "account_name": "", "balance": 0.0,
+            "last_txn_date": None, "match_warning": None,
+        }
 
     root = tree.getroot()
 
@@ -197,20 +217,56 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
             aid = acc_map[aid]["parent_id"]
         return ":".join(reversed(parts))
 
-    # Find the bank account by name match
+    # Candidate accounts: name contains the bank, under Assets/Bank.
+    bank_lower = bank_name.lower()
+    candidates = [
+        (aid, _full_path(aid))
+        for aid, info in acc_map.items()
+        if bank_lower in _full_path(aid).lower() and info["type"] in ("BANK", "ASSET")
+    ]
+
     target_id = None
     target_name = ""
-    bank_lower = bank_name.lower()
+    match_warning = None
+    norm_number = _normalize_digits(account_number)
 
-    for aid, info in acc_map.items():
-        full = _full_path(aid)
-        if bank_lower in full.lower() and info["type"] in ("BANK", "ASSET"):
-            target_id = aid
-            target_name = full
-            break
+    if norm_number:
+        number_matches = [
+            (aid, full) for aid, full in candidates
+            if _normalize_digits(full) and (
+                norm_number in _normalize_digits(full)
+                or _normalize_digits(full) in norm_number
+            )
+        ]
+        if number_matches:
+            target_id, target_name = number_matches[0]
+            if len(number_matches) > 1:
+                match_warning = (
+                    f"Multiple GnuCash accounts matched account number "
+                    f"'{account_number}'; using '{target_name}'."
+                )
+
+    if target_id is None and candidates:
+        target_id, target_name = candidates[0]
+        if norm_number:
+            match_warning = (
+                f"Could not match account number '{account_number}' to any "
+                f"GnuCash account digits; fell back to name match on "
+                f"'{bank_name}' -> '{target_name}'. Verify this is the "
+                f"correct account."
+            )
+        elif len(candidates) > 1:
+            match_warning = (
+                f"{len(candidates)} GnuCash accounts match bank name "
+                f"'{bank_name}'; using '{target_name}' by name only — no "
+                f"account number was available to disambiguate."
+            )
 
     if not target_id:
-        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+        return {
+            "found": False, "account_name": "", "balance": 0.0,
+            "last_txn_date": None, "match_warning": None,
+        }
 
     # Sum splits for this account
     balance = 0.0
@@ -240,6 +296,7 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
         "account_name": target_name,
         "balance": round(balance, 2),
         "last_txn_date": last_date,
+        "match_warning": match_warning,
     }
 
 
@@ -247,6 +304,7 @@ def _reconcile_opening_balance(
     canonical_rows: list[dict],
     gnucash_file: str,
     bank_name: str,
+    account_number: str | None = None,
 ) -> dict:
     """
     Reconcile the canonical CSV's opening balance against GnuCash ledger.
@@ -276,9 +334,10 @@ def _reconcile_opening_balance(
             "filtered_rows": [],
             "gnucash_balance": 0.0,
             "statement_opening": 0.0,
+            "match_warning": None,
         }
 
-    gc = _get_gnucash_account_balance(gnucash_file, bank_name)
+    gc = _get_gnucash_account_balance(gnucash_file, bank_name, account_number)
     if not gc["found"]:
         log.warning(
             "Could not find %s account in GnuCash — skipping opening balance check",
@@ -291,6 +350,8 @@ def _reconcile_opening_balance(
             "filtered_rows": canonical_rows,
             "gnucash_balance": 0.0,
             "statement_opening": 0.0,
+            "account_found": False,
+            "match_warning": None,
         }
 
     gc_balance = gc["balance"]
@@ -314,6 +375,8 @@ def _reconcile_opening_balance(
             "filtered_rows": canonical_rows,
             "gnucash_balance": gc_balance,
             "statement_opening": stmt_opening,
+            "account_found": True,
+            "match_warning": gc.get("match_warning"),
         }
 
     # Scenario A check: are there rows in the statement dated on or before
@@ -359,6 +422,8 @@ def _reconcile_opening_balance(
                     "filtered_rows": filtered,
                     "gnucash_balance": gc_balance,
                     "statement_opening": new_oc["opening_balance"],
+                    "account_found": True,
+                    "match_warning": gc.get("match_warning"),
                 }
 
     # Scenario B or C — gap we can't resolve
@@ -375,7 +440,58 @@ def _reconcile_opening_balance(
         "filtered_rows": canonical_rows,
         "gnucash_balance": gc_balance,
         "statement_opening": stmt_opening,
+        "account_found": True,
+        "match_warning": gc.get("match_warning"),
     }
+
+
+def final_closing_balance_verdict(
+    recon: dict,
+    final_rows: list[dict],
+    stmt_closing: float | None,
+    unresolved_opening_gap: float | None,
+) -> str:
+    """
+    Compute the final closing-balance verdict message.
+
+    The verdict compares the actual POST-IMPORT GnuCash balance (pre-import
+    book balance + net of the rows just imported) against the STATEMENT's own
+    closing balance — an independent source when present, since it comes from
+    the bank, not from the book. Comparing the statement-derived canonical CSV
+    against itself is circular and can't catch a real opening-balance gap. Any
+    gap left unexplained by dedup (``unresolved_opening_gap``) must propagate
+    here too — it must never be silently dropped just because dedup found
+    zero overlapping rows, and it always wins over a coincidentally-matching
+    closing balance (an AMBER/RED verdict, never a false green).
+    """
+    if recon.get("account_found") is False:
+        return "⚠ GnuCash account not found; post-import balance could not be verified."
+
+    if stmt_closing is None:
+        return "⚠ No independent statement closing balance available; nothing to verify the book against."
+
+    net_imported = sum(
+        _safe_float(r.get("Deposit", 0)) - _safe_float(r.get("Withdrawal", 0))
+        for r in final_rows
+    )
+    post_import_balance = recon["gnucash_balance"] + net_imported
+    closing_diff = abs(post_import_balance - stmt_closing)
+
+    if unresolved_opening_gap is not None and unresolved_opening_gap > 0.02:
+        return (
+            f"⚠ unreconciled {unresolved_opening_gap:.2f} — opening-balance adjustment or "
+            f"investigate. (Post-import book={post_import_balance:.2f}, "
+            f"statement closing={stmt_closing:.2f}, diff={closing_diff:.2f}.)"
+        )
+    if closing_diff <= 0.02:
+        return (
+            f"Closing balance VERIFIED (independent): post-import book="
+            f"{post_import_balance:.2f} matches statement closing={stmt_closing:.2f}."
+        )
+    return (
+        f"❌ CLOSING BALANCE MISMATCH: post-import book={post_import_balance:.2f}, "
+        f"statement closing={stmt_closing:.2f} (diff={closing_diff:.2f})."
+    )
 
 
 _NORMALISE_PROMPT = """\
@@ -401,7 +517,7 @@ Rules:
 - Do not invent column names; only use names that appear verbatim in the headers list.
 
 Example response:
-{
+{{
   "Date": "Txn Date",
   "Transaction ID": "Ref No / Cheque No",
   "Description": "Narration",
@@ -410,15 +526,13 @@ Example response:
   "Withdrawal": "Debit",
   "Balance": "Balance (INR)",
   "Currency": null
-}
+}}
 """
 
 
-def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
-    """
-    Read a CSV or XLS/XLSX file and return (headers, sample_rows).
-    sample_rows is at most 5 data rows.
-    """
+def _read_tabular_rows(file_path: str) -> list[list[str]]:
+    """Read a CSV or XLS/XLSX file into a flat list of string rows (no header
+    split — see _find_generic_header_row for locating the header row)."""
     p = Path(file_path)
     suffix = p.suffix.lower()
 
@@ -433,8 +547,7 @@ def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
                 for c in range(ws.ncols):
                     cell = ws.cell(r, c)
                     if cell.ctype == xlrd.XL_CELL_DATE:
-                        import xlrd as _x
-                        dt = _x.xldate_as_datetime(cell.value, wb.datemode)
+                        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
                         row.append(dt.strftime("%d/%m/%Y"))
                     elif cell.ctype == xlrd.XL_CELL_NUMBER:
                         v = cell.value
@@ -450,23 +563,79 @@ def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
             ws = wb.active
             rows = []
             for row in ws.iter_rows(values_only=True):
-                rows.append([str(c) if c is not None else "" for c in row])
-
-        if not rows:
-            return [], []
-        headers = rows[0]
-        sample = rows[1:6]
-        return headers, sample
+                rows.append([str(c).strip() if c is not None else "" for c in row])
+        return rows
 
     else:  # CSV
         with open(file_path, newline="", encoding="utf-8-sig") as fh:
             reader = csv.reader(fh)
-            rows = list(reader)
-        if not rows:
-            return [], []
-        headers = rows[0]
-        sample = rows[1:6]
-        return headers, sample
+            return [[str(c).strip() for c in row] for row in reader]
+
+
+_HEADER_DATEISH_RE = re.compile(r'^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$')
+
+
+def _find_generic_header_row(rows: list[list[str]]) -> int:
+    """Locate the header row in an arbitrary bank CSV/XLS export, tolerant of
+    preamble rows (account info, statement period, blank rows, '****'
+    separators) above it — mirrors skill_hdfc's header detection but without
+    assuming any particular bank's column names. Heuristic: the first row
+    with >=2 non-empty cells where most cells look like text labels (contain
+    a letter and aren't themselves a date), i.e. a plausible header row."""
+    for i, row in enumerate(rows):
+        cells = [str(c).strip() for c in row]
+        non_empty = [c for c in cells if c]
+        if len(non_empty) < 2:
+            continue
+        text_like = sum(
+            1 for c in non_empty
+            if re.search(r'[A-Za-z]', c) and not _HEADER_DATEISH_RE.match(c)
+        )
+        if text_like >= max(2, (len(non_empty) + 1) // 2):
+            return i
+    return 0  # fallback: no clear header row found, assume the first row
+
+
+_CANONICAL_MAPPING_KEYS = {
+    "Date", "Transaction ID", "Description", "Account",
+    "Deposit", "Withdrawal", "Balance", "Currency",
+}
+
+
+def _sanitize_and_validate_mapping(raw_reply: str, headers: list[str]) -> dict:
+    """Parse + sanitize an LLM column-mapping reply: strip accidental
+    markdown fences, drop unknown keys, and verify every mapped value is
+    either null or a header that actually appears (verbatim) in the file.
+    Raises ValueError naming the offending keys/values on any violation —
+    callers retry once on this error, then hard-fail."""
+    raw = raw_reply.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        mapping = json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM reply was not valid JSON: {e}") from e
+    if not isinstance(mapping, dict):
+        raise ValueError("LLM reply must be a JSON object")
+
+    sign_convention = mapping.get("sign_convention")
+    sanitized = {k: v for k, v in mapping.items() if k in _CANONICAL_MAPPING_KEYS}
+
+    header_set = set(headers)
+    bad_values = {
+        k: v for k, v in sanitized.items()
+        if v is not None and v not in header_set
+    }
+    if bad_values:
+        raise ValueError(
+            "LLM mapped canonical column(s) to header(s) not present in the "
+            f"file: {bad_values}. Real headers are: {headers}"
+        )
+
+    sanitized["sign_convention"] = sign_convention
+    return sanitized
 
 
 def _normalise_to_canonical(
@@ -478,16 +647,24 @@ def _normalise_to_canonical(
 ) -> None:
     """
     LLM-assisted column normalisation: maps arbitrary CSV/XLS to the canonical
-    8-column schema and writes the result to output_path.
+    8-column schema and writes the result to output_path. Reserved for
+    "Other Bank (CSV)" — HDFC always uses skill_hdfc's deterministic parser.
     """
     agents_root = Path(__file__).resolve().parent.parent
     if str(agents_root) not in sys.path:
         sys.path.insert(0, str(agents_root))
     from agents.base_agent import run_direct  # noqa: E402
 
-    headers, sample = _read_csv_or_xls(input_file)
-    if not headers:
+    rows = _read_tabular_rows(input_file)
+    if not rows:
         raise ValueError(f"Could not read any data from {input_file}")
+
+    header_idx = _find_generic_header_row(rows)
+    headers = rows[header_idx]
+    sample = rows[header_idx + 1: header_idx + 6]
+    all_rows = rows[header_idx + 1:]
+    if not headers or not any(str(h).strip() for h in headers):
+        raise ValueError(f"Could not find a header row in {input_file}")
 
     headers_str = json.dumps(headers)
     sample_str = "\n".join(
@@ -501,64 +678,36 @@ def _normalise_to_canonical(
         "Output ONLY raw JSON — no markdown, no explanation."
     )
 
-    raw = run_direct(
-        user_message=prompt,
-        system_prompt=system,
-        config_path=config_path,
-        model_override=model_override,
-    )
+    mapping = None
+    last_error = None
+    for attempt in range(2):  # one retry after an invalid/hallucinated reply
+        user_message = prompt
+        if attempt == 1:
+            user_message = (
+                prompt
+                + f"\n\nYour previous reply was rejected: {last_error}\n"
+                + "Only use header names that appear verbatim in the headers list above."
+            )
+        raw = run_direct(
+            user_message=user_message,
+            system_prompt=system,
+            config_path=config_path,
+            model_override=model_override,
+        )
+        try:
+            mapping = _sanitize_and_validate_mapping(raw, headers)
+            break
+        except ValueError as e:
+            last_error = e
+            mapping = None
 
-    # Strip accidental markdown fences if the LLM adds them
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    mapping = json.loads(raw.strip())
+    if mapping is None:
+        raise ValueError(
+            f"LLM column mapping failed validation after retry: {last_error}"
+        )
 
     sign_convention = mapping.pop("sign_convention", None)
-
-    # Re-read full file
-    all_headers, _ = _read_csv_or_xls(input_file)
-    p = Path(input_file)
-    if p.suffix.lower() in (".xls", ".xlsx"):
-        # Re-read all rows
-        if p.suffix.lower() == ".xls":
-            import xlrd
-            wb = xlrd.open_workbook(str(p))
-            ws = wb.sheet_by_index(0)
-            all_rows = []
-            for r in range(1, ws.nrows):  # skip header
-                row = []
-                for c in range(ws.ncols):
-                    cell = ws.cell(r, c)
-                    if cell.ctype == xlrd.XL_CELL_DATE:
-                        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
-                        row.append(dt.strftime("%d/%m/%Y"))
-                    elif cell.ctype == xlrd.XL_CELL_NUMBER:
-                        v = cell.value
-                        row.append(str(int(v)) if v == int(v) else str(v))
-                    elif cell.ctype == xlrd.XL_CELL_EMPTY:
-                        row.append("")
-                    else:
-                        row.append(str(cell.value).strip())
-                all_rows.append(row)
-        else:
-            import openpyxl
-            wb = openpyxl.load_workbook(str(p), data_only=True)
-            ws = wb.active
-            all_rows = []
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i == 0:
-                    continue
-                all_rows.append([str(c) if c is not None else "" for c in row])
-    else:
-        with open(input_file, newline="", encoding="utf-8-sig") as fh:
-            reader = csv.reader(fh)
-            data_rows = list(reader)
-        all_rows = data_rows[1:]  # skip header
-
-    col_idx = {h: i for i, h in enumerate(all_headers)}
+    col_idx = {h: i for i, h in enumerate(headers)}
 
     def _get(row, col_name):
         if col_name is None:
@@ -612,6 +761,7 @@ def run(
     output_path: str,
     config_path: str = None,
     model_override: str = None,
+    pdf_password: str = None,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -625,6 +775,9 @@ def run(
         output_path:     Path for the final mapped CSV.
         config_path:     Passed through to sub-skills and LLM calls.
         model_override:  Passed through to sub-skills and LLM calls.
+        pdf_password:    Optional statement password, forwarded to skill_hdfc
+                         for password-protected HDFC PDFs (for HDFC often the
+                         Cust ID). Never logged.
 
     Returns:
         Human-readable summary string for the UI.
@@ -759,57 +912,41 @@ def run(
                 )
 
         elif bank == "HDFC":
+            # All HDFC input shapes (PDF, password-protected PDF, XLS, XLSX,
+            # CSV) go through skill_hdfc's deterministic parser — no LLM.
+            # The generic LLM-assisted normalisation path below is reserved
+            # for "Other Bank (CSV)" only.
             input_file = (
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
             input_file = _resolve_single_file(input_file, (".csv", ".xls", ".xlsx", ".pdf"))
             suffix = Path(input_file).suffix.lower()
-            if suffix == ".pdf":
-                _emit_progress(1, f"HDFC: OCR scanning PDF statement")
-                log_lines.append("**Step 1** — HDFC: OCR scanning PDF statement")
-                _emit_progress(2, f"HDFC: parsing transactions to canonical format")
-                log_lines.append("**Step 2** — HDFC: parsing transactions to canonical format")
-                try:
-                    from skill_hdfc.agent import run as hdfc_run  # noqa: E402
-                    hdfc_result = hdfc_run(
-                        pdf_path=input_file,
-                        output_path=canonical_path,
-                        config_path=config_path,
-                        model_override=model_override,
-                    )
-                    # hdfc_run returns an error string (starting with ❌) on failure
-                    if hdfc_result and "❌" in str(hdfc_result):
-                        return (
-                            f"## {bank} → extraction error\n\n"
-                            f"{hdfc_result}"
-                        )
-                except Exception as e:
-                    log.error("HDFC extraction failed: %s", e, exc_info=True)
+            step_label = "OCR/parsing PDF statement" if suffix == ".pdf" else "parsing statement"
+            _emit_progress(1, f"HDFC: {step_label}")
+            log_lines.append(f"**Step 1** — HDFC: {step_label} (deterministic, no LLM)")
+            try:
+                from skill_hdfc.agent import run as hdfc_run  # noqa: E402
+                hdfc_result = hdfc_run(
+                    pdf_path=input_file,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                    pdf_password=pdf_password,
+                )
+                # hdfc_run returns an error string (starting with "Error " or
+                # containing ❌) on failure rather than raising.
+                if hdfc_result and ("❌" in str(hdfc_result) or str(hdfc_result).startswith("Error")):
                     return (
                         f"## {bank} → extraction error\n\n"
-                        f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                        f"{hdfc_result}"
                     )
-            else:
-                # CSV/XLS fallback
-                _emit_progress(1, f"HDFC: reading CSV/XLS statement")
-                log_lines.append("**Step 1** — HDFC: reading CSV/XLS statement")
-                _emit_progress(2, f"HDFC: LLM normalising columns → canonical schema")
-                log_lines.append("**Step 2** — HDFC: LLM normalising columns → canonical schema")
-                try:
-                    _normalise_to_canonical(
-                        input_file=input_file,
-                        output_path=canonical_path,
-                        bank_name=bank,
-                        config_path=config_path,
-                        model_override=model_override,
-                    )
-                except Exception as e:
-                    log.error("HDFC normalisation failed: %s", e, exc_info=True)
-                    return (
-                        f"## {bank} → normalisation error\n\n"
-                        f"❌ HDFC column normalisation raised an exception:\n```\n{e}\n```"
-                    )
+            except Exception as e:
+                log.error("HDFC extraction failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → extraction error\n\n"
+                    f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                )
 
         elif bank == "Other Bank (CSV)":
             input_file = (
@@ -866,7 +1003,14 @@ def run(
             )
 
         # ── Opening balance reconciliation with GnuCash (Intervention 1) ──
-        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank)
+        # Prefer the account number from statement metadata (if the adapter
+        # captured one) over a bare bank-name match — disambiguates multiple
+        # accounts at the same bank.
+        stmt_sidecar = _read_sidecar(canonical_path)
+        stmt_account_number = stmt_sidecar.get("account_number") if stmt_sidecar else None
+        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank, stmt_account_number)
+        if recon.get("match_warning"):
+            log_lines.append(f"⚠ Account match: {recon['match_warning']}")
 
         if recon["rows_skipped"] > 0:
             log_lines.append(
@@ -879,15 +1023,20 @@ def run(
                 writer.writerows(recon["filtered_rows"])
             canonical_rows = recon["filtered_rows"]
 
+        # Track any unexplained opening-balance gap so it survives into the
+        # final closing-balance verdict below, instead of silently evaporating
+        # if dedup happens to find zero overlapping rows.
+        unresolved_opening_gap = None
         if recon["ok"]:
             log_lines.append(f"**Balance check** — {recon['message']}")
         else:
-            # Don't flag as error — dedup below will handle overlapping rows
+            unresolved_opening_gap = abs(recon["gnucash_balance"] - recon["statement_opening"])
             log_lines.append(
-                f"**Balance check** — Opening balance gap detected "
+                f"**Balance check** — ⚠ Opening balance gap detected "
                 f"(GnuCash={recon['gnucash_balance']:.2f}, "
-                f"statement={recon['statement_opening']:.2f}). "
-                f"Dedup will reconcile overlapping transactions."
+                f"statement={recon['statement_opening']:.2f}, diff={unresolved_opening_gap:.2f}). "
+                f"Dedup below will attempt to reconcile overlapping transactions; "
+                f"if it doesn't, this gap carries into the final verdict."
             )
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
@@ -1079,46 +1228,17 @@ def run(
                 log.warning(f"Could not write contra sidecar: {e}")
 
         _emit_progress(6, f"{bank}: final balance verification")
-        # ── Final closing balance verification (Intervention 3) ──────────
-        # After dedup removes overlapping rows the pre-dedup closing balance
-        # no longer matches the output CSV — skip the check in that case.
-        if total_duplicates > 0:
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                final_rows = list(csv.DictReader(f))
+            sidecar = _read_sidecar(canonical_path)
+            stmt_closing = sidecar.get("closing_balance") if sidecar else None
             log_lines.append(
-                "**Final check** — Closing balance check skipped "
-                f"(dedup removed {total_duplicates} overlapping rows)"
+                "**Final check** — "
+                + final_closing_balance_verdict(recon, final_rows, stmt_closing, unresolved_opening_gap)
             )
-        else:
-            try:
-                with open(output_path, "r", encoding="utf-8") as f:
-                    final_rows = list(csv.DictReader(f))
-
-                # Read sidecar for an independent expected closing balance
-                sidecar = _read_sidecar(canonical_path)
-                if sidecar and "closing_balance" in sidecar:
-                    expected_closing = sidecar["closing_balance"]
-                    source_label = sidecar.get("source", "unknown")
-                else:
-                    expected_closing = running["closing_balance"]
-                    source_label = "derived"
-
-                closing_check = verify_closing_balance(
-                    final_rows,
-                    expected_closing=expected_closing,
-                )
-
-                if source_label == "statement_summary":
-                    tag = "VERIFIED (independent)"
-                elif source_label == "derived":
-                    tag = "OK (derived — no independent source)"
-                else:
-                    tag = f"OK ({source_label})"
-
-                if closing_check.get("ok"):
-                    log_lines.append(f"**Final check** — Closing balance {tag}: {closing_check['message']}")
-                else:
-                    log_lines.append(f"**Final check** — ❌ {closing_check['message']}")
-            except Exception as e:
-                log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
+        except Exception as e:
+            log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
 
     # Color-code each log line: green = OK, amber = warning, red = error
     _WARN_KEYS = ("mismatch", "gap detected", "skipped", "⚠", "warning")

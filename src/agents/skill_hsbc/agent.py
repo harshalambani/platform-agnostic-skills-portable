@@ -1,29 +1,29 @@
 """
-agent.py — HSBC Bank Statement LangGraph agent.
+agent.py — HSBC bank statement direct-mode entry point.
 
-``run()`` drives the OCR → enrich → Excel pipeline for the standalone UI tab.
-:class:`HSBCSkill` is the ``BankSkill`` implementation: it maps the enriched
-workbook to canonical rows (folding in the retired ``adapter_hsbc``) and is the
-parser the GnuCash pipeline dispatches on.
+``run()`` drives the OCR -> parse -> enrich -> Excel pipeline for the
+standalone UI tab, deterministically (no LLM). :class:`HSBCSkill` is the
+``BankSkill`` implementation: it maps the enriched workbook to canonical rows
+(folding in the retired ``adapter_hsbc``) and is the parser the GnuCash
+pipeline dispatches on.
 """
 from __future__ import annotations
 
 import logging
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from agents.base_agent import build_agent
 from agents.bank_contract import BankResult
 from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
-from agents.skill_hsbc.tools import run_hsbc_pipeline, skip_ocr_pipeline
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
-TOOLS = [run_hsbc_pipeline, skip_ocr_pipeline]
-
 BANK_KEY = "hsbc"
+
+_PIPELINE = Path(__file__).parent / "scripts" / "run_pipeline.py"
 
 
 def run(
@@ -31,33 +31,39 @@ def run(
     work_dir: str,
     output_path: str,
     title: str = "HSBC Statement",
-    config_path: str = "config.yaml",
+    config_path: str = None,
     model_override: str = None,
 ) -> str:
     """
-    Run the HSBC agent and return the final response.
+    Run the HSBC OCR -> parse -> enrich -> Excel pipeline directly (no LLM)
+    and return a summary string, or raise with the real stderr on failure.
 
     Args:
         pdf_dir:        Directory containing HSBC PDF statements.
         work_dir:       Scratch directory for intermediate files.
         output_path:    Path where the output .xlsx should be saved.
         title:          Workbook title shown in the Summary sheet.
-        config_path:    Path to config.yaml.
-        model_override: Optional model name, e.g. 'llama3.1', 'qwen3', 'phi4-mini'.
+        config_path:    Unused (kept for run_args compatibility with the
+                         other bank skills' entry-point signature).
+        model_override: Unused (ditto).
     """
-    agent = build_agent(TOOLS, SYSTEM_PROMPT, config_path, model_override)
-    result = agent.invoke({
-        "messages": [(
-            "user",
-            f"Process these HSBC bank statement PDFs into a clean Excel workbook.\n"
-            f"PDF directory: {pdf_dir}\n"
-            f"Work directory: {work_dir}\n"
-            f"Output Excel:  {output_path}\n"
-            f"Title: {title}\n"
-            f"Run the full pipeline (including OCR) and report the summary."
-        )]
-    })
-    return result["messages"][-1].content
+    result = subprocess.run(
+        [
+            sys.executable, str(_PIPELINE),
+            "--pdf-dir", pdf_dir,
+            "--work-dir", work_dir,
+            "--out", output_path,
+            "--title", title,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "HSBC pipeline failed:\n"
+            + (result.stderr.strip() or result.stdout.strip() or "(no output captured)")
+        )
+    return result.stdout.strip() or "Pipeline complete."
 
 
 # ---------------------------------------------------------------------------

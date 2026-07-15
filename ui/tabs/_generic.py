@@ -44,6 +44,7 @@ from .. import _health
 from .. import _help
 from .. import _review_csv
 from .. import _runner
+from .. import _runlog
 
 if TYPE_CHECKING:
     from agents.registry import SkillInfo
@@ -319,13 +320,16 @@ def _make_run_handler(skill: SkillInfo):
             val = input_values[i] if i < len(input_values) else None
             if inp_def.type in ("file", "output_file"):
                 if val is None or (isinstance(val, str) and not val.strip()):
-                    yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
-                    return
-                fpath = Path(val.name if hasattr(val, "name") else val)
-                if not fpath.is_file():
-                    yield add(f"Warning: file not found at {fpath}"), gr.update(interactive=False, value=None), gr.update()
-                    return
-                input_map[inp_def.name] = str(fpath)
+                    if inp_def.required:
+                        yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    input_map[inp_def.name] = ""
+                else:
+                    fpath = Path(val.name if hasattr(val, "name") else val)
+                    if not fpath.is_file():
+                        yield add(f"Warning: file not found at {fpath}"), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    input_map[inp_def.name] = str(fpath)
             elif inp_def.type == "files":
                 # Multi-file upload: Gradio gives a list of file paths.
                 # Stage them into a temp directory so the skill receives
@@ -506,8 +510,13 @@ def _make_run_handler(skill: SkillInfo):
                 agent_reply = yield from _runner.run_with_progress(work, tick_factory)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
+            log_path = _runlog.new_log_path(skill.name)
+            _runlog.write_run_log(
+                log_path, skill_name=skill.name, run_log_lines=log, traceback_text=tb,
+            )
             yield add(
                 f"Error: run failed: {e}\n\n"
+                f"Full log: `{log_path}`\n\n"
                 f"<details><summary>Traceback</summary>\n\n```\n{tb}\n```\n</details>"
             ), gr.update(interactive=False, value=None), gr.update()
             return
@@ -516,6 +525,13 @@ def _make_run_handler(skill: SkillInfo):
         if agent_reply == "__CANCELLED__":
             yield add("**Cancelled** — run was stopped by user."), gr.update(interactive=False, value=None), gr.update()
             return
+
+        # -- Log this run (agent-mode: `log` also carries the tool-call
+        #    transcript) regardless of outcome, so a silently-absorbed tool
+        #    failure inside a successful-looking agent reply still leaves a
+        #    trace on disk. --
+        log_path = _runlog.new_log_path(skill.name)
+        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log)
 
         # -- Verify output --
         yield add("**Verifying output…**"), gr.update(interactive=False, value=None), gr.update()
@@ -526,6 +542,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"Error: the run did not finish successfully — no output "
                     f"was produced at {out_path}. Check the details below, fix "
                     f"the input, and run again.\n\n"
+                    f"Full log: `{log_path}`\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
@@ -557,6 +574,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"Error: the run did not finish successfully — no output "
                     f"file was produced, so there is nothing to download. "
                     f"Check the details below, fix the input, and run again.\n\n"
+                    f"Full log: `{log_path}`\n\n"
                     f"**Agent reply:**\n\n{agent_reply}"
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
