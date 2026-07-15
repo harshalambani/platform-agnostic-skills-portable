@@ -28,7 +28,6 @@ from pathlib import Path
 
 from agents.balance_utils import (
     verify_running_balance,
-    verify_closing_balance,
     extract_opening_closing,
     format_balance_summary,
     _safe_float,
@@ -156,12 +155,28 @@ CANONICAL_COLS = [
 # GnuCash ledger balance extraction
 # ---------------------------------------------------------------------------
 
-def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
+def _normalize_digits(s: str | None) -> str:
+    """Strip everything but digits, e.g. for comparing account numbers that
+    may carry spaces/dashes/masking in either the statement or GnuCash."""
+    return "".join(c for c in (s or "") if c.isdigit())
+
+
+def _get_gnucash_account_balance(
+    gnucash_file: str, bank_name: str, account_number: str | None = None
+) -> dict:
     """
     Parse a .gnucash XML file and find the bank account's ledger balance.
 
-    Searches for an account whose name contains bank_name (case-insensitive)
-    under Assets, sums all transaction splits to compute the balance.
+    Candidate accounts are those whose name contains bank_name
+    (case-insensitive) under Assets. When ``account_number`` is supplied
+    (from statement metadata), it is normalised to digits and matched
+    against digits embedded in each candidate's account name (e.g.
+    "BOB - 760001001951") — this disambiguates multiple accounts at the
+    same bank and is preferred over a bare name match. If no account
+    number is given, or none of the candidates' digits match it, falls
+    back to the first name match and reports that in "match_warning" so
+    callers can surface it (a name-only match is a guess when there are
+    multiple accounts for the same bank).
 
     Returns:
         {
@@ -169,13 +184,17 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
             "account_name": str,
             "balance": float,
             "last_txn_date": str or None,  # YYYY-MM-DD
+            "match_warning": str or None,
         }
     """
     try:
         with gzip.open(gnucash_file, 'rt', encoding='utf-8') as f:
             tree = ET.parse(f)
     except Exception:
-        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+        return {
+            "found": False, "account_name": "", "balance": 0.0,
+            "last_txn_date": None, "match_warning": None,
+        }
 
     root = tree.getroot()
 
@@ -198,20 +217,56 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
             aid = acc_map[aid]["parent_id"]
         return ":".join(reversed(parts))
 
-    # Find the bank account by name match
+    # Candidate accounts: name contains the bank, under Assets/Bank.
+    bank_lower = bank_name.lower()
+    candidates = [
+        (aid, _full_path(aid))
+        for aid, info in acc_map.items()
+        if bank_lower in _full_path(aid).lower() and info["type"] in ("BANK", "ASSET")
+    ]
+
     target_id = None
     target_name = ""
-    bank_lower = bank_name.lower()
+    match_warning = None
+    norm_number = _normalize_digits(account_number)
 
-    for aid, info in acc_map.items():
-        full = _full_path(aid)
-        if bank_lower in full.lower() and info["type"] in ("BANK", "ASSET"):
-            target_id = aid
-            target_name = full
-            break
+    if norm_number:
+        number_matches = [
+            (aid, full) for aid, full in candidates
+            if _normalize_digits(full) and (
+                norm_number in _normalize_digits(full)
+                or _normalize_digits(full) in norm_number
+            )
+        ]
+        if number_matches:
+            target_id, target_name = number_matches[0]
+            if len(number_matches) > 1:
+                match_warning = (
+                    f"Multiple GnuCash accounts matched account number "
+                    f"'{account_number}'; using '{target_name}'."
+                )
+
+    if target_id is None and candidates:
+        target_id, target_name = candidates[0]
+        if norm_number:
+            match_warning = (
+                f"Could not match account number '{account_number}' to any "
+                f"GnuCash account digits; fell back to name match on "
+                f"'{bank_name}' -> '{target_name}'. Verify this is the "
+                f"correct account."
+            )
+        elif len(candidates) > 1:
+            match_warning = (
+                f"{len(candidates)} GnuCash accounts match bank name "
+                f"'{bank_name}'; using '{target_name}' by name only — no "
+                f"account number was available to disambiguate."
+            )
 
     if not target_id:
-        return {"found": False, "account_name": "", "balance": 0.0, "last_txn_date": None}
+        return {
+            "found": False, "account_name": "", "balance": 0.0,
+            "last_txn_date": None, "match_warning": None,
+        }
 
     # Sum splits for this account
     balance = 0.0
@@ -241,6 +296,7 @@ def _get_gnucash_account_balance(gnucash_file: str, bank_name: str) -> dict:
         "account_name": target_name,
         "balance": round(balance, 2),
         "last_txn_date": last_date,
+        "match_warning": match_warning,
     }
 
 
@@ -248,6 +304,7 @@ def _reconcile_opening_balance(
     canonical_rows: list[dict],
     gnucash_file: str,
     bank_name: str,
+    account_number: str | None = None,
 ) -> dict:
     """
     Reconcile the canonical CSV's opening balance against GnuCash ledger.
@@ -277,9 +334,10 @@ def _reconcile_opening_balance(
             "filtered_rows": [],
             "gnucash_balance": 0.0,
             "statement_opening": 0.0,
+            "match_warning": None,
         }
 
-    gc = _get_gnucash_account_balance(gnucash_file, bank_name)
+    gc = _get_gnucash_account_balance(gnucash_file, bank_name, account_number)
     if not gc["found"]:
         log.warning(
             "Could not find %s account in GnuCash — skipping opening balance check",
@@ -292,6 +350,8 @@ def _reconcile_opening_balance(
             "filtered_rows": canonical_rows,
             "gnucash_balance": 0.0,
             "statement_opening": 0.0,
+            "account_found": False,
+            "match_warning": None,
         }
 
     gc_balance = gc["balance"]
@@ -315,6 +375,8 @@ def _reconcile_opening_balance(
             "filtered_rows": canonical_rows,
             "gnucash_balance": gc_balance,
             "statement_opening": stmt_opening,
+            "account_found": True,
+            "match_warning": gc.get("match_warning"),
         }
 
     # Scenario A check: are there rows in the statement dated on or before
@@ -360,6 +422,8 @@ def _reconcile_opening_balance(
                     "filtered_rows": filtered,
                     "gnucash_balance": gc_balance,
                     "statement_opening": new_oc["opening_balance"],
+                    "account_found": True,
+                    "match_warning": gc.get("match_warning"),
                 }
 
     # Scenario B or C — gap we can't resolve
@@ -376,7 +440,58 @@ def _reconcile_opening_balance(
         "filtered_rows": canonical_rows,
         "gnucash_balance": gc_balance,
         "statement_opening": stmt_opening,
+        "account_found": True,
+        "match_warning": gc.get("match_warning"),
     }
+
+
+def final_closing_balance_verdict(
+    recon: dict,
+    final_rows: list[dict],
+    stmt_closing: float | None,
+    unresolved_opening_gap: float | None,
+) -> str:
+    """
+    Compute the final closing-balance verdict message.
+
+    The verdict compares the actual POST-IMPORT GnuCash balance (pre-import
+    book balance + net of the rows just imported) against the STATEMENT's own
+    closing balance — an independent source when present, since it comes from
+    the bank, not from the book. Comparing the statement-derived canonical CSV
+    against itself is circular and can't catch a real opening-balance gap. Any
+    gap left unexplained by dedup (``unresolved_opening_gap``) must propagate
+    here too — it must never be silently dropped just because dedup found
+    zero overlapping rows, and it always wins over a coincidentally-matching
+    closing balance (an AMBER/RED verdict, never a false green).
+    """
+    if recon.get("account_found") is False:
+        return "⚠ GnuCash account not found; post-import balance could not be verified."
+
+    if stmt_closing is None:
+        return "⚠ No independent statement closing balance available; nothing to verify the book against."
+
+    net_imported = sum(
+        _safe_float(r.get("Deposit", 0)) - _safe_float(r.get("Withdrawal", 0))
+        for r in final_rows
+    )
+    post_import_balance = recon["gnucash_balance"] + net_imported
+    closing_diff = abs(post_import_balance - stmt_closing)
+
+    if unresolved_opening_gap is not None and unresolved_opening_gap > 0.02:
+        return (
+            f"⚠ unreconciled {unresolved_opening_gap:.2f} — opening-balance adjustment or "
+            f"investigate. (Post-import book={post_import_balance:.2f}, "
+            f"statement closing={stmt_closing:.2f}, diff={closing_diff:.2f}.)"
+        )
+    if closing_diff <= 0.02:
+        return (
+            f"Closing balance VERIFIED (independent): post-import book="
+            f"{post_import_balance:.2f} matches statement closing={stmt_closing:.2f}."
+        )
+    return (
+        f"❌ CLOSING BALANCE MISMATCH: post-import book={post_import_balance:.2f}, "
+        f"statement closing={stmt_closing:.2f} (diff={closing_diff:.2f})."
+    )
 
 
 _NORMALISE_PROMPT = """\
@@ -888,7 +1003,14 @@ def run(
             )
 
         # ── Opening balance reconciliation with GnuCash (Intervention 1) ──
-        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank)
+        # Prefer the account number from statement metadata (if the adapter
+        # captured one) over a bare bank-name match — disambiguates multiple
+        # accounts at the same bank.
+        stmt_sidecar = _read_sidecar(canonical_path)
+        stmt_account_number = stmt_sidecar.get("account_number") if stmt_sidecar else None
+        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank, stmt_account_number)
+        if recon.get("match_warning"):
+            log_lines.append(f"⚠ Account match: {recon['match_warning']}")
 
         if recon["rows_skipped"] > 0:
             log_lines.append(
@@ -901,15 +1023,20 @@ def run(
                 writer.writerows(recon["filtered_rows"])
             canonical_rows = recon["filtered_rows"]
 
+        # Track any unexplained opening-balance gap so it survives into the
+        # final closing-balance verdict below, instead of silently evaporating
+        # if dedup happens to find zero overlapping rows.
+        unresolved_opening_gap = None
         if recon["ok"]:
             log_lines.append(f"**Balance check** — {recon['message']}")
         else:
-            # Don't flag as error — dedup below will handle overlapping rows
+            unresolved_opening_gap = abs(recon["gnucash_balance"] - recon["statement_opening"])
             log_lines.append(
-                f"**Balance check** — Opening balance gap detected "
+                f"**Balance check** — ⚠ Opening balance gap detected "
                 f"(GnuCash={recon['gnucash_balance']:.2f}, "
-                f"statement={recon['statement_opening']:.2f}). "
-                f"Dedup will reconcile overlapping transactions."
+                f"statement={recon['statement_opening']:.2f}, diff={unresolved_opening_gap:.2f}). "
+                f"Dedup below will attempt to reconcile overlapping transactions; "
+                f"if it doesn't, this gap carries into the final verdict."
             )
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
@@ -1101,46 +1228,17 @@ def run(
                 log.warning(f"Could not write contra sidecar: {e}")
 
         _emit_progress(6, f"{bank}: final balance verification")
-        # ── Final closing balance verification (Intervention 3) ──────────
-        # After dedup removes overlapping rows the pre-dedup closing balance
-        # no longer matches the output CSV — skip the check in that case.
-        if total_duplicates > 0:
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                final_rows = list(csv.DictReader(f))
+            sidecar = _read_sidecar(canonical_path)
+            stmt_closing = sidecar.get("closing_balance") if sidecar else None
             log_lines.append(
-                "**Final check** — Closing balance check skipped "
-                f"(dedup removed {total_duplicates} overlapping rows)"
+                "**Final check** — "
+                + final_closing_balance_verdict(recon, final_rows, stmt_closing, unresolved_opening_gap)
             )
-        else:
-            try:
-                with open(output_path, "r", encoding="utf-8") as f:
-                    final_rows = list(csv.DictReader(f))
-
-                # Read sidecar for an independent expected closing balance
-                sidecar = _read_sidecar(canonical_path)
-                if sidecar and "closing_balance" in sidecar:
-                    expected_closing = sidecar["closing_balance"]
-                    source_label = sidecar.get("source", "unknown")
-                else:
-                    expected_closing = running["closing_balance"]
-                    source_label = "derived"
-
-                closing_check = verify_closing_balance(
-                    final_rows,
-                    expected_closing=expected_closing,
-                )
-
-                if source_label == "statement_summary":
-                    tag = "VERIFIED (independent)"
-                elif source_label == "derived":
-                    tag = "OK (derived — no independent source)"
-                else:
-                    tag = f"OK ({source_label})"
-
-                if closing_check.get("ok"):
-                    log_lines.append(f"**Final check** — Closing balance {tag}: {closing_check['message']}")
-                else:
-                    log_lines.append(f"**Final check** — ❌ {closing_check['message']}")
-            except Exception as e:
-                log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
+        except Exception as e:
+            log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
 
     # Color-code each log line: green = OK, amber = warning, red = error
     _WARN_KEYS = ("mismatch", "gap detected", "skipped", "⚠", "warning")

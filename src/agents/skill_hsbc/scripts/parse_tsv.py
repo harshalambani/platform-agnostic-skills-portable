@@ -27,6 +27,7 @@ import csv
 import json
 import re
 from collections import defaultdict
+from datetime import date
 from pathlib import Path
 
 # Fallback column right-edges (tuned for HSBC Premier Savings statements at
@@ -74,16 +75,21 @@ def load_tsv_lines(tsv_path: Path):
                     continue
                 left = int(row['left']); top = int(row['top'])
                 w = int(row['width']); h = int(row['height'])
+                # Some Tesseract builds emit sub-pixel confidence as a float
+                # string (e.g. "96.637047") rather than a plain int.
+                conf = int(float(row['conf']))
                 key = (int(row['block_num']), int(row['par_num']), int(row['line_num']))
                 lines[key].append({
                     'text': txt, 'left': left, 'top': top,
                     'width': w, 'height': h, 'right': left + w,
-                    'conf': int(row['conf']),
+                    'conf': conf,
                 })
             except (ValueError, KeyError):
                 continue
     flat = []
     for _, words in lines.items():
+        if not words:  # defaultdict access can leave a phantom empty entry
+            continue    # if a later field in this row failed to parse
         words.sort(key=lambda w: w['left'])
         avg_top = sum(w['top'] for w in words) / len(words)
         flat.append({'top': avg_top, 'words': words})
@@ -334,6 +340,39 @@ def try_fix_pair(tx_list, i, fixes_log):
     return False
 
 
+def check_statement_continuity(stmt_periods):
+    """Flag likely-missing or overlapping statements.
+
+    Args:
+        stmt_periods: list of (name, period_start, period_end), already sorted
+            by period_start; period_start/period_end are ISO date strings or
+            None (e.g. a statement with no parseable transaction dates).
+
+    Returns a list of human-readable warning strings (empty if none).
+    """
+    warnings = []
+    dated = [p for p in stmt_periods if p[1] and p[2]]
+    for (prev_name, _, prev_end), (cur_name, cur_start, _) in zip(dated, dated[1:]):
+        gap_days = (date.fromisoformat(cur_start) - date.fromisoformat(prev_end)).days
+        if gap_days > 3:
+            warnings.append(
+                f"POSSIBLE MISSING STATEMENT: {gap_days}-day gap between "
+                f"'{prev_name}' (ends {prev_end}) and '{cur_name}' (starts {cur_start})."
+            )
+        elif gap_days < -1:
+            warnings.append(
+                f"OVERLAPPING/OUT-OF-ORDER STATEMENTS: '{cur_name}' (starts {cur_start}) "
+                f"overlaps '{prev_name}' (ends {prev_end})."
+            )
+    undated = [p[0] for p in stmt_periods if not (p[1] and p[2])]
+    if undated:
+        warnings.append(
+            f"{len(undated)} statement(s) had no readable dates and could not be "
+            f"checked for continuity: " + ", ".join(undated)
+        )
+    return warnings
+
+
 def is_carried_forward(desc):
     low = (desc or '').lower().replace(' ', '')
     return 'carriedforward' in low or 'cartiedforward' in low or 'cariedforward' in low
@@ -359,9 +398,11 @@ def main():
     if not tsv_root.exists():
         raise SystemExit(f"No TSV folder at {tsv_root}; run ocr_to_tsv.py first.")
 
-    # Natural sort on statement-dir names so that `234-070977`, `234-070977__1_`,
-    # `234-070977__2_`, ..., `234-070977__11_` come out in month order. A plain
-    # alphabetical sort breaks this (it places `__10_` before `__1_`).
+    # Filename order is untrustworthy: Google-Drive-style "(1)".."(11)" download
+    # suffixes reflect download order, not statement period. We parse every
+    # statement first, then order the results by the actual transaction dates
+    # found inside each one (falling back to filename order only if a
+    # statement yields no dates at all, e.g. a truly empty/unreadable file).
     def natural_key(p):
         return [int(tok) if tok.isdigit() else tok.lower()
                 for tok in re.findall(r'\d+|\D+', p.name)]
@@ -370,7 +411,7 @@ def main():
     if not statement_dirs:
         raise SystemExit(f"No statement subfolders under {tsv_root}.")
 
-    all_tx = []
+    stmt_results = []  # (stmt_dir, tx, period_start, period_end)
     for stmt_dir in statement_dirs:
         pages = sorted(
             stmt_dir.glob("page-*.tsv"),
@@ -395,6 +436,21 @@ def main():
         tx = extract_transactions_multi_page(pages, dep_r, wd_r, bal_r)
         for t in tx:
             t['source_pdf'] = stmt_dir.name
+        dates = sorted(t['date'] for t in tx if t.get('date'))
+        period_start = dates[0] if dates else None
+        period_end = dates[-1] if dates else None
+        stmt_results.append((stmt_dir, tx, period_start, period_end))
+
+    # Order by actual statement period (undated statements sort last, in
+    # filename order, since we have nothing better to go on for them).
+    stmt_results.sort(key=lambda r: (r[2] is None, r[2] or '', natural_key(r[0])))
+
+    continuity_warnings = check_statement_continuity(
+        [(r[0].name, r[2], r[3]) for r in stmt_results]
+    )
+
+    all_tx = []
+    for stmt_dir, tx, _, _ in stmt_results:
         all_tx.extend(tx)
 
     # Drop "Balance Carried Forward" noise and keep only the first brought_forward.
@@ -429,10 +485,20 @@ def main():
         print(f"  [{idx}] {t.get('date')} dep={t.get('deposit')} wd={t.get('withdrawal')} "
               f"bal={got} expected={round(expected,2)} | {t.get('desc','')[:60]}")
 
+    print(f"Statement continuity: {len(continuity_warnings)} warning(s)")
+    for w in continuity_warnings:
+        print(f"  WARNING: {w}")
+
     out = args.out or (args.work_dir / "cleaned.json")
     with open(out, 'w') as f:
         json.dump(cleaned, f, indent=2, default=str)
     print(f"Wrote {out}")
+
+    if continuity_warnings:
+        warnings_path = out.parent / "continuity_warnings.json"
+        with open(warnings_path, 'w') as f:
+            json.dump(continuity_warnings, f, indent=2)
+        print(f"Wrote {warnings_path}")
 
     if args.fixes_log or fixes_log:
         flog = args.fixes_log or (args.work_dir / "fixes_log.json")

@@ -212,6 +212,7 @@ def test_sidecar_round_trip(tmp_path):
         "opening_balance": 100000.0,
         "closing_balance": 137499.5,
         "row_count": 3,
+        "account_number": None,
     }
     # Sanity: matches what json.load sees directly.
     assert json.loads(sidecar.read_text(encoding="utf-8")) == data
