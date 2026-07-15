@@ -1,12 +1,12 @@
 name: "skill_hdfc"
 display_name: "HDFC"
 description: >
-  Convert HDFC Bank statements to GnuCash-importable CSV.
-  Supports scanned PDF (OCR via pypdfium2 + pytesseract) and
-  net-banking XLS/XLSX (pure Python, no external tools needed).
-  No LLM required.
+  Convert HDFC Bank statements to GnuCash-importable CSV. Supports digital PDF
+  (including password-protected), scanned/garbled-text PDF (OCR via
+  pypdfium2 + pytesseract, auto-detected), net-banking XLS/XLSX, and CSV
+  exports (including renamed headers). Pure Python, deterministic — no LLM.
 category: "banks"
-version: "1.2.0"
+version: "1.3.0"
 
 mode: "direct"
 entry_point: "agent:run"
@@ -14,15 +14,20 @@ entry_point: "agent:run"
 inputs:
   - name: "pdf_path"
     type: "file"
-    label: "HDFC statement (PDF, XLS, or XLSX)"
-    file_types: [".pdf", ".xls", ".xlsx"]
+    label: "HDFC statement (PDF, XLS, XLSX, or CSV)"
+    file_types: [".pdf", ".xls", ".xlsx", ".csv"]
     required: true
+  - name: "pdf_password"
+    type: "password"
+    label: "PDF password (only if the statement PDF is password-protected — for HDFC often the Cust ID)"
+    required: false
 
 run_args:
   pdf_path: "{inputs.pdf_path}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
+  pdf_password: "{inputs.pdf_password}"
 
 output:
   extension: ".csv"
@@ -37,23 +42,31 @@ requires:
 
 help:
   overview: >
-    Converts HDFC statements — scanned or text PDF, or a net-banking XLS/XLSX —
-    into a GnuCash-ready canonical CSV. Scanned PDFs are OCR'd automatically with
-    Tesseract; XLS/XLSX and text PDFs skip OCR. Runs offline.
+    Converts HDFC statements — digital PDF, password-protected PDF,
+    scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a
+    GnuCash-ready canonical CSV. All four shapes are parsed deterministically
+    (no LLM). A garbled/unusable PDF text layer (custom font encoding) is
+    auto-detected and routed to OCR with Tesseract automatically. Runs offline.
   when_to_use: >
     Use this to get a clean, consistently-columned CSV from any HDFC statement
     format. To also map the rows to GnuCash accounts in one step, use the GnuCash
     Import skill and choose HDFC instead.
   inputs:
     - name: "pdf_path"
-      tooltip: "Your HDFC statement — PDF (scanned or text) or the net-banking spreadsheet."
-      accepts: "PDF (.pdf), Excel (.xls / .xlsx) — one file."
+      tooltip: "Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export."
+      accepts: "PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file."
       gotchas: >
-        XLS/XLSX downloads are the most reliable. Scanned PDFs need Tesseract
-        (bundled in the frozen build; on PATH for source mode) and OCR quality
-        depends on the scan.
+        XLS/XLSX downloads are the most reliable and exact. Digital PDFs work
+        directly; scanned or font-garbled PDFs are OCR'd automatically and OCR
+        quality depends on the scan. CSV exports with renamed headers (e.g.
+        "Value Date"/"Number") are auto-mapped via an alias table.
+    - name: "pdf_password"
+      tooltip: "Only needed if the PDF itself is password-protected."
+      accepts: "The statement's open password — for HDFC this is often the Cust ID."
+      gotchas: "Never required for XLS/XLSX/CSV. Left blank for non-encrypted PDFs. Never logged or included in output."
   steps:
-    - "Pick your HDFC statement file (XLS/XLSX preferred, PDF also works)."
+    - "Pick your HDFC statement file (XLS/XLSX preferred, PDF and CSV also work)."
+    - "If the PDF is password-protected, enter its password."
     - "Click Run."
     - "Download the canonical CSV."
   outputs:
@@ -66,9 +79,12 @@ help:
           into the GnuCash account-mapping pipeline.
   tips: >
     Prefer the net-banking XLS/XLSX export when you have the choice — it skips
-    OCR entirely and is exact.
+    OCR entirely and is exact. All four input shapes should produce the same
+    rows and balances for the same statement period.
   troubleshooting:
-    - problem: "A scanned PDF produces poor or missing rows."
-      fix: "Use the XLS/XLSX export instead, or improve the scan. Ensure Tesseract is available in source mode."
+    - problem: "A scanned or font-garbled PDF produces poor or missing rows."
+      fix: "Use the XLS/XLSX/CSV export instead if available. Ensure Tesseract is available in source mode; OCR fidelity depends on scan quality."
+    - problem: "'PDF is password-protected' error."
+      fix: "Enter the statement's password in the pdf_password field — for HDFC this is often the account Cust ID."
     - problem: "Columns do not look canonical."
       fix: "Confirm the file is a real HDFC statement; other banks have their own skills."

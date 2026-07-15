@@ -19,6 +19,7 @@ import csv
 import gzip
 import json
 import logging
+import re
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
@@ -401,7 +402,7 @@ Rules:
 - Do not invent column names; only use names that appear verbatim in the headers list.
 
 Example response:
-{
+{{
   "Date": "Txn Date",
   "Transaction ID": "Ref No / Cheque No",
   "Description": "Narration",
@@ -410,15 +411,13 @@ Example response:
   "Withdrawal": "Debit",
   "Balance": "Balance (INR)",
   "Currency": null
-}
+}}
 """
 
 
-def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
-    """
-    Read a CSV or XLS/XLSX file and return (headers, sample_rows).
-    sample_rows is at most 5 data rows.
-    """
+def _read_tabular_rows(file_path: str) -> list[list[str]]:
+    """Read a CSV or XLS/XLSX file into a flat list of string rows (no header
+    split — see _find_generic_header_row for locating the header row)."""
     p = Path(file_path)
     suffix = p.suffix.lower()
 
@@ -433,8 +432,7 @@ def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
                 for c in range(ws.ncols):
                     cell = ws.cell(r, c)
                     if cell.ctype == xlrd.XL_CELL_DATE:
-                        import xlrd as _x
-                        dt = _x.xldate_as_datetime(cell.value, wb.datemode)
+                        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
                         row.append(dt.strftime("%d/%m/%Y"))
                     elif cell.ctype == xlrd.XL_CELL_NUMBER:
                         v = cell.value
@@ -450,23 +448,79 @@ def _read_csv_or_xls(file_path: str) -> tuple[list[str], list[list[str]]]:
             ws = wb.active
             rows = []
             for row in ws.iter_rows(values_only=True):
-                rows.append([str(c) if c is not None else "" for c in row])
-
-        if not rows:
-            return [], []
-        headers = rows[0]
-        sample = rows[1:6]
-        return headers, sample
+                rows.append([str(c).strip() if c is not None else "" for c in row])
+        return rows
 
     else:  # CSV
         with open(file_path, newline="", encoding="utf-8-sig") as fh:
             reader = csv.reader(fh)
-            rows = list(reader)
-        if not rows:
-            return [], []
-        headers = rows[0]
-        sample = rows[1:6]
-        return headers, sample
+            return [[str(c).strip() for c in row] for row in reader]
+
+
+_HEADER_DATEISH_RE = re.compile(r'^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$')
+
+
+def _find_generic_header_row(rows: list[list[str]]) -> int:
+    """Locate the header row in an arbitrary bank CSV/XLS export, tolerant of
+    preamble rows (account info, statement period, blank rows, '****'
+    separators) above it — mirrors skill_hdfc's header detection but without
+    assuming any particular bank's column names. Heuristic: the first row
+    with >=2 non-empty cells where most cells look like text labels (contain
+    a letter and aren't themselves a date), i.e. a plausible header row."""
+    for i, row in enumerate(rows):
+        cells = [str(c).strip() for c in row]
+        non_empty = [c for c in cells if c]
+        if len(non_empty) < 2:
+            continue
+        text_like = sum(
+            1 for c in non_empty
+            if re.search(r'[A-Za-z]', c) and not _HEADER_DATEISH_RE.match(c)
+        )
+        if text_like >= max(2, (len(non_empty) + 1) // 2):
+            return i
+    return 0  # fallback: no clear header row found, assume the first row
+
+
+_CANONICAL_MAPPING_KEYS = {
+    "Date", "Transaction ID", "Description", "Account",
+    "Deposit", "Withdrawal", "Balance", "Currency",
+}
+
+
+def _sanitize_and_validate_mapping(raw_reply: str, headers: list[str]) -> dict:
+    """Parse + sanitize an LLM column-mapping reply: strip accidental
+    markdown fences, drop unknown keys, and verify every mapped value is
+    either null or a header that actually appears (verbatim) in the file.
+    Raises ValueError naming the offending keys/values on any violation —
+    callers retry once on this error, then hard-fail."""
+    raw = raw_reply.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```")[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    try:
+        mapping = json.loads(raw.strip())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM reply was not valid JSON: {e}") from e
+    if not isinstance(mapping, dict):
+        raise ValueError("LLM reply must be a JSON object")
+
+    sign_convention = mapping.get("sign_convention")
+    sanitized = {k: v for k, v in mapping.items() if k in _CANONICAL_MAPPING_KEYS}
+
+    header_set = set(headers)
+    bad_values = {
+        k: v for k, v in sanitized.items()
+        if v is not None and v not in header_set
+    }
+    if bad_values:
+        raise ValueError(
+            "LLM mapped canonical column(s) to header(s) not present in the "
+            f"file: {bad_values}. Real headers are: {headers}"
+        )
+
+    sanitized["sign_convention"] = sign_convention
+    return sanitized
 
 
 def _normalise_to_canonical(
@@ -478,16 +532,24 @@ def _normalise_to_canonical(
 ) -> None:
     """
     LLM-assisted column normalisation: maps arbitrary CSV/XLS to the canonical
-    8-column schema and writes the result to output_path.
+    8-column schema and writes the result to output_path. Reserved for
+    "Other Bank (CSV)" — HDFC always uses skill_hdfc's deterministic parser.
     """
     agents_root = Path(__file__).resolve().parent.parent
     if str(agents_root) not in sys.path:
         sys.path.insert(0, str(agents_root))
     from agents.base_agent import run_direct  # noqa: E402
 
-    headers, sample = _read_csv_or_xls(input_file)
-    if not headers:
+    rows = _read_tabular_rows(input_file)
+    if not rows:
         raise ValueError(f"Could not read any data from {input_file}")
+
+    header_idx = _find_generic_header_row(rows)
+    headers = rows[header_idx]
+    sample = rows[header_idx + 1: header_idx + 6]
+    all_rows = rows[header_idx + 1:]
+    if not headers or not any(str(h).strip() for h in headers):
+        raise ValueError(f"Could not find a header row in {input_file}")
 
     headers_str = json.dumps(headers)
     sample_str = "\n".join(
@@ -501,64 +563,36 @@ def _normalise_to_canonical(
         "Output ONLY raw JSON — no markdown, no explanation."
     )
 
-    raw = run_direct(
-        user_message=prompt,
-        system_prompt=system,
-        config_path=config_path,
-        model_override=model_override,
-    )
+    mapping = None
+    last_error = None
+    for attempt in range(2):  # one retry after an invalid/hallucinated reply
+        user_message = prompt
+        if attempt == 1:
+            user_message = (
+                prompt
+                + f"\n\nYour previous reply was rejected: {last_error}\n"
+                + "Only use header names that appear verbatim in the headers list above."
+            )
+        raw = run_direct(
+            user_message=user_message,
+            system_prompt=system,
+            config_path=config_path,
+            model_override=model_override,
+        )
+        try:
+            mapping = _sanitize_and_validate_mapping(raw, headers)
+            break
+        except ValueError as e:
+            last_error = e
+            mapping = None
 
-    # Strip accidental markdown fences if the LLM adds them
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"):
-            raw = raw[4:]
-    mapping = json.loads(raw.strip())
+    if mapping is None:
+        raise ValueError(
+            f"LLM column mapping failed validation after retry: {last_error}"
+        )
 
     sign_convention = mapping.pop("sign_convention", None)
-
-    # Re-read full file
-    all_headers, _ = _read_csv_or_xls(input_file)
-    p = Path(input_file)
-    if p.suffix.lower() in (".xls", ".xlsx"):
-        # Re-read all rows
-        if p.suffix.lower() == ".xls":
-            import xlrd
-            wb = xlrd.open_workbook(str(p))
-            ws = wb.sheet_by_index(0)
-            all_rows = []
-            for r in range(1, ws.nrows):  # skip header
-                row = []
-                for c in range(ws.ncols):
-                    cell = ws.cell(r, c)
-                    if cell.ctype == xlrd.XL_CELL_DATE:
-                        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
-                        row.append(dt.strftime("%d/%m/%Y"))
-                    elif cell.ctype == xlrd.XL_CELL_NUMBER:
-                        v = cell.value
-                        row.append(str(int(v)) if v == int(v) else str(v))
-                    elif cell.ctype == xlrd.XL_CELL_EMPTY:
-                        row.append("")
-                    else:
-                        row.append(str(cell.value).strip())
-                all_rows.append(row)
-        else:
-            import openpyxl
-            wb = openpyxl.load_workbook(str(p), data_only=True)
-            ws = wb.active
-            all_rows = []
-            for i, row in enumerate(ws.iter_rows(values_only=True)):
-                if i == 0:
-                    continue
-                all_rows.append([str(c) if c is not None else "" for c in row])
-    else:
-        with open(input_file, newline="", encoding="utf-8-sig") as fh:
-            reader = csv.reader(fh)
-            data_rows = list(reader)
-        all_rows = data_rows[1:]  # skip header
-
-    col_idx = {h: i for i, h in enumerate(all_headers)}
+    col_idx = {h: i for i, h in enumerate(headers)}
 
     def _get(row, col_name):
         if col_name is None:
@@ -612,6 +646,7 @@ def run(
     output_path: str,
     config_path: str = None,
     model_override: str = None,
+    pdf_password: str = None,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -625,6 +660,9 @@ def run(
         output_path:     Path for the final mapped CSV.
         config_path:     Passed through to sub-skills and LLM calls.
         model_override:  Passed through to sub-skills and LLM calls.
+        pdf_password:    Optional statement password, forwarded to skill_hdfc
+                         for password-protected HDFC PDFs (for HDFC often the
+                         Cust ID). Never logged.
 
     Returns:
         Human-readable summary string for the UI.
@@ -759,57 +797,41 @@ def run(
                 )
 
         elif bank == "HDFC":
+            # All HDFC input shapes (PDF, password-protected PDF, XLS, XLSX,
+            # CSV) go through skill_hdfc's deterministic parser — no LLM.
+            # The generic LLM-assisted normalisation path below is reserved
+            # for "Other Bank (CSV)" only.
             input_file = (
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
             input_file = _resolve_single_file(input_file, (".csv", ".xls", ".xlsx", ".pdf"))
             suffix = Path(input_file).suffix.lower()
-            if suffix == ".pdf":
-                _emit_progress(1, f"HDFC: OCR scanning PDF statement")
-                log_lines.append("**Step 1** — HDFC: OCR scanning PDF statement")
-                _emit_progress(2, f"HDFC: parsing transactions to canonical format")
-                log_lines.append("**Step 2** — HDFC: parsing transactions to canonical format")
-                try:
-                    from skill_hdfc.agent import run as hdfc_run  # noqa: E402
-                    hdfc_result = hdfc_run(
-                        pdf_path=input_file,
-                        output_path=canonical_path,
-                        config_path=config_path,
-                        model_override=model_override,
-                    )
-                    # hdfc_run returns an error string (starting with ❌) on failure
-                    if hdfc_result and "❌" in str(hdfc_result):
-                        return (
-                            f"## {bank} → extraction error\n\n"
-                            f"{hdfc_result}"
-                        )
-                except Exception as e:
-                    log.error("HDFC extraction failed: %s", e, exc_info=True)
+            step_label = "OCR/parsing PDF statement" if suffix == ".pdf" else "parsing statement"
+            _emit_progress(1, f"HDFC: {step_label}")
+            log_lines.append(f"**Step 1** — HDFC: {step_label} (deterministic, no LLM)")
+            try:
+                from skill_hdfc.agent import run as hdfc_run  # noqa: E402
+                hdfc_result = hdfc_run(
+                    pdf_path=input_file,
+                    output_path=canonical_path,
+                    config_path=config_path,
+                    model_override=model_override,
+                    pdf_password=pdf_password,
+                )
+                # hdfc_run returns an error string (starting with "Error " or
+                # containing ❌) on failure rather than raising.
+                if hdfc_result and ("❌" in str(hdfc_result) or str(hdfc_result).startswith("Error")):
                     return (
                         f"## {bank} → extraction error\n\n"
-                        f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                        f"{hdfc_result}"
                     )
-            else:
-                # CSV/XLS fallback
-                _emit_progress(1, f"HDFC: reading CSV/XLS statement")
-                log_lines.append("**Step 1** — HDFC: reading CSV/XLS statement")
-                _emit_progress(2, f"HDFC: LLM normalising columns → canonical schema")
-                log_lines.append("**Step 2** — HDFC: LLM normalising columns → canonical schema")
-                try:
-                    _normalise_to_canonical(
-                        input_file=input_file,
-                        output_path=canonical_path,
-                        bank_name=bank,
-                        config_path=config_path,
-                        model_override=model_override,
-                    )
-                except Exception as e:
-                    log.error("HDFC normalisation failed: %s", e, exc_info=True)
-                    return (
-                        f"## {bank} → normalisation error\n\n"
-                        f"❌ HDFC column normalisation raised an exception:\n```\n{e}\n```"
-                    )
+            except Exception as e:
+                log.error("HDFC extraction failed: %s", e, exc_info=True)
+                return (
+                    f"## {bank} → extraction error\n\n"
+                    f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                )
 
         elif bank == "Other Bank (CSV)":
             input_file = (
