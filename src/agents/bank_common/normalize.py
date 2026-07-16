@@ -2,32 +2,47 @@
 agents/bank_common/normalize.py — shared amount/date normalization.
 
 Moved verbatim from ``skill_hdfc/agent.py`` (``_clean_amount`` /
-``_normalise_date``), which remains the reference implementation.
+``_normalise_date``), which remains the reference implementation. Extended
+for BoB (P2): a trailing Cr/Dr balance suffix (e.g. "1,57,950.00Cr") and a
+"-"-separated DD-MM-YY(YY) date form, both common on BoB statements but
+absent from HDFC's.
 """
 from __future__ import annotations
 
 import re
 
 _ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+_CR_DR_SUFFIX_RE = re.compile(r'(Cr|Dr)$', re.IGNORECASE)
 
 
-def clean_amount(s) -> str:
-    """Strip thousands separators; render an exact-zero amount as "" (blank
-    cell), matching the canonical schema's convention for "no amount"."""
+def clean_amount(s, blank_zero: bool = True) -> str:
+    """Strip thousands separators and a trailing Cr/Dr suffix.
+
+    ``blank_zero`` (default True, HDFC's original convention) renders an
+    exact-zero amount as "" (blank cell) -- the canonical schema's
+    convention for "no amount". Pass ``blank_zero=False`` to keep the
+    zero-amount string as-is instead (BoB's canonical mapper applies its own
+    blank/zero convention on top of this primitive).
+    """
     s = str(s).replace(",", "").strip()
+    s = _CR_DR_SUFFIX_RE.sub("", s).strip()
     try:
-        return "" if float(s) == 0.0 else s
+        return "" if (blank_zero and float(s) == 0.0) else s
     except ValueError:
         return s
 
 
 def normalise_date(d) -> str:
-    """Normalize a DD/MM/YY(YY) date string to ISO YYYY-MM-DD; pass through
-    values already in ISO form or that don't match the DD/MM/YY(YY) shape."""
+    """Normalize a DD/MM/YY(YY) or DD-MM-YY(YY) date string to ISO
+    YYYY-MM-DD; pass through values already in ISO form or that don't match
+    either shape."""
     d = str(d).strip()
     if _ISO_DATE_RE.match(d):
         return d  # already canonical ISO
-    parts = d.split("/")
+    sep = "/" if "/" in d else "-" if "-" in d else None
+    if sep is None:
+        return d
+    parts = d.split(sep)
     if len(parts) != 3:
         return d
     dd, mm, yy = parts[0], parts[1], parts[2]
