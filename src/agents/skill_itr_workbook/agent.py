@@ -57,6 +57,20 @@ a selected entity now auto-derives that entity's
 start (no mapping anywhere) now routes into the same BLOCKED-FOR-REVIEW +
 proposed-mappings-snippet flow as a partially mapped file, rather than
 silently reporting STATUS: OK on an empty one-sheet stub.
+2026-07-16 ITR Best-Effort Workbook, Part 1: BLOCKED-FOR-REVIEW-with-nothing-
+built is gone. Any unmapped leaf (partial mapping OR true cold start) now
+still builds the full BS + P&L + IT working workbook -- every unmapped leaf
+routes into scripts/schedules.py's UNCLASSIFIED/REVIEW bucket
+(build_unclassified) instead of silently being dropped, so BS/P&L totals
+still tally with those amounts included. The IT working shows a DRAFT tax
+(resolved items only) plus a worst-case upper bound (every unclassified
+INCOME-type leaf taxed at the top slab; unclassified expense/deduction
+items are never assumed to reduce tax) -- both loudly labelled, neither
+presented as filing-ready. STATUS is now "BUILT -- N REVIEW ITEM(S)" (N>0)
+instead of BLOCKED-FOR-REVIEW; the <output>-proposed-mappings.yaml
+learning-loop snippet is still written whenever N>0. Hard-error paths
+(unparseable HTML, unresolved entity, AY-vs-HTML mismatch, mapping
+VALIDATION ERROR) are unchanged -- still stub + ERROR, no workbook.
 """
 from __future__ import annotations
 
@@ -82,7 +96,11 @@ from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 _AS_OF_RE = re.compile(r"Balance Sheet \(eguile\)[^0-9]*(\d{2})-(\d{2})-(\d{4})")
 
 OK = "OK"
-BLOCKED_FOR_REVIEW = "BLOCKED-FOR-REVIEW"
+BLOCKED_FOR_REVIEW = "BLOCKED-FOR-REVIEW"   # hard-error paths only (bad HTML, unresolved
+                                             # entity, AY mismatch, mapping VALIDATION ERROR) --
+                                             # unmapped leaves no longer route here (2026-07-16
+                                             # Part 1: best-effort build-with-call-outs instead).
+BUILT_WITH_REVIEW_PREFIX = "BUILT --"
 
 
 def _infer_year_key(bs_html: str) -> str | None:
@@ -155,7 +173,15 @@ def _mapping_summary(
             "Mapping: no mapping_file supplied and none found for this entity -- "
             "cold start: treating every leaf as unmapped.",
         )
-    lines.append("Mapping: BLOCKED-FOR-REVIEW -- unmapped accounts found:")
+    n_unmapped = len(result.unmapped)
+    unmapped_total = sum(leaf.total or 0.0 for leaf in result.unmapped)
+    status = f"{BUILT_WITH_REVIEW_PREFIX} {n_unmapped} REVIEW ITEM(S)"
+    lines.append(
+        f"Mapping: {n_unmapped} unmapped account(s) (Rs {unmapped_total:,.2f} total) -- routed to the "
+        "UNCLASSIFIED/REVIEW bucket; the workbook still builds (best-effort, plan decision locked "
+        "2026-07-16). See the Unclassified/Computation sheets for the DRAFT tax and worst-case "
+        "upper bound. Unmapped accounts:"
+    )
     for leaf in result.unmapped:
         lines.append(f"  - {leaf.path} (FY total {leaf.total})")
 
@@ -165,11 +191,11 @@ def _mapping_summary(
     Path(snippet_path).write_text(snippet, encoding="utf-8")
     lines.append(f"Proposed mappings written to {snippet_path} -- review and paste into the mapping file.")
     if suggestions:
-        lines.append(f"  ({len(suggestions)} of {len(result.unmapped)} unmapped account(s) got an LLM suggestion.)")
+        lines.append(f"  ({len(suggestions)} of {n_unmapped} unmapped account(s) got an LLM suggestion.)")
     else:
         lines.append("  (No LLM suggestions -- no endpoint configured, or the endpoint call failed.)")
 
-    return lines, BLOCKED_FOR_REVIEW, result, loaded.entries
+    return lines, status, result, loaded.entries
 
 
 def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) -> list[str]:
@@ -353,14 +379,22 @@ def _build_and_write_workbook(
     regime_override: str | None = None, mapping_entries: dict | None = None,
 ) -> list[str]:
     """Builds the full schedule model + formula-driven workbook (plan
-    sections 2.2/3) when a resolved, unblocked mapping is available. Returns
-    extra summary lines describing what happened; the caller still writes
-    a stub workbook on any failure so a run never crashes for a schedule/
-    rules problem outside this batch's control (e.g. no rules config for
-    this year yet). `entity` is resolved once by the caller (run()) rather
-    than re-resolved here, so the Form16 PAN auto-derivation (B7) and this
-    schedule build always agree on the same profile."""
-    if result is None or result.blocked or year_key is None:
+    sections 2.2/3) whenever mapping resolution ran at all. Returns extra
+    summary lines describing what happened; the caller still writes a stub
+    workbook on any failure so a run never crashes for a schedule/rules
+    problem outside this batch's control (e.g. no rules config for this
+    year yet). `entity` is resolved once by the caller (run()) rather than
+    re-resolved here, so the Form16 PAN auto-derivation (B7) and this
+    schedule build always agree on the same profile.
+
+    2026-07-16 Part 1: a resolved-but-partial mapping (result.blocked,
+    i.e. some leaves unmapped) NO LONGER skips the build -- every unmapped
+    leaf routes into schedules.py's UNCLASSIFIED/REVIEW bucket instead
+    (build_unclassified) and the full workbook still builds with loud
+    call-outs (write_workbook.py). Only result is None (a mapping
+    VALIDATION ERROR -- a config bug, not a review case) or a missing
+    year_key still skips the build entirely."""
+    if result is None or year_key is None:
         return []
 
     try:
@@ -389,7 +423,7 @@ def _build_and_write_workbook(
 
     model = sch.build_all_schedules(
         tree, result.resolved, book, form16_data, year_key, rules, regime,
-        entity.status, entity.dob, scrips, fmv_tables, as26_data,
+        entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
@@ -407,6 +441,14 @@ def _build_and_write_workbook(
         f"Workbook: full schedule model built for {rules.year_label} (regime={regime}), "
         f"written to {Path(output_path).name}.",
     ]
+    if result.unmapped:
+        n = len(result.unmapped)
+        total = sum(leaf.total or 0.0 for leaf in result.unmapped)
+        lines.append(
+            f"Workbook: {n} account(s) unclassified (Rs {total:,.2f} total) -- routed to the "
+            "UNCLASSIFIED/REVIEW bucket; DRAFT tax + worst-case upper bound shown on Computation "
+            "(NOT filing-ready). See Unclassified / Mapping Review sheets."
+        )
     lines.extend(as26_lines)
     if model.taxes_paid.as26_available and not model.taxes_paid.tie_out_ok:
         for c in model.taxes_paid.tie_out_conflicts:
@@ -451,10 +493,12 @@ def run(
     When book_file is supplied, also runs the book<->HTML cross-check and
     feeds CG-lot reconstruction + dividend/interest quarter bucketing. When
     mapping_file is supplied, resolves every leaf to a tag (plan section
-    3.1); any unmapped leaf sets the run's status to BLOCKED-FOR-REVIEW,
-    writes a <output_path>-proposed-mappings.yaml snippet, and skips the
-    full workbook build entirely -- no value from an unmapped leaf reaches
-    any downstream schedule.
+    3.1); any unmapped leaf (2026-07-16 Part 1) routes into the
+    UNCLASSIFIED/REVIEW bucket instead of blocking the build, sets the
+    run's status to "BUILT -- N REVIEW ITEM(S)", and writes a
+    <output_path>-proposed-mappings.yaml snippet -- the full workbook still
+    builds, with a DRAFT tax figure (resolved items only) and a worst-case
+    upper bound shown alongside, neither presented as filing-ready.
 
     When form16_pdf is supplied, parses the Part B/Annexure-I salary
     computation and feeds the Salary schedule + the two Book<->Form16

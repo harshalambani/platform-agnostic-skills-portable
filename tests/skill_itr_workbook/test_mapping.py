@@ -348,28 +348,33 @@ def test_agent_run_ok_status_when_fully_mapped(tmp_path):
     assert not Path(str(out_path) + "-proposed-mappings.yaml").exists()
 
 
-def test_agent_run_blocked_status_with_extra_unmapped_account(tmp_path):
+def test_agent_run_built_with_review_status_with_extra_unmapped_account(tmp_path):
+    """2026-07-16 Part 1: an unmapped account no longer blocks the run --
+    it still builds, with STATUS: BUILT -- N REVIEW ITEM(S) and a
+    proposed-mappings learning-loop snippet."""
     html_path = tmp_path / "syn_ind.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
     out_path = tmp_path / "out.xlsx"
     summary = agent.run(str(html_path), str(out_path), mapping_file=str(SYN_IND_UNMAPPED_MAPPING))
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
+    assert "STATUS: BUILT -- 1 REVIEW ITEM(S)" in summary
     assert "Misc Holding (unmapped)" in summary
     snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
     assert snippet_path.exists()
     assert "REPLACE_ME" in snippet_path.read_text(encoding="utf-8")
 
 
-def test_agent_run_blocked_cold_start_when_no_mapping_file_supplied(tmp_path):
+def test_agent_run_built_cold_start_when_no_mapping_file_supplied(tmp_path):
     """Defect B(ii): no mapping_file and no entity selected is a true cold
-    start -- every leaf is treated as unmapped and the run BLOCKS for
-    review with a proposed-mappings snippet, rather than reporting
-    STATUS: OK on an empty stub."""
+    start -- every leaf is treated as unmapped, but 2026-07-16 Part 1 still
+    builds a best-effort workbook (everything routed to UNCLASSIFIED) and
+    writes the proposed-mappings snippet, rather than reporting STATUS: OK
+    on an empty stub."""
     html_path = tmp_path / "syn_ind.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
     out_path = tmp_path / "out.xlsx"
     summary = agent.run(str(html_path), str(out_path))
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
+    assert "STATUS: BUILT --" in summary
+    assert "REVIEW ITEM(S)" in summary
     assert "cold start" in summary
     snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
     assert snippet_path.exists()

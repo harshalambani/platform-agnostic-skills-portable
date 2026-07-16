@@ -37,7 +37,8 @@ INR_FORMAT = "#,##,##0.00"
 _MAX_SLAB_ROWS = 8
 _MAX_SURCHARGE_ROWS = 4
 
-_UNMAPPED_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+_UNMAPPED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_UNMAPPED_FONT = Font(color="9C0006", bold=True)
 
 # Line label shown on the Mapping Review sheet's Destination column, one per
 # tag -- kept in sync BY HAND with the row labels write_*_sheet() above
@@ -514,6 +515,44 @@ def write_bs_transcript(wb: Workbook, tree) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Unclassified / Review sheet (2026-07-16 Part 1: best-effort workbook)
+# ---------------------------------------------------------------------------
+
+def write_unclassified_sheet(wb: Workbook, uncl: sch.UnclassifiedSchedule) -> None:
+    """Only created when uncl.count > 0 (see write_workbook orchestrator) --
+    a fully-mapped run gets no Unclassified sheet at all, keeping that run
+    byte-for-behaviour identical to a pre-Part-1 workbook (gate 3)."""
+    ws = wb.create_sheet("Unclassified")
+    sw = _SheetWriter(ws)
+    header_row = sw.row
+    sw.header(
+        f"UNCLASSIFIED / REVIEW -- {uncl.count} item(s), Rs {uncl.total_amount:,.2f} total -- "
+        "NOT filing-ready. Every unmapped leaf lands here instead of being dropped."
+    )
+    ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
+    ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+    sw.blank()
+
+    headers = ["Account path", "Amount", "Section", "Income-type (worst-case tax base)"]
+    for col, h in enumerate(headers, start=1):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for item in uncl.items:
+        row = sw.row
+        sw.cell(1, item.path)
+        sw.cell(2, item.amount, number_format=INR_FORMAT)
+        sw.cell(3, item.section)
+        sw.cell(4, item.is_income_type)
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
+        sw.row += 1
+
+    sw.blank()
+    sw.label_value("TOTAL unclassified (all sections)", uncl.total_amount)
+    sw.label_value("  of which income-type (worst-case tax base -- see Computation)", uncl.income_type_total)
+
+
+# ---------------------------------------------------------------------------
 # Computation sheet -- the formula-driven backbone
 # ---------------------------------------------------------------------------
 
@@ -646,15 +685,57 @@ def write_computation_sheet(
     sw.cell(2, f"={regime_cell}", number_format=None)
     sw.row += 1
 
-    sw.cell(1, "Tax liability (selected regime)")
+    uncl = model.unclassified
+    liability_label = "Tax liability (selected regime)"
+    refund_label = "Refund (+) / Payable (-), s.288B rounded"
+    if uncl.count > 0:
+        liability_label += " -- DRAFT (not filing-ready; see call-out below)"
+        refund_label += " -- DRAFT (not filing-ready; see call-out below)"
+
+    sw.cell(1, liability_label)
     selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
     sw.row += 1
 
     taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
 
-    sw.cell(1, "Refund (+) / Payable (-), s.288B rounded")
+    sw.cell(1, refund_label)
     sw.cell(2, f"=MROUND({taxes_paid_cell.coordinate}-{selected_liability_cell},'Rules'!{rules_layout['round_tax_nearest'].coordinate})", number_format=INR_FORMAT)
     sw.row += 1
+
+    if uncl.count > 0:
+        sw.blank()
+        header_row = sw.row
+        sw.header(
+            f"BEST-EFFORT CALL-OUT -- {uncl.count} item(s) unclassified, NOT filing-ready"
+        )
+        ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
+        ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+        sw.label_value("Unclassified item(s) -- count", uncl.count, number_format=None)
+        sw.label_value("Unclassified item(s) -- total amount (Rs, all sections)", uncl.total_amount)
+        sw.label_value(
+            "Unclassified income-type total (Rs) -- worst-case tax base", uncl.income_type_total,
+        )
+        draft_row = sw.row
+        sw.cell(
+            1,
+            f"DRAFT tax liability (selected regime) -- {uncl.count} item(s) unclassified "
+            f"(Rs {uncl.total_amount:,.2f} total), NOT filing-ready",
+        )
+        sw.cell(2, model.computation.tax_block.tax_liability, number_format=INR_FORMAT)
+        for col in (1, 2):
+            ws.cell(row=draft_row, column=col).font = _UNMAPPED_FONT
+        sw.row += 1
+        worst_case_row = sw.row
+        sw.cell(
+            1,
+            "Worst-case upper bound tax liability -- assumes every unclassified income-type "
+            "item is fully taxable at the top slab rate (expenses/deductions NOT assumed to "
+            "reduce tax); true liability sits between DRAFT and this figure",
+        )
+        sw.cell(2, model.computation.worst_case_tax_liability, number_format=INR_FORMAT)
+        for col in (1, 2):
+            ws.cell(row=worst_case_row, column=col).font = _UNMAPPED_FONT
+        sw.row += 1
 
 
 # ---------------------------------------------------------------------------
@@ -703,6 +784,13 @@ def write_reconciliation_sheet(
     sw.blank()
 
     sw.header(f"Unmapped accounts ({len(unmapped)})")
+    if unmapped:
+        sw.label_value(
+            "BEST-EFFORT BUILD",
+            f"{len(unmapped)} item(s) unclassified -- routed to the Unclassified sheet + "
+            "Computation DRAFT/worst-case tax figures, NOT filing-ready",
+            number_format=None,
+        )
     for leaf in unmapped:
         sw.label_value(leaf.path, leaf.total)
     sw.blank()
@@ -767,7 +855,11 @@ def write_mapping_review_sheet(
         sw.row += 1
 
     if unmapped:
-        sw.header(f"UNMAPPED ({len(unmapped)}) -- needs a mapping entry before a full workbook can build")
+        sw.header(
+            f"UNMAPPED ({len(unmapped)}) -- routed to the UNCLASSIFIED/REVIEW bucket (see "
+            "'Unclassified' sheet); the workbook still builds best-effort. Add a mapping entry "
+            "to move an item out of DRAFT/worst-case status."
+        )
         _header_row()
         for leaf in unmapped:
             row = sw.row
@@ -781,6 +873,7 @@ def write_mapping_review_sheet(
             sw.cell(8, leaf.guid)
             for col in range(1, 9):
                 ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
+                ws.cell(row=row, column=col).font = _UNMAPPED_FONT
             sw.row += 1
         sw.blank()
 
@@ -840,6 +933,8 @@ def write_workbook(
     tp_layout = write_taxes_paid_sheet(wb, model.taxes_paid)
     ded_layout = write_deductions_sheet(wb, model.deductions)
     write_schedule_al_sheet(wb, model.schedule_al)
+    if model.unclassified.count > 0:
+        write_unclassified_sheet(wb, model.unclassified)
     write_is_transcript(wb, tree)
     write_bs_transcript(wb, tree)
 

@@ -218,7 +218,7 @@ def test_auto_derive_does_not_override_explicit_mapping_file(tmp_path):
     mappings_dir.mkdir(parents=True, exist_ok=True)
     # A decoy auto-derive target that would resolve every leaf, so if
     # auto-derive wrongly overrode the explicit mapping_file this test would
-    # see STATUS: OK instead of BLOCKED-FOR-REVIEW.
+    # see STATUS: OK instead of the partial mapping's BUILT-with-review-items.
     shutil.copy(FIXTURES / "syn_ind.mapping.yaml", mappings_dir / "SYN-IND.mapping.yaml")
 
     summary = agent.run(
@@ -228,14 +228,18 @@ def test_auto_derive_does_not_override_explicit_mapping_file(tmp_path):
     )
 
     assert "Mapping: auto-derived" not in summary
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
+    assert "STATUS: BUILT -- 1 REVIEW ITEM(S)" in summary
 
 
 # ---------------------------------------------------------------------------
 # Gate 4 -- B(ii) true cold start (no mapping anywhere for the entity)
 # ---------------------------------------------------------------------------
 
-def test_cold_start_no_mapping_anywhere_blocks_for_review(tmp_path):
+def test_cold_start_no_mapping_anywhere_builds_best_effort(tmp_path):
+    """2026-07-16 Part 1: a true cold start (nothing resolved at all) still
+    builds a best-effort workbook -- every leaf routes to UNCLASSIFIED --
+    rather than a bare stub. STATUS is never OK (nothing was actually
+    resolved), but it's BUILT, not BLOCKED."""
     html_path = tmp_path / "bs.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
     out_path = tmp_path / "out.xlsx"
@@ -249,7 +253,8 @@ def test_cold_start_no_mapping_anywhere_blocks_for_review(tmp_path):
         entity_key="SYN-IND", entities_path=str(entities_path),
     )
 
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
+    assert "STATUS: BUILT --" in summary
+    assert "REVIEW ITEM(S)" in summary
     assert "STATUS: OK" not in summary
     assert "cold start" in summary
     snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
@@ -257,4 +262,5 @@ def test_cold_start_no_mapping_anywhere_blocks_for_review(tmp_path):
     assert "REPLACE_ME" in snippet_path.read_text(encoding="utf-8")
 
     wb = openpyxl.load_workbook(str(out_path))
-    assert wb.sheetnames == ["Reconciliation"]  # never a green full workbook
+    assert "Computation" in wb.sheetnames  # best-effort: a full workbook, not a bare stub
+    assert "Unclassified" in wb.sheetnames

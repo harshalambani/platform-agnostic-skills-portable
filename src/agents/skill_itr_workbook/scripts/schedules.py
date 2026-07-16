@@ -680,6 +680,54 @@ def build_schedule_fa(resolved: dict, node_by_guid: dict) -> ScheduleFASchedule:
 
 
 # ---------------------------------------------------------------------------
+# Unclassified / Review bucket (2026-07-16 Part 1: best-effort workbook)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UnclassifiedItem:
+    path: str
+    guid: str | None
+    amount: float
+    section: str
+    is_income_type: bool   # True only for RetainedEarnings-Income leaves --
+                            # drives the worst-case upper-bound tax base.
+
+
+@dataclass
+class UnclassifiedSchedule:
+    items: list = field(default_factory=list)   # list[UnclassifiedItem]
+    count: int = 0
+    total_amount: float = 0.0            # signed sum, every section (BS + P&L)
+    income_type_total: float = 0.0       # signed sum, RetainedEarnings-Income leaves only
+
+
+def build_unclassified(tree: pe.ParsedBalanceSheet, unmapped: list) -> UnclassifiedSchedule:
+    """Every unmapped leaf (mapping.py's ResolutionResult.unmapped) routes
+    here instead of being silently dropped (plan decision locked
+    2026-07-16, Part 1 -- "block-to-nothing" replaced by "build-with-
+    call-outs"). `is_income_type` (True only for RetainedEarnings-Income
+    leaves) is the base for the IT working's worst-case upper bound;
+    unclassified expense/deduction/BS-side items are NOT assumed to reduce
+    tax (conservative -- they simply don't count toward the worst case)."""
+    node_by_guid = _node_by_guid(tree)
+    items: list[UnclassifiedItem] = []
+    total = 0.0
+    income_total = 0.0
+    for leaf in unmapped:
+        node = node_by_guid.get(leaf.guid) if leaf.guid else None
+        section = node.section if node is not None else "Unknown"
+        amount = (node.total if node is not None and node.total is not None else leaf.total) or 0.0
+        is_income = section == "RetainedEarnings-Income"
+        items.append(UnclassifiedItem(
+            path=leaf.path, guid=leaf.guid, amount=amount, section=section, is_income_type=is_income,
+        ))
+        total += amount
+        if is_income:
+            income_total += amount
+    return UnclassifiedSchedule(items=items, count=len(items), total_amount=total, income_type_total=income_total)
+
+
+# ---------------------------------------------------------------------------
 # Computation backbone (plan section 2.1 / 3.3)
 # ---------------------------------------------------------------------------
 
@@ -846,6 +894,13 @@ class ComputationSchedule:
     tax_block: TaxBlock
     taxes_paid: float
     refund_or_payable: float   # positive == refund, negative == payable
+    unclassified_count: int = 0
+    unclassified_total: float = 0.0
+    unclassified_income_type_total: float = 0.0
+    worst_case_extra_tax: float = 0.0    # additional tax+cess on unclassified income-type
+                                           # items, taxed at the top slab rate (upper bound)
+    worst_case_tax_liability: float = 0.0  # tax_block.tax_liability + worst_case_extra_tax;
+                                             # == tax_block.tax_liability when nothing unclassified
 
 
 def build_computation(
@@ -853,6 +908,7 @@ def build_computation(
     other_sources: OtherSourcesSchedule, capital_gains: CapitalGainsSchedule,
     deductions: DeductionsSchedule, taxes_paid: TaxesPaidSchedule,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
+    unclassified: "UnclassifiedSchedule | None" = None,
 ) -> ComputationSchedule:
     cg_cfg = rules.common["capital_gains"]
 
@@ -894,6 +950,20 @@ def build_computation(
     nearest_tax = rules.common["rounding"]["tax_payable_refund"]["nearest"]
     refund_or_payable = round_288b(refund_or_payable_raw, nearest_tax)
 
+    uncl = unclassified or UnclassifiedSchedule()
+    # Worst-case upper bound (plan decision locked 2026-07-16): every
+    # unclassified INCOME-type leaf assumed fully taxable at the top slab
+    # rate for this regime/status/age-band; unclassified expense/deduction
+    # (or BS-side) items are never assumed to reduce tax, so they don't
+    # enter this figure at all. max(0.0, ...) so a negative income-type
+    # total (unusual, but possible on a mis-signed leaf) can never pull the
+    # worst-case figure below the DRAFT tax liability.
+    top_slab_rate = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end)[-1]["rate"]
+    cess_rate = rules.common["cess_rate"]
+    extra_income = max(0.0, uncl.income_type_total)
+    worst_case_extra_tax = extra_income * top_slab_rate * (1 + cess_rate)
+    worst_case_tax_liability = tax_block.tax_liability + worst_case_extra_tax
+
     return ComputationSchedule(
         salary_income=salary.income_chargeable, house_property_income=house_property.income,
         business_income=business.net, capital_gains_lt=capital_gains.lt_taxable_gross,
@@ -901,6 +971,9 @@ def build_computation(
         gti=gti, via_deductions=via, total_income_raw=total_income_raw,
         total_income_rounded=total_income_rounded, tax_block=tax_block,
         taxes_paid=taxes_paid.total, refund_or_payable=refund_or_payable,
+        unclassified_count=uncl.count, unclassified_total=uncl.total_amount,
+        unclassified_income_type_total=uncl.income_type_total,
+        worst_case_extra_tax=worst_case_extra_tax, worst_case_tax_liability=worst_case_tax_liability,
     )
 
 
@@ -921,12 +994,13 @@ class ITRModel:
     schedule_al: ScheduleALSchedule
     schedule_fa: ScheduleFASchedule
     computation: ComputationSchedule
+    unclassified: UnclassifiedSchedule = field(default_factory=UnclassifiedSchedule)
 
 
 def build_all_schedules(
     tree: pe.ParsedBalanceSheet, resolved: dict, book: Book | None, form16, year_key: str | None,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
-    scrips: dict, fmv_tables: FmvTables, as26_data=None,
+    scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -939,6 +1013,7 @@ def build_all_schedules(
     capital_gains = build_capital_gains(resolved, node_by_guid, book, year_key, rules, scrips, fmv_tables)
     exempt_income = build_exempt_income(resolved, node_by_guid)
     taxes_paid = build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    unclassified = build_unclassified(tree, unmapped or [])
 
     agti_estimate = (
         salary.income_chargeable + house_property.income + business.net + other_sources.taxable_total
@@ -949,7 +1024,7 @@ def build_all_schedules(
     )
     computation = build_computation(
         salary, business, house_property, other_sources, capital_gains, deductions, taxes_paid,
-        rules, regime, status, dob, fy_end,
+        rules, regime, status, dob, fy_end, unclassified,
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
     schedule_fa = build_schedule_fa(resolved, node_by_guid)
@@ -958,4 +1033,5 @@ def build_all_schedules(
         salary=salary, business=business, house_property=house_property, other_sources=other_sources,
         capital_gains=capital_gains, exempt_income=exempt_income, taxes_paid=taxes_paid,
         deductions=deductions, schedule_al=schedule_al, schedule_fa=schedule_fa, computation=computation,
+        unclassified=unclassified,
     )

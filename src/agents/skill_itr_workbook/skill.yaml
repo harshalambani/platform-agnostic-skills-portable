@@ -24,6 +24,13 @@
 # Selecting an `ay` that disagrees with the uploaded HTML's own inferred
 # income year is a hard failure (not a warning): a year mismatch is a real
 # misfiling risk, not a cosmetic one.
+# 2026-07-16 ITR Best-Effort Workbook, Part 1: an unmapped account no longer
+# blocks the run -- it still builds the full workbook, with every unmapped
+# leaf routed into a visible UNCLASSIFIED/REVIEW bucket (included in that
+# bucket's own total, never silently dropped) and the IT working showing a
+# DRAFT tax (resolved items only) plus a worst-case upper bound (every
+# unclassified income-type leaf taxed at the top slab), both loudly labelled
+# as not filing-ready. A fully-mapped run is unchanged.
 
 name: "ITR Workbook"
 display_name: "ITR Workbook"
@@ -32,9 +39,10 @@ description: >
   GnuCash "Balance Sheet (eguile)" HTML export (P&L embedded via Retained
   Earnings) plus optional book, mapping, Form 16, and 26AS inputs. Runs the
   full identity/reconciliation check suite every time; an unmapped account
-  blocks the run for review rather than silently misstating income.
+  still builds a best-effort workbook (DRAFT tax + worst-case upper bound,
+  loudly flagged for review) rather than blocking the run to nothing.
 category: "itr"
-version: "0.8.0"
+version: "0.9.0"
 
 mode: "direct"
 entry_point: "agent:run"

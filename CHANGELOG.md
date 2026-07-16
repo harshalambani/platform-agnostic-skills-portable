@@ -77,6 +77,47 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proposed-mappings-snippet learning loop, the same as a partially mapped
   file — a mapping-less run can no longer report a green `STATUS: OK`.
 
+## [2.5.0] — 2026-07-16
+
+### Changed
+- **ITR Workbook — best-effort workbook instead of block-to-nothing (Part
+  1).** An unmapped account used to set `STATUS: BLOCKED-FOR-REVIEW` and
+  skip the workbook build entirely (`_build_and_write_workbook` returned
+  `[]`, and `run()` wrote a one-sheet scaffold) — a user with even one
+  unmapped leaf got nothing usable. Any unmapped leaf (a partially mapped
+  file, or a true cold start with none) now still builds the full
+  BS + P&L + IT working workbook:
+  - Every unmapped leaf routes into a new UNCLASSIFIED/REVIEW bucket
+    (`schedules.build_unclassified`, rendered on a new `Unclassified` sheet
+    plus red call-outs on Mapping Review/Reconciliation) instead of being
+    silently dropped — its amount is included in that bucket's own total,
+    so the accounting identity (Assets = Equity+Liabilities; the
+    RetainedEarnings P&L control total) still ties out exactly.
+  - The IT working (Computation sheet) shows two tax figures whenever
+    anything is unclassified: **DRAFT** (tax computed on resolved items
+    only, stamped with the unclassified count/₹ total, not filing-ready)
+    and a **worst-case upper bound** (every unclassified INCOME-type leaf
+    assumed fully taxable at the top slab rate for the selected regime;
+    unclassified expense/deduction/BS-side items are never assumed to
+    reduce tax — conservative). Neither is presented as a final total; the
+    plain "Tax liability" row is relabelled DRAFT whenever N > 0.
+  - `STATUS: BLOCKED-FOR-REVIEW` (nothing built) is replaced by
+    `STATUS: BUILT -- N REVIEW ITEM(S)` whenever N > 0; the
+    `<output>-proposed-mappings.yaml` learning-loop snippet is still
+    written every time.
+  - Hard-error paths (unparseable HTML, unresolved entity, AY-vs-HTML
+    mismatch, a mapping file with a `VALIDATION ERROR`) are unchanged —
+    still fail loud with a stub, no workbook.
+  - A fully-mapped run (0 unmapped) is unchanged: no DRAFT stamp, no
+    `Unclassified` sheet, tax shown as final — same as before this change.
+  - Part 2 (an in-app ITR Mapping review UI, so a user never has to
+    hand-edit the proposed-mappings YAML) is tracked separately and not
+    included in this release.
+
+### Pending
+- **Frozen-build smoke test** (Harshal-side, PortableApps install) not run
+  as part of this release — flagged pending, not blocking.
+
 ## [1.0.1] — 2026-06-25
 
 ### Fixed
