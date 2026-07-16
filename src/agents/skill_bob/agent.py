@@ -186,6 +186,9 @@ class BoBSkill:
 
     bank_key = BANK_KEY
 
+    def formats(self) -> tuple[str, ...]:
+        return (".pdf",)
+
     def detect(self, path: str | Path) -> float:
         """Confidence that ``path`` is a Bank of Baroda statement PDF."""
         p = Path(path)

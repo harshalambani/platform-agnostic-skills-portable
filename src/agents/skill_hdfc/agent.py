@@ -36,38 +36,26 @@ from agents.balance_utils import (
     verify_closing_balance,
     format_balance_summary,
 )
-from agents.canonical_io import CANONICAL_FIELDS
+from agents.bank_common import normalize as _normalize
+from agents.bank_common import password as _password
+from agents.bank_common import tabular as _tabular
+from agents.bank_common import text_quality as _text_quality
+from agents.bank_contract import BankResult, BankStatementMeta
+from agents.canonical_io import CANONICAL_FIELDS, run_balance_check
 
 log = logging.getLogger(__name__)
 
+BANK_KEY = "hdfc"
 
 # Single source of truth for the canonical schema lives in canonical_io; keep
 # the local name as an alias so existing references don't churn.
 CANONICAL_COLS = list(CANONICAL_FIELDS)
 
-
-def _clean_amount(s):
-    s = str(s).replace(",", "").strip()
-    try:
-        return "" if float(s) == 0.0 else s
-    except ValueError:
-        return s
-
-
-_ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
-
-
-def _normalise_date(d):
-    d = str(d).strip()
-    if _ISO_DATE_RE.match(d):
-        return d  # already canonical ISO
-    parts = d.split("/")
-    if len(parts) != 3:
-        return d
-    dd, mm, yy = parts[0], parts[1], parts[2]
-    if len(yy) == 2:
-        yy = "20" + yy
-    return yy + "-" + mm + "-" + dd
+# Local aliases onto agents.bank_common — HDFC is the reference implementation
+# these were promoted from verbatim; kept as module-level names so the many
+# call-sites below don't churn.
+_clean_amount = _normalize.clean_amount
+_normalise_date = _normalize.normalise_date
 
 
 def _extract_statement_summary(text):
@@ -96,30 +84,14 @@ def _extract_statement_summary(text):
 # regex parse and route to OCR instead.
 # ---------------------------------------------------------------------------
 
-_CID_RE = re.compile(r'\(cid:\d+\)')
+# HDFC's required structural anchors -- absence of either indicates a
+# font-encoding problem that will make the transaction-line regexes fail
+# silently. See agents.bank_common.text_quality for the shared heuristic.
+_HDFC_TEXT_ANCHORS = (r'\bdate\b', r'narration')
 
 
 def _text_layer_usable(full_text):
-    """Heuristic: is this extracted PDF text layer usable for regex parsing?
-
-    Unusable if: dense "(cid:NN)" junk, a low ASCII-printable ratio, or the
-    absence of both structural anchors ("Date" and "Narration") anywhere in
-    the document -- any of these indicate a font-encoding problem that will
-    make the transaction-line regexes fail silently.
-    """
-    if not full_text or not full_text.strip():
-        return False
-    cid_hits = len(_CID_RE.findall(full_text))
-    if cid_hits > 0 and cid_hits / max(len(full_text), 1) > 0.005:
-        return False
-    printable = sum(1 for c in full_text if c.isprintable() and ord(c) < 128)
-    if printable / len(full_text) < 0.85:
-        return False
-    has_date_anchor = re.search(r'\bdate\b', full_text, re.IGNORECASE) is not None
-    has_narration_anchor = re.search(r'narration', full_text, re.IGNORECASE) is not None
-    if not (has_date_anchor and has_narration_anchor):
-        return False
-    return True
+    return _text_quality.text_layer_usable(full_text, _HDFC_TEXT_ANCHORS)
 
 
 _PB_DATE_RE = re.compile(r'^(\d{2}/\d{2}/\d{2})\s+(.+)')
@@ -253,23 +225,9 @@ def _parse_pdf_pdfplumber(pdf_path, password=None):
     try:
         pdf = pdfplumber.open(pdf_path, password=password or "")
     except Exception as e:
-        # pdfminer's PDFPasswordIncorrect (missing/wrong password) has no
-        # message of its own -- pdfplumber wraps it in a PdfminerException
-        # whose str() is also empty, so the substring check must also look at
-        # the exception chain (cause / wrapped arg), not just str(e).
-        candidates = [e, getattr(e, "__cause__", None), *e.args]
-        is_password_error = any(
-            c is not None and (
-                "password" in type(c).__name__.lower()
-                or "password" in str(c).lower()
-                or "encrypt" in str(c).lower()
-            )
-            for c in candidates
-        )
-        if is_password_error:
+        if _password.is_password_error(e):
             raise ValueError(
-                "PDF is password-protected — supply the statement password "
-                "(for HDFC often the Cust ID)."
+                _password.password_error_message("for HDFC often the Cust ID")
             ) from e
         raise
 
@@ -528,32 +486,19 @@ def _read_csv_rows(file_path):
         return [[str(c).strip() for c in row] for row in reader]
 
 
+# Header-row detection is tolerant of preamble rows and a '****' separator
+# (HDFC's native XLS export) by looking for the FIRST row containing both a
+# date-like column name and a description-like column name, regardless of
+# their position (CSV exports may rename/reorder the "Date" column to "Value
+# Date", which sits in column 0 with no separate "Date" column). See
+# agents.bank_common.tabular for the shared mechanics.
+
 def _find_header_row(rows):
-    """Find the header row: tolerant of preamble rows and a '****' separator
-    (HDFC's native XLS export) by looking for the FIRST row containing both a
-    date-like column name and a description-like column name, regardless of
-    their position (CSV exports may rename/reorder the "Date" column to
-    "Value Date", which sits in column 0 with no separate "Date" column)."""
-    for i, row in enumerate(rows):
-        cells = [str(c).strip().lower() for c in row]
-        has_date = any(c in _HEADER_DATE_ALIASES for c in cells)
-        has_desc = any(any(k in c for k in _HEADER_DESC_ALIASES) for c in cells)
-        if has_date and has_desc:
-            return i
-    return -1
+    return _tabular.find_header_row(rows, _HEADER_DATE_ALIASES, _HEADER_DESC_ALIASES)
 
 
 def _map_columns(header_row):
-    headers = [str(h).strip().lower() for h in header_row]
-    result = {}
-    for field, candidates in _HDFC_TABULAR_COLS.items():
-        idx = None
-        for h_idx, h in enumerate(headers):
-            if any(c in h for c in candidates):
-                idx = h_idx
-                break
-        result[field] = idx
-    return result
+    return _tabular.map_columns(header_row, _HDFC_TABULAR_COLS)
 
 
 def _parse_tabular_transactions(rows, source_label):
@@ -608,50 +553,70 @@ def _parse_xls_transactions(rows):
     return _parse_tabular_transactions(rows, "XLS/XLSX")
 
 
+class _UnsupportedFormat(Exception):
+    """Raised by _extract_transactions for a suffix HDFC doesn't handle."""
+
+
+def _extract_transactions(input_path, pdf_password=None):
+    """Parse ``input_path`` (PDF/XLS/XLSX/CSV) into (transactions, summary, fmt).
+
+    The shared core of both run() and parse(): sniffs the suffix, dispatches
+    to the right reader, and falls back to OCR for PDFs with an unusable text
+    layer. Raises ValueError (a parser-detected problem, e.g. bad password or
+    missing header) or _UnsupportedFormat (unknown suffix) instead of
+    returning an error string, so both callers can format/handle it their
+    own way.
+    """
+    suffix = Path(input_path).suffix.lower()
+    summary = {}
+
+    if suffix == ".pdf":
+        transactions, summary, usable = _parse_pdf_pdfplumber(input_path, password=pdf_password)
+        if transactions:
+            _resolve_ambiguous_amounts(transactions, summary.get("opening"))
+        fmt = "PDF (pdfplumber)"
+        if not usable or not transactions:
+            page_count_note = ""
+            try:
+                import pdfplumber
+                with pdfplumber.open(input_path, password=pdf_password or "") as _p:
+                    page_count_note = " (~%dpp)" % len(_p.pages)
+            except Exception:
+                pass
+            log.info(
+                "pdfplumber text layer unusable or empty — falling back to OCR%s",
+                page_count_note,
+            )
+            ocr_text, _page_count = _ocr_pdf(input_path, password=pdf_password)
+            transactions = _parse_pdf_transactions(ocr_text)
+            if not summary:
+                summary = _extract_statement_summary(ocr_text)
+            if transactions:
+                _resolve_ambiguous_amounts(transactions, summary.get("opening"))
+            fmt = "PDF (OCR" + page_count_note + ")"
+    elif suffix in (".xls", ".xlsx"):
+        rows = _read_xls_rows(input_path)
+        transactions = _parse_tabular_transactions(rows, suffix.upper())
+        fmt = suffix.upper()
+    elif suffix == ".csv":
+        rows = _read_csv_rows(input_path)
+        transactions = _parse_tabular_transactions(rows, "CSV")
+        fmt = "CSV"
+    else:
+        raise _UnsupportedFormat(suffix)
+    return transactions, summary, fmt
+
+
 def run(pdf_path, output_path, config_path=None, model_override=None, pdf_password=None):
     """HDFC statement (PDF, password-protected PDF, XLS/XLSX, or CSV) -> canonical CSV."""
     input_path = str(pdf_path)
     if not Path(input_path).is_file():
         return "File not found: " + input_path
 
-    suffix = Path(input_path).suffix.lower()
-    summary = {}
-
     try:
-        if suffix == ".pdf":
-            transactions, summary, usable = _parse_pdf_pdfplumber(input_path, password=pdf_password)
-            if transactions:
-                _resolve_ambiguous_amounts(transactions, summary.get("opening"))
-            fmt = "PDF (pdfplumber)"
-            if not usable or not transactions:
-                page_count_note = ""
-                try:
-                    import pdfplumber
-                    with pdfplumber.open(input_path, password=pdf_password or "") as _p:
-                        page_count_note = " (~%dpp)" % len(_p.pages)
-                except Exception:
-                    pass
-                log.info(
-                    "pdfplumber text layer unusable or empty — falling back to OCR%s",
-                    page_count_note,
-                )
-                ocr_text, _page_count = _ocr_pdf(input_path, password=pdf_password)
-                transactions = _parse_pdf_transactions(ocr_text)
-                if not summary:
-                    summary = _extract_statement_summary(ocr_text)
-                if transactions:
-                    _resolve_ambiguous_amounts(transactions, summary.get("opening"))
-                fmt = "PDF (OCR" + page_count_note + ")"
-        elif suffix in (".xls", ".xlsx"):
-            rows = _read_xls_rows(input_path)
-            transactions = _parse_tabular_transactions(rows, suffix.upper())
-            fmt = suffix.upper()
-        elif suffix == ".csv":
-            rows = _read_csv_rows(input_path)
-            transactions = _parse_tabular_transactions(rows, "CSV")
-            fmt = "CSV"
-        else:
-            return "Unsupported file type: " + suffix
+        transactions, summary, fmt = _extract_transactions(input_path, pdf_password)
+    except _UnsupportedFormat as e:
+        return "Unsupported file type: " + str(e)
     except ValueError as e:
         return "Error processing " + Path(input_path).name + ": " + str(e)
     except Exception as e:
@@ -720,3 +685,116 @@ def run(pdf_path, output_path, config_path=None, model_override=None, pdf_passwo
     if count_warnings:
         result += "\n" + "\n".join(count_warnings)
     return result
+
+
+# ---------------------------------------------------------------------------
+# BankSkill protocol (agents.bank_contract) — re-expresses the parsing above
+# as detect()/parse()/formats(), with zero change to run()'s own behavior
+# (run() is still the skill's UI entry_point and is untouched above).
+# ---------------------------------------------------------------------------
+
+def formats() -> tuple[str, ...]:
+    return (".pdf", ".xls", ".xlsx", ".csv")
+
+
+def detect(path) -> float:
+    """Cheap, conservative sniff: does this file look like an HDFC statement?
+
+    Format mismatch (wrong suffix) -> 0.0. Otherwise looks for "hdfc" in the
+    first slice of readable content; a positive hit is a strong signal, a
+    miss (or an unreadable/encrypted file, e.g. a password-protected PDF we
+    can't peek into without a password) still returns a low-but-nonzero
+    confidence since the format itself matches.
+    """
+    p = Path(str(path))
+    suffix = p.suffix.lower()
+    if suffix not in formats():
+        return 0.0
+    try:
+        if suffix == ".pdf":
+            import pdfplumber
+            with pdfplumber.open(str(p)) as pdf:
+                text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
+        elif suffix == ".csv":
+            text = p.read_text(encoding="utf-8-sig", errors="ignore")[:4000]
+        else:
+            rows = _read_xls_rows(str(p))
+            text = " ".join(str(c) for row in rows[:5] for c in row)
+        return 0.8 if "hdfc" in text.lower() else 0.3
+    except Exception:
+        return 0.3
+
+
+def parse(path, password=None) -> BankResult:
+    """Parse ``path`` into a :class:`BankResult` of canonical rows.
+
+    Delegates to the same ``_extract_transactions`` core as ``run()`` — no
+    parsing logic is duplicated — but returns the rows in memory rather than
+    writing a CSV/sidecar (that IO belongs to the caller, per the BankSkill
+    protocol's contract).
+    """
+    input_path = str(path)
+    if not Path(input_path).is_file():
+        raise FileNotFoundError(input_path)
+    suffix = Path(input_path).suffix.lower()
+    if suffix not in formats():
+        raise ValueError("Unsupported file type: " + suffix)
+
+    transactions, summary, fmt = _extract_transactions(input_path, password)
+    if not transactions:
+        raise ValueError("No transactions found in " + fmt + " file.")
+
+    balance_check = run_balance_check(transactions)
+    opening = summary.get("opening", balance_check.opening_balance)
+    closing = summary.get("closing", balance_check.closing_balance)
+
+    warnings = []
+    if summary:
+        expected_total = summary.get("dr_count", 0) + summary.get("cr_count", 0)
+        if expected_total > 0 and len(transactions) != expected_total:
+            warnings.append(
+                "TRANSACTION COUNT MISMATCH: extracted %d, statement says %d (Dr=%d + Cr=%d)" % (
+                    len(transactions), expected_total, summary["dr_count"], summary["cr_count"])
+            )
+
+    meta = BankStatementMeta(
+        bank_key=BANK_KEY,
+        account_number=None,
+        period_from=None,
+        period_to=None,
+        source_format=fmt,
+        fidelity="ocr-approx" if "OCR" in fmt else "exact",
+        password_used=bool(password),
+    )
+
+    return BankResult(
+        rows=transactions,
+        bank_key=BANK_KEY,
+        currency="INR",
+        opening_balance=opening,
+        closing_balance=closing,
+        balance_check=balance_check,
+        sidecar_path=None,
+        warnings=warnings,
+        meta=meta,
+    )
+
+
+class HDFCBankSkill:
+    """BankSkill implementation for HDFC — delegates to this module's
+    detect()/parse()/formats(), which are the reference for other banks'
+    future migration onto the same protocol."""
+
+    bank_key = BANK_KEY
+
+    def formats(self) -> tuple[str, ...]:
+        return formats()
+
+    def detect(self, path) -> float:
+        return detect(path)
+
+    def parse(self, path, password=None) -> BankResult:
+        return parse(path, password=password)
+
+
+bank_skill = HDFCBankSkill()
