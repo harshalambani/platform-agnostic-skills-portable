@@ -118,6 +118,41 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Frozen-build smoke test** (Harshal-side, PortableApps install) not run
   as part of this release — flagged pending, not blocking.
 
+## [2.6.0] — 2026-07-16
+
+### Added
+- **ITR Mapping review UI (Part 2).** A new "ITR Mapping" tab (GnuCash >
+  ITR Mapping, next to ITR Workbook) gives the account-tag mapping the same
+  review UX as the post-bank-transformation "Review & Edit Account Mappings"
+  tab — no more hand-editing the `-proposed-mappings.yaml` snippet or
+  running a CLI script:
+  - Select an entity (same `Data/itr/entities.yaml` dropdown source as the
+    ITR Workbook tab); Load shows every account for that entity, sourced
+    from `Data/itr/mappings/<entity>.mapping.yaml` plus the most recent
+    `-proposed-mappings.yaml` run artifact — unmapped accounts are flagged
+    (red UNMAPPED badge) with any LLM suggestion shown alongside.
+  - A searchable tag-assignment picker (typeahead over `tags.py`'s
+    vocabulary, showing each tag's description) plus row multi-select and
+    "Apply to selected", mirroring `ui/tabs/gnucash_review.py`'s account
+    picker.
+  - Save writes `Data/itr/mappings/<entity>.mapping.yaml` (anchored via
+    `data_root_dir()`, works in both source and frozen layouts) —  always
+    backing up the pre-save file first (timestamped `.bak-YYYYMMDD-HHMMSS`)
+    before any in-place rewrite, and never touching disk at all for a blank
+    entity or an empty change set. Touched entries are marked approved
+    (`suggested_by_llm` cleared, note replaced) the same way the CLI
+    correction script already did.
+  - `apply_mapping_corrections.py` gained an importable
+    `apply_corrections_map(mapping_file, {guid: tag}, output_yaml, paths=...)`
+    — the new core the UI calls directly (no more shelling out); the
+    existing CLI (`apply_corrections(mapping_file, reviewed_xlsx,
+    output_yaml)`) is now a thin wrapper over it and its behaviour is
+    unchanged (round-trip test still green).
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
+
 ## [1.0.1] — 2026-06-25
 
 ### Fixed

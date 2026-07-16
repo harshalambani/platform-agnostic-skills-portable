@@ -31,6 +31,13 @@
 # DRAFT tax (resolved items only) plus a worst-case upper bound (every
 # unclassified income-type leaf taxed at the top slab), both loudly labelled
 # as not filing-ready. A fully-mapped run is unchanged.
+# 2026-07-16 ITR Best-Effort Workbook, Part 2: the ITR Mapping review UI
+# (ui/tabs/itr_mapping_review.py, "GnuCash > ITR Mapping" tab) lets a user
+# review/assign account tags via a searchable dropdown and Save straight to
+# Data/itr/mappings/<entity>.mapping.yaml -- no more hand-editing the
+# proposed-mappings YAML. No agent.py/scripts behaviour changed by Part 2
+# itself; apply_mapping_corrections.py gained an importable
+# apply_corrections_map() so the UI doesn't shell out to the CLI.
 
 name: "ITR Workbook"
 display_name: "ITR Workbook"
@@ -42,7 +49,7 @@ description: >
   still builds a best-effort workbook (DRAFT tax + worst-case upper bound,
   loudly flagged for review) rather than blocking the run to nothing.
 category: "itr"
-version: "0.9.0"
+version: "0.10.0"
 
 mode: "direct"
 entry_point: "agent:run"
