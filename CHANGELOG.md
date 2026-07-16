@@ -43,6 +43,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dropdown/Banks-tab wiring to the new registry and migrating BoB/HSBC/ICICI
   onto it are deferred to later sessions (one bank per session; the pipeline
   already dispatches to their existing `BankSkill` classes directly).
+- **Bank abstraction, P2 — BoB (`skill_bob`, v1.1.0) onto the contract.**
+  `BoBSkill.parse()` now accepts an optional `password` and returns a fully
+  populated `BankStatementMeta` — account number and statement period parsed
+  from the PDF front matter (`A/C Number :` / `Statement of account for the
+  period of ...`), `source_format` (`pdf` / `pw-pdf`), `fidelity`, and
+  `password_used` (never the password). BoB now builds on `bank_common`
+  instead of private duplicates: `normalize.clean_amount`/`normalise_date`
+  (extended with a trailing Cr/Dr balance-suffix strip and dash-separated
+  dates), `text_quality.text_layer_usable` (rejects a garbled/scanned text
+  layer before parsing, no OCR fallback), and `password.is_password_error`
+  (clear, non-echoing password-error messages). `extract_bob_statement.py`'s
+  page-1 x-coordinate column-geometry detection (multi-page tables without a
+  repeated header row) stays BoB-specific but now sits on top of these shared
+  primitives. Registered in the `banks.py` registry via `skill.yaml`
+  (`bank: true`, `bank_key: "bob"`). New synthetic cross-format golden family
+  (`tests/skill_bob/bob_fixture_gen.py`): the same 5 fake transactions as a
+  2-page PDF (no repeated header, Cr-suffixed balances) and the native CSV
+  `extract_bob_statement.py` emits, with an identity test asserting
+  byte-identical canonical rows. Canonical CSV output verified byte-identical
+  before/after migration against the real local BoB corpus sample (74 rows,
+  opening/closing balances unchanged) and the Session-A independent
+  closing-balance verdict fix is untouched. HDFC/ICICI/HSBC not touched.
 
 ### Fixed
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry

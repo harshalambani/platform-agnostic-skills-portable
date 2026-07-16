@@ -35,6 +35,21 @@ except ImportError:
     )
     sys.exit(2)
 
+# Runs as a subprocess entry point (not `python -m`), so agents.* isn't on
+# sys.path automatically -- bootstrap it the same way suggest.py does.
+_SRC_ROOT = Path(__file__).resolve().parents[3]
+if str(_SRC_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SRC_ROOT))
+
+from agents.bank_common import normalize as _normalize  # noqa: E402
+from agents.bank_common import password as _password  # noqa: E402
+from agents.bank_common import text_quality as _text_quality  # noqa: E402
+
+# Anchors that must be present for the page-1 text layer to be considered
+# usable (garbled/scanned PDFs fail this and raise rather than silently
+# producing empty output).
+_BOB_TEXT_ANCHORS = (r'\bdate\b', r'particulars')
+
 
 # ---- Config --------------------------------------------------------------
 
@@ -166,8 +181,7 @@ def _expand_date(dd_mm_yy: str) -> str:
 
 def _clean_amount(raw: str) -> str:
     """'1,57,950.00' or '1,57,950.00Cr' → '157950.00'."""
-    raw = raw.replace(",", "").replace("Cr", "").replace("Dr", "").strip()
-    return raw
+    return _normalize.clean_amount(raw, blank_zero=False)
 
 
 def _is_footer_line(text: str) -> bool:
@@ -299,12 +313,29 @@ def parse_opening_balance(line_words, cols: ColumnMap) -> Optional[Row]:
 # ---- Main extraction -----------------------------------------------------
 
 
-def extract(pdf_path: Path) -> list[Row]:
+def extract(pdf_path: Path, password: Optional[str] = None) -> list[Row]:
     rows: list[Row] = []
     cols: Optional[ColumnMap] = None
     opening_seen = False
 
-    with pdfplumber.open(str(pdf_path)) as pdf:
+    try:
+        pdf_cm = pdfplumber.open(str(pdf_path), password=password or "")
+    except RuntimeError:
+        raise
+    except Exception as e:  # noqa: BLE001 — classify password vs. other failures
+        if _password.is_password_error(e):
+            raise RuntimeError(_password.password_error_message()) from e
+        raise
+
+    with pdf_cm as pdf:
+        if pdf.pages:
+            first_page_text = pdf.pages[0].extract_text() or ""
+            if not _text_quality.text_layer_usable(first_page_text, _BOB_TEXT_ANCHORS):
+                raise RuntimeError(
+                    "PDF text layer is not usable for parsing (garbled or scanned "
+                    "text) — no OCR fallback is available for Bank of Baroda statements."
+                )
+
         for page_idx, page in enumerate(pdf.pages):
             words = page.extract_words(keep_blank_chars=False)
             if cols is None:

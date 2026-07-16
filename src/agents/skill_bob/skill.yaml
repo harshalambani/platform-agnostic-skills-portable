@@ -6,7 +6,10 @@ description: >
   Parse a Bank of Baroda transaction-statement PDF into a flat CSV of rows.
   Handles multi-page table overflow without column-header re-banner.
 category: "banks"
-version: "1.0.0"
+version: "1.1.0"
+
+bank: true
+bank_key: "bob"
 
 mode: "direct"
 entry_point: "agent:run"

@@ -38,12 +38,30 @@ def test_clean_amount_non_numeric_passes_through():
     assert clean_amount("N/A") == "N/A"
 
 
+def test_clean_amount_strips_cr_dr_suffix():
+    assert clean_amount("1,57,950.00Cr") == "157950.00"
+    assert clean_amount("20,000.00Dr") == "20000.00"
+
+
+def test_clean_amount_blank_zero_false_keeps_zero_string():
+    assert clean_amount("0.00", blank_zero=False) == "0.00"
+    assert clean_amount("0", blank_zero=True) == ""
+
+
 def test_normalise_date_ddmmyy_to_iso():
     assert normalise_date("05/04/25") == "2025-04-05"
 
 
 def test_normalise_date_ddmmyyyy_to_iso():
     assert normalise_date("05/04/2025") == "2025-04-05"
+
+
+def test_normalise_date_dash_ddmmyy_to_iso():
+    assert normalise_date("05-04-25") == "2025-04-05"
+
+
+def test_normalise_date_dash_ddmmyyyy_to_iso():
+    assert normalise_date("05-04-2025") == "2025-04-05"
 
 
 def test_normalise_date_already_iso_passes_through():

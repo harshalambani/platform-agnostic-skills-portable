@@ -13,14 +13,15 @@ from __future__ import annotations
 
 import csv
 import logging
+import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from agents.bank_contract import BankResult
+from agents.bank_common import normalize as _normalize
+from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
 
 log = logging.getLogger(__name__)
@@ -103,30 +104,62 @@ def run(
 # Header tokens that identify a Bank of Baroda statement PDF.
 _BOB_MARKERS = ("BANK OF BARODA", "WITHDRAWALS", "DEPOSITS")
 
+# Statement front-matter anchors (page 1) for BankStatementMeta extraction.
+_ACCOUNT_RE = re.compile(r'A/C\s*Number\s*:\s*([\d\s]+)', re.IGNORECASE)
+_PERIOD_RE = re.compile(
+    r'Statement of account for the period of\s*(\d{2}-\d{2}-\d{4})\s*to\s*(\d{2}-\d{2}-\d{4})',
+    re.IGNORECASE,
+)
+
+_BOB_DATE_SHAPE_RE = re.compile(r'^\d{2}-\d{2}-\d{2,4}$')
+
 
 def _parse_date_bob(date_str: str) -> Optional[str]:
     """Parse BoB date format DD-MM-YY (or DD-MM-YYYY) to ISO YYYY-MM-DD."""
     if not date_str or not str(date_str).strip():
         return None
     date_str = str(date_str).strip()
-    try:
-        return datetime.strptime(date_str, "%d-%m-%y").strftime("%Y-%m-%d")
-    except ValueError:
-        try:
-            return datetime.strptime(date_str, "%d-%m-%Y").strftime("%Y-%m-%d")
-        except ValueError:
-            return None
+    if not _BOB_DATE_SHAPE_RE.match(date_str):
+        return None
+    return _normalize.normalise_date(date_str)
 
 
 def _parse_indian_number(num_str: str) -> str:
     """Parse Indian number format (1,23,456.78) to a plain decimal string."""
     if not num_str or not str(num_str).strip():
         return "0"
-    num_str = str(num_str).strip()
+    cleaned = _normalize.clean_amount(num_str, blank_zero=False)
     try:
-        return str(float(num_str.replace(",", "")))
+        return str(float(cleaned))
     except ValueError:
         return "0"
+
+
+def _extract_meta_fields(
+    pdf_path: Path, password: Optional[str] = None
+) -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """Best-effort extraction of (account_number, period_from, period_to)
+    from a BoB statement's page-1 front matter. Never raises."""
+    try:
+        import pdfplumber  # noqa: PLC0415
+
+        with pdfplumber.open(str(pdf_path), password=password or "") as pdf:
+            text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
+    except Exception:  # noqa: BLE001 — best-effort, must never raise
+        return None, None, None
+
+    account_number = None
+    m = _ACCOUNT_RE.search(text)
+    if m:
+        account_number = re.sub(r"\D", "", m.group(1)) or None
+
+    period_from = period_to = None
+    m = _PERIOD_RE.search(text)
+    if m:
+        period_from = _normalize.normalise_date(m.group(1))
+        period_to = _normalize.normalise_date(m.group(2))
+
+    return account_number, period_from, period_to
 
 
 def _native_csv_to_canonical(input_csv: str) -> tuple[list[dict], list[str]]:
@@ -210,7 +243,12 @@ class BoBSkill:
             return 0.95
         return 0.0
 
-    def parse(self, path: str | Path, output_path: str | Path | None = None) -> BankResult:
+    def parse(
+        self,
+        path: str | Path,
+        password: str | None = None,
+        output_path: str | Path | None = None,
+    ) -> BankResult:
         """Parse a BoB statement PDF (or directory of PDFs) to a BankResult.
 
         When ``output_path`` is given, the canonical CSV and its sidecar are
@@ -227,7 +265,7 @@ class BoBSkill:
 
         native_rows = []
         for pdf in pdfs:
-            native_rows.extend(extract(pdf))
+            native_rows.extend(extract(pdf, password=password))
 
         # Round-trip through the native CSV so the canonical mapping sees the
         # exact same representation adapter_bob consumed (keeps tie-out exact).
@@ -249,6 +287,17 @@ class BoBSkill:
                 len(rows),
             )
 
+        account_number, period_from, period_to = _extract_meta_fields(pdfs[0], password)
+        meta = BankStatementMeta(
+            bank_key=BANK_KEY,
+            account_number=account_number,
+            period_from=period_from,
+            period_to=period_to,
+            source_format="pw-pdf" if password else "pdf",
+            fidelity="exact",
+            password_used=bool(password),
+        )
+
         return BankResult(
             rows=rows,
             bank_key=BANK_KEY,
@@ -259,4 +308,8 @@ class BoBSkill:
             balance_check=balance_check,
             sidecar_path=sidecar_path,
             warnings=warnings,
+            meta=meta,
         )
+
+
+bank_skill = BoBSkill()

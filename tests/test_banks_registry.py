@@ -34,6 +34,12 @@ def test_discover_finds_hdfc():
     assert "hdfc" in keys
 
 
+def test_discover_finds_bob():
+    found = banks.discover()
+    keys = [b.bank_key for b in found]
+    assert "bob" in keys
+
+
 def test_discover_is_sorted_by_display_name():
     found = banks.discover()
     names = [b.display_name for b in found]
@@ -53,6 +59,13 @@ def test_get_hdfc_case_insensitive():
     assert info is not None
     assert info.bank_key == "hdfc"
     assert info.package == "agents.skill_hdfc"
+
+
+def test_get_bob_case_insensitive():
+    info = banks.get("BOB")
+    assert info is not None
+    assert info.bank_key == "bob"
+    assert info.package == "agents.skill_bob"
 
 
 def test_get_unknown_bank_returns_none():
@@ -83,6 +96,13 @@ def test_load_bank_skill_parse_round_trips_on_synthetic_csv(tmp_path):
     assert result.meta is not None
     assert result.meta.bank_key == "hdfc"
     assert result.meta.password_used is False
+
+
+def test_load_bank_skill_returns_conforming_bob():
+    info = banks.get("bob")
+    skill = banks.load_bank_skill(info)
+    assert isinstance(skill, BankSkill)
+    assert ".pdf" in skill.formats()
 
 
 def test_discover_skips_non_bank_manifests():
