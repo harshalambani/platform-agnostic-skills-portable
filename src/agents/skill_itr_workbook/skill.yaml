@@ -34,7 +34,7 @@ description: >
   full identity/reconciliation check suite every time; an unmapped account
   blocks the run for review rather than silently misstating income.
 category: "itr"
-version: "0.7.0"
+version: "0.8.0"
 
 mode: "direct"
 entry_point: "agent:run"
@@ -93,6 +93,14 @@ run_args:
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
+  # Anchored to the same Data\ root as the entity/ay dropdowns
+  # (ui/_config.data_root_dir(), via the {data_root} run_args token) so a
+  # run reads Data/itr/... in both source and frozen builds -- agent.py's
+  # own defaults are a source-mode-only fallback for direct/programmatic
+  # callers (tests, bootstrap_mappings.py).
+  entities_path: "{data_root}/itr/entities.yaml"
+  rules_dir: "{data_root}/itr/rules"
+  scrips_path: "{data_root}/itr/scrips.yaml"
 
 output:
   extension: ".xlsx"
