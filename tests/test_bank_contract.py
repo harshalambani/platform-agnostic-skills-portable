@@ -142,17 +142,34 @@ class _ConformingBank:
     def detect(self, path):
         return 1.0
 
-    def parse(self, path):
+    def parse(self, path, password=None):
         return BankResult(rows=[], bank_key="x")
+
+    def formats(self):
+        return (".pdf",)
 
 
 class _MissingParse:
     def detect(self, path):
         return 0.0
 
+    def formats(self):
+        return (".pdf",)
+
 
 class _MissingDetect:
-    def parse(self, path):
+    def parse(self, path, password=None):
+        return BankResult(rows=[], bank_key="x")
+
+    def formats(self):
+        return (".pdf",)
+
+
+class _MissingFormats:
+    def detect(self, path):
+        return 0.0
+
+    def parse(self, path, password=None):
         return BankResult(rows=[], bank_key="x")
 
 
@@ -163,9 +180,52 @@ def test_conforming_bank_is_instance():
 def test_missing_method_is_not_instance():
     assert not isinstance(_MissingParse(), BankSkill)
     assert not isinstance(_MissingDetect(), BankSkill)
+    assert not isinstance(_MissingFormats(), BankSkill)
 
 
 def test_conforming_bank_round_trips():
     bank: BankSkill = _ConformingBank()
     assert bank.detect("anything") == 1.0
     assert isinstance(bank.parse("anything"), BankResult)
+    assert bank.formats() == (".pdf",)
+
+
+# ---------------------------------------------------------------------------
+# BankStatementMeta / RowProvenance / BankResult.meta
+# ---------------------------------------------------------------------------
+
+def test_bank_result_meta_defaults_to_none():
+    br = BankResult(rows=[], bank_key="hdfc")
+    assert br.meta is None
+    assert br.provenance == ()
+
+
+def test_bank_statement_meta_defaults():
+    from agents.bank_contract import BankStatementMeta
+    meta = BankStatementMeta(bank_key="hdfc")
+    assert meta.account_number is None
+    assert meta.period_from is None
+    assert meta.period_to is None
+    assert meta.source_format == ""
+    assert meta.fidelity == "exact"
+    assert meta.password_used is False
+
+
+def test_bank_statement_meta_is_frozen():
+    from agents.bank_contract import BankStatementMeta
+    meta = BankStatementMeta(bank_key="hdfc")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        meta.bank_key = "bob"  # type: ignore[misc]
+
+
+def test_bank_result_carries_meta_and_provenance():
+    from agents.bank_contract import BankStatementMeta, RowProvenance
+    meta = BankStatementMeta(
+        bank_key="hdfc", account_number="1234", source_format="pdf",
+        fidelity="ocr-approx", password_used=True,
+    )
+    prov = (RowProvenance(row_index=0, page=1, source_line="01/04/25 ..."),)
+    br = BankResult(rows=[{"Date": "2025-04-01"}], bank_key="hdfc", meta=meta, provenance=prov)
+    assert br.meta is meta
+    assert br.meta.password_used is True
+    assert br.provenance == prov

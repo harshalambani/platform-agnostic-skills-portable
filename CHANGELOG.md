@@ -21,6 +21,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `USER-GUIDE.html` bundled into the frozen package via `paskills.spec`.
 - **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
   the generated docs are stale (`gen_docs.py --check`).
+- **Bank abstraction, P1 — contracts.** `agents/bank_contract.py` gains
+  `BankStatementMeta` (account number, statement period, source format,
+  OCR-vs-exact fidelity, password-used flag — never the password itself) and
+  `RowProvenance`; `BankResult` now carries an optional `meta` field, and the
+  `BankSkill` protocol gains `formats()`. New `agents/bank_common/` package
+  (`normalize`, `tabular`, `text_quality`, `password`) promotes HDFC's
+  header-detection, alias-table mapping, date/amount normalization, garbled-
+  PDF-text-layer heuristic, and password-error handling into shared,
+  bank-agnostic utilities — moved verbatim, so behavior is unchanged. HDFC
+  (`skill_hdfc`) is re-expressed on `BankSkill` (`detect()`/`parse()`/
+  `formats()` + a `bank_skill` instance) alongside its existing `run()` entry
+  point, which is untouched; `parse()` shares the same extraction core via a
+  new `_extract_transactions()` helper, verified byte-identical against the
+  existing cross-format golden suite. New `agents/banks.py` registry
+  discovers banks via a `bank: true` skill.yaml key (frozen-safe, no dynamic
+  imports at discovery time — same pattern as `agents/registry.py`); HDFC is
+  the first bank onboarded to it. BoB/HSBC/ICICI (already on `BankSkill` from
+  earlier work) needed a matching `formats()` method added to stay conformant
+  with the extended protocol — no change to their parsing logic. Pipeline
+  dropdown/Banks-tab wiring to the new registry and migrating BoB/HSBC/ICICI
+  onto it are deferred to later sessions (one bank per session; the pipeline
+  already dispatches to their existing `BankSkill` classes directly).
 
 ### Fixed
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry

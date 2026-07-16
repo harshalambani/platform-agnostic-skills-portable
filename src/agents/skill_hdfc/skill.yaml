@@ -6,7 +6,10 @@ description: >
   pypdfium2 + pytesseract, auto-detected), net-banking XLS/XLSX, and CSV
   exports (including renamed headers). Pure Python, deterministic — no LLM.
 category: "banks"
-version: "1.3.0"
+version: "1.4.0"
+
+bank: true
+bank_key: "hdfc"
 
 mode: "direct"
 entry_point: "agent:run"

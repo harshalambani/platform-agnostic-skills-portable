@@ -855,6 +855,9 @@ class ICICISkill:
 
     bank_key = BANK_KEY
 
+    def formats(self) -> tuple[str, ...]:
+        return (".xls", ".xlsx")
+
     def detect(self, path: str | Path) -> float:
         """Confidence that ``path`` is an ICICI XLS statement download."""
         p = Path(path)

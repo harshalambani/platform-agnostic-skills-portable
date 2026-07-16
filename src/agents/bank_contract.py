@@ -60,6 +60,54 @@ class BalanceCheck:
 
 
 @dataclass(frozen=True)
+class RowProvenance:
+    """Trace-back reference for one canonical row, to its source line.
+
+    Optional and best-effort: a parser that can't cheaply track this (e.g. a
+    tabular reader that already loses the original line on read) may simply
+    not emit entries for those rows. ``row_index`` is the index into
+    :attr:`BankResult.rows` this entry describes.
+
+    Attributes:
+        row_index:    Index into the canonical rows list this entry describes.
+        page:         1-based source page number, for paginated formats (PDF).
+                      None for formats without pages (XLS/XLSX/CSV).
+        source_line:  Raw source line/row text the canonical row was built
+                      from, for drill-back during review. None when unknown.
+    """
+    row_index: int
+    page: int | None = None
+    source_line: str | None = None
+
+
+@dataclass(frozen=True)
+class BankStatementMeta:
+    """Metadata about the statement itself, independent of its transaction rows.
+
+    Attributes:
+        bank_key:        Stable identifier for the bank (e.g. "bob", "hdfc").
+        account_number:  Normalized digits-only account number, or None when
+                          the statement didn't carry one / it couldn't be read.
+        period_from:      Statement period start (ISO ``YYYY-MM-DD``), or None.
+        period_to:        Statement period end (ISO ``YYYY-MM-DD``), or None.
+        source_format:    Shape the statement was read from, e.g. "pw-pdf",
+                          "pdf", "xls", "xlsx", "csv".
+        fidelity:         "exact" for a direct digital read, "ocr-approx" when
+                          the rows came via OCR (lower-confidence amounts/text).
+        password_used:    Whether a password was supplied to open the file.
+                          NEVER the password itself — that must never be
+                          logged or stored here.
+    """
+    bank_key: str
+    account_number: str | None = None
+    period_from: str | None = None
+    period_to: str | None = None
+    source_format: str = ""
+    fidelity: str = "exact"
+    password_used: bool = False
+
+
+@dataclass(frozen=True)
 class BankResult:
     """The uniform return value of every bank parser.
 
@@ -74,6 +122,9 @@ class BankResult:
         sidecar_path:     Path to the emitted ``*.csv_summary.json`` sidecar,
                           or None when no sidecar was written.
         warnings:         Non-fatal issues encountered while parsing.
+        meta:             Statement-level metadata (:class:`BankStatementMeta`),
+                          or None when the parser doesn't yet populate it.
+        provenance:       Optional per-row source trace-back entries.
     """
     rows: list[dict]
     bank_key: str
@@ -84,6 +135,8 @@ class BankResult:
     balance_check: BalanceCheck = field(default_factory=lambda: BalanceCheck(ok=True))
     sidecar_path: Path | None = None
     warnings: list[str] = field(default_factory=list)
+    meta: BankStatementMeta | None = None
+    provenance: tuple[RowProvenance, ...] = ()
 
     @property
     def row_count(self) -> int:
@@ -100,7 +153,8 @@ class BankSkill(Protocol):
     two banks duplicate it.
 
     Because this is ``@runtime_checkable``, ``isinstance(obj, BankSkill)`` checks
-    only that ``detect`` and ``parse`` exist as attributes — not their signatures.
+    only that ``detect``, ``parse`` and ``formats`` exist as attributes — not
+    their signatures.
     """
 
     def detect(self, path: str | Path) -> float:
@@ -112,6 +166,14 @@ class BankSkill(Protocol):
         """
         ...
 
-    def parse(self, path: str | Path) -> BankResult:
-        """Parse ``path`` into a :class:`BankResult` of canonical rows."""
+    def parse(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse ``path`` into a :class:`BankResult` of canonical rows.
+
+        ``password`` is only meaningful for formats that can be encrypted
+        (PDF); parsers that never see encrypted input may ignore it.
+        """
+        ...
+
+    def formats(self) -> tuple[str, ...]:
+        """Accepted file suffixes/shapes, e.g. ``(".pdf", ".xls", ".csv")``."""
         ...

@@ -185,6 +185,9 @@ class HSBCSkill:
 
     bank_key = BANK_KEY
 
+    def formats(self) -> tuple[str, ...]:
+        return (".xlsx", ".xlsm")
+
     def detect(self, path: str | Path) -> float:
         """Confidence that ``path`` is an enriched HSBC workbook."""
         p = Path(path)
