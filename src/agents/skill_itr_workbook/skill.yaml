@@ -38,6 +38,16 @@
 # proposed-mappings YAML. No agent.py/scripts behaviour changed by Part 2
 # itself; apply_mapping_corrections.py gained an importable
 # apply_corrections_map() so the UI doesn't shell out to the CLI.
+# 2026-07-16 ITR Mapping review UI polish (Part 3): the "Show" filter
+# defaults to All (was "Unmapped only", hiding everything else) and its
+# low-contrast native <select> chrome is now explicitly styled. Mapped rows
+# now carry a RAG confidence tier -- green "confirmed" once a human has
+# approved/set the tag, amber "needs review" while it's still an unapproved
+# LLM suggestion (suggested_by_llm set), red "unmapped" as before -- shown
+# as a row accent + inline badge, with a matching filter option. The tab
+# itself moved: "ITR" is now its own GnuCash sub-tab (mirroring "Banks"),
+# containing "ITR Workbook" and "ITR Mapping" as sub-sub-tabs, instead of
+# both being flat sub-tabs directly under GnuCash.
 
 name: "ITR Workbook"
 display_name: "ITR Workbook"
@@ -49,7 +59,7 @@ description: >
   still builds a best-effort workbook (DRAFT tax + worst-case upper bound,
   loudly flagged for review) rather than blocking the run to nothing.
 category: "itr"
-version: "0.10.0"
+version: "0.11.0"
 
 mode: "direct"
 entry_point: "agent:run"

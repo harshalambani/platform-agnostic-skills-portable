@@ -341,12 +341,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
     ]
     # "krc" and "intercompany" have no top-level GROUP_ORDER entry of their
     # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
-    # "Intercompany" sub-tab, both inside "gnucash" (see below). "itr" (ITR
-    # Workbook) is likewise nested as its own "ITR Workbook" sub-tab inside
-    # "gnucash" rather than getting a flat top-level tab. Exclude them here
-    # too, otherwise the fallback loop at the end of this function (for
-    # skills whose category isn't in _known_cats) renders them a second time
-    # as flat top-level tabs.
+    # "Intercompany" sub-tab, both inside "gnucash" (see below). "itr" is
+    # likewise nested inside "gnucash" as its own "ITR" sub-tab (mirroring
+    # "Banks"), containing "ITR Workbook" and "ITR Mapping" as sub-sub-tabs,
+    # rather than getting a flat top-level tab. Exclude them here too,
+    # otherwise the fallback loop at the end of this function (for skills
+    # whose category isn't in _known_cats) renders them a second time as
+    # flat top-level tabs.
     _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany", "itr"}
 
     _grouped = defaultdict(list)
@@ -399,7 +400,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
 
                 # GnuCash is a container: a "Banks" sub-tab (statement import +
                 # Review Mappings), an "Intercompany" sub-tab (Reco + Matrix),
-                # and a "26AS" sub-tab (Convert + Journal).
+                # a "26AS" sub-tab (Convert + Journal), a "KRChoksey" sub-tab,
+                # and an "ITR" sub-tab (ITR Workbook + ITR Mapping).
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
@@ -442,10 +444,12 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                             tab_generic.render(_skill, container_tab=_t)
                             _itr_skills = _grouped.get("itr", [])
                             if _itr_skills:
-                                with gr.Tab("ITR Workbook") as _t:
-                                    tab_generic.render(_itr_skills[0], container_tab=_t)
-                                with gr.Tab("ITR Mapping") as _mt:
-                                    tab_itr_mapping_review.render(container_tab=_mt)
+                                with gr.Tab("ITR"):
+                                    with gr.Tabs():
+                                        with gr.Tab("ITR Workbook") as _t:
+                                            tab_generic.render(_itr_skills[0], container_tab=_t)
+                                        with gr.Tab("ITR Mapping") as _mt:
+                                            tab_itr_mapping_review.render(container_tab=_mt)
                     continue
 
                 if not _cat_skills:

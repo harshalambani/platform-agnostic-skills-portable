@@ -196,3 +196,12 @@ def test_webui_constructs():
     from ui import webui
     app = webui.build_app(launch=False)
     assert app is not None
+
+    # ITR (Workbook + Mapping) is nested inside GnuCash as its own "ITR"
+    # sub-tab (mirroring "Banks"), not a flat top-level tab -- see
+    # GROUP_ORDER / _known_cats in webui.py.
+    tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
+    assert "ITR" in tab_labels
+    assert "ITR Workbook" in tab_labels
+    assert "ITR Mapping" in tab_labels
+    assert "GnuCash" in tab_labels
