@@ -6,38 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Fixed
-- **ITR Workbook — Data/itr paths no longer double up under the frozen
-  Launcher.** `entities_path`/`rules_dir`/`scrips_path` were CWD-relative
-  defaults with `Data/` baked in (`agent.py::run()`); the frozen PortableApps
-  build sets CWD to `...\Data\`, so they silently resolved to
-  `...\Data\Data\itr\...` and the run read stale/empty config while the
-  entity/AY dropdowns (already anchored via `ui/_config.data_root_dir()`)
-  showed the correct list. `ui/tabs/_generic.py` now anchors all three via a
-  new `{data_root}` `run_args` token (same anchor the dropdowns use);
-  `skill.yaml`'s `run_args` route through it. Agent defaults remain a
-  source-mode-only fallback.
-- **ITR Workbook — missing/unresolved entity now fails loud.** A missing or
-  unreadable `entities.yaml`, or an explicitly selected entity not found in
-  it, used to silently substitute a generic `UNKNOWN`/`Individual`/new-regime
-  profile — picking the wrong regime/age band without any warning.
-  `agent.py::_resolve_entity()` now raises when an *explicitly selected*
-  entity can't be resolved, naming the resolved path it looked at; the run
-  reports an `ERROR:` summary and writes no green stub. An entity key merely
-  *inferred* from a mapping file's stem (no explicit selection) still
-  degrades gracefully, unchanged.
-- **ITR Workbook — mapping-less run no longer silently emits an empty green
-  stub.** With the Entity mapping box empty, a run used to report
-  `STATUS: OK` and write a one-sheet scaffold with no schedules — easy to
-  mistake for a real, populated workbook. Two changes: (1) when an entity is
-  selected and it has an existing
-  `<data_root>/itr/mappings/<entity>.mapping.yaml`, the run now auto-derives
-  and uses it (logged in the summary as `Mapping: auto-derived ...`); (2) a
-  true cold start (no mapping anywhere for the entity) now treats every leaf
-  as unmapped and routes into the existing BLOCKED-FOR-REVIEW +
-  proposed-mappings-snippet learning loop, the same as a partially mapped
-  file — a mapping-less run can no longer report a green `STATUS: OK`.
-
 ### Added
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
   a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
@@ -74,6 +42,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dedicated `category: "intercompany"` and render under a new
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
+
+## [2.4.0] — 2026-07-16
+
+### Fixed
+- **ITR Workbook — Data/itr paths no longer double up under the frozen
+  Launcher.** `entities_path`/`rules_dir`/`scrips_path` were CWD-relative
+  defaults with `Data/` baked in (`agent.py::run()`); the frozen PortableApps
+  build sets CWD to `...\Data\`, so they silently resolved to
+  `...\Data\Data\itr\...` and the run read stale/empty config while the
+  entity/AY dropdowns (already anchored via `ui/_config.data_root_dir()`)
+  showed the correct list. `ui/tabs/_generic.py` now anchors all three via a
+  new `{data_root}` `run_args` token (same anchor the dropdowns use);
+  `skill.yaml`'s `run_args` route through it. Agent defaults remain a
+  source-mode-only fallback.
+- **ITR Workbook — missing/unresolved entity now fails loud.** A missing or
+  unreadable `entities.yaml`, or an explicitly selected entity not found in
+  it, used to silently substitute a generic `UNKNOWN`/`Individual`/new-regime
+  profile — picking the wrong regime/age band without any warning.
+  `agent.py::_resolve_entity()` now raises when an *explicitly selected*
+  entity can't be resolved, naming the resolved path it looked at; the run
+  reports an `ERROR:` summary and writes no green stub. An entity key merely
+  *inferred* from a mapping file's stem (no explicit selection) still
+  degrades gracefully, unchanged.
+- **ITR Workbook — mapping-less run no longer silently emits an empty green
+  stub.** With the Entity mapping box empty, a run used to report
+  `STATUS: OK` and write a one-sheet scaffold with no schedules — easy to
+  mistake for a real, populated workbook. Two changes: (1) when an entity is
+  selected and it has an existing
+  `<data_root>/itr/mappings/<entity>.mapping.yaml`, the run now auto-derives
+  and uses it (logged in the summary as `Mapping: auto-derived ...`); (2) a
+  true cold start (no mapping anywhere for the entity) now treats every leaf
+  as unmapped and routes into the existing BLOCKED-FOR-REVIEW +
+  proposed-mappings-snippet learning loop, the same as a partially mapped
+  file — a mapping-less run can no longer report a green `STATUS: OK`.
 
 ## [1.0.1] — 2026-06-25
 
