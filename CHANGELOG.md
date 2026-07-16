@@ -153,6 +153,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
   run as part of this release — flagged pending, not blocking.
 
+## [2.7.0] — 2026-07-16
+
+### Added
+- **ITR Mapping review UI polish (Part 3): RAG confidence coding.** Mapped
+  accounts on the "ITR Mapping" tab now show a confidence tier instead of
+  just a tag: green "(confirmed)" once a human has approved/set the entry,
+  amber "(needs review)" while it's still an unapproved LLM suggestion
+  (`suggested_by_llm` set), red "UNMAPPED" as before — shown as both a
+  left-border row accent and an inline badge. The "Show" filter gained
+  "Needs review" and "Confirmed only" options alongside the existing
+  All/Unmapped/Mapped.
+
+### Fixed
+- **ITR Mapping "Show" filter defaulted to hiding everything but unmapped
+  rows**, and its native `<select>` chrome had poor contrast against the
+  dark theme (reported as barely visible). The filter now defaults to
+  **All** and is explicitly styled to match the rest of the tab.
+
+### Changed
+- **ITR nav restructured.** "ITR Workbook" and "ITR Mapping" were flat
+  sub-tabs directly under GnuCash; they now live inside a single "ITR"
+  sub-tab (GnuCash > ITR > ITR Workbook / ITR Mapping), mirroring how
+  "Banks" already groups its own sub-tabs.
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
+
 ## [1.0.1] — 2026-06-25
 
 ### Fixed

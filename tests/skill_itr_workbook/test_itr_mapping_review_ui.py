@@ -94,10 +94,41 @@ def test_load_rows_flags_unmapped_and_shows_suggestion(tmp_path):
     assert by_guid[UNMAPPED_GUID]["unmapped"] is True
     assert by_guid[UNMAPPED_GUID]["suggested"] == "AL_CASH_BANK"
     assert by_guid[UNMAPPED_GUID]["tag"] is None
+    # An unmapped row is never flagged needs_review -- its own red
+    # "unmapped" tier already dominates, and it carries no LLM-approved tag.
+    assert by_guid[UNMAPPED_GUID]["needs_review"] is False
 
     # An already-mapped entry shows its current tag, not flagged unmapped.
     assert by_guid[RETAG_GUID]["unmapped"] is False
     assert by_guid[RETAG_GUID]["tag"] == "OS_INTEREST_BANK"
+    # The fixture mapping's entries carry no suggested_by_llm -- confirmed.
+    assert by_guid[RETAG_GUID]["needs_review"] is False
+
+
+def test_load_rows_needs_review_flag_reflects_llm_suggestion(tmp_path):
+    """RAG confidence tier: a mapped entry still carrying suggested_by_llm
+    (an unapproved LLM suggestion) is needs_review=True; once a human has
+    approved/set it (suggested_by_llm cleared to None), needs_review=False."""
+    data_root = tmp_path / "Data"
+    _entities_yaml(data_root / "itr" / "entities.yaml")
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    (mappings_dir / "SYN-IND.mapping.yaml").write_text(yaml.safe_dump([
+        {"guid": "guid-unreviewed", "path": "Income/Bank Interest",
+         "tag": "OS_INTEREST_BANK", "suggested_by_llm": "2026-07-16",
+         "note": "LLM suggestion, not yet approved"},
+        {"guid": "guid-confirmed", "path": "Assets/Cash and Bank/Cash",
+         "tag": "AL_CASH_BANK", "suggested_by_llm": None, "note": ""},
+    ], sort_keys=False), encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        rows = ui_mod._load_review_rows("SYN-IND")
+
+    by_guid = {r["guid"]: r for r in rows}
+    assert by_guid["guid-unreviewed"]["unmapped"] is False
+    assert by_guid["guid-unreviewed"]["needs_review"] is True
+    assert by_guid["guid-confirmed"]["unmapped"] is False
+    assert by_guid["guid-confirmed"]["needs_review"] is False
 
 
 def test_load_rows_replace_me_suggestion_shown_as_none(tmp_path):

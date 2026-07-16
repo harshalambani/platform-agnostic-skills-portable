@@ -118,12 +118,16 @@ def _entity_choices() -> list[tuple[str, str]]:
 def _load_review_rows(entity_key: str) -> list[dict]:
     """Build the review table rows for `entity_key`.
 
-    Each row: {guid, path, tag, unmapped, suggested, note}. `tag` is the
-    entity's currently-resolved tag (None when unmapped). `suggested` is the
-    proposed-mappings snippet's suggestion for an unmapped leaf (None if the
-    snippet has no suggestion, or has "REPLACE_ME"). Handles both cold start
-    (mapping file absent, everything comes from the snippet) and correction
-    (mapping file has entries; snippet supplies nothing new) cleanly.
+    Each row: {guid, path, tag, unmapped, needs_review, suggested, note}.
+    `tag` is the entity's currently-resolved tag (None when unmapped).
+    `needs_review` is the RAG confidence signal for a mapped row: True when
+    the entry is still an unapproved LLM suggestion (suggested_by_llm set),
+    False once a human has confirmed/set it (suggested_by_llm cleared to
+    None). `suggested` is the proposed-mappings snippet's suggestion for an
+    unmapped leaf (None if the snippet has no suggestion, or has
+    "REPLACE_ME"). Handles both cold start (mapping file absent, everything
+    comes from the snippet) and correction (mapping file has entries;
+    snippet supplies nothing new) cleanly.
     """
     if not entity_key or not entity_key.strip():
         return []
@@ -144,6 +148,11 @@ def _load_review_rows(entity_key: str) -> list[dict]:
             "path": entry.path,
             "tag": entry.tag,
             "unmapped": False,
+            # RAG confidence: an entry the LLM suggested that no human has
+            # approved yet (suggested_by_llm still set) is "needs_review"
+            # (amber); once a human has touched/approved it (cleared to
+            # None -- see apply_corrections_map) it's "confirmed" (green).
+            "needs_review": bool(entry.suggested_by_llm),
             "suggested": None,
             "note": entry.note or "",
         })
@@ -171,6 +180,7 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                     "path": item.get("path", ""),
                     "tag": None,
                     "unmapped": True,
+                    "needs_review": False,
                     "suggested": suggested_tag,
                     "note": item.get("note", ""),
                 })
@@ -240,9 +250,16 @@ _REVIEW_HTML = r"""
 #itrmap-app tbody tr.selected { background: #1e3a5f; }
 #itrmap-app tbody tr.selected:hover { background: #254a73; }
 #itrmap-app tbody tr.unmapped-row td:first-child { border-left: 3px solid #f87171; }
+#itrmap-app tbody tr.needs-review-row td:first-child { border-left: 3px solid #fbbf24; }
+#itrmap-app tbody tr.confirmed-row td:first-child { border-left: 3px solid #4ade80; }
 #itrmap-app tbody td { padding: 5px 8px; font-size: 12px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
 
+/* RAG confidence badges -- red = unmapped, amber = LLM-suggested/unreviewed,
+   green = human-confirmed. Kept high-contrast against the #1a1a1a/#111 row
+   backgrounds (WCAG AA for 12px text needs ~4.5:1). */
 #itrmap-app .badge-unmapped { color: #f87171; font-weight: 600; }
+#itrmap-app .badge-needs-review { color: #fbbf24; font-weight: 600; }
+#itrmap-app .badge-confirmed { color: #4ade80; }
 #itrmap-app .badge-mapped { color: #4ade80; }
 #itrmap-app .badge-suggested { color: #60a5fa; }
 #itrmap-app .changed-marker { color: #a78bfa; font-weight: bold; margin-left: 4px; }
@@ -266,6 +283,16 @@ _REVIEW_HTML = r"""
 #itrmap-app .tag-dropdown .tag-item .tag-name { font-weight: 600; color: #fff; }
 #itrmap-app .tag-dropdown .tag-item .tag-desc { color: #888; font-size: 11px; display: block; }
 #itrmap-app .scroll-wrapper { max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px; }
+
+/* The "Show" filter used the browser's default <select> chrome, which reads
+   as barely-there (near-invisible border, low-contrast text) against this
+   dark theme -- style it explicitly to match .tag-search. */
+#itrmap-app select#itrmap-filter {
+  padding: 5px 8px; border: 1px solid #555; border-radius: 4px;
+  font-size: 12px; background: #1a1a1a; color: #f0f0f0;
+}
+#itrmap-app select#itrmap-filter:hover { border-color: #777; }
+#itrmap-app select#itrmap-filter:focus { border-color: #2563eb; outline: none; }
 </style>
 <style>
 #itrmap-payload-box, #itrmap-payload-box * { position: absolute !important; left: -9999px !important; height: 0 !important; overflow: hidden !important; opacity: 0 !important; pointer-events: none !important; }
@@ -275,9 +302,11 @@ _REVIEW_HTML = r"""
   <div class="toolbar">
     <label>Show:</label>
     <select id="itrmap-filter">
-      <option value="">All</option>
-      <option value="unmapped" selected>Unmapped only</option>
-      <option value="mapped">Mapped only</option>
+      <option value="" selected>All</option>
+      <option value="unmapped">Unmapped only</option>
+      <option value="needs_review">Needs review (LLM-suggested)</option>
+      <option value="confirmed">Confirmed only</option>
+      <option value="mapped">Mapped only (confirmed + needs review)</option>
     </select>
     <span class="spacer"></span>
     <span class="stats" id="itrmap-stats"></span>
@@ -323,7 +352,7 @@ _REVIEW_HTML = r"""
   let rows = DATA.map((r, i) => ({...r, _idx: i, _assigned: null}));
   let selected = new Set();
   let lastClickIdx = null;
-  let filter = 'unmapped';
+  let filter = '';
 
   const filterDD = document.getElementById('itrmap-filter');
   filterDD.onchange = (e) => { filter = e.target.value; renderTable(); };
@@ -376,13 +405,19 @@ _REVIEW_HTML = r"""
     const tbody = document.getElementById('itrmap-tbody');
     let filtered = rows;
     if (filter === 'unmapped') filtered = rows.filter(r => r.unmapped);
+    else if (filter === 'needs_review') filtered = rows.filter(r => !r.unmapped && r.needs_review);
+    else if (filter === 'confirmed') filtered = rows.filter(r => !r.unmapped && !r.needs_review);
     else if (filter === 'mapped') filtered = rows.filter(r => !r.unmapped);
 
     tbody.innerHTML = '';
     filtered.forEach(r => {
       const tr = document.createElement('tr');
       if (selected.has(r._idx)) tr.classList.add('selected');
+      // RAG row accent: red = unmapped, amber = LLM-suggested/unreviewed,
+      // green = human-confirmed.
       if (r.unmapped) tr.classList.add('unmapped-row');
+      else if (r.needs_review) tr.classList.add('needs-review-row');
+      else tr.classList.add('confirmed-row');
       tr.dataset.idx = r._idx;
 
       const tdPath = document.createElement('td');
@@ -393,8 +428,10 @@ _REVIEW_HTML = r"""
       const tdCurrent = document.createElement('td');
       if (r.unmapped) {
         tdCurrent.innerHTML = '<span class="badge-unmapped">UNMAPPED</span>';
+      } else if (r.needs_review) {
+        tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-needs-review">(needs review)</span>';
       } else {
-        tdCurrent.textContent = r.tag || '';
+        tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-confirmed">(confirmed)</span>';
       }
       tr.appendChild(tdCurrent);
 
@@ -416,11 +453,13 @@ _REVIEW_HTML = r"""
 
     const changed = rows.filter(r => r._assigned && r._assigned !== r.tag).length;
     const unmappedCount = rows.filter(r => r.unmapped).length;
+    const needsReviewCount = rows.filter(r => !r.unmapped && r.needs_review).length;
     document.getElementById('itrmap-stats').textContent =
       filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
       (changed ? ' | ' + changed + ' changed' : '') +
-      (unmappedCount ? ' | ' + unmappedCount + ' unmapped' : '');
+      (unmappedCount ? ' | ' + unmappedCount + ' unmapped' : '') +
+      (needsReviewCount ? ' | ' + needsReviewCount + ' needs review' : '');
   }
 
   function handleRowClick(idx, e) {
