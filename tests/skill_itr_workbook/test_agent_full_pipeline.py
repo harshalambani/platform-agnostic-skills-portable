@@ -99,32 +99,37 @@ def test_dod_syn_huf_produces_full_workbook(tmp_path):
     assert salary_rows.get("Gross salary (17(1)+17(2)+17(3))") == 0.0
 
 
-def test_blocked_mapping_writes_stub_not_full_workbook(tmp_path):
-    """An unmapped account must BLOCK the full workbook build entirely --
-    no value from an unmapped leaf may reach any downstream schedule."""
+def test_partial_mapping_still_builds_full_workbook_with_review_items(tmp_path):
+    """2026-07-16 Part 1: an unmapped account no longer blocks the build --
+    it routes into the UNCLASSIFIED/REVIEW bucket and the full workbook
+    still builds, loudly flagged as best-effort."""
     summary, out_path = _run_full(
         tmp_path, fixture_gen.build_syn_ind_html, fixture_gen.build_syn_ind_gnucash,
         FIXTURES / "syn_ind_unmapped.mapping.yaml", "SYN-IND",
     )
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
-    assert "Workbook: full schedule model built" not in summary
+    assert "STATUS: BUILT -- 1 REVIEW ITEM(S)" in summary
+    assert "Workbook: full schedule model built" in summary
+    assert "1 account(s) unclassified" in summary
     wb = openpyxl.load_workbook(str(out_path))
-    assert wb.sheetnames == ["Reconciliation"]  # stub workbook only
+    assert "Computation" in wb.sheetnames
+    assert "Unclassified" in wb.sheetnames
 
 
-def test_no_mapping_file_writes_stub(tmp_path):
+def test_no_mapping_file_builds_cold_start_best_effort_workbook(tmp_path):
     """Defect B(ii): a mapping-less run (no entity selected either, so B(i)
-    auto-derive can't kick in) is a true cold start -- it must BLOCK for
-    review with a proposed-mappings snippet, never silently green an empty
-    stub."""
+    auto-derive can't kick in) is a true cold start -- every leaf is
+    unmapped, but 2026-07-16 Part 1 still builds a best-effort workbook
+    (everything routed to UNCLASSIFIED) rather than a bare stub, and still
+    writes the proposed-mappings snippet."""
     html_path = tmp_path / "bs.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
     out_path = tmp_path / "out.xlsx"
     summary = agent.run(str(html_path), str(out_path))
-    assert "STATUS: BLOCKED-FOR-REVIEW" in summary
-    assert "Workbook: full schedule model built" not in summary
+    assert "STATUS: BUILT --" in summary
+    assert "REVIEW ITEM(S)" in summary
+    assert "Workbook: full schedule model built" in summary
     wb = openpyxl.load_workbook(str(out_path))
-    assert wb.sheetnames == ["Reconciliation"]
+    assert "Unclassified" in wb.sheetnames
     assert Path(str(out_path) + "-proposed-mappings.yaml").exists()
 
 
@@ -241,8 +246,9 @@ def test_real_corpus_end_to_end_identities_green_and_controls_tie():
             finally:
                 if out_path.exists():
                     out_path.unlink()
-            if "STATUS: BLOCKED-FOR-REVIEW" in summary:
-                continue  # this HTML doesn't belong to this entity's mapping
+            if "STATUS: OK" not in summary:
+                continue  # this HTML doesn't belong to this entity's mapping (partial/cold-start
+                          # best-effort BUILT status is expected for a mismatched pair, not a clean run)
             ran_any = True
             assert "Verify: OK" in summary or "VALIDATION ERRORS" not in summary
 
