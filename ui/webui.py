@@ -83,6 +83,7 @@ from ui.tabs import settings as tab_settings  # noqa: E402
 from ui.tabs import history as tab_history  # noqa: E402
 from ui.tabs import help as tab_help  # noqa: E402
 from ui.tabs import gnucash_review as tab_gnucash_review  # noqa: E402
+from ui.tabs import itr_mapping_review as tab_itr_mapping_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
 from ui import _update  # noqa: E402
@@ -443,6 +444,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             if _itr_skills:
                                 with gr.Tab("ITR Workbook") as _t:
                                     tab_generic.render(_itr_skills[0], container_tab=_t)
+                                with gr.Tab("ITR Mapping") as _mt:
+                                    tab_itr_mapping_review.render(container_tab=_mt)
                     continue
 
                 if not _cat_skills:

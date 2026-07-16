@@ -73,27 +73,80 @@ def read_corrections(reviewed_xlsx: str) -> tuple[dict, list]:
     return valid, invalid
 
 
-def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str) -> tuple[int, list]:
-    """Load `mapping_file`, apply every valid correction from
-    `reviewed_xlsx`, and write the result to `output_yaml` (never touches
-    `mapping_file` itself). Returns (count applied, invalid corrections)."""
-    loaded = load_mapping(mapping_file)
-    entries = dict(loaded.entries)
-    valid, invalid = read_corrections(reviewed_xlsx)
+def apply_corrections_map(
+    mapping_file: str,
+    corrections: dict,
+    output_yaml: str,
+    paths: dict | None = None,
+) -> tuple[int, list]:
+    """Load `mapping_file` (an empty/missing file is treated as zero
+    entries -- lets a true cold-start entity, which has no mapping file yet,
+    be corrected straight into existence), apply every entry in
+    `corrections` ({guid: tag}) that names a valid tag, and write the result
+    to `output_yaml`. NEVER touches `mapping_file` in place -- the caller
+    decides whether/how `output_yaml` replaces it (see the UI's backup
+    discipline in ui/tabs/itr_mapping_review.py).
 
-    for guid, (tag, path) in valid.items():
+    A touched entry (whether previously unmapped or already mapped with a
+    different tag) is marked approved: `suggested_by_llm` cleared, `note`
+    replaced with `_APPROVED_NOTE` -- a human just confirmed it.
+
+    `paths` supplies the account path for a guid that has no existing entry
+    in `mapping_file` (a previously-unmapped leaf, whose path is only known
+    from the proposed-mappings snippet / parsed tree, not the mapping file
+    itself). A guid with neither an existing entry nor a supplied path is
+    written with an empty path.
+
+    Returns (count applied, invalid corrections as [(path, guid, bad_tag)]),
+    mirroring apply_corrections()'s return shape.
+    """
+    mp = Path(mapping_file)
+    if mp.is_file():
+        entries = dict(load_mapping(mapping_file).entries)
+    else:
+        entries = {}
+    paths = paths or {}
+
+    applied = 0
+    invalid: list[tuple] = []
+    for guid, tag in corrections.items():
+        if not guid or tag is None:
+            continue
+        tag = str(tag).strip()
+        if not tag:
+            continue
         existing = entries.get(guid)
+        path = paths.get(guid) or (existing.path if existing else "")
+        if not tag_vocab.is_valid_tag(tag):
+            invalid.append((path, guid, tag))
+            continue
         entries[guid] = MappingEntry(
             guid=guid,
-            path=path or (existing.path if existing else ""),
+            path=path,
             tag=tag,
             flags=existing.flags if existing else [],
             note=_APPROVED_NOTE,
             suggested_by_llm=None,
         )
+        applied += 1
 
     Path(output_yaml).write_text(dump_mapping_entries(list(entries.values())), encoding="utf-8")
-    return len(valid), invalid
+    return applied, invalid
+
+
+def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str) -> tuple[int, list]:
+    """Load `mapping_file`, apply every valid correction from
+    `reviewed_xlsx`, and write the result to `output_yaml` (never touches
+    `mapping_file` itself). Returns (count applied, invalid corrections).
+
+    Thin wrapper around `apply_corrections_map`: reads the reviewed
+    workbook's Correction cells (which already validate tags via
+    `read_corrections`), then delegates the entries build + write."""
+    valid, invalid = read_corrections(reviewed_xlsx)
+    corrections = {guid: tag for guid, (tag, _path) in valid.items()}
+    paths = {guid: path for guid, (_tag, path) in valid.items()}
+    applied, _ = apply_corrections_map(mapping_file, corrections, output_yaml, paths=paths)
+    return applied, invalid
 
 
 def main() -> int:
