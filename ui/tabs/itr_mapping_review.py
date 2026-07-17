@@ -1,12 +1,20 @@
 """
-ui/tabs/itr_mapping_review.py -- ITR Mapping review tab (2026-07-16, Part 2).
+ui/tabs/itr_mapping_review.py -- ITR Mapping review tab (2026-07-16, Part 2;
+2026-07-17, Part 4).
 
 Gives the ITR account-tag mapping the same review UX as
 ui/tabs/gnucash_review.py's "Review & Edit Account Mappings" tab: a
 searchable-dropdown assignment picker, row multi-select, "Apply to
-selected", and a Save -> YAML round trip with a backup kept before any
-in-place rewrite. No YAML editing, no CLI -- everything here is driven
-through apply_mapping_corrections.apply_corrections_map().
+selected", click-to-sort + per-column text filters on the table headers,
+and a Save -> YAML round trip with a backup kept before any in-place
+rewrite. No YAML editing, no CLI -- everything here is driven through
+apply_mapping_corrections.apply_corrections_map().
+
+Tag vocabulary help (Part 4): every tag code shown (Current/Suggested/New
+tag) carries a title tooltip with its one-line meaning from tags.py's
+TagMeta.treatment, and a toggleable "? Tag glossary" panel lists the full
+searchable vocabulary -- the raw tag codes (e.g. OS_INTEREST_BANK) are
+otherwise meaningless to anyone who hasn't memorized tags.py.
 
 Data sources for the review table (per entity):
   - Data/itr/mappings/<entity>.mapping.yaml  -- already-resolved entries
@@ -190,10 +198,12 @@ def _load_review_rows(entity_key: str) -> list[dict]:
 
 
 def _tag_options() -> list[dict]:
-    """(tag, description) pairs from tags.py's vocabulary, sorted by tag."""
+    """(tag, sheet, target, description) rows from tags.py's vocabulary,
+    sorted by tag. `sheet`/`target` (e.g. "RE"/"OtherSources") give the
+    glossary a bit more orientation than the one-line treatment note alone."""
     _configs, tag_vocab, _amc = _itr_modules()
     return [
-        {"tag": tag, "desc": meta.treatment}
+        {"tag": tag, "sheet": meta.sheet, "target": meta.target, "desc": meta.treatment}
         for tag, meta in sorted(tag_vocab.TAGS.items())
     ]
 
@@ -241,7 +251,20 @@ _REVIEW_HTML = r"""
   background: #1e1e1e; color: #ccc;
   border-bottom: 2px solid #444;
   padding: 6px 8px; text-align: left; font-size: 12px; white-space: nowrap;
+  cursor: pointer; user-select: none;
 }
+#itrmap-app thead th:hover { background: #2a2a2a; }
+#itrmap-app thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
+#itrmap-app thead .filter-row td {
+  padding: 3px 4px; background: #1a1a1a; border-bottom: 1px solid #444; position: sticky; top: 27px; z-index: 2;
+}
+#itrmap-app thead .filter-row input {
+  width: 100%; box-sizing: border-box;
+  padding: 3px 6px; border: 1px solid #333; border-radius: 3px;
+  font-size: 11px; background: #111; color: #ccc;
+}
+#itrmap-app thead .filter-row input:focus { border-color: #2563eb; outline: none; }
+#itrmap-app thead .filter-row input::placeholder { color: #555; }
 #itrmap-app tbody tr {
   border-bottom: 1px solid #262626; cursor: pointer; transition: background 0.1s;
 }
@@ -284,6 +307,25 @@ _REVIEW_HTML = r"""
 #itrmap-app .tag-dropdown .tag-item .tag-desc { color: #888; font-size: 11px; display: block; }
 #itrmap-app .scroll-wrapper { max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px; }
 
+/* Tag glossary -- a persistent reference for what each tag code means, since
+   hovering a badge one at a time isn't enough to get your bearings on the
+   vocabulary. Toggled open/closed by the "? Tag glossary" button. */
+#itrmap-app .glossary-panel {
+  display: none; max-height: 260px; overflow-y: auto;
+  border: 1px solid #333; border-radius: 4px; background: #161616;
+  margin-bottom: 8px; padding: 6px 10px;
+}
+#itrmap-app .glossary-panel.open { display: block; }
+#itrmap-app .glossary-panel input {
+  width: 100%; box-sizing: border-box; margin-bottom: 6px;
+  padding: 5px 8px; border: 1px solid #444; border-radius: 4px;
+  font-size: 12px; background: #1a1a1a; color: #e0e0e0;
+}
+#itrmap-app .glossary-panel table { width: 100%; }
+#itrmap-app .glossary-panel td { padding: 3px 8px; font-size: 11px; white-space: normal; color: #ccc; vertical-align: top; }
+#itrmap-app .glossary-panel td.g-tag { font-weight: 600; color: #60a5fa; white-space: nowrap; }
+#itrmap-app .glossary-panel td.g-sheet { color: #888; white-space: nowrap; }
+
 /* The "Show" filter used the browser's default <select> chrome, which reads
    as barely-there (near-invisible border, low-contrast text) against this
    dark theme -- style it explicitly to match .tag-search. */
@@ -308,6 +350,7 @@ _REVIEW_HTML = r"""
       <option value="confirmed">Confirmed only</option>
       <option value="mapped">Mapped only (confirmed + needs review)</option>
     </select>
+    <button id="itrmap-glossary-btn" title="Show what each tag code means">? Tag glossary</button>
     <span class="spacer"></span>
     <span class="stats" id="itrmap-stats"></span>
   </div>
@@ -322,16 +365,14 @@ _REVIEW_HTML = r"""
     <span class="spacer"></span>
   </div>
 
+  <div class="glossary-panel" id="itrmap-glossary-panel">
+    <input type="text" id="itrmap-glossary-search" placeholder="Search tag codes or meanings&#8230;" autocomplete="off">
+    <table id="itrmap-glossary-table"></table>
+  </div>
+
   <div class="scroll-wrapper">
     <table>
-      <thead>
-        <tr>
-          <th>Account path</th>
-          <th>Current tag</th>
-          <th>Suggested</th>
-          <th>New tag</th>
-        </tr>
-      </thead>
+      <thead id="itrmap-thead"><tr></tr></thead>
       <tbody id="itrmap-tbody"></tbody>
     </table>
   </div>
@@ -353,9 +394,56 @@ _REVIEW_HTML = r"""
   let selected = new Set();
   let lastClickIdx = null;
   let filter = '';
+  let colFilters = {};   // {colKey: 'search text'}
+  let activeFilterCol = null;
+  let sortCol = 'path';
+  let sortAsc = true;
+
+  const TAG_DESC = {};
+  TAGS.forEach(t => { TAG_DESC[t.tag] = t.desc; });
+  function tagTitle(tag) {
+    return tag && TAG_DESC[tag] ? (tag + ' -- ' + TAG_DESC[tag]) : (tag || '');
+  }
+
+  // Column config: key used both for the row's plain-text value (sorting +
+  // column filters) and for driving the custom badge rendering below.
+  const COLS = [
+    {key: 'path', label: 'Account path'},
+    {key: 'tag', label: 'Current tag'},
+    {key: 'suggested', label: 'Suggested'},
+    {key: '_assigned', label: 'New tag'},
+  ];
+  function colText(r, key) {
+    if (key === 'tag') return r.unmapped ? 'UNMAPPED' : (r.tag || '');
+    return r[key] || '';
+  }
 
   const filterDD = document.getElementById('itrmap-filter');
   filterDD.onchange = (e) => { filter = e.target.value; renderTable(); };
+
+  // -- Tag glossary --
+  const glossaryBtn = document.getElementById('itrmap-glossary-btn');
+  const glossaryPanel = document.getElementById('itrmap-glossary-panel');
+  const glossarySearch = document.getElementById('itrmap-glossary-search');
+  const glossaryTable = document.getElementById('itrmap-glossary-table');
+  function renderGlossary(filterText) {
+    const q = (filterText || '').toLowerCase();
+    const items = q
+      ? TAGS.filter(t => t.tag.toLowerCase().includes(q) || t.desc.toLowerCase().includes(q))
+      : TAGS;
+    glossaryTable.innerHTML = items.map(t =>
+      '<tr><td class="g-tag">' + esc(t.tag) + '</td>' +
+      '<td class="g-sheet">' + esc(t.target || t.sheet || '') + '</td>' +
+      '<td>' + esc(t.desc) + '</td></tr>'
+    ).join('') || '<tr><td colspan="3">No matching tags.</td></tr>';
+  }
+  glossaryBtn.onclick = () => {
+    const open = glossaryPanel.classList.toggle('open');
+    glossaryBtn.textContent = open ? '✕ Tag glossary' : '? Tag glossary';
+    if (open) { renderGlossary(glossarySearch.value); glossarySearch.focus(); }
+  };
+  glossarySearch.oninput = () => renderGlossary(glossarySearch.value);
+  renderGlossary('');
 
   // -- Tag search --
   const tagSearch = document.getElementById('itrmap-tag-search');
@@ -402,12 +490,63 @@ _REVIEW_HTML = r"""
   syncPayload();
 
   function renderTable() {
+    const thead = document.getElementById('itrmap-thead');
     const tbody = document.getElementById('itrmap-tbody');
+
+    // Header -- click a column to sort by it (click again to flip direction).
+    thead.innerHTML = '<tr>' + COLS.map(c =>
+      '<th data-col="' + c.key + '">' + esc(c.label) +
+      (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
+      '</th>'
+    ).join('') + '</tr>';
+    thead.querySelectorAll('th').forEach(th => {
+      th.onclick = () => {
+        const col = th.dataset.col;
+        if (col === sortCol) { sortAsc = !sortAsc; }
+        else { sortCol = col; sortAsc = true; }
+        renderTable();
+      };
+    });
+
+    // Per-column text filter row.
+    const fRow = document.createElement('tr');
+    fRow.className = 'filter-row';
+    COLS.forEach(c => {
+      const td = document.createElement('td');
+      const inp = document.createElement('input');
+      inp.type = 'text';
+      inp.placeholder = '⌕';
+      inp.dataset.col = c.key;
+      inp.value = colFilters[c.key] || '';
+      inp.oninput = () => { colFilters[c.key] = inp.value; activeFilterCol = c.key; renderTable(); };
+      inp.onclick = (e) => e.stopPropagation();
+      td.appendChild(inp);
+      fRow.appendChild(td);
+    });
+    thead.appendChild(fRow);
+
+    // Status filter (the "Show" dropdown).
     let filtered = rows;
     if (filter === 'unmapped') filtered = rows.filter(r => r.unmapped);
     else if (filter === 'needs_review') filtered = rows.filter(r => !r.unmapped && r.needs_review);
     else if (filter === 'confirmed') filtered = rows.filter(r => !r.unmapped && !r.needs_review);
     else if (filter === 'mapped') filtered = rows.filter(r => !r.unmapped);
+
+    // Per-column text filters.
+    for (const [col, q] of Object.entries(colFilters)) {
+      if (!q) continue;
+      const ql = q.toLowerCase();
+      filtered = filtered.filter(r => colText(r, col).toLowerCase().includes(ql));
+    }
+
+    // Sort.
+    filtered = [...filtered].sort((a, b) => {
+      const va = colText(a, sortCol).toLowerCase();
+      const vb = colText(b, sortCol).toLowerCase();
+      if (va < vb) return sortAsc ? -1 : 1;
+      if (va > vb) return sortAsc ? 1 : -1;
+      return 0;
+    });
 
     tbody.innerHTML = '';
     filtered.forEach(r => {
@@ -425,23 +564,34 @@ _REVIEW_HTML = r"""
       tdPath.title = r.path || '';
       tr.appendChild(tdPath);
 
+      // Current/Suggested/New-tag cells all carry a title tooltip with the
+      // tag's one-line meaning (from tags.py's TagMeta.treatment) -- the
+      // vocabulary is opaque otherwise ("OS_INTEREST_BANK" on its own tells
+      // you nothing). The "? Tag glossary" panel is the persistent version
+      // of the same lookup.
       const tdCurrent = document.createElement('td');
       if (r.unmapped) {
         tdCurrent.innerHTML = '<span class="badge-unmapped">UNMAPPED</span>';
       } else if (r.needs_review) {
         tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-needs-review">(needs review)</span>';
+        tdCurrent.title = tagTitle(r.tag);
       } else {
         tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-confirmed">(confirmed)</span>';
+        tdCurrent.title = tagTitle(r.tag);
       }
       tr.appendChild(tdCurrent);
 
       const tdSuggested = document.createElement('td');
-      tdSuggested.innerHTML = r.suggested ? '<span class="badge-suggested">' + esc(r.suggested) + '</span>' : '';
+      if (r.suggested) {
+        tdSuggested.innerHTML = '<span class="badge-suggested">' + esc(r.suggested) + '</span>';
+        tdSuggested.title = tagTitle(r.suggested);
+      }
       tr.appendChild(tdSuggested);
 
       const tdAssigned = document.createElement('td');
       if (r._assigned) {
         tdAssigned.innerHTML = '<span class="badge-mapped">' + esc(r._assigned) + '</span><span class="changed-marker">*</span>';
+        tdAssigned.title = tagTitle(r._assigned);
       } else {
         tdAssigned.textContent = '';
       }
@@ -460,6 +610,12 @@ _REVIEW_HTML = r"""
       (changed ? ' | ' + changed + ' changed' : '') +
       (unmappedCount ? ' | ' + unmappedCount + ' unmapped' : '') +
       (needsReviewCount ? ' | ' + needsReviewCount + ' needs review' : '');
+
+    // Re-focus the column filter input that was being typed in.
+    if (activeFilterCol) {
+      const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
+      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
+    }
   }
 
   function handleRowClick(idx, e) {

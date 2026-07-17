@@ -180,6 +180,54 @@ def test_load_rows_blank_entity_returns_empty():
 
 
 # ---------------------------------------------------------------------------
+# Part 4 -- tag glossary data (_tag_options) and the sortable/filterable +
+# tooltip-carrying markup in the rendered review HTML.
+# ---------------------------------------------------------------------------
+
+def test_tag_options_include_sheet_target_and_description():
+    """Every tag row carries enough for the glossary panel and the badge
+    tooltips: the code, its target sheet, and a one-line meaning."""
+    options = ui_mod._tag_options()
+    assert options, "expected at least one tag in the vocabulary"
+    by_tag = {o["tag"]: o for o in options}
+    assert "OS_INTEREST_BANK" in by_tag
+    row = by_tag["OS_INTEREST_BANK"]
+    assert row["target"] == "OtherSources"
+    assert row["sheet"] in ("RE", "BS", "EITHER")
+    assert row["desc"]  # non-empty treatment note
+    # Sorted by tag.
+    assert [o["tag"] for o in options] == sorted(o["tag"] for o in options)
+
+
+def test_review_html_has_sortable_headers_and_glossary_and_tooltips(tmp_path):
+    """The rendered HTML must carry: clickable/sortable column headers with
+    a per-column filter row (mirroring gnucash_review.py), a toggleable tag
+    glossary panel, and a JS-side tag-description lookup used to title
+    Current/Suggested/New tag badges."""
+    data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        html = ui_mod._load_review_data("SYN-IND")
+
+    # Sortable/filterable column headers, built dynamically in JS from COLS.
+    assert 'id="itrmap-thead"' in html
+    assert "sort-arrow" in html
+    assert "filter-row" in html
+    assert "colFilters" in html
+
+    # Tag glossary: toggle button + panel + search box.
+    assert 'id="itrmap-glossary-btn"' in html
+    assert 'id="itrmap-glossary-panel"' in html
+    assert 'id="itrmap-glossary-search"' in html
+
+    # Tag-description tooltip lookup, sourced from the TAGS payload.
+    assert "TAG_DESC" in html
+    assert "tagTitle" in html
+    # The vocabulary payload itself is embedded (used by both the glossary
+    # and the tooltips) -- spot-check one known tag/description round-trips.
+    assert "OS_INTEREST_BANK" in html
+
+
+# ---------------------------------------------------------------------------
 # Gate 2 -- Save writes the anchored mapping file, keeps a backup, marks
 # touched entries approved.
 # ---------------------------------------------------------------------------
