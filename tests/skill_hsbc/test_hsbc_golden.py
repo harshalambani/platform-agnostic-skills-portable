@@ -119,18 +119,20 @@ def test_extra_information_folded_into_description_no_loss(tmp_path):
     assert "ELECTRO 12:30:00" in row["Description"]
 
 
-def test_output_path_writes_canonical_csv_and_sidecar(tmp_path):
-    """The current skill_gnucash_pipeline call site does
-    ``HSBCSkill().parse(xlsx, output_path=canonical_path)`` -- this must keep
-    working unmodified even though ``parse()`` also grew a ``password`` arg."""
+def test_parse_returns_rows_only_no_output_path(tmp_path):
+    """P3a: ``output_path`` is retired from the BankSkill protocol -- parse()
+    returns canonical rows only, and the caller (skill_gnucash_pipeline)
+    writes the CSV/sidecar itself via canonical_io. This proves the returned
+    rows are directly consumable by that shared write path."""
     xlsx_path = _write_fixture(tmp_path)
+
+    result = HSBCSkill().parse(xlsx_path)
+
+    assert result.sidecar_path is None
     out_csv = tmp_path / "canonical.csv"
-
-    result = HSBCSkill().parse(xlsx_path, output_path=out_csv)
-
+    from agents.canonical_io import write_canonical_csv
+    write_canonical_csv(result.rows, out_csv)
     assert out_csv.is_file()
-    assert result.sidecar_path is not None
-    assert Path(result.sidecar_path).is_file()
 
 
 # ---------------------------------------------------------------------------

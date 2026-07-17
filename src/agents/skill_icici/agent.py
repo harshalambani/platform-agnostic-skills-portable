@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.balance_utils import format_balance_summary as _fmt_bal
 from agents.bank_common import normalize as _normalize
 from agents.bank_contract import BankResult, BankStatementMeta
-from agents.canonical_io import CANONICAL_FIELDS, run_balance_check, write_sidecar
+from agents.canonical_io import CANONICAL_FIELDS, run_balance_check
 
 logger = logging.getLogger(__name__)
 
@@ -905,8 +905,12 @@ class ICICISkill:
             return 0.9
         return 0.0
 
-    def parse(self, path: str | Path, output_path: str | Path | None = None) -> BankResult:
-        """Parse an ICICI XLS (or directory of XLS) into a canonical BankResult."""
+    def parse(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse an ICICI XLS (or directory of XLS) into a canonical BankResult.
+
+        ``password`` is accepted for ``BankSkill`` protocol conformance but
+        ignored — ICICI's XLS export is never password-protected.
+        """
         src = Path(path)
         if src.is_dir():
             xls_files = sorted(src.glob("*.xls"))
@@ -920,8 +924,9 @@ class ICICISkill:
         with tempfile.TemporaryDirectory(prefix="pa-skills-icici-parse-") as tmp:
             tmp_path = Path(tmp)
             # Write the canonical CSV with the unchanged transform writer so the
-            # bytes match the pre-refactor output exactly.
-            target = Path(output_path) if output_path is not None else tmp_path / "canonical.csv"
+            # bytes match the pre-refactor output exactly (temp file; the
+            # caller owns the permanent write via canonical_io).
+            target = tmp_path / "canonical.csv"
             if len(xls_files) == 1:
                 result = transform_icici_statement(str(xls_files[0]), str(target))
                 warnings.extend(result.get("issues", []))
@@ -938,14 +943,6 @@ class ICICISkill:
             rows = _read_canonical_csv(target)
 
         balance_check = run_balance_check(rows)
-
-        sidecar_path = None
-        if output_path is not None:
-            sidecar_path = write_sidecar(
-                output_path, "ICICI", "derived",
-                balance_check.opening_balance, balance_check.closing_balance,
-                len(rows),
-            )
 
         try:
             raw_rows = convert_xls_to_csv(str(xls_files[0]))
@@ -970,7 +967,7 @@ class ICICISkill:
             opening_balance=balance_check.opening_balance,
             closing_balance=balance_check.closing_balance,
             balance_check=balance_check,
-            sidecar_path=sidecar_path,
+            sidecar_path=None,
             warnings=warnings,
             meta=meta,
         )

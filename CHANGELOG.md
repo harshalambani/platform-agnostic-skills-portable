@@ -127,6 +127,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   running. HDFC/BoB/ICICI not touched. This completes P2 (all four banks now
   on `BankSkill`); P3 (migrating the pipeline/UI to consume only the
   contract) is next.
+- **Bank abstraction, P3a — contract-only pipeline.** `skill_gnucash_pipeline`
+  now dispatches every dedicated bank (ICICI, Bank of Baroda, HSBC, HDFC)
+  through a single registry-driven path — `agents.banks.discover()` matched
+  on `display_name` → `load_bank_skill()` → `skill.parse(path,
+  password=pdf_password)` — replacing the four hardcoded `if bank == "..."`
+  branches and their four duplicated error-handling blocks with one. Restores
+  the `BankSkill` protocol's actual contract (`parse(path, password=None) ->
+  BankResult`, canonical rows only): removed the `output_path` side-channel
+  from `BoBSkill.parse`, `ICICISkill.parse`, and `HSBCSkill.parse` — three of
+  four banks had grown it to write their own canonical CSV, exactly the
+  duplication `bank_contract.py`'s docstring forbids. The pipeline now writes
+  the canonical CSV + sidecar exactly once, for every bank, via the shared
+  `canonical_io.write_canonical_csv`/`write_sidecar` tail (previously only
+  used inside each bank's own `parse()`). HDFC — the reference bank — is now
+  called through `HDFCBankSkill.parse()` instead of `skill_hdfc.agent.run()`;
+  `run()` itself is untouched and still backs the standalone HDFC UI tab.
+  HSBC's two-step pipeline seam (`skill_hsbc.tools.run_hsbc_pipeline` to build
+  an enriched `.xlsx`, then a separate `HSBCSkill().parse()` call) collapses
+  to one: the pipeline now hands HSBC's PDF directory straight to
+  `HSBCSkill.parse()`, which already folds OCR-to-enriched-workbook and
+  enriched-to-canonical into a single call (from P2) — the
+  `run_hsbc_pipeline` import is gone from the pipeline entirely. Each bank
+  still needs a little input shaping before the uniform `parse()` call (ICICI
+  and HDFC resolve a staged-upload directory to a single matching file; HSBC
+  resolves to a PDF directory; BoB keeps its pre-existing "no PDFs found in
+  this directory" check) — that's the one piece of per-bank logic that
+  couldn't be pushed into the registry itself, since no two banks accept a
+  staged upload in quite the same shape. This is a pure wiring phase — zero
+  extraction/OCR/canonical-output behavior change, confirmed by every
+  existing bank's golden tests passing unchanged (BoB/ICICI/HSBC-deterministic-
+  stage/HDFC cross-format goldens all byte-identical). New tests: a contract-
+  conformance check (`inspect.signature` asserts every discovered bank's
+  `parse()` is exactly `(path, password=None)`, so the `output_path` drift
+  can't silently return) and a registry round-trip test per bank (BoB/ICICI/
+  HSBC — HDFC's already existed) that parses a synthetic fixture through
+  `agents.banks` only, with no direct `from skill_* import`. Grep-verified
+  zero `from skill_hdfc`/`skill_bob`/`skill_icici`/`skill_hsbc` imports remain
+  in `skill_gnucash_pipeline/agent.py`. Central verdict engine and
+  multi-statement-consolidation promotion into `bank_common` are deferred to
+  P3b; `skill_itr_workbook`, `skill_26as`, and intercompany skills untouched.
 
 ### Fixed
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry

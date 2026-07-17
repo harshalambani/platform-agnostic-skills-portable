@@ -7,6 +7,7 @@ Run with:
 """
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
@@ -16,6 +17,10 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+for _extra in ("skill_bob", "skill_icici", "skill_hsbc"):
+    _dir = ROOT / "tests" / _extra
+    if str(_dir) not in sys.path:
+        sys.path.insert(0, str(_dir))
 
 from agents import banks
 from agents.bank_contract import BankResult, BankSkill
@@ -151,3 +156,79 @@ def test_discover_skips_non_bank_manifests():
     found = banks.discover()
     packages = [b.package for b in found]
     assert "agents.skill_gnucash_pipeline" not in packages
+
+
+# ---------------------------------------------------------------------------
+# P3a — contract conformance: every discovered bank's parse() is exactly
+# (path, password=None), no output_path side-channel left anywhere.
+# ---------------------------------------------------------------------------
+
+def test_all_discovered_banks_parse_signature_matches_contract():
+    found = banks.discover()
+    assert len(found) == 4, f"expected 4 banks, discovered {len(found)}: {found}"
+    for info in found:
+        skill = banks.load_bank_skill(info)
+        sig = inspect.signature(skill.parse)
+        params = list(sig.parameters.values())
+        names = [p.name for p in params]
+        assert names == ["path", "password"], (
+            f"{info.bank_key}.parse() has parameters {names}, "
+            f"expected exactly ['path', 'password'] -- no output_path"
+        )
+        assert params[1].default is None
+
+
+# ---------------------------------------------------------------------------
+# P3a — registry round-trip: one synthetic fixture per bank, parsed through
+# the registry ONLY (no direct `from skill_* import`), proving the wiring
+# phase didn't change any bank's canonical output.
+# ---------------------------------------------------------------------------
+
+def test_registry_round_trip_bob(tmp_path):
+    import bob_fixture_gen
+
+    info = banks.get("bob")
+    skill = banks.load_bank_skill(info)
+    pdf_path = tmp_path / "syn_bob.pdf"
+    pdf_path.write_bytes(bob_fixture_gen.build_pdf())
+
+    result = skill.parse(pdf_path)
+    assert isinstance(result, BankResult)
+    assert result.bank_key == "bob"
+    assert result.row_count == len(bob_fixture_gen.SYN_TRANSACTIONS)
+    assert result.opening_balance == bob_fixture_gen.SYN_OPENING_BALANCE
+    assert result.closing_balance == bob_fixture_gen.SYN_CLOSING_BALANCE
+    assert result.balance_check.ok is True
+
+
+def test_registry_round_trip_icici(tmp_path):
+    import icici_fixture_gen
+
+    info = banks.get("icici")
+    skill = banks.load_bank_skill(info)
+    xls_path = tmp_path / "syn_icici.xls"
+    xls_path.write_bytes(icici_fixture_gen.build_xls())
+
+    result = skill.parse(xls_path)
+    assert isinstance(result, BankResult)
+    assert result.bank_key == "icici"
+    assert result.row_count == len(icici_fixture_gen.SYN_TRANSACTIONS)
+    assert result.opening_balance == icici_fixture_gen.SYN_OPENING_BALANCE
+    assert result.closing_balance == icici_fixture_gen.SYN_CLOSING_BALANCE
+    assert result.balance_check.ok is True
+
+
+def test_registry_round_trip_hsbc(tmp_path):
+    import hsbc_fixture_gen
+
+    info = banks.get("hsbc")
+    skill = banks.load_bank_skill(info)
+    xlsx_path = tmp_path / "syn_hsbc_enriched.xlsx"
+    xlsx_path.write_bytes(hsbc_fixture_gen.build_xlsx())
+
+    result = skill.parse(xlsx_path)
+    assert isinstance(result, BankResult)
+    assert result.bank_key == "hsbc"
+    assert result.opening_balance == hsbc_fixture_gen.SYN_OPENING_BALANCE
+    assert result.closing_balance == hsbc_fixture_gen.SYN_CLOSING_BALANCE
+    assert result.balance_check.ok is True

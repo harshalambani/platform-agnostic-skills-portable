@@ -4,11 +4,13 @@ GnuCash Import Pipeline
 End-to-end: raw bank statement → GnuCash-ready mapped CSV.
 
 Chain:
-  1. Bank parse → canonical (BankSkill.parse() for ICICI / BoB / HSBC, each of
-                  which extracts AND maps to the canonical schema via the shared
-                  canonical_io tail; HDFC + Other Bank use LLM-assisted column
-                  normalisation; HSBC still runs its OCR pipeline to an enriched
-                  workbook first, which HSBCSkill.parse() then maps)
+  1. Bank parse → canonical. Every dedicated bank (ICICI / Bank of Baroda /
+                  HSBC / HDFC) is dispatched purely through the agents.banks
+                  registry: BankSkill.parse() returns canonical rows in
+                  memory, and this module writes the canonical CSV + sidecar
+                  once via the shared canonical_io tail — no bank writes its
+                  own CSV. "Other Bank (CSV)" is the one path that still uses
+                  LLM-assisted column normalisation.
   2. Account mapping   (skill_gnucash_account_mapper)
 
 Public surface:
@@ -32,8 +34,11 @@ from agents.balance_utils import (
     format_balance_summary,
     _safe_float,
 )
+from agents.banks import discover as discover_banks, load_bank_skill
 from agents.canonical_io import (
     read_sidecar as _ci_read_sidecar,
+    write_canonical_csv,
+    write_sidecar,
 )
 from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
@@ -802,150 +807,64 @@ def run(
         tmp_path = Path(tmp)
         canonical_path = str(tmp_path / "canonical.csv")
 
-        # ── Step 1 + 2: Bank extraction → canonical CSV ───────────────────────
+        # ── Step 1: Bank extraction → canonical CSV ───────────────────────────
+        # Every dedicated bank (DEDICATED_BANKS) is dispatched purely through
+        # the agents.banks registry: display_name matches this pipeline's
+        # `bank` dispatch string exactly (verified 2026-07-17), so no mapping
+        # table is needed. Each BankSkill.parse() returns canonical rows in
+        # memory only; the canonical CSV + sidecar is written once, here, via
+        # the shared canonical_io tail — no bank writes its own CSV anymore.
 
-        if bank == "ICICI":
-            icici_input = (
+        bank_info = next((b for b in discover_banks() if b.display_name == bank), None)
+
+        if bank_info is not None:
+            bank_input = (
                 statement_files[0] if isinstance(statement_files, list)
                 else statement_files.split(",")[0].strip()
             )
-            icici_input = _resolve_single_file(icici_input, (".xls", ".xlsx"))
-            _emit_progress(1, f"ICICI: extracting statement to canonical CSV")
-            log_lines.append("**Step 1** — ICICI: extracting statement to canonical CSV")
-            # ICICISkill.parse() writes the canonical CSV (byte-identical to the
-            # former run() path) plus the sidecar via the shared canonical_io tail.
-            try:
-                from skill_icici.agent import ICICISkill  # noqa: E402
-                icici_result = ICICISkill().parse(icici_input, output_path=canonical_path)
-                log.info("ICICI skill: %d canonical rows (balance_ok=%s)",
-                         icici_result.row_count, icici_result.balance_check.ok)
-            except Exception as e:
-                log.error("ICICI extraction failed: %s", e, exc_info=True)
-                return (
-                    f"## {bank} → extraction error\n\n"
-                    f"❌ ICICI skill raised an exception:\n```\n{e}\n```"
-                )
-
-        elif bank == "Bank of Baroda":
-            bob_input = (
-                statement_files[0] if isinstance(statement_files, list)
-                else statement_files.split(",")[0].strip()
-            )
-            _emit_progress(1, "Bank of Baroda: extracting PDFs to canonical CSV")
-            log_lines.append("**Step 1** — Bank of Baroda: extracting PDFs to canonical CSV")
-            # skill_bob.BoBSkill.parse() extracts the PDF table AND maps it to the
-            # canonical schema (the former adapter_bob step is folded in), writing
-            # the canonical CSV + sidecar via the shared canonical_io tail.
-            try:
-                from skill_bob.agent import BoBSkill  # noqa: E402
-
-                bob_src = Path(bob_input)
+            # Per-bank input shaping — the one piece of bank-specific logic
+            # that can't be pushed into a uniform call, since each skill's
+            # parse() expects a different shape for a staged multi-file
+            # upload (single resolved file vs. a whole PDF directory).
+            if bank == "ICICI":
+                bank_input = _resolve_single_file(bank_input, (".xls", ".xlsx"))
+            elif bank == "HDFC":
+                bank_input = _resolve_single_file(bank_input, (".csv", ".xls", ".xlsx", ".pdf"))
+            elif bank == "HSBC":
+                # If input is a directory (staged uploads), use it as-is;
+                # if it's a single file, use its parent directory — HSBC's
+                # parse() OCRs every PDF in the directory it's given.
+                hsbc_src = Path(bank_input)
+                bank_input = hsbc_src if hsbc_src.is_dir() else hsbc_src.parent
+            elif bank == "Bank of Baroda":
+                bob_src = Path(bank_input)
                 if bob_src.is_dir() and not sorted(bob_src.glob("*.pdf")):
                     return (
                         f"## {bank} → no PDFs found\n\n"
                         f"❌ The staged upload directory contains no .pdf files:\n"
-                        f"`{bob_input}`"
+                        f"`{bank_input}`"
                     )
-                bob_result = BoBSkill().parse(bob_src, output_path=canonical_path)
-                log.info("BoB skill: %d canonical rows (balance_ok=%s)",
-                         bob_result.row_count, bob_result.balance_check.ok)
+                bank_input = bob_src
+
+            _emit_progress(1, f"{bank}: extracting statement to canonical CSV")
+            log_lines.append(f"**Step 1** — {bank}: extracting statement to canonical CSV")
+            try:
+                skill = load_bank_skill(bank_info)
+                bank_result = skill.parse(bank_input, password=pdf_password)
+                write_canonical_csv(bank_result.rows, canonical_path)
+                write_sidecar(
+                    canonical_path, bank_info.display_name, "derived",
+                    bank_result.opening_balance, bank_result.closing_balance,
+                    bank_result.row_count,
+                    account_number=(bank_result.meta.account_number if bank_result.meta else None),
+                )
+                log.info("%s skill: %d canonical rows (balance_ok=%s)",
+                         bank, bank_result.row_count, bank_result.balance_check.ok)
             except Exception as e:
-                log.error("BoB extraction failed: %s", e, exc_info=True)
+                log.error("%s extraction failed: %s", bank, e, exc_info=True)
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ Bank of Baroda extraction failed:\n```\n{e}\n```"
-                )
-
-        elif bank == "HSBC":
-            hsbc_xlsx = str(tmp_path / "hsbc_raw.xlsx")
-            work_dir = str(tmp_path / "hsbc_work")
-            hsbc_input = (
-                statement_files[0] if isinstance(statement_files, list)
-                else statement_files.split(",")[0].strip()
-            )
-            # If input is a directory (staged uploads), use it as pdf_dir;
-            # if it's a single file, use its parent directory.
-            hsbc_src = Path(hsbc_input)
-            pdf_dir_for_hsbc = str(hsbc_src) if hsbc_src.is_dir() else str(hsbc_src.parent)
-
-            _emit_progress(1, "HSBC: extracting PDFs to Excel (direct)")
-            log_lines.append("**Step 1** — HSBC: extracting PDFs to Excel")
-            try:
-                # Bypass the LangGraph agent — call the pipeline tool directly.
-                # HSBC extraction is pure Python (OCR + parse), no LLM needed.
-                from skill_hsbc.tools import run_hsbc_pipeline  # noqa: E402
-                hsbc_result = run_hsbc_pipeline.invoke({
-                    "pdf_dir": pdf_dir_for_hsbc,
-                    "work_dir": work_dir,
-                    "output_path": hsbc_xlsx,
-                    "title": "HSBC Statement",
-                })
-                log.info("HSBC pipeline result: %s", hsbc_result[:200] if hsbc_result else "empty")
-            except Exception as e:
-                log.error("HSBC extraction failed: %s", e, exc_info=True)
-                return (
-                    f"## {bank} → extraction error\n\n"
-                    f"❌ HSBC extraction failed:\n```\n{e}\n```"
-                )
-            # Check intermediate output before proceeding to adapter
-            if not Path(hsbc_xlsx).is_file():
-                return (
-                    f"## {bank} → extraction produced no output\n\n"
-                    f"❌ The HSBC pipeline did not create the Excel file.\n\n"
-                    f"**Pipeline result:** {hsbc_result}"
-                )
-            _emit_progress(2, "HSBC: converting to canonical format")
-            log_lines.append("**Step 2** — HSBC: converting to canonical format")
-            # HSBCSkill.parse() maps the enriched workbook to the canonical
-            # schema (folds in the former adapter_hsbc, with the column-mapping
-            # bug fixed) and writes the canonical CSV + sidecar.
-            try:
-                from skill_hsbc.agent import HSBCSkill  # noqa: E402
-                hsbc_result = HSBCSkill().parse(hsbc_xlsx, output_path=canonical_path)
-                log.info("HSBC skill: %d canonical rows (balance_ok=%s)",
-                         hsbc_result.row_count, hsbc_result.balance_check.ok)
-            except Exception as e:
-                log.error("HSBC adapter failed: %s", e, exc_info=True)
-                return (
-                    f"## {bank} → canonical conversion error\n\n"
-                    f"❌ HSBC adapter raised an exception:\n```\n{e}\n```"
-                )
-
-        elif bank == "HDFC":
-            # All HDFC input shapes (PDF, password-protected PDF, XLS, XLSX,
-            # CSV) go through skill_hdfc's deterministic parser — no LLM.
-            # The generic LLM-assisted normalisation path below is reserved
-            # for "Other Bank (CSV)" only.
-            input_file = (
-                statement_files[0] if isinstance(statement_files, list)
-                else statement_files.split(",")[0].strip()
-            )
-            input_file = _resolve_single_file(input_file, (".csv", ".xls", ".xlsx", ".pdf"))
-            suffix = Path(input_file).suffix.lower()
-            step_label = "OCR/parsing PDF statement" if suffix == ".pdf" else "parsing statement"
-            _emit_progress(1, f"HDFC: {step_label}")
-            log_lines.append(f"**Step 1** — HDFC: {step_label} (deterministic, no LLM)")
-            try:
-                from skill_hdfc.agent import run as hdfc_run  # noqa: E402
-                hdfc_result = hdfc_run(
-                    pdf_path=input_file,
-                    output_path=canonical_path,
-                    config_path=config_path,
-                    model_override=model_override,
-                    pdf_password=pdf_password,
-                )
-                # hdfc_run returns an error string (starting with "Error " or
-                # containing ❌) on failure rather than raising.
-                if hdfc_result and ("❌" in str(hdfc_result) or str(hdfc_result).startswith("Error")):
-                    return (
-                        f"## {bank} → extraction error\n\n"
-                        f"{hdfc_result}"
-                    )
-            except Exception as e:
-                log.error("HDFC extraction failed: %s", e, exc_info=True)
-                return (
-                    f"## {bank} → extraction error\n\n"
-                    f"❌ HDFC skill raised an exception:\n```\n{e}\n```"
+                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```"
                 )
 
         elif bank == "Other Bank (CSV)":
