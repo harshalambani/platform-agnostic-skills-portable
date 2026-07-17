@@ -5,8 +5,7 @@ agent.py — HSBC bank statement entry point.
 standalone UI tab, deterministically (no LLM). :class:`HSBCSkill` is the
 ``BankSkill`` implementation: ``parse()`` accepts a single PDF, a folder of
 PDFs (HSBC's multi-statement consolidation -- date-ordered, continuity
-checked, see ``scripts/parse_tsv.py``), or -- as a fast-path/test seam that
-also keeps the current GnuCash-pipeline call site working unmodified -- an
+checked, see ``scripts/parse_tsv.py``), or -- as a fast-path/test seam -- an
 already-enriched ``.xlsx``/``.xlsm`` workbook. HSBC is the OCR bank: every
 row's fidelity is ``"ocr-approx"``, never ``"exact"``.
 """
@@ -23,7 +22,7 @@ from typing import Any, Optional
 from agents.bank_common import normalize as _normalize
 from agents.bank_common import password as _password
 from agents.bank_contract import BankResult, BankStatementMeta
-from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
+from agents.canonical_io import run_balance_check
 
 log = logging.getLogger(__name__)
 
@@ -241,11 +240,8 @@ class HSBCSkill:
     ``parse`` accepts:
       - a single PDF statement,
       - a folder of PDF statements (HSBC's multi-statement consolidation),
-      - or, as a fast-path/test seam -- and to keep the current
-        ``skill_gnucash_pipeline`` call site (which builds the enriched
-        workbook itself, then calls ``HSBCSkill().parse(xlsx,
-        output_path=...)``) working unmodified -- an already-enriched
-        ``.xlsx``/``.xlsm`` workbook, which skips OCR entirely.
+      - or, as a fast-path/test seam, an already-enriched ``.xlsx``/``.xlsm``
+        workbook, which skips OCR entirely.
 
     Every path OCRs at some stage, so ``fidelity`` is always ``"ocr-approx"``.
     """
@@ -288,14 +284,13 @@ class HSBCSkill:
         self,
         path: str | Path,
         password: str | None = None,
-        output_path: str | Path | None = None,
     ) -> BankResult:
         """Parse HSBC statement(s) into a canonical BankResult.
 
         ``path`` may be a single PDF, a folder of PDFs, or an already-enriched
-        ``.xlsx``/``.xlsm`` workbook (see class docstring). ``output_path``,
-        when given, writes the canonical CSV + sidecar as a side effect (the
-        existing ``skill_gnucash_pipeline`` call convention).
+        ``.xlsx``/``.xlsm`` workbook (see class docstring). Returns canonical
+        rows only — writing the CSV/sidecar is the caller's job via
+        ``canonical_io`` (the shared tail), per the ``BankSkill`` protocol.
         """
         p = Path(path)
         suffix = p.suffix.lower()
@@ -321,15 +316,6 @@ class HSBCSkill:
         if not balance_check.ok:
             warnings.extend(f"Balance: {d}" for d in balance_check.details)
 
-        sidecar_path = None
-        if output_path is not None:
-            write_canonical_csv(rows, output_path)
-            sidecar_path = write_sidecar(
-                output_path, "HSBC", "derived",
-                balance_check.opening_balance, balance_check.closing_balance,
-                len(rows),
-            )
-
         dates = [r["Date"] for r in rows if r.get("Date")]
         meta = BankStatementMeta(
             bank_key=BANK_KEY,
@@ -349,7 +335,7 @@ class HSBCSkill:
             opening_balance=balance_check.opening_balance,
             closing_balance=balance_check.closing_balance,
             balance_check=balance_check,
-            sidecar_path=sidecar_path,
+            sidecar_path=None,
             warnings=warnings,
             meta=meta,
         )

@@ -22,7 +22,7 @@ from typing import Optional
 
 from agents.bank_common import normalize as _normalize
 from agents.bank_contract import BankResult, BankStatementMeta
-from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
+from agents.canonical_io import run_balance_check
 
 log = logging.getLogger(__name__)
 
@@ -247,12 +247,12 @@ class BoBSkill:
         self,
         path: str | Path,
         password: str | None = None,
-        output_path: str | Path | None = None,
     ) -> BankResult:
         """Parse a BoB statement PDF (or directory of PDFs) to a BankResult.
 
-        When ``output_path`` is given, the canonical CSV and its sidecar are
-        written there via ``canonical_io`` (the shared tail).
+        Returns canonical rows only — writing the CSV/sidecar is the caller's
+        job via ``canonical_io`` (the shared tail), per the ``BankSkill``
+        protocol.
         """
         from agents.skill_bob.scripts.extract_bob_statement import (  # noqa: PLC0415
             extract,
@@ -278,15 +278,6 @@ class BoBSkill:
         if not balance_check.ok:
             warnings.extend(f"Balance: {d}" for d in balance_check.details)
 
-        sidecar_path = None
-        if output_path is not None:
-            write_canonical_csv(rows, output_path)
-            sidecar_path = write_sidecar(
-                output_path, "Bank of Baroda", "derived",
-                balance_check.opening_balance, balance_check.closing_balance,
-                len(rows),
-            )
-
         account_number, period_from, period_to = _extract_meta_fields(pdfs[0], password)
         meta = BankStatementMeta(
             bank_key=BANK_KEY,
@@ -306,7 +297,7 @@ class BoBSkill:
             opening_balance=balance_check.opening_balance,
             closing_balance=balance_check.closing_balance,
             balance_check=balance_check,
-            sidecar_path=sidecar_path,
+            sidecar_path=None,
             warnings=warnings,
             meta=meta,
         )

@@ -177,7 +177,7 @@ def test_hsbc_parse_maps_columns_and_reconciles(tmp_path):
     xlsx = tmp_path / "hsbc.xlsx"
     _build_hsbc_workbook(xlsx)
 
-    res = HSBCSkill().parse(xlsx, output_path=tmp_path / "out.csv")
+    res = HSBCSkill().parse(xlsx)
     assert isinstance(res, BankResult)
     assert res.row_count == 4
     # The bug fix: descriptions + withdrawals are now populated, NaN → "0"/"".
@@ -191,8 +191,8 @@ def test_hsbc_parse_maps_columns_and_reconciles(tmp_path):
     assert res.balance_check.ok is True
     assert res.opening_balance == 1000.0
     assert res.closing_balance == 1200.0
-    # Sidecar written next to the canonical CSV.
-    assert res.sidecar_path is not None and res.sidecar_path.is_file()
+    # parse() returns rows only — writing the CSV/sidecar is the caller's job.
+    assert res.sidecar_path is None
 
 
 def test_hsbc_detect_on_workbook(tmp_path):
@@ -233,7 +233,7 @@ def test_icici_detect_rejects_non_xls(tmp_path):
 
 @pytest.mark.skipif(not _present(BOB_PDF), reason="BoB corpus PDF not available")
 def test_bob_corpus_tieout(tmp_path):
-    res = BoBSkill().parse(BOB_PDF, output_path=tmp_path / "bob.csv")
+    res = BoBSkill().parse(BOB_PDF)
     assert BoBSkill().detect(BOB_PDF) == 0.95
     assert res.row_count == 74
     assert res.balance_check.ok is True
@@ -244,7 +244,7 @@ def test_bob_corpus_tieout(tmp_path):
 @pytest.mark.skipif(not _present(HSBC_XLSX), reason="HSBC corpus workbook not available")
 def test_hsbc_corpus_tieout(tmp_path):
     pytest.importorskip("pandas")
-    res = HSBCSkill().parse(HSBC_XLSX, output_path=tmp_path / "hsbc.csv")
+    res = HSBCSkill().parse(HSBC_XLSX)
     assert HSBCSkill().detect(HSBC_XLSX) == 0.9
     assert res.row_count == 482
     # The deliberate column-bug fix: balance now reconciles, opening is real.
@@ -257,7 +257,7 @@ def test_hsbc_corpus_tieout(tmp_path):
 
 @pytest.mark.skipif(not _present(ICICI_XLS), reason="ICICI corpus XLS not available")
 def test_icici_corpus_tieout(tmp_path):
-    res = ICICISkill().parse(ICICI_XLS, output_path=tmp_path / "icici.csv")
+    res = ICICISkill().parse(ICICI_XLS)
     assert ICICISkill().detect(ICICI_XLS) == 0.9
     assert res.row_count == 465
     assert res.balance_check.ok is True
