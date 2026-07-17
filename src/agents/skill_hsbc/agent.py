@@ -1,29 +1,36 @@
 """
-agent.py — HSBC bank statement direct-mode entry point.
+agent.py — HSBC bank statement entry point.
 
 ``run()`` drives the OCR -> parse -> enrich -> Excel pipeline for the
 standalone UI tab, deterministically (no LLM). :class:`HSBCSkill` is the
-``BankSkill`` implementation: it maps the enriched workbook to canonical rows
-(folding in the retired ``adapter_hsbc``) and is the parser the GnuCash
-pipeline dispatches on.
+``BankSkill`` implementation: ``parse()`` accepts a single PDF, a folder of
+PDFs (HSBC's multi-statement consolidation -- date-ordered, continuity
+checked, see ``scripts/parse_tsv.py``), or -- as a fast-path/test seam that
+also keeps the current GnuCash-pipeline call site working unmodified -- an
+already-enriched ``.xlsx``/``.xlsm`` workbook. HSBC is the OCR bank: every
+row's fidelity is ``"ocr-approx"``, never ``"exact"``.
 """
 from __future__ import annotations
 
 import logging
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
-from agents.bank_contract import BankResult
+from agents.bank_common import normalize as _normalize
+from agents.bank_common import password as _password
+from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
 
 log = logging.getLogger(__name__)
 
 BANK_KEY = "hsbc"
 
-_PIPELINE = Path(__file__).parent / "scripts" / "run_pipeline.py"
+_SCRIPTS = Path(__file__).parent / "scripts"
+_PIPELINE = _SCRIPTS / "run_pipeline.py"
 
 
 def run(
@@ -82,6 +89,7 @@ def run(
 # Canonical-to-workbook column resolution, in preference order.
 _DATE_COLS = ("Date", "Transaction Date")
 _DESC_COLS = ("Transaction Details", "Particulars", "Description")
+_EXTRA_INFO_COLS = ("Extra Information",)
 _TXN_ID_COLS = ("Transaction Number", "Cheque", "Reference", "Ref")
 _DEPOSIT_COLS = ("Deposit", "Credit")
 _WITHDRAWAL_COLS = ("Withdrawals", "Withdrawal", "Debit")
@@ -107,7 +115,13 @@ def _parse_date_hsbc(date_val: Any) -> Optional[str]:
 
 
 def _parse_number_hsbc(num_val: Any) -> str:
-    """Parse an amount to a decimal string. NaN/None/blank all become "0"."""
+    """Parse an amount to a decimal string. NaN/None/blank all become "0".
+
+    Comma/Cr-Dr-suffix cleanup is delegated to ``bank_common.clean_amount``
+    (the same primitive HDFC/BoB/ICICI use) — HSBC just guards NaN/None first
+    and re-normalizes through ``float()`` to keep its existing decimal-string
+    convention (e.g. "50000.0", not "50000").
+    """
     if num_val is None:
         return "0"
     # Catch float('nan') (and pandas NaN, which is a float) — nan != nan.
@@ -116,8 +130,9 @@ def _parse_number_hsbc(num_val: Any) -> str:
     s = str(num_val).strip()
     if not s or s.lower() == "nan":
         return "0"
+    cleaned = _normalize.clean_amount(s, blank_zero=False)
     try:
-        return str(float(s.replace(",", "")))
+        return str(float(cleaned))
     except ValueError:
         return "0"
 
@@ -152,6 +167,7 @@ def _read_enriched_rows(input_xlsx: str) -> list[dict]:
     cols = set(df.columns)
     date_col = _pick(cols, _DATE_COLS)
     desc_col = _pick(cols, _DESC_COLS)
+    extra_col = _pick(cols, _EXTRA_INFO_COLS)
     txn_col = _pick(cols, _TXN_ID_COLS)
     dep_col = _pick(cols, _DEPOSIT_COLS)
     wdl_col = _pick(cols, _WITHDRAWAL_COLS)
@@ -162,10 +178,17 @@ def _read_enriched_rows(input_xlsx: str) -> list[dict]:
         date_str = _parse_date_hsbc(row.get(date_col)) if date_col else None
         if not date_str:
             continue
+        desc = _clean_str(row.get(desc_col)) if desc_col else ""
+        extra = _clean_str(row.get(extra_col)) if extra_col else ""
+        # Extra Information (channel/time stamps, stray IMPS markers, etc. --
+        # see enrich.py's clean_desc) is real content the enrichment stage
+        # extracted; the canonical schema has no dedicated column for it, so
+        # fold it into Description rather than silently dropping it.
+        description = f"{desc} | {extra}" if desc and extra else (desc or extra)
         rows.append({
             "Date": date_str,
             "Transaction ID": _clean_str(row.get(txn_col)) if txn_col else "",
-            "Description": _clean_str(row.get(desc_col)) if desc_col else "",
+            "Description": description,
             "Account": "",
             "Deposit": _parse_number_hsbc(row.get(dep_col)) if dep_col else "0",
             "Withdrawal": _parse_number_hsbc(row.get(wdl_col)) if wdl_col else "0",
@@ -175,42 +198,123 @@ def _read_enriched_rows(input_xlsx: str) -> list[dict]:
     return rows
 
 
+def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Path:
+    """Run OCR -> parse -> enrich -> xlsx over ``pdf_paths`` in a fresh scratch
+    dir and return the built enriched workbook's path.
+
+    This is the "uniform PDF-in boundary": it's the same four-stage pipeline
+    ``run()``/``run_pipeline.py`` drives, just invoked with an in-memory list
+    of PDFs (one or many -- HSBC's multi-statement date-ordering and
+    continuity detection in ``scripts/parse_tsv.py`` kick in automatically
+    for folders with more than one PDF) rather than a pre-existing directory.
+    """
+    work_dir = Path(tempfile.mkdtemp(prefix="hsbc_bankskill_"))
+    pdf_dir = work_dir / "pdfs"
+    pdf_dir.mkdir()
+    for src in pdf_paths:
+        (pdf_dir / src.name).write_bytes(Path(src).read_bytes())
+    out_xlsx = work_dir / "enriched.xlsx"
+
+    cmd = [
+        sys.executable, str(_PIPELINE),
+        "--pdf-dir", str(pdf_dir),
+        "--work-dir", str(work_dir / "work"),
+        "--out", str(out_xlsx),
+    ]
+    if password:
+        cmd += ["--password", password]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        stderr = result.stderr.strip() or result.stdout.strip() or "(no output captured)"
+        if _password.is_password_error(RuntimeError(stderr)):
+            raise ValueError(
+                _password.password_error_message("the statement-open password")
+            )
+        raise RuntimeError("HSBC pipeline failed:\n" + stderr)
+    return out_xlsx
+
+
 class HSBCSkill:
     """HSBC parser implementing the ``BankSkill`` protocol.
 
-    ``parse`` consumes the *enriched workbook* produced by the HSBC OCR pipeline
-    (``run()`` above / the standalone tab), not the raw PDF — that heavy OCR
-    step stays separate. ``detect`` sniffs that workbook's columns.
+    ``parse`` accepts:
+      - a single PDF statement,
+      - a folder of PDF statements (HSBC's multi-statement consolidation),
+      - or, as a fast-path/test seam -- and to keep the current
+        ``skill_gnucash_pipeline`` call site (which builds the enriched
+        workbook itself, then calls ``HSBCSkill().parse(xlsx,
+        output_path=...)``) working unmodified -- an already-enriched
+        ``.xlsx``/``.xlsm`` workbook, which skips OCR entirely.
+
+    Every path OCRs at some stage, so ``fidelity`` is always ``"ocr-approx"``.
     """
 
     bank_key = BANK_KEY
 
     def formats(self) -> tuple[str, ...]:
-        return (".xlsx", ".xlsm")
+        return (".pdf",)
 
     def detect(self, path: str | Path) -> float:
-        """Confidence that ``path`` is an enriched HSBC workbook."""
+        """Confidence that ``path`` is an HSBC statement (PDF) or an already-
+        enriched HSBC workbook (the fast-path/test seam)."""
         p = Path(path)
-        if p.suffix.lower() not in (".xlsx", ".xlsm"):
+        suffix = p.suffix.lower()
+        if suffix in (".xlsx", ".xlsm"):
+            try:
+                import openpyxl  # noqa: PLC0415
+
+                wb = openpyxl.load_workbook(str(p), read_only=True)
+                ws = wb[wb.sheetnames[0]]
+                header = {str(c.value).strip() for c in next(ws.iter_rows(max_row=1))}
+                wb.close()
+            except Exception:  # noqa: BLE001 — detection must never raise
+                return 0.0
+            return 0.9 if ("Transaction Details" in header and "Withdrawals" in header) else 0.0
+        if suffix != ".pdf":
+            return 0.0
+        if not p.is_file():
             return 0.0
         try:
-            import openpyxl  # noqa: PLC0415
+            import pdfplumber  # noqa: PLC0415
 
-            wb = openpyxl.load_workbook(str(p), read_only=True)
-            ws = wb[wb.sheetnames[0]]
-            header = {str(c.value).strip() for c in next(ws.iter_rows(max_row=1))}
-            wb.close()
-        except Exception:  # noqa: BLE001 — detection must never raise
-            return 0.0
-        if "Transaction Details" in header and "Withdrawals" in header:
-            return 0.9
-        return 0.0
+            with pdfplumber.open(str(p)) as pdf:
+                text = (pdf.pages[0].extract_text() or "") if pdf.pages else ""
+            return 0.8 if "hsbc" in text.lower() else 0.5
+        except Exception:  # noqa: BLE001 — scanned/encrypted PDFs have no text layer; that's the norm for HSBC
+            return 0.5
 
-    def parse(self, path: str | Path, output_path: str | Path | None = None) -> BankResult:
-        """Parse an enriched HSBC workbook into a canonical BankResult."""
-        rows = _read_enriched_rows(str(path))
+    def parse(
+        self,
+        path: str | Path,
+        password: str | None = None,
+        output_path: str | Path | None = None,
+    ) -> BankResult:
+        """Parse HSBC statement(s) into a canonical BankResult.
+
+        ``path`` may be a single PDF, a folder of PDFs, or an already-enriched
+        ``.xlsx``/``.xlsm`` workbook (see class docstring). ``output_path``,
+        when given, writes the canonical CSV + sidecar as a side effect (the
+        existing ``skill_gnucash_pipeline`` call convention).
+        """
+        p = Path(path)
+        suffix = p.suffix.lower()
+
+        if suffix in (".xlsx", ".xlsm"):
+            enriched_xlsx = p
+        elif p.is_dir():
+            pdfs = sorted(p.glob("*.pdf"))
+            if not pdfs:
+                raise ValueError(f"No PDFs found in {path}")
+            enriched_xlsx = _run_ocr_pipeline(pdfs, password)
+        elif suffix == ".pdf":
+            enriched_xlsx = _run_ocr_pipeline([p], password)
+        else:
+            raise ValueError(f"Unsupported file type: {suffix or path}")
+
+        rows = _read_enriched_rows(str(enriched_xlsx))
         if not rows:
-            raise ValueError(f"No transaction rows found in HSBC workbook: {path}")
+            raise ValueError(f"No transaction rows found in HSBC statement: {path}")
 
         balance_check = run_balance_check(rows)
         warnings: list[str] = []
@@ -226,6 +330,17 @@ class HSBCSkill:
                 len(rows),
             )
 
+        dates = [r["Date"] for r in rows if r.get("Date")]
+        meta = BankStatementMeta(
+            bank_key=BANK_KEY,
+            account_number=None,
+            period_from=min(dates) if dates else None,
+            period_to=max(dates) if dates else None,
+            source_format="pw-pdf" if password else "pdf",
+            fidelity="ocr-approx",
+            password_used=bool(password),
+        )
+
         return BankResult(
             rows=rows,
             bank_key=BANK_KEY,
@@ -236,4 +351,8 @@ class HSBCSkill:
             balance_check=balance_check,
             sidecar_path=sidecar_path,
             warnings=warnings,
+            meta=meta,
         )
+
+
+bank_skill = HSBCSkill()

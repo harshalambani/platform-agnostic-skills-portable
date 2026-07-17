@@ -36,11 +36,10 @@ Files produced:
 
 ## Tips
 
-Check the Summary sheet first — if its totals reconcile, the extraction is sound. This skill is on the roadmap to go fully offline (no LLM).
+Check the Summary sheet first — if its totals reconcile, the extraction is sound. This skill runs fully offline (no LLM, direct mode).
 
 ## Troubleshooting
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | Currently HSBC uses an LLM step. Start Ollama or set an endpoint in Settings. |
 | OCR output is poor or missing. | Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans. |

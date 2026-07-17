@@ -292,9 +292,8 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <ul class="outputs">
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-HSBC.xlsx</code><span class="pa-tip" data-tip="A reconciled workbook: one row per transaction with extracted transaction ID, separate transaction date, scrubbed description and an Extra Information column, plus a Summary sheet that ties the totals out.">ℹ️</span> — A reconciled workbook: one row per transaction with extracted transaction ID, separate transaction date, scrubbed description and an Extra Information column, plus a Summary sheet that ties the totals out.</li>
 </ul>
-<h3>Tips</h3><p>Check the Summary sheet first — if its totals reconcile, the extraction is sound. This skill is on the roadmap to go fully offline (no LLM).</p>
+<h3>Tips</h3><p>Check the Summary sheet first — if its totals reconcile, the extraction is sound. This skill runs fully offline (no LLM, direct mode).</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>Currently HSBC uses an LLM step. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>OCR output is poor or missing.</td><td>Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans.</td></tr>
 </tbody></table>
 </section>

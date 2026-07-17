@@ -5,10 +5,13 @@ display_name: "HSBC"
 description: >
   Consolidate one or more HSBC bank-statement PDFs into a clean Excel workbook
   with extracted transaction IDs, separate transaction dates, scrubbed
-  descriptions, and an Extra Information column. Scanned pages flow through
-  Tesseract OCR; text-extractable pages skip OCR automatically.
+  descriptions, and an Extra Information column. Every page is rasterised and
+  OCR'd via Tesseract + Poppler (HSBC statements are scanned; there is no
+  digital-text-layer fast path).
 category: "banks"
-version: "1.0.0"
+version: "1.1.0"
+bank: true
+bank_key: "hsbc"
 
 mode: "direct"
 entry_point: "agent:run"
@@ -69,9 +72,7 @@ help:
           Extra Information column, plus a Summary sheet that ties the totals out.
   tips: >
     Check the Summary sheet first — if its totals reconcile, the extraction is
-    sound. This skill is on the roadmap to go fully offline (no LLM).
+    sound. This skill runs fully offline (no LLM, direct mode).
   troubleshooting:
-    - problem: "Run errors mentioning the endpoint / model."
-      fix: "Currently HSBC uses an LLM step. Start Ollama or set an endpoint in Settings."
     - problem: "OCR output is poor or missing."
       fix: "Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans."

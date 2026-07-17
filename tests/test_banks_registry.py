@@ -46,6 +46,12 @@ def test_discover_finds_icici():
     assert "icici" in keys
 
 
+def test_discover_finds_hsbc():
+    found = banks.discover()
+    keys = [b.bank_key for b in found]
+    assert "hsbc" in keys
+
+
 def test_discover_is_sorted_by_display_name():
     found = banks.discover()
     names = [b.display_name for b in found]
@@ -79,6 +85,13 @@ def test_get_icici_case_insensitive():
     assert info is not None
     assert info.bank_key == "icici"
     assert info.package == "agents.skill_icici"
+
+
+def test_get_hsbc_case_insensitive():
+    info = banks.get("HSBC")
+    assert info is not None
+    assert info.bank_key == "hsbc"
+    assert info.package == "agents.skill_hsbc"
 
 
 def test_get_unknown_bank_returns_none():
@@ -123,6 +136,13 @@ def test_load_bank_skill_returns_conforming_icici():
     skill = banks.load_bank_skill(info)
     assert isinstance(skill, BankSkill)
     assert ".xls" in skill.formats()
+
+
+def test_load_bank_skill_returns_conforming_hsbc():
+    info = banks.get("hsbc")
+    skill = banks.load_bank_skill(info)
+    assert isinstance(skill, BankSkill)
+    assert ".pdf" in skill.formats()
 
 
 def test_discover_skips_non_bank_manifests():
