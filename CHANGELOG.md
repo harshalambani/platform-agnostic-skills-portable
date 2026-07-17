@@ -65,6 +65,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   before/after migration against the real local BoB corpus sample (74 rows,
   opening/closing balances unchanged) and the Session-A independent
   closing-balance verdict fix is untouched. HDFC/ICICI/HSBC not touched.
+- **Bank abstraction, P2 — ICICI (`skill_icici`, v1.1.0) onto the contract.**
+  `ICICISkill.parse()` now returns a fully populated `BankStatementMeta` —
+  account number and statement period parsed from the XLS "Search" preamble
+  (`Account Number` / `Transaction Date from ... to ...` rows), `source_format`
+  (`"xls"`), `fidelity`, and `password_used` (ICICI statements are never
+  password-protected). ICICI now builds on `bank_common.normalize` for amount
+  cleanup and date parsing instead of a private `MONTH_MAP`: a new
+  `parse_comma_month_date()` / `MONTH_ABBR` pair handles ICICI's distinctive
+  "DD,Mon,YYYY" date shape, layered under the same `clean_amount()` used by
+  HDFC/BoB. `formats()`/`detect()`/the directory glob in `parse()` are
+  narrowed from `(".xls", ".xlsx")` to `(".xls",)` — a pre-existing latent
+  bug, since `xlrd` 2.x cannot actually read `.xlsx` (support dropped in
+  2.0+), and ICICI's own `skill.yaml` already declared `.xls`-only. Registered
+  in the `banks.py` registry via `skill.yaml` (`bank: true`, `bank_key:
+  "icici"`) plus a module-level `bank_skill` instance. New synthetic golden
+  fixture (`tests/skill_icici/icici_fixture_gen.py`): a single `.xls` (ICICI
+  has only one real input shape) encoding 5 fake transactions in the real
+  12-row-preamble + header-row-13 + data-row-14+ layout, with an identity
+  test asserting the expected canonical rows, balances, and meta fields, plus
+  a `.xlsx`-rejected test. Canonical CSV output verified byte-identical
+  before/after migration against the real local ICICI corpus sample (465
+  rows, opening/closing balances unchanged). HDFC/BoB/HSBC not touched.
 
 ### Fixed
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry

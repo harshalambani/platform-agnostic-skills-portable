@@ -14,6 +14,14 @@ import re
 _ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _CR_DR_SUFFIX_RE = re.compile(r'(Cr|Dr)$', re.IGNORECASE)
 
+# ICICI-specific: month abbreviation -> number, for the "DD,Mon,YYYY" date shape
+# (e.g. "01,Apr,2024") used throughout ICICI's XLS statement downloads.
+MONTH_ABBR = {
+    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+    'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+    'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
+}
+
 
 def clean_amount(s, blank_zero: bool = True) -> str:
     """Strip thousands separators and a trailing Cr/Dr suffix.
@@ -49,3 +57,22 @@ def normalise_date(d) -> str:
     if len(yy) == 2:
         yy = "20" + yy
     return yy + "-" + mm + "-" + dd
+
+
+def parse_comma_month_date(d) -> str | None:
+    """Parse ICICI's "DD,Mon,YYYY" date shape (e.g. "01,Apr,2024") to ISO
+    YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't
+    match -- callers decide how to log/report that."""
+    if not d or not isinstance(d, str):
+        return None
+    d = d.strip().strip('"')
+    if not d:
+        return None
+    parts = d.split(',')
+    if len(parts) != 3:
+        return None
+    day, month_abbr, year = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
+    month = MONTH_ABBR.get(month_abbr)
+    if not month:
+        return None
+    return f"{year}-{month}-{day.zfill(2)}"

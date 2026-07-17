@@ -9,7 +9,9 @@ description: >
   to cheque column, and running balance reconciliation.
   Uses xlrd (pure Python) to read XLS — no LibreOffice required.
 category: "banks"
-version: "1.0.0"
+version: "1.1.0"
+bank: true
+bank_key: "icici"
 
 mode: "agent"
 entry_point: "agent:run"

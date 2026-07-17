@@ -23,7 +23,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from agents.balance_utils import format_balance_summary as _fmt_bal
-from agents.bank_contract import BankResult
+from agents.bank_common import normalize as _normalize
+from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import CANONICAL_FIELDS, run_balance_check, write_sidecar
 
 logger = logging.getLogger(__name__)
@@ -54,13 +55,6 @@ COL_REMARKS = 5
 COL_WITHDRAWAL = 6
 COL_DEPOSIT = 7
 COL_BALANCE = 8
-
-# Month abbreviation → number
-MONTH_MAP = {
-    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
-    'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
-    'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
-}
 
 # Legend/footer markers — rows starting with these are stripped
 LEGEND_MARKERS = [
@@ -125,6 +119,43 @@ def convert_xls_to_csv(xls_path: str) -> List[List[str]]:
 
 
 # ============================================================================
+# STATEMENT META EXTRACTION
+# ============================================================================
+
+# Preamble anchors: row 3 col 1 label "Account Number", value in col 3 as
+# "<digits>(CCY)  - <branch/name>"; row 4 col 1 label "Transaction Date from",
+# from-date in col 3, "to" in col 4, to-date in col 5 (both DD,Mon,YYYY).
+_ACCOUNT_ROW, _ACCOUNT_LABEL_COL, _ACCOUNT_VALUE_COL = 3, 1, 3
+_PERIOD_ROW, _PERIOD_LABEL_COL, _PERIOD_FROM_COL, _PERIOD_TO_COL = 4, 1, 3, 5
+_ACCOUNT_NUM_RE = re.compile(r'^\s*(\d+)')
+
+
+def _extract_meta_fields(
+    raw_rows: List[List[str]],
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Best-effort extraction of (account_number, period_from, period_to)
+    from the XLS preamble's "Search" front-matter rows. Never raises."""
+    account_number = period_from = period_to = None
+    try:
+        if len(raw_rows) > _ACCOUNT_ROW:
+            row = raw_rows[_ACCOUNT_ROW]
+            label = str(row[_ACCOUNT_LABEL_COL]).strip().lower() if len(row) > _ACCOUNT_LABEL_COL else ""
+            if "account number" in label and len(row) > _ACCOUNT_VALUE_COL:
+                m = _ACCOUNT_NUM_RE.match(str(row[_ACCOUNT_VALUE_COL]))
+                if m:
+                    account_number = m.group(1)
+        if len(raw_rows) > _PERIOD_ROW:
+            row = raw_rows[_PERIOD_ROW]
+            label = str(row[_PERIOD_LABEL_COL]).strip().lower() if len(row) > _PERIOD_LABEL_COL else ""
+            if "transaction date" in label and len(row) > _PERIOD_TO_COL:
+                period_from = parse_icici_date(str(row[_PERIOD_FROM_COL]))
+                period_to = parse_icici_date(str(row[_PERIOD_TO_COL]))
+    except Exception:  # noqa: BLE001 — best-effort, must never raise
+        return None, None, None
+    return account_number, period_from, period_to
+
+
+# ============================================================================
 # DATE PARSING
 # ============================================================================
 
@@ -134,28 +165,24 @@ def parse_icici_date(date_str: str) -> Optional[str]:
     Examples:
         "01,Apr,2024" → "2024-04-01"
         "31,Mar,2025" → "2025-03-31"
+
+    Delegates to bank_common.normalize.parse_comma_month_date; preserves the
+    original unknown-month warning log.
     """
     if not date_str or not isinstance(date_str, str):
         return None
-    date_str = date_str.strip().strip('"')
-    if not date_str:
+    stripped = date_str.strip().strip('"')
+    if not stripped:
         return None
 
-    parts = date_str.split(',')
-    if len(parts) != 3:
-        return None
-
-    day = parts[0].strip()
-    month_abbr = parts[1].strip().lower()
-    year = parts[2].strip()
-
-    month = MONTH_MAP.get(month_abbr)
-    if not month:
-        logger.warning(f"Unknown month abbreviation: {month_abbr}")
-        return None
-
-    day = day.zfill(2)
-    return f"{year}-{month}-{day}"
+    result = _normalize.parse_comma_month_date(stripped)
+    if result is None:
+        parts = stripped.split(',')
+        if len(parts) == 3:
+            month_abbr = parts[1].strip().lower()
+            if month_abbr not in _normalize.MONTH_ABBR:
+                logger.warning(f"Unknown month abbreviation: {month_abbr}")
+    return result
 
 
 # ============================================================================
@@ -177,8 +204,9 @@ def format_amount(value_str: str) -> str:
     if not value_str:
         return "0"
 
+    cleaned = _normalize.clean_amount(value_str, blank_zero=False)
     try:
-        val = float(value_str.replace(',', ''))
+        val = float(cleaned)
     except ValueError:
         return "0"
 
@@ -198,8 +226,9 @@ def parse_amount_float(value_str: str) -> float:
     """Parse amount string to float for validation."""
     if not value_str or not isinstance(value_str, str):
         return 0.0
+    cleaned = _normalize.clean_amount(value_str.strip(), blank_zero=False)
     try:
-        return float(value_str.strip().replace(',', ''))
+        return float(cleaned)
     except ValueError:
         return 0.0
 
@@ -856,12 +885,12 @@ class ICICISkill:
     bank_key = BANK_KEY
 
     def formats(self) -> tuple[str, ...]:
-        return (".xls", ".xlsx")
+        return (".xls",)
 
     def detect(self, path: str | Path) -> float:
         """Confidence that ``path`` is an ICICI XLS statement download."""
         p = Path(path)
-        if p.suffix.lower() not in (".xls", ".xlsx"):
+        if p.suffix.lower() != ".xls":
             return 0.0
         try:
             rows = convert_xls_to_csv(str(p))
@@ -880,7 +909,7 @@ class ICICISkill:
         """Parse an ICICI XLS (or directory of XLS) into a canonical BankResult."""
         src = Path(path)
         if src.is_dir():
-            xls_files = sorted(src.glob("*.xls")) + sorted(src.glob("*.xlsx"))
+            xls_files = sorted(src.glob("*.xls"))
         else:
             xls_files = [src]
         if not xls_files:
@@ -918,6 +947,21 @@ class ICICISkill:
                 len(rows),
             )
 
+        try:
+            raw_rows = convert_xls_to_csv(str(xls_files[0]))
+            account_number, period_from, period_to = _extract_meta_fields(raw_rows)
+        except Exception:  # noqa: BLE001 — meta extraction must never fail parse()
+            account_number = period_from = period_to = None
+        meta = BankStatementMeta(
+            bank_key=BANK_KEY,
+            account_number=account_number,
+            period_from=period_from,
+            period_to=period_to,
+            source_format="xls",
+            fidelity="exact",
+            password_used=False,
+        )
+
         return BankResult(
             rows=rows,
             bank_key=BANK_KEY,
@@ -928,7 +972,12 @@ class ICICISkill:
             balance_check=balance_check,
             sidecar_path=sidecar_path,
             warnings=warnings,
+            meta=meta,
         )
+
+
+# Module-level instance required by agents.banks.load_bank_skill().
+bank_skill = ICICISkill()
 
 
 # ============================================================================
