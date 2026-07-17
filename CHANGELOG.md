@@ -87,6 +87,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a `.xlsx`-rejected test. Canonical CSV output verified byte-identical
   before/after migration against the real local ICICI corpus sample (465
   rows, opening/closing balances unchanged). HDFC/BoB/HSBC not touched.
+- **Bank abstraction, P2 — HSBC (`skill_hsbc`, v1.1.0) onto the contract, and
+  last bank of P2.** HSBC is the OCR bank (scanned PDFs -> Tesseract ->
+  `parse_tsv.py` -> `enrich.py` -> `build_xlsx.py`), so unlike HDFC/BoB/ICICI
+  its `BankSkill` boundary is a hybrid: `parse(path, password=None,
+  output_path=None)` accepts a PDF, a folder of PDFs, or an already-enriched
+  `.xlsx` (the existing `skill_gnucash_pipeline` call site passes an enriched
+  workbook plus `output_path` and keeps working unmodified). A PDF/folder
+  input runs the OCR pipeline end-to-end via a new `_run_ocr_pipeline()`
+  helper (`--password` now threads through `run_pipeline.py` ->
+  `ocr_to_tsv.py` -> `pdftoppm -upw`); an `.xlsx` input skips straight to
+  `_read_enriched_rows()`. `BankStatementMeta.fidelity` is always
+  `"ocr-approx"` (Tesseract output is inherently non-deterministic, never
+  `"exact"`); `source_format` is `"pdf"`/`"pw-pdf"`. `_parse_number_hsbc` now
+  delegates comma/Cr-Dr cleanup to `bank_common.normalize.clean_amount`
+  instead of a private regex. Fixed a real data-loss bug:
+  `_read_enriched_rows` was silently dropping the enriched workbook's "Extra
+  Information" column; it's now folded into `Description`
+  (`"<desc> | <extra>"`) so no field is lost. `detect()` gains an `.xlsx`/
+  `.xlsm` fast path (checks for `Transaction Details`/`Withdrawals` headers,
+  confidence 0.9) alongside the existing `.pdf` heuristic (text-layer sniff
+  for "hsbc", confidence 0.8/0.5, 0.0 for a missing file). Registered in the
+  `banks.py` registry via `skill.yaml` (`bank: true`, `bank_key: "hsbc"`)
+  plus a module-level `bank_skill` instance; two false claims in its
+  `help:` block (a stale "start Ollama" LLM troubleshooting entry and a
+  false "text-extractable pages skip OCR" claim) corrected to match the
+  actual direct-mode, always-OCR behavior. Session A's float-string
+  OCR-confidence crash fix, direct/no-LLM mode, and multi-statement
+  date-ordering + continuity detection were confirmed present in code (not
+  assumed) and are untouched. Golden strategy differs from BoB/ICICI: OCR
+  output isn't byte-deterministic, so the new golden family
+  (`tests/skill_hsbc/hsbc_fixture_gen.py`) fixes the deterministic stage only
+  — an already-enriched synthetic workbook, shaped exactly like
+  `build_xlsx.py`'s real output, asserted against expected canonical rows,
+  balances, and meta fields — while the existing OCR-stage tests
+  (`parse_tsv.py`'s float-confidence + continuity tests) stay separate and
+  untouched. No real HSBC corpus was available locally this session, so the
+  pre-existing skipif-guarded corpus tie-out test skips cleanly rather than
+  running. HDFC/BoB/ICICI not touched. This completes P2 (all four banks now
+  on `BankSkill`); P3 (migrating the pipeline/UI to consume only the
+  contract) is next.
 
 ### Fixed
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry

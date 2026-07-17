@@ -36,7 +36,7 @@ def check_binaries():
         )
 
 
-def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300):
+def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None):
     """Render one PDF to PNGs then OCR each page to TSV.
 
     Creates:
@@ -50,10 +50,11 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300):
     tsv_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[{stem}] rasterising at {dpi} DPI...", flush=True)
-    subprocess.run(
-        ["pdftoppm", "-r", str(dpi), "-png", str(pdf_path), str(png_dir / "page")],
-        check=True,
-    )
+    cmd = ["pdftoppm", "-r", str(dpi)]
+    if password:
+        cmd += ["-upw", password]
+    cmd += ["-png", str(pdf_path), str(png_dir / "page")]
+    subprocess.run(cmd, check=True)
 
     pngs = sorted(png_dir.glob("page-*.png"))
     # pdftoppm may produce `page-1.png` or `page-01.png` depending on page count.
@@ -83,6 +84,8 @@ def main():
                     help="Scratch folder for intermediate PNG/TSV output.")
     ap.add_argument("--dpi", type=int, default=300,
                     help="Raster DPI (default 300; do not go below 250).")
+    ap.add_argument("--password", default=None,
+                    help="User password for encrypted PDFs (passed to pdftoppm -upw).")
     args = ap.parse_args()
 
     check_binaries()
@@ -94,7 +97,7 @@ def main():
 
     print(f"Found {len(pdfs)} PDF(s) in {args.pdf_dir}")
     for pdf in pdfs:
-        ocr_pdf(pdf, args.work_dir, dpi=args.dpi)
+        ocr_pdf(pdf, args.work_dir, dpi=args.dpi, password=args.password)
 
     print(f"\nDone. TSVs under {args.work_dir / 'tsv'}/")
 

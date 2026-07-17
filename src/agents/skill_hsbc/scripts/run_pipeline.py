@@ -48,15 +48,20 @@ def main():
                     help="Reuse existing TSVs in <work-dir>/tsv/ (skip the OCR step).")
     ap.add_argument("--dpi", type=int, default=300,
                     help="OCR raster DPI (default 300; do not go below 250).")
+    ap.add_argument("--password", default=None,
+                    help="User password for encrypted PDFs (passed to pdftoppm).")
     args = ap.parse_args()
 
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
     if not args.skip_ocr:
-        run([sys.executable, str(SCRIPTS / "ocr_to_tsv.py"),
-             "--pdf-dir", str(args.pdf_dir),
-             "--work-dir", str(args.work_dir),
-             "--dpi", str(args.dpi)])
+        ocr_cmd = [sys.executable, str(SCRIPTS / "ocr_to_tsv.py"),
+                   "--pdf-dir", str(args.pdf_dir),
+                   "--work-dir", str(args.work_dir),
+                   "--dpi", str(args.dpi)]
+        if args.password:
+            ocr_cmd += ["--password", args.password]
+        run(ocr_cmd)
     else:
         print("[skip-ocr] reusing existing TSVs", flush=True)
 
