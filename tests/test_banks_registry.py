@@ -40,6 +40,12 @@ def test_discover_finds_bob():
     assert "bob" in keys
 
 
+def test_discover_finds_icici():
+    found = banks.discover()
+    keys = [b.bank_key for b in found]
+    assert "icici" in keys
+
+
 def test_discover_is_sorted_by_display_name():
     found = banks.discover()
     names = [b.display_name for b in found]
@@ -66,6 +72,13 @@ def test_get_bob_case_insensitive():
     assert info is not None
     assert info.bank_key == "bob"
     assert info.package == "agents.skill_bob"
+
+
+def test_get_icici_case_insensitive():
+    info = banks.get("ICICI")
+    assert info is not None
+    assert info.bank_key == "icici"
+    assert info.package == "agents.skill_icici"
 
 
 def test_get_unknown_bank_returns_none():
@@ -103,6 +116,13 @@ def test_load_bank_skill_returns_conforming_bob():
     skill = banks.load_bank_skill(info)
     assert isinstance(skill, BankSkill)
     assert ".pdf" in skill.formats()
+
+
+def test_load_bank_skill_returns_conforming_icici():
+    info = banks.get("icici")
+    skill = banks.load_bank_skill(info)
+    assert isinstance(skill, BankSkill)
+    assert ".xls" in skill.formats()
 
 
 def test_discover_skips_non_bank_manifests():
