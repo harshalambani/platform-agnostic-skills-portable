@@ -105,7 +105,9 @@ def test_registry_discovers_all_skills():
     assert "gnucash_intercompany_matrix" in names
     # ITR Workbook scaffold (batch 1: eguile HTML parser + verification only)
     assert "ITR Workbook" in names
-    assert len(skills) == 20
+    # 5th bank onboarding (P4)
+    assert "Kotak" in names
+    assert len(skills) == 21
 
 
 def test_registry_get_by_name():

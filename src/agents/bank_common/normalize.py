@@ -59,6 +59,25 @@ def normalise_date(d) -> str:
     return yy + "-" + mm + "-" + dd
 
 
+def parse_space_month_date(d) -> str | None:
+    """Parse Kotak's "DD Mon YYYY" date shape (e.g. "03 Jun 2026") to ISO
+    YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't
+    match -- callers decide how to log/report that (e.g. reject the row)."""
+    if not d or not isinstance(d, str):
+        return None
+    d = d.strip()
+    if not d:
+        return None
+    parts = d.split()
+    if len(parts) != 3:
+        return None
+    day, month_abbr, year = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
+    month = MONTH_ABBR.get(month_abbr)
+    if not month or not day.isdigit() or not year.isdigit() or len(year) != 4:
+        return None
+    return f"{year}-{month}-{day.zfill(2)}"
+
+
 def parse_comma_month_date(d) -> str | None:
     """Parse ICICI's "DD,Mon,YYYY" date shape (e.g. "01,Apr,2024") to ISO
     YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't

@@ -6,8 +6,9 @@ description: >
   End-to-end import pipeline: upload a raw bank statement and your GnuCash book,
   get back a GnuCash-ready mapped CSV in one click. No intermediate steps.
   Supports ICICI (XLS), Bank of Baroda (PDF), HSBC (PDF), HDFC (PDF incl.
-  password-protected, XLS/XLSX, CSV — all deterministic, no LLM), and any
-  other bank via CSV upload with LLM-assisted column normalisation.
+  password-protected, XLS/XLSX, CSV — all deterministic, no LLM), Kotak
+  (PDF), and any other bank via CSV upload with LLM-assisted column
+  normalisation.
   Chain: bank extraction → canonical format → account mapping.
 category: "gnucash"
 version: "1.2.0"
@@ -25,11 +26,12 @@ inputs:
       - "Bank of Baroda"
       - "HSBC"
       - "HDFC"
+      - "Kotak"
       - "Other Bank (CSV)"
 
   - name: "statement_files"
     type: "files"
-    label: "Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other"
+    label: "Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other"
     file_types: [".xls", ".xlsx", ".pdf", ".csv"]
     required: true
 
@@ -78,11 +80,11 @@ help:
   inputs:
     - name: "bank"
       tooltip: "Which bank the statement is from — this picks the right extractor."
-      accepts: "One of: ICICI, Bank of Baroda, HSBC, HDFC, Other Bank (CSV)."
+      accepts: "One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV)."
       gotchas: "Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help."
     - name: "statement_files"
       tooltip: "The statement file(s), matching the bank you chose."
-      accepts: "XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other."
+      accepts: "XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other."
       gotchas: "File type must match the selected bank, or extraction will fail."
     - name: "gnucash_file"
       tooltip: "Your GnuCash book — used to learn your accounts and map transactions."
