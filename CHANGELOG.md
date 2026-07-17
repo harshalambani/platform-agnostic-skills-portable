@@ -197,6 +197,25 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
   run as part of this release — flagged pending, not blocking.
 
+## [2.8.0] — 2026-07-17
+
+### Added
+- **ITR Mapping review UI polish (Part 4): sortable/filterable columns.**
+  The "ITR Mapping" table's headers are now click-to-sort (click again to
+  flip direction) with a per-column text filter row underneath — the same
+  UX as `ui/tabs/gnucash_review.py`'s "Review & Edit Account Mappings" tab,
+  which this screen had not previously matched.
+- **ITR Mapping review UI polish (Part 4): tag vocabulary help.** Every tag
+  code shown in the table (Current tag / Suggested / New tag) now carries a
+  hover tooltip with its one-line meaning, and a new toggleable "? Tag
+  glossary" panel lists the full, searchable tag vocabulary (code, target
+  sheet, meaning) — the raw tag codes (e.g. `OS_INTEREST_BANK`) previously
+  had no in-UI explanation.
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
+
 ## [2.7.0] — 2026-07-16
 
 ### Added

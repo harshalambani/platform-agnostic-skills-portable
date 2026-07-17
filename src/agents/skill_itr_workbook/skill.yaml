@@ -48,6 +48,14 @@
 # itself moved: "ITR" is now its own GnuCash sub-tab (mirroring "Banks"),
 # containing "ITR Workbook" and "ITR Mapping" as sub-sub-tabs, instead of
 # both being flat sub-tabs directly under GnuCash.
+# 2026-07-17 ITR Mapping review UI polish (Part 4): the review table's
+# column headers are now click-to-sort (click again to flip direction) and
+# carry a per-column text filter row, mirroring gnucash_review.py's "Review
+# & Edit Account Mappings" tab exactly. Every tag code shown (Current /
+# Suggested / New tag) now carries a title tooltip with its one-line meaning
+# (tags.py's TagMeta.treatment), and a toggleable "? Tag glossary" panel
+# lists the full searchable tag vocabulary -- addresses feedback that the
+# raw tag codes (e.g. OS_INTEREST_BANK) were otherwise unexplained.
 
 name: "ITR Workbook"
 display_name: "ITR Workbook"
@@ -59,7 +67,7 @@ description: >
   still builds a best-effort workbook (DRAFT tax + worst-case upper bound,
   loudly flagged for review) rather than blocking the run to nothing.
 category: "itr"
-version: "0.11.0"
+version: "0.12.0"
 
 mode: "direct"
 entry_point: "agent:run"
