@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from agents.bank_common import normalize as _normalize
+from agents.bank_common.consolidate import StatementGroup, consolidate as _consolidate
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check
 
@@ -263,9 +264,22 @@ class BoBSkill:
         if not pdfs:
             raise FileNotFoundError(f"No BoB PDF(s) found at: {path}")
 
-        native_rows = []
+        # Order multi-file batches by actual transaction date (not filename)
+        # and flag gaps/overlaps, via the shared bank_common helper. A single
+        # PDF is just a one-group "batch" -- consolidate() is a no-op for it,
+        # so the single-statement (e.g. full-year) path stays byte-identical.
+        groups = []
         for pdf in pdfs:
-            native_rows.extend(extract(pdf, password=password))
+            pdf_rows = extract(pdf, password=password)
+            dates = sorted(d for d in (_parse_date_bob(r.date) for r in pdf_rows) if d)
+            groups.append(StatementGroup(
+                name=pdf.name,
+                rows=pdf_rows,
+                period_start=dates[0] if dates else None,
+                period_end=dates[-1] if dates else None,
+            ))
+        consolidated = _consolidate(groups)
+        native_rows = consolidated.rows
 
         # Round-trip through the native CSV so the canonical mapping sees the
         # exact same representation adapter_bob consumed (keeps tie-out exact).
@@ -273,6 +287,7 @@ class BoBSkill:
             native_csv = Path(tmp) / "bob_raw.csv"
             _write_native_csv(native_rows, native_csv)
             rows, warnings = _native_csv_to_canonical(str(native_csv))
+        warnings.extend(consolidated.warnings)
 
         balance_check = run_balance_check(rows)
         if not balance_check.ok:

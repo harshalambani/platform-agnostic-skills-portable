@@ -196,6 +196,43 @@ def build_garbled_pdf() -> bytes:
     return buf.getvalue()
 
 
+# ---------------------------------------------------------------------------
+# Parameterized single-page PDF builder for multi-statement consolidation
+# tests (P3b): lets a caller supply its own date/txn list so several
+# single-month statements can be combined into a synthetic multi-file batch.
+# ---------------------------------------------------------------------------
+
+def build_pdf_for(
+    transactions: list[tuple[str, str, str, str, str, str]],
+    period_from: str,
+    period_to: str,
+    account_number: str = SYN_ACCOUNT_NUMBER,
+) -> bytes:
+    """Build a single-page synthetic BoB PDF for an arbitrary transaction
+    list (same 6-tuple shape as SYN_TRANSACTIONS), with its own period."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    _, height = A4
+
+    y = height - 50
+    c.setFont("Helvetica", 10)
+    c.drawString(40, y, "BANK OF BARODA")
+    y -= 16
+    c.drawString(40, y, f"A/C Number : {account_number}")
+    y -= 16
+    c.drawString(40, y, f"Statement of account for the period of {period_from} to {period_to}")
+    y -= 24
+    y = _draw_header_row(c, y)
+    for date, narr, chq, wdl, dep, bal in transactions:
+        y = _draw_row(c, y, _pdf_date(date), narr, chq, wdl, dep, bal)
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
 if __name__ == "__main__":
     import pathlib
     out_dir = pathlib.Path(__file__).parent / "fixtures"

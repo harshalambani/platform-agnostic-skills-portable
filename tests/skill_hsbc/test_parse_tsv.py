@@ -15,11 +15,15 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
+SRC = ROOT / "src"
 SCRIPTS = ROOT / "src" / "agents" / "skill_hsbc" / "scripts"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 import parse_tsv  # noqa: E402
+from agents.bank_common.consolidate import StatementGroup, consolidate  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -115,3 +119,25 @@ def test_continuity_small_gap_within_tolerance_is_fine():
         ("stmt_b", "2025-05-05", "2025-06-04"),
     ]
     assert parse_tsv.check_statement_continuity(periods) == []
+
+
+# ---------------------------------------------------------------------------
+# Parity: HSBC's consolidation must equal bank_common.consolidate() exactly
+# (acceptance gate 2 -- HSBC is the reference implementation the shared
+# helper was lifted from, and now delegates to it for real).
+# ---------------------------------------------------------------------------
+
+def test_check_statement_continuity_delegates_to_shared_helper():
+    """parse_tsv.check_statement_continuity(periods) must produce identical
+    warnings to feeding the same periods straight into
+    bank_common.consolidate.check_continuity via StatementGroup — proving
+    HSBC's runtime is routed through the shared helper, not a parallel copy
+    of the same logic."""
+    periods = [
+        ("stmt_apr", "2025-04-01", "2025-04-30"),
+        ("stmt_jun", "2025-06-01", "2025-06-30"),  # gap
+        ("stmt_unreadable", None, None),
+    ]
+    groups = [StatementGroup(name, [], start, end) for name, start, end in periods]
+
+    assert parse_tsv.check_statement_continuity(periods) == consolidate(groups).warnings
