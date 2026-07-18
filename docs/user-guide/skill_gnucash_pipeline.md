@@ -11,10 +11,10 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 
 ## Inputs
 
-- **Bank** (required) — accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Other Bank (CSV).
+- **Bank** (required) — accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).
   - Which bank the statement is from — this picks the right extractor.
   - ⚠️ Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help.
-- **Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other** (required) — accepts: XLS for ICICI; PDF(s) for BoB / HSBC; CSV or XLS/XLSX for HDFC / Other.
+- **Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other** (required) — accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other.
   - The statement file(s), matching the bank you chose.
   - ⚠️ File type must match the selected bank, or extraction will fail.
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).

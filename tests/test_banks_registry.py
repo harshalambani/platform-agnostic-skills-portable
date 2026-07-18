@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
-for _extra in ("skill_bob", "skill_icici", "skill_hsbc"):
+for _extra in ("skill_bob", "skill_icici", "skill_hsbc", "skill_kotak"):
     _dir = ROOT / "tests" / _extra
     if str(_dir) not in sys.path:
         sys.path.insert(0, str(_dir))
@@ -55,6 +55,12 @@ def test_discover_finds_hsbc():
     found = banks.discover()
     keys = [b.bank_key for b in found]
     assert "hsbc" in keys
+
+
+def test_discover_finds_kotak():
+    found = banks.discover()
+    keys = [b.bank_key for b in found]
+    assert "kotak" in keys
 
 
 def test_discover_is_sorted_by_display_name():
@@ -97,6 +103,13 @@ def test_get_hsbc_case_insensitive():
     assert info is not None
     assert info.bank_key == "hsbc"
     assert info.package == "agents.skill_hsbc"
+
+
+def test_get_kotak_case_insensitive():
+    info = banks.get("KOTAK")
+    assert info is not None
+    assert info.bank_key == "kotak"
+    assert info.package == "agents.skill_kotak"
 
 
 def test_get_unknown_bank_returns_none():
@@ -150,6 +163,13 @@ def test_load_bank_skill_returns_conforming_hsbc():
     assert ".pdf" in skill.formats()
 
 
+def test_load_bank_skill_returns_conforming_kotak():
+    info = banks.get("kotak")
+    skill = banks.load_bank_skill(info)
+    assert isinstance(skill, BankSkill)
+    assert ".pdf" in skill.formats()
+
+
 def test_discover_skips_non_bank_manifests():
     """Sanity: not every discovered skill is a bank -- e.g. the GnuCash
     pipeline itself must not show up (it has no `bank: true` key)."""
@@ -165,7 +185,7 @@ def test_discover_skips_non_bank_manifests():
 
 def test_all_discovered_banks_parse_signature_matches_contract():
     found = banks.discover()
-    assert len(found) == 4, f"expected 4 banks, discovered {len(found)}: {found}"
+    assert len(found) == 5, f"expected 5 banks, discovered {len(found)}: {found}"
     for info in found:
         skill = banks.load_bank_skill(info)
         sig = inspect.signature(skill.parse)
@@ -231,4 +251,21 @@ def test_registry_round_trip_hsbc(tmp_path):
     assert result.bank_key == "hsbc"
     assert result.opening_balance == hsbc_fixture_gen.SYN_OPENING_BALANCE
     assert result.closing_balance == hsbc_fixture_gen.SYN_CLOSING_BALANCE
+    assert result.balance_check.ok is True
+
+
+def test_registry_round_trip_kotak(tmp_path):
+    import kotak_fixture_gen
+
+    info = banks.get("kotak")
+    skill = banks.load_bank_skill(info)
+    pdf_path = tmp_path / "syn_kotak.pdf"
+    pdf_path.write_bytes(kotak_fixture_gen.build_pdf())
+
+    result = skill.parse(pdf_path)
+    assert isinstance(result, BankResult)
+    assert result.bank_key == "kotak"
+    assert result.row_count == len(kotak_fixture_gen.SYN_TRANSACTIONS)
+    assert result.opening_balance == kotak_fixture_gen.SYN_OPENING_BALANCE
+    assert result.closing_balance == kotak_fixture_gen.SYN_CLOSING_BALANCE
     assert result.balance_check.ok is True

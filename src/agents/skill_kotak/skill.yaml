@@ -1,0 +1,103 @@
+# skill.yaml — Kotak skill manifest
+
+name: "Kotak"
+display_name: "Kotak"
+description: >
+  Parse a Kotak Mahindra Bank savings-account transaction-statement PDF into
+  a flat CSV of rows. Handles multi-page table overflow without a repeated
+  column header, and excludes the trailing abbreviation-legend page.
+category: "banks"
+version: "1.0.0"
+
+bank: true
+bank_key: "kotak"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_path"
+    type: "files"
+    label: "Kotak statement PDF"
+    file_types: [".pdf"]
+    required: true
+
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "Kotak"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+# ---------------------------------------------------------------------------
+# help: — single source of truth for the user guide, the standalone HTML, and
+# the in-app inline panel / Help tab / tooltips. Edit here, then run
+# `python scripts/gen_docs.py`. See docs/dev/help-block-schema.md.
+# ---------------------------------------------------------------------------
+help:
+  overview: >
+    Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into
+    a flat CSV — one row per transaction. Runs fully offline (no LLM, no
+    internet) and reads the statement's ruled/bordered table structure
+    directly, so a table that overflows from one page to the next (without
+    repeating the column header) is still captured correctly, and the
+    trailing abbreviation-legend page is excluded rather than mistaken for
+    transaction rows.
+  when_to_use: >
+    Use this when you have a Kotak savings-account statement as a PDF and want
+    it as a tidy CSV you can open in Excel, reconcile, or feed into the
+    GnuCash Import pipeline (choose "Kotak" there to do extraction + account
+    mapping in one step instead). This skill is extraction only — it does not
+    categorise or assign accounts.
+  inputs:
+    - name: "pdf_path"
+      tooltip: "Your Kotak statement PDF."
+      accepts: "PDF (.pdf) — one statement per run."
+      gotchas: >
+        Use the bank's original text PDF, not a photo/scan. Password-protected
+        PDFs must be unlocked first, or the run will report the file could not
+        be opened.
+  steps:
+    - "Click the input and pick a Kotak statement PDF."
+    - "Click Run — it processes offline in a few seconds."
+    - "Download the CSV, or open it from the outputs folder (see below)."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Kotak.csv"
+        tooltip: >
+          One row per transaction with columns: #, Date, Description,
+          Chq/Ref. No., Withdrawal, Deposit, Balance. Rows are in statement
+          order; the "Opening Balance" front-matter row and the trailing
+          abbreviation-legend page are both excluded from the CSV.
+  tips: >
+    The running balance carries straight from the statement — if the final
+    Balance matches your passbook, the extraction tied out. Sweep-in/sweep-out
+    transfers to a linked Fixed Deposit are kept as real transactions, not
+    filtered out. Columns are kept verbatim from the statement so amounts are
+    not rounded or reformatted.
+  troubleshooting:
+    - problem: "The output CSV is empty or has very few rows."
+      fix: >
+        The PDF is probably a scanned image, not a text PDF. Re-download the
+        original statement from Kotak net-banking, or run it through an OCR
+        step first. This skill does not OCR.
+    - problem: "Run fails saying the PDF could not be opened."
+      fix: >
+        The PDF is password-protected. Unlock it (open in a viewer, print/save
+        as a new unprotected PDF) and try again.
+    - problem: "Closing balance in the CSV does not match my passbook."
+      fix: >
+        Check the statement's last page — the abbreviation legend on that page
+        is intentionally excluded, but if any real transaction rows sit above
+        it, make sure the whole document (all pages) was included when you
+        selected the PDF.
