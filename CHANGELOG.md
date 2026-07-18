@@ -167,6 +167,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `skill_gnucash_pipeline/agent.py`. Central verdict engine and
   multi-statement-consolidation promotion into `bank_common` are deferred to
   P3b; `skill_itr_workbook`, `skill_26as`, and intercompany skills untouched.
+- **Bank abstraction, P3b — shared multi-statement consolidation.** New
+  `agents/bank_common/consolidate.py` (`StatementGroup`, `consolidate()`,
+  `check_continuity()`) lifts HSBC's reference multi-file logic — order
+  statements by actual transaction date (not filename), flag gaps (>3 days)
+  and overlaps (<-1 days) as warnings without raising — into a pure,
+  bank-agnostic helper. HSBC's own runtime (`skill_hsbc/scripts/parse_tsv.py`)
+  is routed through it via a `sys.path` bootstrap (the script runs as a
+  subprocess, so it can't rely on `agents` being importable — same convention
+  already used by `skill_bob/scripts/extract_bob_statement.py`); its old
+  inline sort/continuity/concat logic is gone, replaced by a thin call into
+  the shared helper, with `check_statement_continuity()`'s public signature
+  preserved for backward compatibility. BoB (`skill_bob/agent.py`) and ICICI
+  (`skill_icici/agent.py`) now route their multi-file `BankSkill.parse()`
+  batches through the same helper too, replacing their previous naive
+  `sorted(glob)` + blind-concat merge, which silently misordered batches with
+  non-chronologically-sorting filenames and never reported missing/
+  overlapping periods. A single-file batch (the dominant real-world case —
+  e.g. a full-year statement for BoB/ICICI/HDFC/Kotak) is a no-op through
+  `consolidate()`, so single-statement behavior for all banks is unchanged
+  and verified byte-identical against the existing golden suite. Scope note:
+  only the registry-driven `BankSkill.parse()` path (used by the GnuCash
+  pipeline and covered by goldens) was changed for BoB/ICICI; each bank's
+  legacy standalone-UI-tab `run()` entry point (used only by
+  `ui/tabs/_generic.py`, untested by any golden) still does its old naive
+  filename-sorted concat and was deliberately left untouched. HDFC and Kotak
+  remain single-statement only (no multi-file path added). Central verdict
+  engine, HDFC/Kotak, and the statement-profile engine untouched.
 
 ### Fixed
 - **Bank gating, registry-driven (closes the Kotak offer-then-reject leak).**

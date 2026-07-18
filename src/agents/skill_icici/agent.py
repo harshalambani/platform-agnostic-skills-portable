@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from agents.balance_utils import format_balance_summary as _fmt_bal
 from agents.bank_common import normalize as _normalize
+from agents.bank_common.consolidate import StatementGroup, consolidate as _consolidate
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import CANONICAL_FIELDS, run_balance_check
 
@@ -931,14 +932,29 @@ class ICICISkill:
                 result = transform_icici_statement(str(xls_files[0]), str(target))
                 warnings.extend(result.get("issues", []))
             else:
-                parts = []
+                # Order the batch by actual transaction date (not filename)
+                # and flag gaps/overlaps, via the shared bank_common helper.
+                groups = []
                 for i, xls in enumerate(xls_files):
                     part = tmp_path / f"part_{i}.csv"
                     result = transform_icici_statement(str(xls), str(part))
                     warnings.extend(result.get("issues", []))
-                    parts.append(part)
+                    part_rows = _read_canonical_csv(part)
+                    dates = sorted(r["Date"] for r in part_rows if r.get("Date"))
+                    groups.append(StatementGroup(
+                        name=xls.name,
+                        rows=part_rows,
+                        period_start=dates[0] if dates else None,
+                        period_end=dates[-1] if dates else None,
+                    ))
+                consolidated = _consolidate(groups)
+                warnings.extend(consolidated.warnings)
+
                 target.parent.mkdir(parents=True, exist_ok=True)
-                _merge_csvs(parts, target)
+                with open(target, "w", newline="", encoding="utf-8") as f:
+                    writer = csv.DictWriter(f, fieldnames=list(CANONICAL_FIELDS))
+                    writer.writeheader()
+                    writer.writerows(consolidated.rows)
 
             rows = _read_canonical_csv(target)
 

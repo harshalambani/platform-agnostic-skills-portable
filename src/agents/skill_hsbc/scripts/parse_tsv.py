@@ -26,9 +26,18 @@ import argparse
 import csv
 import json
 import re
+import sys
 from collections import defaultdict
-from datetime import date
 from pathlib import Path
+
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build where
+# the whole ``agents`` tree ships as raw .py data files under _MEIPASS) --
+# it never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path
+# to ``src`` (or _MEIPASS, in frozen mode) so ``agents.bank_common`` is
+# importable regardless of how this script was invoked.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents.bank_common.consolidate import StatementGroup, consolidate  # noqa: E402
 
 # Fallback column right-edges (tuned for HSBC Premier Savings statements at
 # 300 DPI, portrait A4). Auto-detection from the header row normally wins;
@@ -349,28 +358,15 @@ def check_statement_continuity(stmt_periods):
             None (e.g. a statement with no parseable transaction dates).
 
     Returns a list of human-readable warning strings (empty if none).
+
+    Thin wrapper over the shared ``bank_common.consolidate.check_continuity``
+    (this bank's original algorithm, now promoted to be the single shared
+    implementation BoB and ICICI also use) -- kept as a standalone function
+    so existing direct callers/tests of this exact signature keep working.
     """
-    warnings = []
-    dated = [p for p in stmt_periods if p[1] and p[2]]
-    for (prev_name, _, prev_end), (cur_name, cur_start, _) in zip(dated, dated[1:]):
-        gap_days = (date.fromisoformat(cur_start) - date.fromisoformat(prev_end)).days
-        if gap_days > 3:
-            warnings.append(
-                f"POSSIBLE MISSING STATEMENT: {gap_days}-day gap between "
-                f"'{prev_name}' (ends {prev_end}) and '{cur_name}' (starts {cur_start})."
-            )
-        elif gap_days < -1:
-            warnings.append(
-                f"OVERLAPPING/OUT-OF-ORDER STATEMENTS: '{cur_name}' (starts {cur_start}) "
-                f"overlaps '{prev_name}' (ends {prev_end})."
-            )
-    undated = [p[0] for p in stmt_periods if not (p[1] and p[2])]
-    if undated:
-        warnings.append(
-            f"{len(undated)} statement(s) had no readable dates and could not be "
-            f"checked for continuity: " + ", ".join(undated)
-        )
-    return warnings
+    groups = [StatementGroup(name, [], start, end) for name, start, end in stmt_periods]
+    from agents.bank_common.consolidate import check_continuity  # noqa: PLC0415
+    return check_continuity(groups)
 
 
 def is_carried_forward(desc):
@@ -439,19 +435,15 @@ def main():
         dates = sorted(t['date'] for t in tx if t.get('date'))
         period_start = dates[0] if dates else None
         period_end = dates[-1] if dates else None
-        stmt_results.append((stmt_dir, tx, period_start, period_end))
+        stmt_results.append(StatementGroup(stmt_dir.name, tx, period_start, period_end))
 
     # Order by actual statement period (undated statements sort last, in
-    # filename order, since we have nothing better to go on for them).
-    stmt_results.sort(key=lambda r: (r[2] is None, r[2] or '', natural_key(r[0])))
-
-    continuity_warnings = check_statement_continuity(
-        [(r[0].name, r[2], r[3]) for r in stmt_results]
-    )
-
-    all_tx = []
-    for stmt_dir, tx, _, _ in stmt_results:
-        all_tx.extend(tx)
+    # filename order) and flag gaps/overlaps -- the shared bank_common
+    # helper (this bank's original algorithm, now promoted to be the single
+    # shared implementation BoB and ICICI also use).
+    consolidated = consolidate(stmt_results)
+    continuity_warnings = consolidated.warnings
+    all_tx = consolidated.rows
 
     # Drop "Balance Carried Forward" noise and keep only the first brought_forward.
     cleaned = []
