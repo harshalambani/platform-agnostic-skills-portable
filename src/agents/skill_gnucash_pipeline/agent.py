@@ -4,13 +4,15 @@ GnuCash Import Pipeline
 End-to-end: raw bank statement → GnuCash-ready mapped CSV.
 
 Chain:
-  1. Bank parse → canonical. Every dedicated bank (ICICI / Bank of Baroda /
-                  HSBC / HDFC) is dispatched purely through the agents.banks
-                  registry: BankSkill.parse() returns canonical rows in
-                  memory, and this module writes the canonical CSV + sidecar
-                  once via the shared canonical_io tail — no bank writes its
-                  own CSV. "Other Bank (CSV)" is the one path that still uses
-                  LLM-assisted column normalisation.
+  1. Bank parse → canonical. Every dedicated bank (DEDICATED_BANKS, derived
+                  from agents.banks.discover() — currently ICICI / Bank of
+                  Baroda / HSBC / HDFC / Kotak) is dispatched purely through
+                  the agents.banks registry: BankSkill.parse() returns
+                  canonical rows in memory, and this module writes the
+                  canonical CSV + sidecar once via the shared canonical_io
+                  tail — no bank writes its own CSV. "Other Bank (CSV)" is
+                  the one path that still uses LLM-assisted column
+                  normalisation.
   2. Account mapping   (skill_gnucash_account_mapper)
 
 Public surface:
@@ -138,8 +140,16 @@ def _apply_confirmed_contras(output_path: str, contra_flags: dict) -> int:
     return remapped
 
 
-# Banks with dedicated extraction skills
-DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]
+# Banks with dedicated extraction skills — registry-driven (agents.banks
+# discover()) rather than a hardcoded literal, so onboarding a new bank
+# (adding its skill.yaml `bank: true` manifest) automatically extends both
+# this gating list and the pipeline's `bank` dropdown (ui/tabs/_generic.py's
+# "banks" options_from source) without any edit here. See
+# 2026-07-18-bank-registry-gating-followup-prompt.md — this list previously
+# diverged from the dropdown's options: list (Kotak was added to the
+# dropdown in #89 but not here), causing an offer-then-reject bug at the
+# SUPPORTED_BANKS guard below.
+DEDICATED_BANKS = [b.display_name for b in discover_banks()]
 # Banks that go through the generic CSV normalisation path
 CSV_BANKS = ["Other Bank (CSV)"]
 SUPPORTED_BANKS = DEDICATED_BANKS + CSV_BANKS

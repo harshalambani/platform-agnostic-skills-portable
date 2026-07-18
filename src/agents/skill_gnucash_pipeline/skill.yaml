@@ -21,13 +21,7 @@ inputs:
     type: "select"
     label: "Bank"
     required: true
-    options:
-      - "ICICI"
-      - "Bank of Baroda"
-      - "HSBC"
-      - "HDFC"
-      - "Kotak"
-      - "Other Bank (CSV)"
+    options_from: "banks"
 
   - name: "statement_files"
     type: "files"

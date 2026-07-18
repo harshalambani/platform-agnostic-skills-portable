@@ -169,6 +169,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   P3b; `skill_itr_workbook`, `skill_26as`, and intercompany skills untouched.
 
 ### Fixed
+- **Bank gating, registry-driven (closes the Kotak offer-then-reject leak).**
+  Onboarding Kotak (#89) added it to the `skill_gnucash_pipeline` Bank
+  dropdown's static `options:` list but not to `agent.py`'s hardcoded
+  `DEDICATED_BANKS = ["ICICI", "Bank of Baroda", "HSBC", "HDFC"]`, so
+  selecting "Kotak" in the UI passed the dropdown but then failed the
+  `SUPPORTED_BANKS` guard at runtime ("Supported banks: ICICI, Bank of
+  Baroda, HSBC, HDFC") — an offer-then-reject bug live on `main`. Both
+  gating surfaces are now registry-driven off the single source of truth,
+  `agents.banks.discover()`, so they can never diverge again for any future
+  bank: a new `_options_from_banks()` resolver in `ui/tabs/_generic.py`
+  (registered as `"banks"` in `_OPTIONS_FROM_RESOLVERS`) drives the dropdown
+  via `skill_gnucash_pipeline/skill.yaml`'s `bank` input (now
+  `options_from: "banks"` instead of a static list), and `DEDICATED_BANKS`
+  is now `[b.display_name for b in discover()]` instead of a literal. Dropdown
+  order is now alphabetical by `display_name` with "Other Bank (CSV)" last
+  (an accepted cosmetic change — previously ICICI/BoB/HSBC/HDFC/Kotak/Other).
+  No dispatch logic changed; all 5 banks' extraction goldens remain
+  byte-identical. New `tests/test_bank_gating.py` is the permanent regression
+  guard: asserts `"Kotak" in SUPPORTED_BANKS`, `DEDICATED_BANKS == [b.display_name
+  for b in discover()]`, and that the dropdown's resolved options exactly
+  match `discover()` display names + `"Other Bank (CSV)"` last.
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry
   both a posting Date and a Value Dt; the canonical CSV's "Date" column
   (which flows unchanged through balance checks, dedup, and account mapping)

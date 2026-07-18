@@ -142,6 +142,24 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
         return []
 
 
+def _options_from_banks() -> list[tuple[str, str]]:
+    """(display_name, display_name) pairs from agents.banks.discover(), for
+    the GnuCash Import Pipeline skill's `bank` dropdown (options_from:
+    "banks"). Mirrors dispatch's own source of truth (agent.py matches on
+    BankInfo.display_name) so the dropdown and the dispatch/guard can never
+    diverge again — the whole point of this option source. Discovery order
+    is alphabetical by display_name; "Other Bank (CSV)" (the generic LLM-
+    normalised path, not a registered bank) is appended last. Imported
+    lazily to avoid import cycles, matching the ITR resolvers' pattern."""
+    from agents import banks
+    try:
+        pairs = [(b.display_name, b.display_name) for b in banks.discover()]
+    except Exception:
+        return []
+    pairs.append(("Other Bank (CSV)", "Other Bank (CSV)"))
+    return pairs
+
+
 # Named dynamic option sources for SkillInput.options_from. Keyed by the
 # string used in skill.yaml (`options_from: <key>`); each resolver returns
 # (label, value) pairs. Add an entry here whenever a new skill needs a
@@ -149,6 +167,7 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
 _OPTIONS_FROM_RESOLVERS = {
     "itr_entities": _options_from_itr_entities,
     "itr_ay_years": _options_from_itr_ay_years,
+    "banks": _options_from_banks,
 }
 
 
