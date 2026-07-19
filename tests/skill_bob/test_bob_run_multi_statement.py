@@ -98,11 +98,20 @@ def test_overlapping_statement_periods_produce_warning(tmp_path):
     assert "OVERLAPPING/OUT-OF-ORDER" in summary
 
 
+_GOLDEN_SINGLE_FILE = Path(__file__).resolve().parent / "golden_single_file_run.csv"
+
+
 def test_single_file_batch_run_is_a_no_op_consolidation(tmp_path):
     """A directory containing exactly one PDF must go through the new
     per-batch consolidate() path as a single-group no-op, producing output
-    byte-identical to the plain single-file fast path (_run_single) and no
-    continuity warnings in the summary."""
+    byte-identical -- including line terminator -- to the plain single-file
+    fast path (_run_single) AND to a golden captured from the pre-#92
+    baseline (commit 1fde0cd), so this proves no regression vs main, not
+    just internal self-consistency between two paths that changed together.
+    Compared with read_bytes(): read_text() performs universal-newline
+    translation and would silently fold CRLF into LF, making a
+    line-terminator regression invisible (see P3b follow-up fix-up,
+    2026-07-19-bank-P3b-followup-FIXUP-crlf-prompt.md)."""
     direct_pdf = tmp_path / "syn_bob.pdf"
     direct_pdf.write_bytes(fixture_gen.build_pdf())
     direct_out = tmp_path / "direct.csv"
@@ -114,6 +123,8 @@ def test_single_file_batch_run_is_a_no_op_consolidation(tmp_path):
     batch_out = tmp_path / "batch.csv"
     batch_summary = bob_run(str(batch_dir), str(batch_out))
 
-    assert direct_out.read_text(encoding="utf-8") == batch_out.read_text(encoding="utf-8")
+    golden = _GOLDEN_SINGLE_FILE.read_bytes()
+    assert direct_out.read_bytes() == golden
+    assert batch_out.read_bytes() == golden
     assert "Continuity warnings" not in batch_summary
     assert "Continuity warnings" not in direct_summary

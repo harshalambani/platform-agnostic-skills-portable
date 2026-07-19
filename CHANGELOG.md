@@ -218,6 +218,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fix only: `BankSkill.parse()`, `bank_common/consolidate.py`'s behavior,
   and every bank's single-statement extraction/parse/OCR path are untouched;
   HDFC and Kotak (no multi-file `run()` path) untouched.
+- **Bank abstraction, P3b follow-up fix-up — BoB batch `run()` output now
+  consistently CRLF, matching the rest of the codebase.** The line above's
+  "byte-identical" claim for a single-file batch didn't hold for BoB: the
+  old `_merge_csvs` it replaced read part-CSVs with universal-newline
+  translation and wrote with `newline=""`, producing bare-LF output, while
+  every other CSV writer in this codebase — BoB's own single-file fast path
+  (`extract_bob_statement.write_csv`), both of ICICI's paths, and
+  `canonical_io.write_canonical_csv` (what `BankSkill.parse()`'s pipeline
+  output actually goes through) — already default to `csv.DictWriter`'s
+  standard CRLF. So the new `run()` code's CRLF batch output is not a
+  regression against the house standard; it's the old LF-only batch quirk
+  that was the outlier, and it's now gone. No code change was needed in
+  `skill_bob/agent.py` or `skill_icici/agent.py` for this — both already
+  emitted CRLF. What changed: the single-file no-op tests for both banks
+  now assert via `read_bytes()` against a committed pre-#92 golden
+  (`tests/skill_bob/golden_single_file_run.csv`,
+  `tests/skill_icici/golden_single_file_run.csv`, captured from BoB's/
+  ICICI's direct single-file path, unchanged since `main`), instead of
+  comparing two post-#92 paths via `read_text()` — the original assertion
+  compared new code against new code and silently folded CRLF into LF on
+  read, so it could not have caught this either way. `BankSkill.parse()`
+  and `bank_common/consolidate.py` untouched; no row/value content changed
+  for either bank.
 
 ### Fixed
 - **Bank gating, registry-driven (closes the Kotak offer-then-reject leak).**

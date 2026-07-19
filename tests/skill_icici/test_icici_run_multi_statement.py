@@ -98,11 +98,20 @@ def test_overlapping_statement_periods_produce_warning(tmp_path):
     assert "OVERLAPPING/OUT-OF-ORDER" in summary
 
 
+_GOLDEN_SINGLE_FILE = Path(__file__).resolve().parent / "golden_single_file_run.csv"
+
+
 def test_single_file_batch_run_is_a_no_op_consolidation(tmp_path):
     """A directory containing exactly one XLS must NOT enter the
     len(csv_parts) > 1 consolidate() path at all (single-file runs write
-    straight to output_path), so it stays byte-identical to the plain
-    single-file run() and produces no continuity warnings."""
+    straight to output_path), so it stays byte-identical -- including line
+    terminator -- to the plain single-file run() AND to a golden captured
+    from the pre-#92 baseline (commit 1fde0cd), so this proves no regression
+    vs main, not just internal self-consistency between two paths that
+    changed together. Compared with read_bytes(): read_text() performs
+    universal-newline translation and would silently fold CRLF into LF,
+    making a line-terminator regression invisible (see P3b follow-up
+    fix-up, 2026-07-19-bank-P3b-followup-FIXUP-crlf-prompt.md)."""
     direct_xls = tmp_path / "syn_icici.xls"
     direct_xls.write_bytes(fixture_gen.build_xls())
     direct_out = tmp_path / "direct.csv"
@@ -114,6 +123,8 @@ def test_single_file_batch_run_is_a_no_op_consolidation(tmp_path):
     batch_out = tmp_path / "batch.csv"
     batch_summary = icici_run(str(batch_dir), str(batch_out))
 
-    assert direct_out.read_text(encoding="utf-8") == batch_out.read_text(encoding="utf-8")
+    golden = _GOLDEN_SINGLE_FILE.read_bytes()
+    assert direct_out.read_bytes() == golden
+    assert batch_out.read_bytes() == golden
     assert "Continuity warnings" not in batch_summary
     assert "Continuity warnings" not in direct_summary
