@@ -1081,6 +1081,7 @@ def write_workbook(
         year_key, rules.year_label,
         father_name=entity.father_name, aadhaar=entity.aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
+        business_subtree=entity.business_subtree,
     )
 
     wb.save(output_path)

@@ -3,10 +3,12 @@ presentation.py -- the deliverable/presentation layer over the calculation
 engine (2026-07-19 "presentable workbook" prompt).
 
 The workbook write_workbook.py produces is a *calculation engine*: 17 sheets,
-every figure traceable, none of it printable. This module ADDS four presentable
-sheets in front of those 17 -- `Statement of Income`, `IS`, `BS`, `CG` -- and
-hides the four raw working sheets. It changes no computation, no rule, no rate
-and no tax logic, and it overwrites no existing sheet's values.
+every figure traceable, none of it printable. This module ADDS presentable
+sheets in front of those 17, in this order -- `Statement of Income`, `BS`,
+`IS`, `PL for Business` (present only for an entity with a configured
+`business_subtree`, 2026-07-19 "PL for Business" prompt), `CG` -- and hides
+the four raw working sheets. It changes no computation, no rule, no rate and
+no tax logic, and it overwrites no existing sheet's values.
 
 **Every money cell written here is an Excel formula pointing back at the
 existing sheets** (`Computation`, `CapitalGains`, `OtherSources`,
@@ -39,14 +41,10 @@ INDENT = " " * 6          # CA file indents ~6 spaces per hierarchy level
 #: Canonical order for the deliverable sheets. This is the ONLY place order is
 #: expressed: `move_presentation_sheets_first` positions whatever subset of
 #: these actually got created, so a sheet may be conditionally omitted (`CG`
-#: already is) and a further sheet may later be inserted at any position by
-#: adding its name here -- nothing downstream assumes a fixed count or that
-#: any particular sheet is present.
-#:
-#: Known gap (2026-07-19): one of Harshal's CA reference workbooks carries a
-#: `PL for Business` sheet. It is deliberately NOT built here -- out of scope
-#: for this prompt and it needs Harshal's input on what feeds it.
-PRESENTATION_SHEETS = ("Statement of Income", "IS", "BS", "CG")
+#: and `PL for Business` already are) and a further sheet may later be
+#: inserted at any position by adding its name here -- nothing downstream
+#: assumes a fixed count or that any particular sheet is present.
+PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG")
 
 #: Raw working sheets hidden (never deleted) once the four above exist.
 HIDDEN_SHEETS = ("Rules", "Mapping Review", "IS_Transcript", "BS_Transcript")
@@ -518,7 +516,12 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 # ---------------------------------------------------------------------------
 
 def _write_hierarchy_sheet(wb, sheet_name: str, title_formula: str, entries,
-                           source_sheet: str, label_width: float, print_title: str):
+                           source_sheet: str, label_width: float, print_title: str, *,
+                           extra_row_fn=None):
+    """`extra_row_fn(ws, next_row, tops, last_col) -> new_next_row`, if given,
+    runs after the hierarchy body and before sheet chrome is applied -- e.g.
+    `PL for Business`'s net-income row, which is not part of the generic
+    hierarchy shape but still needs `last_row`/widths sized to include it."""
     ws = wb.create_sheet(sheet_name)
     t = ws.cell(row=1, column=1, value=title_formula)
     t.font = _font(12, bold=True)
@@ -534,7 +537,9 @@ def _write_hierarchy_sheet(wb, sheet_name: str, title_formula: str, entries,
         c.alignment = Alignment(horizontal="center")
         c.border = _BOTTOM_RULE
 
-    next_row, _ = render_hierarchy(ws, 4, root, source_sheet, label_col=1, money_col=2)
+    next_row, tops = render_hierarchy(ws, 4, root, source_sheet, label_col=1, money_col=2)
+    if extra_row_fn is not None:
+        next_row = extra_row_fn(ws, next_row, tops, last_col)
 
     widths = {"A": fit_label_width(ws, 1, label_width)}
     for col in range(2, last_col + 1):
@@ -562,6 +567,84 @@ def write_bs_sheet(wb, entries, entity_layout: dict, as_at_text: str, print_titl
     title = (f"='Entity'!{entity_layout['name'].coordinate}"
              f"&\" Balance Sheet as at {as_at_text}\"")
     return _write_hierarchy_sheet(wb, "BS", title, entries, "BS_Transcript", 47.8, print_title)
+
+
+# ---------------------------------------------------------------------------
+# PL for Business -- nets one entity's business income against its expenses
+# ---------------------------------------------------------------------------
+
+class BusinessSubtreeError(Exception):
+    """Raised when an entity's `business_subtree` config (Data/itr/entities.yaml)
+    is set but this FY's `IS` entries contain nothing under it.
+
+    A configured `business_subtree` is a structural fact about that entity's
+    GnuCash chart of accounts, not a per-year on/off signal -- once set, it is
+    expected to keep matching every year. A zero-match year is therefore far
+    more likely a GnuCash rename or a typo in the config than a genuine
+    zero-business year, and gate 4 (2026-07-19 PL for Business prompt) forbids
+    treating the two the same way: silently rendering an empty/omitted sheet
+    here would hide exactly the failure this check exists to catch.
+    """
+
+
+def resolve_business_entries(is_entries, business_subtree: str | None):
+    """Filter `is_entries` -- the same `[(path, cell), ...]` list `write_is_sheet`
+    already consumes -- down to the leaves under `business_subtree` (a GnuCash
+    account path prefix, e.g. `"Income/xBusiness Income"`), via a plain
+    path-prefix subtree walk. Never a keyword/name match: an out-of-subtree
+    account that merely *sounds* business-related (e.g. `Expense/Professional
+    Tax`) must never leak in just because its name contains "business"-ish
+    words.
+
+    Returns None when `business_subtree` is not configured for this entity --
+    the ordinary, per-FY "this entity has no business" case, evaluated fresh
+    from config every run (never an entity-level flag baked in elsewhere,
+    never cross-year-persisted, never inferred from a prior year or from
+    whether a CA reference workbook happened to include the sheet). The
+    `PL for Business` sheet is simply omitted; no error.
+
+    Raises BusinessSubtreeError when `business_subtree` IS configured but this
+    FY's `is_entries` matches nothing under it (see BusinessSubtreeError).
+    """
+    if not business_subtree:
+        return None
+    prefix = business_subtree.rstrip("/") + "/"
+    matches = [(path, cell) for path, cell in is_entries if str(path).startswith(prefix)]
+    if not matches:
+        raise BusinessSubtreeError(
+            f"business_subtree {business_subtree!r} is configured for this entity "
+            f"but no IS entries under it were found for this FY -- check for a "
+            f"GnuCash rename before assuming a zero-business year"
+        )
+    return matches
+
+
+def write_pl_for_business_sheet(wb, entries, entity_layout: dict, period_text: str,
+                                print_title: str):
+    """`PL for Business` -- nets one entity's business income against its
+    business expenses via a plain subtree walk (see `resolve_business_entries`).
+    Reuses `_write_hierarchy_sheet` exactly like `IS`/`BS`: the income leaf and
+    the nested expense group render as an ordinary hierarchy, sourced from
+    `IS_Transcript` since `entries` is a filtered slice of the same
+    `is_entries` list `IS` renders from. Expense leaves already carry the
+    book's negative sign (HTML convention), so the net row is a plain SUM/`+`
+    of the top-level cells -- never restated as a subtraction.
+    """
+    title = (f"='Entity'!{entity_layout['name'].coordinate}"
+             f"&\" Profit and Loss for Business For Period Covering {period_text}\"")
+
+    def net_row(ws, row, tops, last_col):
+        label = ws.cell(row=row, column=1, value="Net Business Income / (Loss)")
+        label.font = _font(bold=True)
+        formula = ("=" + "+".join(f"{get_column_letter(c)}{r}" for r, c in tops)) if tops else "=0"
+        cell = ws.cell(row=row, column=last_col, value=formula)
+        cell.number_format = INR_FORMAT
+        cell.font = _font(bold=True)
+        cell.border = _TOP_RULE
+        return row + 1
+
+    return _write_hierarchy_sheet(wb, "PL for Business", title, entries, "IS_Transcript",
+                                  38.1, print_title, extra_row_fn=net_row)
 
 
 # ---------------------------------------------------------------------------
@@ -732,7 +815,8 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
                              lot_start_row: int, age_class: str, year_key: str,
                              year_label: str, *, father_name: str | None = None,
                              aadhaar: str | None = None, residency_value: str = "R/OR",
-                             residency_declared: bool = False) -> None:
+                             residency_declared: bool = False,
+                             business_subtree: str | None = None) -> None:
     """Add the four deliverable sheets in front of the calculation sheets and
     hide the raw working sheets. Adds only -- restyles and overwrites nothing."""
     start_year = int(year_key[:4]) if year_key else 0
@@ -748,6 +832,14 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
     )
     write_is_sheet(wb, is_entries, entity_layout, period_text, print_title)
     write_bs_sheet(wb, bs_entries, entity_layout, as_at_text, print_title)
+    # PL for Business is omitted entirely when this entity has no
+    # business_subtree configured (the ordinary case for every entity except
+    # Harshal's) -- see resolve_business_entries. When configured but this
+    # FY's data matches nothing under it, resolve_business_entries raises
+    # rather than silently rendering a zero/omitted sheet.
+    business_entries = resolve_business_entries(is_entries, business_subtree)
+    if business_entries is not None:
+        write_pl_for_business_sheet(wb, business_entries, entity_layout, period_text, print_title)
     # CG is omitted entirely when this FY has no capital-gains activity --
     # mirroring what the CA actually produced for such a year. A blank grid on
     # a document handed to a CA or a bank is worse than no sheet.

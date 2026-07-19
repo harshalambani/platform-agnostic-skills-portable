@@ -103,7 +103,7 @@ def wb(tmp_path_factory):
 # ---------------------------------------------------------------------------
 
 def test_four_presentation_sheets_are_first_in_order(wb):
-    assert wb.sheetnames[:4] == ["Statement of Income", "IS", "BS", "CG"]
+    assert wb.sheetnames[:4] == ["Statement of Income", "BS", "IS", "CG"]
 
 
 def test_working_sheets_are_hidden_not_deleted(wb):
@@ -560,7 +560,7 @@ def test_cg_sheet_is_omitted_when_the_year_has_no_gains(tmp_path):
 def test_remaining_sheets_still_render_and_position_correctly_without_cg(tmp_path):
     """Sheet ordering must not assume CG is present."""
     built = _build(tmp_path, no_capital_gains=True)
-    assert built.sheetnames[:3] == ["Statement of Income", "IS", "BS"]
+    assert built.sheetnames[:3] == ["Statement of Income", "BS", "IS"]
     assert ORIGINAL_SHEETS.issubset(set(built.sheetnames))
     hidden = {n for n in built.sheetnames if built[n].sheet_state == "hidden"}
     assert hidden == set(presentation.HIDDEN_SHEETS)
@@ -595,6 +595,150 @@ def test_cg_date_columns_are_date_formatted(wb):
     assert date_cells
     for c in date_cells:
         assert c.number_format == presentation.DATE_FORMAT
+
+
+# ---------------------------------------------------------------------------
+# PL for Business (2026-07-19 "PL for Business" prompt) -- subtree walk,
+# isolation, omit-vs-raise, and sheet ordering. All lightweight: these hit
+# presentation.py's functions directly with hand-built entries, exactly like
+# the Gate-5 _render()/_SIBLING_ENTRIES pattern above, so none of them need
+# the full synthetic-book pipeline. Account names below are structural/generic
+# (a partnership remuneration line + a handful of common business expense
+# heads) -- no real amounts, names or PII of any kind.
+# ---------------------------------------------------------------------------
+
+_BIZ_SUBTREE = "Income/xBusiness Income"
+
+_BIZ_ENTRIES = [
+    ("Income/xBusiness Income/Remuneration from Partnership", "B10"),
+    ("Income/xBusiness Income/Business Expenses/Bank Service Charge", "B11"),
+    ("Income/xBusiness Income/Business Expenses/Staff Salary", "B12"),
+    # Decoy: sounds business-related, but lives OUTSIDE the configured
+    # subtree -- mirrors Expense/Professional Tax. Must never appear in a
+    # filtered/rendered PL for Business result.
+    ("Expense/Professional Tax", "B13"),
+]
+
+
+def test_business_subtree_walk_excludes_an_out_of_subtree_business_sounding_account():
+    """The highest-value test here: subtree isolation is a plain path-prefix
+    walk, not a keyword/name match. `Expense/Professional Tax` sounds
+    business-related but is outside the configured subtree and must not leak
+    into the filtered entries."""
+    matches = presentation.resolve_business_entries(_BIZ_ENTRIES, _BIZ_SUBTREE)
+    paths = [p for p, _ in matches]
+    assert "Expense/Professional Tax" not in paths
+    assert len(matches) == 3
+    assert all(p.startswith(_BIZ_SUBTREE + "/") for p in paths)
+
+
+def test_pl_for_business_renders_income_leaf_and_nested_expense_group_with_net_row():
+    wb_ = openpyxl.Workbook()
+    matches = presentation.resolve_business_entries(_BIZ_ENTRIES, _BIZ_SUBTREE)
+    presentation.write_pl_for_business_sheet(wb_, matches, {"name": _Coord("A1")}, "period", "title")
+    ws = wb_["PL for Business"]
+
+    # Income leaf, the nested expense group, its subtotal, and the top-level
+    # net row all render.
+    assert _row_of(ws, "Remuneration from Partnership")
+    assert _row_of(ws, "Business Expenses")
+    assert _row_of(ws, "Total Business Expenses")
+    net_row = _row_of(ws, "Net Business Income / (Loss)")
+
+    # The decoy never appears anywhere on the rendered sheet.
+    all_labels = [c.value for row in ws.iter_rows(min_col=1, max_col=1) for c in row]
+    assert not any(isinstance(v, str) and "Professional Tax" in v for v in all_labels)
+
+    # Net row is a plain SUM/addition of the top-level cells -- expenses are
+    # already negative (HTML sign convention), so this nets correctly as-is.
+    # It must not be rewritten as a subtraction.
+    net_cell = ws.cell(row=net_row, column=_money_col(ws, net_row))
+    assert net_cell.value.startswith("=")
+    assert "-" not in net_cell.value
+    assert net_cell.number_format == presentation.INR_FORMAT
+
+
+class _Coord:
+    def __init__(self, coordinate):
+        self.coordinate = coordinate
+
+
+def _stub_model():
+    import types
+    return types.SimpleNamespace(
+        salary=sch.SalarySchedule(), house_property=sch.HousePropertySchedule(),
+        business=sch.BusinessSchedule(), capital_gains=sch.CapitalGainsSchedule(),
+        other_sources=sch.OtherSourcesSchedule(), taxes_paid=sch.TaxesPaidSchedule(),
+    )
+
+
+_STUB_ENTITY_LAYOUT = {k: _Coord(f"B{i}") for i, k in
+                       enumerate(("name", "pan", "address", "dob", "status", "regime"), start=1)}
+_STUB_COMP_LAYOUT = {
+    "gti": "'Computation'!B1", "total_income": "'Computation'!B2",
+    "new_tax_before_cess": "'Computation'!B3", "old_tax_before_cess": "'Computation'!B4",
+    "new_cess": "'Computation'!B5", "old_cess": "'Computation'!B6",
+    "selected_liability": "'Computation'!B7", "refund": "'Computation'!B8",
+}
+_STUB_TP_LAYOUT = {"total": "B1"}
+
+
+def _minimal_presentation_layer(is_entries, bs_entries, business_subtree):
+    """Calls build_presentation_layer directly with a zeroed stub model and
+    dummy layouts -- no salary/HP/CG activity, so only the always-emitted
+    rows of Statement of Income execute. This proves sheet
+    presence/order/omission without needing the full synthetic-book pipeline
+    (parse_eguile/parse_gnucash/mapping/Form16/schedules)."""
+    wb_ = openpyxl.Workbook()
+    wb_.remove(wb_.active)
+    presentation.build_presentation_layer(
+        wb_, _stub_model(), _STUB_ENTITY_LAYOUT, _STUB_COMP_LAYOUT, {}, _STUB_TP_LAYOUT,
+        is_entries, bs_entries, 10, "general", "2024-25", "AY 2025-26",
+        business_subtree=business_subtree,
+    )
+    return wb_
+
+
+def test_pl_for_business_is_omitted_when_entity_has_no_business_subtree_configured():
+    """No entity-level flag anywhere -- the decision is made fresh, per call,
+    from the `business_subtree` argument alone."""
+    wb_ = _minimal_presentation_layer(_BIZ_ENTRIES, [], business_subtree=None)
+    assert "PL for Business" not in wb_.sheetnames
+    assert wb_.sheetnames[:3] == ["Statement of Income", "BS", "IS"]
+
+
+def test_pl_for_business_is_present_and_correctly_positioned_when_configured():
+    wb_ = _minimal_presentation_layer(_BIZ_ENTRIES, [], business_subtree=_BIZ_SUBTREE)
+    assert wb_.sheetnames[:4] == ["Statement of Income", "BS", "IS", "PL for Business"]
+    assert "CG" not in wb_.sheetnames   # no CG activity in the stub model -- still omittable
+
+
+def test_business_subtree_decision_holds_no_cross_year_or_cross_call_state():
+    """Calling with business_subtree=None then immediately with a configured,
+    matching subtree must not be influenced by the prior call -- proves the
+    per-FY decision is not cached or persisted anywhere."""
+    first = _minimal_presentation_layer(_BIZ_ENTRIES, [], business_subtree=None)
+    second = _minimal_presentation_layer(_BIZ_ENTRIES, [], business_subtree=_BIZ_SUBTREE)
+    assert "PL for Business" not in first.sheetnames
+    assert "PL for Business" in second.sheetnames
+
+
+def test_configured_but_missing_business_subtree_raises_not_silently_omits():
+    """Gate 4: if business_subtree IS configured but this FY's data matches
+    nothing under it, the code must raise -- never silently render a
+    zero/omitted sheet as if it were simply 'no activity'."""
+    no_match_entries = [("Expense/Professional Tax", "B13")]   # decoy only
+    with pytest.raises(presentation.BusinessSubtreeError):
+        presentation.resolve_business_entries(no_match_entries, _BIZ_SUBTREE)
+    with pytest.raises(presentation.BusinessSubtreeError):
+        _minimal_presentation_layer(no_match_entries, [], business_subtree=_BIZ_SUBTREE)
+
+
+def test_business_subtree_config_field_round_trips_through_load_entities():
+    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    assert entities["SYN-IND-BIZ"].business_subtree == "Income/xBusiness Income"
+    # Unconfigured entities keep the field absent, not a hardcoded literal.
+    assert entities["SYN-IND"].business_subtree is None
 
 
 # ---------------------------------------------------------------------------
