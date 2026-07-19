@@ -14,6 +14,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > back-filed into sections that do not exist for those tags.
 
 ### Added
+- **Help system, single-source-of-truth.** Every skill's user help now lives in
+  a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
+  tooltips/formats/gotchas, steps, per-output-file interpretation, tips,
+  troubleshooting). One generator, `scripts/gen_docs.py`, renders it to per-skill
+  guides in `docs/user-guide/`, a bundled standalone `docs/USER-GUIDE.html`, and
+  the developer `docs/dev/skills-reference.md`.
+- **In-app help.** A collapsible "How to use — formats & output" panel on every
+  skill tab, a central **Help** tab, and two-tier tooltips (native `info=` helper
+  text on inputs; `title=` hover on each output file). All read the `help:` block
+  live via `agents.registry` (new `SkillHelp` model) — see `ui/_help.py`.
+- **Docs.** `docs/dev/help-block-schema.md` and `docs/dev/editing-help.md`;
+  `USER-GUIDE.html` bundled into the frozen package via `paskills.spec`.
+- **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
+  the generated docs are stale (`gen_docs.py --check`).
+
+### Fixed
+- **HDFC — Value Dt now used on every input path.** HDFC statements carry
+  both a posting Date and a Value Dt; the canonical CSV's "Date" column
+  (which flows unchanged through balance checks, dedup, and account mapping)
+  now emits the Value Dt on the PDF text path (`skill_hdfc`) and the PDF OCR
+  path, matching the XLS/XLSX path which already preferred it. Falls back to
+  the posting date only when Value Dt is blank. Note: opening-balance
+  reconciliation and duplicate detection key on this field, so rows where
+  posting and value dates differ (e.g. cheque clearing) may now be bucketed
+  by a different date than before.
+- **ICICI — docstring corrected.** The module docstring wrongly claimed
+  ICICI used Transaction Date; the code already preferred Value Date
+  (falling back to Transaction Date only when blank). No behavior change —
+  documentation and a regression test now match the existing code.
+- **Intercompany skills moved out of GnuCash > Banks.** "Intercompany Reco"
+  and "Intercompany Matrix" are not bank-statement tools and were rendering
+  alongside statement-import skills under the Banks sub-tab. Both now use a
+  dedicated `category: "intercompany"` and render under a new
+  GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
+  only statement import + Review Mappings.
+
+## [2.13.0] — 2026-07-19
+
+### Added
 - **ITR workbook — `PL for Business` sheet, subtree-driven.** A fifth
   presentable sheet nets an entity's business income against business
   expenses for entities that have both: `Remuneration from Partnership` and a
@@ -91,20 +130,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     is an assumption the tool does not determine. The age half of the status
     line comes from the existing `rules.resolve_age_class()` — no new age
     logic.
-- **Help system, single-source-of-truth.** Every skill's user help now lives in
-  a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
-  tooltips/formats/gotchas, steps, per-output-file interpretation, tips,
-  troubleshooting). One generator, `scripts/gen_docs.py`, renders it to per-skill
-  guides in `docs/user-guide/`, a bundled standalone `docs/USER-GUIDE.html`, and
-  the developer `docs/dev/skills-reference.md`.
-- **In-app help.** A collapsible "How to use — formats & output" panel on every
-  skill tab, a central **Help** tab, and two-tier tooltips (native `info=` helper
-  text on inputs; `title=` hover on each output file). All read the `help:` block
-  live via `agents.registry` (new `SkillHelp` model) — see `ui/_help.py`.
-- **Docs.** `docs/dev/help-block-schema.md` and `docs/dev/editing-help.md`;
-  `USER-GUIDE.html` bundled into the frozen package via `paskills.spec`.
-- **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
-  the generated docs are stale (`gen_docs.py --check`).
 
 ### Fixed
 - **ITR rules — senior-citizen age-class benefit no longer leaks to
@@ -144,25 +169,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   was already correct, since the real defects there turned out to be
   per-entity mapping-file mistags outside this project's `Data/` fence,
   not code bugs.
-- **HDFC — Value Dt now used on every input path.** HDFC statements carry
-  both a posting Date and a Value Dt; the canonical CSV's "Date" column
-  (which flows unchanged through balance checks, dedup, and account mapping)
-  now emits the Value Dt on the PDF text path (`skill_hdfc`) and the PDF OCR
-  path, matching the XLS/XLSX path which already preferred it. Falls back to
-  the posting date only when Value Dt is blank. Note: opening-balance
-  reconciliation and duplicate detection key on this field, so rows where
-  posting and value dates differ (e.g. cheque clearing) may now be bucketed
-  by a different date than before.
-- **ICICI — docstring corrected.** The module docstring wrongly claimed
-  ICICI used Transaction Date; the code already preferred Value Date
-  (falling back to Transaction Date only when blank). No behavior change —
-  documentation and a regression test now match the existing code.
-- **Intercompany skills moved out of GnuCash > Banks.** "Intercompany Reco"
-  and "Intercompany Matrix" are not bank-statement tools and were rendering
-  alongside statement-import skills under the Banks sub-tab. Both now use a
-  dedicated `category: "intercompany"` and render under a new
-  GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
-  only statement import + Review Mappings.
 
 ## [2.12.0] — 2026-07-19
 
