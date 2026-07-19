@@ -123,6 +123,31 @@ def _fy_to_ay(fy_year_key: str) -> str:
     return f"{start + 1}-{str(start + 2)[-2:]}"
 
 
+def _provenance_summary_lines(tree, resolved: dict, mapping_entries: dict | None) -> list[str]:
+    """Fail-loud (2026-07-19 mapping-precedence prompt item 1b): report the
+    heuristic-vs-approved split in the run's own text summary, not only on
+    the Mapping Review sheet -- and surface any heuristic-tagged INCOME
+    account by name, since an unverified guess there can silently misstate
+    taxable income. Returns [] when nothing has resolved yet (cold start)."""
+    if not resolved:
+        return []
+    counts = write_workbook.provenance_counts(resolved, mapping_entries)
+    lines = [
+        f"Mapping: tag provenance -- {counts.get('approved', 0)} approved, "
+        f"{counts.get('heuristic', 0)} heuristic (unverified), {counts.get('llm', 0)} llm-suggested, "
+        f"{counts.get('inherited', 0)} inherited (of {len(resolved)} resolved leaf(ves))."
+    ]
+    income_leaves = write_workbook.heuristic_income_leaves(tree, resolved, mapping_entries)
+    if income_leaves:
+        lines.append(
+            f"  WARNING: {len(income_leaves)} INCOME account(s) resolved via an unreviewed "
+            "heuristic guess (not human-approved) -- verify before filing:"
+        )
+        for path, tag, amount in income_leaves:
+            lines.append(f"    - {path} -> {tag} (FY total {amount})")
+    return lines
+
+
 def _mapping_summary(
     tree,
     mapping_file: str | None,
@@ -162,6 +187,7 @@ def _mapping_summary(
     lines = [f"Mapping: {len(result.resolved)} leaf(ves) resolved, {len(result.unmapped)} unmapped."]
     for w in result.warnings:
         lines.append(f"  WARNING: {w}")
+    lines.extend(_provenance_summary_lines(tree, result.resolved, loaded.entries))
 
     if not result.blocked:
         lines.append("Mapping: OK -- every leaf resolved to a tag.")

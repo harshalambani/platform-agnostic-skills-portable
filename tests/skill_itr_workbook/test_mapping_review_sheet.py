@@ -95,3 +95,59 @@ def test_groups_have_subtotal_rows():
     subtotal_labels = [label for label in labels if isinstance(label, str) and label.startswith("Subtotal -- ")]
     assert subtotal_labels
     assert "Subtotal -- OtherSources" in subtotal_labels
+
+
+# ---------------------------------------------------------------------------
+# Fail-loud provenance (2026-07-19 mapping-precedence prompt, item 1b)
+# ---------------------------------------------------------------------------
+
+BANK_INTEREST_GUID = "11fc5a724efb9eb161ac039825b3e6dd"       # Income/Bank Interest (RE-Income)
+BUS_REMUNERATION_GUID = "e605d8704bc37ebb37e724769e83bfb6"    # Income/Business Remuneration (RE-Income)
+
+
+def _build_resolution_with_one_heuristic_income_leaf():
+    """Marks Income/Bank Interest as an unverified heuristic guess (the same
+    note text bootstrap tooling has historically used) while leaving every
+    other entry, including another RE-Income leaf, as a plain approved
+    entry -- so the provenance helpers can be checked for both true- and
+    false-positive discrimination."""
+    tree = pe.parse_html(fixture_gen.build_syn_ind_html())
+    loaded = configs.load_mapping(FIXTURES / "syn_ind.mapping.yaml")
+    entries = dict(loaded.entries)
+    entries[BANK_INTEREST_GUID] = configs.MappingEntry(
+        guid=BANK_INTEREST_GUID, path="Income/Bank Interest", tag="OS_INTEREST_BANK",
+        note="HEURISTIC AUTO-SUGGESTION -- unverified, keyword-based, no LLM/network used.",
+    )
+    modified = configs.MappingLoadResult(entries=entries, warnings=[])
+    result = mapping_engine.resolve_tree(tree, modified)
+    return tree, result, entries
+
+
+def test_provenance_counts_tallies_heuristic_vs_approved():
+    tree, result, entries = _build_resolution_with_one_heuristic_income_leaf()
+    counts = ww.provenance_counts(result.resolved, entries)
+    assert counts["heuristic"] == 1
+    assert counts["approved"] == len(result.resolved) - 1
+
+
+def test_heuristic_income_leaves_flags_only_the_heuristic_income_row():
+    tree, result, entries = _build_resolution_with_one_heuristic_income_leaf()
+    leaves = ww.heuristic_income_leaves(tree, result.resolved, entries)
+    # Only the one entry deliberately marked heuristic is flagged -- the
+    # other RE-Income leaf (Business Remuneration), plainly approved, is not.
+    assert [path for path, _tag, _amt in leaves] == ["Income/Bank Interest"]
+    assert result.resolved[BUS_REMUNERATION_GUID].path not in [p for p, _t, _a in leaves]
+
+
+def test_reconciliation_sheet_surfaces_heuristic_income_warning():
+    tree, result, entries = _build_resolution_with_one_heuristic_income_leaf()
+    wb = Workbook()
+    ww.write_reconciliation_sheet(
+        wb, tree, [], [], [], result.unmapped, "v1", "v1", "2026-07-19T00:00:00", {}, True,
+        resolved=result.resolved, mapping_entries=entries,
+    )
+    ws = wb["Reconciliation"]
+    cells = [row[0] for row in ws.iter_rows(values_only=True) if row and row[0] is not None]
+    assert any("Tag provenance" in str(c) for c in cells)
+    assert any("unverified INCOME tag" in str(c) for c in cells)
+    assert any("Income/Bank Interest" in str(c) for c in cells)

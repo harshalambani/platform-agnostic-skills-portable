@@ -350,7 +350,7 @@ def test_deductions_80tta_capped_at_savings_interest():
 
 def test_deductions_80ttb_senior_covers_deposit_interest_and_uses_higher_cap():
     # CF2: a senior (age_cls resolved from status+dob, CF6-guarded) gets
-    # 80TTB -- a higher cap AND covers bank/NBFC deposit interest, not just
+    # 80TTB -- a higher cap AND covers bank FD deposit interest, not just
     # savings-account interest.
     rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
     other_sources = sch.OtherSourcesSchedule(interest_sb=15000.0, interest_bank=40000.0)
@@ -358,6 +358,19 @@ def test_deductions_80ttb_senior_covers_deposit_interest_and_uses_higher_cap():
         {}, {}, other_sources, rules, "old", "Individual", 500000.0, age_cls="senior",
     )
     assert ded.total_80tta_ttb_claimed == 50000.0  # 80TTB cap, not the full 55000
+
+
+def test_deductions_80ttb_senior_excludes_nbfc_hfc_interest():
+    # 2026-07-19 mapping-precedence prompt, gate 5: 80TTB covers banks/
+    # co-ops/post office only, never NBFC/HFC deposits, at any age class.
+    # A senior with mostly NBFC interest must NOT get it folded into the
+    # deduction base just because interest_nbfc is nonzero.
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    other_sources = sch.OtherSourcesSchedule(interest_sb=2000.0, interest_bank=3000.0, interest_nbfc=200000.0)
+    ded = sch.build_deductions(
+        {}, {}, other_sources, rules, "old", "Individual", 500000.0, age_cls="senior",
+    )
+    assert ded.total_80tta_ttb_claimed == 5000.0  # sb + bank only -- nbfc excluded, well under the 80TTB cap
 
 
 def test_deductions_general_age_class_never_gets_80ttb_even_with_bank_interest():
@@ -382,6 +395,51 @@ def test_schedule_al_excludes_equity_capital_and_trading(syn_ind_resolved):
     assert "TRADING" not in al.buckets
     assert al.total_assets > 0
     assert al.required == (500000.0 > al.threshold)
+
+
+def _fake_resolved_and_nodes(tag_amounts: dict) -> tuple:
+    """Builds minimal (resolved, node_by_guid) dicts -- one synthetic leaf
+    per {tag: amount} pair -- exercising _sum_tag()'s tag-only routing
+    without needing a full HTML/mapping fixture round trip."""
+    resolved, node_by_guid = {}, {}
+    for i, (tag, amount) in enumerate(tag_amounts.items()):
+        guid = f"synthetic-guid-{i}"
+        resolved[guid] = mapping_engine.ResolvedLeaf(guid=guid, path=f"Synthetic/{tag}", tag=tag)
+        node_by_guid[guid] = pe.AccountNode(
+            guid=guid, name=tag, depth=1, section="x", path=f"Synthetic/{tag}", total=amount,
+        )
+    return resolved, node_by_guid
+
+
+def test_schedule_al_ncd_routes_to_securities_not_cash_bank():
+    # 2026-07-19 mapping-precedence prompt, gate 6: an NCD/debenture tagged
+    # AL_SECURITIES must land in the securities bucket, not AL_CASH_BANK --
+    # and an ordinary FD tagged AL_CASH_BANK must still land there (1d: the
+    # Schedule AL bucket definitions themselves are unchanged, ordinary FDs
+    # stay clustered with bank accounts).
+    resolved, node_by_guid = _fake_resolved_and_nodes({
+        "AL_SECURITIES": 50000.0,   # e.g. an NCD, correctly tagged
+        "AL_CASH_BANK": 30000.0,    # an ordinary FD, correctly tagged
+    })
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    al = sch.build_schedule_al(resolved, node_by_guid, rules, total_income=500000.0)
+    assert al.buckets["AL_SECURITIES"] == 50000.0
+    assert al.buckets["AL_CASH_BANK"] == 30000.0
+
+
+def test_exempt_income_ppf_interest_excluded_from_taxable_other_sources():
+    # 2026-07-19 mapping-precedence prompt, gate 4: an account tagged
+    # EXEMPT_PPF_INTEREST must land on ExemptIncome's "PPF interest" line
+    # and never enter OtherSources.taxable_total.
+    resolved, node_by_guid = _fake_resolved_and_nodes({
+        "EXEMPT_PPF_INTEREST": 481957.0,
+        "OS_INTEREST_SB": 1000.0,
+    })
+    exempt = sch.build_exempt_income(resolved, node_by_guid)
+    assert exempt.ppf_interest == 481957.0
+
+    other_sources = sch.build_other_sources(resolved, node_by_guid, book=None, year_key=None)
+    assert other_sources.taxable_total == 1000.0  # PPF interest excluded entirely
 
 
 

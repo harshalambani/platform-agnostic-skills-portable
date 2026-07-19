@@ -30,6 +30,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the generated docs are stale (`gen_docs.py --check`).
 
 ### Fixed
+- **ITR mapping — approved corrections now actually reach a run.** The root
+  cause of a real entity showing almost every mapped account as `heuristic`
+  despite real review work: `apply_mapping_corrections.py`'s CLI wrote
+  corrections to a separate output file instead of the live mapping file,
+  requiring a manual rename step that was never performed. It now defaults
+  to writing in place, with an automatic timestamped backup; an explicit
+  output path remains available as an opt-in dry run. Matching was already
+  GUID-based (rename-safe) — a regression test now proves it, alongside a
+  persist-reload-apply round-trip test.
+- **ITR mapping — fail-loud on guessed tags.** The run summary now states
+  heuristic-vs-approved tag counts and prominently warns when any INCOME
+  account resolved via an unreviewed heuristic guess, in addition to the
+  existing `Mapping Review` sheet detail; the Reconciliation sheet also
+  gained a "Mapping provenance" block for the same reason.
+- **ITR schedules — 80TTA/80TTB no longer includes NBFC/HFC deposit
+  interest.** For senior/super-senior filers, the deduction base wrongly
+  summed savings + bank FD + NBFC/HFC interest; 80TTB (like 80TTA) only
+  ever covers banks/co-operative societies/post office deposits, never
+  NBFC/HFC. Fixed with a regression test; savings, bank-FD, and NBFC/HFC
+  interest were already tracked on separate lines and already correctly
+  excluded PPF interest and NCD/securities routing from Schedule AL and
+  ExemptIncome — added synthetic tests confirming that tag-driven routing
+  was already correct, since the real defects there turned out to be
+  per-entity mapping-file mistags outside this project's `Data/` fence,
+  not code bugs.
 - **HDFC — Value Dt now used on every input path.** HDFC statements carry
   both a posting Date and a Value Dt; the canonical CSV's "Date" column
   (which flows unchanged through balance checks, dedup, and account mapping)
