@@ -72,7 +72,7 @@ class TestDescriptionCleanup(unittest.TestCase):
     """Test description cleaning logic."""
 
     def test_upi_vpa_preserved(self):
-        desc = "UPI-MERCHANT-ABC-7359777800-2@OKBIZAXIS-UTIB0000553"
+        desc = "UPI-MERCHANT-ABC-9000000000-2@OKBIZAXIS-UTIB0000553"
         result = cleanup_description(desc)
         self.assertIn("@", result)
 

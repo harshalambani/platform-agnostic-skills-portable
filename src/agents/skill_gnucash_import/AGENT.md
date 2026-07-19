@@ -64,7 +64,7 @@ For each row in the table (excluding header + any junk):
 
 ### Description Cleanup
 - Remove trailing numeric codes (cheque numbers, reference IDs) — but **preserve**:
-  - UPI VPA (e.g., `merchant@bank`, `7359777800-2@okbizaxis`).
+  - UPI VPA (e.g., `merchant@bank`, `9000000000-2@okbizaxis`).
   - NEFT/IMPS counterparty names (e.g., `ACME CONSULTING LLP`).
   - Card merchant ID codes in parentheses.
 - If in doubt, keep the full description; Phase 3 (account mapping) will use stable keys (VPA, counterparty) anyway.

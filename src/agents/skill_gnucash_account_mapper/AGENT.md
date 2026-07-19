@@ -21,7 +21,7 @@ For each transaction in the file:
 3. For single-dominant split or two-way transfers:
    - Extract transaction description.
    - Parse **key fields**:
-     - **UPI VPA**: e.g., `merchant@bank` or `7359777800-2@okbizaxis` → extract stable VPA.
+     - **UPI VPA**: e.g., `merchant@bank` or `9000000000-2@okbizaxis` → extract stable VPA.
      - **NEFT/IMPS counterparty**: e.g., `ACME CONSULTING LLP` → extract exact name.
      - **Card merchant ID**: e.g., `MERCHANT-1234-ABC` → extract numeric code.
    - Build map: (key_field, account) → [(transaction_date, description)].
@@ -71,7 +71,7 @@ rules:
     last_seen: "2025-03-15"
     basis: "4 NEFT matches, most recent 3 months ago"
 
-  - key: 7359777800
+  - key: 9000000000
     type: upi_phone
     accounts: ["Expenses:Groceries"]
     confidence: Medium
@@ -93,7 +93,7 @@ rules:
 Rule Key,Key Type,Primary Account,Frequency,Confidence,Last Seen,Basis
 salary@employer.com,upi_vpa,Income:Salary,12,High,2025-03-31,"12 matches, all <12mo"
 ACME CONSULTING LLP,neft_counterparty,Income:Consulting,4,High,2025-03-15,"4 matches, most <3mo"
-7359777800,upi_phone,Expenses:Groceries,8,Medium,2025-02-20,"8 matches; 1 High-conf alternative"
+9000000000,upi_phone,Expenses:Groceries,8,Medium,2025-02-20,"8 matches; 1 High-conf alternative"
 UBER,merchant_keyword,Expenses:Transportation,15,Medium,2025-03-28,"15 matches; fuzzy on 1 alt"
 ```
 
