@@ -94,6 +94,45 @@ def test_resolve_age_class_guard(status, dob, expected):
     assert rules_engine.resolve_age_class(status, dob, date(2025, 3, 31)) == expected
 
 
+@pytest.mark.parametrize("status,dob,residency,expected", [
+    # DOB 1960-01-01 is 65 at FY end 2025-03-31 -- senior-citizen age. The
+    # higher basic exemption is a RESIDENT-only benefit (2026-07-19 residency
+    # prompt, section 3): a non-resident senior must NOT get it.
+    ("Individual", "1960-01-01", "NR", "general"),
+    ("Individual", "1960-01-01", "R/OR", "senior"),
+    ("Individual", "1960-01-01", "RNOR", "senior"),   # RNOR is a resident sub-status (s.6)
+    ("Individual", "1960-01-01", None, "senior"),      # undeclared -- defaults to R/OR, unchanged
+    ("Individual", "1945-01-01", "R/OR", "super_senior"),
+    ("Individual", "1945-01-01", "NR", "general"),
+])
+def test_resolve_age_class_gates_on_residency_not_only_status(status, dob, residency, expected):
+    """Regression test for the section-3 fix: resolve_age_class's docstring
+    always claimed 'applies only to resident Individuals' but the code never
+    checked residency until this fix -- only status. Without the fix, every
+    one of the NR rows above would incorrectly resolve to 'senior'/
+    'super_senior' instead of 'general'."""
+    assert rules_engine.resolve_age_class(status, dob, date(2025, 3, 31), residency=residency) == expected
+
+
+def test_resolve_slabs_old_regime_nonresident_senior_gets_general_slabs():
+    """End-to-end through resolve_slabs: an NR senior citizen must land on
+    the general (250000) old-regime slab table, not the senior (300000) one."""
+    rules = rules_engine.load_rules(RULES_DIR, "2025-26")
+    slabs = rules_engine.resolve_slabs(
+        rules, "old", "Individual", "1960-01-01", date(2025, 3, 31), residency="NR",
+    )
+    assert slabs == rules.regime("old")["slabs_by_age"]["general"]
+
+
+def test_resolve_residency_declared_tokens_and_default():
+    assert rules_engine.resolve_residency("R/OR") == ("R/OR", True)
+    assert rules_engine.resolve_residency("RNOR") == ("RNOR", True)
+    assert rules_engine.resolve_residency("NR") == ("NR", True)
+    assert rules_engine.resolve_residency("Resident") == ("R/OR", False)
+    assert rules_engine.resolve_residency(None) == ("R/OR", False)
+    assert rules_engine.resolve_residency("") == ("R/OR", False)
+
+
 def test_load_user_rules_rule1_present():
     user_rules = rules_engine.load_user_rules(RULES_DIR / "user_rules.yaml")
     ids = [r.id for r in user_rules]

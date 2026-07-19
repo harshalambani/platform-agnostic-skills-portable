@@ -54,10 +54,13 @@ ORIGINAL_SHEETS = {
 }
 
 
-def _build(tmp_path, *, dob: str | None = None, no_capital_gains: bool = False):
+def _build(tmp_path, *, dob: str | None = None, no_capital_gains: bool = False,
+           entity_overrides: dict | None = None):
     """Build the full synthetic workbook, optionally overriding the synthetic
-    entity's (already fake) DOB to exercise a different age class, or blanking
-    this FY's capital-gains activity to exercise the no-CG path."""
+    entity's (already fake) DOB to exercise a different age class, other
+    entity fields (father_name/aadhaar/residency, all still synthetic) via
+    `entity_overrides`, or blanking this FY's capital-gains activity to
+    exercise the no-CG path."""
     tree = pe.parse_html(fixture_gen.build_syn_ind_html())
     book = pg.parse_book(FIXTURES / "syn_ind.gnucash")
     loaded = configs.load_mapping(FIXTURES / "syn_ind.mapping.yaml")
@@ -67,13 +70,15 @@ def _build(tmp_path, *, dob: str | None = None, no_capital_gains: bool = False):
     entity = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")["SYN-IND"]
     if dob is not None:
         entity = dataclasses.replace(entity, dob=dob)
+    if entity_overrides:
+        entity = dataclasses.replace(entity, **entity_overrides)
     scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
     fmv_tables = sch.load_fmv_tables()
     user_rules = rules_engine.load_user_rules(RULES_DIR / "user_rules.yaml")
 
     model = sch.build_all_schedules(
         tree, result.resolved, book, form16, YEAR_KEY, rules, "new",
-        entity.status, entity.dob, scrips, fmv_tables,
+        entity.status, entity.dob, scrips, fmv_tables, residency=entity.residency,
     )
     if no_capital_gains:
         # A financial year with no disposals at all -- synthetic, and applied
@@ -188,12 +193,11 @@ def _find_label(ws, needle: str):
 
 
 @pytest.mark.parametrize("needle,value_col", [
-    ("Father's Name", 2),
-    ("Aadhaar No.", 5),
     ("Brought forward losses set off", 4),
 ])
 def test_parked_items_render_as_label_plus_empty_styled_cell(wb, needle, value_col):
-    """All three parked items render the row and the label, with an EMPTY but
+    """Brought-forward-loss set-off stays PARKED (out of scope for the
+    2026-07-19 residency prompt): row and label render, with an EMPTY but
     visibly-styled value cell -- never a value, never silently dropped."""
     ws = wb["Statement of Income"]
     label = _find_label(ws, needle)
@@ -202,6 +206,75 @@ def test_parked_items_render_as_label_plus_empty_styled_cell(wb, needle, value_c
     assert cell.value is None, f"{needle} parked cell must stay empty, got {cell.value!r}"
     assert cell.fill.start_color.rgb == "00FFF2CC" or cell.fill.fgColor.rgb == "00FFF2CC"
     assert cell.border.bottom.style == "dotted"
+
+
+# ---------------------------------------------------------------------------
+# Gate 1/1a -- Father's Name and Aadhaar are unparked, present vs. absent
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("needle,value_col", [
+    ("Father's Name", 2),
+    ("Aadhaar No.", 5),
+])
+def test_father_name_and_aadhaar_render_as_parked_when_absent(tmp_path, needle, value_col):
+    """When the entity has no father_name/aadhaar on file, the field falls
+    back to the same styled-empty PARKED presentation as before -- per field,
+    proven independently of the other unparked field."""
+    built = _build(tmp_path, entity_overrides={"father_name": None, "aadhaar": None})
+    ws = built["Statement of Income"]
+    label = _find_label(ws, needle)
+    assert "(to be filled)" in label.value
+    cell = ws.cell(row=label.row, column=value_col)
+    assert cell.value is None, f"{needle} parked cell must stay empty, got {cell.value!r}"
+    assert cell.fill.start_color.rgb == "00FFF2CC" or cell.fill.fgColor.rgb == "00FFF2CC"
+    assert cell.border.bottom.style == "dotted"
+
+
+def test_father_name_renders_a_real_value_and_drops_the_parked_note(wb):
+    """SYN-IND now carries a synthetic father_name -- the label loses
+    "(to be filled)" and the value cell is a formula back to the Entity
+    sheet, not a hardcoded literal (audit-trail rule)."""
+    ws = wb["Statement of Income"]
+    label = _find_label(ws, "Father's Name")
+    assert "(to be filled)" not in label.value
+    value = ws.cell(row=label.row, column=2).value
+    assert isinstance(value, str) and value.startswith("='Entity'!")
+
+
+def test_aadhaar_renders_space_grouped_formula_and_drops_the_parked_note(wb):
+    """SYN-IND now carries a synthetic aadhaar -- the label loses
+    "(to be filled)" and the value cell is a LEFT/MID formula over the raw
+    digits on the Entity sheet, space-grouped NNNN NNNN NNNN CA-file style."""
+    ws = wb["Statement of Income"]
+    label = _find_label(ws, "Aadhaar No.")
+    assert "(to be filled)" not in label.value
+    value = ws.cell(row=label.row, column=5).value
+    assert isinstance(value, str) and value.startswith("=LEFT('Entity'!")
+    assert 'MID(' in value and '" "&' in value
+
+
+def test_aadhaar_value_never_appears_literally_outside_its_own_entity_cell(wb):
+    """The raw Aadhaar digit string is stored once, on the Entity sheet, the
+    same way PAN/DOB are (plaintext, no at-rest masking -- see PR report).
+    It must never appear a second time anywhere else in the workbook -- not
+    as a duplicated literal, and not inside any warning/error/log-style cell
+    -- only inside formulas that reference the Entity sheet's own cell by
+    coordinate."""
+    import configs as configs_mod
+    entity = configs_mod.load_entities(
+        ROOT / "Data" / "itr" / "entities.example.yaml"
+    )["SYN-IND"]
+    raw = entity.aadhaar
+    assert raw is not None and raw.isdigit()
+    literal_hits = []
+    for sheet in wb.sheetnames:
+        for row in wb[sheet].iter_rows():
+            for c in row:
+                v = c.value
+                if isinstance(v, str) and raw in v and not v.startswith("="):
+                    literal_hits.append((sheet, c.coordinate, v))
+    assert len(literal_hits) == 1, f"Aadhaar digits found outside its single Entity source cell: {literal_hits}"
+    assert literal_hits[0][0] == "Entity"
 
 
 def test_status_line_is_assumed_ror_with_footnote_marker(wb):
@@ -217,6 +290,58 @@ def test_assumptions_note_renders_and_names_the_assumption(wb):
     note = _find_label(ws, "Residential status is ASSUMED")
     assert "R/OR" in note.value and "not determined by this tool" in note.value
     assert _find_label(ws, "Assumptions") is not None
+
+
+# ---------------------------------------------------------------------------
+# Gate 2/3 -- real residency: declared vs. defaulted, RNOR/NR rendering
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("residency,expected_prefix", [
+    ("R/OR", "R/OR"),
+    ("RNOR", "RNOR"),
+    ("NR", "NR"),
+])
+def test_status_line_renders_all_three_declared_residency_categories(residency, expected_prefix):
+    assert presentation.status_line("general", residency, declared=True) == expected_prefix
+
+
+def test_status_line_carries_no_footnote_when_declared():
+    value = presentation.status_line("general", "NR", declared=True)
+    assert not value.rstrip().endswith("*")
+
+
+def test_status_line_carries_footnote_when_not_declared():
+    value = presentation.status_line("general", "R/OR", declared=False)
+    assert value.rstrip().endswith("*")
+
+
+def test_resolve_residency_only_accepts_the_three_statutory_tokens():
+    assert rules_engine.resolve_residency("R/OR") == ("R/OR", True)
+    assert rules_engine.resolve_residency("RNOR") == ("RNOR", True)
+    assert rules_engine.resolve_residency("NR") == ("NR", True)
+    # Legacy free text (every real and synthetic entities.yaml today) and an
+    # unset value are both undeclared -- default to R/OR, exactly as before.
+    assert rules_engine.resolve_residency("Resident") == ("R/OR", False)
+    assert rules_engine.resolve_residency(None) == ("R/OR", False)
+
+
+def test_declared_nr_entity_drops_the_assumptions_footnote_end_to_end(tmp_path):
+    """SYN-IND-NR (Data/itr/entities.example.yaml) declares residency: NR.
+    End to end, the header line shows 'NR' with no footnote marker and the
+    whole Assumptions block is gone -- someone asserted this."""
+    entity = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")["SYN-IND-NR"]
+    assert entity.residency == "NR"
+    built = _build(tmp_path, entity_overrides={
+        "residency": entity.residency, "dob": entity.dob,
+        "father_name": entity.father_name, "aadhaar": entity.aadhaar,
+    })
+    ws = built["Statement of Income"]
+    label = _find_label(ws, "Residential Status")
+    value = ws.cell(row=label.row, column=5).value
+    assert value.startswith("NR")
+    assert not value.rstrip().endswith("*")
+    with pytest.raises(AssertionError):
+        _find_label(ws, "Assumptions")
 
 
 def test_status_line_age_half_comes_from_resolve_age_class():

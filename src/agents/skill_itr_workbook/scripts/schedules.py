@@ -831,9 +831,9 @@ def _surcharge(
 def compute_tax(
     normal_income: float, special_rate_tax: float, special_rate_income_amount: float,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
-    relief_89: float = 0.0,
+    relief_89: float = 0.0, residency: str | None = None,
 ) -> TaxBlock:
-    slabs = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end)
+    slabs = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end, residency=residency)
     block = rules.regime(regime)
     tax_normal = _slab_tax(normal_income, slabs)
 
@@ -910,7 +910,7 @@ def build_computation(
     other_sources: OtherSourcesSchedule, capital_gains: CapitalGainsSchedule,
     deductions: DeductionsSchedule, taxes_paid: TaxesPaidSchedule,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
-    unclassified: "UnclassifiedSchedule | None" = None,
+    unclassified: "UnclassifiedSchedule | None" = None, residency: str | None = None,
 ) -> ComputationSchedule:
     cg_cfg = rules.common["capital_gains"]
 
@@ -946,6 +946,7 @@ def build_computation(
         normal_income=max(0.0, total_income_rounded - cg_total),
         special_rate_tax=tax_special, special_rate_income_amount=cg_total,
         rules=rules, regime=regime, status=status, dob=dob, fy_end=fy_end,
+        residency=residency,
     )
 
     refund_or_payable_raw = taxes_paid.total - tax_block.tax_liability
@@ -960,7 +961,7 @@ def build_computation(
     # enter this figure at all. max(0.0, ...) so a negative income-type
     # total (unusual, but possible on a mis-signed leaf) can never pull the
     # worst-case figure below the DRAFT tax liability.
-    top_slab_rate = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end)[-1]["rate"]
+    top_slab_rate = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end, residency=residency)[-1]["rate"]
     cess_rate = rules.common["cess_rate"]
     extra_income = max(0.0, uncl.income_type_total)
     worst_case_extra_tax = extra_income * top_slab_rate * (1 + cess_rate)
@@ -1003,10 +1004,11 @@ def build_all_schedules(
     tree: pe.ParsedBalanceSheet, resolved: dict, book: Book | None, form16, year_key: str | None,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
+    residency: str | None = None,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
-    age_cls = rules_engine.resolve_age_class(status, dob, fy_end)
+    age_cls = rules_engine.resolve_age_class(status, dob, fy_end, residency=residency)
 
     salary = build_salary(resolved, node_by_guid, form16, rules, regime)
     business = build_business(resolved, node_by_guid)
@@ -1026,7 +1028,7 @@ def build_all_schedules(
     )
     computation = build_computation(
         salary, business, house_property, other_sources, capital_gains, deductions, taxes_paid,
-        rules, regime, status, dob, fy_end, unclassified,
+        rules, regime, status, dob, fy_end, unclassified, residency=residency,
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
     schedule_fa = build_schedule_fa(resolved, node_by_guid)

@@ -78,14 +78,16 @@ def _font(size: int = 10, *, bold: bool = False, underline: str | None = None,
     return Font(name=FONT_NAME, size=size, bold=bold, underline=underline, italic=italic)
 
 
-def status_line(age_class: str) -> str:
-    """The header block's residential-status line. The residency half is the
-    assumed constant `R/OR` (prompt 2b -- the engine performs no residency
-    determination); the age half is whatever `rules.resolve_age_class()`
-    returned. 'general' renders no suffix."""
+def status_line(age_class: str, residency: str = "R/OR", *, declared: bool = False) -> str:
+    """The header block's residential-status line. `residency` is the
+    resolved value (R/OR / RNOR / NR) from `rules.resolve_residency()`; the
+    age half is whatever `rules.resolve_age_class()` returned. 'general'
+    renders no suffix. The footnote marker is dropped once `declared` is
+    True -- a reader must be able to tell "someone asserted this" from "the
+    tool fell back" (2026-07-19 residency prompt, section 2)."""
     label = _AGE_LABELS.get(age_class, "")
-    base = f"R/OR - {label}" if label else "R/OR"
-    return base + " " + _STATUS_FOOTNOTE
+    base = f"{residency} - {label}" if label else residency
+    return base if declared else base + " " + _STATUS_FOOTNOTE
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +248,13 @@ def fit_label_width(ws, col: int, minimum: float, cap: float = 90.0) -> float:
     return max(minimum, min(cap, longest + 2))
 
 
+def _aadhaar_formula(ref: str) -> str:
+    """CA-file space-grouped Aadhaar (`NNNN NNNN NNNN`), built as a formula
+    over the raw digits stored on the Entity sheet -- never a second literal
+    copy of the number (2026-07-19 residency prompt, section 1)."""
+    return f'=LEFT({ref},4)&" "&MID({ref},5,4)&" "&MID({ref},9,4)'
+
+
 def _parked_cell(ws, row: int, col: int):
     """A PARKED value: empty, but visibly styled -- dotted rule plus a light
     fill -- so the reader can see the field exists and is unfilled (prompt
@@ -265,7 +274,9 @@ def _parked_cell(ws, row: int, col: int):
 
 def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
                               os_layout: dict, tp_layout: dict, age_class: str,
-                              period_label: str, print_title: str):
+                              period_label: str, print_title: str, *,
+                              father_name: str | None = None, aadhaar: str | None = None,
+                              residency_value: str = "R/OR", residency_declared: bool = False):
     """Mirrors the CA reference's `ITWorking`: a letterhead header block, then
     three money columns (line items / sub-totals / running total) showing ONLY
     the selected regime."""
@@ -309,21 +320,29 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     left("Name", ent("name"))
     right("Previous Year", period_label)
     row += 1
-    # PARKED (Harshal, 2026-07-19): Entity has no such field. Label + empty
-    # styled cell, so the layout is final and these can be filled later
-    # without a re-layout. No values invented, no rows omitted.
-    left(f"Father's Name {_PARKED_NOTE}", None)
+    # Father's Name / Aadhaar are OPTIONAL entity fields (2026-07-19 residency
+    # prompt, section 1 -- previously PARKED, Harshal 2026-07-19). Per field:
+    # present -> a real formula + label with "(to be filled)" dropped; absent
+    # -> label keeps "(to be filled)" and the cell stays empty-but-styled.
+    if father_name:
+        left("Father's Name", ent("father_name"))
+    else:
+        left(f"Father's Name {_PARKED_NOTE}", None)
     right("PAN", ent("pan"))
     row += 1
     left("Address", ent("address"))
-    right(f"Aadhaar No. {_PARKED_NOTE}", None, parked=True)
+    if aadhaar:
+        right("Aadhaar No.", _aadhaar_formula(f"'Entity'!{entity_layout['aadhaar'].coordinate}"))
+    else:
+        right(f"Aadhaar No. {_PARKED_NOTE}", None, parked=True)
     row += 1
     left("", "");                             right("Date of Birth", ent("dob"));          row += 1
     ws.cell(row=row, column=4, value="Status").font = _font(bold=True)
     ws.cell(row=row, column=5, value=ent("status")).font = _font()
     row += 1
     ws.cell(row=row, column=4, value="Residential Status").font = _font(bold=True)
-    ws.cell(row=row, column=5, value=status_line(age_class)).font = _font()
+    ws.cell(row=row, column=5,
+            value=status_line(age_class, residency_value, declared=residency_declared)).font = _font()
     row += 1
     ws.cell(row=row, column=4, value="Regime").font = _font(bold=True)
     ws.cell(row=row, column=5,
@@ -472,13 +491,18 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     line("Refund Due / (Tax Payable)", OUTER, comp("refund"), bold=True, rule=_TOP_RULE)
     row += 3
 
-    ws.cell(row=row, column=1, value="Assumptions").font = _font(bold=True, underline="single")
-    row += 1
-    note = ws.cell(row=row, column=1, value=_ASSUMPTION_NOTE)
-    note.font = _font(8, italic=True)
-    note.alignment = Alignment(wrap_text=True, vertical="top")
-    ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=OUTER)
-    row += 2
+    # Assumptions note only renders while residency is DEFAULTED -- a reader
+    # must be able to tell "someone asserted this" from "the tool fell back"
+    # (2026-07-19 residency prompt, section 2). Dropped entirely once the
+    # entity declares R/OR / RNOR / NR.
+    if not residency_declared:
+        ws.cell(row=row, column=1, value="Assumptions").font = _font(bold=True, underline="single")
+        row += 1
+        note = ws.cell(row=row, column=1, value=_ASSUMPTION_NOTE)
+        note.font = _font(8, italic=True)
+        note.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=OUTER)
+        row += 2
 
     apply_sheet_chrome(
         ws,
@@ -706,7 +730,9 @@ def move_presentation_sheets_first(wb) -> None:
 def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
                              os_layout: dict, tp_layout: dict, is_entries, bs_entries,
                              lot_start_row: int, age_class: str, year_key: str,
-                             year_label: str) -> None:
+                             year_label: str, *, father_name: str | None = None,
+                             aadhaar: str | None = None, residency_value: str = "R/OR",
+                             residency_declared: bool = False) -> None:
     """Add the four deliverable sheets in front of the calculation sheets and
     hide the raw working sheets. Adds only -- restyles and overwrites nothing."""
     start_year = int(year_key[:4]) if year_key else 0
@@ -717,6 +743,8 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
     write_statement_of_income(
         wb, model, entity_layout, comp_layout, os_layout, tp_layout,
         age_class, period_text, print_title,
+        father_name=father_name, aadhaar=aadhaar,
+        residency_value=residency_value, residency_declared=residency_declared,
     )
     write_is_sheet(wb, is_entries, entity_layout, period_text, print_title)
     write_bs_sheet(wb, bs_entries, entity_layout, as_at_text, print_title)
