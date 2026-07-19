@@ -607,10 +607,12 @@ def build_deductions(
     sched.total_80d_claimed = min(sum(c.amount for c in c80d), caps.get("80D_self", 0))
 
     # 80TTB (senior/super-senior, resolved from status+dob -- CF2/CF6) covers
-    # all deposit interest (savings + bank/NBFC FDs); 80TTA (general) covers
-    # savings-account interest only.
+    # savings + bank/co-op/post-office FD interest; 80TTA (general) covers
+    # savings-account interest only. Neither covers NBFC/HFC deposit
+    # interest at any age -- that is fully taxable with no 80TTA/80TTB relief
+    # (2026-07-19 mapping-precedence prompt, section 0/1c).
     if age_cls in ("senior", "super_senior"):
-        ded_base = other_sources.interest_sb + other_sources.interest_bank + other_sources.interest_nbfc
+        ded_base = other_sources.interest_sb + other_sources.interest_bank
         tta_ttb_cap = caps.get("80TTB", 0)
     else:
         ded_base = other_sources.interest_sb

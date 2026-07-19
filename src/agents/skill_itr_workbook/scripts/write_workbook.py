@@ -748,6 +748,7 @@ def write_reconciliation_sheet(
     cg_reconciliation_ok: bool,
     split_year_exemption_prorated: bool = False, split_year_exemption_ratio: float = 1.0,
     as26_available: bool = False, as26_tie_out_ok: bool = True, as26_conflicts: list | None = None,
+    resolved: dict | None = None, mapping_entries: dict | None = None,
 ) -> None:
     ws = wb.create_sheet("Reconciliation")
     sw = _SheetWriter(ws)
@@ -772,6 +773,35 @@ def write_reconciliation_sheet(
                 number_format=None,
             )
     sw.blank()
+
+    if resolved:
+        counts = provenance_counts(resolved, mapping_entries)
+        heuristic_n = counts.get("heuristic", 0)
+        approved_n = counts.get("approved", 0)
+        sw.header("Mapping provenance (fail-loud -- 2026-07-19)")
+        sw.label_value(
+            "Tag provenance",
+            f"{approved_n} approved, {heuristic_n} heuristic (unverified), "
+            f"{counts.get('llm', 0)} llm-suggested, {counts.get('inherited', 0)} inherited "
+            f"-- {len(resolved)} leaf(ves) total",
+            number_format=None,
+        )
+        income_leaves = heuristic_income_leaves(tree, resolved, mapping_entries)
+        if income_leaves:
+            row = sw.row
+            sw.label_value(
+                "WARNING -- unverified INCOME tag(s)",
+                f"{len(income_leaves)} income account(s) resolved via an unreviewed heuristic "
+                "guess, not a human-approved mapping -- verify before filing:",
+                number_format=None,
+            )
+            ws.cell(row=row, column=1).fill = _UNMAPPED_FILL
+            ws.cell(row=row, column=1).font = _UNMAPPED_FONT
+            for path, tag, amount in income_leaves:
+                row = sw.row
+                sw.label_value(f"  {path} ({tag})", amount)
+                ws.cell(row=row, column=1).font = _UNMAPPED_FONT
+        sw.blank()
 
     sw.header("Book<->HTML cross-check")
     for r in book_cross_check:
@@ -826,6 +856,37 @@ def _suggested_by(guid: str, mapping_entries: dict | None) -> str:
     if "heuristic" in (entry.note or "").lower():
         return "heuristic"
     return "approved"
+
+
+def provenance_counts(resolved: dict, mapping_entries: dict | None) -> dict:
+    """Tally every resolved leaf's `_suggested_by` provenance label (fail-loud,
+    2026-07-19 mapping-precedence prompt item 1b): {"heuristic": N, "approved": N,
+    "llm": N, "inherited": N}. Missing categories are omitted (never zero-padded),
+    so callers can do `counts.get("heuristic", 0)`."""
+    counts: dict[str, int] = {}
+    for guid in resolved:
+        label = _suggested_by(guid, mapping_entries)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def heuristic_income_leaves(tree, resolved: dict, mapping_entries: dict | None) -> list:
+    """Every resolved RetainedEarnings-Income leaf whose tag provenance is
+    "heuristic" (an unverified keyword-guess, never reviewed by a human) --
+    fail-loud item 1b: these must be surfaced prominently (run summary +
+    Reconciliation sheet), not buried only in the Mapping Review sheet's
+    Suggested-by column, since a wrong tag here can silently misstate
+    taxable income. Returns [(path, tag, amount), ...] sorted by path."""
+    income_sections = {n.guid: n.section for n in tree.all_nodes() if n.guid and not n.children}
+    guid_amount = {n.guid: (n.total or 0.0) for n in tree.all_nodes() if n.guid and not n.children}
+    out = []
+    for guid, rl in resolved.items():
+        if income_sections.get(guid) != "RetainedEarnings-Income":
+            continue
+        if _suggested_by(guid, mapping_entries) != "heuristic":
+            continue
+        out.append((rl.path, rl.tag, guid_amount.get(guid, 0.0)))
+    return sorted(out)
 
 
 def _destination(tag: str) -> tuple:
@@ -948,6 +1009,7 @@ def write_workbook(
         mapping_version, rules.version, run_timestamp, input_hashes, model.capital_gains.reconciliation_ok,
         model.capital_gains.split_year_exemption_prorated, model.capital_gains.split_year_exemption_ratio,
         model.taxes_paid.as26_available, model.taxes_paid.tie_out_ok, model.taxes_paid.tie_out_conflicts,
+        resolved, mapping_entries,
     )
 
     write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)

@@ -1,26 +1,41 @@
 """
-apply_mapping_corrections.py -- LOCAL-ONLY dev helper: reads a reviewed
-workbook's "Mapping Review" sheet (write_workbook.write_mapping_review_sheet)
-and applies every non-blank Correction cell that names a valid tag back into
-an UPDATED copy of the entity's mapping YAML. A touched entry (whether it
-was previously unmapped or already mapped with a different tag) is marked
-approved -- suggested_by_llm cleared, note replaced -- since a human just
-confirmed it via the Correction cell.
+apply_mapping_corrections.py -- reads a reviewed workbook's "Mapping Review"
+sheet (write_workbook.write_mapping_review_sheet) and applies every
+non-blank Correction cell that names a valid tag back into the entity's
+mapping YAML. A touched entry (whether it was previously unmapped or
+already mapped with a different tag) is marked approved -- suggested_by_llm
+cleared, note replaced -- since a human just confirmed it via the
+Correction cell.
 
-Like bootstrap_mappings.py, this script NEVER writes to the real mapping
-file in place: it writes a new file at `output_yaml` for you to review and
-rename into Data/itr/mappings/<entity>.mapping.yaml yourself. A Correction
-cell naming an unknown tag is reported, never applied.
+By default (no `output_yaml` given) this writes IN PLACE to `mapping_file`,
+after first writing a timestamped `.bak-<ISO8601>` backup alongside it --
+the same discipline ui/tabs/itr_mapping_review.py's Save button already
+uses. This is deliberate: a prior version of this script always wrote to a
+separate `output_yaml` that required a manual review-and-rename step to
+take effect, and in practice that manual step was never completed for any
+real entity -- every correction ever run through the old flow was silently
+stranded, and the mapping files kept resolving 100% "heuristic" forever.
+Writing in place by default closes that gap. Pass an explicit `output_yaml`
+only if you deliberately want a side file to review before it goes live
+(e.g. a dry run) -- doing so does NOT update the live mapping file, and
+this script says so loudly. A Correction cell naming an unknown tag is
+reported, never applied.
 
 Usage (from the repo root, with the venv active):
     python src/agents/skill_itr_workbook/scripts/apply_mapping_corrections.py \\
         Data/itr/mappings/Harshal.mapping.yaml \\
+        reviewed/Harshal-ITR.xlsx
+
+    # dry run -- writes a side file instead of updating the live mapping:
+    python src/agents/skill_itr_workbook/scripts/apply_mapping_corrections.py \\
+        Data/itr/mappings/Harshal.mapping.yaml \\
         reviewed/Harshal-ITR.xlsx \\
-        Harshal.mapping.updated.yaml
+        --output Harshal.mapping.proposed.yaml
 """
 from __future__ import annotations
 
 import argparse
+import datetime
 import sys
 from pathlib import Path
 
@@ -134,10 +149,30 @@ def apply_corrections_map(
     return applied, invalid
 
 
-def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str) -> tuple[int, list]:
+def backup_mapping_file(mapping_file: str) -> str | None:
+    """Write a timestamped `.bak-<ISO8601>` copy of `mapping_file` alongside
+    it before an in-place overwrite (mirrors the UI's save discipline).
+    Returns the backup path, or None if `mapping_file` doesn't exist yet
+    (a true cold-start entity has nothing to back up)."""
+    mp = Path(mapping_file)
+    if not mp.is_file():
+        return None
+    stamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
+    backup_path = mp.with_name(f"{mp.name}.bak-{stamp}")
+    backup_path.write_text(mp.read_text(encoding="utf-8"), encoding="utf-8")
+    return str(backup_path)
+
+
+def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str | None = None) -> tuple[int, list, str | None]:
     """Load `mapping_file`, apply every valid correction from
-    `reviewed_xlsx`, and write the result to `output_yaml` (never touches
-    `mapping_file` itself). Returns (count applied, invalid corrections).
+    `reviewed_xlsx`, and write the result. If `output_yaml` is None
+    (the default), writes IN PLACE to `mapping_file` -- after first taking a
+    timestamped backup via `backup_mapping_file` -- so the correction is
+    live for the very next run, no manual rename step required. If
+    `output_yaml` is given explicitly, writes there instead and leaves
+    `mapping_file` untouched (a deliberate dry run).
+
+    Returns (count applied, invalid corrections, backup path or None).
 
     Thin wrapper around `apply_corrections_map`: reads the reviewed
     workbook's Correction cells (which already validate tags via
@@ -145,19 +180,39 @@ def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str) -
     valid, invalid = read_corrections(reviewed_xlsx)
     corrections = {guid: tag for guid, (tag, _path) in valid.items()}
     paths = {guid: path for guid, (_tag, path) in valid.items()}
-    applied, _ = apply_corrections_map(mapping_file, corrections, output_yaml, paths=paths)
-    return applied, invalid
+
+    backup_path = None
+    target = output_yaml
+    if target is None:
+        target = mapping_file
+        backup_path = backup_mapping_file(mapping_file)
+
+    applied, _ = apply_corrections_map(mapping_file, corrections, target, paths=paths)
+    return applied, invalid, backup_path
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mapping_file", help="The entity's current Data/itr/mappings/<entity>.mapping.yaml")
     parser.add_argument("reviewed_xlsx", help="The ITR workbook, reviewed, with Correction cells filled in")
-    parser.add_argument("output_yaml", help="Where to write the updated mapping snippet")
+    parser.add_argument(
+        "output_yaml", nargs="?", default=None,
+        help="Optional dry-run path. If omitted (recommended), corrections are written IN PLACE "
+             "to mapping_file (with an automatic .bak-<timestamp> backup) and take effect on the "
+             "next run. If given, corrections are written here instead and mapping_file is left "
+             "unchanged -- they will NOT take effect until you apply them yourself.",
+    )
     args = parser.parse_args()
 
-    applied, invalid = apply_corrections(args.mapping_file, args.reviewed_xlsx, args.output_yaml)
-    print(f"Applied {applied} correction(s) -> {args.output_yaml}")
+    applied, invalid, backup_path = apply_corrections(args.mapping_file, args.reviewed_xlsx, args.output_yaml)
+    if args.output_yaml is None:
+        if backup_path:
+            print(f"Backed up previous mapping to {backup_path}")
+        print(f"Applied {applied} correction(s) -> {args.mapping_file} (LIVE -- takes effect on the next run)")
+    else:
+        print(f"Applied {applied} correction(s) -> {args.output_yaml}")
+        print(f"NOTE: {args.mapping_file} was NOT modified. These corrections do not take effect "
+              f"until you apply them (e.g. re-run without the output_yaml argument).")
     if invalid:
         print(f"{len(invalid)} correction(s) NOT applied (unknown tag):")
         for path, guid, tag in invalid:

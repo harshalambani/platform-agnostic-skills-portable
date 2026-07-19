@@ -167,6 +167,32 @@ def test_nearest_ancestor_child_tag_overrides_parent_tag():
     assert result.resolved["child-b"].tag == "AL_SECURITIES"  # overridden
 
 
+def test_resolution_survives_account_rename_matching_is_guid_based_not_path_based(tmp_path):
+    """Root-cause gate: confirm matching is GUID-based, not name/path-based
+    (2026-07-19 mapping-precedence prompt, item 1a candidate cause). A GnuCash
+    account renamed after the mapping file was written must still resolve
+    correctly by GUID alone -- the mapping's stale `path` field is cosmetic
+    and must not prevent resolution. The end-to-end round trip (load with
+    known_paths -> resolve) both surfaces a rename warning AND still applies
+    the tag -- rename detection is advisory, never a resolution failure."""
+    renamed_leaf = pe.AccountNode(guid="stable-guid-123", name="Renamed Account", depth=0,
+                                   section="Assets", path="Assets/Renamed Account", total=42.0)
+    tree = pe.ParsedBalanceSheet(section_roots={"Assets": [renamed_leaf]}, section_totals={}, imbalance=0.0)
+
+    mapping_file = tmp_path / "renamed.mapping.yaml"
+    mapping_file.write_text(
+        "- guid: stable-guid-123\n  path: Assets/Old Account Name\n  tag: AL_CASH_BANK\n",
+        encoding="utf-8",
+    )
+    known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
+    loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
+    assert any("stable-guid-123" in w for w in loaded.warnings)  # rename detected
+
+    result = mapping.resolve_tree(tree, loaded)
+    assert not result.blocked
+    assert result.resolved["stable-guid-123"].tag == "AL_CASH_BANK"  # but still resolves by GUID
+
+
 # ---------------------------------------------------------------------------
 # mapping.py -- section-aware tag validation (B4 carry-forward)
 # ---------------------------------------------------------------------------
@@ -346,6 +372,22 @@ def test_agent_run_ok_status_when_fully_mapped(tmp_path):
     summary = agent.run(str(html_path), str(out_path), mapping_file=str(SYN_IND_MAPPING))
     assert "STATUS: OK" in summary
     assert not Path(str(out_path) + "-proposed-mappings.yaml").exists()
+
+
+def test_agent_run_summary_surfaces_heuristic_income_warning(tmp_path):
+    """Fail-loud gate (2026-07-19 mapping-precedence prompt, item 1b): the
+    run's own text summary -- not only the Mapping Review sheet buried in
+    the workbook -- must report the heuristic/approved provenance split and
+    call out any heuristic-tagged INCOME account by name."""
+    html_path = tmp_path / "syn_ind.html"
+    html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
+    out_path = tmp_path / "out.xlsx"
+    heuristic_mapping = FIXTURES / "syn_ind_heuristic_income.mapping.yaml"
+    summary = agent.run(str(html_path), str(out_path), mapping_file=str(heuristic_mapping))
+    assert "tag provenance" in summary
+    assert "1 heuristic" in summary
+    assert "WARNING" in summary and "INCOME account" in summary
+    assert "Income/Bank Interest" in summary
 
 
 def test_agent_run_built_with_review_status_with_extra_unmapped_account(tmp_path):
