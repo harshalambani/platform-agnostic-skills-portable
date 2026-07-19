@@ -6,6 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> **Note.** The entries below were never rolled into a released section at
+> tag time, but git history shows they already shipped: the help-system
+> entries in `v1.2.2` (`a284dc3`, `57975da`), the HDFC/ICICI value-date
+> entries in `v2.3.0` (`cc2221e`, PR #62), and the Intercompany sub-tab
+> entry in `v2.3.1` (`a8cf73a`, PR #76). They are left here rather than
+> back-filed into sections that do not exist for those tags.
+
 ### Added
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
   a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
@@ -21,72 +28,62 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `USER-GUIDE.html` bundled into the frozen package via `paskills.spec`.
 - **CI.** `tests/test_help_coverage.py` fails if any UI skill lacks help or if
   the generated docs are stale (`gen_docs.py --check`).
-- **Bank abstraction, P1 — contracts.** `agents/bank_contract.py` gains
-  `BankStatementMeta` (account number, statement period, source format,
-  OCR-vs-exact fidelity, password-used flag — never the password itself) and
-  `RowProvenance`; `BankResult` now carries an optional `meta` field, and the
-  `BankSkill` protocol gains `formats()`. New `agents/bank_common/` package
-  (`normalize`, `tabular`, `text_quality`, `password`) promotes HDFC's
-  header-detection, alias-table mapping, date/amount normalization, garbled-
-  PDF-text-layer heuristic, and password-error handling into shared,
-  bank-agnostic utilities — moved verbatim, so behavior is unchanged. HDFC
-  (`skill_hdfc`) is re-expressed on `BankSkill` (`detect()`/`parse()`/
-  `formats()` + a `bank_skill` instance) alongside its existing `run()` entry
-  point, which is untouched; `parse()` shares the same extraction core via a
-  new `_extract_transactions()` helper, verified byte-identical against the
-  existing cross-format golden suite. New `agents/banks.py` registry
-  discovers banks via a `bank: true` skill.yaml key (frozen-safe, no dynamic
-  imports at discovery time — same pattern as `agents/registry.py`); HDFC is
-  the first bank onboarded to it. BoB/HSBC/ICICI (already on `BankSkill` from
-  earlier work) needed a matching `formats()` method added to stay conformant
-  with the extended protocol — no change to their parsing logic. Pipeline
-  dropdown/Banks-tab wiring to the new registry and migrating BoB/HSBC/ICICI
-  onto it are deferred to later sessions (one bank per session; the pipeline
-  already dispatches to their existing `BankSkill` classes directly).
-- **Bank abstraction, P2 — BoB (`skill_bob`, v1.1.0) onto the contract.**
-  `BoBSkill.parse()` now accepts an optional `password` and returns a fully
-  populated `BankStatementMeta` — account number and statement period parsed
-  from the PDF front matter (`A/C Number :` / `Statement of account for the
-  period of ...`), `source_format` (`pdf` / `pw-pdf`), `fidelity`, and
-  `password_used` (never the password). BoB now builds on `bank_common`
-  instead of private duplicates: `normalize.clean_amount`/`normalise_date`
-  (extended with a trailing Cr/Dr balance-suffix strip and dash-separated
-  dates), `text_quality.text_layer_usable` (rejects a garbled/scanned text
-  layer before parsing, no OCR fallback), and `password.is_password_error`
-  (clear, non-echoing password-error messages). `extract_bob_statement.py`'s
-  page-1 x-coordinate column-geometry detection (multi-page tables without a
-  repeated header row) stays BoB-specific but now sits on top of these shared
-  primitives. Registered in the `banks.py` registry via `skill.yaml`
-  (`bank: true`, `bank_key: "bob"`). New synthetic cross-format golden family
-  (`tests/skill_bob/bob_fixture_gen.py`): the same 5 fake transactions as a
-  2-page PDF (no repeated header, Cr-suffixed balances) and the native CSV
-  `extract_bob_statement.py` emits, with an identity test asserting
-  byte-identical canonical rows. Canonical CSV output verified byte-identical
-  before/after migration against the real local BoB corpus sample (74 rows,
-  opening/closing balances unchanged) and the Session-A independent
-  closing-balance verdict fix is untouched. HDFC/ICICI/HSBC not touched.
-- **Bank abstraction, P2 — ICICI (`skill_icici`, v1.1.0) onto the contract.**
-  `ICICISkill.parse()` now returns a fully populated `BankStatementMeta` —
-  account number and statement period parsed from the XLS "Search" preamble
-  (`Account Number` / `Transaction Date from ... to ...` rows), `source_format`
-  (`"xls"`), `fidelity`, and `password_used` (ICICI statements are never
-  password-protected). ICICI now builds on `bank_common.normalize` for amount
-  cleanup and date parsing instead of a private `MONTH_MAP`: a new
-  `parse_comma_month_date()` / `MONTH_ABBR` pair handles ICICI's distinctive
-  "DD,Mon,YYYY" date shape, layered under the same `clean_amount()` used by
-  HDFC/BoB. `formats()`/`detect()`/the directory glob in `parse()` are
-  narrowed from `(".xls", ".xlsx")` to `(".xls",)` — a pre-existing latent
-  bug, since `xlrd` 2.x cannot actually read `.xlsx` (support dropped in
-  2.0+), and ICICI's own `skill.yaml` already declared `.xls`-only. Registered
-  in the `banks.py` registry via `skill.yaml` (`bank: true`, `bank_key:
-  "icici"`) plus a module-level `bank_skill` instance. New synthetic golden
-  fixture (`tests/skill_icici/icici_fixture_gen.py`): a single `.xls` (ICICI
-  has only one real input shape) encoding 5 fake transactions in the real
-  12-row-preamble + header-row-13 + data-row-14+ layout, with an identity
-  test asserting the expected canonical rows, balances, and meta fields, plus
-  a `.xlsx`-rejected test. Canonical CSV output verified byte-identical
-  before/after migration against the real local ICICI corpus sample (465
-  rows, opening/closing balances unchanged). HDFC/BoB/HSBC not touched.
+
+### Fixed
+- **HDFC — Value Dt now used on every input path.** HDFC statements carry
+  both a posting Date and a Value Dt; the canonical CSV's "Date" column
+  (which flows unchanged through balance checks, dedup, and account mapping)
+  now emits the Value Dt on the PDF text path (`skill_hdfc`) and the PDF OCR
+  path, matching the XLS/XLSX path which already preferred it. Falls back to
+  the posting date only when Value Dt is blank. Note: opening-balance
+  reconciliation and duplicate detection key on this field, so rows where
+  posting and value dates differ (e.g. cheque clearing) may now be bucketed
+  by a different date than before.
+- **ICICI — docstring corrected.** The module docstring wrongly claimed
+  ICICI used Transaction Date; the code already preferred Value Date
+  (falling back to Transaction Date only when blank). No behavior change —
+  documentation and a regression test now match the existing code.
+- **Intercompany skills moved out of GnuCash > Banks.** "Intercompany Reco"
+  and "Intercompany Matrix" are not bank-statement tools and were rendering
+  alongside statement-import skills under the Banks sub-tab. Both now use a
+  dedicated `category: "intercompany"` and render under a new
+  GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
+  only statement import + Review Mappings.
+
+## [2.11.0] — 2026-07-18
+
+### Added
+- **Bank abstraction, P3b — shared multi-statement consolidation.** New
+  `agents/bank_common/consolidate.py` (`StatementGroup`, `consolidate()`,
+  `check_continuity()`) lifts HSBC's reference multi-file logic — order
+  statements by actual transaction date (not filename), flag gaps (>3 days)
+  and overlaps (<-1 days) as warnings without raising — into a pure,
+  bank-agnostic helper. HSBC's own runtime (`skill_hsbc/scripts/parse_tsv.py`)
+  is routed through it via a `sys.path` bootstrap (the script runs as a
+  subprocess, so it can't rely on `agents` being importable — same convention
+  already used by `skill_bob/scripts/extract_bob_statement.py`); its old
+  inline sort/continuity/concat logic is gone, replaced by a thin call into
+  the shared helper, with `check_statement_continuity()`'s public signature
+  preserved for backward compatibility. BoB (`skill_bob/agent.py`) and ICICI
+  (`skill_icici/agent.py`) now route their multi-file `BankSkill.parse()`
+  batches through the same helper too, replacing their previous naive
+  `sorted(glob)` + blind-concat merge, which silently misordered batches with
+  non-chronologically-sorting filenames and never reported missing/
+  overlapping periods. A single-file batch (the dominant real-world case —
+  e.g. a full-year statement for BoB/ICICI/HDFC/Kotak) is a no-op through
+  `consolidate()`, so single-statement behavior for all banks is unchanged
+  and verified byte-identical against the existing golden suite. Scope note:
+  only the registry-driven `BankSkill.parse()` path (used by the GnuCash
+  pipeline and covered by goldens) was changed for BoB/ICICI; each bank's
+  legacy standalone-UI-tab `run()` entry point (used only by
+  `ui/tabs/_generic.py`, untested by any golden) still does its old naive
+  filename-sorted concat and was deliberately left untouched. HDFC and Kotak
+  remain single-statement only (no multi-file path added). Central verdict
+  engine, HDFC/Kotak, and the statement-profile engine untouched.
+
+## [2.10.0] — 2026-07-18
+
+### Added
 - **Bank abstraction, P2 — HSBC (`skill_hsbc`, v1.1.0) onto the contract, and
   last bank of P2.** HSBC is the OCR bank (scanned PDFs -> Tesseract ->
   `parse_tsv.py` -> `enrich.py` -> `build_xlsx.py`), so unlike HDFC/BoB/ICICI
@@ -167,33 +164,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in `skill_gnucash_pipeline/agent.py`. Central verdict engine and
   multi-statement-consolidation promotion into `bank_common` are deferred to
   P3b; `skill_itr_workbook`, `skill_26as`, and intercompany skills untouched.
-- **Bank abstraction, P3b — shared multi-statement consolidation.** New
-  `agents/bank_common/consolidate.py` (`StatementGroup`, `consolidate()`,
-  `check_continuity()`) lifts HSBC's reference multi-file logic — order
-  statements by actual transaction date (not filename), flag gaps (>3 days)
-  and overlaps (<-1 days) as warnings without raising — into a pure,
-  bank-agnostic helper. HSBC's own runtime (`skill_hsbc/scripts/parse_tsv.py`)
-  is routed through it via a `sys.path` bootstrap (the script runs as a
-  subprocess, so it can't rely on `agents` being importable — same convention
-  already used by `skill_bob/scripts/extract_bob_statement.py`); its old
-  inline sort/continuity/concat logic is gone, replaced by a thin call into
-  the shared helper, with `check_statement_continuity()`'s public signature
-  preserved for backward compatibility. BoB (`skill_bob/agent.py`) and ICICI
-  (`skill_icici/agent.py`) now route their multi-file `BankSkill.parse()`
-  batches through the same helper too, replacing their previous naive
-  `sorted(glob)` + blind-concat merge, which silently misordered batches with
-  non-chronologically-sorting filenames and never reported missing/
-  overlapping periods. A single-file batch (the dominant real-world case —
-  e.g. a full-year statement for BoB/ICICI/HDFC/Kotak) is a no-op through
-  `consolidate()`, so single-statement behavior for all banks is unchanged
-  and verified byte-identical against the existing golden suite. Scope note:
-  only the registry-driven `BankSkill.parse()` path (used by the GnuCash
-  pipeline and covered by goldens) was changed for BoB/ICICI; each bank's
-  legacy standalone-UI-tab `run()` entry point (used only by
-  `ui/tabs/_generic.py`, untested by any golden) still does its old naive
-  filename-sorted concat and was deliberately left untouched. HDFC and Kotak
-  remain single-statement only (no multi-file path added). Central verdict
-  engine, HDFC/Kotak, and the statement-profile engine untouched.
+- **Kotak Mahindra Bank onboarded as the 5th bank (`skill_kotak`).** New
+  `src/agents/skill_kotak/` implements the `BankSkill` protocol
+  (`detect`/`parse`/`formats`) for Kotak's ruled-table PDF statements:
+  7 columns with separate Withdrawal (Dr.)/Deposit (Cr.) columns, `DD Mon
+  YYYY` dates, Indian-grouped amounts, an "Opening Balance" pseudo-row
+  excluded from canonical rows (mirroring BoB), multi-page overflow with no
+  repeated header, and a trailing abbreviation-legend page rejected purely
+  by column count (2 vs. 7) rather than a keyword blocklist. Sweep transfers
+  to and from a linked FD are kept as real transactions. Adds a fully
+  synthetic fixture family (`tests/skill_kotak/kotak_fixture_gen.py`)
+  covering the golden path, legend exclusion, multi-page continuation,
+  password-protected PDFs, and garbled-text rejection, plus registry
+  round-trip and `discover() == 5` coverage in `tests/test_banks_registry.py`.
+  The only pipeline edit is declarative: "Kotak" added to the bank dropdown
+  and help text in `skill_gnucash_pipeline/skill.yaml`. (PR #89, `8c85f4e`.)
 
 ### Fixed
 - **Bank gating, registry-driven (closes the Kotak offer-then-reject leak).**
@@ -217,59 +202,158 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   guard: asserts `"Kotak" in SUPPORTED_BANKS`, `DEDICATED_BANKS == [b.display_name
   for b in discover()]`, and that the dropdown's resolved options exactly
   match `discover()` display names + `"Other Bank (CSV)"` last.
-- **HDFC — Value Dt now used on every input path.** HDFC statements carry
-  both a posting Date and a Value Dt; the canonical CSV's "Date" column
-  (which flows unchanged through balance checks, dedup, and account mapping)
-  now emits the Value Dt on the PDF text path (`skill_hdfc`) and the PDF OCR
-  path, matching the XLS/XLSX path which already preferred it. Falls back to
-  the posting date only when Value Dt is blank. Note: opening-balance
-  reconciliation and duplicate detection key on this field, so rows where
-  posting and value dates differ (e.g. cheque clearing) may now be bucketed
-  by a different date than before.
-- **ICICI — docstring corrected.** The module docstring wrongly claimed
-  ICICI used Transaction Date; the code already preferred Value Date
-  (falling back to Transaction Date only when blank). No behavior change —
-  documentation and a regression test now match the existing code.
-- **Intercompany skills moved out of GnuCash > Banks.** "Intercompany Reco"
-  and "Intercompany Matrix" are not bank-statement tools and were rendering
-  alongside statement-import skills under the Banks sub-tab. Both now use a
-  dedicated `category: "intercompany"` and render under a new
-  GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
-  only statement import + Review Mappings.
 
-## [2.4.0] — 2026-07-16
+## [2.9.0] — 2026-07-17
+
+### Added
+- **ITR Mapping review UI polish (Part 4): sortable/filterable columns.**
+  The "ITR Mapping" table's headers are now click-to-sort (click again to
+  flip direction) with a per-column text filter row underneath — the same
+  UX as `ui/tabs/gnucash_review.py`'s "Review & Edit Account Mappings" tab,
+  which this screen had not previously matched.
+- **ITR Mapping review UI polish (Part 4): tag vocabulary help.** Every tag
+  code shown in the table (Current tag / Suggested / New tag) now carries a
+  hover tooltip with its one-line meaning, and a new toggleable "? Tag
+  glossary" panel lists the full, searchable tag vocabulary (code, target
+  sheet, meaning) — the raw tag codes (e.g. `OS_INTEREST_BANK`) previously
+  had no in-UI explanation.
+- **Bank abstraction, P2 — ICICI (`skill_icici`, v1.1.0) onto the contract.**
+  `ICICISkill.parse()` now returns a fully populated `BankStatementMeta` —
+  account number and statement period parsed from the XLS "Search" preamble
+  (`Account Number` / `Transaction Date from ... to ...` rows), `source_format`
+  (`"xls"`), `fidelity`, and `password_used` (ICICI statements are never
+  password-protected). ICICI now builds on `bank_common.normalize` for amount
+  cleanup and date parsing instead of a private `MONTH_MAP`: a new
+  `parse_comma_month_date()` / `MONTH_ABBR` pair handles ICICI's distinctive
+  "DD,Mon,YYYY" date shape, layered under the same `clean_amount()` used by
+  HDFC/BoB. `formats()`/`detect()`/the directory glob in `parse()` are
+  narrowed from `(".xls", ".xlsx")` to `(".xls",)` — a pre-existing latent
+  bug, since `xlrd` 2.x cannot actually read `.xlsx` (support dropped in
+  2.0+), and ICICI's own `skill.yaml` already declared `.xls`-only. Registered
+  in the `banks.py` registry via `skill.yaml` (`bank: true`, `bank_key:
+  "icici"`) plus a module-level `bank_skill` instance. New synthetic golden
+  fixture (`tests/skill_icici/icici_fixture_gen.py`): a single `.xls` (ICICI
+  has only one real input shape) encoding 5 fake transactions in the real
+  12-row-preamble + header-row-13 + data-row-14+ layout, with an identity
+  test asserting the expected canonical rows, balances, and meta fields, plus
+  a `.xlsx`-rejected test. Canonical CSV output verified byte-identical
+  before/after migration against the real local ICICI corpus sample (465
+  rows, opening/closing balances unchanged). HDFC/BoB/HSBC not touched.
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
+
+## [2.8.0] — 2026-07-16
+
+### Added
+- **Bank abstraction, P2 — BoB (`skill_bob`, v1.1.0) onto the contract.**
+  `BoBSkill.parse()` now accepts an optional `password` and returns a fully
+  populated `BankStatementMeta` — account number and statement period parsed
+  from the PDF front matter (`A/C Number :` / `Statement of account for the
+  period of ...`), `source_format` (`pdf` / `pw-pdf`), `fidelity`, and
+  `password_used` (never the password). BoB now builds on `bank_common`
+  instead of private duplicates: `normalize.clean_amount`/`normalise_date`
+  (extended with a trailing Cr/Dr balance-suffix strip and dash-separated
+  dates), `text_quality.text_layer_usable` (rejects a garbled/scanned text
+  layer before parsing, no OCR fallback), and `password.is_password_error`
+  (clear, non-echoing password-error messages). `extract_bob_statement.py`'s
+  page-1 x-coordinate column-geometry detection (multi-page tables without a
+  repeated header row) stays BoB-specific but now sits on top of these shared
+  primitives. Registered in the `banks.py` registry via `skill.yaml`
+  (`bank: true`, `bank_key: "bob"`). New synthetic cross-format golden family
+  (`tests/skill_bob/bob_fixture_gen.py`): the same 5 fake transactions as a
+  2-page PDF (no repeated header, Cr-suffixed balances) and the native CSV
+  `extract_bob_statement.py` emits, with an identity test asserting
+  byte-identical canonical rows. Canonical CSV output verified byte-identical
+  before/after migration against the real local BoB corpus sample (74 rows,
+  opening/closing balances unchanged) and the Session-A independent
+  closing-balance verdict fix is untouched. HDFC/ICICI/HSBC not touched.
+
+## [2.7.0] — 2026-07-16
+
+### Added
+- **ITR Mapping review UI polish (Part 3): RAG confidence coding.** Mapped
+  accounts on the "ITR Mapping" tab now show a confidence tier instead of
+  just a tag: green "(confirmed)" once a human has approved/set the entry,
+  amber "(needs review)" while it's still an unapproved LLM suggestion
+  (`suggested_by_llm` set), red "UNMAPPED" as before — shown as both a
+  left-border row accent and an inline badge. The "Show" filter gained
+  "Needs review" and "Confirmed only" options alongside the existing
+  All/Unmapped/Mapped.
+- **Bank abstraction, P1 — contracts.** `agents/bank_contract.py` gains
+  `BankStatementMeta` (account number, statement period, source format,
+  OCR-vs-exact fidelity, password-used flag — never the password itself) and
+  `RowProvenance`; `BankResult` now carries an optional `meta` field, and the
+  `BankSkill` protocol gains `formats()`. New `agents/bank_common/` package
+  (`normalize`, `tabular`, `text_quality`, `password`) promotes HDFC's
+  header-detection, alias-table mapping, date/amount normalization, garbled-
+  PDF-text-layer heuristic, and password-error handling into shared,
+  bank-agnostic utilities — moved verbatim, so behavior is unchanged. HDFC
+  (`skill_hdfc`) is re-expressed on `BankSkill` (`detect()`/`parse()`/
+  `formats()` + a `bank_skill` instance) alongside its existing `run()` entry
+  point, which is untouched; `parse()` shares the same extraction core via a
+  new `_extract_transactions()` helper, verified byte-identical against the
+  existing cross-format golden suite. New `agents/banks.py` registry
+  discovers banks via a `bank: true` skill.yaml key (frozen-safe, no dynamic
+  imports at discovery time — same pattern as `agents/registry.py`); HDFC is
+  the first bank onboarded to it. BoB/HSBC/ICICI (already on `BankSkill` from
+  earlier work) needed a matching `formats()` method added to stay conformant
+  with the extended protocol — no change to their parsing logic. Pipeline
+  dropdown/Banks-tab wiring to the new registry and migrating BoB/HSBC/ICICI
+  onto it are deferred to later sessions (one bank per session; the pipeline
+  already dispatches to their existing `BankSkill` classes directly).
 
 ### Fixed
-- **ITR Workbook — Data/itr paths no longer double up under the frozen
-  Launcher.** `entities_path`/`rules_dir`/`scrips_path` were CWD-relative
-  defaults with `Data/` baked in (`agent.py::run()`); the frozen PortableApps
-  build sets CWD to `...\Data\`, so they silently resolved to
-  `...\Data\Data\itr\...` and the run read stale/empty config while the
-  entity/AY dropdowns (already anchored via `ui/_config.data_root_dir()`)
-  showed the correct list. `ui/tabs/_generic.py` now anchors all three via a
-  new `{data_root}` `run_args` token (same anchor the dropdowns use);
-  `skill.yaml`'s `run_args` route through it. Agent defaults remain a
-  source-mode-only fallback.
-- **ITR Workbook — missing/unresolved entity now fails loud.** A missing or
-  unreadable `entities.yaml`, or an explicitly selected entity not found in
-  it, used to silently substitute a generic `UNKNOWN`/`Individual`/new-regime
-  profile — picking the wrong regime/age band without any warning.
-  `agent.py::_resolve_entity()` now raises when an *explicitly selected*
-  entity can't be resolved, naming the resolved path it looked at; the run
-  reports an `ERROR:` summary and writes no green stub. An entity key merely
-  *inferred* from a mapping file's stem (no explicit selection) still
-  degrades gracefully, unchanged.
-- **ITR Workbook — mapping-less run no longer silently emits an empty green
-  stub.** With the Entity mapping box empty, a run used to report
-  `STATUS: OK` and write a one-sheet scaffold with no schedules — easy to
-  mistake for a real, populated workbook. Two changes: (1) when an entity is
-  selected and it has an existing
-  `<data_root>/itr/mappings/<entity>.mapping.yaml`, the run now auto-derives
-  and uses it (logged in the summary as `Mapping: auto-derived ...`); (2) a
-  true cold start (no mapping anywhere for the entity) now treats every leaf
-  as unmapped and routes into the existing BLOCKED-FOR-REVIEW +
-  proposed-mappings-snippet learning loop, the same as a partially mapped
-  file — a mapping-less run can no longer report a green `STATUS: OK`.
+- **ITR Mapping "Show" filter defaulted to hiding everything but unmapped
+  rows**, and its native `<select>` chrome had poor contrast against the
+  dark theme (reported as barely visible). The filter now defaults to
+  **All** and is explicitly styled to match the rest of the tab.
+
+### Changed
+- **ITR nav restructured.** "ITR Workbook" and "ITR Mapping" were flat
+  sub-tabs directly under GnuCash; they now live inside a single "ITR"
+  sub-tab (GnuCash > ITR > ITR Workbook / ITR Mapping), mirroring how
+  "Banks" already groups its own sub-tabs.
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
+
+## [2.6.0] — 2026-07-16
+
+### Added
+- **ITR Mapping review UI (Part 2).** A new "ITR Mapping" tab (GnuCash >
+  ITR Mapping, next to ITR Workbook) gives the account-tag mapping the same
+  review UX as the post-bank-transformation "Review & Edit Account Mappings"
+  tab — no more hand-editing the `-proposed-mappings.yaml` snippet or
+  running a CLI script:
+  - Select an entity (same `Data/itr/entities.yaml` dropdown source as the
+    ITR Workbook tab); Load shows every account for that entity, sourced
+    from `Data/itr/mappings/<entity>.mapping.yaml` plus the most recent
+    `-proposed-mappings.yaml` run artifact — unmapped accounts are flagged
+    (red UNMAPPED badge) with any LLM suggestion shown alongside.
+  - A searchable tag-assignment picker (typeahead over `tags.py`'s
+    vocabulary, showing each tag's description) plus row multi-select and
+    "Apply to selected", mirroring `ui/tabs/gnucash_review.py`'s account
+    picker.
+  - Save writes `Data/itr/mappings/<entity>.mapping.yaml` (anchored via
+    `data_root_dir()`, works in both source and frozen layouts) —  always
+    backing up the pre-save file first (timestamped `.bak-YYYYMMDD-HHMMSS`)
+    before any in-place rewrite, and never touching disk at all for a blank
+    entity or an empty change set. Touched entries are marked approved
+    (`suggested_by_llm` cleared, note replaced) the same way the CLI
+    correction script already did.
+  - `apply_mapping_corrections.py` gained an importable
+    `apply_corrections_map(mapping_file, {guid: tag}, output_yaml, paths=...)`
+    — the new core the UI calls directly (no more shelling out); the
+    existing CLI (`apply_corrections(mapping_file, reviewed_xlsx,
+    output_yaml)`) is now a thin wrapper over it and its behaviour is
+    unchanged (round-trip test still green).
+
+### Pending
+- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
+  run as part of this release — flagged pending, not blocking.
 
 ## [2.5.0] — 2026-07-16
 
@@ -312,87 +396,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Frozen-build smoke test** (Harshal-side, PortableApps install) not run
   as part of this release — flagged pending, not blocking.
 
-## [2.6.0] — 2026-07-16
-
-### Added
-- **ITR Mapping review UI (Part 2).** A new "ITR Mapping" tab (GnuCash >
-  ITR Mapping, next to ITR Workbook) gives the account-tag mapping the same
-  review UX as the post-bank-transformation "Review & Edit Account Mappings"
-  tab — no more hand-editing the `-proposed-mappings.yaml` snippet or
-  running a CLI script:
-  - Select an entity (same `Data/itr/entities.yaml` dropdown source as the
-    ITR Workbook tab); Load shows every account for that entity, sourced
-    from `Data/itr/mappings/<entity>.mapping.yaml` plus the most recent
-    `-proposed-mappings.yaml` run artifact — unmapped accounts are flagged
-    (red UNMAPPED badge) with any LLM suggestion shown alongside.
-  - A searchable tag-assignment picker (typeahead over `tags.py`'s
-    vocabulary, showing each tag's description) plus row multi-select and
-    "Apply to selected", mirroring `ui/tabs/gnucash_review.py`'s account
-    picker.
-  - Save writes `Data/itr/mappings/<entity>.mapping.yaml` (anchored via
-    `data_root_dir()`, works in both source and frozen layouts) —  always
-    backing up the pre-save file first (timestamped `.bak-YYYYMMDD-HHMMSS`)
-    before any in-place rewrite, and never touching disk at all for a blank
-    entity or an empty change set. Touched entries are marked approved
-    (`suggested_by_llm` cleared, note replaced) the same way the CLI
-    correction script already did.
-  - `apply_mapping_corrections.py` gained an importable
-    `apply_corrections_map(mapping_file, {guid: tag}, output_yaml, paths=...)`
-    — the new core the UI calls directly (no more shelling out); the
-    existing CLI (`apply_corrections(mapping_file, reviewed_xlsx,
-    output_yaml)`) is now a thin wrapper over it and its behaviour is
-    unchanged (round-trip test still green).
-
-### Pending
-- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
-  run as part of this release — flagged pending, not blocking.
-
-## [2.8.0] — 2026-07-17
-
-### Added
-- **ITR Mapping review UI polish (Part 4): sortable/filterable columns.**
-  The "ITR Mapping" table's headers are now click-to-sort (click again to
-  flip direction) with a per-column text filter row underneath — the same
-  UX as `ui/tabs/gnucash_review.py`'s "Review & Edit Account Mappings" tab,
-  which this screen had not previously matched.
-- **ITR Mapping review UI polish (Part 4): tag vocabulary help.** Every tag
-  code shown in the table (Current tag / Suggested / New tag) now carries a
-  hover tooltip with its one-line meaning, and a new toggleable "? Tag
-  glossary" panel lists the full, searchable tag vocabulary (code, target
-  sheet, meaning) — the raw tag codes (e.g. `OS_INTEREST_BANK`) previously
-  had no in-UI explanation.
-
-### Pending
-- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
-  run as part of this release — flagged pending, not blocking.
-
-## [2.7.0] — 2026-07-16
-
-### Added
-- **ITR Mapping review UI polish (Part 3): RAG confidence coding.** Mapped
-  accounts on the "ITR Mapping" tab now show a confidence tier instead of
-  just a tag: green "(confirmed)" once a human has approved/set the entry,
-  amber "(needs review)" while it's still an unapproved LLM suggestion
-  (`suggested_by_llm` set), red "UNMAPPED" as before — shown as both a
-  left-border row accent and an inline badge. The "Show" filter gained
-  "Needs review" and "Confirmed only" options alongside the existing
-  All/Unmapped/Mapped.
+## [2.4.0] — 2026-07-16
 
 ### Fixed
-- **ITR Mapping "Show" filter defaulted to hiding everything but unmapped
-  rows**, and its native `<select>` chrome had poor contrast against the
-  dark theme (reported as barely visible). The filter now defaults to
-  **All** and is explicitly styled to match the rest of the tab.
-
-### Changed
-- **ITR nav restructured.** "ITR Workbook" and "ITR Mapping" were flat
-  sub-tabs directly under GnuCash; they now live inside a single "ITR"
-  sub-tab (GnuCash > ITR > ITR Workbook / ITR Mapping), mirroring how
-  "Banks" already groups its own sub-tabs.
-
-### Pending
-- **Frozen-build UI smoke test** (Harshal-side, PortableApps install) not
-  run as part of this release — flagged pending, not blocking.
+- **ITR Workbook — Data/itr paths no longer double up under the frozen
+  Launcher.** `entities_path`/`rules_dir`/`scrips_path` were CWD-relative
+  defaults with `Data/` baked in (`agent.py::run()`); the frozen PortableApps
+  build sets CWD to `...\Data\`, so they silently resolved to
+  `...\Data\Data\itr\...` and the run read stale/empty config while the
+  entity/AY dropdowns (already anchored via `ui/_config.data_root_dir()`)
+  showed the correct list. `ui/tabs/_generic.py` now anchors all three via a
+  new `{data_root}` `run_args` token (same anchor the dropdowns use);
+  `skill.yaml`'s `run_args` route through it. Agent defaults remain a
+  source-mode-only fallback.
+- **ITR Workbook — missing/unresolved entity now fails loud.** A missing or
+  unreadable `entities.yaml`, or an explicitly selected entity not found in
+  it, used to silently substitute a generic `UNKNOWN`/`Individual`/new-regime
+  profile — picking the wrong regime/age band without any warning.
+  `agent.py::_resolve_entity()` now raises when an *explicitly selected*
+  entity can't be resolved, naming the resolved path it looked at; the run
+  reports an `ERROR:` summary and writes no green stub. An entity key merely
+  *inferred* from a mapping file's stem (no explicit selection) still
+  degrades gracefully, unchanged.
+- **ITR Workbook — mapping-less run no longer silently emits an empty green
+  stub.** With the Entity mapping box empty, a run used to report
+  `STATUS: OK` and write a one-sheet scaffold with no schedules — easy to
+  mistake for a real, populated workbook. Two changes: (1) when an entity is
+  selected and it has an existing
+  `<data_root>/itr/mappings/<entity>.mapping.yaml`, the run now auto-derives
+  and uses it (logged in the summary as `Mapping: auto-derived ...`); (2) a
+  true cold start (no mapping anywhere for the entity) now treats every leaf
+  as unmapped and routes into the existing BLOCKED-FOR-REVIEW +
+  proposed-mappings-snippet learning loop, the same as a partially mapped
+  file — a mapping-less run can no longer report a green `STATUS: OK`.
 
 ## [1.0.1] — 2026-06-25
 
