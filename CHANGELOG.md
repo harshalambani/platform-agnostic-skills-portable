@@ -14,6 +14,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > back-filed into sections that do not exist for those tags.
 
 ### Added
+- **ITR workbook — four presentable deliverable sheets.** The generated
+  workbook was a calculation engine, not something that could be handed to a
+  CA: `Computation` was a flat two-column list with no column widths at all,
+  no header block, no print setup, and it showed both regimes side by side.
+  Four new sheets now sit in front of the existing ones — `Statement of
+  Income`, `IS`, `BS` and `CG` — modelled on the CA-prepared reference
+  workbooks, with a letterhead header block, tiered money columns, Arial 10,
+  Indian digit grouping, explicit column widths sized to the longest label
+  actually present, borders, freeze panes, gridlines off, and A4
+  fit-to-one-page-wide print setup. The four raw working sheets (`Rules`,
+  `Mapping Review`, `IS_Transcript`, `BS_Transcript`) are now hidden — hidden,
+  not deleted. This is a rendering change only: no computation, rule, rate or
+  tax logic was touched, and no existing sheet's values changed.
+  - **Every money cell on the four new sheets is a formula** into the existing
+    sheets (`Computation`, `CapitalGains`, `OtherSources`, `IS_Transcript`,
+    `BS_Transcript`, `TaxesPaid`, `Entity`). Nothing is recomputed or
+    hardcoded, so the audit trail survives into the printable output.
+  - `IS`/`BS` rebuild the full GnuCash hierarchy by splitting the transcripts'
+    `Path` column on `/`, preserving every intermediate group as its own row
+    with its own subtotal. Sibling groups are never merged — in particular
+    `Fixed Deposits` stays a sibling of `Cash and Bank`. (Schedule AL's
+    statutory buckets do combine them; that is a different sheet with a
+    different purpose.) Depth is derived from the path, not a fixed level
+    count.
+  - `CG` is a view over `CapitalGains`. It deliberately does not copy two
+    traits of the CA reference: inline 31-Jan-2018 FMV price literals, and
+    grandfathering arithmetic that is inconsistent between rows.
+  - `CG` is omitted entirely when the financial year being generated has no
+    capital-gains activity, mirroring what the CA produced for such a year.
+    The test is per-run and per-FY — never an entity-level flag or a cached
+    answer that could silently drop a real CG sheet the year it matters.
+  - Three items render as a label plus an empty, visibly-styled cell rather
+    than being invented or dropped: Father's Name, Aadhaar No. and
+    brought-forward loss set-off. Residential status renders the assumed
+    constant `R/OR` with a footnote marker and an Assumptions note, because it
+    is an assumption the tool does not determine. The age half of the status
+    line comes from the existing `rules.resolve_age_class()` — no new age
+    logic.
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
   a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
   tooltips/formats/gotchas, steps, per-output-file interpretation, tips,

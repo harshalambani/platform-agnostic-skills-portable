@@ -28,6 +28,7 @@ from datetime import date
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+import presentation
 import rules as rules_engine
 import schedules as sch
 import tags as tag_vocab
@@ -1047,10 +1048,10 @@ def write_workbook(
     write_schedule_al_sheet(wb, model.schedule_al)
     if model.unclassified.count > 0:
         write_unclassified_sheet(wb, model.unclassified)
-    write_is_transcript(wb, tree)
-    write_bs_transcript(wb, tree)
+    is_entries = write_is_transcript(wb, tree)
+    bs_entries = write_bs_transcript(wb, tree)
 
-    write_computation_sheet(
+    comp_layout = write_computation_sheet(
         wb, model, rules_layout, entity_layout, salary_layout, business_layout, hp_layout,
         os_layout, cg_layout, ded_layout, tp_layout,
     )
@@ -1064,5 +1065,17 @@ def write_workbook(
     )
 
     write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)
+
+    # Presentation layer -- ADDS four deliverable sheets in front of the 17
+    # calculation sheets and hides the raw working sheets. Every money cell it
+    # writes is a formula into the sheets built above; it recomputes nothing.
+    # The age half of the status line comes from the existing age-class
+    # resolver -- no new age logic anywhere.
+    presentation.build_presentation_layer(
+        wb, model, entity_layout, comp_layout, os_layout, tp_layout,
+        is_entries, bs_entries, cg_layout["lot_start_row"],
+        rules_engine.resolve_age_class(entity.status, entity.dob, fy_end),
+        year_key, rules.year_label,
+    )
 
     wb.save(output_path)

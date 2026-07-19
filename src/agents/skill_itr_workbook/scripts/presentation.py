@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from openpyxl.styles import Alignment, Border, Font, Side
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.properties import PageSetupProperties
 
@@ -36,7 +36,16 @@ DATE_FORMAT = "DD-MM-YYYY"
 FONT_NAME = "Arial"
 INDENT = " " * 6          # CA file indents ~6 spaces per hierarchy level
 
-#: Sheets this module creates, in the order they must appear (first).
+#: Canonical order for the deliverable sheets. This is the ONLY place order is
+#: expressed: `move_presentation_sheets_first` positions whatever subset of
+#: these actually got created, so a sheet may be conditionally omitted (`CG`
+#: already is) and a further sheet may later be inserted at any position by
+#: adding its name here -- nothing downstream assumes a fixed count or that
+#: any particular sheet is present.
+#:
+#: Known gap (2026-07-19): one of Harshal's CA reference workbooks carries a
+#: `PL for Business` sheet. It is deliberately NOT built here -- out of scope
+#: for this prompt and it needs Harshal's input on what feeds it.
 PRESENTATION_SHEETS = ("Statement of Income", "IS", "BS", "CG")
 
 #: Raw working sheets hidden (never deleted) once the four above exist.
@@ -61,6 +70,7 @@ _TOP_RULE = Border(top=_THIN)
 _BOTTOM_RULE = Border(bottom=_THIN)
 #: The empty-but-visible cell used for every PARKED value (prompt 2a/2d).
 _PARKED_BORDER = Border(bottom=Side(style="dotted"))
+_PARKED_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
 
 
 def _font(size: int = 10, *, bold: bool = False, underline: str | None = None,
@@ -218,13 +228,34 @@ def apply_sheet_chrome(ws, widths: dict, last_row: int, last_col: int, *,
         ws.oddFooter.right.text = "Page &P of &N"
 
 
+def fit_label_width(ws, col: int, minimum: float, cap: float = 90.0) -> float:
+    """Label-column width: wide enough for the longest label actually present,
+    never narrower than the CA reference's own width, never absurdly wide.
+
+    The CA file's fixed A=38.1/47.8 were tuned to that one entity's account
+    names; a book with deeper nesting or longer names would truncate at those
+    widths, and a truncated label is the single most visible defect this whole
+    exercise exists to fix. Formulas are skipped -- their rendered text is not
+    the formula string.
+    """
+    longest = 0
+    for row in ws.iter_rows(min_col=col, max_col=col):
+        for c in row:
+            if isinstance(c.value, str) and not c.value.startswith("="):
+                longest = max(longest, len(c.value))
+    return max(minimum, min(cap, longest + 2))
+
+
 def _parked_cell(ws, row: int, col: int):
-    """A PARKED value: empty, but visibly styled so the reader can see the
-    field exists and is unfilled (prompt 2a/2d). Never a value, never dropped."""
+    """A PARKED value: empty, but visibly styled -- dotted rule plus a light
+    fill -- so the reader can see the field exists and is unfilled (prompt
+    2a/2d). Never carries a value, and the row is never dropped. The
+    "(to be filled)" wording goes in the LABEL, so no stray text ever lands in
+    a money column."""
     c = ws.cell(row=row, column=col, value=None)
     c.border = _PARKED_BORDER
+    c.fill = _PARKED_FILL
     c.font = _font(italic=True)
-    ws.cell(row=row, column=col + 1, value=_PARKED_NOTE).font = _font(size=8, italic=True)
     return c
 
 
@@ -275,9 +306,18 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         else:
             ws.cell(row=row, column=5, value=value).font = _font()
 
-    left("Name", ent("name"));                right("Previous Year", period_label);        row += 1
-    left("Father's Name", None);              right("PAN", ent("pan"));                    row += 1
-    left("Address", ent("address"));          right("Aadhaar No.", None, parked=True);     row += 1
+    left("Name", ent("name"))
+    right("Previous Year", period_label)
+    row += 1
+    # PARKED (Harshal, 2026-07-19): Entity has no such field. Label + empty
+    # styled cell, so the layout is final and these can be filled later
+    # without a re-layout. No values invented, no rows omitted.
+    left(f"Father's Name {_PARKED_NOTE}", None)
+    right("PAN", ent("pan"))
+    row += 1
+    left("Address", ent("address"))
+    right(f"Aadhaar No. {_PARKED_NOTE}", None, parked=True)
+    row += 1
     left("", "");                             right("Date of Birth", ent("dob"));          row += 1
     ws.cell(row=row, column=4, value="Status").font = _font(bold=True)
     ws.cell(row=row, column=5, value=ent("status")).font = _font()
@@ -390,7 +430,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     # PARKED -- the engine has no b/f loss handling. The row always renders:
     # its absence from a statement is itself misleading.
-    ws.cell(row=row, column=LBL, value="Less - Brought forward losses set off").font = _font()
+    ws.cell(row=row, column=LBL,
+            value=f"Less - Brought forward losses set off {_PARKED_NOTE}").font = _font()
     _parked_cell(ws, row, SUB)
     row += 1
 
@@ -441,7 +482,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     apply_sheet_chrome(
         ws,
-        {"A": 3.5, "B": 46, "C": 15, "D": 15, "E": 16, "F": 12},
+        {"A": 3.5, "B": fit_label_width(ws, LBL, 46), "C": 15, "D": 15, "E": 16, "F": 12},
         last_row=row, last_col=OUTER,
         freeze=f"A{header_end + 1}", print_title=print_title,
     )
@@ -471,7 +512,7 @@ def _write_hierarchy_sheet(wb, sheet_name: str, title_formula: str, entries,
 
     next_row, _ = render_hierarchy(ws, 4, root, source_sheet, label_col=1, money_col=2)
 
-    widths = {"A": label_width}
+    widths = {"A": fit_label_width(ws, 1, label_width)}
     for col in range(2, last_col + 1):
         widths[get_column_letter(col)] = 15
     apply_sheet_chrome(ws, widths, last_row=next_row, last_col=last_col,
@@ -596,6 +637,24 @@ def _cg_block(ws, row: int, banner: str, lot_rows, lot_start_row: int, term: str
     return row + 2
 
 
+def has_capital_gains_activity(cg_schedule) -> bool:
+    """Does the financial year being generated have any capital-gains activity?
+
+    Evaluated PER RUN, from this year's own data -- lots/disposals, book
+    control totals, or taxable figures. Deliberately NOT an entity-level flag,
+    config toggle, or anything else that persists one year's answer into the
+    next: an entity with no gains this year may well have a disposal next
+    year, and a cached "this entity doesn't do CG" would silently drop a real
+    CG sheet the year it finally matters. It is also never inferred from a
+    prior year's output or from whether a CA's reference workbook happened to
+    include the sheet.
+    """
+    return bool(cg_schedule.lot_rows) or any((
+        cg_schedule.lt_control, cg_schedule.st_control,
+        cg_schedule.lt_taxable_gross, cg_schedule.st_taxable_gross,
+    ))
+
+
 def write_cg_sheet(wb, cg_schedule, entity_layout: dict, lot_start_row: int, print_title: str):
     ws = wb.create_sheet("CG")
     ncols = len(_CG_HEADERS)
@@ -617,7 +676,10 @@ def write_cg_sheet(wb, cg_schedule, entity_layout: dict, lot_start_row: int, pri
         cg_schedule.lot_rows, lot_start_row, "ST",
     )
 
-    widths = {"A": 5, "B": 30, "C": 12, "D": 13, "E": 14, "F": 13,
+    # The Name column holds formulas, so its rendered width can't be measured
+    # from the sheet -- size it from the source scrip names instead.
+    name_width = max([30.0] + [len(str(r.scrip)) + 2 for r in cg_schedule.lot_rows])
+    widths = {"A": 5, "B": min(name_width, 90.0), "C": 12, "D": 13, "E": 14, "F": 13,
               "G": 13, "H": 14, "I": 15, "J": 16}
     apply_sheet_chrome(ws, widths, last_row=row, last_col=ncols,
                        landscape=True, print_title=print_title)
@@ -658,7 +720,11 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
     )
     write_is_sheet(wb, is_entries, entity_layout, period_text, print_title)
     write_bs_sheet(wb, bs_entries, entity_layout, as_at_text, print_title)
-    write_cg_sheet(wb, model.capital_gains, entity_layout, lot_start_row, print_title)
+    # CG is omitted entirely when this FY has no capital-gains activity --
+    # mirroring what the CA actually produced for such a year. A blank grid on
+    # a document handed to a CA or a bank is worse than no sheet.
+    if has_capital_gains_activity(model.capital_gains):
+        write_cg_sheet(wb, model.capital_gains, entity_layout, lot_start_row, print_title)
 
     hide_working_sheets(wb)
     move_presentation_sheets_first(wb)
