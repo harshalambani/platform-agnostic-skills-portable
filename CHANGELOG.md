@@ -50,6 +50,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
 
+## [2.13.1] — 2026-07-19
+
+### Fixed
+- **Frozen build could not start (v2.13.0 was unusable).** `pydantic` 2.13.4
+  declares `_COMPATIBLE_PYDANTIC_CORE_VERSION = 2.46.4` and raises
+  `SystemError` at import when it finds a different `pydantic-core`, so every
+  launch of the v2.13.0 package died in `gradio` → `fastapi` → `pydantic`
+  before the UI came up. Dependabot PR #69 had bumped `pydantic-core` to
+  2.47.0 on its own without bumping `pydantic`; because `bundling/build.py`
+  installs the lock with `--require-hashes --no-deps`, pip never evaluated
+  `pydantic`'s pin on `pydantic-core` and the mismatch installed silently.
+  The test suite runs against the separate dev virtualenv, so it stayed green
+  — only the release workflow's frozen smoke test caught this. `pydantic-core`
+  is pinned back to 2.46.4. No application code changed; v2.13.1 is v2.13.0
+  with a working package.
+
 ## [2.13.0] — 2026-07-19
 
 ### Added
