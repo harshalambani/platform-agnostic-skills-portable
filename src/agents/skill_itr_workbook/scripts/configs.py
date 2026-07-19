@@ -44,12 +44,24 @@ class EntityProfile:
     name: str
     pan: str
     status: str                      # "Individual" | "HUF"
-    residency: str = "Resident"
+    residency: str = "Resident"      # legacy free-text display field, NOT one of the
+                                       # statutory tokens the tax engine now consumes -- see
+                                       # rules.resolve_residency(), which treats anything
+                                       # other than exactly "R/OR" / "RNOR" / "NR" as
+                                       # undeclared and falls back to R/OR (2026-07-19
+                                       # residency prompt, section 2)
     dob: str | None = None
     doi: str | None = None           # date of incorporation (HUF/non-individual password
                                        # material, e.g. encrypted 26AS PDFs) -- CF6; NEVER
                                        # used for age-class resolution (see rules.resolve_age_class)
     address: str | None = None
+    father_name: str | None = None
+    aadhaar: str | None = None       # store raw digits only (no spaces); presentation.py
+                                       # formats it CA-file style (space-grouped) for display.
+                                       # No at-rest protection exists for identity fields in
+                                       # this project (PAN/DOB/address are all plaintext) --
+                                       # stored the same way, not a new decision (2026-07-19
+                                       # residency prompt, section 1)
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
@@ -79,6 +91,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             dob=fields_.get("dob"),
             doi=fields_.get("doi"),
             address=fields_.get("address"),
+            father_name=fields_.get("father_name"),
+            aadhaar=fields_.get("aadhaar"),
             default_regime=fields_.get("default_regime", "new"),
             regime_by_ay=fields_.get("regime_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},

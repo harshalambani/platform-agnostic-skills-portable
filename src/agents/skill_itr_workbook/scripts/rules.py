@@ -110,25 +110,56 @@ def age_class(dob: str | None, fy_end: date) -> str:
     return "general"
 
 
-def resolve_age_class(status: str, dob: str | None, fy_end: date) -> str:
+#: The only tokens that count as a DECLARED residency (2026-07-19 residency
+#: prompt, section 2). EntityProfile.residency is a pre-existing field that
+#: historically held free text like "Resident" -- never consumed by any rule.
+#: Anything other than exactly one of these three is treated as undeclared.
+RESIDENCY_VALUES = ("R/OR", "RNOR", "NR")
+DEFAULT_RESIDENCY = "R/OR"
+
+
+def resolve_residency(residency: str | None) -> tuple[str, bool]:
+    """Resolve `EntityProfile.residency` to (value, declared).
+
+    Only the three statutory tokens (R/OR, RNOR, NR) count as a declaration.
+    Anything else -- unset, or legacy free text such as "Resident" (which
+    predates this resolver and doesn't distinguish R/OR from RNOR) -- is
+    undeclared and defaults to R/OR. This keeps every pre-existing
+    entities.yaml (real and synthetic) resolving exactly as before: still
+    R/OR, still with the Assumptions footnote, until the entity explicitly
+    declares one of the three tokens."""
+    if residency in RESIDENCY_VALUES:
+        return residency, True
+    return DEFAULT_RESIDENCY, False
+
+
+def resolve_age_class(status: str, dob: str | None, fy_end: date, residency: str | None = None) -> str:
     """Age-class resolution (CF6) applies only to resident Individuals with
-    a known DOB; HUF/other non-individual statuses and individuals with no
-    DOB on file always resolve to 'general'. `doi` (date of incorporation --
-    HUF/non-individual password material, e.g. for encrypted 26AS PDFs) is
-    NEVER used here -- it carries no age semantics."""
+    a known DOB; HUF/other non-individual statuses, individuals with no DOB
+    on file, and NON-RESIDENT individuals always resolve to 'general' -- the
+    higher senior/super-senior basic exemption is a resident-only benefit
+    (2026-07-19 residency prompt, section 3). RNOR is a resident sub-status
+    under s.6 and still gets the benefit; only NR is excluded. `doi` (date of
+    incorporation -- HUF/non-individual password material, e.g. for
+    encrypted 26AS PDFs) is NEVER used here -- it carries no age semantics."""
     if status != "Individual" or not dob:
+        return "general"
+    residency_value, _ = resolve_residency(residency)
+    if residency_value == "NR":
         return "general"
     return age_class(dob, fy_end)
 
 
-def resolve_slabs(rules: RulesConfig, regime: str, status: str, dob: str | None, fy_end: date) -> list[dict]:
+def resolve_slabs(rules: RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
+                   residency: str | None = None) -> list[dict]:
     """Resolve the applicable slab table for `regime` ('new'/'old') given
-    entity `status` ('Individual'/'HUF') and DOB (age class only matters for
-    the old regime, individual only -- plan section 3.4)."""
+    entity `status` ('Individual'/'HUF'), DOB and residency (age class only
+    matters for the old regime, individual, resident -- plan section 3.4;
+    2026-07-19 residency prompt section 3)."""
     block = rules.regime(regime)
     if regime == "new":
         return block["slabs"]
     if status == "HUF":
         return block["huf_slabs"]
-    cls = resolve_age_class(status, dob, fy_end)
+    cls = resolve_age_class(status, dob, fy_end, residency=residency)
     return block["slabs_by_age"][cls]

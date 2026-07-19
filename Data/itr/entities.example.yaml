@@ -2,14 +2,20 @@
 # entities.example.yaml -- SYNTHETIC example of Data/itr/entities.yaml (plan
 # section 4.2). Copy this file to entities.yaml and fill in real profiles;
 # entities.yaml itself is user data and is gitignored (see .gitignore).
-# No real names/PANs/DOBs appear here -- SYN-IND and SYN-HUF match the
-# synthetic fixtures under tests/skill_itr_workbook/fixtures/.
+# No real names/PANs/DOBs/Aadhaar appear here -- SYN-IND and SYN-HUF match the
+# synthetic fixtures under tests/skill_itr_workbook/fixtures/. father_name and
+# aadhaar are OPTIONAL fields (2026-07-19 residency prompt, section 1).
+# `residency` only takes effect when set to exactly one of R/OR, RNOR, NR --
+# any other value (including the legacy free text below) is undeclared and
+# defaults to R/OR (rules.resolve_residency()).
 # =============================================================================
 SYN-IND:
   name: "Synthetic Individual"
   pan: "AAAAA0000A"
   status: "Individual"
   residency: "Resident"
+  father_name: "Synthetic Father"
+  aadhaar: "000011112222"
   dob: "1980-01-01"
   address: "123 Example Street, Example City"
   default_regime: "new"
@@ -31,3 +37,20 @@ SYN-HUF:
     bf_losses: []
     clubbing_notes:
       - "example: minor's interest income clubbed under s.64(1A) -- illustrative only"
+
+SYN-IND-NR:
+  # Illustrates a DECLARED residency (2026-07-19 residency prompt, section 2):
+  # exactly "NR" gates senior-citizen age-class benefits off entirely, and
+  # the Assumptions footnote is dropped from the Statement of Income header.
+  name: "Synthetic Non-Resident"
+  pan: "CCCCC2222C"
+  status: "Individual"
+  residency: "NR"
+  father_name: "Synthetic Father NR"
+  aadhaar: "333344445555"
+  dob: "1955-01-01"
+  address: "456 Example Avenue, Example Town"
+  default_regime: "new"
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []

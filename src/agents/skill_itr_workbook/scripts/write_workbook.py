@@ -148,7 +148,7 @@ def _write_surcharge_block(sw: _SheetWriter, bands: list) -> dict:
     return refs
 
 
-def write_rules_sheet(wb: Workbook, rules: rules_engine.RulesConfig, user_rules: list, status: str, dob: str | None, fy_end: date) -> dict:
+def write_rules_sheet(wb: Workbook, rules: rules_engine.RulesConfig, user_rules: list, status: str, dob: str | None, fy_end: date, residency: str | None = None) -> dict:
     """Dumps the versioned rules config (plan row 2). Returns a `layout` dict
     of A1 cell references the Computation sheet formulas key off of."""
     ws = wb.create_sheet("Rules")
@@ -174,7 +174,7 @@ def write_rules_sheet(wb: Workbook, rules: rules_engine.RulesConfig, user_rules:
 
     sw.header("Old Regime (resolved slab table for this entity's age/status)")
     old_block = rules.regime("old")
-    old_slabs = rules_engine.resolve_slabs(rules, "old", status, dob, fy_end)
+    old_slabs = rules_engine.resolve_slabs(rules, "old", status, dob, fy_end, residency=residency)
     layout["old_slabs"] = _write_slab_block(sw, old_slabs)
     layout["old_std_deduction"] = sw.label_value("Std deduction (salary)", old_block["std_deduction_salary"])
     layout["old_rebate_max_ti"] = sw.label_value("87A max total income", old_block["rebate_87a"]["max_total_income"])
@@ -251,6 +251,8 @@ def write_entity_sheet(wb: Workbook, entity, year_key: str, rules: rules_engine.
     layout["residency"] = sw.label_value("Residency", entity.residency, number_format=None)
     layout["dob"] = sw.label_value("DOB", entity.dob, number_format=None)
     layout["address"] = sw.label_value("Address", entity.address, number_format=None)
+    layout["father_name"] = sw.label_value("Father's Name", entity.father_name, number_format=None)
+    layout["aadhaar"] = sw.label_value("Aadhaar", entity.aadhaar, number_format=None)
     layout["year_label"] = sw.label_value("Year", rules.year_label, number_format=None)
     layout["regime"] = sw.label_value("Regime (flip this cell: new / old)", regime, number_format=None)
     if form16_election is not None:
@@ -1034,7 +1036,7 @@ def write_workbook(
     wb = Workbook()
     wb.remove(wb.active)
 
-    rules_layout = write_rules_sheet(wb, rules, user_rules, entity.status, entity.dob, fy_end)
+    rules_layout = write_rules_sheet(wb, rules, user_rules, entity.status, entity.dob, fy_end, residency=entity.residency)
     entity_layout = write_entity_sheet(wb, entity, year_key, rules, regime, form16_election)
     salary_layout = write_salary_sheet(wb, model.salary)
     business_layout = write_business_sheet(wb, model.business)
@@ -1071,11 +1073,14 @@ def write_workbook(
     # writes is a formula into the sheets built above; it recomputes nothing.
     # The age half of the status line comes from the existing age-class
     # resolver -- no new age logic anywhere.
+    residency_value, residency_declared = rules_engine.resolve_residency(entity.residency)
     presentation.build_presentation_layer(
         wb, model, entity_layout, comp_layout, os_layout, tp_layout,
         is_entries, bs_entries, cg_layout["lot_start_row"],
-        rules_engine.resolve_age_class(entity.status, entity.dob, fy_end),
+        rules_engine.resolve_age_class(entity.status, entity.dob, fy_end, residency=entity.residency),
         year_key, rules.year_label,
+        father_name=entity.father_name, aadhaar=entity.aadhaar,
+        residency_value=residency_value, residency_declared=residency_declared,
     )
 
     wb.save(output_path)

@@ -14,6 +14,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > back-filed into sections that do not exist for those tags.
 
 ### Added
+- **ITR workbook — Father's Name, Aadhaar and real residency, unparked.**
+  Three placeholders on `Statement of Income`'s header block are now live,
+  optional entity fields: `father_name` and `aadhaar` (Aadhaar rendered
+  space-grouped `NNNN NNNN NNNN`, CA-file style, as a formula over the raw
+  digits on `Entity` — never a second literal copy). Both stay PARKED
+  (styled-empty, label keeps "(to be filled)") when absent on the entity, and
+  drop the parked note per field the moment a value is supplied. Stored the
+  same way as PAN/DOB (plaintext in `EntityProfile`/`entities.yaml`) — no
+  at-rest protection exists for any identity field in this project, and this
+  does not introduce one. Residential status (`R/OR` / `RNOR` / `NR`) is now
+  a DECLARED entity field (`rules.resolve_residency()`), read from the
+  pre-existing but previously-unconsumed `EntityProfile.residency`; only the
+  exact statutory tokens count as declared, everything else (including the
+  ubiquitous legacy free text `"Resident"`) is undeclared and defaults to
+  `R/OR`, preserving prior behavior byte-for-byte. The "Assumptions" footnote
+  now renders only while residency is defaulted, and disappears once an
+  entity declares one of the three tokens. Brought-forward loss set-off
+  remains PARKED — out of scope for this change.
 - **ITR workbook — four presentable deliverable sheets.** The generated
   workbook was a calculation engine, not something that could be handed to a
   CA: `Computation` was a flat two-column list with no column widths at all,
@@ -68,6 +86,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the generated docs are stale (`gen_docs.py --check`).
 
 ### Fixed
+- **ITR rules — senior-citizen age-class benefit no longer leaks to
+  non-residents.** `rules.resolve_age_class()`'s docstring always claimed it
+  "applies only to resident Individuals," but the code only checked `status`,
+  never residency — a non-resident senior/super-senior citizen wrongly
+  received the higher basic exemption (300000/500000 vs 250000), which is a
+  resident-only benefit. Now gated on residency too (`NR` → `'general'`;
+  `RNOR`, a resident sub-status under s.6, is unaffected). A regression test
+  proves NR-65 → general slabs while resident-65 → senior and resident-82 →
+  super-senior still resolve as before. Every real entity on file declares
+  the legacy `"Resident"` value (undeclared, defaults to `R/OR`), so this fix
+  changes no real entity's computed numbers — confirmed by direct
+  before/after comparison of `resolve_age_class()` across all five.
 - **ITR mapping — approved corrections now actually reach a run.** The root
   cause of a real entity showing almost every mapped account as `heuristic`
   despite real review work: `apply_mapping_corrections.py`'s CLI wrote
