@@ -38,6 +38,25 @@ SYN-HUF:
     clubbing_notes:
       - "example: minor's interest income clubbed under s.64(1A) -- illustrative only"
 
+SYN-IND-BIZ:
+  # Illustrates `business_subtree` (2026-07-19 "PL for Business" prompt): a
+  # GnuCash account path prefix, not a keyword/name match, that the `PL for
+  # Business` sheet walks as a subtree. Only set this for an entity whose
+  # books actually have such a group -- an entity with the field set but no
+  # matching accounts for a given FY will fail loudly (BusinessSubtreeError)
+  # rather than silently render a blank sheet.
+  name: "Synthetic Business Individual"
+  pan: "DDDDD3333D"
+  status: "Individual"
+  residency: "Resident"
+  dob: "1978-01-01"
+  address: "789 Example Lane, Example City"
+  business_subtree: "Income/xBusiness Income"
+  default_regime: "new"
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []
+
 SYN-IND-NR:
   # Illustrates a DECLARED residency (2026-07-19 residency prompt, section 2):
   # exactly "NR" gates senior-citizen age-class benefits off entirely, and

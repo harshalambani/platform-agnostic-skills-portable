@@ -14,6 +14,27 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > back-filed into sections that do not exist for those tags.
 
 ### Added
+- **ITR workbook — `PL for Business` sheet, subtree-driven.** A fifth
+  presentable sheet nets an entity's business income against business
+  expenses for entities that have both: `Remuneration from Partnership` and a
+  nested `Business Expenses/` group. It is driven entirely by a new optional
+  entity field, `EntityProfile.business_subtree` (e.g.
+  `"Income/xBusiness Income"`) — a GnuCash account path prefix walked as a
+  plain subtree (`path.startswith(prefix)`), never a keyword or account-name
+  match, so a business-sounding account outside the configured subtree (e.g.
+  `Expense/Professional Tax`) is never swept in. Reuses the existing
+  `_write_hierarchy_sheet`/`build_hierarchy`/`render_hierarchy` engine
+  unchanged (extended with an optional `extra_row_fn` hook to add the "Net
+  Business Income / (Loss)" total row) — no second layout engine. The sheet
+  is omitted, per-run and per-FY exactly like `CG`, when the entity has no
+  `business_subtree` configured or the FY has no matching activity; if
+  `business_subtree` **is** configured but nothing under it appears for the
+  FY, generation now raises (`BusinessSubtreeError`) rather than silently
+  rendering a zero sheet, so a GnuCash account rename can't quietly drop a
+  real business year. Sheet order is now `Statement of Income`, `BS`, `IS`,
+  `PL for Business`, `CG`. Presentation-only: business income is not routed
+  into tax computation, and no other sheet's content, order relative to each
+  other, or computed figures changed.
 - **ITR workbook — Father's Name, Aadhaar and real residency, unparked.**
   Three placeholders on `Statement of Income`'s header block are now live,
   optional entity fields: `father_name` and `aadhaar` (Aadhaar rendered

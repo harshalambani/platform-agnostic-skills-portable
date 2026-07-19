@@ -62,6 +62,11 @@ class EntityProfile:
                                        # this project (PAN/DOB/address are all plaintext) --
                                        # stored the same way, not a new decision (2026-07-19
                                        # residency prompt, section 1)
+    business_subtree: str | None = None   # GnuCash account path prefix (e.g.
+                                       # "Income/xBusiness Income") that `PL for Business`
+                                       # walks as a subtree -- never a hardcoded literal in
+                                       # presentation.py, so a book rename can't silently
+                                       # render a zero sheet (2026-07-19 PL for Business prompt)
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
@@ -93,6 +98,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             address=fields_.get("address"),
             father_name=fields_.get("father_name"),
             aadhaar=fields_.get("aadhaar"),
+            business_subtree=fields_.get("business_subtree"),
             default_regime=fields_.get("default_regime", "new"),
             regime_by_ay=fields_.get("regime_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},
