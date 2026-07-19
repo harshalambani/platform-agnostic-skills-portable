@@ -50,6 +50,50 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
 
+## [2.12.0] — 2026-07-19
+
+### Fixed
+- **Bank abstraction, P3b follow-up — legacy `run()` UI path now routes
+  through the shared consolidator.** P3b deliberately left each bank's
+  legacy standalone-UI-tab `run()` entry point untouched, but BoB's and
+  ICICI's tabs turned out to be reachable multi-file paths: the generic
+  runner stages uploads into a temp directory and `run()` iterates every
+  file there, still doing the old naive `sorted(glob)` + blind concat. That
+  silently misordered batches and never surfaced missing or overlapping
+  periods — worse than the pipeline case, since temp-staging filenames bear
+  no relation to statement chronology. Both `skill_bob.agent.run()` and
+  `skill_icici.agent.run()` now build `StatementGroup`s per file and route
+  through the same `bank_common.consolidate()` / `check_continuity()` helper
+  that `BankSkill.parse()` already uses, so multi-file uploads are ordered
+  by actual transaction date and gap/overlap warnings are surfaced in
+  `run()`'s returned summary text. ICICI reuses `_read_canonical_csv()`
+  verbatim (its per-file intermediates are already canonical); BoB builds
+  its own group-construction block, since its intermediates are bank-native
+  rather than canonical, though both go through the identical
+  `StatementGroup` / `consolidate()` contract. A single-file batch — the
+  dominant real-world case — remains a proven no-op for both banks.
+  `BankSkill.parse()`, `bank_common/consolidate.py`, and every bank's
+  single-statement extraction/parse/OCR path are untouched; HDFC and Kotak
+  have no multi-file `run()` path and are unaffected.
+- **BoB batch-mode line terminators normalized to CRLF.** The `_merge_csvs`
+  helper that the change above replaced read part-CSVs with universal-newline
+  translation and wrote with `newline=""`, emitting bare-LF output — the
+  lone outlier in this codebase. Every other CSV writer, including BoB's own
+  single-file fast path (`extract_bob_statement.write_csv`), both ICICI
+  paths, and `canonical_io.write_canonical_csv` (which backs the pipeline's
+  `parse()` output), already defaults to `csv.DictWriter`'s standard CRLF.
+  BoB batch output now matches them. No production code change was required
+  for this — the new `run()` code already emitted CRLF; what changed is that
+  the single-file no-op tests for both banks now assert via `read_bytes()`
+  against a committed pre-#92 golden
+  (`tests/skill_bob/golden_single_file_run.csv`,
+  `tests/skill_icici/golden_single_file_run.csv`, captured from each bank's
+  direct single-file path and unchanged since `main`). The previous
+  assertion compared two post-change paths via `read_text()`, silently
+  folding CRLF into LF on read, and so could not have caught this in either
+  direction. No row or value content changed for either bank. (PR #92,
+  `48cc688`.)
+
 ## [2.11.0] — 2026-07-18
 
 ### Added
