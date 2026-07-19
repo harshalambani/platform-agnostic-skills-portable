@@ -788,6 +788,8 @@ def run(
 
     csv_parts = []
     replies = []
+    result = None
+    consolidation_warnings: list[str] = []
 
     for i, xls in enumerate(xls_files, 1):
         # For single file, use the requested output_path directly;
@@ -809,7 +811,7 @@ def run(
                 f"(balance: {ob:.2f} → {cb:.2f})"
             )
             if result["success"]:
-                csv_parts.append(csv_out)
+                csv_parts.append((xls, csv_out))
             if result.get("issues"):
                 for iss in result["issues"]:
                     replies.append(f"  - {iss}")
@@ -819,9 +821,28 @@ def run(
     if not csv_parts:
         return "ERROR: no CSVs were produced from any of the input files."
 
-    # For batch mode with multiple outputs, merge them into the single output_path
+    # For batch mode with multiple outputs, order by actual transaction date
+    # (not filename) and flag gaps/overlaps, via the same bank_common helper
+    # ICICISkill.parse() uses — this is the same fix #91 applied to parse(),
+    # now closing the UI path.
     if len(csv_parts) > 1:
-        _merge_csvs(csv_parts, Path(output_path))
+        groups = []
+        for xls, part in csv_parts:
+            part_rows = _read_canonical_csv(part)
+            dates = sorted(r["Date"] for r in part_rows if r.get("Date"))
+            groups.append(StatementGroup(
+                name=xls.name,
+                rows=part_rows,
+                period_start=dates[0] if dates else None,
+                period_end=dates[-1] if dates else None,
+            ))
+        consolidated = _consolidate(groups)
+        consolidation_warnings = consolidated.warnings
+
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(CANONICAL_FIELDS))
+            writer.writeheader()
+            writer.writerows(consolidated.rows)
 
     # Write sidecar summary JSON for pipeline's balance verification
     # ICICI closing_balance is derived from last row (no independent statement summary)
@@ -846,22 +867,14 @@ def run(
 
     summary = (
         f"Complete - processed {len(xls_files)} file(s), "
-        f"produced {len(csv_parts)} CSV(s).\n\n"
-        + "\n".join(replies)
+        f"produced {len(csv_parts)} CSV(s)."
     )
+    if consolidation_warnings:
+        summary += "\n\n**Continuity warnings:**\n" + "\n".join(
+            f"- {w}" for w in consolidation_warnings
+        )
+    summary += "\n\n" + "\n".join(replies)
     return summary
-
-
-def _merge_csvs(parts: list, output: Path) -> None:
-    """Merge multiple CSVs into one, keeping header from first file only."""
-    with open(output, "w", newline="", encoding="utf-8") as out:
-        for idx, part in enumerate(parts):
-            with open(part, "r", encoding="utf-8") as f:
-                for line_no, line in enumerate(f):
-                    # Skip header row on all but the first file
-                    if idx > 0 and line_no == 0:
-                        continue
-                    out.write(line)
 
 
 # ============================================================================

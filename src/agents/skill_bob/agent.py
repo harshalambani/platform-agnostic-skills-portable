@@ -43,17 +43,6 @@ def _run_single(pdf: Path, csv_out: Path) -> str:
     return (result.stdout or "").strip() or "Extraction complete."
 
 
-def _merge_csvs(csv_files: list[Path], output_path: Path) -> None:
-    """Concatenate multiple CSVs into one, keeping the header only from the first."""
-    with open(output_path, "w", encoding="utf-8", newline="") as out:
-        for idx, csv_file in enumerate(csv_files):
-            with open(csv_file, "r", encoding="utf-8") as inp:
-                for line_no, line in enumerate(inp):
-                    if idx > 0 and line_no == 0:
-                        continue
-                    out.write(line)
-
-
 def run(
     pdf_path: str,
     output_path: str,
@@ -76,7 +65,7 @@ def run(
 
     print(f"[BoB batch] Found {len(pdfs)} PDF(s) in {pdf_path}")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pa-skills-bob-batch-"))
-    csv_parts: list[Path] = []
+    csv_parts: list[tuple[Path, Path]] = []
     replies: list[str] = []
     for i, pdf in enumerate(pdfs, 1):
         part_csv = tmp_dir / f"{pdf.stem}.csv"
@@ -84,13 +73,45 @@ def run(
         reply = _run_single(pdf, part_csv)
         replies.append(f"**{pdf.name}:** {reply}")
         if part_csv.is_file():
-            csv_parts.append(part_csv)
+            csv_parts.append((pdf, part_csv))
     if not csv_parts:
         return "ERROR: no CSVs were produced from any of the input PDFs."
-    _merge_csvs(csv_parts, Path(output_path))
-    return (f"Batch complete — processed {len(pdfs)} PDF(s), produced "
-            f"{len(csv_parts)} CSV(s), merged into {output_path}.\n\n"
-            + "\n\n".join(replies))
+
+    # Order the batch by actual transaction date (not filename) and flag
+    # gaps/overlaps, via the same bank_common helper BoBSkill.parse() uses —
+    # this is the same fix #91 applied to parse(), now closing the UI path.
+    fieldnames = None
+    groups = []
+    for pdf, part_csv in csv_parts:
+        with open(part_csv, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if fieldnames is None:
+                fieldnames = reader.fieldnames
+            part_rows = list(reader)
+        dates = sorted(
+            d for d in (_parse_date_bob(r.get("DATE", "")) for r in part_rows) if d
+        )
+        groups.append(StatementGroup(
+            name=pdf.name,
+            rows=part_rows,
+            period_start=dates[0] if dates else None,
+            period_end=dates[-1] if dates else None,
+        ))
+    consolidated = _consolidate(groups)
+
+    with open(output_path, "w", encoding="utf-8", newline="") as out:
+        writer = csv.DictWriter(out, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(consolidated.rows)
+
+    summary = (f"Batch complete — processed {len(pdfs)} PDF(s), produced "
+               f"{len(csv_parts)} CSV(s), merged into {output_path}.")
+    if consolidated.warnings:
+        summary += "\n\n**Continuity warnings:**\n" + "\n".join(
+            f"- {w}" for w in consolidated.warnings
+        )
+    summary += "\n\n" + "\n\n".join(replies)
+    return summary
 
 
 # ---------------------------------------------------------------------------

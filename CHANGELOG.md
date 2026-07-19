@@ -194,6 +194,30 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filename-sorted concat and was deliberately left untouched. HDFC and Kotak
   remain single-statement only (no multi-file path added). Central verdict
   engine, HDFC/Kotak, and the statement-profile engine untouched.
+- **Bank abstraction, P3b follow-up — route legacy `run()` UI path through
+  the shared consolidator.** P3b deliberately left each bank's legacy
+  standalone-UI-tab `run()` entry point untouched; BoB's and ICICI's tabs
+  turned out to be reachable multi-file UI paths (the generic runner stages
+  uploads into a temp directory and `run()` iterates every file there) still
+  doing the old naive `sorted(glob)` + blind concat — silently misordering
+  batches with non-chronologically-sorting filenames and never surfacing
+  missing/overlapping periods, worse than the pipeline case since
+  temp-staging filenames bear no relation to statement chronology. Both
+  `skill_bob.agent.run()` and `skill_icici.agent.run()` now build
+  `StatementGroup`s per file and route through the same
+  `bank_common.consolidate()`/`check_continuity()` helper `parse()` already
+  uses; ICICI shares `_read_canonical_csv()` verbatim with `parse()` since
+  its per-file intermediate CSVs are already canonical, while BoB's `run()`
+  builds its own group-construction block (its intermediates are bank-native
+  CSVs, not canonical, so the row-reading step differs from `parse()`'s
+  in-process `Row` objects even though both now go through the identical
+  `StatementGroup`/`consolidate()` contract). Gap/overlap warnings are
+  surfaced in `run()`'s returned summary text via each skill's existing
+  warning-reporting convention. A single-file batch remains a proven no-op
+  (byte-identical output, no continuity-warning text) for both banks. Bug
+  fix only: `BankSkill.parse()`, `bank_common/consolidate.py`'s behavior,
+  and every bank's single-statement extraction/parse/OCR path are untouched;
+  HDFC and Kotak (no multi-file `run()` path) untouched.
 
 ### Fixed
 - **Bank gating, registry-driven (closes the Kotak offer-then-reject leak).**
