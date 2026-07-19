@@ -28,6 +28,7 @@ from datetime import date
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+import presentation
 import rules as rules_engine
 import schedules as sch
 import tags as tag_vocab
@@ -242,12 +243,14 @@ def write_entity_sheet(wb: Workbook, entity, year_key: str, rules: rules_engine.
     layout = {}
 
     sw.header("Entity")
-    sw.label_value("Name", entity.name, number_format=None)
-    sw.label_value("PAN", entity.pan, number_format=None)
-    sw.label_value("Status", entity.status, number_format=None)
-    sw.label_value("Residency", entity.residency, number_format=None)
-    sw.label_value("DOB", entity.dob, number_format=None)
-    sw.label_value("Address", entity.address, number_format=None)
+    # These cells are the single source the presentation layer's header block
+    # formulas point at -- captured, not duplicated (presentation.py).
+    layout["name"] = sw.label_value("Name", entity.name, number_format=None)
+    layout["pan"] = sw.label_value("PAN", entity.pan, number_format=None)
+    layout["status"] = sw.label_value("Status", entity.status, number_format=None)
+    layout["residency"] = sw.label_value("Residency", entity.residency, number_format=None)
+    layout["dob"] = sw.label_value("DOB", entity.dob, number_format=None)
+    layout["address"] = sw.label_value("Address", entity.address, number_format=None)
     layout["year_label"] = sw.label_value("Year", rules.year_label, number_format=None)
     layout["regime"] = sw.label_value("Regime (flip this cell: new / old)", regime, number_format=None)
     if form16_election is not None:
@@ -372,6 +375,10 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
     for col, h in enumerate(lot_headers, start=1):
         sw.cell(col, h)
     sw.row += 1
+    # First lot-detail data row -- the presentation `CG` sheet is a pure view
+    # over these rows (it reads FMV from column J rather than restating a
+    # 31-Jan-2018 price as a literal, as the CA reference does).
+    layout["lot_start_row"] = sw.row
     for lot in cg.lot_rows:
         sw.cell(1, lot.scrip)
         sw.cell(2, lot.sale_date.isoformat())
@@ -479,9 +486,13 @@ def write_schedule_fa_sheet(wb: Workbook, fa: sch.ScheduleFASchedule) -> None:
         sw.row += 1
 
 
-def write_is_transcript(wb: Workbook, tree) -> None:
+def write_is_transcript(wb: Workbook, tree) -> list:
+    """Returns [(account path, amount-cell A1 ref), ...] -- the presentation
+    layer's `IS` sheet rebuilds the GnuCash hierarchy by splitting each path
+    on '/' and links every leaf amount back to the cell named here."""
     ws = wb.create_sheet("IS_Transcript")
     sw = _SheetWriter(ws)
+    entries = []
     sw.header("Retained Earnings -- verbatim transcript")
     for col, h in enumerate(["Path", "Total", "GUID"], start=1):
         sw.cell(col, h)
@@ -491,12 +502,17 @@ def write_is_transcript(wb: Workbook, tree) -> None:
             sw.cell(1, n.path)
             sw.cell(2, n.total, number_format=INR_FORMAT)
             sw.cell(3, n.guid)
+            entries.append((n.path, f"B{sw.row}"))
             sw.row += 1
+    return entries
 
 
-def write_bs_transcript(wb: Workbook, tree) -> None:
+def write_bs_transcript(wb: Workbook, tree) -> list:
+    """Returns [(account path, amount-cell A1 ref), ...] -- see
+    write_is_transcript."""
     ws = wb.create_sheet("BS_Transcript")
     sw = _SheetWriter(ws)
+    entries = []
     sw.header("Balance Sheet -- verbatim transcript")
     for col, h in enumerate(["Path", "Total", "GUID", "Section"], start=1):
         sw.cell(col, h)
@@ -507,7 +523,9 @@ def write_bs_transcript(wb: Workbook, tree) -> None:
             sw.cell(2, n.total, number_format=INR_FORMAT)
             sw.cell(3, n.guid)
             sw.cell(4, n.section)
+            entries.append((n.path, f"B{sw.row}"))
             sw.row += 1
+    return entries
     sw.blank()
     sw.label_value("Assets - Equity - NetIncome (self-check, should be 0)", tree.section_totals.get("Assets Accounts", 0.0)
                     - tree.section_totals.get("Equity, Trading, and Liabilities", 0.0)
@@ -592,7 +610,10 @@ def write_computation_sheet(
     wb: Workbook, model: sch.ITRModel, rules_layout: dict, entity_layout: dict,
     salary_layout: dict, business_layout: dict, hp_layout: dict, os_layout: dict,
     cg_layout: dict, ded_layout: dict, tp_layout: dict,
-) -> None:
+) -> dict:
+    """Returns a layout of sheet-qualified expressions (e.g.
+    "'Computation'!B12") for the presentation layer's `Statement of Income`
+    to point at -- the statement recomputes nothing."""
     ws = wb.create_sheet("Computation")
     sw = _SheetWriter(ws)
     regime_cell = f"'Entity'!{entity_layout['regime'].coordinate}"
@@ -667,18 +688,25 @@ def write_computation_sheet(
         sw.cell(1, "Tax liability")
         liability_cell = sw.cell(2, f"={after_rebate_ref}+{surcharge_ref}+{cess_ref}", number_format=INR_FORMAT)
         sw.row += 1
-        return liability_cell.coordinate
+        return {
+            "liability": liability_cell.coordinate,
+            "cess": cess_ref,
+            # Tax before cess = tax after rebate + special-rate CG tax + surcharge.
+            "tax_before_cess": f"{after_rebate_ref}+{surcharge_ref}",
+        }
 
-    new_liability = _regime_block(
+    new_block = _regime_block(
         "New", rules_layout["new_slabs"],
         rules_layout["new_rebate_max_ti"].coordinate, rules_layout["new_rebate_max_amt"].coordinate,
         rules_layout["new_rebate_marginal"].coordinate, rules_layout["new_surcharge"],
     )
-    old_liability = _regime_block(
+    old_block = _regime_block(
         "Old", rules_layout["old_slabs"],
         rules_layout["old_rebate_max_ti"].coordinate, rules_layout["old_rebate_max_amt"].coordinate,
         rules_layout["old_rebate_marginal"].coordinate, rules_layout["old_surcharge"],
     )
+    new_liability = new_block["liability"]
+    old_liability = old_block["liability"]
     sw.blank()
 
     sw.cell(1, "Selected regime (from Entity sheet)")
@@ -699,8 +727,30 @@ def write_computation_sheet(
     taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
 
     sw.cell(1, refund_label)
-    sw.cell(2, f"=MROUND({taxes_paid_cell.coordinate}-{selected_liability_cell},'Rules'!{rules_layout['round_tax_nearest'].coordinate})", number_format=INR_FORMAT)
+    refund_cell = sw.cell(2, f"=MROUND({taxes_paid_cell.coordinate}-{selected_liability_cell},'Rules'!{rules_layout['round_tax_nearest'].coordinate})", number_format=INR_FORMAT)
     sw.row += 1
+
+    def _q(expr: str) -> str:
+        """Qualify a bare cell/expression on this sheet for use from another
+        sheet, e.g. 'B45+B46' -> "'Computation'!B45+'Computation'!B46"."""
+        return "+".join(f"'Computation'!{part}" for part in expr.split("+"))
+
+    comp_layout = {
+        "salary": _q(salary_cell.coordinate),
+        "hp": _q(hp_cell.coordinate),
+        "business": _q(biz_cell.coordinate),
+        "os": _q(os_cell.coordinate),
+        "cg_lt": _q(cg_lt_cell.coordinate),
+        "cg_st": _q(cg_st_cell.coordinate),
+        "gti": _q(gti_cell),
+        "total_income": _q(ti_cell),
+        "selected_liability": _q(selected_liability_cell),
+        "refund": _q(refund_cell.coordinate),
+        "new_cess": _q(new_block["cess"]),
+        "old_cess": _q(old_block["cess"]),
+        "new_tax_before_cess": _q(new_block["tax_before_cess"]),
+        "old_tax_before_cess": _q(old_block["tax_before_cess"]),
+    }
 
     if uncl.count > 0:
         sw.blank()
@@ -736,6 +786,8 @@ def write_computation_sheet(
         for col in (1, 2):
             ws.cell(row=worst_case_row, column=col).font = _UNMAPPED_FONT
         sw.row += 1
+
+    return comp_layout
 
 
 # ---------------------------------------------------------------------------
@@ -996,10 +1048,10 @@ def write_workbook(
     write_schedule_al_sheet(wb, model.schedule_al)
     if model.unclassified.count > 0:
         write_unclassified_sheet(wb, model.unclassified)
-    write_is_transcript(wb, tree)
-    write_bs_transcript(wb, tree)
+    is_entries = write_is_transcript(wb, tree)
+    bs_entries = write_bs_transcript(wb, tree)
 
-    write_computation_sheet(
+    comp_layout = write_computation_sheet(
         wb, model, rules_layout, entity_layout, salary_layout, business_layout, hp_layout,
         os_layout, cg_layout, ded_layout, tp_layout,
     )
@@ -1013,5 +1065,17 @@ def write_workbook(
     )
 
     write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)
+
+    # Presentation layer -- ADDS four deliverable sheets in front of the 17
+    # calculation sheets and hides the raw working sheets. Every money cell it
+    # writes is a formula into the sheets built above; it recomputes nothing.
+    # The age half of the status line comes from the existing age-class
+    # resolver -- no new age logic anywhere.
+    presentation.build_presentation_layer(
+        wb, model, entity_layout, comp_layout, os_layout, tp_layout,
+        is_entries, bs_entries, cg_layout["lot_start_row"],
+        rules_engine.resolve_age_class(entity.status, entity.dob, fy_end),
+        year_key, rules.year_label,
+    )
 
     wb.save(output_path)
