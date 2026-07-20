@@ -17,12 +17,22 @@ recomputed and nothing is hardcoded -- that formula link is the audit trail
 this tool has and a hand-built workbook does not. The only literals this
 module writes are labels, headings and captions.
 
-Three items are PARKED by Harshal's explicit direction (2026-07-19) and render
+Two items are PARKED by Harshal's explicit direction (2026-07-19) and render
 as a label plus an empty, visibly-styled value cell so the layout is final and
-they can be filled later without a re-layout: Father's Name, Aadhaar No., and
-brought-forward loss set-off. A fourth, residential status, is an *assumed*
-constant `R/OR` -- it renders a value a reader would take as computed, so it
-carries a footnote marker and an Assumptions note (see `_STATUS_FOOTNOTE`).
+they can be filled later without a re-layout: Father's Name and Aadhaar No.
+A third, residential status, is an *assumed* constant `R/OR` -- it renders a
+value a reader would take as computed, so it carries a footnote marker and an
+Assumptions note (see `_STATUS_FOOTNOTE`).
+
+Brought-forward-loss set-off was PARKED through 2026-07-19; as of the
+2026-07-20 on-page-totals change it is a REAL, editable input cell
+(`_INPUT_FILL`, defaulting to 0) instead -- see `write_statement_of_income`.
+That same change moves the income-ladder totals (Gross Total Income, Total
+Income, and the normal-income/special-rate-CG split feeding `Computation`'s
+slab tax) onto this sheet as on-page formulas, so an override anywhere in the
+ladder -- a leaf, Chapter VI-A, or the b/f-loss cell -- now flows end-to-end
+through tax, cess and refund. See
+`docs/2026-07-20-itr-onpage-totals-plan.md`.
 """
 from __future__ import annotations
 
@@ -107,6 +117,27 @@ _BOTTOM_RULE = Border(bottom=_THIN)
 #: The empty-but-visible cell used for every PARKED value (prompt 2a/2d).
 _PARKED_BORDER = Border(bottom=Side(style="dotted"))
 _PARKED_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+# A real, editable INPUT cell (2026-07-20 on-page-totals change) -- distinct
+# from a PARKED cell: it always carries a literal value (never blank) and
+# feeds live downstream formulas. Styled with a solid border (not dotted) and
+# a different fill so a reader -- and a test -- can tell "type here, it
+# means something" apart from "not filled in yet". See b/f-loss cell below.
+_INPUT_BORDER = Border(bottom=Side(style="thin"))
+_INPUT_FILL = PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid")
+
+
+def _input_cell(ws, row: int, col: int, default_value=0):
+    """A real, editable input cell: a literal value (default 0), visibly
+    styled so it reads as "preparer-editable", never a formula. Unlike
+    `_parked_cell` this is wired into downstream formulas -- overriding it
+    must move every total below it."""
+    c = ws.cell(row=row, column=col, value=default_value)
+    c.number_format = INR_FORMAT
+    c.border = _INPUT_BORDER
+    c.fill = _INPUT_FILL
+    c.font = _font()
+    return c
 
 
 def _font(size: int = 10, *, bold: bool = False, underline: str | None = None,
@@ -309,13 +340,28 @@ def _parked_cell(ws, row: int, col: int):
 # ---------------------------------------------------------------------------
 
 def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
-                              os_layout: dict, tp_layout: dict, age_class: str,
-                              period_label: str, print_title: str, *,
+                              os_layout: dict, tp_layout: dict, ded_layout: dict,
+                              rules_layout: dict,
+                              age_class: str, period_label: str, print_title: str,
+                              computation_tail_fn, *,
                               father_name: str | None = None, aadhaar: str | None = None,
                               residency_value: str = "R/OR", residency_declared: bool = False):
     """Mirrors the CA reference's `ITWorking`: a letterhead header block, then
     three money columns (line items / sub-totals / running total) showing ONLY
-    the selected regime."""
+    the selected regime.
+
+    2026-07-20 on-page-totals change: the income ladder (GTI -> Chapter VI-A
+    -> b/f loss -> Total Income -> normal/special-CG split) is now computed
+    ON THIS PAGE from on-page cells, rather than mirroring a hidden
+    `Computation` sheet. `comp_layout` here is the LEAF layout only (salary,
+    hp, business, os, cg_lt, cg_st -- see `write_computation_leaf_cells`).
+    Once this page has written its own `normal_income_base` /
+    `total_income` coordinates, it calls `computation_tail_fn(page_layout)`
+    to have `write_computation_tail` write the re-anchored slab-tax
+    machinery on `Computation`, reading THIS page's cells. That callback
+    returns a comp_layout-shaped dict (`tail_layout`) for the tax/cess/
+    liability/refund lines below. See `docs/2026-07-20-itr-onpage-totals-plan.md`.
+    """
     ws = wb.create_sheet("Statement of Income")
     ent = lambda key: f"='Entity'!{entity_layout[key].coordinate}"  # noqa: E731
     # comp_layout values are already sheet-qualified expressions
@@ -481,26 +527,88 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         close_section(first)
 
     row += 1
-    line("Total", OUTER, comp("gti"), bold=True, rule=_TOP_RULE)
+    # Gross Total Income -- ON-PAGE, summed from this page's own section
+    # subtotal cells (2026-07-20 on-page-totals change). Previously this
+    # mirrored a hidden Computation-sheet total; now it IS the total, so an
+    # override to any leaf item flows through automatically.
+    # Guard against the (theoretical) case of every head-of-income section
+    # being zero and therefore unrendered -- "=SUM()" is not a valid Excel
+    # formula, so fall back to a literal 0 range rather than an empty SUM().
+    gti_formula = f"=SUM({','.join(subtotal_cells)})" if subtotal_cells else "=0"
+    line("Total", OUTER, gti_formula, bold=True, rule=_TOP_RULE)
+    gti_row = row
+    gti_ref = f"{get_column_letter(OUTER)}{gti_row}"
     row += 1
 
-    # PARKED -- the engine has no b/f loss handling. The row always renders:
-    # its absence from a statement is itself misleading.
+    # Chapter VI-A deductions -- a leaf reference to the Deductions sheet
+    # (individual items still come from the source schedule; only the total
+    # is aggregated here).
+    line("Less - Chapter VI-A deductions", SUB, f"='Deductions'!{ded_layout['total']}")
+    via_row = row
+    via_ref = f"{get_column_letter(SUB)}{via_row}"
+    row += 1
+
+    # Brought-forward losses set off -- REAL, editable input cell defaulting
+    # to 0 (was PARKED through 2026-07-19; see module docstring and
+    # docs/2026-07-20-itr-onpage-totals-plan.md section 6). Reduces the
+    # NORMAL-income base first -- a documented default, not a full head-wise
+    # set-off engine (out of scope for v1).
     ws.cell(row=row, column=LBL,
-            value=f"Less - Brought forward losses set off {_PARKED_NOTE}").font = _font()
-    _parked_cell(ws, row, SUB)
+            value="Less - Brought forward losses set off (editable; reduces normal income first)"
+            ).font = _font()
+    _input_cell(ws, row, SUB, default_value=0)
+    bf_row = row
+    bf_ref = f"{get_column_letter(SUB)}{bf_row}"
     row += 1
 
-    line("Total Income", OUTER, comp("total_income"), bold=True, rule=_TOP_RULE)
+    # s.288A rounding (nearest, from Rules) is applied here, exactly as the
+    # pre-change Computation-sheet formula did (MROUND(ti_raw, round_ti_nearest))
+    # -- dropping it would silently break paisa-exact parity with today's
+    # workbook for the default (no-override) case.
+    round_ti_ref = f"'Rules'!{rules_layout['round_ti_nearest'].coordinate}"
+    line("Total Income", OUTER, f"=MROUND({gti_ref}-{via_ref}-{bf_ref},{round_ti_ref})",
+         bold=True, rule=_TOP_RULE)
+    ti_row = row
+    ti_ref = f"{get_column_letter(OUTER)}{ti_row}"
+    row += 1
+
+    # Special-rate CG base and normal-income base -- the correctness-trap
+    # carve-out (design doc section 5): Total Income (above) INCLUDES
+    # special-rate CG (112A/111A LTCG/STCG); the slab-tax BASE that
+    # `Computation` reads must exclude it. cg_lt/cg_st are always present in
+    # comp_layout (the leaf cells are written unconditionally), so this
+    # reads safely even when the CG section is not rendered on-page (both
+    # leaves are 0 in that case).
+    line("  (of which) Special-rate Capital Gains", SUB,
+         f"={comp_layout['cg_lt']}+{comp_layout['cg_st']}")
+    special_cg_row = row
+    special_cg_ref = f"{get_column_letter(SUB)}{special_cg_row}"
+    row += 1
+    line("  (of which) Normal income (slab-tax base)", SUB,
+         f"=MAX(0,{ti_ref}-{special_cg_ref})")
+    normal_income_row = row
+    normal_income_ref = f"{get_column_letter(SUB)}{normal_income_row}"
     row += 2
 
+    # Re-anchor point: hand the page's own coordinates to `Computation` so
+    # its slab/rebate/surcharge/cess formulas read THIS page instead of
+    # recomputing GTI/TI from source leaves (design doc section 7 step 2).
+    page_layout = {
+        "gti": gti_ref,
+        "total_income": ti_ref,
+        "normal_income_base": normal_income_ref,
+        "special_cg_base": special_cg_ref,
+    }
+    tail_layout = computation_tail_fn(page_layout)
+    tail = lambda key: f"={tail_layout[key]}"  # noqa: E731
+
     line("Tax on total income", SUB,
-         sel(comp_layout["new_tax_before_cess"], comp_layout["old_tax_before_cess"]))
+         sel(tail_layout["new_tax_before_cess"], tail_layout["old_tax_before_cess"]))
     row += 1
     line("Add - Health & Education Cess", SUB,
-         sel(comp_layout["new_cess"], comp_layout["old_cess"]))
+         sel(tail_layout["new_cess"], tail_layout["old_cess"]))
     row += 1
-    line("Tax with cess", OUTER, comp("selected_liability"), bold=True, rule=_TOP_RULE)
+    line("Tax with cess", OUTER, tail("selected_liability"), bold=True, rule=_TOP_RULE)
     row += 2
 
     tp = model.taxes_paid
@@ -525,7 +633,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     line("Total prepaid taxes", OUTER, f"='TaxesPaid'!{tp_layout['total']}", bold=True)
     row += 1
-    line("Refund Due / (Tax Payable)", OUTER, comp("refund"), bold=True, rule=_TOP_RULE)
+    line("Refund Due / (Tax Payable)", OUTER, tail("refund"), bold=True, rule=_TOP_RULE)
     row += 3
 
     # Assumptions note only renders while residency is DEFAULTED -- a reader
@@ -853,22 +961,32 @@ def move_presentation_sheets_first(wb) -> None:
 
 
 def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
-                             os_layout: dict, tp_layout: dict, is_entries, bs_entries,
+                             os_layout: dict, tp_layout: dict, ded_layout: dict,
+                             rules_layout: dict,
+                             is_entries, bs_entries,
                              lot_start_row: int, age_class: str, year_key: str,
-                             year_label: str, *, father_name: str | None = None,
+                             year_label: str, computation_tail_fn, *,
+                             father_name: str | None = None,
                              aadhaar: str | None = None, residency_value: str = "R/OR",
                              residency_declared: bool = False,
                              business_subtree: str | None = None) -> None:
     """Add the four deliverable sheets in front of the calculation sheets and
-    hide the raw working sheets. Adds only -- restyles and overwrites nothing."""
+    hide the raw working sheets. Adds only -- restyles and overwrites nothing.
+
+    `comp_layout` is the LEAF-only Computation layout (2026-07-20 on-page-totals
+    change); `computation_tail_fn` is called from inside `write_statement_of_income`
+    once the page's own ladder coordinates exist, to write the re-anchored
+    slab-tax machinery. `rules_layout` is needed on-page now too, for the
+    s.288A Total Income rounding (MROUND) that used to live on `Computation`.
+    See `write_statement_of_income`'s docstring."""
     start_year = int(year_key[:4]) if year_key else 0
     period_text = f"01-04-{start_year} to 31-03-{start_year + 1}"
     as_at_text = f"31-03-{start_year + 1}"
     print_title = f"&\"{FONT_NAME},Bold\"&A  --  {year_label}"
 
     write_statement_of_income(
-        wb, model, entity_layout, comp_layout, os_layout, tp_layout,
-        age_class, period_text, print_title,
+        wb, model, entity_layout, comp_layout, os_layout, tp_layout, ded_layout,
+        rules_layout, age_class, period_text, print_title, computation_tail_fn,
         father_name=father_name, aadhaar=aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
     )

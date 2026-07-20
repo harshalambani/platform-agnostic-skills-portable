@@ -90,11 +90,20 @@ def test_computation_sheet_is_formula_driven(built_workbook):
     assert all(f.startswith("=") for f in formula_cells)
 
 
+def _all_formulas(ws):
+    return [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str)]
+
+
 def test_computation_references_every_schedule_sheet(built_workbook):
+    """2026-07-20 on-page-totals change: 'Deductions' is now referenced from
+    the `Statement of Income` page (the on-page Chapter VI-A leaf line), not
+    from `Computation` -- the cross-section ladder moved off the working
+    sheet. So this scans both sheets together; every other schedule is still
+    referenced directly from `Computation`'s leaf cells."""
     wb, _ = built_workbook
-    text = "\n".join(f for f in _col_b_formulas(wb["Computation"]) if isinstance(f, str))
+    text = "\n".join(_all_formulas(wb["Computation"]) + _all_formulas(wb["Statement of Income"]))
     for sheet in ("Salary", "HouseProperty", "BusinessPL", "OtherSources", "CapitalGains", "Deductions", "TaxesPaid", "Rules", "Entity"):
-        assert f"'{sheet}'!" in text, f"Computation never references {sheet!r}"
+        assert f"'{sheet}'!" in text, f"neither Computation nor Statement of Income references {sheet!r}"
 
 
 def test_regime_chooser_cell_drives_selected_liability(built_workbook):

@@ -608,18 +608,36 @@ def _rebate_formula(normal_income_cell: str, tax_normal_cell: str, max_ti_ref: s
     )
 
 
-def write_computation_sheet(
-    wb: Workbook, model: sch.ITRModel, rules_layout: dict, entity_layout: dict,
-    salary_layout: dict, business_layout: dict, hp_layout: dict, os_layout: dict,
-    cg_layout: dict, ded_layout: dict, tp_layout: dict,
-) -> dict:
-    """Returns a layout of sheet-qualified expressions (e.g.
-    "'Computation'!B12") for the presentation layer's `Statement of Income`
-    to point at -- the statement recomputes nothing."""
+def _q_computation(expr: str) -> str:
+    """Qualify a bare Computation-sheet cell/expression for use from another
+    sheet, e.g. 'B45+B46' -> "'Computation'!B45+'Computation'!B46"."""
+    return "+".join(f"'Computation'!{part}" for part in expr.split("+"))
+
+
+def write_computation_leaf_cells(
+    wb: Workbook, salary_layout: dict, business_layout: dict, hp_layout: dict,
+    os_layout: dict, cg_layout: dict,
+):
+    """Creates the `Computation` sheet and writes ONLY the per-head leaf
+    cells (2026-07-20 on-page-totals change, design doc section 7 step 2).
+
+    These are written FIRST -- before the `Statement of Income` page -- so
+    the page's own leaf line-items (`comp("salary")`, `comp("cg_lt")`, ...)
+    can reference them. Everything cross-section (GTI, Total Income, the
+    slab-tax machinery) has moved off this sheet's "always compute from
+    leaves" path: GTI/Total Income are now owned by the page, and the slab
+    formulas are re-anchored to read the page's normal-income-base cell --
+    see `write_computation_tail`, called from inside
+    `presentation.write_statement_of_income` once the page has written that
+    cell.
+
+    Returns `(sw, leaf)`: `sw` is the same row-cursor the caller hands back
+    into `write_computation_tail` to keep writing at the correct row, and
+    `leaf` holds the six Cell objects (salary/hp/biz/os/cg_lt/cg_st) both
+    the page and the tail need.
+    """
     ws = wb.create_sheet("Computation")
     sw = _SheetWriter(ws)
-    regime_cell = f"'Entity'!{entity_layout['regime'].coordinate}"
-
     sw.header("Computation")
     salary_cell = sw.label_value("Salary income", f"='Salary'!{salary_layout['income_chargeable'].coordinate}")
     hp_cell = sw.label_value("Income from house property", f"='HouseProperty'!{hp_layout['income'].coordinate}")
@@ -627,32 +645,65 @@ def write_computation_sheet(
     os_cell = sw.label_value("Other sources income", f"='OtherSources'!{os_layout['taxable_total']}")
     cg_lt_cell = sw.label_value("Capital gains -- LT (special rate)", f"='CapitalGains'!{cg_layout['lt_taxable_gross'].coordinate}-'CapitalGains'!{cg_layout['lt_exemption'].coordinate}")
     cg_st_cell = sw.label_value("Capital gains -- ST (special rate)", f"='CapitalGains'!{cg_layout['st_taxable_gross'].coordinate}")
-
-    sw.cell(1, "Normal-rate income (Salary+HP+Business+OS)")
-    normal_cell_ref = sw.cell(
-        2, f"={salary_cell.coordinate}+{hp_cell.coordinate}+{biz_cell.coordinate}+{os_cell.coordinate}",
-        number_format=INR_FORMAT,
-    ).coordinate
-    sw.row += 1
-
-    sw.cell(1, "Gross Total Income")
-    gti_cell = sw.cell(2, f"={normal_cell_ref}+{cg_lt_cell.coordinate}+{cg_st_cell.coordinate}", number_format=INR_FORMAT).coordinate
-    sw.row += 1
-
-    via_cell = sw.label_value("Chapter VI-A deductions", f"='Deductions'!{ded_layout['total']}")
-
-    sw.cell(1, "Total Income (before s.288A rounding)")
-    ti_raw_cell = sw.cell(2, f"={gti_cell}-{via_cell.coordinate}", number_format=INR_FORMAT).coordinate
-    sw.row += 1
-
-    sw.cell(1, "Total Income (rounded, s.288A)")
-    ti_cell = sw.cell(2, f"=MROUND({ti_raw_cell},'Rules'!{rules_layout['round_ti_nearest'].coordinate})", number_format=INR_FORMAT).coordinate
-    sw.row += 1
     sw.blank()
+    leaf = {
+        "salary_cell": salary_cell, "hp_cell": hp_cell, "biz_cell": biz_cell,
+        "os_cell": os_cell, "cg_lt_cell": cg_lt_cell, "cg_st_cell": cg_st_cell,
+    }
+    return sw, leaf
 
-    sw.cell(1, "Normal income net of special-rate CG (used for slab tax)")
-    normal_for_slab_cell = sw.cell(2, f"=MAX(0,{ti_cell}-{cg_lt_cell.coordinate}-{cg_st_cell.coordinate})", number_format=INR_FORMAT).coordinate
-    sw.row += 1
+
+def leaf_comp_layout(leaf: dict) -> dict:
+    """Sheet-qualified formula strings for the page's leaf line-items --
+    the ONLY comp_layout entries `write_statement_of_income` needs before it
+    builds its own on-page GTI/Total Income ladder."""
+    return {
+        "salary": _q_computation(leaf["salary_cell"].coordinate),
+        "hp": _q_computation(leaf["hp_cell"].coordinate),
+        "business": _q_computation(leaf["biz_cell"].coordinate),
+        "os": _q_computation(leaf["os_cell"].coordinate),
+        "cg_lt": _q_computation(leaf["cg_lt_cell"].coordinate),
+        "cg_st": _q_computation(leaf["cg_st_cell"].coordinate),
+    }
+
+
+def write_computation_tail(
+    wb: Workbook, sw: "_SheetWriter", leaf: dict, model: sch.ITRModel, rules_layout: dict,
+    entity_layout: dict, tp_layout: dict, cg_layout: dict, page_layout: dict,
+) -> dict:
+    """Continues the `Computation` sheet started by
+    `write_computation_leaf_cells` with the tax-slab machinery. Called from
+    INSIDE `presentation.write_statement_of_income`, once the page has
+    written its own income ladder and can hand back `page_layout` -- this is
+    the ordering resolution for design doc section 7 step 2 (rather than
+    predicting the page's row layout, which varies with which optional
+    sections render, `Computation`'s tail is written interleaved with the
+    page, right after the coordinate it needs exists).
+
+    Re-anchored (2026-07-20, Option C): the slab/rebate/surcharge formulas
+    read the PAGE's `normal_income_base` cell -- `'Statement of
+    Income'!<page_layout["normal_income_base"]>` -- instead of recomputing
+    GTI/Total Income from source leaves. This is THE re-anchor point: an
+    on-page override (any leaf, Chapter VI-A, or the b/f-loss cell) changes
+    that page cell, which this formula reads, so it flows through tax, cess
+    and refund with no Python-side recomputation. `comp_layout` keys this
+    returns are unchanged from before the split (`selected_liability`,
+    `refund`, `new/old_cess`, `new/old_tax_before_cess`) so the page's own
+    `comp(...)` refs for those keep resolving.
+
+    Special-rate CG tax is untouched -- still `cg_layout['special_tax_cell']`
+    -- so LTCG/STCG never enters the slab base (design doc section 5, THE
+    correctness trap: Total Income on the page INCLUDES special-rate CG, but
+    `normal_income_base` is Total Income minus it, computed on the page).
+    """
+    ws = sw.ws
+    regime_cell = f"'Entity'!{entity_layout['regime'].coordinate}"
+    cg_lt_cell = leaf["cg_lt_cell"]
+    cg_st_cell = leaf["cg_st_cell"]
+
+    # Cross-sheet ref into the page's own derived normal-income-base cell --
+    # NOT recomputed here. See module docstring above.
+    normal_for_slab_cell = f"'Statement of Income'!{page_layout['normal_income_base']}"
 
     def _regime_block(prefix: str, slab_refs: dict, rebate_max_ti: str, rebate_max_amt: str,
                        rebate_marginal: str, surcharge_refs: dict) -> str:
@@ -732,26 +783,13 @@ def write_computation_sheet(
     refund_cell = sw.cell(2, f"=MROUND({taxes_paid_cell.coordinate}-{selected_liability_cell},'Rules'!{rules_layout['round_tax_nearest'].coordinate})", number_format=INR_FORMAT)
     sw.row += 1
 
-    def _q(expr: str) -> str:
-        """Qualify a bare cell/expression on this sheet for use from another
-        sheet, e.g. 'B45+B46' -> "'Computation'!B45+'Computation'!B46"."""
-        return "+".join(f"'Computation'!{part}" for part in expr.split("+"))
-
-    comp_layout = {
-        "salary": _q(salary_cell.coordinate),
-        "hp": _q(hp_cell.coordinate),
-        "business": _q(biz_cell.coordinate),
-        "os": _q(os_cell.coordinate),
-        "cg_lt": _q(cg_lt_cell.coordinate),
-        "cg_st": _q(cg_st_cell.coordinate),
-        "gti": _q(gti_cell),
-        "total_income": _q(ti_cell),
-        "selected_liability": _q(selected_liability_cell),
-        "refund": _q(refund_cell.coordinate),
-        "new_cess": _q(new_block["cess"]),
-        "old_cess": _q(old_block["cess"]),
-        "new_tax_before_cess": _q(new_block["tax_before_cess"]),
-        "old_tax_before_cess": _q(old_block["tax_before_cess"]),
+    comp_tail = {
+        "selected_liability": _q_computation(selected_liability_cell),
+        "refund": _q_computation(refund_cell.coordinate),
+        "new_cess": _q_computation(new_block["cess"]),
+        "old_cess": _q_computation(old_block["cess"]),
+        "new_tax_before_cess": _q_computation(new_block["tax_before_cess"]),
+        "old_tax_before_cess": _q_computation(old_block["tax_before_cess"]),
     }
 
     if uncl.count > 0:
@@ -789,7 +827,7 @@ def write_computation_sheet(
             ws.cell(row=worst_case_row, column=col).font = _UNMAPPED_FONT
         sw.row += 1
 
-    return comp_layout
+    return comp_tail
 
 
 # ---------------------------------------------------------------------------
@@ -1053,10 +1091,23 @@ def write_workbook(
     is_entries = write_is_transcript(wb, tree)
     bs_entries = write_bs_transcript(wb, tree)
 
-    comp_layout = write_computation_sheet(
-        wb, model, rules_layout, entity_layout, salary_layout, business_layout, hp_layout,
-        os_layout, cg_layout, ded_layout, tp_layout,
+    # `Computation` is now written in two passes (2026-07-20 on-page-totals
+    # change) -- leaf cells here, tax-slab machinery ("tail") interleaved
+    # into `presentation.write_statement_of_income` below via
+    # `_computation_tail_fn`, once the page has written the coordinate the
+    # tail needs to read (`normal_income_base`). See write_computation_tail's
+    # docstring for why this ordering was chosen over predicting the page's
+    # row layout up front.
+    comp_sw, comp_leaf = write_computation_leaf_cells(
+        wb, salary_layout, business_layout, hp_layout, os_layout, cg_layout,
     )
+    comp_layout_leaf = leaf_comp_layout(comp_leaf)
+
+    def _computation_tail_fn(page_layout: dict) -> dict:
+        return write_computation_tail(
+            wb, comp_sw, comp_leaf, model, rules_layout, entity_layout, tp_layout,
+            cg_layout, page_layout,
+        )
 
     write_reconciliation_sheet(
         wb, tree, identity_failures, book_cross_check, form16_cross_check, unmapped,
@@ -1075,10 +1126,10 @@ def write_workbook(
     # resolver -- no new age logic anywhere.
     residency_value, residency_declared = rules_engine.resolve_residency(entity.residency)
     presentation.build_presentation_layer(
-        wb, model, entity_layout, comp_layout, os_layout, tp_layout,
-        is_entries, bs_entries, cg_layout["lot_start_row"],
+        wb, model, entity_layout, comp_layout_leaf, os_layout, tp_layout, ded_layout,
+        rules_layout, is_entries, bs_entries, cg_layout["lot_start_row"],
         rules_engine.resolve_age_class(entity.status, entity.dob, fy_end, residency=entity.residency),
-        year_key, rules.year_label,
+        year_key, rules.year_label, _computation_tail_fn,
         father_name=entity.father_name, aadhaar=entity.aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
         business_subtree=entity.business_subtree,
