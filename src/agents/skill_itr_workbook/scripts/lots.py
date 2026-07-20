@@ -49,7 +49,6 @@ from fractions import Fraction
 
 from parse_gnucash import Book, fy_window
 
-GAIN_ACTIONS = {"LTCG", "STCG"}
 _STOCK_TYPES = {"STOCK", "MUTUAL"}
 UNATTRIBUTED = "unattributed — review"
 FIFO_VIOLATION = "FIFO violation — review"
@@ -130,7 +129,16 @@ def _sale_transactions(book: Book):
                 continue
             if acct.type in _STOCK_TYPES and sp.quantity < 0:
                 stock_splits.append(sp)
-            elif acct.type == "INCOME" and sp.action in GAIN_ACTIONS:
+            elif acct.type == "INCOME":
+                # Real GnuCash books never stamp an LTCG/STCG `action` on the
+                # booked-gain split -- only the stock assistant's Buy/Sell
+                # actions get auto-stamped, and a manually-entered capital-
+                # gain split carries none. Detect the gain leg by account
+                # TYPE, not by `action` (2026-07-19 CG gain-split-vs-action
+                # fix): every INCOME-type split inside a disposal transaction
+                # (per the module docstring's three-split anatomy) is the
+                # booked-gain leg, whether or not a book happens to also set
+                # action="LTCG"/"STCG" on it.
                 gain_splits.append(sp)
             else:
                 other_splits.append(sp)
