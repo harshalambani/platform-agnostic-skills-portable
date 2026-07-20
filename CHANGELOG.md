@@ -13,6 +13,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > entry in `v2.3.1` (`a8cf73a`, PR #76). They are left here rather than
 > back-filed into sections that do not exist for those tags.
 
+### Changed
+- **ITR workbook — income totals now compute on the deliverable page, so
+  manual overrides propagate.** The `Statement of Income` sheet's income
+  ladder (Gross Total Income → Chapter VI-A → brought-forward-loss set-off →
+  Total Income, plus the normal-income / special-rate-CG split) is now built
+  from live on-page Excel formulas over on-page cells, instead of mirroring a
+  hidden `Computation` working sheet. The tax-slab machinery still lives on
+  `Computation` but is re-anchored to read the page's normal-income cell, so an
+  override to any leaf item, to Chapter VI-A, or to the b/f-loss cell flows
+  end-to-end through tax, cess and refund. **Brought-forward-loss set-off is
+  now a real, editable input cell** (defaulting to 0, styled distinctly),
+  replacing the previously-parked placeholder — a manual set-off amount now
+  actually moves Total Income and everything downstream. Special-rate LTCG/STCG
+  (111A/112A) stays carved out of the slab base (regression-tested). No change
+  to any tax rate, rule, or the default (no-override) figures — the generated
+  workbook reconciles to the same numbers as before. Design:
+  `docs/2026-07-20-itr-onpage-totals-plan.md`.
+
 ### Added
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
   a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
