@@ -50,6 +50,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
 
+## [2.13.2] — 2026-07-20
+
+### Fixed
+- **ITR workbook — capital gains understated to ~zero on every equity sale.**
+  The lot-reconstruction engine (`scripts/lots.py` `_sale_transactions`)
+  identified the booked-gain leg of a stock disposal by requiring the income
+  split's GnuCash `action` to be `"LTCG"`/`"STCG"`. Real books never carry
+  that: GnuCash only auto-stamps `Buy`/`Sell` via the stock assistant, and a
+  manually entered capital-gain income split has no `action`. So the gain leg
+  was misclassified as a *proceeds* split, where its negative value cancelled
+  the real broker proceeds — collapsing computed proceeds to the cost basis
+  and the gain to ~0 for every sale. The gain leg is now detected by account
+  **type** (`INCOME`) instead of `action`; books that do set an explicit
+  `action` still classify correctly. Verified against a real book: a disposal
+  that previously reported a 0 gain now reports the correct ~2.46 lakh gain.
+- **Capital-gains reconciliation now fails loud (banner, no abort).** When the
+  reconstructed lot gains do not reconcile to the books' `CG_*_CONTROL`
+  totals, the workbook is still written in full, but a prominent ERROR banner
+  is placed at the top of both the `CG` and `Statement of Income` sheets, and
+  the new `agent.main()` CLI wrapper exits non-zero with a stderr line. Prior
+  behaviour surfaced a mismatch only as a buried `OK`/`MISMATCH` cell on a
+  working sheet, so a materially wrong return could be handed on unnoticed.
+
 ## [2.13.1] — 2026-07-19
 
 ### Fixed
