@@ -74,6 +74,7 @@ VALIDATION ERROR) are unchanged -- still stub + ERROR, no workbook.
 """
 from __future__ import annotations
 
+import argparse
 import datetime
 import re
 import sys
@@ -90,6 +91,7 @@ import suggest  # noqa: E402
 import rules as rules_engine  # noqa: E402
 import schedules as sch  # noqa: E402
 import write_workbook  # noqa: E402
+import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
@@ -488,6 +490,19 @@ def _build_and_write_workbook(
             "Workbook: FMV lookup FAILED for scrip(s) (fail-loud, review scrips.yaml): "
             + ", ".join(model.capital_gains.unresolved_scrips)
         )
+    if not model.capital_gains.reconciliation_ok:
+        # "Banner, no abort" (2026-07-19 CG gain-split-vs-action fix): the
+        # workbook above has ALREADY been written in full, with a matching
+        # top-of-sheet ERROR banner on the CG and Statement of Income sheets
+        # (see presentation.py's _write_cg_error_banner). This line's job is
+        # only to carry presentation.CG_RECONCILIATION_ERROR_MARKER into the
+        # run() summary so that main()'s process-level exit code below (and
+        # any other caller grepping the summary) can detect the mismatch.
+        lines.append(
+            f"{presentation.CG_RECONCILIATION_ERROR_MARKER} "
+            f"(diff {model.capital_gains.reconciliation_diff:,.2f}) -- workbook still written "
+            "(see ERROR banner on CG / Statement of Income sheets) -- DO NOT FILE without review."
+        )
     return lines
 
 
@@ -620,3 +635,59 @@ def run(
         _write_stub_workbook(output_path, summary)
 
     return summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Standalone CLI wrapper around run() (this skill is normally invoked
+    in-process via skill.yaml's `mode: "direct"` / `entry_point: "agent:run"`,
+    through the registry or the Gradio UI's background thread -- see
+    ui/_runner.py -- so no OS-process exit code previously existed for it).
+    Added for the CG-reconciliation "banner, no abort" fail-loud requirement
+    (2026-07-19 CG gain-split-vs-action fix): the workbook is ALWAYS written
+    in full, but a genuine CG control mismatch must still be impossible to
+    miss for a process/CI caller, so this wrapper greps run()'s returned
+    summary for presentation.CG_RECONCILIATION_ERROR_MARKER and turns that
+    into a non-zero exit code plus a stderr line, mirroring this repo's
+    other skills' `def main() -> int: ... print("ERROR: ...", file=sys.stderr);
+    return 1` convention (e.g. skill_krc/scripts/parse_krc_ledger.py)."""
+    parser = argparse.ArgumentParser(
+        description="Build the ITR workbook from the command line (wraps agent.run()).",
+    )
+    parser.add_argument("bs_html", help="Path to the eguile Balance Sheet HTML.")
+    parser.add_argument("output_path", help="Path to write the .xlsx workbook to.")
+    parser.add_argument("--book-file", dest="book_file", default=None)
+    parser.add_argument("--mapping-file", dest="mapping_file", default=None)
+    parser.add_argument("--form16-pdf", dest="form16_pdf", default=None)
+    parser.add_argument("--form16-pan", dest="form16_pan", default=None)
+    parser.add_argument("--as26-workbook", dest="as26_workbook", default=None)
+    parser.add_argument("--config-path", dest="config_path", default="config.yaml")
+    parser.add_argument("--model-override", dest="model_override", default=None)
+    parser.add_argument("--entities-path", dest="entities_path", default="Data/itr/entities.yaml")
+    parser.add_argument("--entity-key", dest="entity_key", default=None)
+    parser.add_argument("--rules-dir", dest="rules_dir", default="Data/itr/rules")
+    parser.add_argument("--scrips-path", dest="scrips_path", default="Data/itr/scrips.yaml")
+    parser.add_argument("--ay", dest="ay", default=None)
+    parser.add_argument("--regime-override", dest="regime_override", default=None)
+    args = parser.parse_args(argv)
+
+    summary = run(
+        args.bs_html, args.output_path, book_file=args.book_file, mapping_file=args.mapping_file,
+        form16_pdf=args.form16_pdf, form16_pan=args.form16_pan, as26_workbook=args.as26_workbook,
+        config_path=args.config_path, model_override=args.model_override,
+        entities_path=args.entities_path, entity_key=args.entity_key, rules_dir=args.rules_dir,
+        scrips_path=args.scrips_path, ay=args.ay, regime_override=args.regime_override,
+    )
+    print(summary)
+    if presentation.CG_RECONCILIATION_ERROR_MARKER in summary:
+        print(
+            f"{presentation.CG_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
+            "MUST be reviewed before filing (see ERROR banner on CG / Statement of Income "
+            "sheets).",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

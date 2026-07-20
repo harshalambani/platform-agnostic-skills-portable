@@ -57,6 +57,44 @@ _ASSUMPTION_NOTE = (
     "taxable at all."
 )
 
+#: Fail-loud (2026-07-19 CG gain-split-vs-action fix), "banner, no abort":
+#: schedules.py's build_capital_gains already computes reconciliation_ok /
+#: reconciliation_diff correctly -- this is only about making a mismatch
+#: IMPOSSIBLE TO MISS on the deliverable sheets, never about refusing to
+#: produce the workbook. `CG_RECONCILIATION_ERROR_MARKER` is the substring
+#: agent.py greps its own run() summary for to decide the process's exit
+#: code, so the wording here and the summary line it feeds must both
+#: contain it verbatim.
+CG_RECONCILIATION_ERROR_MARKER = "ERROR: Capital Gains do not reconcile to books"
+_CG_ERROR_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_CG_ERROR_FONT_COLOR = "9C0006"
+
+
+def cg_mismatch_banner_text(cg_schedule) -> str:
+    return (
+        f"*** {CG_RECONCILIATION_ERROR_MARKER} "
+        f"(diff {cg_schedule.reconciliation_diff:,.2f}) -- DO NOT FILE ***"
+    )
+
+
+def _write_cg_error_banner(ws, row: int, cg_schedule, ncols: int) -> int:
+    """Top-of-sheet ERROR banner, present only when the CG lot-sum fails to
+    reconcile to the books' control total (schedules.py build_capital_gains,
+    diff magnitude > 0.01). Modeled on the CapitalGains sheet's existing
+    'Unresolved FMV scrips (fail-loud, review)' row, but rendered as a
+    prominent merged banner at the very top of a presentation sheet instead
+    of a label/value cell buried in a working sheet -- this is what a CA or
+    a bank actually opens. The workbook is ALWAYS still produced ("banner,
+    no abort"); omitted entirely (returns `row` unchanged) when reconciled."""
+    if cg_schedule.reconciliation_ok:
+        return row
+    c = ws.cell(row=row, column=1, value=cg_mismatch_banner_text(cg_schedule))
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
 _PARKED_NOTE = "(to be filled)"
 
 #: Human labels for rules.resolve_age_class()'s return values. 'general'
@@ -295,6 +333,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     # -- header block -------------------------------------------------------
     row = 1
+    row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     title = ws.cell(row=row, column=1, value="STATEMENT OF INCOME")
     title.font = _font(14, bold=True)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=OUTER)
@@ -766,12 +805,15 @@ def write_cg_sheet(wb, cg_schedule, entity_layout: dict, lot_start_row: int, pri
     ws = wb.create_sheet("CG")
     ncols = len(_CG_HEADERS)
 
-    t = ws.cell(row=1, column=1, value=f"='Entity'!{entity_layout['name'].coordinate}")
+    row = 1
+    row = _write_cg_error_banner(ws, row, cg_schedule, ncols)
+    title_row = row
+    t = ws.cell(row=title_row, column=1, value=f"='Entity'!{entity_layout['name'].coordinate}")
     t.font = _font(12, bold=True)
     t.alignment = Alignment(horizontal="center")
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=ncols)
+    ws.merge_cells(start_row=title_row, start_column=1, end_row=title_row, end_column=ncols)
 
-    row = 3
+    row = title_row + 2
     row = _cg_block(
         ws, row,
         "Details of Long Term Capital Gain / (Loss) on Shares and MF during the year",
