@@ -219,3 +219,115 @@ check if it's cheap; do **not** stand it up in CI for v1.
    want sheet protection with only the ladder-input cells unlocked, to prevent
    accidental edits to formula cells? Default: no protection in v1 (matches
    current workbook), revisit if preparers clobber formulas.
+
+---
+
+## 11. REVISION 2 (2026-07-21) — Harshal's decisions; supersedes §4, §6, §10
+
+Harshal reviewed and made the calls below. These **supersede** the defaults in
+§4 (Option C), §6 (single b/f cell), and §10. This is now authorized to build,
+test hard, PR, **merge and release** (not stop-at-PR) — Sonnet subagent for the
+build. Next release version: **v2.14.0** (minor; backward-compatible feature).
+
+### 11.1 Tax computation on the page (supersedes §4 / §10-Q1)
+
+Decision: **move the tax computation onto the deliverable page** as live
+formulas — the page is the live authority. `Computation` stays as a parallel
+backing sheet, but on-page cells no longer merely mirror it. Detail level =
+**standard computation lines** (§10-Q2 answer):
+
+```
+Tax on total income (slab)      [on-page live formula]
+  less s.87A rebate             [on-page]
+  add  Surcharge                [on-page]
+  less Marginal relief          [on-page]
+  add  Health & Education Cess  [on-page]
+  = Total tax liability         [on-page]
+  add special-rate CG tax       [on-page, from CapitalGains]
+  less prepaid taxes
+  = Refund / (Payable)          [on-page]
+```
+
+The **granular slab-band derivation** (which bands, at what rate) may still be a
+formula that references the `Rules` sheet — it is **not** expanded band-by-band
+on the deliverable (Harshal picked "standard comp lines", not "fully expanded
+slabs"). Regime pick (old/new) stays as the existing selector. The special-rate
+CG carve-out of §5 **still holds and is still the primary correctness trap**: the
+slab formula's base is the page's normal-income base, CG special-rate tax is
+added separately.
+
+### 11.2 b/f-loss = statutory per-bucket set-off (supersedes §6 / §10-Q2)
+
+Decision (Harshal): **"this is set in law - not up for interpretation."** So the
+single "reduce normal income first" cell is **wrong** and is replaced by
+**per-bucket b/f-loss cells routed per the Income Tax Act**. Brought-forward
+losses follow the *carry-forward* set-off rules (stricter than current-year
+inter-head set-off) — each b/f loss sets off **only** against its own income
+type:
+
+| B/f loss bucket | Section | Sets off (current yr) ONLY against | Build in v1? |
+|---|---|---|---|
+| House Property loss | 71B | House Property income only | **Yes** |
+| Business loss (non-spec.) | 72 | Business/profession income only | **Yes** |
+| Short-term capital loss | 74 | STCG, then LTCG | **Yes** |
+| Long-term capital loss | 74 | LTCG only | **Yes** |
+| Speculation loss | 73 | Speculation income only | No* |
+| Specified business (35AD) | 73A | Specified-business income only | No* |
+| Race-horse loss | 74A | Race-horse income only | No* |
+
+\* Omitted because the tool does not model those income sources (nothing to set
+off against). **Not** a legal interpretation — a scope match to existing heads.
+Build the bucket model so adding these later is trivial (data-driven list).
+
+**Routing rules (must be enforced by the formulas, capped at available income
+in each target):**
+
+- **b/f HP loss** → reduces House Property head income only. Cap at HP income
+  (cannot go negative into other heads).
+- **b/f Business loss** → reduces Business head income only. Cap at business
+  income. (Explicitly **cannot** reduce salary or other-sources — this is the
+  correction to the old "reduce normal income first" default.)
+- **b/f STCL** → reduces STCG first, remainder against LTCG. Both are within the
+  capital-gains block; must respect the special-rate carve-out plumbing.
+- **b/f LTCL** → reduces LTCG only.
+
+Set-off happens at the **head/gain-type level, before aggregation into GTI**,
+not as one lump against Total Income. Each bucket is an editable input cell
+(default 0), styled as an input (the `_input_cell` DDEBF7 convention). Excess
+over available income is **not** auto-carried-forward in v1 (out of scope; the
+cap simply prevents an impossible negative) — but do not silently swallow it;
+if a preparer enters more than is available in the bucket, the set-off is capped
+at available and the entered figure remains visible. Order of statutory
+precedence (s.71 current-year set-off before b/f) is **not** re-implemented — the
+preparer enters b/f figures directly; v1 is faithful *routing + caps*, not a full
+CYLA/BFLA engine.
+
+Sources for the law: incometax.gov.in set-off/carry-forward help; s.72 (business
+loss, 8y, business income only); s.71B (HP loss, 8y, HP income only); s.74
+(capital loss, 8y — STCL vs STCG+LTCG, LTCL vs LTCG only).
+
+### 11.3 Locking (supersedes §10-Q3)
+
+Decision: **do not lock / no sheet protection.** Unchanged from current workbook.
+
+### 11.4 Testing bar (Harshal: "test hard")
+
+In addition to §8:
+- **Per-bucket routing tests** (one per bucket): entering a b/f HP loss reduces
+  only HP income and flows to GTI/TI/tax; a b/f business loss does **not** reduce
+  salary; b/f LTCL reduces LTCG only (never STCG, never normal income); b/f STCL
+  spills STCG→LTCG.
+- **Cap tests:** a bucket entry exceeding available income sets off only up to
+  available (no negative head income; no cross-bucket leakage).
+- **Special-rate CG carve-out** regression (from §5) — still mandatory.
+- **Default (no-override) parity to the paisa** vs `schedules.py` — the generated
+  workbook's figures must be unchanged from v2.13.x. Strongest regression.
+- Full `pytest tests` green; ruff no new findings; **synthetic fixtures only, no
+  PII**.
+
+### 11.5 Rollout (supersedes §9)
+
+Build → verify independently → PR → **merge to main** → tag **v2.14.0** to
+trigger the release workflow (frozen build + frozen smoke test is the gate) →
+GitHub Release. Authorized by Harshal 2026-07-21. Do **not** release if the
+frozen smoke test is not green — HOLD and report.
