@@ -336,12 +336,208 @@ def _parked_cell(ws, row: int, col: int):
 
 
 # ---------------------------------------------------------------------------
+# Tax-computation formula builders (2026-07-21 on-page-totals change, design
+# doc section 11.1). Moved here from write_workbook.py -- these are pure
+# Excel-formula-string builders over cell-reference strings, no hardcoded
+# rate or threshold, and this module needs to call them directly to write the
+# on-page tax block. write_workbook.py `import presentation`s this module (to
+# call `write_statement_of_income`), so the dependency cannot run the other
+# way: write_workbook.py's own `write_computation_tail` now calls
+# `presentation._slab_tax_formula` / `presentation._surcharge_formula`
+# instead of keeping a second copy.
+# ---------------------------------------------------------------------------
+
+def _slab_tax_formula(income_cell: str, slab_refs: dict) -> str:
+    """SUM of MAX(0, MIN(income, upto_i) - upto_(i-1)) * rate_i across the
+    padded slab rows in `slab_refs` (Rules-sheet cell refs) -- a generic
+    Excel slab-tax formula that never hardcodes a rate or threshold."""
+    terms = []
+    prev_upto_ref = None
+    for i in sorted(slab_refs):
+        upto_ref, rate_ref = slab_refs[i]
+        lower = f"'Rules'!{prev_upto_ref}" if prev_upto_ref else "0"
+        terms.append(f"(MAX(0,MIN({income_cell},'Rules'!{upto_ref})-{lower}))*'Rules'!{rate_ref}")
+        prev_upto_ref = upto_ref
+    return "+".join(terms)
+
+
+def _surcharge_formula(income_cell: str, tax_cell: str, surcharge_refs: dict) -> str:
+    """Nested-IF surcharge-rate lookup (highest matching band) * tax."""
+    expr = "0"
+    for i in sorted(surcharge_refs):
+        above_ref, rate_ref = surcharge_refs[i]
+        expr = f"IF({income_cell}>'Rules'!{above_ref},'Rules'!{rate_ref},{expr})"
+    return f"({expr})*{tax_cell}"
+
+
+def _rebate_base_formula(normal_income_cell: str, tax_normal_cell: str, max_ti_ref: str,
+                         max_amt_ref: str) -> str:
+    """s.87A base rebate ONLY (no marginal relief) -- the design doc's ladder
+    (section 11.1) wants this as its own line item, split out of what used to
+    be one combined "87A rebate" cell (write_workbook.py's `_rebate_formula`,
+    still used unchanged by `Computation`'s own audit copy). Mutually
+    exclusive with `_marginal_relief_formula` by construction (one of the two
+    is always 0), so `tax - rebate_base - marginal_relief` reproduces the old
+    combined formula's result exactly -- see the paired function below."""
+    return f"IF({normal_income_cell}<='Rules'!{max_ti_ref},MIN('Rules'!{max_amt_ref},{tax_normal_cell}),0)"
+
+
+def _marginal_relief_formula(normal_income_cell: str, tax_normal_cell: str, max_ti_ref: str,
+                             marginal_ref: str) -> str:
+    """s.87A marginal relief ONLY -- the other half of the split described in
+    `_rebate_base_formula`'s docstring. Zero whenever income is within the
+    rebate-eligible band (that's `_rebate_base_formula`'s job) or the regime
+    has no marginal-relief flag set."""
+    return (
+        f"IF(AND({normal_income_cell}>'Rules'!{max_ti_ref},'Rules'!{marginal_ref}),"
+        f"MAX(0,{tax_normal_cell}-({normal_income_cell}-'Rules'!{max_ti_ref})),0)"
+    )
+
+
+#: Helper columns for the on-page tax block's both-regimes working (design
+#: doc section 11.1) -- past OUTER (column E), so `apply_sheet_chrome`'s print
+#: area (always "A1:<last_col><last_row>" with last_col=OUTER) never includes
+#: them. This is genuinely-live, page-local arithmetic -- not a mirror of
+#: `Computation`, which keeps its own separately-anchored copy for audit only.
+_TAX_HELPER_COL = 8   # column H
+
+
+def _write_regime_tax_workings(ws, start_row: int, col: int, prefix: str, normal_ref: str,
+                               special_cg_ref: str, cg_tax_ref: str, cess_rate_ref: str,
+                               slab_refs: dict, rebate_max_ti: str, rebate_max_amt: str,
+                               rebate_marginal: str, surcharge_refs: dict) -> tuple:
+    """Writes one regime's FULL on-page tax working -- slab tax -> s.87A
+    rebate -> marginal relief -> tax after rebate -> + special-rate CG tax ->
+    surcharge -> cess -> total tax liability -- each its own live-formula
+    cell, chained cell-to-cell (never re-embedded as one giant nested
+    string, which is how `Computation`'s own regime block stays readable).
+    The visible ladder in `write_statement_of_income` just IF()-picks between
+    this regime's final cells and the other regime's at every line.
+
+    Numeric-parity note (design doc section 11.4, "default parity to the
+    paisa"): schedules.py's compute_tax() applies surcharge and cess to
+    (tax-after-rebate + special-rate CG tax) COMBINED, not to normal-rate tax
+    alone -- so special-rate CG tax is added in BEFORE surcharge/cess here,
+    matching schedules.py exactly, even though the design doc's line order
+    lists "add special-rate CG tax" after "Total tax liability". Both regimes
+    are always computed regardless of which is selected -- see
+    `write_statement_of_income`'s `sel()`.
+
+    Returns (parts, next_row) where `parts` has keys slab/rebate/marginal/
+    cg_tax/surcharge/cess/liability -> this regime's cell coordinates.
+    """
+    r = start_row
+
+    # NOTE: these working-cell labels deliberately avoid reusing any phrase
+    # from the VISIBLE ladder below (e.g. never literally "Tax on total
+    # income" or "Brought forward losses set off") -- tests locate visible
+    # rows by a case-insensitive label SUBSTRING search over the *whole*
+    # sheet, and these helper cells sit earlier in row order (row 2 onward)
+    # than the visible ladder, so a shared phrase would shadow the real row.
+    def put(label: str, formula: str) -> str:
+        nonlocal r
+        ws.cell(row=r, column=col, value=f"{prefix} regime working -- {label}").font = _font(8, italic=True)
+        c = ws.cell(row=r, column=col + 1, value=formula)
+        c.number_format = INR_FORMAT
+        c.font = _font(8)
+        r += 1
+        return c.coordinate
+
+    slab_ref = put("gross tax on income (slab)", "=" + _slab_tax_formula(normal_ref, slab_refs))
+    rebate_ref = put("rebate u/s 87A",
+                     "=" + _rebate_base_formula(normal_ref, slab_ref, rebate_max_ti, rebate_max_amt))
+    marginal_ref = put("marginal relief u/s 87A",
+                       "=" + _marginal_relief_formula(normal_ref, slab_ref, rebate_max_ti, rebate_marginal))
+    after_rebate_ref = put("tax after rebate and marginal relief",
+                           f"=MAX(0,{slab_ref}-{rebate_ref}-{marginal_ref})")
+    combined_ref = put("plus special-rate CG tax", f"={after_rebate_ref}+{cg_tax_ref}")
+    surcharge_income_expr = f"({normal_ref}+{special_cg_ref})"
+    surcharge_ref = put("surcharge on tax",
+                        "=" + _surcharge_formula(surcharge_income_expr, combined_ref, surcharge_refs))
+    cess_ref = put("health and education cess", f"=({combined_ref}+{surcharge_ref})*{cess_rate_ref}")
+    liability_ref = put("tax liability, combined", f"={combined_ref}+{surcharge_ref}+{cess_ref}")
+    return {
+        "slab": slab_ref, "rebate": rebate_ref, "marginal": marginal_ref,
+        "cg_tax": cg_tax_ref, "surcharge": surcharge_ref, "cess": cess_ref,
+        "liability": liability_ref,
+    }, r
+
+
+# ---------------------------------------------------------------------------
+# Statutory per-bucket brought-forward-loss set-off (2026-07-21 on-page-
+# totals change, design doc section 11.2). Set BY THE INCOME TAX ACT, not a
+# design choice: each bucket sets off ONLY against its own income head/
+# gain-type, capped at that head's available (non-negative) income for the
+# year -- it can never drive a head negative and it can never leak into
+# another head. Set-off happens here, at the head/gain-type level, BEFORE
+# aggregation into Gross Total Income (the pre-2026-07-21 behaviour -- one
+# lump cell subtracted from normal income after GTI -- was not what the
+# statute requires; see write_statement_of_income's docstring).
+# ---------------------------------------------------------------------------
+
+#: Simple single-head buckets: each just caps its own bf-loss input against
+#: MAX(head, 0) via `_capped_setoff_expr`. Data-driven so a future bucket
+#: (s.73 speculation-business loss, s.73A specified-business loss, s.74A
+#: race-horse-owning loss) is a one-line addition here once the tool models
+#: that income source -- intentionally NOT built now (design doc section
+#: 11.2 lists them but only the first four buckets ship in this change).
+#: Each tuple is (bucket key, on-page label, comp_layout leaf key it nets).
+_SIMPLE_BF_BUCKETS = (
+    ("bf_hp", "b/f House Property loss (s.71B) -- HP income only", "hp"),
+    ("bf_business", "b/f Business loss (s.72) -- Business income only", "business"),
+)
+
+
+def _capped_setoff_expr(head_ref: str, bf_ref: str) -> str:
+    """Reduces `head_ref` by up to `bf_ref`, capped at MAX(head_ref,0) -- the
+    statutory cap (design doc section 11.2): the bucket cannot drive the head
+    negative, and it cannot apply at all when the head is already <=0 (that's
+    the head's OWN current-year loss, a separate matter from a brought-
+    forward loss set off against it). Returns a bare expression (no leading
+    "=") so callers can embed it directly in `item()`'s formula string."""
+    return f"({head_ref})-MIN({bf_ref},MAX({head_ref},0))"
+
+
+def _cg_setoff_exprs(stcg_ref: str, ltcg_ref: str, bf_stcl_ref: str, bf_ltcl_ref: str) -> tuple:
+    """s.74 capital-loss set-off: b/f Short-term capital loss sets off
+    against STCG first, any remainder spills over against LTCG; b/f
+    Long-term capital loss sets off against LTCG ONLY (never STCG, never
+    normal income), applied AFTER the STCL spillover. Both capped so a
+    set-off can never drive an already-positive head negative and can never
+    leak outside the CG head.
+
+    Deliberately NOT floored via an unconditional MAX(0,...) on the raw
+    head value: when a head is already a current-year LOSS (e.g. LTCG < 0)
+    and there is nothing to set off against it (bf buckets at their default
+    0, or a positive spillover with no positive LTCG available to absorb
+    it), the raw signed value must pass through UNCHANGED so the default
+    (no-override) case stays paisa-exact with schedules.py's own ground
+    truth (which flows the raw signed CG figures into GTI/Total Income and
+    only nets LTCG+STCG together for the special-rate base -- see
+    test_default_case_ladder_matches_schedules_engine_to_the_paisa). The
+    cap only ever *reduces towards* zero an amount that was actually
+    available (positive) before the set-off touched it; it never invents a
+    floor on an untouched negative starting point. Returns
+    (net_stcg_expr, net_ltcg_expr), bare expressions (no leading "=")."""
+    stcg_avail = f"MAX({stcg_ref},0)"
+    stcl_used = f"MIN({bf_stcl_ref},{stcg_avail})"
+    net_stcg = f"({stcg_ref})-{stcl_used}"
+    stcl_spill = f"MAX(0,{bf_stcl_ref}-{stcg_avail})"
+    ltcg_avail = f"MAX({ltcg_ref},0)"
+    spill_used = f"MIN({stcl_spill},{ltcg_avail})"
+    remaining_after_spill = f"({ltcg_avail})-{spill_used}"
+    ltcl_used = f"MIN({bf_ltcl_ref},{remaining_after_spill})"
+    net_ltcg = f"({ltcg_ref})-{spill_used}-{ltcl_used}"
+    return net_stcg, net_ltcg
+
+
+# ---------------------------------------------------------------------------
 # Sheet 1 -- Statement of Income
 # ---------------------------------------------------------------------------
 
 def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
                               os_layout: dict, tp_layout: dict, ded_layout: dict,
-                              rules_layout: dict,
+                              rules_layout: dict, cg_layout: dict,
                               age_class: str, period_label: str, print_title: str,
                               computation_tail_fn, *,
                               father_name: str | None = None, aadhaar: str | None = None,
@@ -350,17 +546,32 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     three money columns (line items / sub-totals / running total) showing ONLY
     the selected regime.
 
-    2026-07-20 on-page-totals change: the income ladder (GTI -> Chapter VI-A
-    -> b/f loss -> Total Income -> normal/special-CG split) is now computed
-    ON THIS PAGE from on-page cells, rather than mirroring a hidden
-    `Computation` sheet. `comp_layout` here is the LEAF layout only (salary,
-    hp, business, os, cg_lt, cg_st -- see `write_computation_leaf_cells`).
-    Once this page has written its own `normal_income_base` /
-    `total_income` coordinates, it calls `computation_tail_fn(page_layout)`
-    to have `write_computation_tail` write the re-anchored slab-tax
-    machinery on `Computation`, reading THIS page's cells. That callback
-    returns a comp_layout-shaped dict (`tail_layout`) for the tax/cess/
-    liability/refund lines below. See `docs/2026-07-20-itr-onpage-totals-plan.md`.
+    2026-07-20/21 on-page-totals change: the income ladder (GTI -> Chapter
+    VI-A -> Total Income -> normal/special-CG split) AND the standard tax
+    computation (slab tax -> s.87A rebate -> marginal relief -> + special-
+    rate CG tax -> surcharge -> cess -> Total tax liability -> refund) are
+    now computed ON THIS PAGE from on-page cells, rather than mirroring a
+    hidden `Computation` sheet. `comp_layout` here is the LEAF layout only
+    (salary, hp, business, os, cg_lt, cg_st -- see
+    `write_computation_leaf_cells`). `cg_layout` supplies
+    `special_tax_cell` -- the 112A/111A tax on special-rate CG, read
+    directly from `CapitalGains`, regime-independent.
+
+    Brought-forward losses (design doc section 11.2) are FOUR statutory
+    per-bucket input cells -- HP (s.71B), Business (s.72), STCL and LTCL
+    (both s.74) -- each capped and routed to its own head/gain-type BEFORE
+    aggregation into Gross Total Income; see `_SIMPLE_BF_BUCKETS`,
+    `_capped_setoff_expr` and `_cg_setoff_exprs`. This replaces the single
+    lump "reduces normal income first" input cell from 2026-07-20.
+
+    `computation_tail_fn(page_layout)` is still called, once this page has
+    written its own `normal_income_base` coordinate, so `write_computation_tail`
+    keeps writing its re-anchored slab-tax machinery onto `Computation` as a
+    parallel, hidden backing/audit sheet (design doc section 11.1) -- but this
+    page's own tax/cess/liability/refund lines no longer read that return
+    value; they are built independently here via `_write_regime_tax_workings`
+    so the page is genuinely live, not a mirror. See
+    `docs/2026-07-20-itr-onpage-totals-plan.md` section 11.
     """
     ws = wb.create_sheet("Statement of Income")
     ent = lambda key: f"='Entity'!{entity_layout[key].coordinate}"  # noqa: E731
@@ -478,7 +689,50 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         subtotal_cells.append(f"{get_column_letter(SUB)}{row}")
         row += 1
 
+    # Brought-forward losses set off -- FOUR statutory per-bucket input cells
+    # (design doc section 11.2), written BEFORE the heads-of-income sections
+    # below so their coordinates exist for those sections' net-of-set-off
+    # formulas. Each is a real, editable input cell (`_input_cell`, default
+    # 0) -- unlike the pre-2026-07-21 single lump cell, entering a bucket
+    # value that exceeds available income in its head is visibly capped
+    # downstream (never silently zeroed on THIS cell -- the entered figure
+    # itself always stays visible, only the *effect* is capped).
+    section("Brought forward losses set off (statutory routing, s.71B / s.72 / s.74)")
+    row += 1
+    bf_refs: dict[str, str] = {}
+    for key, label, _head in _SIMPLE_BF_BUCKETS:
+        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
+        _input_cell(ws, row, SUB, default_value=0)
+        bf_refs[key] = f"{get_column_letter(SUB)}{row}"
+        row += 1
+    for key, label in (
+        ("bf_stcl", "b/f Short-term capital loss (s.74) -- STCG first, remainder to LTCG"),
+        ("bf_ltcl", "b/f Long-term capital loss (s.74) -- LTCG only"),
+    ):
+        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
+        _input_cell(ws, row, SUB, default_value=0)
+        bf_refs[key] = f"{get_column_letter(SUB)}{row}"
+        row += 1
+    row += 1
+
+    # Net-of-set-off expressions -- computed ONCE, unconditionally (comp_layout's
+    # leaf cells are always present even when a head's section below is not
+    # rendered), so "(of which) Special-rate Capital Gains" further down can
+    # reuse the same net CG figures the CG section itself shows. When a bucket
+    # is left at its default 0, every expression below reduces to the original
+    # (un-netted) leaf value -- preserving exact parity with the pre-2026-07-21
+    # default case.
+    net_hp_expr = _capped_setoff_expr(comp_layout["hp"], bf_refs["bf_hp"])
+    net_business_expr = _capped_setoff_expr(comp_layout["business"], bf_refs["bf_business"])
+    net_stcg_expr, net_ltcg_expr = _cg_setoff_exprs(
+        comp_layout["cg_st"], comp_layout["cg_lt"], bf_refs["bf_stcl"], bf_refs["bf_ltcl"],
+    )
+
     # Heads of income -- rendered only when the underlying figure is non-zero.
+    # HP / Business / CG items use the NET-of-set-off expressions above so the
+    # statutory routing happens at the head/gain-type level, before
+    # aggregation into Gross Total Income (design doc section 11.2) -- not as
+    # one lump deduction against Total Income (the pre-2026-07-21 behaviour).
     if model.salary.income_chargeable:
         section("Income from Salary"); row += 1
         first = row
@@ -488,13 +742,13 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     if model.house_property.income:
         section("Income from House Property"); row += 1
         first = row
-        item("Income from house property", comp("hp")); row += 1
+        item("Income from house property", f"={net_hp_expr}"); row += 1
         close_section(first)
 
     if model.business.remuneration or model.business.expenses_total:
         section("Income from Business or Profession"); row += 1
         first = row
-        item("Net business income", comp("business")); row += 1
+        item("Net business income", f"={net_business_expr}"); row += 1
         close_section(first)
 
     cg = model.capital_gains
@@ -502,9 +756,9 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         section("Capital Gains"); row += 1
         first = row
         if cg.lt_taxable_gross:
-            item("Long Term Capital Gain / (Loss)", comp("cg_lt")); row += 1
+            item("Long Term Capital Gain / (Loss)", f"={net_ltcg_expr}"); row += 1
         if cg.st_taxable_gross:
-            item("Short Term Capital Gain / (Loss)", comp("cg_st")); row += 1
+            item("Short Term Capital Gain / (Loss)", f"={net_stcg_expr}"); row += 1
         close_section(first)
 
     os_ = model.other_sources
@@ -548,25 +802,18 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     via_ref = f"{get_column_letter(SUB)}{via_row}"
     row += 1
 
-    # Brought-forward losses set off -- REAL, editable input cell defaulting
-    # to 0 (was PARKED through 2026-07-19; see module docstring and
-    # docs/2026-07-20-itr-onpage-totals-plan.md section 6). Reduces the
-    # NORMAL-income base first -- a documented default, not a full head-wise
-    # set-off engine (out of scope for v1).
-    ws.cell(row=row, column=LBL,
-            value="Less - Brought forward losses set off (editable; reduces normal income first)"
-            ).font = _font()
-    _input_cell(ws, row, SUB, default_value=0)
-    bf_row = row
-    bf_ref = f"{get_column_letter(SUB)}{bf_row}"
-    row += 1
+    # Brought-forward losses (design doc section 11.2) are now netted at the
+    # HEAD level above, before this SUM -- so Gross Total Income is already
+    # net of every bucket's statutory set-off. There is no separate lump
+    # subtraction at the Total Income level any more (that was the
+    # pre-2026-07-21 behaviour); see the b/f-loss block above.
 
     # s.288A rounding (nearest, from Rules) is applied here, exactly as the
     # pre-change Computation-sheet formula did (MROUND(ti_raw, round_ti_nearest))
     # -- dropping it would silently break paisa-exact parity with today's
     # workbook for the default (no-override) case.
     round_ti_ref = f"'Rules'!{rules_layout['round_ti_nearest'].coordinate}"
-    line("Total Income", OUTER, f"=MROUND({gti_ref}-{via_ref}-{bf_ref},{round_ti_ref})",
+    line("Total Income", OUTER, f"=MROUND({gti_ref}-{via_ref},{round_ti_ref})",
          bold=True, rule=_TOP_RULE)
     ti_row = row
     ti_ref = f"{get_column_letter(OUTER)}{ti_row}"
@@ -574,13 +821,15 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     # Special-rate CG base and normal-income base -- the correctness-trap
     # carve-out (design doc section 5): Total Income (above) INCLUDES
-    # special-rate CG (112A/111A LTCG/STCG); the slab-tax BASE that
-    # `Computation` reads must exclude it. cg_lt/cg_st are always present in
-    # comp_layout (the leaf cells are written unconditionally), so this
-    # reads safely even when the CG section is not rendered on-page (both
-    # leaves are 0 in that case).
+    # special-rate CG (112A/111A LTCG/STCG, net of the CG b/f-loss buckets);
+    # the slab-tax BASE that `Computation` reads must exclude it. Reuses the
+    # SAME net_ltcg_expr/net_stcg_expr the CG section itself renders (when
+    # rendered) so the b/f CG buckets interact correctly with the carve-out
+    # -- always safe to evaluate even when the CG section is not rendered
+    # on-page (both leaves, and hence both net expressions, are 0 in that
+    # case).
     line("  (of which) Special-rate Capital Gains", SUB,
-         f"={comp_layout['cg_lt']}+{comp_layout['cg_st']}")
+         f"=({net_ltcg_expr})+({net_stcg_expr})")
     special_cg_row = row
     special_cg_ref = f"{get_column_letter(SUB)}{special_cg_row}"
     row += 1
@@ -599,16 +848,54 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         "normal_income_base": normal_income_ref,
         "special_cg_base": special_cg_ref,
     }
-    tail_layout = computation_tail_fn(page_layout)
-    tail = lambda key: f"={tail_layout[key]}"  # noqa: E731
+    # `Computation`'s parallel backing/audit copy of the tax-slab machinery
+    # still gets written (re-anchored to read `normal_income_base` above) --
+    # design doc section 11.1 keeps `Computation` as a hidden backing sheet.
+    # Its return value is no longer consumed for this page's own tax lines
+    # (see below): those are built independently via
+    # `_write_regime_tax_workings` so this page is genuinely live, not a
+    # mirror of a hidden sheet.
+    computation_tail_fn(page_layout)
 
-    line("Tax on total income", SUB,
-         sel(tail_layout["new_tax_before_cess"], tail_layout["old_tax_before_cess"]))
+    # Standard tax computation -- ON-PAGE, live formulas (2026-07-21 on-page-
+    # totals change, design doc section 11.1): slab tax -> s.87A rebate ->
+    # marginal relief -> + special-rate CG tax -> surcharge -> cess -> Total
+    # tax liability. Both regimes' full working is computed in helper cells
+    # past the print area (see `_write_regime_tax_workings`); the visible
+    # lines below just IF()-pick between the two at every step, exactly like
+    # the rest of this page's regime selector.
+    cg_tax_ref = f"'CapitalGains'!{cg_layout['special_tax_cell']}"
+    cess_rate_ref = f"'Rules'!{rules_layout['cess_rate'].coordinate}"
+    new_tax_parts, _helper_row = _write_regime_tax_workings(
+        ws, 2, _TAX_HELPER_COL, "New", normal_income_ref, special_cg_ref, cg_tax_ref, cess_rate_ref,
+        rules_layout["new_slabs"], rules_layout["new_rebate_max_ti"].coordinate,
+        rules_layout["new_rebate_max_amt"].coordinate, rules_layout["new_rebate_marginal"].coordinate,
+        rules_layout["new_surcharge"],
+    )
+    old_tax_parts, _helper_row = _write_regime_tax_workings(
+        ws, _helper_row, _TAX_HELPER_COL, "Old", normal_income_ref, special_cg_ref, cg_tax_ref, cess_rate_ref,
+        rules_layout["old_slabs"], rules_layout["old_rebate_max_ti"].coordinate,
+        rules_layout["old_rebate_max_amt"].coordinate, rules_layout["old_rebate_marginal"].coordinate,
+        rules_layout["old_surcharge"],
+    )
+
+    def tax_sel(key: str) -> str:
+        return sel(new_tax_parts[key], old_tax_parts[key])
+
+    line("Tax on total income", SUB, tax_sel("slab"))
     row += 1
-    line("Add - Health & Education Cess", SUB,
-         sel(tail_layout["new_cess"], tail_layout["old_cess"]))
+    line("Less - s.87A rebate", SUB, tax_sel("rebate"))
     row += 1
-    line("Tax with cess", OUTER, tail("selected_liability"), bold=True, rule=_TOP_RULE)
+    line("Less - Marginal relief (s.87A)", SUB, tax_sel("marginal"))
+    row += 1
+    line("Add - Special-rate Capital Gains tax (112A/111A)", SUB, f"={cg_tax_ref}")
+    row += 1
+    line("Add - Surcharge", SUB, tax_sel("surcharge"))
+    row += 1
+    line("Add - Health & Education Cess", SUB, tax_sel("cess"))
+    row += 1
+    line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
+    total_liability_ref = f"{get_column_letter(OUTER)}{row}"
     row += 2
 
     tp = model.taxes_paid
@@ -633,7 +920,13 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     line("Total prepaid taxes", OUTER, f"='TaxesPaid'!{tp_layout['total']}", bold=True)
     row += 1
-    line("Refund Due / (Tax Payable)", OUTER, tail("refund"), bold=True, rule=_TOP_RULE)
+    # s.288B rounding (nearest, from Rules) -- matches Computation's own
+    # refund formula exactly (MROUND(taxes_paid - liability, round_tax_nearest)),
+    # now built directly from this page's own `total_liability_ref` instead of
+    # reading `Computation`'s tail.
+    round_tax_ref = f"'Rules'!{rules_layout['round_tax_nearest'].coordinate}"
+    refund_formula = f"=MROUND('TaxesPaid'!{tp_layout['total']}-{total_liability_ref},{round_tax_ref})"
+    line("Refund Due / (Tax Payable)", OUTER, refund_formula, bold=True, rule=_TOP_RULE)
     row += 3
 
     # Assumptions note only renders while residency is DEFAULTED -- a reader
@@ -962,7 +1255,7 @@ def move_presentation_sheets_first(wb) -> None:
 
 def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
                              os_layout: dict, tp_layout: dict, ded_layout: dict,
-                             rules_layout: dict,
+                             rules_layout: dict, cg_layout: dict,
                              is_entries, bs_entries,
                              lot_start_row: int, age_class: str, year_key: str,
                              year_label: str, computation_tail_fn, *,
@@ -975,10 +1268,13 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
 
     `comp_layout` is the LEAF-only Computation layout (2026-07-20 on-page-totals
     change); `computation_tail_fn` is called from inside `write_statement_of_income`
-    once the page's own ladder coordinates exist, to write the re-anchored
-    slab-tax machinery. `rules_layout` is needed on-page now too, for the
-    s.288A Total Income rounding (MROUND) that used to live on `Computation`.
-    See `write_statement_of_income`'s docstring."""
+    once the page's own ladder coordinates exist, to keep `Computation`'s
+    parallel backing copy of the tax-slab machinery current. `rules_layout` is
+    needed on-page now too, for the s.288A/s.288B rounding (MROUND) and the
+    full slab/rebate/surcharge/cess machinery that used to live only on
+    `Computation`. `cg_layout` supplies `special_tax_cell` (112A/111A tax on
+    special-rate CG) for the on-page tax block. See
+    `write_statement_of_income`'s docstring."""
     start_year = int(year_key[:4]) if year_key else 0
     period_text = f"01-04-{start_year} to 31-03-{start_year + 1}"
     as_at_text = f"31-03-{start_year + 1}"
@@ -986,7 +1282,7 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
 
     write_statement_of_income(
         wb, model, entity_layout, comp_layout, os_layout, tp_layout, ded_layout,
-        rules_layout, age_class, period_text, print_title, computation_tail_fn,
+        rules_layout, cg_layout, age_class, period_text, print_title, computation_tail_fn,
         father_name=father_name, aadhaar=aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
     )

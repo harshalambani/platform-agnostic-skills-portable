@@ -576,27 +576,11 @@ def write_unclassified_sheet(wb: Workbook, uncl: sch.UnclassifiedSchedule) -> No
 # Computation sheet -- the formula-driven backbone
 # ---------------------------------------------------------------------------
 
-def _slab_tax_formula(income_cell: str, slab_refs: dict) -> str:
-    """SUM of MAX(0, MIN(income, upto_i) - upto_(i-1)) * rate_i across the
-    padded slab rows in `slab_refs` (Rules-sheet cell refs) -- a generic
-    Excel slab-tax formula that never hardcodes a rate or threshold."""
-    terms = []
-    prev_upto_ref = None
-    for i in sorted(slab_refs):
-        upto_ref, rate_ref = slab_refs[i]
-        lower = f"'Rules'!{prev_upto_ref}" if prev_upto_ref else "0"
-        terms.append(f"(MAX(0,MIN({income_cell},'Rules'!{upto_ref})-{lower}))*'Rules'!{rate_ref}")
-        prev_upto_ref = upto_ref
-    return "+".join(terms)
-
-
-def _surcharge_formula(income_cell: str, tax_cell: str, surcharge_refs: dict) -> str:
-    """Nested-IF surcharge-rate lookup (highest matching band) * tax."""
-    expr = "0"
-    for i in sorted(surcharge_refs):
-        above_ref, rate_ref = surcharge_refs[i]
-        expr = f"IF({income_cell}>'Rules'!{above_ref},'Rules'!{rate_ref},{expr})"
-    return f"({expr})*{tax_cell}"
+# `_slab_tax_formula` / `_surcharge_formula` moved to presentation.py
+# (2026-07-21 on-page-totals change) -- that module now needs them too, to
+# write the on-page tax block, and since this module already `import
+# presentation`s, the dependency can only run one way. Referenced below as
+# `presentation._slab_tax_formula` / `presentation._surcharge_formula`.
 
 
 def _rebate_formula(normal_income_cell: str, tax_normal_cell: str, max_ti_ref: str, max_amt_ref: str, marginal_ref: str) -> str:
@@ -708,7 +692,7 @@ def write_computation_tail(
     def _regime_block(prefix: str, slab_refs: dict, rebate_max_ti: str, rebate_max_amt: str,
                        rebate_marginal: str, surcharge_refs: dict) -> str:
         sw.header(f"{prefix} regime")
-        tax_normal_cell = sw.cell(2, f"={_slab_tax_formula(normal_for_slab_cell, slab_refs)}", number_format=INR_FORMAT)
+        tax_normal_cell = sw.cell(2, f"={presentation._slab_tax_formula(normal_for_slab_cell, slab_refs)}", number_format=INR_FORMAT)
         sw.cell(1, "Tax on normal-rate income")
         tax_normal_ref = tax_normal_cell.coordinate
         sw.row += 1
@@ -729,7 +713,7 @@ def write_computation_tail(
         sw.row += 1
 
         sw.cell(1, "Surcharge")
-        surcharge_cell = sw.cell(2, f"={_surcharge_formula(f'({normal_for_slab_cell}+{cg_lt_cell.coordinate}+{cg_st_cell.coordinate})', after_rebate_ref, surcharge_refs)}", number_format=INR_FORMAT)
+        surcharge_cell = sw.cell(2, f"={presentation._surcharge_formula(f'({normal_for_slab_cell}+{cg_lt_cell.coordinate}+{cg_st_cell.coordinate})', after_rebate_ref, surcharge_refs)}", number_format=INR_FORMAT)
         surcharge_ref = surcharge_cell.coordinate
         sw.row += 1
 
@@ -1127,7 +1111,7 @@ def write_workbook(
     residency_value, residency_declared = rules_engine.resolve_residency(entity.residency)
     presentation.build_presentation_layer(
         wb, model, entity_layout, comp_layout_leaf, os_layout, tp_layout, ded_layout,
-        rules_layout, is_entries, bs_entries, cg_layout["lot_start_row"],
+        rules_layout, cg_layout, is_entries, bs_entries, cg_layout["lot_start_row"],
         rules_engine.resolve_age_class(entity.status, entity.dob, fy_end, residency=entity.residency),
         year_key, rules.year_label, _computation_tail_fn,
         father_name=entity.father_name, aadhaar=entity.aadhaar,
