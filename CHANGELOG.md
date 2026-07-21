@@ -14,22 +14,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > back-filed into sections that do not exist for those tags.
 
 ### Changed
-- **ITR workbook — income totals now compute on the deliverable page, so
-  manual overrides propagate.** The `Statement of Income` sheet's income
-  ladder (Gross Total Income → Chapter VI-A → brought-forward-loss set-off →
-  Total Income, plus the normal-income / special-rate-CG split) is now built
-  from live on-page Excel formulas over on-page cells, instead of mirroring a
-  hidden `Computation` working sheet. The tax-slab machinery still lives on
-  `Computation` but is re-anchored to read the page's normal-income cell, so an
-  override to any leaf item, to Chapter VI-A, or to the b/f-loss cell flows
-  end-to-end through tax, cess and refund. **Brought-forward-loss set-off is
-  now a real, editable input cell** (defaulting to 0, styled distinctly),
-  replacing the previously-parked placeholder — a manual set-off amount now
-  actually moves Total Income and everything downstream. Special-rate LTCG/STCG
-  (111A/112A) stays carved out of the slab base (regression-tested). No change
-  to any tax rate, rule, or the default (no-override) figures — the generated
-  workbook reconciles to the same numbers as before. Design:
-  `docs/2026-07-20-itr-onpage-totals-plan.md`.
+- **ITR workbook — income totals AND the standard tax computation now
+  compute on the deliverable page, so manual overrides propagate end to
+  end.** The `Statement of Income` sheet's income ladder (Gross Total Income
+  → Chapter VI-A → Total Income, plus the normal-income / special-rate-CG
+  split) **and** the tax computation itself (Tax on total income (slab) →
+  less s.87A rebate → add Surcharge → less Marginal relief → add Health &
+  Education Cess → Total tax liability → add special-rate CG tax → less
+  prepaid taxes → Refund/(Payable)) are now built from live on-page Excel
+  formulas over on-page cells, instead of mirroring a hidden `Computation`
+  working sheet. `Computation` keeps its full slab/rebate/surcharge/cess
+  machinery, re-anchored to read the page's own normal-income cell, and
+  stays as a parallel hidden backing/audit sheet — but the page's own tax
+  lines are now independently live, not a mirror of `Computation`'s output.
+  Special-rate LTCG/STCG (111A/112A) stays carved out of the slab base
+  (regression-tested).
+  **Brought-forward-loss set-off is now FOUR statutory, editable, per-bucket
+  input cells** — b/f House Property loss (s.71B), b/f Business loss (s.72),
+  b/f Short-term capital loss (s.74), b/f Long-term capital loss (s.74) —
+  replacing the previous single lump cell and its previously-parked
+  placeholder. Each bucket sets off only against its own income
+  head/gain-type, capped at that head's available income for the year, at
+  the head level *before* aggregation into Gross Total Income (STCL sets
+  off against STCG first with any remainder spilling to LTCG; LTCL sets off
+  against LTCG only) — matching what the Act actually requires rather than
+  a lump Total-Income deduction. An entered amount always stays visible even
+  if it exceeds the available income in its head; only its *effect* is
+  capped. No change to any tax rate, rule, or the default (no-override)
+  figures — the generated workbook reconciles to the same numbers as
+  before. Design: `docs/2026-07-20-itr-onpage-totals-plan.md` (section 11,
+  "REVISION 2").
 
 ### Added
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
