@@ -13,38 +13,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > entry in `v2.3.1` (`a8cf73a`, PR #76). They are left here rather than
 > back-filed into sections that do not exist for those tags.
 
-### Changed
-- **ITR workbook — income totals AND the standard tax computation now
-  compute on the deliverable page, so manual overrides propagate end to
-  end.** The `Statement of Income` sheet's income ladder (Gross Total Income
-  → Chapter VI-A → Total Income, plus the normal-income / special-rate-CG
-  split) **and** the tax computation itself (Tax on total income (slab) →
-  less s.87A rebate → add Surcharge → less Marginal relief → add Health &
-  Education Cess → Total tax liability → add special-rate CG tax → less
-  prepaid taxes → Refund/(Payable)) are now built from live on-page Excel
-  formulas over on-page cells, instead of mirroring a hidden `Computation`
-  working sheet. `Computation` keeps its full slab/rebate/surcharge/cess
-  machinery, re-anchored to read the page's own normal-income cell, and
-  stays as a parallel hidden backing/audit sheet — but the page's own tax
-  lines are now independently live, not a mirror of `Computation`'s output.
-  Special-rate LTCG/STCG (111A/112A) stays carved out of the slab base
-  (regression-tested).
-  **Brought-forward-loss set-off is now FOUR statutory, editable, per-bucket
-  input cells** — b/f House Property loss (s.71B), b/f Business loss (s.72),
-  b/f Short-term capital loss (s.74), b/f Long-term capital loss (s.74) —
-  replacing the previous single lump cell and its previously-parked
-  placeholder. Each bucket sets off only against its own income
-  head/gain-type, capped at that head's available income for the year, at
-  the head level *before* aggregation into Gross Total Income (STCL sets
-  off against STCG first with any remainder spilling to LTCG; LTCL sets off
-  against LTCG only) — matching what the Act actually requires rather than
-  a lump Total-Income deduction. An entered amount always stays visible even
-  if it exceeds the available income in its head; only its *effect* is
-  capped. No change to any tax rate, rule, or the default (no-override)
-  figures — the generated workbook reconciles to the same numbers as
-  before. Design: `docs/2026-07-20-itr-onpage-totals-plan.md` (section 11,
-  "REVISION 2").
-
 ### Added
 - **Help system, single-source-of-truth.** Every skill's user help now lives in
   a `help:` block in its `skill.yaml` (overview, when-to-use, per-input
@@ -81,6 +49,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dedicated `category: "intercompany"` and render under a new
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
+
+## [2.14.0] — 2026-07-21
+
+### Changed
+- **ITR workbook — income totals AND the standard tax computation now
+  compute on the deliverable page, so manual overrides propagate end to
+  end.** The `Statement of Income` sheet's income ladder (Gross Total Income
+  → Chapter VI-A → Total Income, plus the normal-income / special-rate-CG
+  split) **and** the tax computation itself (Tax on total income (slab) →
+  less s.87A rebate → add Surcharge → less Marginal relief → add Health &
+  Education Cess → Total tax liability → add special-rate CG tax → less
+  prepaid taxes → Refund/(Payable)) are now built from live on-page Excel
+  formulas over on-page cells, instead of mirroring a hidden `Computation`
+  working sheet. `Computation` keeps its full slab/rebate/surcharge/cess
+  machinery, re-anchored to read the page's own normal-income cell, and
+  stays as a parallel hidden backing/audit sheet — but the page's own tax
+  lines are now independently live, not a mirror of `Computation`'s output.
+  Special-rate LTCG/STCG (111A/112A) stays carved out of the slab base
+  (regression-tested).
+  **Brought-forward-loss set-off is now FOUR statutory, editable, per-bucket
+  input cells** — b/f House Property loss (s.71B), b/f Business loss (s.72),
+  b/f Short-term capital loss (s.74), b/f Long-term capital loss (s.74) —
+  replacing the previous single lump cell and its previously-parked
+  placeholder. Each bucket sets off only against its own income
+  head/gain-type, capped at that head's available income for the year, at
+  the head level *before* aggregation into Gross Total Income (STCL sets
+  off against STCG first with any remainder spilling to LTCG; LTCL sets off
+  against LTCG only) — matching what the Act actually requires rather than
+  a lump Total-Income deduction. An entered amount always stays visible even
+  if it exceeds the available income in its head; only its *effect* is
+  capped. No change to any tax rate, rule, or the default (no-override)
+  figures — the generated workbook reconciles to the same numbers as
+  before. Design: `docs/2026-07-20-itr-onpage-totals-plan.md` (section 11,
+  "REVISION 2").
 
 ## [2.13.2] — 2026-07-20
 
