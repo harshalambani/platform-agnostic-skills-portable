@@ -210,24 +210,47 @@ def _find_label(ws, needle: str):
     raise AssertionError(f"label {needle!r} not found")
 
 
-def test_brought_forward_loss_is_a_real_editable_input_cell_not_parked(wb):
-    """2026-07-20 on-page-totals change: b/f-loss set-off is no longer PARKED
-    -- it is a real, editable cell defaulting to 0, styled distinctly from a
-    parked cell (solid border + _INPUT_FILL, not dotted + _PARKED_FILL), and
-    it must be wired into Total Income below it."""
+def test_brought_forward_loss_buckets_are_real_editable_input_cells_not_parked(wb):
+    """2026-07-21 on-page-totals change (design doc section 11.2): the old
+    single lump b/f-loss cell is replaced by FOUR statutory per-bucket
+    input cells (HP s.71B, Business s.72, STCL/LTCL s.74). Each is a real,
+    editable cell defaulting to 0, styled distinctly from a parked cell
+    (solid thin border + _INPUT_FILL, not dotted + _PARKED_FILL). Routing
+    is proven via the Business bucket, which SYN-IND actually renders on
+    the page (non-zero business income) -- it must be wired into the
+    "Net business income" head item, NOT into Total Income directly (the
+    pre-2026-07-21 lump-subtraction wiring)."""
     ws = wb["Statement of Income"]
-    label = _find_label(ws, "Brought forward losses set off")
-    assert "(to be filled)" not in label.value, "b/f loss must no longer read as PARKED"
-    cell = ws.cell(row=label.row, column=4)
-    assert cell.value == 0, f"b/f loss input cell must default to literal 0, got {cell.value!r}"
-    assert cell.fill.start_color.rgb == "00DDEBF7" or cell.fill.fgColor.rgb == "00DDEBF7"
-    assert cell.border.bottom.style == "thin"
+    section_header = _find_label(ws, "Brought forward losses set off")
+    assert "(to be filled)" not in section_header.value, "b/f loss section must no longer read as PARKED"
+
+    bucket_needles = (
+        "b/f House Property loss (s.71B)",
+        "b/f Business loss (s.72)",
+        "b/f Short-term capital loss (s.74)",
+        "b/f Long-term capital loss (s.74)",
+    )
+    biz_cell = None
+    for needle in bucket_needles:
+        label = _find_label(ws, needle)
+        cell = ws.cell(row=label.row, column=4)
+        assert cell.value == 0, f"{needle!r} input cell must default to literal 0, got {cell.value!r}"
+        assert cell.fill.start_color.rgb == "00DDEBF7" or cell.fill.fgColor.rgb == "00DDEBF7"
+        assert cell.border.bottom.style == "thin"
+        if needle == "b/f Business loss (s.72)":
+            biz_cell = cell
+
+    biz_item_label = _find_label(ws, "Net business income")
+    biz_formula = ws.cell(row=biz_item_label.row, column=3).value
+    assert isinstance(biz_formula, str) and biz_formula.startswith("=")
+    assert biz_cell.coordinate in biz_formula, \
+        "Business bucket must be wired into the Business head item, not a lump Total Income term"
 
     total_income_label = _find_label(ws, "Total Income")
     total_income_formula = ws.cell(row=total_income_label.row, column=5).value
     assert isinstance(total_income_formula, str) and total_income_formula.startswith("=")
-    assert cell.coordinate in total_income_formula, \
-        "Total Income formula must reference the b/f-loss input cell"
+    assert biz_cell.coordinate not in total_income_formula, \
+        "b/f buckets must not be a lump Total-Income deduction any more -- routing happens at the head level"
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +731,25 @@ _STUB_COMP_LAYOUT = {
 }
 _STUB_TP_LAYOUT = {"total": "B1"}
 _STUB_DED_LAYOUT = {"total": "B1"}
-_STUB_RULES_LAYOUT = {"round_ti_nearest": _Coord("B99")}
+# 2026-07-21 on-page-totals change: write_statement_of_income now builds the
+# full standard tax computation (slab/rebate/marginal-relief/surcharge/cess)
+# directly on the page, so it needs the full Rules-sheet layout, not just
+# round_ti_nearest -- a minimal one-slab-band table is enough to exercise the
+# formula builders without asserting on their output (these tests don't
+# assert on tax-block wiring).
+_STUB_SLABS = {0: ("B100", "B101")}
+_STUB_SURCHARGE = {0: ("B110", "B111")}
+_STUB_RULES_LAYOUT = {
+    "round_ti_nearest": _Coord("B99"),
+    "round_tax_nearest": _Coord("B98"),
+    "cess_rate": _Coord("B97"),
+    "new_slabs": _STUB_SLABS, "old_slabs": _STUB_SLABS,
+    "new_rebate_max_ti": _Coord("B102"), "new_rebate_max_amt": _Coord("B103"),
+    "new_rebate_marginal": _Coord("B104"), "new_surcharge": _STUB_SURCHARGE,
+    "old_rebate_max_ti": _Coord("B105"), "old_rebate_max_amt": _Coord("B106"),
+    "old_rebate_marginal": _Coord("B107"), "old_surcharge": _STUB_SURCHARGE,
+}
+_STUB_CG_LAYOUT = {"special_tax_cell": "B120"}
 
 
 def _stub_computation_tail_fn(page_layout):
@@ -736,7 +777,7 @@ def _minimal_presentation_layer(is_entries, bs_entries, business_subtree):
     wb_.remove(wb_.active)
     presentation.build_presentation_layer(
         wb_, _stub_model(), _STUB_ENTITY_LAYOUT, _STUB_COMP_LAYOUT, {}, _STUB_TP_LAYOUT,
-        _STUB_DED_LAYOUT, _STUB_RULES_LAYOUT, is_entries, bs_entries, 10, "general",
+        _STUB_DED_LAYOUT, _STUB_RULES_LAYOUT, _STUB_CG_LAYOUT, is_entries, bs_entries, 10, "general",
         "2024-25", "AY 2025-26", _stub_computation_tail_fn, business_subtree=business_subtree,
     )
     return wb_

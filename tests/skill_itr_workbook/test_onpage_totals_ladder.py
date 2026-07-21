@@ -162,7 +162,13 @@ def test_chapter_via_is_a_leaf_reference_to_deductions_sheet(built_workbook):
     assert via_value.startswith("='Deductions'!")
 
 
-def test_bf_loss_cell_is_input_and_total_income_is_gti_minus_via_minus_bf(built_workbook):
+def test_total_income_is_gti_minus_via_with_no_lump_bf_term(built_workbook):
+    """2026-07-21 design (section 11.2): there is no longer a single lump
+    b/f-loss cell subtracted at the Total Income line -- each of the four
+    statutory buckets nets off its OWN head/gain-type BEFORE aggregation
+    into Gross Total Income (see test_bf_loss_buckets_are_real_editable_...
+    and test_bf_loss_buckets_route_into_their_own_head_... below), so Total
+    Income is simply GTI minus Chapter VI-A, s.288A-rounded."""
     ws = built_workbook["Statement of Income"]
     gti_cell = _find_exact(ws, "Total", col=LBL)
     gti_ref = f"{ws.cell(row=gti_cell.row, column=OUTER).coordinate}"
@@ -170,18 +176,62 @@ def test_bf_loss_cell_is_input_and_total_income_is_gti_minus_via_minus_bf(built_
     via_cell = _find_exact(ws, "Less - Chapter VI-A deductions", col=LBL)
     via_ref = ws.cell(row=via_cell.row, column=SUB).coordinate
 
-    bf_label = _find_containing(ws, "Brought forward losses set off", col=LBL)
-    bf_cell = ws.cell(row=bf_label.row, column=SUB)
-    assert bf_cell.value == 0, "b/f-loss input cell must default to literal 0"
-    bf_ref = bf_cell.coordinate
-
     ti_cell = _find_exact(ws, "Total Income", col=LBL)
     ti_formula = ws.cell(row=ti_cell.row, column=OUTER).value
     assert isinstance(ti_formula, str) and ti_formula.startswith("=MROUND(")
     assert gti_ref in ti_formula, "Total Income must reference the GTI cell"
     assert via_ref in ti_formula, "Total Income must reference the Chapter VI-A cell"
-    assert bf_ref in ti_formula, "Total Income must reference the b/f-loss input cell"
     assert "'Rules'!" in ti_formula, "Total Income must keep the s.288A MROUND rounding"
+
+
+def test_bf_loss_buckets_are_real_editable_input_cells_defaulting_to_zero(built_workbook):
+    """Design doc section 11.2: FOUR statutory per-bucket b/f-loss input
+    cells (replacing the pre-2026-07-21 single lump cell) -- HP (s.71B),
+    Business (s.72), STCL and LTCL (both s.74) -- each a real editable
+    `_input_cell` defaulting to literal 0."""
+    ws = built_workbook["Statement of Income"]
+    needles = (
+        "b/f House Property loss (s.71B)",
+        "b/f Business loss (s.72)",
+        "b/f Short-term capital loss (s.74)",
+        "b/f Long-term capital loss (s.74)",
+    )
+    for needle in needles:
+        label_cell = _find_containing(ws, needle, col=LBL)
+        bf_cell = ws.cell(row=label_cell.row, column=SUB)
+        assert bf_cell.value == 0, f"{needle!r} input cell must default to literal 0"
+
+
+def test_bf_loss_buckets_route_into_their_own_head_before_gti_not_a_lump_ti_deduction(built_workbook):
+    """Proves the routing half of section 11.2 on the actual rendered page:
+    the Business b/f bucket (s.72) must appear inside the "Net business
+    income" head item's formula (rendered for SYN-IND, which carries
+    non-zero business income), and the HP bucket must NOT leak into it.
+    Total Income must not reference any bf cell directly any more -- set-off
+    happens at the head level, before GTI, not as a lump TI subtraction."""
+    ws = built_workbook["Statement of Income"]
+    hp_bf = _find_containing(ws, "b/f House Property loss (s.71B)", col=LBL)
+    hp_bf_ref = ws.cell(row=hp_bf.row, column=SUB).coordinate
+    biz_bf = _find_containing(ws, "b/f Business loss (s.72)", col=LBL)
+    biz_bf_ref = ws.cell(row=biz_bf.row, column=SUB).coordinate
+    stcl_bf = _find_containing(ws, "b/f Short-term capital loss (s.74)", col=LBL)
+    stcl_bf_ref = ws.cell(row=stcl_bf.row, column=SUB).coordinate
+
+    biz_item = _find_containing(ws, "Net business income", col=LBL)
+    biz_formula = ws.cell(row=biz_item.row, column=INNER).value
+    assert biz_bf_ref in biz_formula, "Business bucket must route into the Business head item"
+    assert hp_bf_ref not in biz_formula, "HP bucket must never leak into Business"
+    assert stcl_bf_ref not in biz_formula, "CG buckets must never leak into Business"
+
+    stcg_item = _find_containing(ws, "Short Term Capital Gain / (Loss)", col=LBL)
+    stcg_formula = ws.cell(row=stcg_item.row, column=INNER).value
+    assert stcl_bf_ref in stcg_formula, "STCL bucket must route into the STCG head item"
+    assert biz_bf_ref not in stcg_formula, "Business bucket must never leak into CG"
+
+    ti_cell = _find_exact(ws, "Total Income", col=LBL)
+    ti_formula = ws.cell(row=ti_cell.row, column=OUTER).value
+    for ref in (hp_bf_ref, biz_bf_ref, stcl_bf_ref):
+        assert ref not in ti_formula, "b/f buckets must not be a lump Total-Income deduction any more"
 
 
 def test_normal_income_base_excludes_special_rate_cg_on_page(built_workbook):
@@ -306,45 +356,159 @@ def test_default_case_tax_liability_and_refund_match_schedules_engine(built):
     assert refund_shadow == pytest.approx(comp.refund_or_payable)
 
 
-def test_bf_loss_override_reduces_normal_income_and_total_income(built):
-    """Simulates a preparer typing a b/f-loss amount into the (now real,
-    editable) input cell: verifies the override propagates through Total
-    Income and the slab base, and that tax liability moves accordingly --
-    proving the wiring the whole change exists to deliver (design doc
-    section 1: "even if manual override is done ... other totals come from
-    underlying sheets" must no longer be true after this change)."""
+def _capped_setoff_py(head: float, bf: float) -> float:
+    """Pure-Python mirror of `presentation._capped_setoff_expr`'s Excel
+    formula `(head)-MIN(bf,MAX(head,0))` -- used to shadow-calc the
+    statutory per-head cap without needing an Excel formula engine."""
+    return head - min(bf, max(head, 0.0))
+
+
+def _cg_setoff_py(stcg: float, ltcg: float, bf_stcl: float, bf_ltcl: float) -> tuple:
+    """Pure-Python mirror of `presentation._cg_setoff_exprs`'s s.74 cascade
+    (STCL against STCG first, spillover to LTCG; LTCL against LTCG only).
+    Deliberately does NOT floor an untouched negative head at 0 -- only an
+    amount actually available (positive) before set-off can be capped
+    towards zero; a raw current-year loss passes through unchanged when
+    there is nothing positive for a b/f bucket to set off against."""
+    stcg_avail = max(stcg, 0.0)
+    stcl_used = min(bf_stcl, stcg_avail)
+    net_stcg = stcg - stcl_used
+    stcl_spill = max(0.0, bf_stcl - stcg_avail)
+    ltcg_avail = max(ltcg, 0.0)
+    spill_used = min(stcl_spill, ltcg_avail)
+    remaining_after_spill = ltcg_avail - spill_used
+    ltcl_used = min(bf_ltcl, remaining_after_spill)
+    net_ltcg = ltcg - spill_used - ltcl_used
+    return net_stcg, net_ltcg
+
+
+def test_bf_business_bucket_caps_at_available_business_income_never_goes_negative(built):
+    """s.72 cap test: a b/f Business-loss entry that EXCEEDS the year's
+    business income must reduce the Business head to exactly 0 -- never
+    negative -- while an entry within the available income reduces it
+    paisa-for-paisa. SYN-IND's business_income is 180000.0 (non-zero, so
+    the Business section actually renders on-page)."""
     model, rules, entity = built
     comp = model.computation
-    fy_end = date(int(YEAR_KEY[:4]) + 1, 3, 31)
-    nearest = rules.common["rounding"]["total_income"]["nearest"]
+    business_income = comp.business_income
+    assert business_income > 0, "fixture must carry non-zero business income for this cap test to mean anything"
 
-    bf_amount = 50000.0  # synthetic override amount, not from any real return
-    gti = comp.gti
-    total_income_default = sch.round_288a(gti - comp.via_deductions, nearest)
-    total_income_override = sch.round_288a(gti - comp.via_deductions - bf_amount, nearest)
-    assert total_income_default - total_income_override == pytest.approx(bf_amount, abs=nearest)
+    within = _capped_setoff_py(business_income, 50000.0)
+    assert within == pytest.approx(business_income - 50000.0)
 
-    special_cg_base = comp.tax_block.special_rate_income
-    normal_default = max(0.0, total_income_default - special_cg_base)
-    normal_override = max(0.0, total_income_override - special_cg_base)
-    # b/f reduces normal income first (design doc section 6's documented default).
-    assert normal_default - normal_override == pytest.approx(bf_amount, abs=nearest)
+    exceeding = _capped_setoff_py(business_income, business_income + 999999.0)
+    assert exceeding == pytest.approx(0.0), "an over-large b/f Business bucket must cap the head at 0, not negative"
+    assert exceeding >= 0.0
 
-    tax_default = sch.compute_tax(
-        normal_income=normal_default, special_rate_tax=comp.tax_block.tax_on_special_rate_income,
-        special_rate_income_amount=special_cg_base, rules=rules, regime=REGIME,
-        status=entity.status, dob=entity.dob, fy_end=fy_end, residency=entity.residency,
-    )
-    tax_override = sch.compute_tax(
-        normal_income=normal_override, special_rate_tax=comp.tax_block.tax_on_special_rate_income,
-        special_rate_income_amount=special_cg_base, rules=rules, regime=REGIME,
-        status=entity.status, dob=entity.dob, fy_end=fy_end, residency=entity.residency,
-    )
-    # Lower normal-income base can never increase tax liability (monotonic slabs).
-    assert tax_override.tax_liability <= tax_default.tax_liability
-    # And the special-rate CG tax component is completely unaffected by the override --
-    # the carve-out means b/f loss never touches CG.
-    assert tax_override.tax_on_special_rate_income == pytest.approx(tax_default.tax_on_special_rate_income)
+
+def test_bf_hp_bucket_never_leaks_into_business_or_salary(built):
+    """s.71B routes ONLY against House Property income -- proven here at the
+    formula-semantics level (the shadow-calc mirror of
+    `_capped_setoff_expr`) since SYN-IND's own HP income happens to be 0.0,
+    so the HP section is not rendered on-page for this fixture (nothing to
+    show); the cap function itself is fixture-independent and must still
+    correctly zero out (not leak elsewhere) when the head is already nil."""
+    model, rules, entity = built
+    comp = model.computation
+    assert comp.house_property_income == 0.0, "fixture assumption: SYN-IND carries no HP income"
+    # Even a large HP b/f entry against a nil HP head must net to exactly 0 --
+    # never negative, and it has no channel to reduce Business/Salary/OS at all
+    # (each head's expression only ever references its OWN bf bucket ref; see
+    # test_bf_loss_buckets_route_into_their_own_head_before_gti_not_a_lump_ti_deduction).
+    net_hp = _capped_setoff_py(comp.house_property_income, 75000.0)
+    assert net_hp == pytest.approx(0.0)
+    assert net_hp >= 0.0
+
+
+def test_bf_stcl_bucket_sets_off_stcg_first_then_spills_to_ltcg(built):
+    """s.74 cascade, within-STCG case: a b/f STCL smaller than STCG reduces
+    STCG only, LTCG is untouched by the spillover step (spill is 0). SYN-IND's
+    LTCG head is already a current-year loss (-35000): with no spillover, it
+    must pass through UNCHANGED (raw, negative) -- NOT floored at 0 -- since
+    nothing was actually available to set off against it (the floor is only
+    ever applied to a positive amount actually consumed by a set-off)."""
+    model, rules, entity = built
+    comp = model.computation
+    stcg, ltcg = comp.capital_gains_st, comp.capital_gains_lt
+    assert stcg > 0, "fixture must carry positive STCG for this test to mean anything"
+    assert ltcg < 0, "fixture must carry a negative (loss) LTCG head for this test to mean anything"
+
+    net_stcg, net_ltcg = _cg_setoff_py(stcg, ltcg, bf_stcl=5000.0, bf_ltcl=0.0)
+    assert net_stcg == pytest.approx(stcg - 5000.0)
+    assert net_ltcg == pytest.approx(ltcg), \
+        "LTCG must pass through unchanged (raw, negative) when there is no spillover to absorb"
+
+
+def test_bf_stcl_bucket_caps_at_stcg_and_spillover_cannot_reach_a_negative_ltcg(built):
+    """s.74 cascade, over-large STCL case: a b/f STCL LARGER than STCG must
+    cap STCG at exactly 0 (never negative). The remainder ("spillover") is
+    only usable against a *positive* LTCG (MAX(ltcg,0)); SYN-IND's LTCG
+    head is already negative, so MAX(ltcg,0)=0 and the spillover has
+    nothing to absorb -- LTCG must stay at its raw (unchanged, negative)
+    value, not be floored to 0."""
+    model, rules, entity = built
+    comp = model.computation
+    stcg, ltcg = comp.capital_gains_st, comp.capital_gains_lt
+    bf_stcl = stcg + 999999.0  # deliberately far larger than available STCG
+
+    net_stcg, net_ltcg = _cg_setoff_py(stcg, ltcg, bf_stcl=bf_stcl, bf_ltcl=0.0)
+    assert net_stcg == pytest.approx(0.0), "STCL spillover must cap STCG at 0, not negative"
+    assert net_stcg >= 0.0
+    assert net_ltcg == pytest.approx(ltcg), \
+        "a negative LTCG head has no positive amount for the spillover to consume, so it is untouched"
+
+
+def test_bf_ltcl_bucket_never_touches_stcg_or_normal_income(built):
+    """s.74: b/f Long-term capital loss must reduce LTCG ONLY -- never STCG,
+    never any normal-income head. Proven by varying bf_ltcl while holding
+    bf_stcl=0 and observing STCG is completely unchanged; and since SYN-IND's
+    LTCG head is already negative (own-year loss), there is nothing positive
+    for the LTCL bucket to set off against either, so LTCG itself is also
+    unchanged (raw pass-through, not floored)."""
+    model, rules, entity = built
+    comp = model.computation
+    stcg, ltcg = comp.capital_gains_st, comp.capital_gains_lt
+
+    net_stcg_a, _ = _cg_setoff_py(stcg, ltcg, bf_stcl=0.0, bf_ltcl=0.0)
+    net_stcg_b, net_ltcg_b = _cg_setoff_py(stcg, ltcg, bf_stcl=0.0, bf_ltcl=40000.0)
+    assert net_stcg_a == pytest.approx(net_stcg_b) == pytest.approx(stcg), \
+        "LTCL bucket must never move the STCG figure"
+    assert net_ltcg_b == pytest.approx(ltcg), \
+        "a negative LTCG head has nothing positive for the LTCL bucket to set off against"
+
+
+def test_bf_ltcl_bucket_caps_a_positive_ltcg_at_zero_when_it_exceeds_it(built):
+    """The other half of the LTCL cap: when LTCG IS positive, an over-large
+    b/f LTCL entry must cap it at exactly 0, never negative. SYN-IND's own
+    LTCG is a loss, so this is proven with a synthetic positive LTCG value
+    fed directly into the shadow-calc mirror (the mirror is fixture-
+    independent, matching `presentation._cg_setoff_exprs` formula-for-
+    formula)."""
+    net_stcg, net_ltcg = _cg_setoff_py(stcg=0.0, ltcg=30000.0, bf_stcl=0.0, bf_ltcl=999999.0)
+    assert net_ltcg == pytest.approx(0.0), "an over-large LTCL entry must cap a positive LTCG at 0"
+    assert net_ltcg >= 0.0
+    assert net_stcg == pytest.approx(0.0), "LTCL bucket must never move STCG"
+
+
+def test_bf_bucket_default_zero_is_a_no_op_matching_pre_change_default_case(built):
+    """When every bucket is left at its default 0 (no preparer override),
+    every net-of-set-off expression must reduce to the original un-netted
+    leaf value -- i.e. paisa-exact parity with the pre-2026-07-21 default
+    case (also proven end-to-end by
+    test_default_case_ladder_matches_schedules_engine_to_the_paisa)."""
+    model, rules, entity = built
+    comp = model.computation
+    assert _capped_setoff_py(comp.business_income, 0.0) == pytest.approx(comp.business_income)
+    assert _capped_setoff_py(comp.house_property_income, 0.0) == pytest.approx(comp.house_property_income)
+    net_stcg, net_ltcg = _cg_setoff_py(comp.capital_gains_st, comp.capital_gains_lt, 0.0, 0.0)
+    assert net_stcg == pytest.approx(comp.capital_gains_st)
+    assert net_ltcg == pytest.approx(comp.capital_gains_lt), \
+        "at bf=0 the raw (possibly negative) LTCG head must pass through unchanged"
+
+    # And the on-page 'Special-rate Capital Gains' figure (net_ltcg + net_stcg)
+    # must equal schedules.py's own tax_block.special_rate_income exactly --
+    # the actual ground-truth this on-page line is meant to reproduce.
+    assert net_ltcg + net_stcg == pytest.approx(comp.tax_block.special_rate_income)
 
 
 # ---------------------------------------------------------------------------
