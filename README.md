@@ -56,11 +56,6 @@ HSBC and ICICI are next in line to go fully offline (see CHANGELOG).
 
 No Python install required. No admin rights. No registry changes.
 
-**Closing the app:** click the **Exit** button in the top-right of the UI (or
-just close the browser window — the server shuts itself down a few seconds
-after the tab closes). This ensures a clean exit so PortableApps.com does not
-report "did not close correctly" or block a later upgrade.
-
 ### Windows SmartScreen / SmartApp Control
 
 The download is not code-signed yet, so Windows 11 may warn or block it the

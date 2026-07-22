@@ -4,7 +4,7 @@
 > in `tools.py` and are wired into `agent.py`. Exposed as the top-level
 > **Parser Generator** UI tab (entry point `agent:run_ui`) and runnable from the
 > dev CLI: `python -m agents.skill_parser_generator --help`. A developer tool -
-> not an end-user feature. Usage guide: `docs/Parser-Generator-Guide.md`.
+> not an end-user feature. Usage guide: `docs/guides/Parser-Generator-Guide.md`.
 
 ## Role
 Help a developer **create, correct, or edit** the project's embedded *fuzzy

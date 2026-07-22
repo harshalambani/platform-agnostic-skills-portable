@@ -20,7 +20,7 @@ description: >
   0/1/2 exit contract are off-limits. Use the "Fix" task when a parser's tie-out
   fails (oracle exits 2); use "Create" to scaffold a new parser from the shared
   template. Every result must pass the quality gate (validate -> tie-out exit 0)
-  before you commit it. See docs/Parser-Generator-Guide.md.
+  before you commit it. See docs/guides/Parser-Generator-Guide.md.
 category: "dev"
 version: "1.1.0"
 
@@ -77,7 +77,7 @@ help:
     Use "Fix a failing parser" when a statement format changed and a parser's
     tie-out fails (the oracle exits 2). Use "Create a new parser" to scaffold one
     for a new format from the shared template. This is for maintainers, not
-    end-of-day statement processing. See docs/Parser-Generator-Guide.md.
+    end-of-day statement processing. See docs/guides/Parser-Generator-Guide.md.
   inputs:
     - name: "task"
       tooltip: "Whether to repair an existing parser or scaffold a new one."

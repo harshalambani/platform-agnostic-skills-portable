@@ -98,7 +98,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   if it exceeds the available income in its head; only its *effect* is
   capped. No change to any tax rate, rule, or the default (no-override)
   figures — the generated workbook reconciles to the same numbers as
-  before. Design: `docs/2026-07-20-itr-onpage-totals-plan.md` (section 11,
+  before. Design: `docs/history/2026-07-20-itr-onpage-totals-plan.md` (section 11,
   "REVISION 2").
 
 ## [2.13.2] — 2026-07-20

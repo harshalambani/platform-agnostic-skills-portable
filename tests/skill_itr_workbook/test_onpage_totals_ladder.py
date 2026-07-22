@@ -1,6 +1,6 @@
 """
 tests/skill_itr_workbook/test_onpage_totals_ladder.py -- regression coverage
-for the 2026-07-20 on-page-totals change (docs/2026-07-20-itr-onpage-totals-plan.md).
+for the 2026-07-20 on-page-totals change (docs/history/2026-07-20-itr-onpage-totals-plan.md).
 
 Three things this file exists to prove, none of them covered elsewhere:
 
