@@ -32,12 +32,13 @@ Income, and the normal-income/special-rate-CG split feeding `Computation`'s
 slab tax) onto this sheet as on-page formulas, so an override anywhere in the
 ladder -- a leaf, Chapter VI-A, or the b/f-loss cell -- now flows end-to-end
 through tax, cess and refund. See
-`docs/2026-07-20-itr-onpage-totals-plan.md`.
+`docs/history/2026-07-20-itr-onpage-totals-plan.md`.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+import interest_234
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.properties import PageSetupProperties
@@ -64,8 +65,13 @@ _ASSUMPTION_NOTE = (
     "* Residential status is ASSUMED to be R/OR (Resident and Ordinarily Resident). "
     "It is not determined by this tool -- no day-count test or RNOR analysis is "
     "performed. Confirm before filing: R/OR vs RNOR vs NR changes what income is "
-    "taxable at all. Interest u/s 234A / 234B / 234C is NOT computed; the tax "
-    "payable shown above is before interest."
+    "taxable at all.\n"
+    "* Interest u/s 234A / 234B / 234C IS computed and is included in the "
+    "Aggregate liability and Refund lines above. It depends on inputs the tool "
+    "cannot know: the ACTUAL DATE OF FILING (assumed to be the due date unless "
+    "you set it), the due date itself (31 July, i.e. the non-audit case), and "
+    "the instalment-wise advance tax. All are editable in the Workings section "
+    "-- check them, since 234A and 234B both grow for every part-month of delay."
 )
 
 #: Fail-loud (2026-07-19 CG gain-split-vs-action fix), "banner, no abort":
@@ -100,6 +106,211 @@ _CG_ERROR_FONT_COLOR = "9C0006"
 #: safe to repeat.
 def mround_safe(number_expr: str, multiple_ref: str) -> str:
     return f"ROUND(({number_expr})/{multiple_ref},0)*{multiple_ref}"
+
+
+#: Row offsets, from the start of the "Interest u/s 234" workings block, of
+#: every cell the visible ladder references. The block has a FIXED shape
+#: (unlike the income sections, none of it is conditional), so these offsets
+#: are the whole layout contract -- `_i234_refs` turns them into coordinates
+#: before the block is written and `write_234_workings` asserts the real
+#: render lands on them.
+_I234_ROW = {
+    "title": 0,
+    "due_date": 1, "filing_date": 2,
+    "tax": 3, "tds": 4, "advance": 5, "assessed": 6,
+    "a_months": 7, "a_interest": 8,
+    "b_months": 9, "b_interest": 10,
+    "c_header": 11, "c_q1": 12, "c_q2": 13, "c_q3": 14, "c_q4": 15,
+    "c_total": 16, "total": 17,
+}
+I234_BLOCK_ROWS = 18
+
+#: Columns within the block. The 234C instalment rows use three of them:
+#: cumulative advance tax paid (editable), the first-proviso exclusion
+#: (editable), and the resulting interest (formula).
+_I234_COL_PAID = 3      # INNER
+_I234_COL_VALUE = 4     # SUB -- single-value rows, and the 234C exclusion
+_I234_COL_OUT = 5       # OUTER -- the interest amounts
+
+
+def _i234_refs(start_row: int) -> dict:
+    """Coordinates of the 234 workings cells, known before the block is
+    written so the ladder above can reference them."""
+    col_v = get_column_letter(_I234_COL_VALUE)
+    col_o = get_column_letter(_I234_COL_OUT)
+    col_p = get_column_letter(_I234_COL_PAID)
+    refs = {}
+    for key, off in _I234_ROW.items():
+        r = start_row + off
+        if key in ("a_interest", "b_interest", "c_total", "total",
+                   "c_q1", "c_q2", "c_q3", "c_q4"):
+            refs[key] = f"{col_o}{r}"
+        else:
+            refs[key] = f"{col_v}{r}"
+        refs[key + "_row"] = r
+    refs["_paid_col"] = col_p
+    refs["_value_col"] = col_v
+    return refs
+
+
+def _excel_months_between(start_ref: str, end_ref: str) -> str:
+    """Excel equivalent of interest_234.months_between: whole months with ANY
+    part of a month counted as a full one. Deliberately not DAYS()/30 or
+    DATEDIF's "m" alone -- both undercount the part-month the statute
+    charges for."""
+    return (
+        f"IF({end_ref}<={start_ref},0,"
+        f"(YEAR({end_ref})-YEAR({start_ref}))*12+(MONTH({end_ref})-MONTH({start_ref}))"
+        f"+IF(DAY({end_ref})>DAY({start_ref}),1,0))"
+    )
+
+
+def _excel_round_down_100(expr: str) -> str:
+    """Rule 119A. `MAX(0,...)` is not cosmetic: Excel's FLOOR raises #NUM!
+    when number and significance have opposite signs -- the same defect class
+    as the MROUND bug fixed above -- so the argument is clamped non-negative
+    before FLOOR ever sees it. A negative base means nothing is owed anyway."""
+    return f"FLOOR(MAX(0,{expr}),100)"
+
+
+def write_234_workings(ws, start_row: int, model, total_liability_ref: str) -> int:
+    """Render the live "Interest u/s 234" block inside Workings/Inputs.
+
+    Everything here is a real Excel formula over editable input cells, not a
+    frozen Python result: changing the filing date or an instalment figure
+    must move the interest AND the Refund line, because a date cell that
+    looks editable but silently does nothing is worse than no cell at all.
+    The Python computation in interest_234.py seeds the defaults and is the
+    control the tests check these formulas against.
+    """
+    refs = _i234_refs(start_row)
+    tp = model.taxes_paid
+    i234 = model.interest_234
+    # The due date is 31 July of the ASSESSMENT year, so its year IS the AY --
+    # which is where s.234B's clock starts (1 April of the AY).
+    ay_start_year = i234.due_date.year
+
+    ws.cell(row=refs["title_row"], column=2,
+            value="Interest u/s 234A / 234B / 234C -- inputs & workings").font = _font(11, bold=True)
+
+    def label(key: str, text: str) -> None:
+        ws.cell(row=refs[key + "_row"], column=2, value=INDENT + text).font = _font()
+
+    def date_input(key: str, value) -> None:
+        c = ws.cell(row=refs[key + "_row"], column=_I234_COL_VALUE, value=value)
+        c.number_format = "dd-mmm-yyyy"
+        c.border = _INPUT_BORDER
+        c.fill = _INPUT_FILL
+        c.font = _font()
+
+    # -- inputs -------------------------------------------------------------
+    label("due_date", "Due date for furnishing the return")
+    date_input("due_date", i234.due_date)
+    label("filing_date", "Actual date of filing (edit me)")
+    date_input("filing_date", i234.filing_date or i234.due_date)
+
+    label("tax", "Tax on total income (incl. surcharge & cess)")
+    ws.cell(row=refs["tax_row"], column=_I234_COL_VALUE,
+            value=f"={total_liability_ref}").number_format = INR_FORMAT
+
+    label("tds", "Less: TDS / TCS credit allowed")
+    _input_cell(ws, refs["tds_row"], _I234_COL_VALUE,
+                default_value=i234.result.tds_credit.amount if i234.computed else 0)
+
+    label("advance", "Advance tax paid (full year)")
+    _input_cell(ws, refs["advance_row"], _I234_COL_VALUE, default_value=tp.advance_tax)
+
+    label("assessed", "Assessed tax (tax less TDS/TCS)")
+    ws.cell(row=refs["assessed_row"], column=_I234_COL_VALUE,
+            value=f"=MAX(0,{refs['tax']}-{refs['tds']})").number_format = INR_FORMAT
+
+    # -- 234A ---------------------------------------------------------------
+    label("a_months", "234A - months late (part month = full month)")
+    ws.cell(row=refs["a_months_row"], column=_I234_COL_VALUE,
+            value=f"={_excel_months_between(refs['due_date'], refs['filing_date'])}")
+
+    label("a_interest", "Interest u/s 234A")
+    base_a = _excel_round_down_100(f"{refs['tax']}-{refs['tds']}-{refs['advance']}")
+    ws.cell(row=refs["a_interest_row"], column=_I234_COL_OUT,
+            value=f"={base_a}*{interest_234.RATE_PER_MONTH}*{refs['a_months']}"
+            ).number_format = INR_FORMAT
+
+    # -- 234B ---------------------------------------------------------------
+    # Runs from 1 April of the ASSESSMENT year, not the income year.
+    apr1 = f"DATE({ay_start_year},4,1)"
+    label("b_months", f"234B - months from 01-Apr-{ay_start_year}")
+    ws.cell(row=refs["b_months_row"], column=_I234_COL_VALUE,
+            value=f"={_excel_months_between(apr1, refs['filing_date'])}")
+
+    label("b_interest", f"Interest u/s 234B (nil if advance tax >= "
+                        f"{interest_234.S234B_THRESHOLD:.0%} of assessed tax)")
+    base_b = _excel_round_down_100(f"{refs['assessed']}-{refs['advance']}")
+    ws.cell(
+        row=refs["b_interest_row"], column=_I234_COL_OUT,
+        value=(f"=IF({refs['advance']}>={interest_234.S234B_THRESHOLD}*{refs['assessed']},0,"
+               f"{base_b}*{interest_234.RATE_PER_MONTH}*{refs['b_months']})"),
+    ).number_format = INR_FORMAT
+
+    # -- 234C instalment table ---------------------------------------------
+    # Column headings go in the LABEL column, not above the money columns:
+    # every cell in columns C-E below the caption must be a formula or a
+    # styled input cell (test_statement_money_columns_below_caption_are_all_
+    # formulas), and a bare heading string there would break that invariant.
+    hdr = refs["c_header_row"]
+    ws.cell(
+        row=hdr, column=2,
+        value=INDENT + "234C instalments  [cumulative advance tax | proviso exclusion | interest]",
+    ).font = _font(bold=True)
+
+    cum = list(tp.advance_tax_cumulative) + [0.0] * 4
+    for q, (lbl, _mo, _dy, req_pct, safe_pct, months) in enumerate(interest_234.S234C_INSTALMENTS):
+        r = refs[f"c_q{q + 1}_row"]
+        ws.cell(row=r, column=2,
+                value=INDENT * 2 + f"{lbl} -- {req_pct:.0%} required").font = _font()
+        _input_cell(ws, r, _I234_COL_PAID, default_value=cum[q])
+        # The first-proviso exclusion for this instalment, as an editable
+        # figure: it depends on WHEN the capital gain arose, which the tool
+        # infers rather than knows.
+        _input_cell(ws, r, _I234_COL_VALUE, default_value=_seed_exclusion(i234, q))
+        paid = f"{refs['_paid_col']}{r}"
+        exc = f"{refs['_value_col']}{r}"
+        considered = f"MAX(0,{refs['assessed']}-{exc})"
+        shortfall = _excel_round_down_100(f"{considered}*{req_pct}-{paid}")
+        ws.cell(
+            row=r, column=_I234_COL_OUT,
+            value=(f"=IF({paid}>={considered}*{safe_pct},0,"
+                   f"{shortfall}*{interest_234.RATE_PER_MONTH}*{months})"),
+        ).number_format = INR_FORMAT
+
+    label("c_total", "Interest u/s 234C")
+    ws.cell(
+        row=refs["c_total_row"], column=_I234_COL_OUT,
+        value=f"=SUM({refs['c_q1']}:{refs['c_q4']})",
+    ).number_format = INR_FORMAT
+
+    label("total", "Total interest u/s 234A + 234B + 234C")
+    c = ws.cell(
+        row=refs["total_row"], column=_I234_COL_OUT,
+        value=f"={refs['a_interest']}+{refs['b_interest']}+{refs['c_total']}",
+    )
+    c.number_format = INR_FORMAT
+    c.font = _font(bold=True)
+
+    return start_row + I234_BLOCK_ROWS
+
+
+def _seed_exclusion(i234, q: int) -> float:
+    """Default for the 234C first-proviso exclusion cell: the amount
+    interest_234 actually excluded for that instalment, so the sheet opens
+    agreeing with the computed figure and the filer edits from there."""
+    if not i234.computed or q >= len(i234.result.s234c.instalments):
+        return 0.0
+    inst = i234.result.s234c.instalments[q]
+    assessed = max(
+        inst.tax_due_considered,
+        i234.result.s234b.assessed_tax,
+    )
+    return max(0.0, assessed - inst.tax_due_considered)
 
 
 def cg_mismatch_banner_text(cg_schedule) -> str:
@@ -629,7 +840,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     page's own tax/cess/liability/refund lines no longer read that return
     value; they are built independently here via `_write_regime_tax_workings`
     so the page is genuinely live, not a mirror. See
-    `docs/2026-07-20-itr-onpage-totals-plan.md` section 11.
+    `docs/history/2026-07-20-itr-onpage-totals-plan.md` section 11.
     """
     ws = wb.create_sheet("Statement of Income")
     ent = lambda key: f"='Entity'!{entity_layout[key].coordinate}"  # noqa: E731
@@ -824,9 +1035,10 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         # (instead of `+= 1`) leaves behind.
         n += 6
         # Tax ladder -- 7 lines (slab/rebate/marginal/cg/surcharge/cess/
-        # liability), each its own row, PLUS the one extra blank row the
-        # liability line's `row += 2` (instead of `+= 1`) leaves behind.
-        n += 8
+        # liability), each its own row, then the four interest lines (234A/
+        # 234B/234C/aggregate liability), PLUS the one extra blank row the
+        # aggregate line's `row += 2` (instead of `+= 1`) leaves behind.
+        n += 12
         n += 2 + max(sum(1 for _, _, v in prepaid if v), 1)  # prepaid section (incl. close_section total)
         n += 1                                  # "Total prepaid taxes" line
         n += 1                                  # Refund Due / (Tax Payable)
@@ -851,6 +1063,14 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         bf_refs[key] = f"{get_column_letter(SUB)}{_bf_row}"
         _bf_row += 1
     bf_last_row = _bf_row - 1
+
+    # Interest u/s 234 workings -- same deferred-write pattern as the b/f
+    # buckets: the visible ladder references these cells, but the block is
+    # RENDERED further down, inside Workings/Inputs. Its shape is fixed, so
+    # the coordinates are knowable now; `write_234_workings` asserts the real
+    # render lands on them.
+    i234_start_row = bf_last_row + 2
+    i234_refs = _i234_refs(i234_start_row)
 
     # Net-of-set-off expressions -- computed ONCE, unconditionally (comp_layout's
     # leaf cells are always present even when a head's section below is not
@@ -1038,6 +1258,21 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row += 1
     line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
     total_liability_ref = f"{get_column_letter(OUTER)}{row}"
+    row += 1
+
+    # Interest u/s 234 -- added to tax BEFORE prepaid taxes are deducted, the
+    # order PartB-TTI uses, so the Refund line below is net of interest. Each
+    # line mirrors a live formula in the Workings block; none is a frozen
+    # value, so editing the filing date there moves the Refund here.
+    line("Add - Interest u/s 234A (late filing)", SUB, f"={i234_refs['a_interest']}")
+    row += 1
+    line("Add - Interest u/s 234B (advance tax default)", SUB, f"={i234_refs['b_interest']}")
+    row += 1
+    line("Add - Interest u/s 234C (instalment deferment)", SUB, f"={i234_refs['c_total']}")
+    row += 1
+    line("Aggregate liability (tax + interest)", OUTER,
+         f"={total_liability_ref}+{i234_refs['total']}", bold=True, rule=_TOP_RULE)
+    aggregate_liability_ref = f"{get_column_letter(OUTER)}{row}"
     row += 2
 
     # `tp` and `prepaid` are already defined near the top of this function
@@ -1064,7 +1299,10 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # to refund) assessee, which would otherwise raise #NUM! on the headline
     # "Refund Due / (Tax Payable)" cell (bug fix, 2026-07-22).
     round_tax_ref = f"'Rules'!{rules_layout['round_tax_nearest'].coordinate}"
-    taxes_paid_minus_liability = f"'TaxesPaid'!{tp_layout['total']}-{total_liability_ref}"
+    # Net of interest u/s 234 (2026-07-22): the refund/payable line measures
+    # prepaid taxes against the AGGREGATE liability, not the bare tax, or the
+    # headline figure would understate what is actually due at filing.
+    taxes_paid_minus_liability = f"'TaxesPaid'!{tp_layout['total']}-{aggregate_liability_ref}"
     refund_formula = f"={mround_safe(taxes_paid_minus_liability, round_tax_ref)}"
     line("Refund Due / (Tax Payable)", OUTER, refund_formula, bold=True, rule=_TOP_RULE)
     row += 1
@@ -1111,6 +1349,23 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         row += 1
     assert row - 1 == bf_last_row, "b/f-loss block end-row drift (see assertion above)."
     row += 1
+
+    # Interest u/s 234 block. Rendered whether or not it could be computed:
+    # the ladder above references fixed coordinates inside it, and leaving
+    # them unwritten would silently read as zero interest. When there is no
+    # income year to compute against, the block is replaced by a note of the
+    # same height so the rows still line up and the reader can see WHY the
+    # ladder shows nothing.
+    assert row == i234_start_row, "Interest u/s 234 block start-row drift (see assertion above)."
+    if model.interest_234.computed:
+        row = write_234_workings(ws, i234_start_row, model, total_liability_ref)
+    else:
+        note = ws.cell(
+            row=i234_start_row, column=2,
+            value="Interest u/s 234A / 234B / 234C not computed -- no income year supplied.",
+        )
+        note.font = _font(bold=True)
+        row = i234_start_row + I234_BLOCK_ROWS
     # The regime tax workings (columns H/I) were already written earlier in
     # this function, at `workings_start_row` -- may run taller than the b/f
     # block above in columns A-F, so advance the cursor past whichever block

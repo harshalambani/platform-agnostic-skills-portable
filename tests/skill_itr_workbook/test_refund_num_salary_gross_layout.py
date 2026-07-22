@@ -569,11 +569,16 @@ def test_negative_total_income_loss_year_generation_does_not_crash_and_stays_sig
 
 
 # ---------------------------------------------------------------------------
-# Fix D: Assumptions block notes that 234A/234B/234C interest is not
-# computed.
+# Fix D (SUPERSEDED 2026-07-22): the Assumptions block used to state that
+# interest u/s 234A/234B/234C was NOT computed. It now IS computed, so the
+# note's job has changed: it must warn that the figure depends on inputs the
+# tool cannot know -- above all the ACTUAL filing date, since 234A and 234B
+# both grow for every part-month of delay past the due date.
 # ---------------------------------------------------------------------------
 
-def test_assumptions_block_notes_234_interest_not_computed(tmp_path, syn_ind_model_and_paths):
+def test_assumptions_block_notes_234_interest_is_computed_and_date_dependent(
+    tmp_path, syn_ind_model_and_paths,
+):
     tree, model, rules, user_rules, entity, result, loaded, form16 = syn_ind_model_and_paths
     wb = _write_and_load(tmp_path, tree, model, rules, user_rules, entity, result, loaded)
     ws = wb["Statement of Income"]
@@ -581,7 +586,8 @@ def test_assumptions_block_notes_234_interest_not_computed(tmp_path, syn_ind_mod
         str(v) for row in ws.iter_rows(values_only=True) for v in row if isinstance(v, str)
     )
     assert "234A" in text and "234B" in text and "234C" in text
-    assert "NOT computed" in text
+    assert "NOT computed" not in text
+    assert "ACTUAL DATE OF FILING" in text
 
 
 # ---------------------------------------------------------------------------
