@@ -491,7 +491,10 @@ def render_hierarchy(ws, start_row: int, root: HNode, source_sheet: str,
     Every amount cell is a formula: leaves point at `source_sheet`, group
     subtotals SUM their own children's cells on this sheet.
 
-    Returns (next_row, [(row, col) for each top-level group/leaf]).
+    Returns (next_row, [(row, col, name) for each top-level group/leaf]). The
+    name is carried so a caller can find a specific section (BS needs `Assets`)
+    by name rather than by position -- a positional lookup would silently pick
+    the wrong section if the book's top-level order ever changed.
     """
     depth = max_group_level(root)
     row = start_row
@@ -507,7 +510,7 @@ def render_hierarchy(ws, start_row: int, root: HNode, source_sheet: str,
             c = ws.cell(row=row, column=money_col, value=f"='{source_sheet}'!{node.source}")
             c.number_format = INR_FORMAT
             c.font = _font()
-            here = (row, money_col)
+            here = (row, money_col, node.name)
             row += 1
             return here
 
@@ -525,12 +528,13 @@ def render_hierarchy(ws, start_row: int, root: HNode, source_sheet: str,
             letter = get_column_letter(money_col)
             formula = f"=SUM({letter}{first}:{letter}{last})"
         else:
-            formula = "=" + "+".join(f"{get_column_letter(c)}{r}" for r, c in child_cells) if child_cells else "=0"
+            formula = ("=" + "+".join(f"{get_column_letter(c)}{r}" for r, c, _n in child_cells)
+                       if child_cells else "=0")
         t = ws.cell(row=row, column=total_col, value=formula)
         t.number_format = INR_FORMAT
         t.font = _font(bold=True)
         t.border = _TOP_RULE
-        here = (row, total_col)
+        here = (row, total_col, node.name)
         row += 1
         return here
 
@@ -1433,24 +1437,120 @@ def _write_hierarchy_sheet(wb, sheet_name: str, title_formula: str, entries,
     return ws
 
 
+#: Top-level BS section names, matched case-insensitively against the book's
+#: own top-level group names. GnuCash's account types are fixed, so these three
+#: words are stable across books -- but the match is by name, not by position,
+#: so a book that orders them differently still tallies correctly.
+_BS_ASSETS = "assets"
+_BS_LIABILITIES = "liabilities"
+_BS_EQUITY = "equity"
+
+#: Label of the IS bottom line. BS references this row by name-independent
+#: cell ref, but the label is shared so the two sheets read consistently.
+NET_INCOME_LABEL = "Net Income / (Loss) for the Year"
+
+
 def write_is_sheet(wb, entries, entity_layout: dict, period_text: str, print_title: str):
     """`IS` -- clustered as closely to GnuCash as the transcript's own `Path`
     column allows. `IS` is naturally shallow; it is not forced to look
-    symmetrical with `BS`."""
+    symmetrical with `BS`.
+
+    Closes with a bottom line. Income leaves are positive and expense leaves
+    already carry the book's negative sign (HTML convention), so the net is a
+    plain sum of the top-level totals -- never restated as a subtraction.
+
+    Returns (ws, net_income_ref) where net_income_ref is the A1 ref of the
+    bottom-line cell, which `BS` brings over to tally.
+    """
     title = (f"='Entity'!{entity_layout['name'].coordinate}"
              f"&\" Income Statement For Period Covering {period_text}\"")
-    return _write_hierarchy_sheet(wb, "IS", title, entries, "IS_Transcript", 38.1, print_title)
+
+    captured: dict = {}
+
+    def net_row(ws, row, tops, last_col):
+        label = ws.cell(row=row, column=1, value=NET_INCOME_LABEL)
+        label.font = _font(bold=True)
+        formula = ("=" + "+".join(f"{get_column_letter(c)}{r}" for r, c, _n in tops)) \
+            if tops else "=0"
+        cell = ws.cell(row=row, column=last_col, value=formula)
+        cell.number_format = INR_FORMAT
+        cell.font = _font(bold=True)
+        cell.border = _TOP_RULE
+        captured["ref"] = cell.coordinate
+        return row + 1
+
+    ws = _write_hierarchy_sheet(wb, "IS", title, entries, "IS_Transcript", 38.1,
+                                print_title, extra_row_fn=net_row)
+    return ws, captured.get("ref", "")
 
 
-def write_bs_sheet(wb, entries, entity_layout: dict, as_at_text: str, print_title: str):
+def write_bs_sheet(wb, entries, entity_layout: dict, as_at_text: str, print_title: str,
+                   net_income_ref: str = ""):
     """`BS` -- a GnuCash view. Every intermediate group keeps its own row and
     its own subtotal; sibling groups are never merged. In particular
     `Fixed Deposits` stays a sibling of `Cash and Bank` -- Schedule AL's
     statutory buckets do combine them, but that is a different sheet with a
-    different purpose and does not license combining them here."""
+    different purpose and does not license combining them here.
+
+    Closes with the tally. A GnuCash balance sheet exported mid-year does not
+    balance on its own: the year's income and expenses are still sitting in the
+    IS and have not been closed to capital, so Assets exceed Liabilities +
+    Equity by exactly the net income. Carrying the IS bottom line in under
+    Equity is what closes that gap, and the difference row proves it did --
+    a balance sheet that does not tally is not evidence of anything, so the
+    check is on the page rather than left to the reader.
+
+    `net_income_ref` is the A1 ref of the `IS` bottom line (see
+    `write_is_sheet`). When it is blank -- no IS sheet -- the tally rows are
+    omitted rather than silently treating the year's income as nil.
+    """
     title = (f"='Entity'!{entity_layout['name'].coordinate}"
              f"&\" Balance Sheet as at {as_at_text}\"")
-    return _write_hierarchy_sheet(wb, "BS", title, entries, "BS_Transcript", 47.8, print_title)
+
+    def tally_rows(ws, row, tops, last_col):
+        if not net_income_ref:
+            return row
+        by_name = {str(n).strip().lower(): (r, c) for r, c, n in tops}
+        assets = by_name.get(_BS_ASSETS)
+        liabilities = by_name.get(_BS_LIABILITIES)
+        equity = by_name.get(_BS_EQUITY)
+        if assets is None or equity is None:
+            # Without both sides there is nothing to tally against; rendering a
+            # 'difference' row that compares a section to itself would look
+            # like proof while proving nothing.
+            return row
+
+        def ref(cell):
+            return f"{get_column_letter(cell[1])}{cell[0]}"
+
+        def put(label, formula, *, col, bold=True, rule=True, fmt=INR_FORMAT):
+            nonlocal row
+            lc = ws.cell(row=row, column=1, value=label)
+            lc.font = _font(bold=bold)
+            c = ws.cell(row=row, column=col, value=formula)
+            c.number_format = fmt
+            c.font = _font(bold=bold)
+            if rule:
+                c.border = _TOP_RULE
+            here = c.coordinate
+            row += 1
+            return here
+
+        row += 1
+        net_here = put(f"Add: {NET_INCOME_LABEL} (per IS)", f"='IS'!{net_income_ref}",
+                       col=equity[1], rule=False)
+        equity_total = put("Total Equity including Current Year Income",
+                           f"={ref(equity)}+{net_here}", col=equity[1])
+
+        parts = [equity_total] + ([ref(liabilities)] if liabilities else [])
+        le_total = put("Total Liabilities and Equity", "=" + "+".join(parts),
+                       col=assets[1])
+        put("Difference (Assets less Liabilities and Equity) -- must be nil",
+            f"={ref(assets)}-{le_total}", col=assets[1])
+        return row
+
+    return _write_hierarchy_sheet(wb, "BS", title, entries, "BS_Transcript", 47.8,
+                                  print_title, extra_row_fn=tally_rows)
 
 
 # ---------------------------------------------------------------------------
@@ -1520,7 +1620,8 @@ def write_pl_for_business_sheet(wb, entries, entity_layout: dict, period_text: s
     def net_row(ws, row, tops, last_col):
         label = ws.cell(row=row, column=1, value="Net Business Income / (Loss)")
         label.font = _font(bold=True)
-        formula = ("=" + "+".join(f"{get_column_letter(c)}{r}" for r, c in tops)) if tops else "=0"
+        formula = ("=" + "+".join(f"{get_column_letter(c)}{r}" for r, c, _n in tops)) \
+            if tops else "=0"
         cell = ws.cell(row=row, column=last_col, value=formula)
         cell.number_format = INR_FORMAT
         cell.font = _font(bold=True)
@@ -1730,8 +1831,13 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
         father_name=father_name, aadhaar=aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
     )
-    write_is_sheet(wb, is_entries, entity_layout, period_text, print_title)
-    write_bs_sheet(wb, bs_entries, entity_layout, as_at_text, print_title)
+    # BS brings the IS bottom line over under Equity and proves the tally --
+    # a GnuCash balance sheet is short by exactly the year's net income until
+    # that income is closed to capital. See write_bs_sheet.
+    _is_ws, net_income_ref = write_is_sheet(wb, is_entries, entity_layout,
+                                            period_text, print_title)
+    write_bs_sheet(wb, bs_entries, entity_layout, as_at_text, print_title,
+                   net_income_ref=net_income_ref)
     # PL for Business is omitted entirely when this entity has no
     # business_subtree configured (the ordinary case for every entity except
     # Harshal's) -- see resolve_business_entries. When configured but this

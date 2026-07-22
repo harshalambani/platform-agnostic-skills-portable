@@ -703,6 +703,173 @@ def test_pl_for_business_renders_income_leaf_and_nested_expense_group_with_net_r
     assert net_cell.number_format == presentation.INR_FORMAT
 
 
+# ---------------------------------------------------------------------------
+# BS tally -- the year's net income carried over from IS
+#
+# A GnuCash balance sheet exported mid-year does NOT balance on its own: income
+# and expenses are still sitting in the IS and have not been closed to capital,
+# so Assets exceed Liabilities + Equity by exactly the net income. These tests
+# prove the BS closes that gap and says so on the page.
+#
+# openpyxl never evaluates formulas, so the tally is proven by evaluating the
+# rendered formulas here (they are simple enough: SUM ranges, + / - chains and
+# cross-sheet refs) against known transcript numbers.
+# ---------------------------------------------------------------------------
+
+def _mini_eval(wb, sheet: str, coord: str, _seen=None):
+    """Evaluate one cell of the rendered workbook, following formulas across
+    sheets. Supports exactly the shapes the hierarchy writer emits."""
+    import re as _re
+    _seen = _seen or set()
+    key = (sheet, coord)
+    assert key not in _seen, f"formula cycle at {sheet}!{coord}"
+    _seen = _seen | {key}
+
+    v = wb[sheet][coord].value
+    if v is None:
+        return 0.0
+    if not (isinstance(v, str) and v.startswith("=")):
+        return float(v)
+
+    expr = v[1:]
+
+    def sum_range(m):
+        sh, col, r1, r2 = m.group(1), m.group(2), int(m.group(3)), int(m.group(4))
+        sh = (sh or sheet).strip("'!") or sheet
+        total = sum(_mini_eval(wb, sh, f"{col}{r}", _seen) for r in range(r1, r2 + 1))
+        return f"({total!r})"
+
+    expr = _re.sub(r"SUM\((?:('[^']+'!))?([A-Z]+)(\d+):[A-Z]+(\d+)\)", sum_range, expr)
+
+    def one_ref(m):
+        sh = (m.group(1) or "").strip("'!") or sheet
+        return f"({_mini_eval(wb, sh, m.group(2), _seen)!r})"
+
+    expr = _re.sub(r"(?:('[^']+'!))?\$?([A-Z]{1,3}\$?\d+)\b", one_ref, expr)
+    return float(eval(expr))  # noqa: S307 - test-local, operands are all numeric
+
+
+#: Synthetic book. Assets 1000; Liabilities 200; Equity 500. Income 400,
+#: expenses -100 (leaves carry the book's negative sign), so net income is 300
+#: and 200 + 500 + 300 == 1000 exactly.
+_IS_TALLY_ENTRIES = [("Income/Interest", "B4"), ("Expense/Bank Charges", "B5")]
+_BS_TALLY_ENTRIES = [("Assets/Cash and Bank/BOB", "B4"),
+                     ("Liabilities/Loans/Rent Payable", "B5"),
+                     ("Equity/Capital Account", "B6")]
+
+
+def _tally_workbook():
+    wb_ = openpyxl.Workbook()
+    wb_.remove(wb_.active)
+    ist = wb_.create_sheet("IS_Transcript")
+    ist["B4"], ist["B5"] = 400.0, -100.0
+    bst = wb_.create_sheet("BS_Transcript")
+    bst["B4"], bst["B5"], bst["B6"] = 1000.0, 200.0, 500.0
+
+    _ws, net_ref = presentation.write_is_sheet(
+        wb_, _IS_TALLY_ENTRIES, {"name": _Coord("A1")}, "period", "title")
+    presentation.write_bs_sheet(
+        wb_, _BS_TALLY_ENTRIES, {"name": _Coord("A1")}, "31-03-2026", "title",
+        net_income_ref=net_ref)
+    return wb_, net_ref
+
+
+def test_is_sheet_closes_with_a_net_income_bottom_line():
+    wb_, net_ref = _tally_workbook()
+    ws = wb_["IS"]
+    row = _row_of(ws, presentation.NET_INCOME_LABEL)
+    assert net_ref, "write_is_sheet must report the bottom-line cell ref"
+    assert ws[net_ref].row == row
+    # Expenses already carry the book's negative sign, so the bottom line is a
+    # plain addition -- never restated as a subtraction.
+    assert "-" not in ws[net_ref].value
+    assert _mini_eval(wb_, "IS", net_ref) == pytest.approx(300.0)
+
+
+def test_balance_sheet_tallies_to_nil_once_net_income_is_carried_over():
+    """The whole point: Assets 1000 vs Liabilities 200 + Equity 500 is short by
+    300 until the year's income is brought in under capital."""
+    wb_, _ = _tally_workbook()
+    ws = wb_["BS"]
+
+    # Without the carry-over the sheet is out by exactly the net income.
+    assets = _mini_eval(wb_, "BS", _money_ref(ws, "Total Assets"))
+    equity_before = _mini_eval(wb_, "BS", _money_ref(ws, "Total Equity"))
+    liabilities = _mini_eval(wb_, "BS", _money_ref(ws, "Total Liabilities"))
+    assert assets - (liabilities + equity_before) == pytest.approx(300.0)
+
+    # With it, the sheet tallies and the difference row proves it.
+    equity_after = _mini_eval(
+        wb_, "BS", _money_ref(ws, "Total Equity including Current Year Income"))
+    le_total = _mini_eval(wb_, "BS", _money_ref(ws, "Total Liabilities and Equity"))
+    assert equity_after == pytest.approx(800.0)
+    assert le_total == pytest.approx(1000.0)
+
+    diff_label = "Difference (Assets less Liabilities and Equity) -- must be nil"
+    assert _mini_eval(wb_, "BS", _money_ref(ws, diff_label)) == pytest.approx(0.0)
+
+
+def test_bs_net_income_row_points_at_the_is_bottom_line_not_a_baked_number():
+    """The carry-over must be a live cross-sheet reference: edit a leaf on the
+    transcript and both sheets must move together."""
+    wb_, net_ref = _tally_workbook()
+    ws = wb_["BS"]
+    ref = _money_ref(ws, f"Add: {presentation.NET_INCOME_LABEL} (per IS)")
+    assert ws[ref].value == f"='IS'!{net_ref}"
+
+    wb_["IS_Transcript"]["B4"] = 900.0          # income 400 -> 900
+    assert _mini_eval(wb_, "BS", ref) == pytest.approx(800.0)
+    diff_label = "Difference (Assets less Liabilities and Equity) -- must be nil"
+    # Assets did not move, so the sheet is now legitimately out by 500 and the
+    # difference row SAYS so rather than hiding it.
+    assert _mini_eval(wb_, "BS", _money_ref(ws, diff_label)) == pytest.approx(-500.0)
+
+
+def test_bs_omits_the_tally_when_there_is_no_is_sheet_to_source_it_from():
+    """No IS bottom line must mean no tally rows -- never a tally that quietly
+    treats the year's income as nil."""
+    wb_ = openpyxl.Workbook()
+    wb_.remove(wb_.active)
+    bst = wb_.create_sheet("BS_Transcript")
+    bst["B4"], bst["B5"], bst["B6"] = 1000.0, 200.0, 500.0
+    presentation.write_bs_sheet(wb_, _BS_TALLY_ENTRIES, {"name": _Coord("A1")},
+                                "31-03-2026", "title", net_income_ref="")
+    labels = [c.value for row in wb_["BS"].iter_rows(min_col=1, max_col=1) for c in row]
+    assert not any(isinstance(v, str) and "Total Liabilities and Equity" in v
+                   for v in labels)
+
+
+def test_bs_sections_are_found_by_name_not_by_position():
+    """A book that orders Equity before Assets must still tally -- a positional
+    lookup would silently compare the wrong sections."""
+    wb_ = openpyxl.Workbook()
+    wb_.remove(wb_.active)
+    ist = wb_.create_sheet("IS_Transcript")
+    ist["B4"], ist["B5"] = 400.0, -100.0
+    bst = wb_.create_sheet("BS_Transcript")
+    bst["B4"], bst["B5"], bst["B6"] = 500.0, 200.0, 1000.0
+
+    _ws, net_ref = presentation.write_is_sheet(
+        wb_, _IS_TALLY_ENTRIES, {"name": _Coord("A1")}, "period", "title")
+    reordered = [("Equity/Capital Account", "B4"),
+                 ("Liabilities/Loans/Rent Payable", "B5"),
+                 ("Assets/Cash and Bank/BOB", "B6")]
+    presentation.write_bs_sheet(wb_, reordered, {"name": _Coord("A1")},
+                                "31-03-2026", "title", net_income_ref=net_ref)
+    ws = wb_["BS"]
+    diff_label = "Difference (Assets less Liabilities and Equity) -- must be nil"
+    assert _mini_eval(wb_, "BS", _money_ref(ws, diff_label)) == pytest.approx(0.0)
+
+
+def _money_ref(ws, label: str) -> str:
+    """A1 ref of the amount cell on the row whose column-A label is `label`."""
+    row = _row_of(ws, label)
+    for cell in ws[row]:
+        if cell.column > 1 and cell.value is not None:
+            return cell.coordinate
+    raise AssertionError(f"no amount cell on row {label!r}")
+
+
 class _Coord:
     def __init__(self, coordinate):
         self.coordinate = coordinate
