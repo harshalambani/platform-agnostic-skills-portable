@@ -78,24 +78,54 @@ class SalarySchedule:
     income_chargeable: float = 0.0
     source: str = "manual"     # "form16" | "manual" | "book-only"
     manual_flagged: bool = False
+    # Fail-loud (2026-07-22 salary-gross fix), "banner, no abort" -- mirrors
+    # CapitalGainsSchedule.reconciliation_ok/_diff (see build_capital_gains):
+    # asserts the Salary sheet's OWN displayed arithmetic (gross - s.10
+    # exemptions - std deduction - prof tax == income chargeable) actually
+    # adds up. Only ever set on the Form16 path -- the book-only path
+    # constructs income_chargeable = gross - std_deduction directly, so it is
+    # true by construction.
+    reconciliation_ok: bool = True
+    reconciliation_diff: float = 0.0
 
 
 def build_salary(
     resolved: dict, node_by_guid: dict, form16, rules: rules_engine.RulesConfig, regime: str,
 ) -> SalarySchedule:
-    gross = _sum_tag(resolved, node_by_guid, "SALARY_GROSS")
-    if gross == 0.0 and not any(leaf.tag == "SALARY_GROSS" for leaf in resolved.values()):
+    book_gross = _sum_tag(resolved, node_by_guid, "SALARY_GROSS")
+    if book_gross == 0.0 and not any(leaf.tag == "SALARY_GROSS" for leaf in resolved.values()):
         return SalarySchedule(source="manual", manual_flagged=True)
 
     if form16 is not None and form16.s17_1 is not None:
+        # The Salary sheet's displayed "Gross salary" cell is explicitly
+        # labelled "17(1)+17(2)+17(3))" (write_workbook.py), i.e. Form 16's
+        # 1(d) total -- NOT the book's SALARY_GROSS tag, which ties to 17(1)
+        # alone (GnuCash books carry no perquisites/17(2) figure). Using
+        # `book_gross` here understated the displayed gross by the
+        # perquisites amount and made the sheet visibly fail to reconcile
+        # (bug fix, 2026-07-22). `book_gross` remains the independent
+        # cross-check input consumed by verify.py's "17(1) Salary vs
+        # SALARY_GROSS" control, which intentionally keeps comparing the book
+        # against 17(1) alone -- that control is untouched by this fix.
+        gross = form16.total_1d
+        if gross is None:   # defensive: identity check could not confirm 1(d)
+            gross = (form16.s17_1 or 0.0) + (form16.s17_2 or 0.0) + (form16.s17_3 or 0.0)
         std_deduction = form16.std_deduction_16a or 0.0
+        s10_exempt_total = form16.total_2i or 0.0
+        prof_tax = form16.prof_tax_16c or 0.0
+        income_chargeable = (
+            form16.income_chargeable_6 if form16.income_chargeable_6 is not None else gross
+        )
+        diff = (gross - s10_exempt_total - std_deduction - prof_tax) - income_chargeable
         return SalarySchedule(
             gross=gross,
-            s10_exempt_total=form16.total_2i or 0.0,
+            s10_exempt_total=s10_exempt_total,
             std_deduction=std_deduction,
-            prof_tax=form16.prof_tax_16c or 0.0,
-            income_chargeable=form16.income_chargeable_6 if form16.income_chargeable_6 is not None else gross,
+            prof_tax=prof_tax,
+            income_chargeable=income_chargeable,
             source="form16",
+            reconciliation_diff=diff,
+            reconciliation_ok=abs(diff) <= 0.01,
         )
 
     # Book-only path (CF3): no Form 16 to carry a std deduction figure, so
@@ -103,9 +133,9 @@ def build_salary(
     # still manual_flagged=True since perquisites/s.10 exemptions/prof tax
     # remain unknown without Form 16.
     std_deduction = rules.regime(regime)["std_deduction_salary"]
-    income_chargeable = max(0.0, gross - std_deduction)
+    income_chargeable = max(0.0, book_gross - std_deduction)
     return SalarySchedule(
-        gross=gross, std_deduction=std_deduction, income_chargeable=income_chargeable,
+        gross=book_gross, std_deduction=std_deduction, income_chargeable=income_chargeable,
         source="book-only", manual_flagged=True,
     )
 

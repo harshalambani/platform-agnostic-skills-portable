@@ -168,7 +168,12 @@ def test_total_income_is_gti_minus_via_with_no_lump_bf_term(built_workbook):
     statutory buckets nets off its OWN head/gain-type BEFORE aggregation
     into Gross Total Income (see test_bf_loss_buckets_are_real_editable_...
     and test_bf_loss_buckets_route_into_their_own_head_... below), so Total
-    Income is simply GTI minus Chapter VI-A, s.288A-rounded."""
+    Income is simply GTI minus Chapter VI-A, s.288A-rounded.
+
+    2026-07-22 bug fix: the s.288A rounding is `ROUND((x)/m,0)*m`
+    (`presentation.mround_safe`), not Excel's `MROUND(x,m)` -- MROUND raises
+    #NUM! whenever `x` and `m` have opposite signs, which happens for every
+    loss-year (negative Total Income) return."""
     ws = built_workbook["Statement of Income"]
     gti_cell = _find_exact(ws, "Total", col=LBL)
     gti_ref = f"{ws.cell(row=gti_cell.row, column=OUTER).coordinate}"
@@ -178,10 +183,14 @@ def test_total_income_is_gti_minus_via_with_no_lump_bf_term(built_workbook):
 
     ti_cell = _find_exact(ws, "Total Income", col=LBL)
     ti_formula = ws.cell(row=ti_cell.row, column=OUTER).value
-    assert isinstance(ti_formula, str) and ti_formula.startswith("=MROUND(")
+    assert isinstance(ti_formula, str) and ti_formula.startswith("=ROUND((")
+    assert "MROUND(" not in ti_formula, (
+        "Total Income must use the sign-safe ROUND((x)/m,0)*m rounding, not "
+        "Excel's MROUND (which raises #NUM! for a negative Total Income)"
+    )
     assert gti_ref in ti_formula, "Total Income must reference the GTI cell"
     assert via_ref in ti_formula, "Total Income must reference the Chapter VI-A cell"
-    assert "'Rules'!" in ti_formula, "Total Income must keep the s.288A MROUND rounding"
+    assert "'Rules'!" in ti_formula, "Total Income must keep the s.288A rounding"
 
 
 def test_bf_loss_buckets_are_real_editable_input_cells_defaulting_to_zero(built_workbook):
