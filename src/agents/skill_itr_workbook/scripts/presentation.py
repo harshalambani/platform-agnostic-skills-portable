@@ -64,7 +64,8 @@ _ASSUMPTION_NOTE = (
     "* Residential status is ASSUMED to be R/OR (Resident and Ordinarily Resident). "
     "It is not determined by this tool -- no day-count test or RNOR analysis is "
     "performed. Confirm before filing: R/OR vs RNOR vs NR changes what income is "
-    "taxable at all."
+    "taxable at all. Interest u/s 234A / 234B / 234C is NOT computed; the tax "
+    "payable shown above is before interest."
 )
 
 #: Fail-loud (2026-07-19 CG gain-split-vs-action fix), "banner, no abort":
@@ -78,6 +79,27 @@ _ASSUMPTION_NOTE = (
 CG_RECONCILIATION_ERROR_MARKER = "ERROR: Capital Gains do not reconcile to books"
 _CG_ERROR_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 _CG_ERROR_FONT_COLOR = "9C0006"
+
+
+#: Sign-safe replacement for Excel's MROUND(number, multiple): MROUND raises
+#: #NUM! whenever `number` and `multiple` have OPPOSITE signs. Every
+#: statutory rounding checkpoint in this workbook (s.288A on Total Income,
+#: s.288B on the refund/tax-payable line) rounds to a POSITIVE Rules-sheet
+#: constant (`round_ti_nearest` / `round_tax_nearest`, both 10), but the
+#: number being rounded goes negative for a loss year (s.288A) or a
+#: tax-payable (as opposed to refund) assessee (s.288B) -- so the pre-existing
+#: `=MROUND(x,m)` formula produced #NUM! on every such return (bug fix,
+#: 2026-07-22). `ROUND(x/m,0)*m` reproduces MROUND's round-half-away-from-zero
+#: behaviour for BOTH signs and never errors:
+#:   MROUND(7.5,10)=10   == ROUND(0.75,0)*10=10
+#:   MROUND(-5,-10)=-10  == ROUND(-0.5,0)*10=-10
+#:   MROUND(0,10)=0      == ROUND(0,0)*10=0
+#: `number_expr` is wrapped in its own parentheses before the division so a
+#: compound expression (e.g. "'TaxesPaid'!B15-E39") isn't corrupted by
+#: operator precedence; `multiple_ref` is a single cell reference and is
+#: safe to repeat.
+def mround_safe(number_expr: str, multiple_ref: str) -> str:
+    return f"ROUND(({number_expr})/{multiple_ref},0)*{multiple_ref}"
 
 
 def cg_mismatch_banner_text(cg_schedule) -> str:
@@ -104,6 +126,42 @@ def _write_cg_error_banner(ws, row: int, cg_schedule, ncols: int) -> int:
     c.alignment = Alignment(horizontal="center")
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
     return row + 2
+
+#: Fail-loud (2026-07-22 salary-gross fix), mirrors CG_RECONCILIATION_ERROR_MARKER
+#: above -- the control that would have caught the bug where the Salary
+#: sheet's displayed gross (17(1)+17(2)+17(3)) silently dropped perquisites.
+#: schedules.py's build_salary computes reconciliation_ok/reconciliation_diff
+#: (gross - s.10 exempt - std deduction - prof tax vs income chargeable) on
+#: the Form16 path; this is only about making a mismatch impossible to miss.
+#: Same "banner, no abort" contract and agent.py exit-code convention as CG.
+SALARY_RECONCILIATION_ERROR_MARKER = "ERROR: Salary sheet does not reconcile to Form 16"
+
+
+def salary_mismatch_banner_text(salary_schedule) -> str:
+    return (
+        f"*** {SALARY_RECONCILIATION_ERROR_MARKER} "
+        f"(gross - s.10 exempt - std deduction - prof tax vs income chargeable, "
+        f"diff {salary_schedule.reconciliation_diff:,.2f}) -- DO NOT FILE ***"
+    )
+
+
+def _write_salary_error_banner(ws, row: int, salary_schedule, ncols: int) -> int:
+    """Top-of-sheet ERROR banner, modeled directly on `_write_cg_error_banner`
+    above -- present only when the Salary sheet's own arithmetic fails to
+    reconcile to Form 16's income chargeable (schedules.py build_salary,
+    diff magnitude > 0.01). 'Banner, no abort': the workbook is ALWAYS still
+    produced; omitted entirely (returns `row` unchanged) when reconciled, and
+    when there is nothing to check (book-only / manual path, where
+    reconciliation_ok stays at its default True)."""
+    if salary_schedule.reconciliation_ok:
+        return row
+    c = ws.cell(row=row, column=1, value=salary_mismatch_banner_text(salary_schedule))
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
 
 _PARKED_NOTE = "(to be filled)"
 
@@ -591,6 +649,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # -- header block -------------------------------------------------------
     row = 1
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
+    row = _write_salary_error_banner(ws, row, model.salary, OUTER)
     title = ws.cell(row=row, column=1, value="STATEMENT OF INCOME")
     title.font = _font(14, bold=True)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=OUTER)
@@ -689,31 +748,109 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         subtotal_cells.append(f"{get_column_letter(SUB)}{row}")
         row += 1
 
-    # Brought-forward losses set off -- FOUR statutory per-bucket input cells
-    # (design doc section 11.2), written BEFORE the heads-of-income sections
-    # below so their coordinates exist for those sections' net-of-set-off
-    # formulas. Each is a real, editable input cell (`_input_cell`, default
-    # 0) -- unlike the pre-2026-07-21 single lump cell, entering a bucket
-    # value that exceeds available income in its head is visibly capped
-    # downstream (never silently zeroed on THIS cell -- the entered figure
-    # itself always stays visible, only the *effect* is capped).
-    section("Brought forward losses set off (statutory routing, s.71B / s.72 / s.74)")
-    row += 1
+    # -- Workings/Inputs placement (2026-07-22 layout fix) ------------------
+    # The "Brought forward losses set off" input block and the New/Old regime
+    # tax-working formulas used to sit HERE, at the very top of the page,
+    # before any income was even shown -- confusing for a reader (raw
+    # statutory set-off inputs and helper tax machinery ahead of the actual
+    # income statement). Both are now relocated to a labelled "Workings /
+    # Inputs" section BELOW the "Refund Due / (Tax Payable)" line. The catch:
+    # their cell coordinates are consumed by formulas written EARLIER in this
+    # function than that -- the b/f buckets by the HP/Business/CG
+    # net-of-set-off expressions immediately below, the tax workings by the
+    # visible tax ladder further down -- earlier, that is, than the point
+    # where their real target row would become known by simply running this
+    # function top-to-bottom.
+    #
+    # Rather than a full two-pass render, the row arithmetic for everything
+    # BETWEEN the body start and the Refund line is fully deterministic from
+    # `model`/`tp` alone (each section either renders a fixed row count or is
+    # skipped entirely) -- so that row count is predicted analytically
+    # (`_predict_pre_workings_rows`, right below) and the Workings/Inputs
+    # section's start row is computed UP FRONT, before any body content is
+    # written. The b/f input cells' coordinates and the tax-workings' start
+    # row are both derived from that prediction and used immediately by the
+    # formulas that need them; the actual `section()`/`_input_cell()` calls
+    # that render the b/f block are deferred to later in this function, once
+    # the real `row` cursor reaches that point. A runtime assertion right
+    # after the Refund line confirms the real cursor lands exactly where
+    # predicted -- if the two ever drift (e.g. a future edit adds a row to
+    # some section above and forgets to update the prediction), workbook
+    # generation raises immediately instead of silently shipping a
+    # `#REF!`-producing offset.
+    os_ = model.other_sources
+    os_items = (
+        ("Savings bank interest", "sb", os_.interest_sb),
+        ("Bank FD interest", "bank", os_.interest_bank),
+        ("NBFC/HFC interest", "nbfc", os_.interest_nbfc),
+        ("EPF taxable interest", "epf", os_.interest_epf_taxable),
+        ("Interest on Income Tax refund", "refund_interest", os_.refund_interest),
+        ("Dividend income (gross)", "dividend", os_.dividend_gross),
+        ("SLBS income", "slbs", os_.slbs),
+    )
+    tp = model.taxes_paid
+    prepaid = (
+        ("TDS on salary", "tds_salary", tp.tds_salary),
+        ("TDS on interest", "tds_interest", tp.tds_interest),
+        ("TDS on dividend", "tds_dividend", tp.tds_dividend),
+        ("TCS", "tcs", tp.tcs),
+        ("Advance Tax", "advance", tp.advance_tax),
+        ("Self-assessment Tax", "sat", tp.self_assessment_tax),
+    )
+
+    def _predict_pre_workings_rows() -> int:
+        """Deterministic row count from the body start row (right after the
+        'Rs.' header rule) through the Refund line, both inclusive --
+        EXCLUDING the b/f-loss block and regime tax workings, both relocated
+        to the Workings/Inputs section below Refund. Every term here mirrors
+        an actual write further down this function -- see the runtime
+        assertion after the Refund line, which is what actually guarantees
+        this stays correct."""
+        n = 0
+        cg = model.capital_gains
+        if model.salary.income_chargeable:
+            n += 3   # section + 1 item + close_section total
+        if model.house_property.income:
+            n += 3
+        if model.business.remuneration or model.business.expenses_total:
+            n += 3
+        if cg.lt_taxable_gross or cg.st_taxable_gross:
+            n += 2 + (1 if cg.lt_taxable_gross else 0) + (1 if cg.st_taxable_gross else 0)
+        if any(v for _, _, v in os_items):
+            n += 2 + sum(1 for _, _, v in os_items if v)
+        n += 1                                  # blank before GTI
+        # GTI, VIA, TI, special-CG, normal-income -- 5 lines, each its own row,
+        # PLUS the one extra blank row the normal-income line's `row += 2`
+        # (instead of `+= 1`) leaves behind.
+        n += 6
+        # Tax ladder -- 7 lines (slab/rebate/marginal/cg/surcharge/cess/
+        # liability), each its own row, PLUS the one extra blank row the
+        # liability line's `row += 2` (instead of `+= 1`) leaves behind.
+        n += 8
+        n += 2 + max(sum(1 for _, _, v in prepaid if v), 1)  # prepaid section (incl. close_section total)
+        n += 1                                  # "Total prepaid taxes" line
+        n += 1                                  # Refund Due / (Tax Payable)
+        return n
+
+    body_start_row = row
+    predicted_post_refund_row = body_start_row + _predict_pre_workings_rows()
+    workings_start_row = predicted_post_refund_row + 2  # mirrors the old 2-blank-row gap
+
+    # Brought-forward-loss bucket coordinates -- predicted now (see above),
+    # written for real once the cursor reaches the Workings/Inputs section
+    # further down. Layout inside that section: "Workings / Inputs" header
+    # (+1 row), one blank row, "Brought forward losses..." section label
+    # (+1 row), then the four input rows.
+    bf_first_row = workings_start_row + 3
     bf_refs: dict[str, str] = {}
-    for key, label, _head in _SIMPLE_BF_BUCKETS:
-        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
-        _input_cell(ws, row, SUB, default_value=0)
-        bf_refs[key] = f"{get_column_letter(SUB)}{row}"
-        row += 1
-    for key, label in (
-        ("bf_stcl", "b/f Short-term capital loss (s.74) -- STCG first, remainder to LTCG"),
-        ("bf_ltcl", "b/f Long-term capital loss (s.74) -- LTCG only"),
-    ):
-        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
-        _input_cell(ws, row, SUB, default_value=0)
-        bf_refs[key] = f"{get_column_letter(SUB)}{row}"
-        row += 1
-    row += 1
+    _bf_row = bf_first_row
+    for key, _label, _head in _SIMPLE_BF_BUCKETS:
+        bf_refs[key] = f"{get_column_letter(SUB)}{_bf_row}"
+        _bf_row += 1
+    for key in ("bf_stcl", "bf_ltcl"):
+        bf_refs[key] = f"{get_column_letter(SUB)}{_bf_row}"
+        _bf_row += 1
+    bf_last_row = _bf_row - 1
 
     # Net-of-set-off expressions -- computed ONCE, unconditionally (comp_layout's
     # leaf cells are always present even when a head's section below is not
@@ -728,6 +865,11 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         comp_layout["cg_st"], comp_layout["cg_lt"], bf_refs["bf_stcl"], bf_refs["bf_ltcl"],
     )
 
+    #: Short pointer left on every income-section head whose figure is netted
+    #: against a b/f-loss bucket above, since the input cells themselves no
+    #: longer sit right next to these sections (2026-07-22 layout fix).
+    _BF_NOTE = "  (b/f set-off applied -- see Workings below)"
+
     # Heads of income -- rendered only when the underlying figure is non-zero.
     # HP / Business / CG items use the NET-of-set-off expressions above so the
     # statutory routing happens at the head/gain-type level, before
@@ -740,20 +882,20 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         close_section(first)
 
     if model.house_property.income:
-        section("Income from House Property"); row += 1
+        section("Income from House Property" + _BF_NOTE); row += 1
         first = row
         item("Income from house property", f"={net_hp_expr}"); row += 1
         close_section(first)
 
     if model.business.remuneration or model.business.expenses_total:
-        section("Income from Business or Profession"); row += 1
+        section("Income from Business or Profession" + _BF_NOTE); row += 1
         first = row
         item("Net business income", f"={net_business_expr}"); row += 1
         close_section(first)
 
     cg = model.capital_gains
     if cg.lt_taxable_gross or cg.st_taxable_gross:
-        section("Capital Gains"); row += 1
+        section("Capital Gains" + _BF_NOTE); row += 1
         first = row
         if cg.lt_taxable_gross:
             item("Long Term Capital Gain / (Loss)", f"={net_ltcg_expr}"); row += 1
@@ -761,16 +903,6 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
             item("Short Term Capital Gain / (Loss)", f"={net_stcg_expr}"); row += 1
         close_section(first)
 
-    os_ = model.other_sources
-    os_items = (
-        ("Savings bank interest", "sb", os_.interest_sb),
-        ("Bank FD interest", "bank", os_.interest_bank),
-        ("NBFC/HFC interest", "nbfc", os_.interest_nbfc),
-        ("EPF taxable interest", "epf", os_.interest_epf_taxable),
-        ("Interest on Income Tax refund", "refund_interest", os_.refund_interest),
-        ("Dividend income (gross)", "dividend", os_.dividend_gross),
-        ("SLBS income", "slbs", os_.slbs),
-    )
     if any(v for _, _, v in os_items):
         section("Income from other sources"); row += 1
         first = row
@@ -811,9 +943,11 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # s.288A rounding (nearest, from Rules) is applied here, exactly as the
     # pre-change Computation-sheet formula did (MROUND(ti_raw, round_ti_nearest))
     # -- dropping it would silently break paisa-exact parity with today's
-    # workbook for the default (no-override) case.
+    # workbook for the default (no-override) case. Uses `mround_safe` (not
+    # Excel's MROUND) because Total Income can go negative in a loss year,
+    # which would otherwise raise #NUM! (bug fix, 2026-07-22).
     round_ti_ref = f"'Rules'!{rules_layout['round_ti_nearest'].coordinate}"
-    line("Total Income", OUTER, f"=MROUND({gti_ref}-{via_ref},{round_ti_ref})",
+    line("Total Income", OUTER, f"={mround_safe(f'{gti_ref}-{via_ref}', round_ti_ref)}",
          bold=True, rule=_TOP_RULE)
     ti_row = row
     ti_ref = f"{get_column_letter(OUTER)}{ti_row}"
@@ -864,15 +998,23 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # past the print area (see `_write_regime_tax_workings`); the visible
     # lines below just IF()-pick between the two at every step, exactly like
     # the rest of this page's regime selector.
+    # Regime tax workings now live in the Workings/Inputs section below
+    # Refund (2026-07-22 layout fix) -- written here (their call site is
+    # unchanged) but targeting the PREDICTED `workings_start_row` (columns
+    # H/I, so this never collides with the visible A-F ladder regardless of
+    # which real row the cursor is on at this point in the function).
     cg_tax_ref = f"'CapitalGains'!{cg_layout['special_tax_cell']}"
     cess_rate_ref = f"'Rules'!{rules_layout['cess_rate'].coordinate}"
+    tax_workings_row = workings_start_row + 1
+    ws.cell(row=workings_start_row, column=_TAX_HELPER_COL,
+            value="Regime comparison workings (reference only)").font = _font(9, bold=True, italic=True)
     new_tax_parts, _helper_row = _write_regime_tax_workings(
-        ws, 2, _TAX_HELPER_COL, "New", normal_income_ref, special_cg_ref, cg_tax_ref, cess_rate_ref,
+        ws, tax_workings_row, _TAX_HELPER_COL, "New", normal_income_ref, special_cg_ref, cg_tax_ref, cess_rate_ref,
         rules_layout["new_slabs"], rules_layout["new_rebate_max_ti"].coordinate,
         rules_layout["new_rebate_max_amt"].coordinate, rules_layout["new_rebate_marginal"].coordinate,
         rules_layout["new_surcharge"],
     )
-    old_tax_parts, _helper_row = _write_regime_tax_workings(
+    old_tax_parts, tax_workings_end_row = _write_regime_tax_workings(
         ws, _helper_row, _TAX_HELPER_COL, "Old", normal_income_ref, special_cg_ref, cg_tax_ref, cess_rate_ref,
         rules_layout["old_slabs"], rules_layout["old_rebate_max_ti"].coordinate,
         rules_layout["old_rebate_max_amt"].coordinate, rules_layout["old_rebate_marginal"].coordinate,
@@ -898,15 +1040,9 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     total_liability_ref = f"{get_column_letter(OUTER)}{row}"
     row += 2
 
-    tp = model.taxes_paid
-    prepaid = (
-        ("TDS on salary", "tds_salary", tp.tds_salary),
-        ("TDS on interest", "tds_interest", tp.tds_interest),
-        ("TDS on dividend", "tds_dividend", tp.tds_dividend),
-        ("TCS", "tcs", tp.tcs),
-        ("Advance Tax", "advance", tp.advance_tax),
-        ("Self-assessment Tax", "sat", tp.self_assessment_tax),
-    )
+    # `tp` and `prepaid` are already defined near the top of this function
+    # (hoisted alongside `os_items` so `_predict_pre_workings_rows` can use
+    # them too -- see the Workings/Inputs placement comment above).
     section("Less - Prepaid Taxes"); row += 1
     first = row
     for label, key, value in prepaid:
@@ -923,11 +1059,64 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # s.288B rounding (nearest, from Rules) -- matches Computation's own
     # refund formula exactly (MROUND(taxes_paid - liability, round_tax_nearest)),
     # now built directly from this page's own `total_liability_ref` instead of
-    # reading `Computation`'s tail.
+    # reading `Computation`'s tail. Uses `mround_safe` (not Excel's MROUND)
+    # because this expression goes negative for every tax-payable (as opposed
+    # to refund) assessee, which would otherwise raise #NUM! on the headline
+    # "Refund Due / (Tax Payable)" cell (bug fix, 2026-07-22).
     round_tax_ref = f"'Rules'!{rules_layout['round_tax_nearest'].coordinate}"
-    refund_formula = f"=MROUND('TaxesPaid'!{tp_layout['total']}-{total_liability_ref},{round_tax_ref})"
+    taxes_paid_minus_liability = f"'TaxesPaid'!{tp_layout['total']}-{total_liability_ref}"
+    refund_formula = f"={mround_safe(taxes_paid_minus_liability, round_tax_ref)}"
     line("Refund Due / (Tax Payable)", OUTER, refund_formula, bold=True, rule=_TOP_RULE)
-    row += 3
+    row += 1
+
+    # --- Workings/Inputs section (below Refund) -----------------------------
+    # This is the runtime safety net for the row prediction made at the top
+    # of this function: if it ever fires, `_predict_pre_workings_rows` has
+    # drifted from the body it predicts (most likely: a row was added to/
+    # removed from some section above without updating the prediction) --
+    # fail loudly here rather than silently write a workbook whose b/f-loss
+    # cells or regime tax workings are one row off from what the HP/Business/
+    # CG/tax-ladder formulas above actually reference (a `#REF!`-shaped bug
+    # that would otherwise only surface much later, if at all, on manual
+    # inspection).
+    assert row == predicted_post_refund_row, (
+        f"Statement of Income layout drift: _predict_pre_workings_rows() "
+        f"predicted the row right after Refund would be {predicted_post_refund_row}, "
+        f"but it is actually {row}. Fix the prediction (it must mirror every "
+        "row written between the body start and the Refund line) before this "
+        "ships -- otherwise the Workings/Inputs section below is placed on "
+        "top of the wrong cells."
+    )
+    row += 2  # mirrors the pre-2026-07-22 2-blank-row gap before Assumptions
+    assert row == workings_start_row, "Workings/Inputs start-row drift (see assertion above)."
+
+    header = ws.cell(row=row, column=1, value="Workings / Inputs")
+    header.font = _font(12, bold=True, underline="single")
+    row += 2
+    section("Brought forward losses set off (statutory routing, s.71B / s.72 / s.74)")
+    row += 1
+    assert row == bf_first_row, "b/f-loss block start-row drift (see assertion above)."
+    for key, label, _head in _SIMPLE_BF_BUCKETS:
+        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
+        _input_cell(ws, row, SUB, default_value=0)
+        assert bf_refs[key] == f"{get_column_letter(SUB)}{row}"
+        row += 1
+    for key, label in (
+        ("bf_stcl", "b/f Short-term capital loss (s.74) -- STCG first, remainder to LTCG"),
+        ("bf_ltcl", "b/f Long-term capital loss (s.74) -- LTCG only"),
+    ):
+        ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
+        _input_cell(ws, row, SUB, default_value=0)
+        assert bf_refs[key] == f"{get_column_letter(SUB)}{row}"
+        row += 1
+    assert row - 1 == bf_last_row, "b/f-loss block end-row drift (see assertion above)."
+    row += 1
+    # The regime tax workings (columns H/I) were already written earlier in
+    # this function, at `workings_start_row` -- may run taller than the b/f
+    # block above in columns A-F, so advance the cursor past whichever block
+    # is taller for a correct `last_row` / print area.
+    row = max(row, tax_workings_end_row)
+    row += 1
 
     # Assumptions note only renders while residency is DEFAULTED -- a reader
     # must be able to tell "someone asserted this" from "the tool fell back"

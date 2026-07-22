@@ -272,6 +272,16 @@ def write_salary_sheet(wb: Workbook, salary: sch.SalarySchedule) -> dict:
     ws = wb.create_sheet("Salary")
     sw = _SheetWriter(ws)
     layout = {}
+    if not salary.reconciliation_ok:
+        # Fail-loud (2026-07-22 salary-gross fix) -- see
+        # presentation._write_salary_error_banner for the deliverable-page
+        # copy of this banner; this is the same "banner, no abort" mismatch
+        # made impossible to miss on the raw working sheet too.
+        banner = ws.cell(row=sw.row, column=1, value=presentation.salary_mismatch_banner_text(salary))
+        banner.font = _UNMAPPED_FONT
+        banner.fill = _UNMAPPED_FILL
+        ws.merge_cells(start_row=sw.row, start_column=1, end_row=sw.row, end_column=2)
+        sw.row += 2
     sw.header("Salary")
     layout["gross"] = sw.label_value("Gross salary (17(1)+17(2)+17(3))", salary.gross)
     sw.label_value("Source", salary.source, number_format=None)
@@ -764,7 +774,14 @@ def write_computation_tail(
     taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
 
     sw.cell(1, refund_label)
-    refund_cell = sw.cell(2, f"=MROUND({taxes_paid_cell.coordinate}-{selected_liability_cell},'Rules'!{rules_layout['round_tax_nearest'].coordinate})", number_format=INR_FORMAT)
+    # Sign-safe s.288B rounding (see presentation.mround_safe): Excel's
+    # MROUND(x,m) raises #NUM! whenever x and m have opposite signs, which is
+    # exactly the tax-payable (x < 0, m > 0) case -- bug fix, 2026-07-22.
+    round_tax_ref = f"'Rules'!{rules_layout['round_tax_nearest'].coordinate}"
+    refund_cell = sw.cell(
+        2, f"={presentation.mround_safe(f'{taxes_paid_cell.coordinate}-{selected_liability_cell}', round_tax_ref)}",
+        number_format=INR_FORMAT,
+    )
     sw.row += 1
 
     comp_tail = {
@@ -825,6 +842,7 @@ def write_reconciliation_sheet(
     split_year_exemption_prorated: bool = False, split_year_exemption_ratio: float = 1.0,
     as26_available: bool = False, as26_tie_out_ok: bool = True, as26_conflicts: list | None = None,
     resolved: dict | None = None, mapping_entries: dict | None = None,
+    salary_reconciliation_ok: bool = True,
 ) -> None:
     ws = wb.create_sheet("Reconciliation")
     sw = _SheetWriter(ws)
@@ -834,6 +852,16 @@ def write_reconciliation_sheet(
     for f in identity_failures:
         sw.label_value("  failure", f, number_format=None)
     sw.label_value("Capital Gains reconciliation (lots vs control)", "OK" if cg_reconciliation_ok else "MISMATCH", number_format=None)
+    # Salary sheet's OWN arithmetic (gross - s.10 exempt - std deduction -
+    # prof tax vs income chargeable) -- a DIFFERENT check to the "17(1)
+    # Salary vs SALARY_GROSS" line below, which compares the book's 17(1)-only
+    # SALARY_GROSS tag against Form 16's 17(1) alone. Both are correct and
+    # intentionally independent (2026-07-22 salary-gross fix): this line
+    # would have caught the sheet's own gross-vs-income_chargeable mismatch.
+    sw.label_value(
+        "Salary sheet reconciliation (gross - exemptions - deductions vs income chargeable)",
+        "OK" if salary_reconciliation_ok else "MISMATCH", number_format=None,
+    )
     if split_year_exemption_prorated:
         sw.label_value(
             "ASSUMPTION APPLIED -- split-year 112A exemption pro-rated across "
@@ -1099,6 +1127,7 @@ def write_workbook(
         model.capital_gains.split_year_exemption_prorated, model.capital_gains.split_year_exemption_ratio,
         model.taxes_paid.as26_available, model.taxes_paid.tie_out_ok, model.taxes_paid.tie_out_conflicts,
         resolved, mapping_entries,
+        salary_reconciliation_ok=model.salary.reconciliation_ok,
     )
 
     write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)

@@ -503,6 +503,20 @@ def _build_and_write_workbook(
             f"(diff {model.capital_gains.reconciliation_diff:,.2f}) -- workbook still written "
             "(see ERROR banner on CG / Statement of Income sheets) -- DO NOT FILE without review."
         )
+    if not model.salary.reconciliation_ok:
+        # "Banner, no abort" (2026-07-22 salary-gross fix), same contract as
+        # the CG reconciliation check above: the workbook has ALREADY been
+        # written in full, with a matching top-of-sheet ERROR banner on the
+        # Salary and Statement of Income sheets (see
+        # presentation._write_salary_error_banner). This line's job is only
+        # to carry presentation.SALARY_RECONCILIATION_ERROR_MARKER into the
+        # run() summary so that main()'s process-level exit code below (and
+        # any other caller grepping the summary) can detect the mismatch.
+        lines.append(
+            f"{presentation.SALARY_RECONCILIATION_ERROR_MARKER} "
+            f"(diff {model.salary.reconciliation_diff:,.2f}) -- workbook still written "
+            "(see ERROR banner on Salary / Statement of Income sheets) -- DO NOT FILE without review."
+        )
     return lines
 
 
@@ -678,6 +692,7 @@ def main(argv: list[str] | None = None) -> int:
         scrips_path=args.scrips_path, ay=args.ay, regime_override=args.regime_override,
     )
     print(summary)
+    exit_code = 0
     if presentation.CG_RECONCILIATION_ERROR_MARKER in summary:
         print(
             f"{presentation.CG_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
@@ -685,8 +700,16 @@ def main(argv: list[str] | None = None) -> int:
             "sheets).",
             file=sys.stderr,
         )
-        return 1
-    return 0
+        exit_code = 1
+    if presentation.SALARY_RECONCILIATION_ERROR_MARKER in summary:
+        print(
+            f"{presentation.SALARY_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
+            "MUST be reviewed before filing (see ERROR banner on Salary / Statement of Income "
+            "sheets).",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    return exit_code
 
 
 if __name__ == "__main__":
