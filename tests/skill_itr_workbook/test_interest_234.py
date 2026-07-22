@@ -360,6 +360,90 @@ def test_using_book_tds_instead_of_26as_materially_understates_the_interest():
 
 
 # ---------------------------------------------------------------------------
+# s.234C first proviso driven by ACTUAL sale dates (schedules.py)
+# ---------------------------------------------------------------------------
+
+SCRIPTS_STR = str(SCRIPTS)
+if SCRIPTS_STR not in sys.path:
+    sys.path.insert(0, SCRIPTS_STR)
+import schedules as sch  # noqa: E402
+
+
+def _cg(rows):
+    """A CapitalGainsSchedule carrying just the lot rows the proviso reads."""
+    return sch.CapitalGainsSchedule(lot_rows=[
+        sch.CGLotRow(
+            scrip="SYN", sale_date=d, buy_date=None, term="LT", qty=1.0, cost=0.0,
+            proceeds=gain, booked_gain=gain, grandfathered=False, fmv_used=None,
+            taxable_gain=gain, attribution="test",
+        )
+        for d, gain in rows
+    ])
+
+
+def test_proviso_excludes_a_march_gain_from_every_earlier_instalment():
+    """A gain realised in March could not have been foreseen in June, so it
+    is excluded from all four bases up to and including 15 March."""
+    cg = _cg([(date(2026, 3, 20), 1_000_000.0)])
+    excl, dated = sch.cg_proviso_exclusions(cg, cg_tax=100_000.0, year_key="2025-26")
+    assert dated is True
+    assert excl == [100_000.0] * 4      # after 15 Mar too -- it escapes March as well
+
+
+def test_proviso_gives_no_relief_for_a_gain_realised_before_the_first_instalment():
+    """The case that made the old hardcoded assumption wrong: an April gain
+    IS foreseeable by 15 June, so no instalment gets relief."""
+    cg = _cg([(date(2025, 4, 10), 1_000_000.0)])
+    excl, dated = sch.cg_proviso_exclusions(cg, cg_tax=100_000.0, year_key="2025-26")
+    assert dated is True
+    assert excl == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_proviso_apportions_across_instalments_by_when_gains_arose():
+    """Half the gain in May, half in January: June sees only the January half
+    as unforeseeable, and by March neither is."""
+    cg = _cg([(date(2025, 5, 1), 500_000.0), (date(2026, 1, 10), 500_000.0)])
+    excl, _ = sch.cg_proviso_exclusions(cg, cg_tax=100_000.0, year_key="2025-26")
+    assert excl[0] == pytest.approx(50_000.0)   # Jan half still ahead
+    assert excl[1] == pytest.approx(50_000.0)
+    assert excl[2] == pytest.approx(50_000.0)   # 15 Dec is before 10 Jan
+    assert excl[3] == pytest.approx(0.0)        # by 15 Mar both have arisen
+
+
+def test_proviso_boundary_gain_exactly_on_the_due_date_gets_no_relief():
+    """"After" is strict: a gain realised ON 15 June was available to fund
+    that instalment."""
+    cg = _cg([(date(2025, 6, 15), 1_000_000.0)])
+    excl, _ = sch.cg_proviso_exclusions(cg, cg_tax=100_000.0, year_key="2025-26")
+    assert excl[0] == pytest.approx(0.0)
+
+
+def test_proviso_withholds_relief_when_gains_cannot_be_dated():
+    """No lot rows but CG tax exists -- relief cannot be evidenced, so it is
+    refused and the caller is told, rather than granted on trust."""
+    excl, dated = sch.cg_proviso_exclusions(
+        sch.CapitalGainsSchedule(), cg_tax=100_000.0, year_key="2025-26",
+    )
+    assert excl == [0.0] * 4
+    assert dated is False
+
+
+def test_proviso_is_a_noop_when_there_is_no_special_rate_cg_tax():
+    excl, dated = sch.cg_proviso_exclusions(
+        sch.CapitalGainsSchedule(), cg_tax=0.0, year_key="2025-26",
+    )
+    assert excl == [0.0] * 4
+    assert dated is True               # not a data gap, so nothing to warn about
+
+
+def test_proviso_handles_a_net_loss_without_dividing_by_zero():
+    cg = _cg([(date(2025, 5, 1), 100_000.0), (date(2026, 1, 1), -100_000.0)])
+    excl, dated = sch.cg_proviso_exclusions(cg, cg_tax=0.0, year_key="2025-26")
+    assert excl == [0.0] * 4
+    assert dated is True
+
+
+# ---------------------------------------------------------------------------
 # compute_all -- wiring of the three charges
 # ---------------------------------------------------------------------------
 

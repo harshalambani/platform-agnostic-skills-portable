@@ -652,6 +652,50 @@ def default_due_date(year_key: str) -> date:
     return date(int(year_key[:4]) + 1, *_DUE_DATE_MONTH_DAY)
 
 
+def cg_proviso_exclusions(
+    capital_gains: "CapitalGainsSchedule", cg_tax: float, year_key: str,
+) -> tuple[list[float], bool]:
+    """Per-instalment s.234C first-proviso exclusion, derived from the lots'
+    ACTUAL sale dates rather than assumed.
+
+    The proviso excludes capital gains that arose AFTER an instalment's due
+    date, so for each due date the excluded amount is the special-rate CG tax
+    apportioned by the share of taxable gain realised after that date. Every
+    lot already carries `sale_date` and `taxable_gain`, so no assumption
+    about WHEN the gains arose is needed -- an earlier draft assumed all CG
+    arose after 15 December, which is right only by luck.
+
+    Note the fourth instalment is no longer forced to zero: a gain realised
+    between 16 and 31 March genuinely does escape the March instalment.
+
+    Returns ([0,0,0,0], False) when the gains cannot be dated (no lot rows)
+    while CG tax exists -- the conservative direction, since granting relief
+    that cannot be evidenced would understate the charge.
+    """
+    zero = [0.0] * 4
+    rows = capital_gains.lot_rows or []
+    if cg_tax <= 0:
+        return zero, True          # nothing to exclude; not a data gap
+    if not rows:
+        return zero, False         # cannot date the gains -- no relief, flagged
+
+    fy_start = int(year_key[:4])
+    due_dates = [
+        date(fy_start, 6, 15), date(fy_start, 9, 15),
+        date(fy_start, 12, 15), date(fy_start + 1, 3, 15),
+    ]
+    total = sum(r.taxable_gain for r in rows)
+    if total <= 0:
+        return zero, True          # net loss -- no special-rate tax to defer
+
+    out = []
+    for d in due_dates:
+        after = sum(r.taxable_gain for r in rows if r.sale_date > d)
+        ratio = max(0.0, min(1.0, after / total))
+        out.append(cg_tax * ratio)
+    return out, True
+
+
 @dataclass
 class Interest234Schedule:
     result: object = None            # interest_234.Interest234
@@ -666,6 +710,7 @@ def build_interest_234(
     computation: "ComputationSchedule", taxes_paid: TaxesPaidSchedule,
     year_key: str | None, filing_date: date | None = None,
     due_date: date | None = None,
+    capital_gains: "CapitalGainsSchedule | None" = None,
 ) -> Interest234Schedule:
     """Assemble the inputs s.234A/B/C need out of the already-built model.
 
@@ -699,19 +744,20 @@ def build_interest_234(
         book_tds=book_tds, as26_tds=as26_tds, as26_available=taxes_paid.as26_available,
     )
 
-    # s.234C first proviso: tax on special-rate capital gains is excluded
-    # from the first three instalments' base. Using the whole special-rate CG
-    # tax is the correct treatment whenever the gains arose after 15 December
-    # and is conservative-in-the-filer's-favour otherwise; the CG lot dates
-    # needed to prorate it per instalment are a later refinement, and the
-    # workbook says so rather than implying a per-lot analysis happened.
-    # Direct attribute access, deliberately not getattr-with-default: if this
-    # field is ever renamed the proviso must fail loudly rather than silently
-    # degrade to "no relief", which would overstate 234C without a trace.
-    # This is the base special-rate tax; its share of surcharge/cess is not
-    # excluded, which errs towards a slightly HIGHER charge.
+    # s.234C first proviso, computed from the lots' ACTUAL sale dates -- see
+    # cg_proviso_exclusions. Direct attribute access, deliberately not
+    # getattr-with-default: if this field is ever renamed the proviso must
+    # fail loudly rather than silently degrade to "no relief", which would
+    # overstate 234C without a trace. This is the base special-rate tax; its
+    # share of surcharge/cess is not excluded, erring towards a slightly
+    # HIGHER charge.
     cg_tax = computation.tax_block.tax_on_special_rate_income or 0.0
-    unforeseeable = [cg_tax, cg_tax, cg_tax, 0.0]
+    cg_dated = True
+    if capital_gains is not None:
+        unforeseeable, cg_dated = cg_proviso_exclusions(capital_gains, cg_tax, year_key)
+    else:
+        unforeseeable = [0.0] * 4
+        cg_dated = cg_tax <= 0
 
     result = interest_234.compute_all(
         tax_on_total_income=computation.tax_block.tax_liability,
@@ -730,12 +776,19 @@ def build_interest_234(
             "computed as if NOTHING was paid on time. Enter the instalment-wise figures "
             "in the Workings section to correct this -- the charge shown is an upper bound."
         )
-    if cg_tax > 0:
+    if cg_tax > 0 and not cg_dated:
         warnings.append(
-            f"s.234C first proviso applied: tax of {cg_tax:,.2f} on special-rate capital "
-            "gains is excluded from the June/September/December instalment bases. This "
-            "assumes those gains arose after 15 December. If they arose earlier, the "
-            "relief does not apply and 234C is UNDERSTATED -- check the sale dates."
+            f"s.234C first-proviso relief NOT applied to {cg_tax:,.2f} of special-rate "
+            "capital gains tax: the gains carry no lot-level sale dates, so the date they "
+            "arose cannot be evidenced. 234C is therefore an UPPER BOUND -- if the gains "
+            "arose late in the year the real charge is lower."
+        )
+    elif cg_tax > 0 and any(unforeseeable):
+        warnings.append(
+            f"s.234C first proviso applied from actual sale dates: of {cg_tax:,.2f} "
+            f"special-rate capital gains tax, {unforeseeable[0]:,.2f} is excluded from the "
+            f"June instalment, {unforeseeable[1]:,.2f} from September, "
+            f"{unforeseeable[2]:,.2f} from December and {unforeseeable[3]:,.2f} from March."
         )
 
     return Interest234Schedule(
@@ -1222,7 +1275,9 @@ def build_all_schedules(
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
     schedule_fa = build_schedule_fa(resolved, node_by_guid)
-    interest = build_interest_234(computation, taxes_paid, year_key, filing_date)
+    interest = build_interest_234(
+        computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
+    )
 
     return ITRModel(
         salary=salary, business=business, house_property=house_property, other_sources=other_sources,
