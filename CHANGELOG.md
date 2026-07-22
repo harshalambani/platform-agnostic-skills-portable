@@ -49,6 +49,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   dedicated `category: "intercompany"` and render under a new
   GnuCash > Intercompany sub-tab (Reco first, Matrix second). Banks now shows
   only statement import + Review Mappings.
+- **CI now collects `src/agents/**/test_*.py`, not just `tests/`.** Bare
+  `pytest` used `testpaths = ["tests"]`, so `skill_gnucash_import`'s
+  `test_transforms.py` (20 tests) was silently skipped in every run — it only
+  ran when invoked by explicit path. `testpaths` now also includes
+  `src/agents`. That test file also did `sys.path.insert(...)` +
+  `import agent`, writing the generic `agent` key into `sys.modules`; when
+  collected alongside `tests/skill_itr_workbook/test_agent_full_pipeline.py`
+  (which does the same for its own, different `agent.py`), whichever loaded
+  first "won" and the other failed with
+  `ImportError: cannot import name 'parse_date' from 'agent'`. Fixed by
+  loading `skill_gnucash_import`'s `agent.py` via `importlib` under a unique
+  module name instead, so it no longer collides with other skills' same-named
+  `agent.py` modules regardless of collection order.
 
 ## [2.14.0] — 2026-07-21
 
