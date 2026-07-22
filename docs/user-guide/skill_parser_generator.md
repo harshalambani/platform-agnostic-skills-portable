@@ -7,7 +7,7 @@ A developer-time tool that creates or repairs the project's embedded determinist
 
 ## When to use it
 
-Use "Fix a failing parser" when a statement format changed and a parser's tie-out fails (the oracle exits 2). Use "Create a new parser" to scaffold one for a new format from the shared template. This is for maintainers, not end-of-day statement processing. See docs/Parser-Generator-Guide.md.
+Use "Fix a failing parser" when a statement format changed and a parser's tie-out fails (the oracle exits 2). Use "Create a new parser" to scaffold one for a new format from the shared template. This is for maintainers, not end-of-day statement processing. See docs/guides/Parser-Generator-Guide.md.
 
 ## Inputs
 
