@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 
 import as26 as as26_engine
+import interest_234
 import lots as lots_engine
 import parse_eguile as pe
 import quarters as quarters_engine
@@ -535,14 +536,62 @@ class TaxesPaidSchedule:
     as26_tds_dividend: float = 0.0
     tie_out_ok: bool = True
     tie_out_conflicts: list = field(default_factory=list)   # list[dict]
+    #: s.234C needs advance tax CUMULATIVE as at each instalment due date
+    #: (15 Jun / 15 Sep / 15 Dec / 15 Mar), not the annual total -- an
+    #: instalment paid late is still a deferment even though the year-end
+    #: figure looks complete. Derived by bucketing the TAXPAID_ADV accounts'
+    #: own posting dates through quarters.py.
+    advance_tax_cumulative: list = field(default_factory=lambda: [0.0] * 4)
+    #: True when the book actually carried dated advance-tax postings. When
+    #: False the cumulative figures above are all zero and 234C would be
+    #: computed as if nothing was paid until year end -- the workbook says so
+    #: rather than presenting an overstated charge as determined.
+    advance_tax_dates_available: bool = False
 
 
 _TIE_OUT_TOLERANCE = 1.0   # rupee-rounding tolerance between book and 26AS TDS totals
 
 
+def build_advance_tax_cumulative(
+    resolved: dict, book: Book | None, year_key: str | None,
+) -> tuple[list[float], bool]:
+    """Cumulative advance tax as at each of the four s.234C instalment due
+    dates, from the TAXPAID_ADV accounts' own posting dates.
+
+    quarters.bucket_receipts returns five windows (<=15 Jun, 16 Jun-15 Sep,
+    16 Sep-15 Dec, 16 Dec-15 Mar, 16-31 Mar); the running sum of the first
+    four is exactly "paid by" each instalment date. The fifth window is
+    deliberately dropped -- money paid after 15 March cannot cure the March
+    instalment.
+
+    Returns ([0,0,0,0], False) when there is no book or no dated advance-tax
+    posting, so the caller can flag the gap instead of silently treating it
+    as "nothing was paid on time".
+    """
+    zero = [0.0] * 4
+    if book is None or year_key is None:
+        return zero, False
+
+    guids = {
+        leaf.guid for leaf in resolved.values()
+        if leaf.tag == "TAXPAID_ADV" and leaf.guid
+    }
+    if not guids:
+        return zero, False
+
+    buckets = quarters_engine.bucket_receipts(book, guids, year_key).buckets
+    running = 0.0
+    cumulative = []
+    for b in buckets[:4]:
+        running += abs(b)
+        cumulative.append(running)
+    return cumulative, running > 0
+
+
 def build_taxes_paid(
     resolved: dict, node_by_guid: dict,
     rules: rules_engine.RulesConfig | None = None, as26_data=None,
+    book: Book | None = None, year_key: str | None = None,
 ) -> TaxesPaidSchedule:
     adv = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_ADV"))
     sat = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_SAT"))
@@ -577,11 +626,174 @@ def build_taxes_paid(
                 "diff": tds_div - as26_tds_div,
             })
 
+    adv_cumulative, adv_dated = build_advance_tax_cumulative(resolved, book, year_key)
+
     return TaxesPaidSchedule(
         advance_tax=adv, self_assessment_tax=sat, tds_salary=tds_sal,
         tds_interest=tds_int, tds_dividend=tds_div, tcs=tcs, total=total,
         as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
         tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
+        advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Interest u/s 234A / 234B / 234C
+# ---------------------------------------------------------------------------
+
+#: Statutory due date for furnishing a non-audit individual return: 31 July
+#: of the assessment year. Audit cases (31 October) and the various extended
+#: dates are NOT auto-detected -- the due date is an input the filer can
+#: override on the workbook, and this is only the default.
+_DUE_DATE_MONTH_DAY = (7, 31)
+
+
+def default_due_date(year_key: str) -> date:
+    return date(int(year_key[:4]) + 1, *_DUE_DATE_MONTH_DAY)
+
+
+def cg_proviso_exclusions(
+    capital_gains: "CapitalGainsSchedule", cg_tax: float, year_key: str,
+) -> tuple[list[float], bool]:
+    """Per-instalment s.234C first-proviso exclusion, derived from the lots'
+    ACTUAL sale dates rather than assumed.
+
+    The proviso excludes capital gains that arose AFTER an instalment's due
+    date, so for each due date the excluded amount is the special-rate CG tax
+    apportioned by the share of taxable gain realised after that date. Every
+    lot already carries `sale_date` and `taxable_gain`, so no assumption
+    about WHEN the gains arose is needed -- an earlier draft assumed all CG
+    arose after 15 December, which is right only by luck.
+
+    Note the fourth instalment is no longer forced to zero: a gain realised
+    between 16 and 31 March genuinely does escape the March instalment.
+
+    Returns ([0,0,0,0], False) when the gains cannot be dated (no lot rows)
+    while CG tax exists -- the conservative direction, since granting relief
+    that cannot be evidenced would understate the charge.
+    """
+    zero = [0.0] * 4
+    rows = capital_gains.lot_rows or []
+    if cg_tax <= 0:
+        return zero, True          # nothing to exclude; not a data gap
+    if not rows:
+        return zero, False         # cannot date the gains -- no relief, flagged
+
+    fy_start = int(year_key[:4])
+    due_dates = [
+        date(fy_start, 6, 15), date(fy_start, 9, 15),
+        date(fy_start, 12, 15), date(fy_start + 1, 3, 15),
+    ]
+    total = sum(r.taxable_gain for r in rows)
+    if total <= 0:
+        return zero, True          # net loss -- no special-rate tax to defer
+
+    out = []
+    for d in due_dates:
+        after = sum(r.taxable_gain for r in rows if r.sale_date > d)
+        ratio = max(0.0, min(1.0, after / total))
+        out.append(cg_tax * ratio)
+    return out, True
+
+
+@dataclass
+class Interest234Schedule:
+    result: object = None            # interest_234.Interest234
+    total: float = 0.0
+    due_date: date | None = None
+    filing_date: date | None = None
+    warnings: list = field(default_factory=list)
+    computed: bool = False
+
+
+def build_interest_234(
+    computation: "ComputationSchedule", taxes_paid: TaxesPaidSchedule,
+    year_key: str | None, filing_date: date | None = None,
+    due_date: date | None = None,
+    capital_gains: "CapitalGainsSchedule | None" = None,
+) -> Interest234Schedule:
+    """Assemble the inputs s.234A/B/C need out of the already-built model.
+
+    Two deliberate choices, both of which move the number:
+
+    * **TDS credit comes from 26AS when available**, not the book -- 234B and
+      234C are charged on tax LESS TDS, so crediting TDS that 26AS does not
+      support understates the interest the department will compute. See
+      interest_234.resolve_tds_credit.
+    * **The 234C first proviso is applied** to special-rate capital gains,
+      which is what stops a March capital gain from retrospectively shorting
+      the June instalment. Without it a book like this one is materially
+      overstated.
+    """
+    if year_key is None:
+        return Interest234Schedule()
+
+    due = due_date or default_due_date(year_key)
+
+    # Creditable TDS/TCS. The book's own TDS lines are the fallback basis;
+    # 26AS overrides them when present.
+    book_tds = (
+        taxes_paid.tds_salary + taxes_paid.tds_interest
+        + taxes_paid.tds_dividend + taxes_paid.tcs
+    )
+    as26_tds = (
+        taxes_paid.tds_salary + taxes_paid.as26_tds_interest
+        + taxes_paid.as26_tds_dividend + taxes_paid.tcs
+    )
+    credit = interest_234.resolve_tds_credit(
+        book_tds=book_tds, as26_tds=as26_tds, as26_available=taxes_paid.as26_available,
+    )
+
+    # s.234C first proviso, computed from the lots' ACTUAL sale dates -- see
+    # cg_proviso_exclusions. Direct attribute access, deliberately not
+    # getattr-with-default: if this field is ever renamed the proviso must
+    # fail loudly rather than silently degrade to "no relief", which would
+    # overstate 234C without a trace. This is the base special-rate tax; its
+    # share of surcharge/cess is not excluded, erring towards a slightly
+    # HIGHER charge.
+    cg_tax = computation.tax_block.tax_on_special_rate_income or 0.0
+    cg_dated = True
+    if capital_gains is not None:
+        unforeseeable, cg_dated = cg_proviso_exclusions(capital_gains, cg_tax, year_key)
+    else:
+        unforeseeable = [0.0] * 4
+        cg_dated = cg_tax <= 0
+
+    result = interest_234.compute_all(
+        tax_on_total_income=computation.tax_block.tax_liability,
+        tds_tcs_and_reliefs=credit.amount,
+        advance_tax_paid=taxes_paid.advance_tax,
+        cumulative_advance_tax=taxes_paid.advance_tax_cumulative,
+        year_key=year_key, due_date=due, filing_date=filing_date,
+        unforeseeable_by_quarter=unforeseeable, tds_credit=credit,
+    )
+
+    warnings = list(result.warnings)
+    if not taxes_paid.advance_tax_dates_available and taxes_paid.advance_tax > 0:
+        warnings.append(
+            f"Advance tax of {taxes_paid.advance_tax:,.2f} is in the book but carries no "
+            "dated posting that could be attributed to an instalment, so s.234C is "
+            "computed as if NOTHING was paid on time. Enter the instalment-wise figures "
+            "in the Workings section to correct this -- the charge shown is an upper bound."
+        )
+    if cg_tax > 0 and not cg_dated:
+        warnings.append(
+            f"s.234C first-proviso relief NOT applied to {cg_tax:,.2f} of special-rate "
+            "capital gains tax: the gains carry no lot-level sale dates, so the date they "
+            "arose cannot be evidenced. 234C is therefore an UPPER BOUND -- if the gains "
+            "arose late in the year the real charge is lower."
+        )
+    elif cg_tax > 0 and any(unforeseeable):
+        warnings.append(
+            f"s.234C first proviso applied from actual sale dates: of {cg_tax:,.2f} "
+            f"special-rate capital gains tax, {unforeseeable[0]:,.2f} is excluded from the "
+            f"June instalment, {unforeseeable[1]:,.2f} from September, "
+            f"{unforeseeable[2]:,.2f} from December and {unforeseeable[3]:,.2f} from March."
+        )
+
+    return Interest234Schedule(
+        result=result, total=result.total, due_date=due,
+        filing_date=filing_date, warnings=warnings, computed=True,
     )
 
 
@@ -1028,13 +1240,14 @@ class ITRModel:
     schedule_fa: ScheduleFASchedule
     computation: ComputationSchedule
     unclassified: UnclassifiedSchedule = field(default_factory=UnclassifiedSchedule)
+    interest_234: Interest234Schedule = field(default_factory=Interest234Schedule)
 
 
 def build_all_schedules(
     tree: pe.ParsedBalanceSheet, resolved: dict, book: Book | None, form16, year_key: str | None,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
-    residency: str | None = None,
+    residency: str | None = None, filing_date: date | None = None,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -1046,7 +1259,7 @@ def build_all_schedules(
     other_sources = build_other_sources(resolved, node_by_guid, book, year_key, rules, as26_data)
     capital_gains = build_capital_gains(resolved, node_by_guid, book, year_key, rules, scrips, fmv_tables)
     exempt_income = build_exempt_income(resolved, node_by_guid)
-    taxes_paid = build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    taxes_paid = build_taxes_paid(resolved, node_by_guid, rules, as26_data, book, year_key)
     unclassified = build_unclassified(tree, unmapped or [])
 
     agti_estimate = (
@@ -1062,10 +1275,13 @@ def build_all_schedules(
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
     schedule_fa = build_schedule_fa(resolved, node_by_guid)
+    interest = build_interest_234(
+        computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
+    )
 
     return ITRModel(
         salary=salary, business=business, house_property=house_property, other_sources=other_sources,
         capital_gains=capital_gains, exempt_income=exempt_income, taxes_paid=taxes_paid,
         deductions=deductions, schedule_al=schedule_al, schedule_fa=schedule_fa, computation=computation,
-        unclassified=unclassified,
+        unclassified=unclassified, interest_234=interest,
     )

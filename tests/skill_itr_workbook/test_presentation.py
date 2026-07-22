@@ -714,6 +714,11 @@ def _stub_model():
         salary=sch.SalarySchedule(), house_property=sch.HousePropertySchedule(),
         business=sch.BusinessSchedule(), capital_gains=sch.CapitalGainsSchedule(),
         other_sources=sch.OtherSourcesSchedule(), taxes_paid=sch.TaxesPaidSchedule(),
+        # Present but not computed: write_statement_of_income renders the
+        # interest-u/s-234 block unconditionally, because the tax ladder
+        # references fixed coordinates inside it, so the stub must carry the
+        # field even though this path exercises the not-computed branch.
+        interest_234=sch.Interest234Schedule(),
     )
 
 
