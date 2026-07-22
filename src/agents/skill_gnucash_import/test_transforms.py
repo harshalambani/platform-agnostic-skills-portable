@@ -6,12 +6,26 @@ Unit tests for transformation functions: date parsing, number parsing, Dr/Cr han
 import unittest
 from datetime import datetime
 
-# Import the module under test
-import sys
+# Import the module under test.
+#
+# Loaded via importlib under a unique module name (rather than
+# `sys.path.insert(...)` + `import agent`) so this file does not write to the
+# shared `sys.modules['agent']` key. Other test files elsewhere in the repo
+# (e.g. tests/skill_itr_workbook/test_agent_full_pipeline.py) do their own
+# `import agent` under that same generic name; sharing the key would make
+# whichever module loads first "win" for the rest of the pytest session,
+# breaking collection-order-dependent imports.
+import importlib.util
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))
 
-from agent import parse_date, parse_indian_number, cleanup_description
+_agent_path = Path(__file__).parent / "agent.py"
+_spec = importlib.util.spec_from_file_location("skill_gnucash_import_agent", _agent_path)
+_agent = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_agent)
+
+parse_date = _agent.parse_date
+parse_indian_number = _agent.parse_indian_number
+cleanup_description = _agent.cleanup_description
 
 
 class TestDateParsing(unittest.TestCase):
@@ -106,7 +120,8 @@ class TestIntegration(unittest.TestCase):
 
     def test_hdfc_statement_sample(self):
         """Test with actual HDFC statement sample rows."""
-        from agent import ColumnSpec, transform_row
+        ColumnSpec = _agent.ColumnSpec
+        transform_row = _agent.transform_row
 
         # Sample HDFC row
         row = ["02/04/25", "CGST-MANAGED CUSTOMER BENEFIT", "NCB2609278553728", "02/04/25", "225", "", "47037.08"]
