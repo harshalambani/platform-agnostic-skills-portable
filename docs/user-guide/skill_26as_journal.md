@@ -3,11 +3,11 @@
 
 *Mode: agent · 🤖 needs an LLM endpoint*
 
-Builds GnuCash TDS journal entries from a 26AS workbook plus your GnuCash book. It reads Part I of the workbook, matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import.
+Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books.
 
 ## When to use it
 
-Use this after "26AS Convert", when you want the TDS recorded in GnuCash as journal entries instead of typing each one by hand.
+Use this after "26AS Convert", when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.
 
 ## Inputs
 

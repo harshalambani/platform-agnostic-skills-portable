@@ -325,6 +325,25 @@ def test_tds_credit_silent_when_book_and_26as_agree():
     assert c.warnings == []
 
 
+def test_tds_credit_discloses_the_book_only_slice_of_a_26as_basis():
+    """The 26AS reader classifies only interest and dividend, so salary TDS and
+    TCS ride along on their BOOK figures. Presenting that hybrid as a plain
+    '26AS' number would overstate how corroborated the credit is."""
+    c = i234.resolve_tds_credit(
+        book_tds=50_000, as26_tds=50_000, as26_available=True,
+        book_only=25_000, book_only_label="salary TDS + TCS",
+    )
+    assert c.amount == 50_000              # the credit itself is unchanged
+    assert c.basis == "26AS + book"
+    assert any("salary TDS + TCS" in w and "from the BOOK" in w for w in c.warnings)
+
+
+def test_tds_credit_basis_stays_plain_26as_when_nothing_is_book_only():
+    c = i234.resolve_tds_credit(book_tds=4_600, as26_tds=4_600, as26_available=True,
+                                book_only=0.0)
+    assert c.basis == "26AS" and c.warnings == []
+
+
 def test_tds_credit_reports_deducted_but_not_deposited_without_changing_the_amount():
     """s.205 bars recovery from the assessee, so the figure must NOT be
     reduced -- but the exposure has to be visible."""

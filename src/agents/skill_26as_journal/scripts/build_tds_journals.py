@@ -1,9 +1,9 @@
 """
-build_tds_journals.py — Form 26AS (Part I) -> GnuCash multi-split journal CSV.
+build_tds_journals.py — Form 26AS (Parts I & VI) -> GnuCash multi-split journal CSV.
 
-Reads the Part I sub-totals from a Convert-tab 26AS workbook and the user's
-GnuCash account tree, and emits one balanced journal transaction per deductor,
-in three categories driven by the TDS section:
+Reads the Part I (TDS) and Part VI (TCS) sub-totals from a Convert-tab 26AS
+workbook and the user's GnuCash account tree, and emits one balanced journal
+transaction per deductor / collector, in four categories driven by the section:
 
   A. Interest   (sections 194A, 193)
        Dr  Expense:TDS on Interest                  = Tax Deducted          (a)
@@ -15,8 +15,15 @@ in three categories driven by the TDS section:
   C. Partnership (section 194T)
        Dr  Expense:TDS on Partnership Payments      = Tax Deducted          (a)   [emitted as-is]
        Cr  <matched remuneration income account>    = Tax Deducted          (a)
+  T. TCS         (Part VI, sections 206C*)
+       Dr  Expense:TCS on Foreign Trip              = Tax Collected         (a)
+       Cr  Expense:Drawings                         = Tax Collected         (a)
+     Only the TAX moves — the spend it was collected on is already booked.
+     Both accounts are discovered from the chart, and the credit leg is
+     caller-configurable (Bank instead of Drawings when the TCS was paid
+     across separately).
 
-Amounts come from the per-deductor sub-totals (header totals) in Part I.
+Amounts come from the per-party sub-totals (header totals) in Part I / Part VI.
 Each transaction is dated 31-March of the current calendar year.
 
 Account matching is DETERMINISTIC (token overlap + acronym + alias table +
@@ -64,14 +71,30 @@ ACC_TDS_PARTNERSHIP = "Expense:TDS on Partnership Payments"  # may not exist; em
 ACC_INTEREST_ON_FD = "Income:Interest Income:Interest on FD"  # fixed generic (Category A debit b)
 ACC_SUSPENSE = "Liabilities:Suspense"
 
+# Category T (TCS, Part VI). The debit is the tax the collector took off the
+# assessee — a credit claimable in the return, so it must reach the books or
+# the refund is understated. The contra is the personal spending the collection
+# rode on (a foreign tour package, an LRS remittance), which in these books is
+# already sitting in Drawings: the journal reclassifies that slice of Drawings
+# into a recoverable tax. Both are defaults — the caller may override either,
+# e.g. to credit Bank when the TCS was paid separately rather than bundled into
+# the spend.
+ACC_TCS_DEFAULT = "Expense:TCS on Foreign Trip"
+ACC_DRAWINGS = "Expense:Drawings"
+
 CURRENCY = "INR"
 
-# Section -> category.
+# Section -> category. TCS sections (206C...) are matched by prefix, not by
+# this table, because the sub-section suffix varies (206CQ foreign remittance /
+# tour package, 206CR sale of goods, 206CL motor vehicle, ...) and they all
+# post identically.
 SECTION_CATEGORY = {
     "194A": "A", "193": "A",
     "194": "B",
     "194T": "C",
 }
+
+TCS_SECTION_PREFIX = "206C"
 
 # Alias expansion for matching: maps a token found in an ACCOUNT name to the
 # set of tokens it stands for in a DEDUCTOR name (and vice-versa via expansion).
@@ -162,8 +185,35 @@ def parse_part_i(xlsx_path: Path) -> tuple[list[Deductor], str]:
     wb = load_workbook(xlsx_path, data_only=True)
     if "Part I" not in wb.sheetnames:
         raise ValueError("Workbook has no 'Part I' sheet — is this a 26AS Convert output?")
-    ws = wb["Part I"]
+    return _parse_party_sheet(wb["Part I"])
 
+
+def parse_parts(xlsx_path: Path) -> tuple[list[Deductor], list[Deductor], str]:
+    """Return (part_i_deductors, part_vi_collectors, financial_year).
+
+    Either part may be empty — a 26AS with only TCS and no TDS is perfectly
+    valid — but a workbook carrying NEITHER sheet is not a Convert output and
+    is rejected, so a wrong file never silently produces an empty journal.
+    """
+    wb = load_workbook(xlsx_path, data_only=True)
+    if "Part I" not in wb.sheetnames and "Part VI" not in wb.sheetnames:
+        raise ValueError("Workbook has neither a 'Part I' nor a 'Part VI' sheet "
+                         "— is this a 26AS Convert output?")
+    deductors, fy = ([], "")
+    if "Part I" in wb.sheetnames:
+        deductors, fy = _parse_party_sheet(wb["Part I"])
+    collectors, fy6 = ([], "")
+    if "Part VI" in wb.sheetnames:
+        collectors, fy6 = _parse_party_sheet(wb["Part VI"])
+    return deductors, collectors, (fy or fy6)
+
+
+def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
+    """Read a deductor/collector sheet (Part I or Part VI — identical geometry).
+
+    For Part VI the same fields carry the TCS equivalents: amount_paid is the
+    amount paid/DEBITED and tax_deducted the tax COLLECTED.
+    """
     # Financial year lives in the meta strip (row 2).
     fy = ""
     meta = ws.cell(2, 1).value or ""
@@ -331,6 +381,39 @@ def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
     return best.path if best else None
 
 
+def find_tcs_account(accounts: list[Account]) -> Optional[str]:
+    """Locate the account that carries TCS suffered, e.g. 'TCS on Foreign Trip'.
+
+    Its name varies by what the collection was on ('TCS on Foreign Trip', 'TCS
+    on LRS Remittance', 'TCS Receivable'), so we match on the TCS token rather
+    than a fixed path. Deliberately NOT restricted to one account type: books
+    model this either as an expense reclassified out of Drawings or as an asset
+    (a receivable from the department). Prefer the shortest leaf when several
+    exist, and never a placeholder."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.special:
+            continue
+        if "TCS" not in _tokens(a.leaf):
+            continue
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
+def find_drawings_account(accounts: list[Account]) -> Optional[str]:
+    """Locate the Drawings account — the default TCS contra."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.special:
+            continue
+        if "DRAWINGS" not in _tokens(a.leaf):
+            continue
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
 def _candidates_for(category: str, accounts: list[Account],
                     fd_exclude: str = "") -> list[Account]:
     """Income accounts in the relevant subtree. Subtree match is case-insensitive
@@ -490,6 +573,76 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
     return journals
 
 
+def is_tcs_section(sections: tuple) -> bool:
+    """True if every section on the collector block is a 206C sub-section."""
+    secs = [str(s).strip().upper() for s in sections if str(s).strip()]
+    return bool(secs) and all(s.startswith(TCS_SECTION_PREFIX) for s in secs)
+
+
+def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
+                       tcs_account: str = "", credit_account: str = "",
+                       overrides: Optional[dict] = None) -> list[Journal]:
+    """One 2-split journal per collector:
+
+        Dr  <TCS account>       = Tax Collected
+        Cr  <credit account>    = Tax Collected
+
+    Only the TAX is journalled, never the amount paid/debited: the underlying
+    spend is already in the books (that is what the collection rode on), so
+    posting the gross would double-count it.
+
+    Both accounts default to what the chart actually contains and fall back to
+    the canonical names, which then surface under 'accounts to create' rather
+    than importing silently wrong. credit_account is a parameter because the
+    contra is a bookkeeping choice, not a statutory one — Drawings when the TCS
+    was bundled into personal spending, Bank when it was paid across separately.
+
+    match_credit_account is deliberately NOT used here: it searches INCOME
+    subtrees, and a collection at source is a spending-side event with no
+    income leg to match.
+
+    overrides: {collector_sr -> credit account path}, same shape as the TDS path.
+    """
+    overrides = overrides or {}
+    dr = tcs_account or find_tcs_account(accounts) or ACC_TCS_DEFAULT
+    cr_default = credit_account or find_drawings_account(accounts) or ACC_DRAWINGS
+
+    journals = []
+    for c in collectors:
+        label = "/".join(c.sections)
+        j = Journal(sr=c.sr, deductor=c.name, category="T", section_label=label)
+        tax = round(c.tax_deducted, 2)
+
+        if c.sr in overrides and overrides[c.sr]:
+            cr = overrides[c.sr]
+            j.credit_confidence = "Override"
+            j.credit_basis = "resolved by override/LLM"
+        else:
+            cr = cr_default
+            j.credit_confidence = "High" if credit_account or \
+                find_drawings_account(accounts) else "Medium"
+            j.credit_basis = ("TCS contra — " + (
+                "credit account supplied by caller" if credit_account
+                else f"defaulted to {cr}"))
+
+        if not is_tcs_section(c.sections):
+            # A non-206C section under Part VI means the sheet was misread or
+            # the department used a section we don't model. Park it loudly
+            # rather than posting a tax credit we can't justify.
+            j.splits = [Split(ACC_SUSPENSE, debit=tax), Split(ACC_SUSPENSE, credit=tax)]
+            j.credit_account = ACC_SUSPENSE
+            j.credit_confidence = "Suspense"
+            j.credit_basis = f"unexpected non-206C section(s) in Part VI: {label}"
+            j.needs_review = True
+            journals.append(j)
+            continue
+
+        j.credit_account = cr
+        j.splits = [Split(dr, debit=tax), Split(cr, credit=tax)]
+        journals.append(j)
+    return journals
+
+
 # -------------------- output --------------------
 
 def journal_date() -> str:
@@ -528,9 +681,15 @@ def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
                     "Amount", "Currency"])
         fy_pfx = fy_prefix(fy)
         for j in journals:
-            txn_id = f"{fy_pfx}-TDSJ{j.sr:02d}"
-            desc = f"TDS FY {fy} - {j.deductor} (Sec {j.section_label})" if fy \
-                else f"TDS - {j.deductor} (Sec {j.section_label})"
+            # TCS journals get their own ID series: Part I Sr.1 and Part VI
+            # Sr.1 are different parties, and a shared prefix would make
+            # GnuCash's multi-split importer fuse their splits into one
+            # unbalanced transaction.
+            kind = "TCSJ" if j.category == "T" else "TDSJ"
+            tag = "TCS" if j.category == "T" else "TDS"
+            txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
+            desc = f"{tag} FY {fy} - {j.deductor} (Sec {j.section_label})" if fy \
+                else f"{tag} - {j.deductor} (Sec {j.section_label})"
             # Repeat Date / Transaction ID / Description on EVERY split row.
             # GnuCash's multi-split importer groups splits by matching
             # transaction fields (and the Transaction ID), NOT by blank-date
@@ -562,10 +721,16 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
 # -------------------- orchestration --------------------
 
 def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
-        overrides: Optional[dict] = None) -> dict:
-    deductors, fy = parse_part_i(xlsx_path)
+        overrides: Optional[dict] = None, tcs_credit_account: str = "",
+        tcs_overrides: Optional[dict] = None) -> dict:
+    deductors, collectors, fy = parse_parts(xlsx_path)
     accounts = load_accounts(gnucash_path)
     journals = build_journals(deductors, accounts, overrides)
+    # Part VI TCS. Sr numbers restart per part, so TCS overrides are a separate
+    # map — a shared one would let Part I Sr.2 silently redirect Part VI Sr.2.
+    journals += build_tcs_journals(collectors, accounts,
+                                   credit_account=tcs_credit_account,
+                                   overrides=tcs_overrides)
     write_csv(journals, out_path, fy)
 
     review_path = out_path.with_name(out_path.stem + "-review.csv")
@@ -594,6 +759,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "fy": fy,
         "journal_date": journal_date(),
         "deductors": len(deductors),
+        "collectors": len(collectors),
         "balanced_all": all(j.balanced for j in journals),
         "needs_review": [r for r in review_rows if r["needs_review"]],
         "missing_accounts": missing,
@@ -623,7 +789,8 @@ def main(argv: list[str]) -> int:
                 overrides[int(m.group(0))] = v
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
-          f"deductors {stats['deductors']}  balanced_all {stats['balanced_all']}")
+          f"deductors {stats['deductors']}  collectors {stats['collectors']}  "
+          f"balanced_all {stats['balanced_all']}")
     for r in stats["rows"]:
         flag = "  <-- REVIEW" if r["needs_review"] else ""
         print(f"  Sr{r['sr']:>2} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "

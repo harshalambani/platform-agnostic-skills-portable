@@ -731,17 +731,29 @@ def build_interest_234(
     due = due_date or default_due_date(year_key)
 
     # Creditable TDS/TCS. The book's own TDS lines are the fallback basis;
-    # 26AS overrides them when present.
+    # 26AS overrides them when present -- but ONLY for interest and dividend,
+    # which is all the 26AS reader classifies. Salary TDS (s.192, 26AS Part I)
+    # and TCS (26AS Part VI) stay on their book figures, so the "26AS" total is
+    # really a hybrid. book_only carries that un-corroborated slice through to
+    # resolve_tds_credit, which discloses it rather than letting the sheet
+    # present a book number as a 26AS-supported one.
     book_tds = (
         taxes_paid.tds_salary + taxes_paid.tds_interest
         + taxes_paid.tds_dividend + taxes_paid.tcs
     )
+    book_only = taxes_paid.tds_salary + taxes_paid.tcs
     as26_tds = (
         taxes_paid.tds_salary + taxes_paid.as26_tds_interest
         + taxes_paid.as26_tds_dividend + taxes_paid.tcs
     )
+    labels = []
+    if taxes_paid.tds_salary > 0:
+        labels.append("salary TDS")
+    if taxes_paid.tcs > 0:
+        labels.append("TCS")
     credit = interest_234.resolve_tds_credit(
         book_tds=book_tds, as26_tds=as26_tds, as26_available=taxes_paid.as26_available,
+        book_only=book_only, book_only_label=" + ".join(labels),
     )
 
     # s.234C first proviso, computed from the lots' ACTUAL sale dates -- see

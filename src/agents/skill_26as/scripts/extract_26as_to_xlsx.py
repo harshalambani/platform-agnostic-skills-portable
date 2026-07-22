@@ -193,7 +193,23 @@ def split_by_parts(text: str) -> dict[str, str]:
     return parts
 
 
-def parse_part_i(body: str) -> list[P1Deductor]:
+P1_HEADER_TOKENS = ("Name of Deductor", "TAN of Deductor", "Section",
+                    "Transaction Date", "Remarks", "Credited", "Deposited",
+                    "Tax Deducted", "TDS Deposited", "Status of Booking",
+                    "Date of Booking", "Amount Paid")
+
+# Part VI (TCS) has the same row geometry as Part I — a collector header row
+# (Sr, Name, TAN, three totals) followed by transaction rows in the same nine
+# columns — so the same two regexes parse it. Only the column-header wording
+# differs, and those tokens must be recognised so a wrapped header line is
+# never mistaken for a collector name-wrap tail.
+P6_HEADER_TOKENS = ("Name of Collector", "TAN of Collector", "Section",
+                    "Transaction Date", "Remarks", "Debited", "Deposited",
+                    "Tax Collected", "TCS Deposited", "Status of Booking",
+                    "Date of Booking", "Amount Paid")
+
+
+def parse_part_i(body: str, header_tokens: tuple = P1_HEADER_TOKENS) -> list[P1Deductor]:
     """Parse Part I into a list of deductors each with their transactions.
 
     Strategy: walk lines. When we see a DEDUCTOR_RX match, open a new deductor.
@@ -201,6 +217,8 @@ def parse_part_i(body: str) -> list[P1Deductor]:
     rows and page banners get implicitly skipped because they don't match.
     Handles multi-line deductor names by buffering any line that doesn't match
     either regex and retrying it joined with the next non-matching line.
+
+    Also parses Part VI (see parse_part_vi) — the layout is identical.
     """
     deductors: list[P1Deductor] = []
     current: Optional[P1Deductor] = None
@@ -208,10 +226,7 @@ def parse_part_i(body: str) -> list[P1Deductor]:
     # next plain-text-only line is a name-wrap tail like "LIMITED" or "EAST").
     last_was_deductor = False
 
-    HEADER_TOKENS = ("Name of Deductor", "TAN of Deductor", "Section",
-                     "Transaction Date", "Remarks", "Credited", "Deposited",
-                     "Tax Deducted", "TDS Deposited", "Status of Booking",
-                     "Date of Booking", "Amount Paid")
+    HEADER_TOKENS = header_tokens
 
     for raw in body.splitlines():
         line = raw.rstrip()
@@ -272,6 +287,17 @@ def parse_part_i(body: str) -> list[P1Deductor]:
         # Anything else (column headers, etc.) clears the wrap state.
         last_was_deductor = False
     return deductors
+
+
+def parse_part_vi(body: str) -> list[P1Deductor]:
+    """Parse Part VI (Details of Tax Collected at Source) into collectors.
+
+    Reuses the Part I walker: a TCS block is shaped exactly like a TDS block,
+    with 'collector' in place of 'deductor' and Amount Paid/DEBITED in place of
+    Amount Paid/Credited. The returned P1Deductor.tot_tax / P1Txn.tax carry the
+    tax COLLECTED, and .tot_tds / .tds the TCS deposited.
+    """
+    return parse_part_i(body, P6_HEADER_TOKENS)
 
 
 def parse_part_viii(body: str) -> list[P8Row]:
@@ -514,16 +540,33 @@ def _style_body_cell(cell, col: int, num_cols: set[int]) -> None:
         cell.alignment = LEFT if col in (2, 3) else CENTER
 
 
-def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
-    headers = [
-        "Deductor Sr.No.", "Name of Deductor", "TAN of Deductor",
-        "Total Amount Paid/Credited", "Total Tax Deducted #", "Total TDS Deposited",
-        "Txn Sr.No.", "Section", "Transaction Date", "Status of Booking",
-        "Date of Booking", "Remarks", "Amount Paid/Credited",
-        "Tax Deducted ##", "TDS Deposited",
-    ]
+P1_HEADERS = [
+    "Deductor Sr.No.", "Name of Deductor", "TAN of Deductor",
+    "Total Amount Paid/Credited", "Total Tax Deducted #", "Total TDS Deposited",
+    "Txn Sr.No.", "Section", "Transaction Date", "Status of Booking",
+    "Date of Booking", "Remarks", "Amount Paid/Credited",
+    "Tax Deducted ##", "TDS Deposited",
+]
+
+# Part VI mirrors Part I column-for-column; only the wording changes. Keeping
+# the geometry identical is what lets one parser and one builder serve both,
+# and lets the journal builder read either sheet by column index.
+P6_HEADERS = [
+    "Collector Sr.No.", "Name of Collector", "TAN of Collector",
+    "Total Amount Paid/Debited", "Total Tax Collected +", "Total TCS Deposited",
+    "Txn Sr.No.", "Section", "Transaction Date", "Status of Booking",
+    "Date of Booking", "Remarks", "Amount Paid/Debited",
+    "Tax Collected ++", "TCS Deposited",
+]
+
+
+def build_part_i(ws, a: Assessee, deductors: list[P1Deductor],
+                 title: str = "Part I", headers: Optional[list] = None,
+                 entity: str = "deductors") -> None:
+    """Render a deductor/collector part (Part I, or Part VI via build_part_vi)."""
+    headers = headers or P1_HEADERS
     ncols = len(headers)
-    _write_meta(ws, "Part I", ncols, a)
+    _write_meta(ws, title, ncols, a)
     _write_header_row(ws, 3, headers)
 
     r = 4
@@ -593,7 +636,7 @@ def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
             grand_tax = sum(t.tax for d in deductors for t in d.txns)
             grand_tds = sum(t.tds for d in deductors for t in d.txns)
             tot_row = r
-            ws.cell(row=tot_row, column=2, value="GRAND TOTAL (all deductors)")
+            ws.cell(row=tot_row, column=2, value=f"GRAND TOTAL (all {entity})")
             for col, val in ((13, grand_amt), (14, grand_tax), (15, grand_tds)):
                 ws.cell(row=tot_row, column=col, value=val)
             for c in range(1, ncols + 1):
@@ -616,6 +659,12 @@ def build_part_i(ws, a: Assessee, deductors: list[P1Deductor]) -> None:
     for i, w in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(i)].width = w
     ws.freeze_panes = "A4"
+
+
+def build_part_vi(ws, a: Assessee, collectors: list[P1Deductor]) -> None:
+    """Render Part VI (Tax Collected at Source) with the Part I geometry."""
+    build_part_i(ws, a, collectors, title="Part VI", headers=P6_HEADERS,
+                 entity="collectors")
 
 
 def build_part_viii(ws, a: Assessee, rows: list[P8Row]) -> None:
@@ -719,6 +768,7 @@ def run(pdf_path: Path, out_path: Path) -> dict:
     parts = split_by_parts(text)
 
     p1 = parse_part_i(parts.get("I", ""))
+    p6 = parse_part_vi(parts.get("VI", ""))
     p8 = parse_part_viii(parts.get("VIII", ""))
 
     wb = Workbook()
@@ -727,6 +777,8 @@ def run(pdf_path: Path, out_path: Path) -> dict:
         ws = wb.create_sheet(title=title)
         if title == "Part I":
             build_part_i(ws, assessee, p1)
+        elif title == "Part VI":
+            build_part_vi(ws, assessee, p6)
         elif title == "Part VIII":
             build_part_viii(ws, assessee, p8)
         else:
@@ -734,17 +786,25 @@ def run(pdf_path: Path, out_path: Path) -> dict:
     wb.save(out_path)
 
     recon_mismatches = reconcile_part_i(p1)
+    recon_mismatches_vi = reconcile_part_i(p6)
 
     stats = {
         "assessee": vars(assessee),
         "part_i_deductors": len(p1),
         "part_i_transactions": sum(len(d.txns) for d in p1),
+        "part_vi_collectors": len(p6),
+        "part_vi_transactions": sum(len(c.txns) for c in p6),
         "part_viii_rows": len(p8),
         "output": str(out_path),
         "reconciliation": {
             "deductors_checked": len(p1),
             "deductors_ok": len(p1) - len(recon_mismatches),
             "mismatches": recon_mismatches,
+        },
+        "reconciliation_vi": {
+            "collectors_checked": len(p6),
+            "collectors_ok": len(p6) - len(recon_mismatches_vi),
+            "mismatches": recon_mismatches_vi,
         },
     }
     return stats
@@ -763,6 +823,8 @@ def main(argv: list[str]) -> int:
           f"AY: {stats['assessee'].get('ay','?')}")
     print(f"Part I: {stats['part_i_deductors']} deductors, "
           f"{stats['part_i_transactions']} transactions")
+    print(f"Part VI: {stats['part_vi_collectors']} collectors, "
+          f"{stats['part_vi_transactions']} TCS transactions")
     print(f"Part VIII: {stats['part_viii_rows']} rows")
 
     # Reconciliation: computed sub-totals vs the totals the 26AS prints.
@@ -783,6 +845,24 @@ def main(argv: list[str]) -> int:
                 print(f"      {f['field']}: 26AS={f['header_total']:,.2f}  "
                       f"computed={f['computed_subtotal']:,.2f}  "
                       f"diff={f['difference']:+,.2f}")
+
+    recon6 = stats["reconciliation_vi"]
+    if recon6["collectors_checked"]:
+        mm6 = recon6["mismatches"]
+        if not mm6:
+            print(f"Reconciliation (Part VI): {recon6['collectors_ok']}/"
+                  f"{recon6['collectors_checked']} collectors OK.")
+        else:
+            print(f"Reconciliation (Part VI): {recon6['collectors_ok']}/"
+                  f"{recon6['collectors_checked']} collectors OK — "
+                  f"{len(mm6)} MISMATCH(es) below:")
+            for m in mm6:
+                print(f"  ! Sr.{m['sr']} {m['name']} (TAN {m['tan']}, "
+                      f"{m['txns']} txns):")
+                for f in m["fields"]:
+                    print(f"      {f['field']}: 26AS={f['header_total']:,.2f}  "
+                          f"computed={f['computed_subtotal']:,.2f}  "
+                          f"diff={f['difference']:+,.2f}")
     print(f"Saved: {stats['output']}")
     return 0
 
