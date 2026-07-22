@@ -124,7 +124,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </section>
 <section id="skill_26as" class="skill">
 <h2>Convert <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X) and inline per-deductor sub-totals, so TDS, TCS, advance tax, self-assessment tax and refunds are each laid out as a clean, sortable table. Runs fully offline.</p>
+<p class="overview">Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X). The two parts that carry your tax credits are laid out in full as sortable tables with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The remaining parts get their column headers so the workbook is predictable. Note that a modern 26AS carries NO advance tax or self-assessment tax — those were dropped from Part C in AY 2023-24 and now live only in the AIS. Runs fully offline.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run &quot;26AS Journal&quot; on the workbook this produces. Do not use it for AIS or TIS — those are different documents.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Form 26AS PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Form 26AS PDF, exactly as downloaded from TRACES. ⚠️ Must be the genuine 26AS (PAN like ABCDE1234F, parts labelled PART-I to PART-X). AIS / TIS PDFs have a different layout and will not parse here.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — a single TRACES-issued 26AS.</span></li>
@@ -140,7 +140,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <ul class="outputs">
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-26AS.xlsx</code><span class="pa-tip" data-tip="One worksheet per Part (I–X). Each transaction is a flat row; each deductor block ends with a sub-total row so you can tie figures back to the source statement without re-adding them.">ℹ️</span> — One worksheet per Part (I–X). Each transaction is a flat row; each deductor block ends with a sub-total row so you can tie figures back to the source statement without re-adding them.</li>
 </ul>
-<h3>Tips</h3><p>Amounts are kept verbatim from the statement (no rounding). Cross-check the Part I TDS total against the TDS you are claiming in your return.</p>
+<h3>Tips</h3><p>Amounts are kept verbatim from the statement (no rounding). Cross-check the Part I TDS total against the TDS you are claiming in your return, and the Part VI TCS total too — TCS on a foreign tour package or LRS remittance is a credit like any other, and leaving it out understates your refund.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Sheets are empty or the text is garbled.</td><td>The PDF is a scan. Re-download the text 26AS from TRACES; this skill does not OCR.</td></tr>
 <tr><td>Columns look wrong / parts are missing.</td><td>The file is likely an AIS or TIS, not a 26AS. Use the correct 26AS PDF.</td></tr>
@@ -444,8 +444,8 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </section>
 <section id="skill_26as_journal" class="skill">
 <h2>Journal <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">Builds GnuCash TDS journal entries from a 26AS workbook plus your GnuCash book. It reads Part I of the workbook, matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import.</p>
-<p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS recorded in GnuCash as journal entries instead of typing each one by hand.</p>
+<p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books.</p>
+<p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>26AS workbook (Convert output)</b> <em>(required)</em> <span class="pa-tip" data-tip="The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs. ⚠️ Run 26AS Convert first; the picker only shows workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-26AS.xlsx.</span></li>
 <li><b>GnuCash file</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used only to read account names for matching. ⚠️ Close the book in GnuCash before running so the file is not locked. It is never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>

@@ -149,6 +149,73 @@ def test_reconcile_zero_txn_deductor_is_flagged():
 
 
 # ---------------------------------------------------------------------------
+# Part VI — TCS
+#
+# Part VI used to be written as an always-empty sheet, so TCS never reached the
+# workbook and the tax credit was silently lost downstream. These tests pin that
+# it is now parsed and rendered with the same geometry as Part I (which is what
+# lets the journal builder read either sheet by column index).
+# ---------------------------------------------------------------------------
+
+PART_VI_TEXT = """
+                                                                Sr. No.   Name of Collector   TAN of Collector
+     1   THOMAS COOK INDIA                     ABCD12345E          500,000.00      25,000.00      25,000.00
+         LIMITED
+         1   206CQ     15-Jun-2025   F   30-Jun-2025   -    300,000.00   15,000.00   15,000.00
+         2   206CQ     20-Nov-2025   F   30-Nov-2025   -    200,000.00   10,000.00   10,000.00
+"""
+
+
+def test_parse_part_vi_reads_collectors_and_transactions():
+    collectors = m.parse_part_vi(PART_VI_TEXT)
+    assert len(collectors) == 1
+    c = collectors[0]
+    # The name wrapped onto a second line and must be re-joined.
+    assert c.name == "THOMAS COOK INDIA LIMITED"
+    assert c.tan == "ABCD12345E"
+    assert (c.tot_amt, c.tot_tax, c.tot_tds) == (500000.0, 25000.0, 25000.0)
+    assert [t.section for t in c.txns] == ["206CQ", "206CQ"]
+    assert sum(t.tax for t in c.txns) == 25000.0
+
+
+def test_part_vi_column_geometry_matches_part_i():
+    """The journal builder reads Part I and Part VI by the SAME column indices;
+    if the two ever diverge it would read the wrong figures silently."""
+    assert len(m.P6_HEADERS) == len(m.P1_HEADERS) == 15
+
+
+def test_build_part_vi_renders_numeric_subtotals():
+    collectors = [_deductor(1, "THOMAS COOK INDIA LIMITED", "ABCD12345E",
+                            500000, 25000, 25000,
+                            [(300000, 15000, 15000), (200000, 10000, 10000)])]
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Part VI")
+    m.build_part_vi(ws, m.Assessee(name="X", pan="ABCDE1234F"), collectors)
+    out = Path(tempfile.gettempdir()) / "test_26as_part_vi.xlsx"
+    wb.save(out)
+
+    ws2 = load_workbook(out, data_only=True)["Part VI"]
+    assert ws2.cell(3, 2).value == "Name of Collector"
+    assert ws2.cell(3, 14).value == "Tax Collected ++"
+    subs = [(ws2.cell(r, 13).value, ws2.cell(r, 14).value, ws2.cell(r, 15).value)
+            for r in range(4, ws2.max_row + 1)
+            if isinstance(ws2.cell(r, 2).value, str)
+            and ws2.cell(r, 2).value.startswith("Sub-total")]
+    assert subs == [(500000, 25000, 25000)], subs
+
+
+def test_build_part_vi_empty_still_renders_headers():
+    """No TCS in the year must produce the banner, not a crash or a blank sheet."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Part VI")
+    m.build_part_vi(ws, m.Assessee(name="X"), [])
+    assert ws.cell(3, 1).value == "Collector Sr.No."
+    assert ws.cell(4, 1).value == "No Transactions Present"
+
+
+# ---------------------------------------------------------------------------
 # Optional end-to-end (only if a fixture PDF is provided)
 # ---------------------------------------------------------------------------
 

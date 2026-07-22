@@ -3,7 +3,7 @@
 
 *Mode: direct · 🔌 offline (no LLM)*
 
-Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X) and inline per-deductor sub-totals, so TDS, TCS, advance tax, self-assessment tax and refunds are each laid out as a clean, sortable table. Runs fully offline.
+Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X). The two parts that carry your tax credits are laid out in full as sortable tables with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The remaining parts get their column headers so the workbook is predictable. Note that a modern 26AS carries NO advance tax or self-assessment tax — those were dropped from Part C in AY 2023-24 and now live only in the AIS. Runs fully offline.
 
 ## When to use it
 
@@ -35,7 +35,7 @@ Files produced:
 
 ## Tips
 
-Amounts are kept verbatim from the statement (no rounding). Cross-check the Part I TDS total against the TDS you are claiming in your return.
+Amounts are kept verbatim from the statement (no rounding). Cross-check the Part I TDS total against the TDS you are claiming in your return, and the Part VI TCS total too — TCS on a foreign tour package or LRS remittance is a credit like any other, and leaving it out understates your refund.
 
 ## Troubleshooting
 

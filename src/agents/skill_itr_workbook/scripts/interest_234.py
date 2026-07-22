@@ -281,12 +281,20 @@ class TdsCreditBasis:
 def resolve_tds_credit(
     book_tds: float, as26_tds: float, as26_available: bool,
     as26_deducted_vs_deposited: list[tuple[float, float]] | None = None,
+    book_only: float = 0.0, book_only_label: str = "",
 ) -> TdsCreditBasis:
     """Decide which TDS figure the 234 charges are computed on.
 
     `as26_deducted_vs_deposited` is a list of (tax_deducted, tds_deposited)
     pairs straight off 26AS Part I, used only to report the
     deducted-but-not-deposited exposure -- it never changes `amount`.
+
+    `book_only` is the part of `as26_tds` that did NOT come from 26AS and was
+    carried over from the book unchanged, because the 26AS reader classifies
+    only interest and dividend sections. Calling the resulting total a "26AS"
+    figure without saying so would overstate how corroborated it is, so it is
+    disclosed as a warning. It never changes `amount` either -- dropping the
+    component would understate the credit and overstate the interest.
     """
     result = TdsCreditBasis(book_amount=book_tds, as26_amount=as26_tds)
 
@@ -301,8 +309,17 @@ def resolve_tds_credit(
         return result
 
     result.amount = as26_tds
-    result.basis = "26AS"
+    result.basis = "26AS + book" if book_only > 0 else "26AS"
     result.divergence = book_tds - as26_tds
+
+    if book_only > 0:
+        result.warnings.append(
+            f"Of the {as26_tds:,.2f} credit, {book_only:,.2f} "
+            f"({book_only_label or 'not classified by the 26AS reader'}) comes "
+            "from the BOOK, not from 26AS. Confirm it appears in 26AS before "
+            "filing -- if it does not, the department will allow less and the "
+            "real interest will be HIGHER than shown."
+        )
 
     if abs(result.divergence) > 1.0:
         if result.divergence > 0:

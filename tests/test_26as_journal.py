@@ -291,6 +291,180 @@ def test_unknown_section_flags_and_uses_suspense():
 
 
 # ---------------------------------------------------------------------------
+# Category T — TCS (Part VI)
+#
+# TCS is a tax credit like TDS: if it never reaches the books the return
+# understates taxes paid and overstates the balance due. The journal moves the
+# TAX only, out of the personal spending it was collected on.
+# ---------------------------------------------------------------------------
+
+def _tcs_accounts():
+    return _accounts() + [
+        m.Account("Expense:TCS on Foreign Trip", "TCS on Foreign Trip", "EXPENSE"),
+        m.Account("Expense:Drawings", "Drawings", "EXPENSE"),
+        m.Account("Assets:Current Assets:HDFC Bank", "HDFC Bank", "BANK"),
+    ]
+
+
+def _collector(sr, name, section, amt, tax):
+    return m.Deductor(sr=sr, name=name, sections=(section,),
+                      amount_paid=amt, tax_deducted=tax, tds_deposited=tax)
+
+
+@pytest.mark.parametrize("section", ["206CQ", "206CR", "206CL", "206C"])
+def test_tcs_sections_recognised(section):
+    assert m.is_tcs_section((section,))
+
+
+def test_non_tcs_section_not_recognised():
+    assert not m.is_tcs_section(("194A",))
+    assert not m.is_tcs_section(())
+
+
+def test_tcs_journal_posts_tax_only_dr_tcs_cr_drawings():
+    c = _collector(1, "THOMAS COOK INDIA LIMITED", "206CQ", 500000, 25000)
+    j = m.build_tcs_journals([c], _tcs_accounts())[0]
+    assert j.category == "T" and len(j.splits) == 2
+    accts = {s.account: (s.debit, s.credit) for s in j.splits}
+    # The 500000 spend is already in the books — only the 25000 tax moves.
+    assert accts["Expense:TCS on Foreign Trip"] == (25000, 0)
+    assert accts["Expense:Drawings"] == (0, 25000)
+    assert j.balanced
+
+
+def test_tcs_accounts_discovered_from_chart_not_hardcoded():
+    """A book that names the account differently must still be found."""
+    accts = _accounts() + [
+        m.Account("Assets:TCS Receivable", "TCS Receivable", "ASSET"),
+        m.Account("Equity:Drawings", "Drawings", "EQUITY"),
+    ]
+    j = m.build_tcs_journals([_collector(1, "X TOURS", "206CQ", 100, 10)], accts)[0]
+    paths = {s.account for s in j.splits}
+    assert paths == {"Assets:TCS Receivable", "Equity:Drawings"}
+
+
+def test_tcs_falls_back_to_canonical_names_when_chart_has_neither():
+    """Missing accounts must surface as names to CREATE, not vanish."""
+    j = m.build_tcs_journals([_collector(1, "X TOURS", "206CQ", 100, 10)],
+                             _accounts())[0]
+    paths = {s.account for s in j.splits}
+    assert paths == {m.ACC_TCS_DEFAULT, m.ACC_DRAWINGS}
+
+
+def test_tcs_credit_account_is_configurable():
+    """TCS paid across separately credits Bank, not Drawings."""
+    bank = "Assets:Current Assets:HDFC Bank"
+    j = m.build_tcs_journals([_collector(1, "X TOURS", "206CQ", 100, 10)],
+                             _tcs_accounts(), credit_account=bank)[0]
+    assert j.credit_account == bank
+    assert {s.account for s in j.splits} == {"Expense:TCS on Foreign Trip", bank}
+    assert j.balanced
+
+
+def test_tcs_override_wins():
+    j = m.build_tcs_journals([_collector(3, "X TOURS", "206CQ", 100, 10)],
+                             _tcs_accounts(),
+                             overrides={3: "Liabilities:Suspense"})[0]
+    assert j.credit_account == "Liabilities:Suspense"
+    assert j.credit_confidence == "Override" and not j.needs_review
+
+
+def test_non_206c_section_in_part_vi_goes_suspense():
+    """A section we can't justify as TCS must not silently claim a tax credit."""
+    j = m.build_tcs_journals([_collector(1, "ODD CO", "194A", 100, 10)],
+                             _tcs_accounts())[0]
+    assert j.needs_review and j.credit_account == "Liabilities:Suspense"
+    assert j.balanced
+
+
+def test_tcs_never_uses_the_income_matcher():
+    """match_credit_account searches INCOME subtrees; a collection at source
+    has no income leg, so no TCS split may land on one."""
+    j = m.build_tcs_journals([_collector(1, "BANK OF BARODA", "206CQ", 100, 10)],
+                             _tcs_accounts())[0]
+    income = {a.path for a in _tcs_accounts() if a.type == "INCOME"}
+    assert not ({s.account for s in j.splits} & income)
+
+
+def _party_sheet(ws, title, rows):
+    """Write a Convert-shaped Part I / Part VI sheet: title band, meta strip,
+    header row, then one row per transaction with the party's header totals
+    repeated in cols 2/4/5/6 and the section in col 8."""
+    ws.cell(1, 1, f"{title} - Details")
+    ws.cell(2, 1, "Assessee Name: X  |  PAN: AAAAA1111A  |  Financial Year: 2025-26")
+    ws.cell(3, 1, "Sr.No.")
+    r = 4
+    for sr, name, section, amt, tax in rows:
+        ws.cell(r, 1, sr)
+        ws.cell(r, 2, name)
+        ws.cell(r, 4, amt)
+        ws.cell(r, 5, tax)
+        ws.cell(r, 6, tax)
+        ws.cell(r, 8, section)
+        r += 1
+
+
+def _make_workbook(path, parts):
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows in parts.items():
+        _party_sheet(wb.create_sheet(title=title), title, rows)
+    wb.save(path)
+    return path
+
+
+def test_parse_parts_reads_both_tds_and_tcs():
+    p = Path(tempfile.gettempdir()) / "test_26as_both.xlsx"
+    _make_workbook(p, {
+        "Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)],
+        "Part VI": [(1, "THOMAS COOK INDIA LIMITED", "206CQ", 500000.0, 25000.0)],
+    })
+    deductors, collectors, fy = m.parse_parts(p)
+    assert fy == "2025-26"
+    assert [d.name for d in deductors] == ["BANK OF BARODA"]
+    assert [c.name for c in collectors] == ["THOMAS COOK INDIA LIMITED"]
+    assert collectors[0].tax_deducted == 25000.0
+    assert collectors[0].sections == ("206CQ",)
+
+
+def test_parse_parts_accepts_tcs_only_workbook():
+    """A 26AS with TCS but no TDS is valid and must not be rejected."""
+    p = Path(tempfile.gettempdir()) / "test_26as_tcs_only.xlsx"
+    _make_workbook(p, {"Part VI": [(1, "X TOURS", "206CQ", 100.0, 10.0)]})
+    deductors, collectors, fy = m.parse_parts(p)
+    assert deductors == [] and len(collectors) == 1
+    assert fy == "2025-26"
+
+
+def test_parse_parts_rejects_workbook_with_neither_part():
+    p = Path(tempfile.gettempdir()) / "test_26as_neither.xlsx"
+    _make_workbook(p, {"Part VII": []})
+    with pytest.raises(ValueError, match="Part I"):
+        m.parse_parts(p)
+
+
+def test_tcs_and_tds_transaction_ids_never_collide():
+    """Part I Sr.1 and Part VI Sr.1 are different parties — a shared ID would
+    make GnuCash fuse their splits into one unbalanced transaction."""
+    journals = m.build_journals([_deductor(1, "BANK OF BARODA", "194A", 1000, 100)],
+                                _tcs_accounts())
+    journals += m.build_tcs_journals([_collector(1, "X TOURS", "206CQ", 500, 50)],
+                                     _tcs_accounts())
+    out = Path(tempfile.gettempdir()) / "test_tcs_ids.csv"
+    m.write_csv(journals, out, "2025-26")
+
+    txns = {}
+    with out.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            txns.setdefault(row["Transaction ID"], 0.0)
+            txns[row["Transaction ID"]] += float(row["Amount"])
+    assert set(txns) == {"2526-TDSJ01", "2526-TCSJ01"}
+    for tid, total in txns.items():
+        assert abs(total) < 0.01, f"{tid} does not sum to zero: {total}"
+
+
+# ---------------------------------------------------------------------------
 # Date + CSV output
 # ---------------------------------------------------------------------------
 
