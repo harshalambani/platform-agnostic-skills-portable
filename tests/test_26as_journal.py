@@ -272,6 +272,75 @@ def test_all_sample_journals_balanced():
 
 
 # ---------------------------------------------------------------------------
+# Category G -- 15G/15H (Part II)
+#
+# The 15G/15H interest is already booked in a generic FD-interest bucket --
+# this journal is a RECLASSIFICATION (Dr generic FD interest, Cr the specific
+# NBFC account), not new income. With tax_deducted == 0 (the statutory case)
+# that's a 2-split; if tax was ever withheld anyway it degenerates to the
+# identical 3-split Category A uses.
+# ---------------------------------------------------------------------------
+
+def test_category_g_zero_tax_two_split_reclass():
+    d = _deductor(1, "BANK OF BARODA", "194A", 50000, 0)
+    j = m.build_15g_journals([d], _accounts())[0]
+    assert j.category == "G" and len(j.splits) == 2
+    accts = {s.account: (s.debit, s.credit) for s in j.splits}
+    assert accts[m.ACC_INTEREST_ON_FD] == (50000, 0)
+    assert accts["Income:Interest Income:Interest on BOB - FD"] == (0, 50000)
+    assert j.balanced
+
+
+def test_category_g_nonzero_tax_three_split_like_category_a():
+    """Statutory tax on a 15G/15H deductor 'can't be' non-zero, but if the
+    26AS ever shows one, it must post exactly like Category A's 3-split."""
+    d = _deductor(1, "BANK OF BARODA", "194A", 250237, 25024)
+    j = m.build_15g_journals([d], _accounts())[0]
+    assert j.category == "G" and len(j.splits) == 3
+    accts = {s.account: (s.debit, s.credit) for s in j.splits}
+    assert accts[m.ACC_TDS_INTEREST] == (25024, 0)
+    assert accts[m.ACC_INTEREST_ON_FD] == (round(250237 - 25024, 2), 0)
+    assert accts["Income:Interest Income:Interest on BOB - FD"] == (0, 250237)
+    assert j.balanced
+
+
+def test_category_g_never_collides_with_category_a_tdsj_series():
+    """A Part II 194A deductor must NOT become Category A / TDSJ -- category
+    is decided by which Part the row came from, never by a section lookup."""
+    part_i = _deductor(1, "BANK OF BARODA", "194A", 1000, 100)
+    part_ii = _deductor(1, "BANK OF BARODA", "194A", 50000, 0)  # same Sr, same section
+    journals = m.build_journals([part_i], _accounts())
+    journals += m.build_15g_journals([part_ii], _accounts())
+    assert [j.category for j in journals] == ["A", "G"]
+
+    out = Path(tempfile.gettempdir()) / "test_category_g_ids.csv"
+    m.write_csv(journals, out, "2025-26")
+    txns = {}
+    with out.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            txns.setdefault(row["Transaction ID"], 0.0)
+            txns[row["Transaction ID"]] += float(row["Amount"])
+    assert set(txns) == {"2526-TDSJ01", "2526-15GJ01"}, \
+        "Category G must get its own 15GJ series, never fold into TDSJ"
+    for tid, total in txns.items():
+        assert abs(total) < 0.01, f"{tid} does not sum to zero: {total}"
+
+
+def test_category_g_empty_part_ii_is_a_noop():
+    """No 15G/15H deductors (Part II absent or empty) must not crash and must
+    not emit any Category G journals."""
+    assert m.build_15g_journals([], _accounts()) == []
+
+
+def test_series_for_category_maps_g_to_15gj_and_rejects_unknown():
+    assert m.series_for_category("G") == "15GJ"
+    assert m.series_for_category("A") == "TDSJ"
+    assert m.series_for_category("T") == "TCSJ"
+    with pytest.raises(ValueError):
+        m.series_for_category("Z")
+
+
+# ---------------------------------------------------------------------------
 # Overrides + unknown section
 # ---------------------------------------------------------------------------
 
@@ -420,9 +489,10 @@ def test_parse_parts_reads_both_tds_and_tcs():
         "Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)],
         "Part VI": [(1, "THOMAS COOK INDIA LIMITED", "206CQ", 500000.0, 25000.0)],
     })
-    deductors, collectors, fy = m.parse_parts(p)
+    deductors, g_deductors, collectors, fy = m.parse_parts(p)
     assert fy == "2025-26"
     assert [d.name for d in deductors] == ["BANK OF BARODA"]
+    assert g_deductors == []
     assert [c.name for c in collectors] == ["THOMAS COOK INDIA LIMITED"]
     assert collectors[0].tax_deducted == 25000.0
     assert collectors[0].sections == ("206CQ",)
@@ -432,8 +502,23 @@ def test_parse_parts_accepts_tcs_only_workbook():
     """A 26AS with TCS but no TDS is valid and must not be rejected."""
     p = Path(tempfile.gettempdir()) / "test_26as_tcs_only.xlsx"
     _make_workbook(p, {"Part VI": [(1, "X TOURS", "206CQ", 100.0, 10.0)]})
-    deductors, collectors, fy = m.parse_parts(p)
-    assert deductors == [] and len(collectors) == 1
+    deductors, g_deductors, collectors, fy = m.parse_parts(p)
+    assert deductors == [] and g_deductors == [] and len(collectors) == 1
+    assert fy == "2025-26"
+
+
+def test_parse_parts_reads_part_ii_15g_15h():
+    """A 26AS with only 15G/15H (Part II) deductors is valid — no TDS/TCS
+    required — and Part II shares columns 1/2/4/5/6/8 with Part I/VI."""
+    p = Path(tempfile.gettempdir()) / "test_26as_part_ii_only.xlsx"
+    _make_workbook(p, {
+        "Part II": [(1, "BAJAJ FINANCE LIMITED", "194A", 50000.0, 0.0)],
+    })
+    deductors, g_deductors, collectors, fy = m.parse_parts(p)
+    assert deductors == [] and collectors == []
+    assert [d.name for d in g_deductors] == ["BAJAJ FINANCE LIMITED"]
+    assert g_deductors[0].amount_paid == 50000.0
+    assert g_deductors[0].tax_deducted == 0.0
     assert fy == "2025-26"
 
 
