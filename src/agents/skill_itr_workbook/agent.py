@@ -503,6 +503,24 @@ def _build_and_write_workbook(
             f"(diff {model.capital_gains.reconciliation_diff:,.2f}) -- workbook still written "
             "(see ERROR banner on CG / Statement of Income sheets) -- DO NOT FILE without review."
         )
+    if model.taxes_paid.unclassified_sections:
+        # "Banner, no abort" (2026-07-23 26AS s.193-drop fix), same contract
+        # as the CG/Salary checks above: the workbook has ALREADY been
+        # written in full, with a matching top-of-sheet ERROR banner on the
+        # Statement of Income sheet (see
+        # presentation._write_taxes_paid_unclassified_banner) and a detail
+        # row on the TaxesPaid working sheet. This line's job is only to
+        # carry presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER
+        # into the run() summary so main()'s process-level exit code below
+        # (and any other caller grepping the summary) can detect it.
+        total_at_stake = sum(i["amount"] for i in model.taxes_paid.unclassified_sections)
+        sections = ", ".join(sorted({i["section"] for i in model.taxes_paid.unclassified_sections}))
+        lines.append(
+            f"{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER} "
+            f"(section(s) {sections}, Rs {total_at_stake:,.2f} TDS at stake) -- workbook still "
+            "written (see ERROR banner on Statement of Income / TaxesPaid sheets) -- DO NOT FILE "
+            "without review."
+        )
     if not model.salary.reconciliation_ok:
         # "Banner, no abort" (2026-07-22 salary-gross fix), same contract as
         # the CG reconciliation check above: the workbook has ALREADY been
@@ -706,6 +724,14 @@ def main(argv: list[str] | None = None) -> int:
             f"{presentation.SALARY_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
             "MUST be reviewed before filing (see ERROR banner on Salary / Statement of Income "
             "sheets).",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    if presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER in summary:
+        print(
+            f"{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER} -- workbook was "
+            "written but MUST be reviewed before filing (see ERROR banner on Statement of "
+            "Income / TaxesPaid sheets).",
             file=sys.stderr,
         )
         exit_code = 1

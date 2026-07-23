@@ -295,3 +295,50 @@ def test_main_exits_zero_when_marker_absent(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+# ---------------------------------------------------------------------------
+# Part 3: 2026-07-23 26AS unclassified-TDS-section fix -- same "banner, no
+# abort" contract, exercised end-to-end (schedules -> presentation -> agent).
+# ---------------------------------------------------------------------------
+
+def test_no_unclassified_sections_has_no_error_banner(tmp_path, syn_ind_model_and_paths):
+    tree, model, rules, user_rules, entity, result, loaded = syn_ind_model_and_paths
+    assert model.taxes_paid.unclassified_sections == []
+    wb = _write_and_load(tmp_path, tree, model, rules, user_rules, entity, result, loaded)
+    text = " ".join(str(v) for v in _cell_values(wb["Statement of Income"]))
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER not in text
+
+
+def test_unclassified_section_writes_error_banner_on_statement_of_income(tmp_path, syn_ind_model_and_paths):
+    tree, model, rules, user_rules, entity, result, loaded = syn_ind_model_and_paths
+
+    # Simulate a genuine, already-detected unrecognised-section signal (the
+    # mechanics of HOW unclassified_sections gets populated are
+    # build_taxes_paid's job, exercised in test_schedules.py and unchanged
+    # by this fix -- this test is about what the presentation layer DOES
+    # with that signal: banner, no abort).
+    model.taxes_paid.unclassified_sections = [
+        {"section": "195", "amount": 2000.0, "deductor_name": "Foreign Payer", "tan": "TAN9"},
+    ]
+
+    wb = _write_and_load(tmp_path, tree, model, rules, user_rules, entity, result, loaded)
+
+    assert "Statement of Income" in wb.sheetnames  # workbook still fully produced
+    text = " ".join(str(v) for v in _cell_values(wb["Statement of Income"]))
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER in text
+    assert "195" in text
+
+
+def test_main_exits_nonzero_when_unclassified_section_marker_present(monkeypatch, capsys):
+    monkeypatch.setattr(
+        agent, "run",
+        lambda *a, **kw: (
+            f"STATUS: OK\n\n{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER} "
+            "(section(s) 195, Rs 2,000.00 TDS at stake) -- DO NOT FILE without review."
+        ),
+    )
+    rc = agent.main(["bs.html", "out.xlsx"])
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER in captured.err

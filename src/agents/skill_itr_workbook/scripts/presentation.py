@@ -374,6 +374,43 @@ def _write_salary_error_banner(ws, row: int, salary_schedule, ncols: int) -> int
     return row + 2
 
 
+#: Fail-loud (2026-07-23 26AS unclassified-TDS-section fix), same "banner, no
+#: abort" contract as CG/Salary above: schedules.py's build_taxes_paid routes
+#: any 26AS transaction whose TDS section code is not in the Rules-config
+#: tds_sections map into TaxesPaidSchedule.unclassified_sections -- but ONLY
+#: when its tax_deducted is non-zero (a zero-TDS unknown section carries
+#: nothing at stake and stays quiet). This is the control that would have
+#: caught the missing s.193 (interest on securities) entry before it shipped;
+#: the next unrecognised section now surfaces here instead of silently
+#: understating the TaxesPaid tie-out / TDS credit.
+TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER = "ERROR: 26AS has unrecognised TDS section(s) with tax deducted"
+
+
+def taxes_paid_unclassified_banner_text(tp_schedule) -> str:
+    total = sum(item["amount"] for item in tp_schedule.unclassified_sections)
+    sections = ", ".join(sorted({item["section"] for item in tp_schedule.unclassified_sections}))
+    return (
+        f"*** {TAXES_PAID_UNCLASSIFIED_SECTION_ERROR_MARKER} "
+        f"(section(s) {sections}, Rs {total:,.2f} TDS at stake) -- DO NOT FILE ***"
+    )
+
+
+def _write_taxes_paid_unclassified_banner(ws, row: int, tp_schedule, ncols: int) -> int:
+    """Top-of-sheet ERROR banner, modeled directly on `_write_cg_error_banner`
+    above -- present only when build_taxes_paid found a 26AS transaction with
+    an unrecognised TDS section code AND non-zero tax_deducted. 'Banner, no
+    abort': the workbook is ALWAYS still produced; omitted entirely (returns
+    `row` unchanged) when there is nothing unclassified."""
+    if not tp_schedule.unclassified_sections:
+        return row
+    c = ws.cell(row=row, column=1, value=taxes_paid_unclassified_banner_text(tp_schedule))
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
+
 _PARKED_NOTE = "(to be filled)"
 
 #: Human labels for rules.resolve_age_class()'s return values. 'general'
@@ -865,6 +902,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row = 1
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     row = _write_salary_error_banner(ws, row, model.salary, OUTER)
+    row = _write_taxes_paid_unclassified_banner(ws, row, model.taxes_paid, OUTER)
     title = ws.cell(row=row, column=1, value="STATEMENT OF INCOME")
     title.font = _font(14, bold=True)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=OUTER)

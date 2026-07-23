@@ -66,6 +66,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loading `skill_gnucash_import`'s `agent.py` via `importlib` under a unique
   module name instead, so it no longer collides with other skills' same-named
   `agent.py` modules regardless of collection order.
+- **ITR workbook — 26AS silently dropped s.193 TDS from the TaxesPaid tie-out.**
+  `tds_sections.interest` in both `tax_rules_AY2025-26.yaml` and
+  `tax_rules_AY2026-27.yaml` listed only `194A` (interest other than
+  securities); `193` (interest on securities/bonds) was never classified, so
+  any s.193 TDS credit was silently excluded from `TaxesPaidSchedule`,
+  understating the TDS credit and overstating tax payable and the 234B/234C
+  interest that would be computed on it. Added `193` to both Rules-config
+  files alongside `194A`, with a comment distinguishing the two. Also added a
+  fail-loud guard for the underlying class of bug, not just this one section:
+  `build_taxes_paid()` now records every 26AS transaction whose section code
+  is *not* in the Rules-config `tds_sections` map and whose `tax_deducted` is
+  non-zero (`TaxesPaidSchedule.unclassified_sections`) — a prominent ERROR
+  banner is written on the Statement of Income and TaxesPaid sheets naming
+  the section code(s) and amount at stake, `agent.py`'s run summary reports
+  it, and the CLI exits non-zero, mirroring the existing CG-reconciliation
+  fail-loud pattern. An unrecognised section with zero TDS at stake stays
+  silent — nothing is at stake, so nothing to flag. Nothing is hardcoded:
+  the fix is a config addition plus a guard against the next unclassified
+  section, not a hardcoded `"193"` anywhere in Python.
+- **ITR workbook — a renamed GnuCash account produced a path-drift warning
+  that never cleared.** `configs.load_mapping()` compares a mapping entry's
+  stored `path:` against the parsed tree's current path per GUID and warns
+  on a mismatch (rename detection), but nothing ever wrote the refreshed
+  path back — so once an account was renamed, the same warning fired on
+  every single run forever, indistinguishable in the logs from a genuine
+  problem. GUID is identity; `path:` is just descriptive metadata, so
+  `apply_mapping_corrections.py` now refreshes every drifted path it can
+  confirm against the reviewed workbook's current guid → path state
+  whenever it next writes the mapping file (a correction run "heals for
+  free"), and a new `--refresh-paths` mode lets drift clear on its own with
+  no tag correction pending. This is refresh-*on-write*, not
+  auto-write-on-run: a plain workbook build never mutates the mapping file.
+  A GUID missing from the tree entirely (deleted account, or the wrong book
+  loaded) is a different, real problem and is never auto-healed — it keeps
+  warning loudly, worded distinctly from the now-self-healing rename case,
+  until a human resolves it.
 
 ## [2.18.1] — 2026-07-23
 

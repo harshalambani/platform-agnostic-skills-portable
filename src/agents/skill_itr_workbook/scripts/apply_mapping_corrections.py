@@ -88,11 +88,71 @@ def read_corrections(reviewed_xlsx: str) -> tuple[dict, list]:
     return valid, invalid
 
 
+def read_current_paths(reviewed_xlsx: str) -> dict:
+    """Scan the reviewed workbook's Mapping Review sheet and return
+    {guid: current_path} for every mapped data row. write_mapping_review_sheet
+    always writes the resolved leaf's CURRENT tree path into the "Account
+    path" column, so this is the tree's live guid -> path state without
+    needing to re-parse the original HTML/tree (2026-07-23 path-drift fix) --
+    the reviewed workbook already carries everything needed to self-heal
+    stale `path:` entries in the mapping file."""
+    wb = openpyxl.load_workbook(reviewed_xlsx, data_only=True)
+    ws = wb[REVIEW_SHEET]
+
+    known_paths: dict[str, str] = {}
+    in_data_block = False
+
+    for row in ws.iter_rows(values_only=True):
+        if not row:
+            continue
+        if row[0] == "Account path":
+            in_data_block = True
+            continue
+        if not in_data_block:
+            continue
+        if row[0] is None or (isinstance(row[0], str) and row[0].startswith(("Destination:", "UNMAPPED", "Subtotal"))):
+            in_data_block = False
+            continue
+
+        path, guid = row[0], row[7] if len(row) > 7 else None
+        if guid:
+            known_paths[guid] = str(path)
+
+    return known_paths
+
+
+def refresh_drifted_paths(entries: dict, known_paths: dict) -> tuple[dict, int]:
+    """Return a new {guid: MappingEntry} dict with every entry's stored
+    `path` refreshed to match `known_paths` wherever the GUID is present
+    there and the path differs -- a benign rename (see configs.load_mapping's
+    "benign rename, auto-fixable" wording). GUIDs absent from `known_paths`
+    are left completely untouched: that case is a real problem (deleted
+    account, or the wrong book was loaded), never auto-healed. Returns
+    (new entries dict, count of entries refreshed); `entries` itself is not
+    mutated."""
+    refreshed = dict(entries)
+    count = 0
+    for guid, entry in entries.items():
+        new_path = known_paths.get(guid)
+        if new_path is not None and new_path != entry.path:
+            refreshed[guid] = MappingEntry(
+                guid=entry.guid,
+                path=new_path,
+                tag=entry.tag,
+                flags=entry.flags,
+                note=entry.note,
+                suggested_by_llm=entry.suggested_by_llm,
+            )
+            count += 1
+    return refreshed, count
+
+
 def apply_corrections_map(
     mapping_file: str,
     corrections: dict,
     output_yaml: str,
     paths: dict | None = None,
+    known_paths: dict | None = None,
 ) -> tuple[int, list]:
     """Load `mapping_file` (an empty/missing file is treated as zero
     entries -- lets a true cold-start entity, which has no mapping file yet,
@@ -111,6 +171,13 @@ def apply_corrections_map(
     from the proposed-mappings snippet / parsed tree, not the mapping file
     itself). A guid with neither an existing entry nor a supplied path is
     written with an empty path.
+
+    `known_paths`, if supplied (guid -> current tree path, e.g. from
+    read_current_paths()), refreshes any drifted `path:` on EVERY entry
+    being written -- not just the ones touched by `corrections` -- before
+    the file is written (2026-07-23 path-drift fix: "heal for free" on the
+    next correction run). Omitting it (the default) leaves stored paths
+    exactly as loaded, same as before this option existed.
 
     Returns (count applied, invalid corrections as [(path, guid, bad_tag)]),
     mirroring apply_corrections()'s return shape.
@@ -145,6 +212,9 @@ def apply_corrections_map(
         )
         applied += 1
 
+    if known_paths:
+        entries, _ = refresh_drifted_paths(entries, known_paths)
+
     Path(output_yaml).write_text(dump_mapping_entries(list(entries.values())), encoding="utf-8")
     return applied, invalid
 
@@ -176,10 +246,16 @@ def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str | 
 
     Thin wrapper around `apply_corrections_map`: reads the reviewed
     workbook's Correction cells (which already validate tags via
-    `read_corrections`), then delegates the entries build + write."""
+    `read_corrections`), then delegates the entries build + write. Every
+    entry's `path:` (not only the ones being corrected) is also refreshed
+    against the reviewed workbook's current guid -> path state
+    (read_current_paths) -- so any account renamed since the mapping file
+    was last written self-heals for free on this write, without a separate
+    step (2026-07-23 path-drift fix)."""
     valid, invalid = read_corrections(reviewed_xlsx)
     corrections = {guid: tag for guid, (tag, _path) in valid.items()}
     paths = {guid: path for guid, (_tag, path) in valid.items()}
+    known_paths = read_current_paths(reviewed_xlsx)
 
     backup_path = None
     target = output_yaml
@@ -187,8 +263,34 @@ def apply_corrections(mapping_file: str, reviewed_xlsx: str, output_yaml: str | 
         target = mapping_file
         backup_path = backup_mapping_file(mapping_file)
 
-    applied, _ = apply_corrections_map(mapping_file, corrections, target, paths=paths)
+    applied, _ = apply_corrections_map(mapping_file, corrections, target, paths=paths, known_paths=known_paths)
     return applied, invalid, backup_path
+
+
+def refresh_paths(mapping_file: str, known_paths: dict, output_yaml: str | None = None) -> tuple[int, str | None]:
+    """Refresh every drifted `path:` in `mapping_file` against `known_paths`
+    with no tag corrections involved -- lets path drift clear on its own
+    even when no reviewer correction is pending (the `--refresh-paths` CLI
+    mode). A TRUE no-op when nothing has drifted: no backup is taken and
+    nothing is written. When something did drift, mirrors
+    apply_corrections()'s discipline -- backs up then writes in place unless
+    `output_yaml` is given explicitly (a dry run that leaves `mapping_file`
+    untouched).
+
+    Returns (count refreshed, backup path or None)."""
+    entries = dict(load_mapping(mapping_file).entries)
+    refreshed, count = refresh_drifted_paths(entries, known_paths)
+    if count == 0:
+        return 0, None
+
+    backup_path = None
+    target = output_yaml
+    if target is None:
+        target = mapping_file
+        backup_path = backup_mapping_file(mapping_file)
+
+    Path(target).write_text(dump_mapping_entries(list(refreshed.values())), encoding="utf-8")
+    return count, backup_path
 
 
 def main() -> int:
@@ -202,7 +304,26 @@ def main() -> int:
              "next run. If given, corrections are written here instead and mapping_file is left "
              "unchanged -- they will NOT take effect until you apply them yourself.",
     )
+    parser.add_argument(
+        "--refresh-paths", action="store_true",
+        help="Refresh stale path: entries against reviewed_xlsx's current guid -> path state and "
+             "exit -- no Correction cells are read or applied. Use this to clear path-drift "
+             "warnings (renamed accounts) on their own, with no pending tag correction. A true "
+             "no-op (no backup, no write) when nothing has drifted.",
+    )
     args = parser.parse_args()
+
+    if args.refresh_paths:
+        known_paths = read_current_paths(args.reviewed_xlsx)
+        count, backup_path = refresh_paths(args.mapping_file, known_paths, args.output_yaml)
+        target = args.output_yaml or args.mapping_file
+        if count == 0:
+            print("No drifted path(s) found -- nothing to refresh (no write).")
+        else:
+            if backup_path:
+                print(f"Backed up previous mapping to {backup_path}")
+            print(f"Refreshed {count} drifted path(s) -> {target}")
+        return 0
 
     applied, invalid, backup_path = apply_corrections(args.mapping_file, args.reviewed_xlsx, args.output_yaml)
     if args.output_yaml is None:

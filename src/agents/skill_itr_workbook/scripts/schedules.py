@@ -536,6 +536,17 @@ class TaxesPaidSchedule:
     as26_tds_dividend: float = 0.0
     tie_out_ok: bool = True
     tie_out_conflicts: list = field(default_factory=list)   # list[dict]
+    #: Fail-loud (2026-07-23 26AS s.193-drop fix): as26.classify_section
+    #: returns None for any TDS section code not present in the Rules-config
+    #: tds_sections map (dividend/interest). Rather than silently dropping
+    #: such a transaction from the tie-out -- which is exactly how s.193
+    #: (interest on securities) TDS credit went missing before it was added
+    #: to tds_sections -- every UNCLASSIFIED transaction that carries
+    #: non-zero tax_deducted is captured here so the next unrecognised
+    #: section reproduces a loud banner instead of a silent understatement.
+    #: A zero-TDS unknown section (nothing at stake) is NOT recorded.
+    unclassified_sections: list = field(default_factory=list)   # list[dict]:
+    #: {"section", "amount", "deductor_name", "tan"}
     #: s.234C needs advance tax CUMULATIVE as at each instalment due date
     #: (15 Jun / 15 Sep / 15 Dec / 15 Mar), not the annual total -- an
     #: instalment paid late is still a deferment even though the year-end
@@ -605,6 +616,7 @@ def build_taxes_paid(
     as26_tds_int = 0.0
     as26_tds_div = 0.0
     conflicts: list = []
+    unclassified_sections: list = []
     if as26_data is not None and as26_data.transactions and rules is not None:
         tds_sections = rules.common.get("tds_sections", {})
         as26_available = True
@@ -614,6 +626,18 @@ def build_taxes_paid(
                 as26_tds_int += txn.tax_deducted
             elif category == "dividend":
                 as26_tds_div += txn.tax_deducted
+            elif txn.tax_deducted:
+                # Unrecognised section code carrying real TDS -- fail loud
+                # (see TaxesPaidSchedule.unclassified_sections docstring)
+                # rather than silently dropping it from the tie-out. A
+                # zero-TDS unknown section is not noise-worthy and is
+                # skipped.
+                unclassified_sections.append({
+                    "section": txn.section or "(blank)",
+                    "amount": txn.tax_deducted,
+                    "deductor_name": txn.deductor_name,
+                    "tan": txn.tan,
+                })
 
         if abs(as26_tds_int - tds_int) > _TIE_OUT_TOLERANCE:
             conflicts.append({
@@ -634,6 +658,7 @@ def build_taxes_paid(
         as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
         tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
         advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
+        unclassified_sections=unclassified_sections,
     )
 
 

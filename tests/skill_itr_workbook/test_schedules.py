@@ -655,7 +655,7 @@ def test_round_288a_and_288b():
 # the TaxesPaid book<->26AS tie-out (deliberate-conflict case).
 # ---------------------------------------------------------------------------
 
-_TDS_SECTIONS = {"dividend": ["194", "194K"], "interest": ["194A"]}
+_TDS_SECTIONS = {"dividend": ["194", "194K"], "interest": ["193", "194A"]}
 
 
 def test_classify_section_maps_dividend_and_interest_codes():
@@ -664,6 +664,54 @@ def test_classify_section_maps_dividend_and_interest_codes():
     assert as26_engine.classify_section("194A", _TDS_SECTIONS) == "interest"
     assert as26_engine.classify_section("192", _TDS_SECTIONS) is None
     assert as26_engine.classify_section(None, _TDS_SECTIONS) is None
+
+
+def test_classify_section_193_interest_on_securities(syn_ind_resolved):
+    # Regression (2026-07-23 s.193-drop fix): s.193 (interest on securities,
+    # e.g. bonds/debentures) must classify as "interest", not fall through
+    # to None -- the bug that silently dropped it from the TaxesPaid tie-out.
+    assert as26_engine.classify_section("193", _TDS_SECTIONS) == "interest"
+
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction("TAN1", "Bond House", "193", date(2024, 6, 1), 50000.0, 5000.0, 5000.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert tp.as26_tds_interest == pytest.approx(5000.0)
+    assert tp.unclassified_sections == []
+
+
+def test_build_taxes_paid_unknown_section_nonzero_tds_flags_loud(syn_ind_resolved):
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        # "195" is not in tds_sections at all -- and carries real TDS, so it
+        # must surface as a loud, visible signal rather than vanish.
+        as26_engine.As26Transaction("TAN9", "Foreign Payer", "195", date(2024, 6, 1), 20000.0, 2000.0, 2000.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert len(tp.unclassified_sections) == 1
+    item = tp.unclassified_sections[0]
+    assert item["section"] == "195"
+    assert item["amount"] == pytest.approx(2000.0)
+    assert tp.as26_tds_interest == 0.0
+    assert tp.as26_tds_dividend == 0.0
+
+
+def test_build_taxes_paid_unknown_section_zero_tds_stays_quiet(syn_ind_resolved):
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        # Unrecognised section but ZERO tax_deducted -- nothing at stake, so
+        # this must NOT be flagged (would just be noise).
+        as26_engine.As26Transaction("TAN9", "Some Payer", "206C", date(2024, 6, 1), 20000.0, 0.0, 0.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert tp.unclassified_sections == []
 
 
 def test_bucket_as26_transactions_uses_txn_date_for_quarter_index():

@@ -152,8 +152,13 @@ common:
                                           # bucket category and to the TaxesPaid tie-out
                                           # (CF5) — statutory section-number facts, not
                                           # rates/caps, but still config-driven per rule.
+                                          # 193 = interest on securities (bonds/debentures);
+                                          # 194A = interest other than securities (bank/NBFC
+                                          # FDs etc). 193 was missing here (bug fix,
+                                          # 2026-07-23) -- it silently dropped s.193 TDS from
+                                          # the tie-out and understated the TDS credit.
     dividend: ["194", "194K"]
-    interest: ["194A"]
+    interest: ["193", "194A"]
 
   schedule_al:
     total_income_threshold: 10000000     # raised 50L -> 1cr from AY 2025-26 [src-4]
