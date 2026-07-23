@@ -79,6 +79,14 @@ help:
           One balanced journal transaction per TDS entry (every transaction's
           amounts sum to zero), debiting the TDS receivable / asset account and
           crediting the income account, ready for GnuCash CSV import.
+      - name: "YYYY-MM-DD-HHMMSS-<input>-tds-journals-partI.csv"
+        tooltip: >
+          Only written when the 26AS has 15G/15H (Part II) entries: the same
+          journal with every 15G/15H transaction dropped whole. Import this
+          instead of the full journal if you post 15G/15H entries by hand in
+          GnuCash yourself, so the Interest-on-FD reclassification is not
+          double-booked. Regenerated on every save from the Journal Review
+          screen, so it can never go stale.
   tips: >
     Entries whose deductor could not be matched to an account are flagged so you
     can fix the account name in your book (or add the missing account) and re-run.

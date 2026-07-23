@@ -23,6 +23,15 @@ The one thing this screen must get right that a plain "edit one CSV" screen
 doesn't: reassigning a deductor's Credit Account must rewrite BOTH files, and
 the review row -> journal splits link is by Transaction ID, not row order.
 See _apply_changes()'s docstring for the exact matching rules.
+
+Save also regenerates a THIRD file, <stem>-tds-journals-partI.csv, containing
+only the Part I (TDSJ/TCSJ) rows with every Part II (15GJ) transaction
+dropped whole. It exists for users who post 15G/15H by hand in GnuCash
+themselves: importing the full journal's 15GJ rows on top of that hand entry
+double-books the Interest-on-FD -> NBFC reclassification. Regenerating it on
+every Save (never hand-editing a copy) is the whole point -- see
+_regenerate_part_i_split()'s docstring and build_tds_journals.split_part_ii()
+for why a stale hand-filtered copy was the original bug.
 """
 from __future__ import annotations
 
@@ -305,6 +314,54 @@ def _find_credit_split(
     )
 
 
+def _load_split_part_ii():
+    """Import split_part_ii / part_i_path_for / write_rows_csv from
+    build_tds_journals the same defensive way _txn_id_for (above) imports
+    series_for_category -- both pull from that module's single source of
+    truth, and both must fail loud rather than silently guess if it can't be
+    loaded (a guess here could regenerate the Part I file wrong, or not at
+    all, without any indication why)."""
+    try:
+        import sys as _sys
+
+        _src = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from agents.skill_26as_journal.scripts.build_tds_journals import (
+            part_i_path_for,
+            split_part_ii,
+            write_rows_csv,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "_load_split_part_ii: could not load split_part_ii from "
+            "build_tds_journals; refusing to guess the Part I split"
+        ) from e
+    return split_part_ii, part_i_path_for, write_rows_csv
+
+
+def _regenerate_part_i_split(
+    journal_rows: list[dict], journal_p: Path,
+) -> tuple[str | None, list[dict], list[dict], list[str]]:
+    """Regenerate the Part-I-only sibling of journal_p from the just-written
+    journal_rows, so a hand-filtered copy can never go stale -- this is
+    called on every Save, in lockstep with the journal/review rewrite (see
+    build_tds_journals.write_part_i_split's docstring for the same
+    delete-if-not-needed rule this mirrors).
+
+    Returns (part_i_path_or_None, part_i_rows, part_ii_rows, split_problems).
+    """
+    split_part_ii, part_i_path_for, write_rows_csv = _load_split_part_ii()
+    part_i_rows, part_ii_rows, split_problems = split_part_ii(journal_rows)
+    part_i_path = part_i_path_for(journal_p)
+    if not part_ii_rows:
+        if part_i_path.exists():
+            part_i_path.unlink()
+        return None, part_i_rows, part_ii_rows, split_problems
+    write_rows_csv(part_i_rows, part_i_path)
+    return str(part_i_path), part_i_rows, part_ii_rows, split_problems
+
+
 def _verify_balanced(journal_rows: list[dict], tolerance: float = 0.01) -> list[str]:
     """Re-verify every transaction's Amount column sums to zero.
 
@@ -434,20 +491,37 @@ def _write_csv_rows(path: Path, headers: list[str], rows: list[dict]) -> None:
         w.writerows(rows)
 
 
-def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
-    """Process a Save from the review UI -- rewrites BOTH the journal and
-    review CSVs, re-verifies balance, and stages the journal CSV (the
-    deliverable, not the review CSV) for download.
+def _stage_for_download(path: Path) -> str | None:
+    """Copy `path` into the download staging dir and return the staged path,
+    or None (with the caller responsible for reporting the failure)."""
+    staging = _config_mod.download_staging_dir()
+    staging.mkdir(parents=True, exist_ok=True)
+    staged = staging / path.name
+    shutil.copy2(path, staged)
+    return str(staged.resolve())
 
-    Returns (status_markdown, download_file_update).
+
+def _save_changes(
+    changes_json: str,
+) -> tuple[str, "gr.update", "gr.update"]:
+    """Process a Save from the review UI -- rewrites the journal and review
+    CSVs, regenerates the Part-I-only sibling (excluding any 15G/15H rows) in
+    lockstep, re-verifies balance on both the full journal and the Part I
+    split independently, and stages both CSVs for download.
+
+    Returns (status_markdown, download_file_update, part_i_download_update).
     """
+    no_change = (
+        gr.update(interactive=False, value=None),
+        gr.update(interactive=False, value=None),
+    )
     if not changes_json or not changes_json.strip():
-        return "No changes to save.", gr.update(interactive=False, value=None)
+        return ("No changes to save.",) + no_change
 
     try:
         payload = parse_payload(changes_json)
     except ValueError as e:
-        return f"Error parsing changes: {e}", gr.update(interactive=False, value=None)
+        return (f"Error parsing changes: {e}",) + no_change
 
     changes = payload["changes"]
     context = payload["context"]
@@ -455,20 +529,17 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     gnucash_path = context.get("gnucash_path", "")
 
     if not changes:
-        return "No changes to save.", gr.update(interactive=False, value=None)
+        return ("No changes to save.",) + no_change
     if not review_path:
-        return "Error: no review CSV path in payload -- nothing was saved.", \
-            gr.update(interactive=False, value=None)
+        return ("Error: no review CSV path in payload -- nothing was saved.",) + no_change
 
     review_p = Path(review_path)
     if not review_p.is_file():
-        return f"Error: review CSV not found: {review_p}", \
-            gr.update(interactive=False, value=None)
+        return (f"Error: review CSV not found: {review_p}",) + no_change
 
     journal_p = _journal_path_for(str(review_p))
     if not journal_p.is_file():
-        return f"Error: journal CSV not found: {journal_p}", \
-            gr.update(interactive=False, value=None)
+        return (f"Error: journal CSV not found: {journal_p}",) + no_change
 
     review_rows = _read_csv_rows(review_p)
     journal_rows = _read_csv_rows(journal_p)
@@ -485,6 +556,21 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     _write_csv_rows(journal_p, _JOURNAL_HEADERS, journal_rows)
 
     balance_problems = _verify_balanced(journal_rows)
+
+    # Regenerate the Part-I-only file from the rows just written, so an edit
+    # made on this screen (e.g. a credit-account reassignment) is reflected
+    # in it immediately -- a hand-filtered copy of the pre-edit journal would
+    # otherwise silently go stale the moment this Save runs.
+    try:
+        part_i_path, part_i_rows, part_ii_rows, split_problems = \
+            _regenerate_part_i_split(journal_rows, journal_p)
+    except ImportError as e:
+        part_i_path, part_i_rows, part_ii_rows, split_problems = None, [], [], []
+        problems = list(problems) + [f"Part I split not regenerated: {e}"]
+
+    part_i_balance_problems = _verify_balanced(part_i_rows) if part_i_rows else []
+    excluded_txns = sorted({(r.get("Transaction ID") or "").strip()
+                            for r in part_ii_rows if r.get("Transaction ID")})
 
     lines = ["**Saved**", ""]
     lines.append(f"Applied {applied} of {len(changes)} change(s).")
@@ -508,20 +594,68 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
         lines.append("")
         lines.append("Balance re-verification: all transactions sum to 0.00 (ok).")
 
+    # This paragraph is the user's only defence against picking the wrong
+    # file to import, so it states plainly, in numbers, what each file is.
+    lines.append("")
+    if part_i_path:
+        lines.append(
+            f"{len(excluded_txns)} transaction(s) excluded from "
+            f"{Path(part_i_path).name} because they are 15G/15H (Part II) "
+            f"reclassifications -- **if you post Part II by hand in "
+            f"GnuCash, import {Path(part_i_path).name}, not "
+            f"{journal_p.name}, or the reclassification will be "
+            f"double-booked.**"
+        )
+        if part_i_balance_problems:
+            lines.append(
+                "**WARNING: the Part I split itself does not balance after "
+                "re-verification** -- dropping whole transactions must "
+                "never change split sums; investigate before importing "
+                "either file:"
+            )
+            for p in part_i_balance_problems:
+                lines.append(f"  - {p}")
+        else:
+            lines.append(
+                f"Part I split re-verification: all {len(part_i_rows)} "
+                "row(s) sum to 0.00 per transaction (ok)."
+            )
+    else:
+        lines.append(
+            "No 15G/15H (Part II) transactions in this run -- there is "
+            f"nothing to exclude, so {journal_p.name} is the only file "
+            "to import."
+        )
+    if split_problems:
+        lines.append("")
+        lines.append(
+            "Warning: could not determine the series for some Transaction "
+            "ID(s) -- kept in the Part I file, not dropped:"
+        )
+        for p in split_problems:
+            lines.append(f"  - {p}")
+
     download_path: str | None = None
     try:
-        staging = _config_mod.download_staging_dir()
-        staging.mkdir(parents=True, exist_ok=True)
-        staged = staging / journal_p.name
-        shutil.copy2(journal_p, staged)
-        download_path = str(staged.resolve())
+        download_path = _stage_for_download(journal_p)
     except Exception as e:
         lines.append("")
         lines.append(f"Warning: could not stage download -- {e}")
 
-    if download_path:
-        return "\n".join(lines), gr.update(value=download_path, interactive=True)
-    return "\n".join(lines), gr.update(interactive=False, value=None)
+    part_i_download_path: str | None = None
+    if part_i_path:
+        try:
+            part_i_download_path = _stage_for_download(Path(part_i_path))
+        except Exception as e:
+            lines.append("")
+            lines.append(f"Warning: could not stage Part I download -- {e}")
+
+    journal_update = (gr.update(value=download_path, interactive=True)
+                      if download_path else gr.update(interactive=False, value=None))
+    part_i_update = (gr.update(value=part_i_download_path, interactive=True)
+                     if part_i_download_path else gr.update(interactive=False, value=None))
+
+    return "\n".join(lines), journal_update, part_i_update
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +671,10 @@ def render(container_tab=None) -> None:
         "a review CSV and GnuCash book, click Load, assign the correct "
         "credit account via the searchable dropdown, select rows, Apply to "
         "selected, then Save -- this rewrites both the journal and review "
-        "CSVs and re-verifies every transaction still balances."
+        "CSVs and re-verifies every transaction still balances. Save also "
+        "regenerates a second, Part-I-only CSV excluding any 15G/15H rows: "
+        "download the full journal to import everything, or the Part I "
+        "file if you post 15G/15H by hand in GnuCash yourself."
     )
 
     initial_csvs = _scan_review_csvs()
@@ -582,6 +719,14 @@ def render(container_tab=None) -> None:
         label="Download corrected journal CSV", visible=True, interactive=False,
         variant="primary",
     )
+    # Interactive only when this run actually produced a Part II (15G/15H)
+    # row -- with none to exclude there is nothing to distinguish this file
+    # from the full journal, so offering it would just invite picking the
+    # wrong download for no reason.
+    part_i_download_file = gr.DownloadButton(
+        label="Download Part I only (excludes 15G/15H)", visible=True,
+        interactive=False, variant="secondary",
+    )
 
     _payload_box = gr.Textbox(
         value="", show_label=False, container=False, lines=1,
@@ -596,7 +741,7 @@ def render(container_tab=None) -> None:
     save_btn.click(
         fn=_save_changes,
         inputs=[_payload_box],
-        outputs=[save_result, download_file],
+        outputs=[save_result, download_file, part_i_download_file],
         js="(x) => window._tdsJrSavePayload || ''",
     )
 
@@ -608,6 +753,7 @@ def render(container_tab=None) -> None:
             "<p><em>Load a CSV to begin reviewing.</em></p>",        # review_html
             "",                                                       # save_result
             gr.update(interactive=False, value=None),                 # download_file
+            gr.update(interactive=False, value=None),                 # part_i_download_file
             "",                                                       # _payload_box
         )
 
@@ -615,6 +761,6 @@ def render(container_tab=None) -> None:
         fn=_handle_reset,
         inputs=[],
         outputs=[csv_dropdown, gnucash_file, review_html, save_result,
-                 download_file, _payload_box],
+                 download_file, part_i_download_file, _payload_box],
         js="() => { window._tdsJrSavePayload = ''; }",
     )
