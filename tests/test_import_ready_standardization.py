@@ -112,14 +112,21 @@ def _rows_transfer_account_last() -> list[dict]:
 
 
 def _save(tmp_path: Path, all_rows: list[dict]) -> Path:
+    # NOTE: gnucash_review.py migrated onto ui/_review_engine — _save_changes
+    # now reads the engine's payload shape (context/changes/all_rows, with
+    # changes keyed by Column KEY, e.g. "Account" not "account"), not the old
+    # bespoke {gnucash_file, csv_path, changes:[{description, account}]} shape.
     from ui.tabs import gnucash_review as gr_review  # noqa: PLC0415
     csv_p = tmp_path / "2026-01-01-TEST-GnuCash_import_ready.csv"
     csv_p.write_text("placeholder\n", encoding="utf-8")
     payload = {
-        "gnucash_file": str(tmp_path / "nonexistent.gnucash"),
-        "csv_path": str(csv_p),
+        "context": {
+            "gnucash_file": str(tmp_path / "nonexistent.gnucash"),
+            "csv_path": str(csv_p),
+        },
         # Non-empty changes so _save_changes proceeds to the re-export.
-        "changes": [{"description": "COFFEE", "account": "Expense:Food"}],
+        "changes": [{"_idx": 0, "_orig": "Expense:Food", "Description": "COFFEE",
+                      "Account": "Expense:Food"}],
         "all_rows": all_rows,
     }
     gr_review._save_changes(json.dumps(payload))

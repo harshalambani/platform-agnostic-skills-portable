@@ -9,9 +9,9 @@ Auto-generated inventory of every skill. UI skills appear as tabs; internal step
 |-------|-----|------|-----|--------|--------|-------------|
 | Bank of Baroda | `skill_bob` | direct | no | Bank of Baroda statement PDF(s) (PDF (.pdf) — one or many, in any order.) | `YYYY-MM-DD-HHMMSS-<input>-BoB.csv` | — |
 | CSV Data Analyzer | `skill_csv_analyzer` | agent | yes | CSV file (CSV (.csv) with a header row.); Question about this data (e.g. 'What is the average revenue by region?') (Free text.) | `YYYY-MM-DD-HHMMSS-<input>-analysis.md` | — |
-| Convert | `skill_26as` | direct | no | Form 26AS PDF (PDF (.pdf) — a single TRACES-issued 26AS.) | `YYYY-MM-DD-HHMMSS-<input>-26AS.xlsx` | — |
+| Convert | `skill_26as` | direct | no | Form 26AS PDF (PDF (.pdf) — a single TRACES-issued 26AS.) | `YYYY-MM-DD-HHMMSS-<input>-26AS.xlsx` | poppler |
 | Credit Card — Sort PDFs | `skill_cc_sort` | direct | no | Input folder (MSG files and/or PDFs) (A folder of .msg and/or .pdf files.); PDF password(s), comma-separated (or leave blank for auto-detect) (Text — one password, or several comma-separated. Optional.) | `` | qpdf |
-| Credit Card — Transactions | `skill_cc_transactions` | direct | no | Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort) (A folder of decrypted statement PDFs.) | `YYYY-MM-DD-HHMMSS-<input>-CC-Transactions.xlsx` | — |
+| Credit Card — Transactions | `skill_cc_transactions` | direct | no | Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort) (A folder of decrypted statement PDFs.) | `YYYY-MM-DD-HHMMSS-<input>-CC-Transactions.xlsx` | poppler |
 | Document Summarizer | `skill_summarize` | direct | yes | Document (PDF or text file) (PDF (.pdf) or text (.txt, .md, .csv, .log, .json, .xml, .html) — one file.) | `YYYY-MM-DD-HHMMSS-<input>-summary.md` | — |
 | GnuCash Import | `skill_krc_gnucash` | direct | no | Part II Bills workbook (Excel (.xlsx) matching *-KRC-Bills-Recon.xlsx.); GnuCash book (.gnucash) (GnuCash file (.gnucash).) | `` | — |
 | HDFC | `skill_hdfc` | direct | no | HDFC statement (PDF, XLS, XLSX, or CSV) (PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file.); PDF password (only if the statement PDF is password-protected — for HDFC often the Cust ID) (The statement's open password — for HDFC this is often the Cust ID.) | `YYYY-MM-DD-HHMMSS-<input>-HDFC_canonical.csv` | tesseract |

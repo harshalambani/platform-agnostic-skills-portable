@@ -159,8 +159,17 @@ def test_registry_native_requirements():
 
 def test_registry_external_tools():
     from agents.registry import get
+    # CC Sort and KRC Recon both shell out to qpdf but do not vendor their own
+    # copy of it -- correctly declared as native_binaries (not external_tools)
+    # so the vendored qpdf under vendor/qpdf/bin/ wins over any system-PATH
+    # qpdf (the same PATH-resolution bug this fixes for pdftotext). See the
+    # 26AS/Xpdf incident write-up in the skill.yaml correction PR.
     cc_sort = get("CC Sort")
-    assert "qpdf" in cc_sort.requires.external_tools
+    assert "qpdf" in cc_sort.requires.native_binaries
+    assert "qpdf" not in cc_sort.requires.external_tools
+
+    krc_recon = get("KRC Reconcile")
+    assert "qpdf" in krc_recon.requires.native_binaries
 
 
 # ---------------------------------------------------------------------------
