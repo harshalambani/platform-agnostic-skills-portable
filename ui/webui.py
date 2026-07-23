@@ -84,6 +84,8 @@ from ui.tabs import history as tab_history  # noqa: E402
 from ui.tabs import help as tab_help  # noqa: E402
 from ui.tabs import gnucash_review as tab_gnucash_review  # noqa: E402
 from ui.tabs import itr_mapping_review as tab_itr_mapping_review  # noqa: E402
+from ui.tabs import tds_journal_review as tab_tds_journal_review  # noqa: E402
+from ui.tabs import krc_gnucash_review as tab_krc_gnucash_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
 from ui import _update  # noqa: E402
@@ -320,6 +322,15 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 When False, returns the unlaunched object — used by tests.
     """
     _setup_warning_log()
+
+    # Register the vendored native binaries (Tesseract/Poppler/qpdf) on PATH
+    # for EVERY launch, before any skill subprocess can run — independent of
+    # which skills declare `native_binaries` in their skill.yaml (see
+    # ui/tabs/_generic.py's _check_native_binaries, which only gates the
+    # missing-binary error message, not the PATH injection itself).
+    from ui import _native as _native_mod
+    _native_mod.ensure_native_path()
+
     skills = _discover_skills()
 
     # Prime the model-list cache once (avoids a 2-second health-check timeout
@@ -430,6 +441,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     for _skill in _grouped.get("26as", []):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
+                                    with gr.Tab("Journal Review") as _jt:
+                                        tab_tds_journal_review.render(container_tab=_jt)
                             with gr.Tab("KRChoksey"):
                                 with gr.Tabs():
                                     # Order the KRChoksey sub-tabs by workflow
@@ -442,6 +455,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     ):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
+                                    with gr.Tab("Review") as _kt:
+                                        tab_krc_gnucash_review.render(container_tab=_kt)
                             _itr_skills = _grouped.get("itr", [])
                             if _itr_skills:
                                 with gr.Tab("ITR"):

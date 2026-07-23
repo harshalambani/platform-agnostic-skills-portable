@@ -18,20 +18,38 @@ Usage:
     python ocr_to_tsv.py --pdf-dir /path/to/hsbc_pdfs --work-dir /path/to/work
 """
 import argparse
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_krc_recon/scripts/parse_krc_bills.py and skill_cc_sort/scripts/
+# extract_sort_cc_pdfs.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_pdftoppm, resolve_tesseract  # noqa: E402
+
 
 def check_binaries():
+    """Resolve both binaries by absolute path up front so a missing vendored
+    copy (and no usable fallback) fails loudly before any PDF is processed,
+    instead of a bare-name subprocess call silently resolving to whatever
+    tool happens to be on PATH."""
     missing = []
-    for bin_name in ("pdftoppm", "tesseract"):
-        if shutil.which(bin_name) is None:
-            missing.append(bin_name)
+    try:
+        resolve_pdftoppm()
+    except FileNotFoundError as e:
+        missing.append(str(e))
+    try:
+        resolve_tesseract()
+    except FileNotFoundError as e:
+        missing.append(str(e))
     if missing:
         sys.exit(
-            f"Missing required binaries: {', '.join(missing)}.\n"
+            "Missing required binaries:\n  " + "\n  ".join(missing) + "\n"
             "Install with: apt-get install -y poppler-utils tesseract-ocr"
         )
 
@@ -50,7 +68,8 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
     tsv_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[{stem}] rasterising at {dpi} DPI...", flush=True)
-    cmd = ["pdftoppm", "-r", str(dpi)]
+    pdftoppm_path = resolve_pdftoppm()
+    cmd = [pdftoppm_path, "-r", str(dpi)]
     if password:
         cmd += ["-upw", password]
     cmd += ["-png", str(pdf_path), str(png_dir / "page")]
@@ -59,6 +78,7 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
     pngs = sorted(png_dir.glob("page-*.png"))
     # pdftoppm may produce `page-1.png` or `page-01.png` depending on page count.
     # Normalise filenames so downstream glob('page-*.tsv') sorting works by int.
+    tesseract_path = resolve_tesseract()
     for png in pngs:
         page_num = int("".join(c for c in png.stem.split("-")[-1] if c.isdigit()))
         tsv_path = tsv_dir / f"page-{page_num}.tsv"
@@ -66,7 +86,7 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
         # tesseract <png> <out_stem> <config> -> writes <out_stem>.tsv
         subprocess.run(
             [
-                "tesseract", str(png), str(tsv_path.with_suffix("")),
+                tesseract_path, str(png), str(tsv_path.with_suffix("")),
                 "--psm", "6", "tsv",
             ],
             check=True,

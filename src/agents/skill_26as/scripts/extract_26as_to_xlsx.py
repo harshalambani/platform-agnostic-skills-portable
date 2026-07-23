@@ -38,6 +38,15 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_pdftotext, WrongPdftextFlavourError  # noqa: E402
+
 
 # -------------------- regexes --------------------
 
@@ -58,6 +67,14 @@ DEDUCTOR_RX = re.compile(
 #  Sr.No. Section TxnDate Status DateOfBooking Remarks Amount Tax TDS
 TXN_RX = re.compile(
     rf"^\s*(\d+)\s+(\S+)\s+({DATE_RE})\s+({STATUS_RE})\s+({DATE_RE})\s+(\S+)\s+"
+    rf"({NUM_RE})\s+({NUM_RE})\s+({NUM_RE})\s*$"
+)
+
+# A transaction row for Part II (15G/15H) — NO "Status of Booking" column,
+# unlike Part I / Part VI:
+#  Txn Sr.No. Section TxnDate DateOfBooking Remarks Amount Tax TDS
+TXN2_RX = re.compile(
+    rf"^\s*(\d+)\s+(\S+)\s+({DATE_RE})\s+({DATE_RE})\s+(\S+)\s+"
     rf"({NUM_RE})\s+({NUM_RE})\s+({NUM_RE})\s*$"
 )
 
@@ -111,6 +128,29 @@ class P1Deductor:
 
 
 @dataclass
+class P2Txn:
+    sr: int
+    section: str
+    txn_date: str
+    date_booking: str
+    remarks: str
+    amount: float
+    tax: float
+    tds: float
+
+
+@dataclass
+class P2Deductor:
+    sr: int
+    name: str
+    tan: str
+    tot_amt: float
+    tot_tax: float
+    tot_tds: float
+    txns: list[P2Txn] = field(default_factory=list)
+
+
+@dataclass
 class P8Row:
     sr: int
     ack_num: str
@@ -142,10 +182,25 @@ class Assessee:
 # -------------------- parsing --------------------
 
 
-def pdf_to_text(pdf_path: Path) -> str:
-    """Run pdftotext -layout and return the text. Requires poppler-utils."""
-    out = subprocess.check_output(["pdftotext", "-layout", str(pdf_path), "-"])
-    return out.decode("utf-8", errors="replace")
+def pdf_to_text(pdf_path: Path) -> tuple[str, str]:
+    """Run pdftotext -layout and return (text, resolved_pdftotext_path).
+
+    Resolves the vendored Poppler pdftotext by absolute path (not a bare name
+    trusted to PATH) and verifies it is actually Poppler before use — see
+    agents/_native_resolve.py. Raises WrongPdftextFlavourError loudly (naming
+    what was found and where) rather than silently parsing with the wrong
+    tool, which is how the earlier "0 deductors" bug happened.
+
+    The resolved path is returned (not just the text) so that a later
+    zero-extraction failure (see check_extraction_not_vacuous) can name
+    exactly which binary produced the (missing) text, without re-resolving.
+    """
+    try:
+        pdftotext_path = resolve_pdftotext()
+    except (FileNotFoundError, WrongPdftextFlavourError) as e:
+        raise RuntimeError(f"pdftotext resolution failed: {e}") from e
+    out = subprocess.check_output([pdftotext_path, "-layout", str(pdf_path), "-"])
+    return out.decode("utf-8", errors="replace"), pdftotext_path
 
 
 def parse_assessee(text: str) -> Assessee:
@@ -300,6 +355,76 @@ def parse_part_vi(body: str) -> list[P1Deductor]:
     return parse_part_i(body, P6_HEADER_TOKENS)
 
 
+def parse_part_ii(body: str) -> list[P2Deductor]:
+    """Parse Part II (Details of TDS for 15G / 15H) into deductors + their
+    transactions.
+
+    GEOMETRY WARNING: Part II is NOT a drop-in reuse of parse_part_i / TXN_RX.
+    It matches Part I column-for-column on the deductor header row (Sr, Name,
+    TAN, three totals — DEDUCTOR_RX applies unchanged), but its transaction
+    rows carry NO "Status of Booking" column: Sr.No., Section, Transaction
+    Date, Date of Booking, Remarks, Amount, Tax, TDS — eight fields, not
+    Part I/VI's nine. Reusing TXN_RX here would silently misalign every field
+    from Date of Booking onward, so a dedicated TXN2_RX is used instead. The
+    deductor-name-wrap handling is otherwise identical to parse_part_i.
+    """
+    deductors: list[P2Deductor] = []
+    current: Optional[P2Deductor] = None
+    last_was_deductor = False
+
+    for raw in body.splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            continue
+        if "Assessee PAN:" in line and "Assessee Name:" in line:
+            continue
+
+        m = DEDUCTOR_RX.match(line)
+        if m:
+            current = P2Deductor(
+                sr=int(m.group(1)),
+                name=re.sub(r"\s+", " ", m.group(2).strip()),
+                tan=m.group(3),
+                tot_amt=clean_num(m.group(4)),
+                tot_tax=clean_num(m.group(5)),
+                tot_tds=clean_num(m.group(6)),
+            )
+            deductors.append(current)
+            last_was_deductor = True
+            continue
+
+        m = TXN2_RX.match(line)
+        if m and current is not None:
+            current.txns.append(
+                P2Txn(
+                    sr=int(m.group(1)),
+                    section=m.group(2),
+                    txn_date=m.group(3),
+                    date_booking=m.group(4),
+                    remarks=m.group(5),
+                    amount=clean_num(m.group(6)),
+                    tax=clean_num(m.group(7)),
+                    tds=clean_num(m.group(8)),
+                )
+            )
+            last_was_deductor = False
+            continue
+
+        stripped = line.strip()
+        if (
+            last_was_deductor
+            and current is not None
+            and stripped
+            and not re.search(r"\d", stripped)
+            and not any(tok in stripped for tok in P1_HEADER_TOKENS)
+        ):
+            current.name = re.sub(r"\s+", " ", current.name + " " + stripped)
+            continue
+
+        last_was_deductor = False
+    return deductors
+
+
 def parse_part_viii(body: str) -> list[P8Row]:
     """Parse Part VIII. Each deductee has one data row and one TDS row.
 
@@ -394,6 +519,69 @@ def reconcile_part_i(deductors: list[P1Deductor]) -> list[dict]:
                 "fields": diffs,
             })
     return mismatches
+
+
+class Empty26ASExtractionError(RuntimeError):
+    """
+    Raised when a 26AS PDF parses to ZERO rows across every part this script
+    can populate (Part I, Part II, Part VI, Part VIII).
+
+    Why this exists (tier 4 of the 26AS/Xpdf incident remediation — see
+    agents/_native_resolve.py): tiers 1-3 stop the WRONG pdftotext being used.
+    This tier is the backstop for every other way extraction can silently
+    yield nothing (a future binary swap, a changed PDF layout, a regex that
+    stops matching) — it must fail loudly instead of printing a reassuring
+    "0/0 deductors OK — all sub-totals match" summary, which is vacuously
+    true over an empty set and was exactly how the original incident hid
+    itself from the user.
+
+    Boundary this deliberately gets right: Part VI (TCS) alone being zero is
+    completely normal — most taxpayers never have tax collected at source
+    (see the real, correct output "Part VI: 0 collectors"). Only ALL FOUR
+    populated-part counts being zero simultaneously is treated as impossible
+    — a real Form 26AS always has at least a Part I entry (even a nil-TDS
+    salary deductor prints a header row) or a Part II/VI/VIII row.
+    """
+
+
+def check_extraction_not_vacuous(stats: dict, text: str, pdftotext_path: str) -> None:
+    """
+    Raise Empty26ASExtractionError unless at least one of the four parts this
+    script actually parses (I, II, VI, VIII) has a non-zero row count.
+
+    Parts III/IV/V/VII/IX/X are never parsed for content by this script (they
+    are always rendered via build_empty_part regardless of PDF content), so
+    they carry no signal here and are intentionally excluded from the check.
+    """
+    counts = {
+        "Part I (deductors)": stats["part_i_deductors"],
+        "Part II (15G/15H deductors)": stats["part_ii_deductors"],
+        "Part VI (TCS collectors)": stats["part_vi_collectors"],
+        "Part VIII (buyer/tenant rows)": stats["part_viii_rows"],
+    }
+    if any(v > 0 for v in counts.values()):
+        return
+
+    chars_extracted = len(text)
+    if len(text.strip()) == 0:
+        text_diagnosis = "the binary produced NO text at all from this PDF"
+    else:
+        text_diagnosis = (
+            "the binary DID produce text, but none of the row regexes matched — "
+            "the PDF layout may have changed, or this is not a 26AS statement"
+        )
+
+    parts_summary = ", ".join(f"{k} = 0" for k in counts)
+    raise Empty26ASExtractionError(
+        "26AS extraction produced ZERO rows across every part that can "
+        "legitimately be populated. A real Form 26AS always has at least one "
+        "non-empty part; this is almost certainly a broken extraction, not a "
+        "genuinely empty tax record. Diagnostics:\n"
+        f"  Parts checked (all zero): {parts_summary}\n"
+        f"  Resolved pdftotext binary: {pdftotext_path}\n"
+        f"  Characters of text extracted from the PDF: {chars_extracted} "
+        f"({text_diagnosis})"
+    )
 
 
 # -------------------- xlsx building --------------------
@@ -667,6 +855,99 @@ def build_part_vi(ws, a: Assessee, collectors: list[P1Deductor]) -> None:
                  entity="collectors")
 
 
+def build_part_ii(ws, a: Assessee, deductors: list[P2Deductor]) -> None:
+    """Render Part II (TDS for 15G / 15H). 14 columns — NOT Part I's 15;
+    there is no 'Status of Booking' column, so this does NOT reuse
+    build_part_i's column geometry (num_cols, merge ranges, widths all
+    shift by one column from Part I/VI)."""
+    headers = EMPTY_HEADERS["Part II"]
+    ncols = len(headers)
+    _write_meta(ws, "Part II", ncols, a)
+    _write_header_row(ws, 3, headers)
+
+    r = 4
+    num_cols = {4, 5, 6, 12, 13, 14}
+    subtotal_rows: list[int] = []
+
+    if not deductors:
+        cell = ws.cell(row=r, column=1, value="No Transactions Present")
+        cell.font = Font(name="Arial", size=10, italic=True, color="7F7F7F")
+        cell.alignment = CENTER
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=ncols)
+        for c in range(1, ncols + 1):
+            ws.cell(row=r, column=c).border = BORDER
+    else:
+        for d in deductors:
+            for t in d.txns:
+                vals = [
+                    d.sr, d.name, d.tan, d.tot_amt, d.tot_tax, d.tot_tds,
+                    t.sr, t.section, t.txn_date, t.date_booking,
+                    t.remarks, t.amount, t.tax, t.tds,
+                ]
+                for c, v in enumerate(vals, 1):
+                    cell = ws.cell(row=r, column=c, value=v)
+                    _style_body_cell(cell, c, num_cols)
+                r += 1
+
+            # Sub-total row — computed numeric values (see build_part_i for
+            # why: a bare =SUM formula reads back blank under data_only).
+            sub_amt = sum(t.amount for t in d.txns)
+            sub_tax = sum(t.tax for t in d.txns)
+            sub_tds = sum(t.tds for t in d.txns)
+            sub_row = r
+            subtotal_rows.append(sub_row)
+            label = f"Sub-total — {d.name}  (txns: {len(d.txns)})"
+            ws.cell(row=sub_row, column=1, value=f"#{d.sr}")
+            ws.cell(row=sub_row, column=2, value=label)
+            ws.merge_cells(start_row=sub_row, start_column=2,
+                           end_row=sub_row, end_column=11)
+            for col, val in ((12, sub_amt), (13, sub_tax), (14, sub_tds)):
+                ws.cell(row=sub_row, column=col, value=val)
+            for c in range(1, ncols + 1):
+                cell = ws.cell(row=sub_row, column=c)
+                cell.fill = SUBTOTAL_FILL
+                cell.font = SUBTOTAL_FONT
+                cell.border = BORDER
+                if c in num_cols:
+                    cell.alignment = RIGHT
+                    cell.number_format = NUM_FMT
+                elif c == 2:
+                    cell.alignment = RIGHT_WRAP
+                else:
+                    cell.alignment = CENTER
+            ws.row_dimensions[sub_row].height = 20
+            r += 1
+
+        if subtotal_rows:
+            grand_amt = sum(t.amount for d in deductors for t in d.txns)
+            grand_tax = sum(t.tax for d in deductors for t in d.txns)
+            grand_tds = sum(t.tds for d in deductors for t in d.txns)
+            tot_row = r
+            ws.cell(row=tot_row, column=2, value="GRAND TOTAL (all deductors)")
+            for col, val in ((12, grand_amt), (13, grand_tax), (14, grand_tds)):
+                ws.cell(row=tot_row, column=col, value=val)
+            for c in range(1, ncols + 1):
+                cell = ws.cell(row=tot_row, column=c)
+                cell.fill = GRAND_FILL
+                cell.font = GRAND_FONT
+                cell.border = BORDER
+                if c in num_cols:
+                    cell.alignment = RIGHT
+                    cell.number_format = NUM_FMT
+                elif c == 2:
+                    cell.alignment = RIGHT_WRAP
+                else:
+                    cell.alignment = CENTER
+            ws.merge_cells(start_row=tot_row, start_column=2,
+                           end_row=tot_row, end_column=11)
+            ws.row_dimensions[tot_row].height = 24
+
+    widths = [12, 46, 15, 18, 18, 18, 10, 10, 14, 14, 10, 18, 16, 16]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A4"
+
+
 def build_part_viii(ws, a: Assessee, rows: list[P8Row]) -> None:
     headers = [
         "Sr.No.", "Acknowledgement Number", "Name of Deductee", "PAN of Deductee",
@@ -763,13 +1044,26 @@ def build_empty_part(ws, a: Assessee, title: str) -> None:
 
 
 def run(pdf_path: Path, out_path: Path) -> dict:
-    text = pdf_to_text(pdf_path)
+    text, pdftotext_path = pdf_to_text(pdf_path)
     assessee = parse_assessee(text)
     parts = split_by_parts(text)
 
     p1 = parse_part_i(parts.get("I", ""))
+    p2 = parse_part_ii(parts.get("II", ""))
     p6 = parse_part_vi(parts.get("VI", ""))
     p8 = parse_part_viii(parts.get("VIII", ""))
+
+    # Tier 4 hard-fail gate — BEFORE the workbook is built/written, so a
+    # broken extraction never produces a plausible-looking .xlsx file. See
+    # Empty26ASExtractionError's docstring for why this specific boundary
+    # (all four parts zero, not any one part alone) is the right one.
+    precheck_stats = {
+        "part_i_deductors": len(p1),
+        "part_ii_deductors": len(p2),
+        "part_vi_collectors": len(p6),
+        "part_viii_rows": len(p8),
+    }
+    check_extraction_not_vacuous(precheck_stats, text, pdftotext_path)
 
     wb = Workbook()
     wb.remove(wb.active)
@@ -777,6 +1071,8 @@ def run(pdf_path: Path, out_path: Path) -> dict:
         ws = wb.create_sheet(title=title)
         if title == "Part I":
             build_part_i(ws, assessee, p1)
+        elif title == "Part II":
+            build_part_ii(ws, assessee, p2)
         elif title == "Part VI":
             build_part_vi(ws, assessee, p6)
         elif title == "Part VIII":
@@ -786,12 +1082,15 @@ def run(pdf_path: Path, out_path: Path) -> dict:
     wb.save(out_path)
 
     recon_mismatches = reconcile_part_i(p1)
+    recon_mismatches_ii = reconcile_part_i(p2)
     recon_mismatches_vi = reconcile_part_i(p6)
 
     stats = {
         "assessee": vars(assessee),
         "part_i_deductors": len(p1),
         "part_i_transactions": sum(len(d.txns) for d in p1),
+        "part_ii_deductors": len(p2),
+        "part_ii_transactions": sum(len(d.txns) for d in p2),
         "part_vi_collectors": len(p6),
         "part_vi_transactions": sum(len(c.txns) for c in p6),
         "part_viii_rows": len(p8),
@@ -800,6 +1099,11 @@ def run(pdf_path: Path, out_path: Path) -> dict:
             "deductors_checked": len(p1),
             "deductors_ok": len(p1) - len(recon_mismatches),
             "mismatches": recon_mismatches,
+        },
+        "reconciliation_ii": {
+            "deductors_checked": len(p2),
+            "deductors_ok": len(p2) - len(recon_mismatches_ii),
+            "mismatches": recon_mismatches_ii,
         },
         "reconciliation_vi": {
             "collectors_checked": len(p6),
@@ -816,13 +1120,27 @@ def main(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
     pdf, out = Path(argv[1]), Path(argv[2])
-    stats = run(pdf, out)
+    try:
+        stats = run(pdf, out)
+    except Empty26ASExtractionError as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        return 3
+    except (WrongPdftextFlavourError, RuntimeError) as e:
+        # pdf_to_text() wraps a WrongPdftextFlavourError/FileNotFoundError
+        # from resolve_pdftotext() in a plain RuntimeError (see pdf_to_text's
+        # docstring) — catch both so either shape prints a clean FATAL line
+        # instead of a raw traceback. Empty26ASExtractionError is also a
+        # RuntimeError subclass, so it must be (and is) caught above this.
+        print(f"FATAL: {e}", file=sys.stderr)
+        return 4
     # Print a short summary (useful for verification)
     print(f"Assessee: {stats['assessee'].get('name','?')}  "
           f"PAN: {stats['assessee'].get('pan','?')}  "
           f"AY: {stats['assessee'].get('ay','?')}")
     print(f"Part I: {stats['part_i_deductors']} deductors, "
           f"{stats['part_i_transactions']} transactions")
+    print(f"Part II: {stats['part_ii_deductors']} deductors, "
+          f"{stats['part_ii_transactions']} transactions (15G/15H)")
     print(f"Part VI: {stats['part_vi_collectors']} collectors, "
           f"{stats['part_vi_transactions']} TCS transactions")
     print(f"Part VIII: {stats['part_viii_rows']} rows")
@@ -845,6 +1163,24 @@ def main(argv: list[str]) -> int:
                 print(f"      {f['field']}: 26AS={f['header_total']:,.2f}  "
                       f"computed={f['computed_subtotal']:,.2f}  "
                       f"diff={f['difference']:+,.2f}")
+
+    recon2 = stats["reconciliation_ii"]
+    if recon2["deductors_checked"]:
+        mm2 = recon2["mismatches"]
+        if not mm2:
+            print(f"Reconciliation (Part II): {recon2['deductors_ok']}/"
+                  f"{recon2['deductors_checked']} deductors OK.")
+        else:
+            print(f"Reconciliation (Part II): {recon2['deductors_ok']}/"
+                  f"{recon2['deductors_checked']} deductors OK — "
+                  f"{len(mm2)} MISMATCH(es) below:")
+            for m in mm2:
+                print(f"  ! Sr.{m['sr']} {m['name']} (TAN {m['tan']}, "
+                      f"{m['txns']} txns):")
+                for f in m["fields"]:
+                    print(f"      {f['field']}: 26AS={f['header_total']:,.2f}  "
+                          f"computed={f['computed_subtotal']:,.2f}  "
+                          f"diff={f['difference']:+,.2f}")
 
     recon6 = stats["reconciliation_vi"]
     if recon6["collectors_checked"]:

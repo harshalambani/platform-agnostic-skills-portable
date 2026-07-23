@@ -20,10 +20,20 @@ Supported banks and the pdftotext layout each uses:
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from collections import defaultdict
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_pdftotext, WrongPdftextFlavourError  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -31,18 +41,50 @@ from openpyxl.styles import Font, PatternFill, Alignment
 # ---------------------------------------------------------------------------
 
 def extract_text_from_pdf(pdf_path):
-    """Extract text from PDF using pdftotext (UTF-8, replace bad bytes)."""
+    """Extract text from PDF using pdftotext (UTF-8, replace bad bytes).
+
+    Resolves the vendored Poppler pdftotext by absolute path and verifies its
+    identity (cached after the first call in a batch — see
+    agents/_native_resolve.py). Resolution/identity failures are NOT
+    swallowed here — a wrong-flavour pdftotext (e.g. Xpdf) must fail loudly,
+    not silently degrade to an empty extraction.
+
+    On a subprocess failure (non-zero exit or timeout/OSError) this prints a
+    PROMINENT warning — not the old bland one-liner — naming the resolved
+    binary path and the failure, since a swallowed pdftotext failure here is
+    how a whole PDF silently contributes zero transactions.
+    """
+    pdftotext_path = resolve_pdftotext()  # raises loudly; not caught below
     try:
         result = subprocess.run(
-            ['pdftotext', str(pdf_path), '-'],
+            [pdftotext_path, str(pdf_path), '-'],
             capture_output=True,
             timeout=30,
         )
         if result.returncode != 0:
+            stderr = result.stderr.decode('utf-8', errors='replace').strip()
+            print(
+                "\n"
+                "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+                f"  !!! PDFTOTEXT FAILED for {Path(pdf_path).name}\n"
+                f"  !!! Resolved binary : {pdftotext_path}\n"
+                f"  !!! Exit code       : {result.returncode}\n"
+                f"  !!! stderr           : {stderr or '(none)'}\n"
+                "  !!! This PDF will contribute ZERO transactions.\n"
+                "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            )
             return ""
         return result.stdout.decode('utf-8', errors='replace')
-    except Exception as e:
-        print(f"  [WARN] pdftotext failed for {Path(pdf_path).name}: {e}")
+    except (subprocess.TimeoutExpired, OSError) as e:
+        print(
+            "\n"
+            "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+            f"  !!! PDFTOTEXT FAILED for {Path(pdf_path).name}\n"
+            f"  !!! Resolved binary : {pdftotext_path}\n"
+            f"  !!! Error            : {e}\n"
+            "  !!! This PDF will contribute ZERO transactions.\n"
+            "  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n"
+        )
         return ""
 
 
@@ -876,6 +918,7 @@ def extract_all_transactions(pdf_dir):
     all_transactions = []
     bank_counts = defaultdict(int)
     processed = 0
+    total_chars_extracted = 0
 
     pdf_dir = Path(pdf_dir)
     all_found = sorted(pdf_dir.rglob('*.pdf')) + sorted(pdf_dir.rglob('*.PDF'))
@@ -899,6 +942,7 @@ def extract_all_transactions(pdf_dir):
     for pdf_path in pdf_files:
         bank, card_type = get_bank_and_card_type(pdf_path)
         text = extract_text_from_pdf(pdf_path)
+        total_chars_extracted += len(text)
         if not text:
             print(f"  [SKIP] {pdf_path.name} — no text extracted")
             continue
@@ -933,7 +977,7 @@ def extract_all_transactions(pdf_dir):
             print(f"  {bank:10} {card_type:20}: --- (0 transactions) [{pdf_path.name[:50]}]")
 
     print(f"\nProcessed {processed} PDFs with transactions")
-    return all_transactions, bank_counts
+    return all_transactions, bank_counts, total_chars_extracted, len(pdf_files)
 
 
 # ---------------------------------------------------------------------------
@@ -1002,15 +1046,13 @@ def create_excel_file(transactions, output_path):
 # Entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) < 2:
+def main(argv: list[str]) -> int:
+    if len(argv) < 2:
         print("Usage: python create_cc_transaction_list.py <pdf_directory> [output_excel]")
-        sys.exit(1)
+        return 1
 
-    pdf_directory = sys.argv[1]
-    output_excel = sys.argv[2] if len(sys.argv) > 2 else "Consolidated_Transactions.xlsx"
+    pdf_directory = argv[1]
+    output_excel = argv[2] if len(argv) > 2 else "Consolidated_Transactions.xlsx"
 
     # If a directory was passed as output, append a default filename
     output_path = Path(output_excel)
@@ -1023,7 +1065,19 @@ if __name__ == "__main__":
     print("=" * 80)
     print()
 
-    transactions, bank_counts = extract_all_transactions(pdf_directory)
+    # extract_text_from_pdf() resolves pdftotext (by absolute vendored path,
+    # verified to be Poppler) for the FIRST pdf it processes and does not
+    # catch resolution failures itself — a WrongPdftextFlavourError or
+    # FileNotFoundError there must not escape as a raw Python traceback, so
+    # it is caught here at the same top-level boundary as
+    # skill_26as/scripts/extract_26as_to_xlsx.py's main(), with the same
+    # distinct exit code 4 (3 is reserved by that sibling script's
+    # Empty26ASExtractionError; nothing here uses 3).
+    try:
+        transactions, bank_counts, total_chars_extracted, num_pdfs = extract_all_transactions(pdf_directory)
+    except (WrongPdftextFlavourError, FileNotFoundError) as e:
+        print(f"FATAL: {e}", file=sys.stderr)
+        return 4
 
     print()
     print("=" * 80)
@@ -1033,9 +1087,42 @@ if __name__ == "__main__":
     for bank_key in sorted(bank_counts):
         print(f"  {bank_key:35}: {bank_counts[bank_key]:4}")
 
+    if not transactions:
+        # Zero transactions across an ENTIRE run is legitimate (e.g. a
+        # no-spend month on every card), so this is a prominent WARNING,
+        # not a hard fail — but it must not be missable, and must carry the
+        # same diagnostics as the 26AS hard-fail gate (resolved binary,
+        # chars extracted) so a genuinely broken pdftotext is easy to tell
+        # apart from a genuinely quiet month.
+        try:
+            resolved_pdftotext = resolve_pdftotext()
+        except (FileNotFoundError, WrongPdftextFlavourError) as e:
+            resolved_pdftotext = f"<could not resolve: {e}>"
+        print(
+            "\n"
+            "*" * 80 + "\n"
+            "*** WARNING: ZERO TRANSACTIONS EXTRACTED ACROSS ALL PDFs ***\n"
+            "*" * 80 + "\n"
+            f"  PDFs scanned            : {num_pdfs}\n"
+            f"  Total characters of text extracted (all PDFs): {total_chars_extracted}\n"
+            f"  Resolved pdftotext binary: {resolved_pdftotext}\n"
+            "  This IS the expected/legitimate result if every card genuinely had\n"
+            "  no spend this period. It is also EXACTLY what a broken pdftotext\n"
+            "  (wrong binary, PATH change, PDF layout change) would produce.\n"
+            "  If you expected transactions here, check the diagnostics above per\n"
+            "  PDF and re-run 'check_pdftotext_available' before trusting this.\n"
+            + "*" * 80 + "\n"
+        )
+
     if transactions:
         total = create_excel_file(transactions, output_excel)
         print(f"\n✓ Created: {output_excel}")
         print(f"✓ Spreadsheet contains {total} transactions")
     else:
         print("\n✗ No transactions extracted")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

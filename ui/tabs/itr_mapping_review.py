@@ -1,23 +1,26 @@
 """
-ui/tabs/itr_mapping_review.py -- ITR Mapping review tab (2026-07-16, Part 2;
-2026-07-17, Part 4).
+ui/tabs/itr_mapping_review.py -- ITR Mapping review tab.
 
-Gives the ITR account-tag mapping the same review UX as
-ui/tabs/gnucash_review.py's "Review & Edit Account Mappings" tab: a
-searchable-dropdown assignment picker, row multi-select, "Apply to
-selected", click-to-sort + per-column text filters on the table headers,
-and a Save -> YAML round trip with a backup kept before any in-place
-rewrite. No YAML editing, no CLI -- everything here is driven through
-apply_mapping_corrections.apply_corrections_map().
+Built on the shared ui._review_engine skeleton (searchable assign picker, row
+multi-select, sort/filter, save payload bridge) -- see ui/tabs/gnucash_review.py
+(the closest analogue: also a picker that reassigns one column in place) and
+ui/tabs/tds_journal_review.py for the sibling consumers this mirrors. This
+module used to carry its own copy of the ~600-line HTML/JS skeleton (identical
+_js_json, %%TOKEN%% template, eval-bootstrap, payload bridge) -- that is gone;
+everything below is either row-loading, row-presentation, or save logic, all
+plain Python and unit-testable.
 
-Tag vocabulary help (Part 4): every tag code shown (Current/Suggested/New
-tag) carries a title tooltip with its one-line meaning from tags.py's
-TagMeta.treatment, and a toggleable "? Tag glossary" panel lists the full
-searchable vocabulary -- the raw tag codes (e.g. OS_INTEREST_BANK) are
-otherwise meaningless to anyone who hasn't memorized tags.py.
+Tag vocabulary help: every tag code shown in the "Current tag" / "Suggested"
+columns carries a title tooltip with its one-line meaning from tags.py's
+TagMeta.treatment (via the engine's per-column _badges title), and the
+glossary of the full searchable vocabulary lives in the spec's
+extra_panel_html as a collapsible reference table -- the raw tag codes (e.g.
+OS_INTEREST_BANK) are otherwise meaningless to anyone who hasn't memorized
+tags.py. Searching the vocabulary itself is done via the "Assign tag" picker
+(type to search primary/secondary text), which already indexes the same list.
 
 Data sources for the review table (per entity):
-  - Data/itr/mappings/<entity>.mapping.yaml  -- already-resolved entries
+  - Data/itr/mappings/<entity>.mapping.yaml -- already-resolved entries
     (anchored via ui._config.data_root_dir(), never a bare "Data/" prefix --
     see docs/history/2026-07-xx path-anchoring fix).
   - the most-recently-modified *-proposed-mappings.yaml under
@@ -33,11 +36,21 @@ Data sources for the review table (per entity):
 Save discipline (mirrors gnucash_review._save_changes): write a timestamped
 backup of the current mapping file BEFORE any in-place rewrite; a blank/
 missing entity never touches the filesystem.
+
+Payload-shape note: the engine's syncPayload() builds each change as
+{_idx, _orig, <declared Column keys>, guid?}. Declaring "path" as a real
+Column (rather than stuffing it into context) means it rides along on every
+change automatically -- `paths[guid] = ch["path"]` at save time needs
+nothing extra. `guid` passes through the engine's own guid/Sr/'Transaction
+ID'/'CN No' allowlist. `entity_key` isn't a per-row value, so it goes in
+spec.context instead of a second Gradio input -- this also fixes a latent
+bug in the old wiring, where Save read whatever the entity dropdown
+currently showed rather than what was actually Loaded.
 """
 from __future__ import annotations
 
 import datetime
-import json
+import html as _html
 import shutil
 import sys
 from pathlib import Path
@@ -46,6 +59,18 @@ import gradio as gr
 import yaml
 
 from .. import _config as _config_mod
+from .._review_engine import (
+    Column,
+    PickerItem,
+    ReviewSpec,
+    build_html,
+    parse_payload,
+    payload_box_css,
+)
+
+APP_ID = "itrmap"
+TARGET_COL = "tag"
+PAYLOAD_VAR = "_itrMapSavePayload"
 
 # ---------------------------------------------------------------------------
 # Import the ITR Workbook skill's flat (non-package) scripts/ modules.
@@ -209,440 +234,125 @@ def _tag_options() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# HTML/JS review table (mirrors gnucash_review.py's structure: searchable
-# assign picker, row multi-select, Apply to selected).
+# Row presentation -- computed server-side in Python, per the engine's core
+# design rule (see ui/_review_engine.py's module docstring): a loader decides
+# what a row looks like (_tags/_rowclass/_badges/_note) and hands the engine
+# plain data, instead of re-deriving badge/accent logic in eval'd JS.
 # ---------------------------------------------------------------------------
 
-def _js_json(value) -> str:
+def _tag_title(tag: str | None, tag_desc: dict[str, str]) -> str:
+    if not tag:
+        return ""
+    desc = tag_desc.get(tag, "")
+    return f"{tag} -- {desc}" if desc else tag
+
+
+def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
+    """Fill in the engine's _tags / _rowclass / _badges / _note keys in place.
+
+    RAG confidence tiers, same three states the old hand-rolled JS rendered:
+      - unmapped   -> red accent,   "UNMAPPED"     badge on the tag column.
+      - needs_review (mapped but still an unapproved LLM suggestion) ->
+        amber accent, "NEEDS REVIEW" badge.
+      - confirmed  (mapped, human-approved) -> green accent, "CONFIRMED"
+        badge -- every confirmed row gets one, matching the original's
+        unconditional "(confirmed)" suffix.
+    A leaf with a proposed-mappings suggestion additionally gets a blue
+    "SUGGESTED" badge on the suggested column, both title-tooltipped with
+    the tag's one-line meaning from tags.py.
+    """
+    unmapped = bool(row.get("unmapped"))
+    needs_review = bool(row.get("needs_review"))
+    tag = row.get("tag")
+    suggested = row.get("suggested")
+
+    badges: dict = {}
+    if unmapped:
+        tags = ["unmapped"]
+        rowclass = "accent-red"
+        badges[TARGET_COL] = {"text": "UNMAPPED", "cls": "red"}
+    elif needs_review:
+        tags = ["needs_review", "mapped"]
+        rowclass = "accent-amber"
+        badges[TARGET_COL] = {"text": "NEEDS REVIEW", "cls": "amber", "title": _tag_title(tag, tag_desc)}
+    else:
+        tags = ["confirmed", "mapped"]
+        rowclass = "accent-green"
+        badges[TARGET_COL] = {"text": "CONFIRMED", "cls": "green", "title": _tag_title(tag, tag_desc)}
+
+    if suggested:
+        badges["suggested"] = {"text": "SUGGESTED", "cls": "blue", "title": _tag_title(suggested, tag_desc)}
+
+    row["_tags"] = tags
+    row["_rowclass"] = rowclass
+    row["_badges"] = badges
+    row["_note"] = row.get("note") or ""
+
+
+def _build_glossary_html(tag_opts: list[dict]) -> str:
+    """A collapsible tag-vocabulary reference table for spec.extra_panel_html.
+
+    Not a second copy of the picker's search box -- the "Assign tag" picker
+    above already searches this same vocabulary (primary=tag, secondary=
+    desc); this panel is the persistent, browsable reference, toggled via
+    the native <details>/<summary> element (no JS required).
+    """
+    rows_html = "".join(
+        "<tr>"
+        f'<td style="font-weight:600;color:#60a5fa;white-space:nowrap;padding:3px 8px;'
+        f'font-size:11px;vertical-align:top;">{_html.escape(t["tag"])}</td>'
+        f'<td style="color:#888;white-space:nowrap;padding:3px 8px;font-size:11px;'
+        f'vertical-align:top;">{_html.escape(t["target"] or t["sheet"] or "")}</td>'
+        f'<td style="padding:3px 8px;font-size:11px;color:#ccc;vertical-align:top;">'
+        f'{_html.escape(t["desc"])}</td>'
+        "</tr>"
+        for t in tag_opts
+    )
     return (
-        json.dumps(value)
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
-        .replace("&", "\\u0026")
+        '<details style="margin-bottom:8px;border:1px solid #333;border-radius:4px;'
+        'background:#161616;padding:6px 10px;color:#e0e0e0;'
+        'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;">'
+        f'<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#ccc;">'
+        f'Tag glossary ({len(tag_opts)} tags) -- search vocabulary via the "Assign tag" '
+        'box above</summary>'
+        '<div style="max-height:240px;overflow-y:auto;margin-top:6px;">'
+        f'<table style="width:100%;border-collapse:collapse;"><tbody>{rows_html}</tbody></table>'
+        '</div></details>'
     )
 
 
-_REVIEW_HTML = r"""
-<style>
-#itrmap-app {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 13px;
-  color: #e0e0e0;
-}
-#itrmap-app .toolbar {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 8px 0; border-bottom: 1px solid #333;
-  margin-bottom: 8px;
-}
-#itrmap-app .toolbar label { font-weight: 600; font-size: 12px; color: #ccc; }
-#itrmap-app .toolbar button {
-  padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
-  border: 1px solid #444; background: #2a2a2a; color: #e0e0e0;
-}
-#itrmap-app .toolbar button.primary {
-  background: #2563eb; color: #fff; border-color: transparent;
-}
-#itrmap-app .toolbar .spacer { flex: 1; }
-#itrmap-app .stats { font-size: 11px; color: #999; padding: 4px 0; }
+# ---------------------------------------------------------------------------
+# Spec + load
+# ---------------------------------------------------------------------------
 
-#itrmap-app table { width: 100%; border-collapse: collapse; table-layout: auto; }
-#itrmap-app thead th {
-  position: sticky; top: 0; z-index: 2;
-  background: #1e1e1e; color: #ccc;
-  border-bottom: 2px solid #444;
-  padding: 6px 8px; text-align: left; font-size: 12px; white-space: nowrap;
-  cursor: pointer; user-select: none;
-}
-#itrmap-app thead th:hover { background: #2a2a2a; }
-#itrmap-app thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
-#itrmap-app thead .filter-row td {
-  padding: 3px 4px; background: #1a1a1a; border-bottom: 1px solid #444; position: sticky; top: 27px; z-index: 2;
-}
-#itrmap-app thead .filter-row input {
-  width: 100%; box-sizing: border-box;
-  padding: 3px 6px; border: 1px solid #333; border-radius: 3px;
-  font-size: 11px; background: #111; color: #ccc;
-}
-#itrmap-app thead .filter-row input:focus { border-color: #2563eb; outline: none; }
-#itrmap-app thead .filter-row input::placeholder { color: #555; }
-#itrmap-app tbody tr {
-  border-bottom: 1px solid #262626; cursor: pointer; transition: background 0.1s;
-}
-#itrmap-app tbody tr:nth-child(even) { background: #111; }
-#itrmap-app tbody tr:hover { background: #1a2744; }
-#itrmap-app tbody tr.selected { background: #1e3a5f; }
-#itrmap-app tbody tr.selected:hover { background: #254a73; }
-#itrmap-app tbody tr.unmapped-row td:first-child { border-left: 3px solid #f87171; }
-#itrmap-app tbody tr.needs-review-row td:first-child { border-left: 3px solid #fbbf24; }
-#itrmap-app tbody tr.confirmed-row td:first-child { border-left: 3px solid #4ade80; }
-#itrmap-app tbody td { padding: 5px 8px; font-size: 12px; max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
-
-/* RAG confidence badges -- red = unmapped, amber = LLM-suggested/unreviewed,
-   green = human-confirmed. Kept high-contrast against the #1a1a1a/#111 row
-   backgrounds (WCAG AA for 12px text needs ~4.5:1). */
-#itrmap-app .badge-unmapped { color: #f87171; font-weight: 600; }
-#itrmap-app .badge-needs-review { color: #fbbf24; font-weight: 600; }
-#itrmap-app .badge-confirmed { color: #4ade80; }
-#itrmap-app .badge-mapped { color: #4ade80; }
-#itrmap-app .badge-suggested { color: #60a5fa; }
-#itrmap-app .changed-marker { color: #a78bfa; font-weight: bold; margin-left: 4px; }
-
-/* Tag search dropdown -- mirrors gnucash_review.py's .acct-picker */
-#itrmap-app .tag-picker { position: relative; display: inline-block; }
-#itrmap-app .tag-search {
-  width: 320px; padding: 5px 8px; border: 1px solid #444;
-  border-radius: 4px; font-size: 12px; background: #1a1a1a; color: #e0e0e0;
-}
-#itrmap-app .tag-dropdown {
-  position: absolute; top: 100%; left: 0; z-index: 100;
-  width: 460px; max-height: 280px; overflow-y: auto;
-  border: 1px solid #444; background: #1a1a1a;
-  border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-  display: none;
-}
-#itrmap-app .tag-dropdown.open { display: block; }
-#itrmap-app .tag-dropdown .tag-item { padding: 5px 10px; cursor: pointer; font-size: 12px; color: #e0e0e0; }
-#itrmap-app .tag-dropdown .tag-item:hover { background: #1e3a5f; }
-#itrmap-app .tag-dropdown .tag-item .tag-name { font-weight: 600; color: #fff; }
-#itrmap-app .tag-dropdown .tag-item .tag-desc { color: #888; font-size: 11px; display: block; }
-#itrmap-app .scroll-wrapper { max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px; }
-
-/* Tag glossary -- a persistent reference for what each tag code means, since
-   hovering a badge one at a time isn't enough to get your bearings on the
-   vocabulary. Toggled open/closed by the "? Tag glossary" button. */
-#itrmap-app .glossary-panel {
-  display: none; max-height: 260px; overflow-y: auto;
-  border: 1px solid #333; border-radius: 4px; background: #161616;
-  margin-bottom: 8px; padding: 6px 10px;
-}
-#itrmap-app .glossary-panel.open { display: block; }
-#itrmap-app .glossary-panel input {
-  width: 100%; box-sizing: border-box; margin-bottom: 6px;
-  padding: 5px 8px; border: 1px solid #444; border-radius: 4px;
-  font-size: 12px; background: #1a1a1a; color: #e0e0e0;
-}
-#itrmap-app .glossary-panel table { width: 100%; }
-#itrmap-app .glossary-panel td { padding: 3px 8px; font-size: 11px; white-space: normal; color: #ccc; vertical-align: top; }
-#itrmap-app .glossary-panel td.g-tag { font-weight: 600; color: #60a5fa; white-space: nowrap; }
-#itrmap-app .glossary-panel td.g-sheet { color: #888; white-space: nowrap; }
-
-/* The "Show" filter used the browser's default <select> chrome, which reads
-   as barely-there (near-invisible border, low-contrast text) against this
-   dark theme -- style it explicitly to match .tag-search. */
-#itrmap-app select#itrmap-filter {
-  padding: 5px 8px; border: 1px solid #555; border-radius: 4px;
-  font-size: 12px; background: #1a1a1a; color: #f0f0f0;
-}
-#itrmap-app select#itrmap-filter:hover { border-color: #777; }
-#itrmap-app select#itrmap-filter:focus { border-color: #2563eb; outline: none; }
-</style>
-<style>
-#itrmap-payload-box, #itrmap-payload-box * { position: absolute !important; left: -9999px !important; height: 0 !important; overflow: hidden !important; opacity: 0 !important; pointer-events: none !important; }
-</style>
-
-<div id="itrmap-app">
-  <div class="toolbar">
-    <label>Show:</label>
-    <select id="itrmap-filter">
-      <option value="" selected>All</option>
-      <option value="unmapped">Unmapped only</option>
-      <option value="needs_review">Needs review (LLM-suggested)</option>
-      <option value="confirmed">Confirmed only</option>
-      <option value="mapped">Mapped only (confirmed + needs review)</option>
-    </select>
-    <button id="itrmap-glossary-btn" title="Show what each tag code means">? Tag glossary</button>
-    <span class="spacer"></span>
-    <span class="stats" id="itrmap-stats"></span>
-  </div>
-
-  <div class="toolbar">
-    <label>Assign tag:</label>
-    <div class="tag-picker">
-      <input type="text" class="tag-search" id="itrmap-tag-search" placeholder="Type to search tags&#8230;" autocomplete="off">
-      <div class="tag-dropdown" id="itrmap-tag-dropdown"></div>
-    </div>
-    <button id="itrmap-apply-sel" class="primary" title="Apply to selected rows">Apply to selected</button>
-    <span class="spacer"></span>
-  </div>
-
-  <div class="glossary-panel" id="itrmap-glossary-panel">
-    <input type="text" id="itrmap-glossary-search" placeholder="Search tag codes or meanings&#8230;" autocomplete="off">
-    <table id="itrmap-glossary-table"></table>
-  </div>
-
-  <div class="scroll-wrapper">
-    <table>
-      <thead id="itrmap-thead"><tr></tr></thead>
-      <tbody id="itrmap-tbody"></tbody>
-    </table>
-  </div>
-</div>
-
-<script type="text/plain" id="itrmap-init-code">
-(function() {
-  const DATA = %%DATA_JSON%%;
-  const TAGS = %%TAGS_JSON%%;
-  const ENTITY = %%ENTITY_JSON%%;
-
-  function esc(s) {
-    if (!s) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
-                     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  let rows = DATA.map((r, i) => ({...r, _idx: i, _assigned: null}));
-  let selected = new Set();
-  let lastClickIdx = null;
-  let filter = '';
-  let colFilters = {};   // {colKey: 'search text'}
-  let activeFilterCol = null;
-  let sortCol = 'path';
-  let sortAsc = true;
-
-  const TAG_DESC = {};
-  TAGS.forEach(t => { TAG_DESC[t.tag] = t.desc; });
-  function tagTitle(tag) {
-    return tag && TAG_DESC[tag] ? (tag + ' -- ' + TAG_DESC[tag]) : (tag || '');
-  }
-
-  // Column config: key used both for the row's plain-text value (sorting +
-  // column filters) and for driving the custom badge rendering below.
-  const COLS = [
-    {key: 'path', label: 'Account path'},
-    {key: 'tag', label: 'Current tag'},
-    {key: 'suggested', label: 'Suggested'},
-    {key: '_assigned', label: 'New tag'},
-  ];
-  function colText(r, key) {
-    if (key === 'tag') return r.unmapped ? 'UNMAPPED' : (r.tag || '');
-    return r[key] || '';
-  }
-
-  const filterDD = document.getElementById('itrmap-filter');
-  filterDD.onchange = (e) => { filter = e.target.value; renderTable(); };
-
-  // -- Tag glossary --
-  const glossaryBtn = document.getElementById('itrmap-glossary-btn');
-  const glossaryPanel = document.getElementById('itrmap-glossary-panel');
-  const glossarySearch = document.getElementById('itrmap-glossary-search');
-  const glossaryTable = document.getElementById('itrmap-glossary-table');
-  function renderGlossary(filterText) {
-    const q = (filterText || '').toLowerCase();
-    const items = q
-      ? TAGS.filter(t => t.tag.toLowerCase().includes(q) || t.desc.toLowerCase().includes(q))
-      : TAGS;
-    glossaryTable.innerHTML = items.map(t =>
-      '<tr><td class="g-tag">' + esc(t.tag) + '</td>' +
-      '<td class="g-sheet">' + esc(t.target || t.sheet || '') + '</td>' +
-      '<td>' + esc(t.desc) + '</td></tr>'
-    ).join('') || '<tr><td colspan="3">No matching tags.</td></tr>';
-  }
-  glossaryBtn.onclick = () => {
-    const open = glossaryPanel.classList.toggle('open');
-    glossaryBtn.textContent = open ? '✕ Tag glossary' : '? Tag glossary';
-    if (open) { renderGlossary(glossarySearch.value); glossarySearch.focus(); }
-  };
-  glossarySearch.oninput = () => renderGlossary(glossarySearch.value);
-  renderGlossary('');
-
-  // -- Tag search --
-  const tagSearch = document.getElementById('itrmap-tag-search');
-  const tagDD = document.getElementById('itrmap-tag-dropdown');
-  let tagFiltered = TAGS.slice(0, 50);
-  let selectedTag = '';
-
-  function renderTagDropdown(filterText) {
-    const q = (filterText || '').toLowerCase();
-    tagFiltered = q
-      ? TAGS.filter(t => t.tag.toLowerCase().includes(q) || t.desc.toLowerCase().includes(q)).slice(0, 50)
-      : TAGS.slice(0, 50);
-    tagDD.innerHTML = '';
-    tagFiltered.forEach(t => {
-      const div = document.createElement('div');
-      div.className = 'tag-item';
-      div.innerHTML = '<span class="tag-name">' + esc(t.tag) + '</span><span class="tag-desc">' + esc(t.desc) + '</span>';
-      div.onclick = () => { selectedTag = t.tag; tagSearch.value = t.tag; tagDD.classList.remove('open'); };
-      tagDD.appendChild(div);
-    });
-  }
-  tagSearch.onfocus = () => { renderTagDropdown(tagSearch.value); tagDD.classList.add('open'); };
-  tagSearch.oninput = () => { renderTagDropdown(tagSearch.value); tagDD.classList.add('open'); selectedTag = ''; };
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('.tag-picker')) tagDD.classList.remove('open');
-  });
-
-  document.getElementById('itrmap-apply-sel').onclick = () => {
-    if (!selectedTag) { alert('Select a tag first'); return; }
-    if (selected.size === 0) { alert('Select rows first (click/shift-click)'); return; }
-    rows.forEach(r => {
-      if (selected.has(r._idx)) { r._assigned = selectedTag; }
-    });
-    syncPayload();
-    renderTable();
-  };
-
-  function syncPayload() {
-    const changes = rows.filter(r => r._assigned && r._assigned !== r.tag).map(r => ({
-      guid: r.guid, path: r.path, tag: r._assigned,
-    }));
-    window._itrMapSavePayload = JSON.stringify({ entity: ENTITY, changes: changes });
-  }
-  syncPayload();
-
-  function renderTable() {
-    const thead = document.getElementById('itrmap-thead');
-    const tbody = document.getElementById('itrmap-tbody');
-
-    // Header -- click a column to sort by it (click again to flip direction).
-    thead.innerHTML = '<tr>' + COLS.map(c =>
-      '<th data-col="' + c.key + '">' + esc(c.label) +
-      (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
-      '</th>'
-    ).join('') + '</tr>';
-    thead.querySelectorAll('th').forEach(th => {
-      th.onclick = () => {
-        const col = th.dataset.col;
-        if (col === sortCol) { sortAsc = !sortAsc; }
-        else { sortCol = col; sortAsc = true; }
-        renderTable();
-      };
-    });
-
-    // Per-column text filter row.
-    const fRow = document.createElement('tr');
-    fRow.className = 'filter-row';
-    COLS.forEach(c => {
-      const td = document.createElement('td');
-      const inp = document.createElement('input');
-      inp.type = 'text';
-      inp.placeholder = '⌕';
-      inp.dataset.col = c.key;
-      inp.value = colFilters[c.key] || '';
-      inp.oninput = () => { colFilters[c.key] = inp.value; activeFilterCol = c.key; renderTable(); };
-      inp.onclick = (e) => e.stopPropagation();
-      td.appendChild(inp);
-      fRow.appendChild(td);
-    });
-    thead.appendChild(fRow);
-
-    // Status filter (the "Show" dropdown).
-    let filtered = rows;
-    if (filter === 'unmapped') filtered = rows.filter(r => r.unmapped);
-    else if (filter === 'needs_review') filtered = rows.filter(r => !r.unmapped && r.needs_review);
-    else if (filter === 'confirmed') filtered = rows.filter(r => !r.unmapped && !r.needs_review);
-    else if (filter === 'mapped') filtered = rows.filter(r => !r.unmapped);
-
-    // Per-column text filters.
-    for (const [col, q] of Object.entries(colFilters)) {
-      if (!q) continue;
-      const ql = q.toLowerCase();
-      filtered = filtered.filter(r => colText(r, col).toLowerCase().includes(ql));
-    }
-
-    // Sort.
-    filtered = [...filtered].sort((a, b) => {
-      const va = colText(a, sortCol).toLowerCase();
-      const vb = colText(b, sortCol).toLowerCase();
-      if (va < vb) return sortAsc ? -1 : 1;
-      if (va > vb) return sortAsc ? 1 : -1;
-      return 0;
-    });
-
-    tbody.innerHTML = '';
-    filtered.forEach(r => {
-      const tr = document.createElement('tr');
-      if (selected.has(r._idx)) tr.classList.add('selected');
-      // RAG row accent: red = unmapped, amber = LLM-suggested/unreviewed,
-      // green = human-confirmed.
-      if (r.unmapped) tr.classList.add('unmapped-row');
-      else if (r.needs_review) tr.classList.add('needs-review-row');
-      else tr.classList.add('confirmed-row');
-      tr.dataset.idx = r._idx;
-
-      const tdPath = document.createElement('td');
-      tdPath.textContent = r.path || '(no path)';
-      tdPath.title = r.path || '';
-      tr.appendChild(tdPath);
-
-      // Current/Suggested/New-tag cells all carry a title tooltip with the
-      // tag's one-line meaning (from tags.py's TagMeta.treatment) -- the
-      // vocabulary is opaque otherwise ("OS_INTEREST_BANK" on its own tells
-      // you nothing). The "? Tag glossary" panel is the persistent version
-      // of the same lookup.
-      const tdCurrent = document.createElement('td');
-      if (r.unmapped) {
-        tdCurrent.innerHTML = '<span class="badge-unmapped">UNMAPPED</span>';
-      } else if (r.needs_review) {
-        tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-needs-review">(needs review)</span>';
-        tdCurrent.title = tagTitle(r.tag);
-      } else {
-        tdCurrent.innerHTML = esc(r.tag || '') + ' <span class="badge-confirmed">(confirmed)</span>';
-        tdCurrent.title = tagTitle(r.tag);
-      }
-      tr.appendChild(tdCurrent);
-
-      const tdSuggested = document.createElement('td');
-      if (r.suggested) {
-        tdSuggested.innerHTML = '<span class="badge-suggested">' + esc(r.suggested) + '</span>';
-        tdSuggested.title = tagTitle(r.suggested);
-      }
-      tr.appendChild(tdSuggested);
-
-      const tdAssigned = document.createElement('td');
-      if (r._assigned) {
-        tdAssigned.innerHTML = '<span class="badge-mapped">' + esc(r._assigned) + '</span><span class="changed-marker">*</span>';
-        tdAssigned.title = tagTitle(r._assigned);
-      } else {
-        tdAssigned.textContent = '';
-      }
-      tr.appendChild(tdAssigned);
-
-      tr.onclick = (e) => handleRowClick(r._idx, e);
-      tbody.appendChild(tr);
-    });
-
-    const changed = rows.filter(r => r._assigned && r._assigned !== r.tag).length;
-    const unmappedCount = rows.filter(r => r.unmapped).length;
-    const needsReviewCount = rows.filter(r => !r.unmapped && r.needs_review).length;
-    document.getElementById('itrmap-stats').textContent =
-      filtered.length + '/' + rows.length + ' rows' +
-      (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '') +
-      (unmappedCount ? ' | ' + unmappedCount + ' unmapped' : '') +
-      (needsReviewCount ? ' | ' + needsReviewCount + ' needs review' : '');
-
-    // Re-focus the column filter input that was being typed in.
-    if (activeFilterCol) {
-      const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
-      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
-    }
-  }
-
-  function handleRowClick(idx, e) {
-    if (e.shiftKey && lastClickIdx !== null) {
-      const allIdxs = [...document.querySelectorAll('#itrmap-tbody tr')].map(tr => parseInt(tr.dataset.idx));
-      const startPos = allIdxs.indexOf(lastClickIdx);
-      const endPos = allIdxs.indexOf(idx);
-      if (startPos >= 0 && endPos >= 0) {
-        const from = Math.min(startPos, endPos);
-        const to = Math.max(startPos, endPos);
-        for (let i = from; i <= to; i++) selected.add(allIdxs[i]);
-      }
-    } else if (e.ctrlKey || e.metaKey) {
-      if (selected.has(idx)) selected.delete(idx); else selected.add(idx);
-    } else {
-      selected.clear();
-      selected.add(idx);
-    }
-    lastClickIdx = idx;
-    renderTable();
-  }
-
-  renderTable();
-})();
-</script>
-<img src="data:," onerror="eval(document.getElementById('itrmap-init-code').textContent)" style="display:none">
-"""
+def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -> ReviewSpec:
+    return ReviewSpec(
+        app_id=APP_ID,
+        columns=[
+            Column("path", "Account path"),
+            Column(TARGET_COL, "Current tag"),
+            Column("suggested", "Suggested"),
+        ],
+        target_col=TARGET_COL,
+        payload_var=PAYLOAD_VAR,
+        picker_label="Assign tag:",
+        picker_placeholder="Type to search tags…",
+        picker_items=picker_items,
+        status_options=[
+            ("unmapped", "Unmapped only"),
+            ("needs_review", "Needs review (LLM-suggested)"),
+            ("confirmed", "Confirmed only"),
+            ("mapped", "Mapped only (confirmed + needs review)"),
+        ],
+        status_label="Show:",
+        default_sort="path",
+        # Deliberately NOT set: unlike gnucash's bank-description matching,
+        # there's no shared "same pattern" key across mapping rows worth
+        # batch-reassigning by.
+        apply_matching_on="",
+        extra_panel_html=glossary_html,
+        context={"entity_key": entity_key},
+    )
 
 
 def _load_review_data(entity_key: str) -> str:
@@ -660,34 +370,50 @@ def _load_review_data(entity_key: str) -> str:
             "<code>Data/itr/mappings/&lt;entity&gt;.mapping.yaml</code>.</p>"
         )
 
-    html = _REVIEW_HTML
-    html = html.replace("%%DATA_JSON%%", _js_json(rows))
-    html = html.replace("%%TAGS_JSON%%", _js_json(_tag_options()))
-    html = html.replace("%%ENTITY_JSON%%", _js_json(entity_key))
-    return html
+    tag_opts = _tag_options()
+    tag_desc = {t["tag"]: t["desc"] for t in tag_opts}
+    for row in rows:
+        _row_presentation(row, tag_desc)
+
+    picker_items = [PickerItem(value=t["tag"], primary=t["tag"], secondary=t["desc"]) for t in tag_opts]
+    glossary_html = _build_glossary_html(tag_opts)
+    spec = _spec(picker_items, entity_key, glossary_html)
+    return payload_box_css(spec.payload_box_id) + build_html(spec, rows)
 
 
 # ---------------------------------------------------------------------------
 # Save handler.
 # ---------------------------------------------------------------------------
 
-def _save_changes(entity_key: str, changes_json: str) -> str:
+def _save_changes(changes_json: str) -> str:
     """Process a Save from the review UI: writes a backup of the entity's
     current mapping file (if it exists) THEN rewrites it in place via
     apply_corrections_map(). A blank entity, or no changes, never touches
-    the filesystem. Returns a status markdown string."""
-    if not entity_key or not entity_key.strip():
-        return "Error: select an entity first -- nothing was saved."
+    the filesystem. Returns a status markdown string.
 
+    `changes_json` is the engine's syncPayload() shape: {context, changes,
+    all_rows}. Each `changes` entry carries {_idx, _orig, guid, path, tag}
+    (guid/path/tag are the row's guid plus the two declared Columns whose
+    values the entry needs at save time -- `path` for a previously-unmapped
+    leaf that has no existing mapping-file entry to source it from, `tag`
+    for the corrected value). `entity_key` travels in `context` rather than
+    a second Gradio input -- see the module docstring for why.
+    """
     if not changes_json or not changes_json.strip():
         return "No changes to save."
 
     try:
-        payload = json.loads(changes_json)
-    except json.JSONDecodeError as e:
+        payload = parse_payload(changes_json)
+    except ValueError as e:
         return f"Error parsing changes: {e}"
 
-    changes = payload.get("changes", [])
+    changes = payload["changes"]
+    context = payload["context"]
+    entity_key = str(context.get("entity_key") or "").strip()
+
+    if not entity_key:
+        return "Error: select an entity first -- nothing was saved."
+
     if not changes:
         return "No changes to save."
 
@@ -708,7 +434,7 @@ def _save_changes(entity_key: str, changes_json: str) -> str:
     skipped_blank = 0
     for ch in changes:
         guid = ch.get("guid")
-        tag = ch.get("tag")
+        tag = ch.get(TARGET_COL)
         if not guid or not tag or not str(tag).strip():
             skipped_blank += 1
             continue
@@ -785,9 +511,11 @@ def render(container_tab=None) -> None:
         save_btn = gr.Button("Save", variant="primary")
     save_result = gr.Markdown("")
 
+    # Real textbox (visible=True so it's in the DOM) hidden via CSS.
+    # gr.State has no frontend element, so the js parameter can't inject into it.
     _payload_box = gr.Textbox(
         value="", show_label=False, container=False, lines=1,
-        elem_id="itrmap-payload-box",
+        elem_id=f"{APP_ID}-payload-box",
     )
 
     load_btn.click(
@@ -797,7 +525,7 @@ def render(container_tab=None) -> None:
     )
     save_btn.click(
         fn=_save_changes,
-        inputs=[entity_dropdown, _payload_box],
+        inputs=[_payload_box],
         outputs=[save_result],
-        js="(entity, x) => [entity, window._itrMapSavePayload || '']",
+        js=f"(x) => window.{PAYLOAD_VAR} || ''",
     )

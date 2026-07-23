@@ -30,7 +30,7 @@ output:
   download_label: "Download Excel"
 
 requires:
-  native_binaries: []
+  native_binaries: ["poppler"]
   external_tools: []
   llm: false
 

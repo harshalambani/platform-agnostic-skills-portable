@@ -22,6 +22,21 @@ transaction per deductor / collector, in four categories driven by the section:
      Both accounts are discovered from the chart, and the credit leg is
      caller-configurable (Bank instead of Drawings when the TCS was paid
      across separately).
+  G. 15G/15H    (Part II — TDS for 15G/15H)
+       Dr  Expense:TDS on Interest                  = Tax Deducted          (a)   [normally 0]
+       Dr  Income:Interest Income:Interest on FD    = Amount - Tax  (c - a)     [fixed generic]
+       Cr  <matched interest income account>        = Amount Paid/Credited  (c)
+     A RECLASSIFICATION, not new income: the 15G/15H interest is already
+     booked in the generic FD bucket, so this moves it into the specific
+     NBFC/deductor account. Tax deducted is statutorily supposed to be zero
+     for a 15G/15H deductor (that is the point of filing the form) — with
+     a=0 this degenerates to a plain 2-split Dr Interest on FD / Cr NBFC. If
+     tax is nonetheless non-zero it posts exactly like Category A's 3-split
+     (same maths; only the category letter, id series and description
+     differ — see CATEGORY_SERIES below). Category is decided by WHICH PART
+     the row came from, NEVER by section lookup — Part II rows are almost
+     always section 194A too, and a section-based lookup would silently
+     merge them into genuine Part I TDS.
 
 Amounts come from the per-party sub-totals (header totals) in Part I / Part VI.
 Each transaction is dated 31-March of the current calendar year.
@@ -95,6 +110,45 @@ SECTION_CATEGORY = {
 }
 
 TCS_SECTION_PREFIX = "206C"
+
+# Category -> Transaction ID series prefix. SINGLE SOURCE OF TRUTH: both this
+# module's write_csv() and ui/tabs/tds_journal_review.py's _txn_id_for() must
+# resolve a category to the same series, or the review screen's Save path
+# builds a Transaction ID that doesn't exist in the journal CSV and silently
+# skips the row (see series_for_category's docstring). The review tab imports
+# this dict rather than restating it.
+CATEGORY_SERIES = {
+    "A": "TDSJ", "B": "TDSJ", "C": "TDSJ",   # Part I (TDS)
+    "T": "TCSJ",                              # Part VI (TCS)
+    "G": "15GJ",                              # Part II (15G/15H)
+    "?": "TDSJ",  # unhandled/mixed section (build_journals' placeholder) —
+                  # already routed Suspense/Suspense on both legs, so the
+                  # series choice doesn't affect the books; kept as "TDSJ"
+                  # only to preserve pre-existing behaviour, not because it
+                  # means anything.
+}
+
+
+def series_for_category(category: str) -> str:
+    """Resolve a Journal.category to its Transaction ID series prefix.
+
+    Raises ValueError on any category not listed in CATEGORY_SERIES rather
+    than silently defaulting to "TDSJ" — a wrong series would build a
+    Transaction ID that doesn't exist in the journal CSV, and the review
+    screen's Save path would then skip the row without any indication of why
+    (see ui/tabs/tds_journal_review.py's _find_credit_split). "?" (the
+    placeholder build_journals() uses for an unhandled section) IS listed,
+    mapped to "TDSJ", purely to preserve pre-existing behaviour for those
+    already-Suspense-routed journals — not because it carries any category
+    meaning of its own.
+    """
+    try:
+        return CATEGORY_SERIES[(category or "").strip().upper()]
+    except KeyError:
+        raise ValueError(
+            f"no Transaction ID series defined for category {category!r} — "
+            "add it to CATEGORY_SERIES"
+        ) from None
 
 # Alias expansion for matching: maps a token found in an ACCOUNT name to the
 # set of tokens it stands for in a DEDUCTOR name (and vice-versa via expansion).
@@ -188,28 +242,38 @@ def parse_part_i(xlsx_path: Path) -> tuple[list[Deductor], str]:
     return _parse_party_sheet(wb["Part I"])
 
 
-def parse_parts(xlsx_path: Path) -> tuple[list[Deductor], list[Deductor], str]:
-    """Return (part_i_deductors, part_vi_collectors, financial_year).
+def parse_parts(xlsx_path: Path) -> tuple[list[Deductor], list[Deductor], list[Deductor], str]:
+    """Return (part_i_deductors, part_ii_deductors, part_vi_collectors, financial_year).
 
-    Either part may be empty — a 26AS with only TCS and no TDS is perfectly
-    valid — but a workbook carrying NEITHER sheet is not a Convert output and
-    is rejected, so a wrong file never silently produces an empty journal.
+    Any part may be empty — a 26AS with only TCS and no TDS is perfectly
+    valid, and so is one with no 15G/15H deductors — but a workbook carrying
+    NONE of the three sheets is not a Convert output and is rejected, so a
+    wrong file never silently produces an empty journal.
+
+    Part II shares columns 1/2/4/5/6/8 (Sr, Name, the three header totals,
+    Section) with Part I/VI byte-for-byte — the missing "Status of Booking"
+    column only shifts columns FROM 10 onward, which _parse_party_sheet never
+    reads — so the same reader serves all three sheets unchanged.
     """
     wb = load_workbook(xlsx_path, data_only=True)
-    if "Part I" not in wb.sheetnames and "Part VI" not in wb.sheetnames:
-        raise ValueError("Workbook has neither a 'Part I' nor a 'Part VI' sheet "
+    if not ({"Part I", "Part II", "Part VI"} & set(wb.sheetnames)):
+        raise ValueError("Workbook has none of 'Part I' / 'Part II' / 'Part VI' "
                          "— is this a 26AS Convert output?")
     deductors, fy = ([], "")
     if "Part I" in wb.sheetnames:
         deductors, fy = _parse_party_sheet(wb["Part I"])
+    g_deductors, fy2 = ([], "")
+    if "Part II" in wb.sheetnames:
+        g_deductors, fy2 = _parse_party_sheet(wb["Part II"])
     collectors, fy6 = ([], "")
     if "Part VI" in wb.sheetnames:
         collectors, fy6 = _parse_party_sheet(wb["Part VI"])
-    return deductors, collectors, (fy or fy6)
+    return deductors, g_deductors, collectors, (fy or fy2 or fy6)
 
 
 def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
-    """Read a deductor/collector sheet (Part I or Part VI — identical geometry).
+    """Read a deductor/collector sheet (Part I, Part II or Part VI — identical
+    geometry through column 8; see parse_parts).
 
     For Part VI the same fields carry the TCS equivalents: amount_paid is the
     amount paid/DEBITED and tax_deducted the tax COLLECTED.
@@ -573,6 +637,74 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
     return journals
 
 
+def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
+                       overrides: Optional[dict] = None) -> list[Journal]:
+    """Part II (15G/15H) -> Category G journals.
+
+    Reuses Category A's exact posting template and account-matching pool
+    (interest income accounts) — no new maths, per the spec: with tax
+    deducted (a) at its statutory value of 0 this degenerates to a plain
+    2-split Dr Interest on FD / Cr NBFC transfer, and if a is ever nonzero it
+    posts the identical 3-split Category A does.
+
+    Category is hardcoded to "G" here — NEVER derived from
+    categorize()/SECTION_CATEGORY. Part II deductors are almost always
+    section 194A, which SECTION_CATEGORY maps to "A"; routing them through
+    that lookup would silently merge 15G/15H reclassifications into the
+    TDSJ id series, indistinguishable from genuine Part I TDS in the review
+    CSV (see CATEGORY_SERIES / series_for_category).
+
+    overrides: {deductor_sr (int) -> credit account full path}, same shape
+    as build_journals' — Part II Sr numbers restart per part (like Part VI),
+    so this is deliberately a separate map from the Part I overrides.
+    """
+    overrides = overrides or {}
+    fd_account = find_generic_fd_account(accounts) or ACC_INTEREST_ON_FD
+    journals = []
+    for d in deductors:
+        label = "/".join(d.sections)
+        j = Journal(sr=d.sr, deductor=d.name, category="G", section_label=label)
+        a = round(d.tax_deducted, 2)
+        c = round(d.amount_paid, 2)
+
+        # Account matching reuses Category A's candidate pool (interest income
+        # accounts) — a 15G/15H deductor's amount is interest income exactly
+        # like a Category A one; only the tax-withholding status differs.
+        acct, conf, basis, cands = match_credit_account(d.name, "A", accounts, fd_account)
+        j.candidates = cands
+        if d.sr in overrides and overrides[d.sr]:
+            credit_acc = overrides[d.sr]
+            j.credit_account = credit_acc
+            j.credit_confidence = "Override"
+            j.credit_basis = "resolved by override/LLM"
+            j.needs_review = False
+        else:
+            credit_acc = acct or ACC_SUSPENSE
+            j.credit_account = credit_acc
+            j.credit_confidence = conf
+            j.credit_basis = basis
+            j.needs_review = acct is None or conf in ("Low", "Suspense")
+
+        if a:
+            # Tax deducted despite 15G/15H (shouldn't happen, but if it does,
+            # handle it exactly like Category A's 3-split).
+            j.splits = [
+                Split(ACC_TDS_INTEREST, debit=a),
+                Split(fd_account, debit=round(c - a, 2)),
+                Split(credit_acc, credit=c),
+            ]
+        else:
+            # Statutory case: no tax withheld -> a plain reclassification,
+            # Dr Interest on FD / Cr the specific NBFC account. Total income
+            # is unchanged, this only moves it out of the generic bucket.
+            j.splits = [
+                Split(fd_account, debit=c),
+                Split(credit_acc, credit=c),
+            ]
+        journals.append(j)
+    return journals
+
+
 def is_tcs_section(sections: tuple) -> bool:
     """True if every section on the collector block is a 206C sub-section."""
     secs = [str(s).strip().upper() for s in sections if str(s).strip()]
@@ -681,15 +813,21 @@ def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
                     "Amount", "Currency"])
         fy_pfx = fy_prefix(fy)
         for j in journals:
-            # TCS journals get their own ID series: Part I Sr.1 and Part VI
-            # Sr.1 are different parties, and a shared prefix would make
-            # GnuCash's multi-split importer fuse their splits into one
-            # unbalanced transaction.
-            kind = "TCSJ" if j.category == "T" else "TDSJ"
-            tag = "TCS" if j.category == "T" else "TDS"
+            # Each category gets its own ID series (see CATEGORY_SERIES): Part
+            # I Sr.1, Part II Sr.1 and Part VI Sr.1 are different parties, and
+            # a shared prefix would make GnuCash's multi-split importer fuse
+            # their splits into one unbalanced transaction.
+            kind = series_for_category(j.category)
+            if j.category == "T":
+                tag, part_label = "TCS", "Part VI"
+            elif j.category == "G":
+                tag, part_label = "15G/15H TDS", "Part II (15G/15H)"
+            else:
+                tag, part_label = "TDS", "Part I"
             txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
-            desc = f"{tag} FY {fy} - {j.deductor} (Sec {j.section_label})" if fy \
-                else f"{tag} - {j.deductor} (Sec {j.section_label})"
+            desc = (f"{part_label} {tag} FY {fy} - {j.deductor} (Sec {j.section_label})"
+                     if fy else
+                     f"{part_label} {tag} - {j.deductor} (Sec {j.section_label})")
             # Repeat Date / Transaction ID / Description on EVERY split row.
             # GnuCash's multi-split importer groups splits by matching
             # transaction fields (and the Transaction ID), NOT by blank-date
@@ -722,10 +860,15 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
 
 def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         overrides: Optional[dict] = None, tcs_credit_account: str = "",
-        tcs_overrides: Optional[dict] = None) -> dict:
-    deductors, collectors, fy = parse_parts(xlsx_path)
+        tcs_overrides: Optional[dict] = None,
+        g_overrides: Optional[dict] = None) -> dict:
+    deductors, g_deductors, collectors, fy = parse_parts(xlsx_path)
     accounts = load_accounts(gnucash_path)
     journals = build_journals(deductors, accounts, overrides)
+    # Part II (15G/15H). Sr numbers restart per part, so this is a separate
+    # overrides map — a shared one would let Part I Sr.2 silently redirect
+    # Part II Sr.2.
+    journals += build_15g_journals(g_deductors, accounts, overrides=g_overrides)
     # Part VI TCS. Sr numbers restart per part, so TCS overrides are a separate
     # map — a shared one would let Part I Sr.2 silently redirect Part VI Sr.2.
     journals += build_tcs_journals(collectors, accounts,
@@ -759,6 +902,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "fy": fy,
         "journal_date": journal_date(),
         "deductors": len(deductors),
+        "part_ii_deductors": len(g_deductors),
         "collectors": len(collectors),
         "balanced_all": all(j.balanced for j in journals),
         "needs_review": [r for r in review_rows if r["needs_review"]],
@@ -789,8 +933,8 @@ def main(argv: list[str]) -> int:
                 overrides[int(m.group(0))] = v
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
-          f"deductors {stats['deductors']}  collectors {stats['collectors']}  "
-          f"balanced_all {stats['balanced_all']}")
+          f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
+          f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
     for r in stats["rows"]:
         flag = "  <-- REVIEW" if r["needs_review"] else ""
         print(f"  Sr{r['sr']:>2} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "

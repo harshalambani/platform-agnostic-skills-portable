@@ -40,8 +40,8 @@ output:
   download_label: "Download Excel"
 
 requires:
-  native_binaries: []
-  external_tools: ["qpdf"]
+  native_binaries: ["qpdf"]
+  external_tools: []
   llm: false
 
 help:

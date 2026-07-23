@@ -68,6 +68,15 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_qpdf  # noqa: E402
+
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 SEGMENT_TOKEN_RE = re.compile(r"^(NSE_CASH|BSE_CASH|NSE_SLBM|NSECASH|BSECASH|NSESLBM)$")
 INTERNAL_TRANSFER_MARKER = "INTER EXCHANGE SETL"
@@ -121,8 +130,9 @@ def _cluster_lines(words: list[dict], tol: float = 2.0) -> list[list[dict]]:
 
 def decrypt_pdf(pdf_path: str, password: str, scratch_path: str) -> None:
     """Decrypt a password-protected PDF via qpdf. Raises on failure."""
+    qpdf_path = resolve_qpdf()
     result = subprocess.run(
-        ["qpdf", f"--password={password}", "--decrypt", pdf_path, scratch_path],
+        [qpdf_path, f"--password={password}", "--decrypt", pdf_path, scratch_path],
         capture_output=True,
         text=True,
     )

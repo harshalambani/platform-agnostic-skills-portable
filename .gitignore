@@ -39,6 +39,7 @@ desktop.ini
 # --- Logs / outputs (build-time scratch) ---
 *.log
 .coverage
+tests/e2e_results.txt
 
 # --- Local dev overrides ---
 .env

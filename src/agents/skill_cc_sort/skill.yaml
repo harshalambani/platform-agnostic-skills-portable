@@ -35,8 +35,8 @@ output:
   download_label: "Open output folder"
 
 requires:
-  native_binaries: []
-  external_tools: ["qpdf"]
+  native_binaries: ["qpdf"]
+  external_tools: []
   llm: false
 
 help:
