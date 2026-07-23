@@ -73,6 +73,33 @@ def _setup_data_root(tmp_path: Path, mapping_fixture: str) -> Path:
     return data_root
 
 
+def _payload(entity: str, changes: list[dict]) -> str:
+    """Build a Save payload in the shared review engine's shape
+    (ui._review_engine.parse_payload()/syncPayload()): {context, changes,
+    all_rows}, each change carrying {_idx, _orig, <declared columns>, guid}.
+
+    `changes` here is the old test suite's simple {"guid", "path", "tag"}
+    shorthand -- this helper wraps each into the engine's fuller shape so
+    every call site below only needs to change its payload-building call,
+    not its intent.
+    """
+    engine_changes = [
+        {
+            "_idx": i,
+            "_orig": ch.get("_orig", ""),
+            "guid": ch.get("guid"),
+            "path": ch.get("path", ""),
+            "tag": ch.get("tag", ""),
+        }
+        for i, ch in enumerate(changes)
+    ]
+    return json.dumps({
+        "context": {"entity_key": entity},
+        "changes": engine_changes,
+        "all_rows": [],
+    })
+
+
 # ---------------------------------------------------------------------------
 # Gate 1 -- load flags unmapped rows + shows suggestions
 # ---------------------------------------------------------------------------
@@ -201,30 +228,46 @@ def test_tag_options_include_sheet_target_and_description():
 
 def test_review_html_has_sortable_headers_and_glossary_and_tooltips(tmp_path):
     """The rendered HTML must carry: clickable/sortable column headers with
-    a per-column filter row (mirroring gnucash_review.py), a toggleable tag
-    glossary panel, and a JS-side tag-description lookup used to title
-    Current/Suggested/New tag badges."""
+    a per-column filter row (now the shared ui._review_engine skeleton,
+    rather than a bespoke re-implementation), a tag-glossary reference panel,
+    and per-row badge tooltips carrying the tag's one-line meaning.
+
+    NOTE ON CHANGED ASSERTIONS: the hand-rolled #itrmap-glossary-btn /
+    -panel / -search / TAG_DESC / tagTitle markup this test used to assert
+    on was deleted along with the rest of the old template -- the engine has
+    no client-side glossary widget of its own. The glossary now lives in
+    spec.extra_panel_html as a server-rendered <details>/<summary> table
+    (see ui.tabs.itr_mapping_review._build_glossary_html), and per-tag
+    tooltips are server-computed _badges[...]['title'] strings (see
+    _row_presentation/_tag_title), embedded directly in the row JSON rather
+    than looked up client-side from a TAGS array. Asserting a CSS class or
+    id alone would pass even if the engine emitted it unconditionally
+    regardless of data, so this asserts the actual embedded row/tag content
+    instead: the glossary table's tag rows, and a real row's badge title
+    carrying "tag -- description" for a known tag.
+    """
     data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
     with patch("ui._config.data_root_dir", return_value=data_root):
         html = ui_mod._load_review_data("SYN-IND")
 
-    # Sortable/filterable column headers, built dynamically in JS from COLS.
+    # Sortable/filterable column headers -- shared engine markup/JS.
     assert 'id="itrmap-thead"' in html
     assert "sort-arrow" in html
     assert "filter-row" in html
     assert "colFilters" in html
 
-    # Tag glossary: toggle button + panel + search box.
-    assert 'id="itrmap-glossary-btn"' in html
-    assert 'id="itrmap-glossary-panel"' in html
-    assert 'id="itrmap-glossary-search"' in html
+    # Tag glossary: a collapsible <details> reference panel (extra_panel_html),
+    # not a second bespoke search box -- the existing "Assign tag" picker
+    # above already searches this same vocabulary.
+    assert "<details" in html
+    assert "Tag glossary" in html
 
-    # Tag-description tooltip lookup, sourced from the TAGS payload.
-    assert "TAG_DESC" in html
-    assert "tagTitle" in html
-    # The vocabulary payload itself is embedded (used by both the glossary
-    # and the tooltips) -- spot-check one known tag/description round-trips.
+    # A real known tag's description is embedded in the glossary table...
     assert "OS_INTEREST_BANK" in html
+    # ...and a mapped row's badge title carries "TAG -- description" (the
+    # server-computed tooltip _row_presentation attaches to the tag column),
+    # proving the tooltip is real per-row data, not just a static class.
+    assert "OS_INTEREST_BANK --" in html
 
 
 # ---------------------------------------------------------------------------
@@ -237,16 +280,13 @@ def test_save_writes_anchored_file_backup_and_marks_approved(tmp_path):
     mapping_path = data_root / "itr" / "mappings" / "SYN-IND.mapping.yaml"
     assert mapping_path.is_file()
 
-    payload = json.dumps({
-        "entity": "SYN-IND",
-        "changes": [
-            {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "AL_CASH_BANK"},
-            {"guid": RETAG_GUID, "path": "Income/Bank Interest", "tag": "OS_INTEREST_SB"},
-        ],
-    })
+    payload = _payload("SYN-IND", [
+        {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "AL_CASH_BANK"},
+        {"guid": RETAG_GUID, "path": "Income/Bank Interest", "tag": "OS_INTEREST_SB"},
+    ])
 
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("SYN-IND", payload)
+        msg = ui_mod._save_changes(payload)
 
     assert "Saved" in msg
     assert "Applied 2 correction" in msg
@@ -274,12 +314,9 @@ def test_save_cold_start_creates_mapping_file_no_backup_needed(tmp_path):
     mapping_path = data_root / "itr" / "mappings" / "SYN-IND.mapping.yaml"
     assert not mapping_path.exists()
 
-    payload = json.dumps({
-        "entity": "SYN-IND",
-        "changes": [{"guid": "guid-a", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}],
-    })
+    payload = _payload("SYN-IND", [{"guid": "guid-a", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}])
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("SYN-IND", payload)
+        msg = ui_mod._save_changes(payload)
 
     assert "Saved" in msg
     assert "nothing to back up" in msg.lower()
@@ -318,11 +355,9 @@ def test_saved_correction_resolves_on_workbook_rerun(tmp_path):
         rows = ui_mod._load_review_rows("SYN-IND")
         assert any(r["guid"] == UNMAPPED_GUID and r["unmapped"] for r in rows)
 
-        save_msg = ui_mod._save_changes("SYN-IND", json.dumps({
-            "entity": "SYN-IND",
-            "changes": [{"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)",
-                         "tag": "AL_CASH_BANK"}],
-        }))
+        save_msg = ui_mod._save_changes(_payload("SYN-IND", [
+            {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "AL_CASH_BANK"},
+        ]))
     assert "Saved" in save_msg
 
     # Second run: mapping_file omitted -- agent auto-derives the entity's
@@ -344,30 +379,27 @@ def test_saved_correction_resolves_on_workbook_rerun(tmp_path):
 def test_blank_entity_never_touches_filesystem(tmp_path):
     data_root = tmp_path / "Data"
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("", json.dumps({"entity": "", "changes": [{"guid": "x", "tag": "AL_CASH_BANK"}]}))
+        msg = ui_mod._save_changes(_payload("", [{"guid": "x", "tag": "AL_CASH_BANK"}]))
     assert "select an entity" in msg.lower()
     assert not data_root.exists()
 
 
 def test_blank_changes_payload_is_a_noop():
-    assert "no changes" in ui_mod._save_changes("SYN-IND", "").lower()
-    assert "no changes" in ui_mod._save_changes("SYN-IND", "   ").lower()
-    assert "no changes" in ui_mod._save_changes("SYN-IND", json.dumps({"entity": "SYN-IND", "changes": []})).lower()
+    assert "no changes" in ui_mod._save_changes("").lower()
+    assert "no changes" in ui_mod._save_changes("   ").lower()
+    assert "no changes" in ui_mod._save_changes(_payload("SYN-IND", [])).lower()
 
 
 def test_invalid_tag_reported_not_applied_others_still_saved(tmp_path):
     data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
     mapping_path = data_root / "itr" / "mappings" / "SYN-IND.mapping.yaml"
 
-    payload = json.dumps({
-        "entity": "SYN-IND",
-        "changes": [
-            {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "NOT_A_REAL_TAG"},
-            {"guid": RETAG_GUID, "path": "Income/Bank Interest", "tag": "OS_INTEREST_SB"},
-        ],
-    })
+    payload = _payload("SYN-IND", [
+        {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "NOT_A_REAL_TAG"},
+        {"guid": RETAG_GUID, "path": "Income/Bank Interest", "tag": "OS_INTEREST_SB"},
+    ])
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("SYN-IND", payload)
+        msg = ui_mod._save_changes(payload)
 
     assert "not applied" in msg.lower()
     assert "NOT_A_REAL_TAG" in msg
@@ -382,12 +414,9 @@ def test_invalid_tag_reported_not_applied_others_still_saved(tmp_path):
 
 def test_blank_tag_selection_skipped_gracefully(tmp_path):
     data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
-    payload = json.dumps({
-        "entity": "SYN-IND",
-        "changes": [{"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": ""}],
-    })
+    payload = _payload("SYN-IND", [{"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": ""}])
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("SYN-IND", payload)
+        msg = ui_mod._save_changes(payload)
     assert "no valid changes" in msg.lower()
 
 
@@ -424,10 +453,9 @@ def test_save_round_trip_in_both_layouts(tmp_path, layout):
     shutil.copy(FIXTURES / "syn_ind_unmapped.mapping.yaml", mappings_dir / "SYN-IND.mapping.yaml")
 
     with patch("ui._config.data_root_dir", return_value=data_root):
-        msg = ui_mod._save_changes("SYN-IND", json.dumps({
-            "entity": "SYN-IND",
-            "changes": [{"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "AL_CASH_BANK"}],
-        }))
+        msg = ui_mod._save_changes(_payload("SYN-IND", [
+            {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)", "tag": "AL_CASH_BANK"},
+        ]))
     assert "Saved" in msg
     updated = configs.load_mapping(mappings_dir / "SYN-IND.mapping.yaml")
     assert updated.entries[UNMAPPED_GUID].tag == "AL_CASH_BANK"

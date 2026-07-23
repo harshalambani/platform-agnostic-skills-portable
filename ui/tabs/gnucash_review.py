@@ -1,24 +1,50 @@
 """
 ui/tabs/gnucash_review.py — Review & Edit Account Mappings tab.
 
-Interactive table for reviewing mapped CSVs before GnuCash import.
+Interactive table for reviewing mapped CSVs before GnuCash import. Built on
+the shared ui._review_engine skeleton (searchable assign picker, multi-select,
+sort/filter, save payload bridge) — see ui/tabs/tds_journal_review.py for the
+sibling consumer this mirrors.
+
 Supports:
   - Sortable columns (click header)
   - Shift-click / Ctrl-click multi-select
   - Searchable account picker dropdown
-  - Batch "Apply to selected" and "Apply to all matching"
+  - Batch "Apply to selected" and "Apply to matching" (same Description)
   - Save corrections → per-GnuCash override YAML + re-export CSV
+
+Contra (cross-bank transfer) rows are flagged by a `<csv-stem>.contra.json`
+sidecar the pipeline writes next to the CSV. Presentation for those rows
+(tags, row tone, badge) is computed server-side in `_row_presentation()` per
+the engine's design rule — no bespoke JS for this screen anymore.
 """
 from __future__ import annotations
 
 import csv
 import json
 import re
+import shutil
 from pathlib import Path
 
 import gradio as gr
 
 from ui import _config as _config_mod
+from ui._review_engine import (
+    Column,
+    PickerItem,
+    ReviewSpec,
+    build_html,
+    parse_payload,
+    payload_box_css,
+)
+
+APP_ID = "rv"
+TARGET_COL = "Account"
+PAYLOAD_VAR = "_rvSavePayload"
+
+# Worst-first confidence order used for the Confidence column's "order" sort
+# and matches the mapper's own report ordering (see skill_gnucash_account_mapper).
+CONF_ORDER = ("suspense", "none", "low", "smart", "medium", "llm", "override", "high")
 
 
 # ---------------------------------------------------------------------------
@@ -67,627 +93,69 @@ def _extract_account_tree(gnucash_file: str) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# HTML/JS template for the interactive review table
+# Contra sidecar + row presentation (computed in Python, per the engine's
+# core design rule: presentation logic lives here, not in eval'd JS).
 # ---------------------------------------------------------------------------
 
+def _load_contra_sidecar(csv_p: Path) -> dict:
+    """Read the `<csv-stem>.contra.json` sidecar if present.
 
-def _js_json(value) -> str:
-    """json.dumps that is safe to embed inside an inline <script> element.
-
-    Plain json.dumps does not escape "<", so a value containing "</script>"
-    can break out of the surrounding script tag and inject markup.
+    Keys are stringified row indices → per-row {reason, confidence, status}.
+    Missing or unreadable sidecar is treated as "no contras" rather than an
+    error — this is optional review-hint data, not required for the CSV to
+    load.
     """
-    return (
-        json.dumps(value)
-        .replace("<", "\\u003c")
-        .replace(">", "\\u003e")
-        .replace("&", "\\u0026")
-    )
+    contra_path = csv_p.with_suffix(".contra.json")
+    if not contra_path.is_file():
+        return {}
+    try:
+        with open(contra_path, "r", encoding="utf-8") as cf:
+            raw = json.load(cf)
+        return {str(k): v for k, v in raw.items()}
+    except Exception:
+        return {}
 
 
-_REVIEW_HTML = r"""
-<style>
-#review-app {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  font-size: 13px;
-  color: #e0e0e0;
-}
-#review-app .toolbar {
-  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  padding: 8px 0; border-bottom: 1px solid #333;
-  margin-bottom: 8px;
-}
-#review-app .toolbar label { font-weight: 600; font-size: 12px; color: #ccc; }
-#review-app .toolbar select, #review-app .toolbar input[type=text] {
-  padding: 4px 8px; border: 1px solid #444;
-  border-radius: 4px; font-size: 12px;
-  background: #1a1a1a; color: #e0e0e0;
-}
-#review-app .toolbar input[type=text] { width: 220px; }
-#review-app .toolbar button {
-  padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
-  border: 1px solid #444; background: #2a2a2a; color: #e0e0e0;
-}
-#review-app .toolbar button.primary {
-  background: #2563eb; color: #fff; border-color: transparent;
-}
-#review-app .toolbar .spacer { flex: 1; }
-#review-app .stats { font-size: 11px; color: #999; padding: 4px 0; }
+def _row_presentation(row: dict, contra: dict | None) -> None:
+    """Fill in the engine's _tags / _rowclass / _badges / _note keys in place.
 
-#review-app table {
-  width: 100%; border-collapse: collapse; table-layout: auto;
-}
-#review-app thead th {
-  position: sticky; top: 0; z-index: 2;
-  background: #1e1e1e; color: #ccc;
-  border-bottom: 2px solid #444;
-  padding: 6px 8px; text-align: left; font-size: 12px; cursor: pointer;
-  user-select: none; white-space: nowrap;
-}
-#review-app thead th:hover { background: #2a2a2a; }
-#review-app thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
-#review-app thead .filter-row td {
-  padding: 3px 4px; background: #1a1a1a; border-bottom: 1px solid #444;
-}
-#review-app thead .filter-row input {
-  width: 100%; box-sizing: border-box;
-  padding: 3px 6px; border: 1px solid #333; border-radius: 3px;
-  font-size: 11px; background: #111; color: #ccc;
-}
-#review-app thead .filter-row input:focus {
-  border-color: #2563eb; outline: none;
-}
-#review-app thead .filter-row input::placeholder { color: #555; }
+    - _tags always carries the row's confidence tier (drives the "Filter:"
+      dropdown), plus "contra" when the row was flagged by the sidecar — a
+      row can be both (e.g. "suspense" AND "contra"), which is exactly why
+      _tags is a list.
+    - Suspense rows get a red SUSPENSE badge on the Account column (the
+      column that actually holds the value that needs reassigning).
+    - Contra rows get the confirmed/possible distinction preserved via
+      _rowclass (tone-green / tone-amber, matching the old contra-row
+      background colours exactly) and a TRANSFER/POSSIBLE badge on the
+      leftmost (Date) column so it's never clipped by a narrow Reason cell.
+    """
+    confidence = (row.get("Confidence") or "").strip().lower()
+    tags = [confidence or "none"]
+    badges: dict = {}
+    rowclass = ""
+    note = ""
 
-#review-app tbody tr {
-  border-bottom: 1px solid #262626;
-  cursor: pointer; transition: background 0.1s;
-}
-#review-app tbody tr:nth-child(even) { background: #111; }
-#review-app tbody tr:hover { background: #1a2744; }
-#review-app tbody tr.selected { background: #1e3a5f; }
-#review-app tbody tr.selected:hover { background: #254a73; }
-/* Contra (cross-bank transfer) rows — highlighted so they can't be missed
-   even without filtering. Selection still wins visually.
-   confirmed = auto-booked to the counterparty bank (green accent);
-   possible  = amount+date hint, mapper's account kept (amber accent). */
-#review-app tbody tr.contra-row { background: #3a2a1d; }
-#review-app tbody tr.contra-row:hover { background: #4a3626; }
-#review-app tbody tr.contra-row.selected { background: #1e3a5f; }
-#review-app tbody tr.contra-row td:first-child { border-left: 3px solid #facc15; }
-#review-app tbody tr.contra-row.confirmed { background: #16281d; }
-#review-app tbody tr.contra-row.confirmed:hover { background: #1e3a2a; }
-#review-app tbody tr.contra-row.confirmed.selected { background: #1e3a5f; }
-#review-app tbody tr.contra-row.confirmed td:first-child { border-left: 3px solid #4ade80; }
-#review-app tbody td { padding: 5px 8px; font-size: 12px; max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
+    if confidence == "suspense":
+        badges[TARGET_COL] = {"text": "SUSPENSE", "cls": "red"}
 
-/* Confidence badges — bright on dark */
-#review-app .conf-high     { color: #4ade80; font-weight: 600; }
-#review-app .conf-medium   { color: #facc15; }
-#review-app .conf-smart    { color: #60a5fa; }
-#review-app .conf-override { color: #a78bfa; font-weight: 600; }
-#review-app .conf-llm      { color: #22d3ee; }
-#review-app .conf-low      { color: #fb923c; }
-#review-app .conf-suspense { color: #f87171; font-weight: 600; }
-#review-app .conf-none     { color: #f87171; }
-
-#review-app .contra-badge {
-  display: inline-block; font-size: 10px; padding: 1px 5px;
-  border-radius: 3px; margin-left: 4px;
-  background: #7c2d12; color: #fdba74; font-weight: 600;
-}
-/* possible = amber hint; confirmed = green (booked to the bank). */
-#review-app .contra-badge.possible  { background: #7c2d12; color: #fdba74; }
-#review-app .contra-badge.confirmed { background: #14532d; color: #86efac; }
-
-/* Prominent "jump to contras" button — only shown when contras exist. */
-#review-app .contra-alert-btn {
-  background: #7f1d1d; color: #fecaca; border: 1px solid #b91c1c;
-  font-weight: 600;
-}
-#review-app .contra-alert-btn:hover { background: #991b1b; }
-#review-app .contra-alert-btn.active { background: #dc2626; color: #fff; }
-
-#review-app .changed-marker { color: #a78bfa; font-weight: bold; margin-left: 4px; }
-
-/* Account search dropdown */
-#review-app .acct-picker {
-  position: relative; display: inline-block;
-}
-#review-app .acct-search {
-  width: 320px; padding: 5px 8px; border: 1px solid #444;
-  border-radius: 4px; font-size: 12px;
-  background: #1a1a1a; color: #e0e0e0;
-}
-#review-app .acct-dropdown {
-  position: absolute; top: 100%; left: 0; z-index: 100;
-  width: 420px; max-height: 280px; overflow-y: auto;
-  border: 1px solid #444; background: #1a1a1a;
-  border-radius: 4px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
-  display: none;
-}
-#review-app .acct-dropdown.open { display: block; }
-#review-app .acct-dropdown .acct-item {
-  padding: 5px 10px; cursor: pointer; font-size: 12px;
-  color: #e0e0e0;
-}
-#review-app .acct-dropdown .acct-item:hover { background: #1e3a5f; }
-#review-app .acct-dropdown .acct-item .acct-leaf { font-weight: 600; color: #fff; }
-#review-app .acct-dropdown .acct-item .acct-path { color: #888; font-size: 11px; }
-#review-app .scroll-wrapper { max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px; }
-</style>
-<style>
-/* Hide the payload transfer textbox — must be visible=True for Gradio js param to work */
-#rv-payload-box, #rv-payload-box * { position: absolute !important; left: -9999px !important; height: 0 !important; overflow: hidden !important; opacity: 0 !important; pointer-events: none !important; }
-</style>
-
-<div id="review-app">
-  <div class="toolbar">
-    <label>Sort:</label>
-    <select id="rv-sort-col"></select>
-    <button id="rv-sort-dir" title="Toggle sort direction">↑ Asc</button>
-    <label style="margin-left:12px">Filter:</label>
-    <select id="rv-filter-conf">
-      <option value="">All</option>
-      <option value="suspense">Suspense</option>
-      <option value="low">Low</option>
-      <option value="none">Unmatched</option>
-      <option value="smart">Smart</option>
-      <option value="override">Override</option>
-      <option value="medium">Medium</option>
-      <option value="high">High</option>
-      <option value="contra">Contra</option>
-    </select>
-    <button id="rv-show-contra" class="contra-alert-btn" style="display:none"></button>
-    <span class="spacer"></span>
-    <span class="stats" id="rv-stats"></span>
-  </div>
-
-  <div class="toolbar">
-    <label>Assign account:</label>
-    <div class="acct-picker">
-      <input type="text" class="acct-search" id="rv-acct-search" placeholder="Type to search accounts…" autocomplete="off">
-      <div class="acct-dropdown" id="rv-acct-dropdown"></div>
-    </div>
-    <button id="rv-apply-sel" class="primary" title="Apply to selected rows">Apply to selected</button>
-    <button id="rv-apply-match" title="Apply to all rows with same description pattern">Apply to matching</button>
-    <span class="spacer"></span>
-  </div>
-
-  <div class="scroll-wrapper">
-    <table>
-      <thead id="rv-thead"><tr></tr></thead>
-      <tbody id="rv-tbody"></tbody>
-    </table>
-  </div>
-</div>
-
-<script type="text/plain" id="rv-init-code">
-(function() {
-  const DATA = %%DATA_JSON%%;
-  const ACCOUNTS = %%ACCOUNTS_JSON%%;
-  const GNUCASH_FILE = %%GNUCASH_FILE_JSON%%;
-  const CSV_PATH = %%CSV_PATH_JSON%%;
-
-  // SECURITY (finding #11): escape HTML entities before innerHTML insertion.
-  // Prevents XSS via crafted GnuCash account names, MatchReason text, or
-  // any other field that might contain user/LLM-generated content.
-  function esc(s) {
-    if (!s) return '';
-    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
-                     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-  }
-
-  // Column config: key, label, sortable
-  const COLS = [
-    {key: 'Date', label: 'Date', sort: true},
-    {key: 'Description', label: 'Description', sort: true},
-    {key: 'Account', label: 'Account', sort: true},
-    {key: 'Transfer Account', label: 'Transfer Acct', sort: false},
-    {key: 'Deposit - Amount Negated', label: 'Deposit', sort: true},
-    {key: 'Withdrawal - Amount', label: 'Withdrawal', sort: true},
-    {key: 'Balance', label: 'Balance', sort: false},
-    {key: 'Confidence', label: 'Conf', sort: true},
-    {key: 'MatchReason', label: 'Reason', sort: true},
-  ];
-  // Fallback column keys for older CSVs
-  const DEPOSIT_KEY = DATA.length > 0 && ('Deposit - Amount Negated' in DATA[0]) ? 'Deposit - Amount Negated' : 'Deposit';
-  const WITHDRAWAL_KEY = DATA.length > 0 && ('Withdrawal - Amount' in DATA[0]) ? 'Withdrawal - Amount' : 'Withdrawal';
-  if (DEPOSIT_KEY === 'Deposit') {
-    COLS[4] = {key: 'Deposit', label: 'Deposit', sort: true};
-    COLS[5] = {key: 'Withdrawal', label: 'Withdrawal', sort: true};
-  }
-
-  let rows = DATA.map((r, i) => ({...r, _idx: i, _changed: false, _origAccount: r.Account || ''}));
-  let selected = new Set();
-  let lastClickIdx = null;
-  let sortCol = 'Confidence';
-  let sortAsc = true;
-  let filterConf = '';
-  let colFilters = {};  // {colKey: 'search text'}
-  let activeFilterCol = null;
-
-  // Confidence sort order (worst first for review)
-  const CONF_ORDER = {suspense:0, none:1, low:2, smart:3, medium:4, llm:5, override:6, high:7};
-
-  // ── Sort dropdown ──
-  const sortDD = document.getElementById('rv-sort-col');
-  COLS.filter(c => c.sort).forEach(c => {
-    const o = document.createElement('option');
-    o.value = c.key; o.textContent = c.label;
-    if (c.key === 'Confidence') o.selected = true;
-    sortDD.appendChild(o);
-  });
-  sortDD.onchange = () => { sortCol = sortDD.value; renderTable(); };
-  const sortDirBtn = document.getElementById('rv-sort-dir');
-  sortDirBtn.onclick = () => { sortAsc = !sortAsc; sortDirBtn.textContent = sortAsc ? '↑ Asc' : '↓ Desc'; renderTable(); };
-
-  // ── Filter ──
-  const filterConfDD = document.getElementById('rv-filter-conf');
-  filterConfDD.onchange = (e) => { filterConf = e.target.value; syncContraBtn(); renderTable(); };
-
-  // ── Contra surfacing ──
-  // Count flagged cross-bank transfers and, when present, show a prominent
-  // toggle button so they can be isolated in one click (the small inline
-  // badge alone is easy to miss, and gets clipped in a narrow Reason cell).
-  const contraCount = rows.filter(r => !!r._contra).length;
-  const possibleCount = rows.filter(r => r._contra_status === 'possible').length;
-  const confirmedCount = rows.filter(r => r._contra_status === 'confirmed').length;
-  const showContraBtn = document.getElementById('rv-show-contra');
-  function contraSummary() {
-    // e.g. "2 confirmed, 1 possible" / "3 possible" / "1 transfer"
-    const parts = [];
-    if (confirmedCount) parts.push(confirmedCount + ' confirmed');
-    if (possibleCount) parts.push(possibleCount + ' possible');
-    return parts.length ? parts.join(', ')
-      : (contraCount + ' transfer' + (contraCount === 1 ? '' : 's'));
-  }
-  function syncContraBtn() {
-    if (contraCount === 0) return;
-    const on = filterConf === 'contra';
-    showContraBtn.classList.toggle('active', on);
-    showContraBtn.textContent = on
-      ? ('✕ Showing transfers (' + contraSummary() + ')')
-      : ('⚠ ' + contraCount + ' cross-bank transfer' + (contraCount === 1 ? '' : 's')
-         + ' (' + contraSummary() + ')');
-  }
-  if (contraCount > 0) {
-    showContraBtn.style.display = '';
-    showContraBtn.onclick = () => {
-      filterConf = (filterConf === 'contra') ? '' : 'contra';
-      filterConfDD.value = filterConf;
-      syncContraBtn();
-      renderTable();
-    };
-    syncContraBtn();
-  }
-
-  // ── Account search ──
-  const acctSearch = document.getElementById('rv-acct-search');
-  const acctDD = document.getElementById('rv-acct-dropdown');
-  let acctFiltered = ACCOUNTS.slice(0, 50);
-  let selectedAccount = '';
-
-  function renderAcctDropdown(filter) {
-    const q = (filter || '').toLowerCase();
-    acctFiltered = q
-      ? ACCOUNTS.filter(a => a.toLowerCase().includes(q)).slice(0, 50)
-      : ACCOUNTS.slice(0, 50);
-    acctDD.innerHTML = '';
-    acctFiltered.forEach(a => {
-      const div = document.createElement('div');
-      div.className = 'acct-item';
-      const parts = a.split(':');
-      const leaf = parts[parts.length - 1];
-      const path = parts.slice(0, -1).join(':');
-      div.innerHTML = '<span class="acct-leaf">' + esc(leaf) + '</span> <span class="acct-path">' + esc(path) + '</span>';
-      div.onclick = () => { selectedAccount = a; acctSearch.value = a; acctDD.classList.remove('open'); };
-      acctDD.appendChild(div);
-    });
-  }
-
-  acctSearch.onfocus = () => { renderAcctDropdown(acctSearch.value); acctDD.classList.add('open'); };
-  acctSearch.oninput = () => { renderAcctDropdown(acctSearch.value); acctDD.classList.add('open'); };
-  document.addEventListener('click', (e) => {
-    if (!e.target.closest('.acct-picker')) acctDD.classList.remove('open');
-  });
-
-  // ── Apply to selected ──
-  document.getElementById('rv-apply-sel').onclick = () => {
-    if (!selectedAccount) { alert('Select an account first'); return; }
-    if (selected.size === 0) { alert('Select rows first (click/shift-click)'); return; }
-    rows.forEach(r => {
-      if (selected.has(r._idx)) {
-        r.Account = selectedAccount;
-        r.Confidence = 'override';
-        r.MatchReason = 'User override (review)';
-        r._changed = true;
-      }
-    });
-    renderTable();
-  };
-
-  // ── Apply to matching ──
-  document.getElementById('rv-apply-match').onclick = () => {
-    if (!selectedAccount) { alert('Select an account first'); return; }
-    if (selected.size === 0) { alert('Select a row first to define the pattern'); return; }
-    // Get descriptions of selected rows, build patterns
-    const selDescs = new Set();
-    rows.forEach(r => { if (selected.has(r._idx)) selDescs.add(r.Description); });
-    let matchCount = 0;
-    rows.forEach(r => {
-      if (selDescs.has(r.Description)) {
-        r.Account = selectedAccount;
-        r.Confidence = 'override';
-        r.MatchReason = 'User override (batch match)';
-        r._changed = true;
-        matchCount++;
-      }
-    });
-    alert('Applied to ' + matchCount + ' matching rows');
-    renderTable();
-  };
-
-  // ── Auto-sync save payload to global (Gradio reads via js parameter) ──
-  function syncPayload() {
-    const changes = rows.filter(r => r._changed).map(r => ({
-      idx: r._idx,
-      description: r.Description,
-      account: r.Account,
-      confidence: r.Confidence,
-      matchReason: r.MatchReason,
-    }));
-    window._rvSavePayload = JSON.stringify({
-      gnucash_file: GNUCASH_FILE,
-      csv_path: CSV_PATH,
-      changes: changes,
-      all_rows: rows.map(r => {
-        const out = {};
-        for (const c of COLS) out[c.key] = r[c.key] || '';
-        out['Transaction ID'] = r['Transaction ID'] || '';
-        out['Currency'] = r['Currency'] || 'INR';
-        return out;
-      }),
-    });
-  }
-  // Sync after every change
-  const _origApplySel = document.getElementById('rv-apply-sel').onclick;
-  const _origApplyMatch = document.getElementById('rv-apply-match').onclick;
-  document.getElementById('rv-apply-sel').onclick = function(e) { _origApplySel.call(this, e); syncPayload(); };
-  document.getElementById('rv-apply-match').onclick = function(e) { _origApplyMatch.call(this, e); syncPayload(); };
-  syncPayload();
-
-  // ── Table rendering ──
-  function renderTable() {
-    const thead = document.getElementById('rv-thead');
-    const tbody = document.getElementById('rv-tbody');
-
-    // Header
-    thead.innerHTML = '<tr>' + COLS.map(c =>
-      '<th data-col="' + c.key + '">' + c.label +
-      (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
-      '</th>'
-    ).join('') + '</tr>';
-    thead.querySelectorAll('th').forEach(th => {
-      th.onclick = () => {
-        const col = th.dataset.col;
-        if (col === sortCol) { sortAsc = !sortAsc; sortDirBtn.textContent = sortAsc ? '↑ Asc' : '↓ Desc'; }
-        else { sortCol = col; sortDD.value = col; sortAsc = true; sortDirBtn.textContent = '↑ Asc'; }
-        renderTable();
-      };
-    });
-
-    // Column filter row
-    const existingFilter = thead.querySelector('.filter-row');
-    if (!existingFilter) {
-      const fRow = document.createElement('tr');
-      fRow.className = 'filter-row';
-      COLS.forEach(c => {
-        const td = document.createElement('td');
-        const inp = document.createElement('input');
-        inp.type = 'text';
-        inp.placeholder = '\u2315';
-        inp.dataset.col = c.key;
-        inp.value = colFilters[c.key] || '';
-        inp.oninput = () => { colFilters[c.key] = inp.value; activeFilterCol = c.key; renderTable(); };
-        inp.onclick = (e) => e.stopPropagation();
-        td.appendChild(inp);
-        fRow.appendChild(td);
-      });
-      thead.appendChild(fRow);
-    } else {
-      existingFilter.querySelectorAll('input').forEach(inp => {
-        inp.value = colFilters[inp.dataset.col] || '';
-      });
-    }
-
-    // Filter
-    let filtered;
-    if (filterConf === 'contra') {
-      filtered = rows.filter(r => !!r._contra);
-    } else {
-      filtered = filterConf ? rows.filter(r => (r.Confidence||'').toLowerCase() === filterConf) : rows;
-    }
-    // Column text filters
-    for (const [col, q] of Object.entries(colFilters)) {
-      if (!q) continue;
-      const ql = q.toLowerCase();
-      filtered = filtered.filter(r => ((r[col]||'') + '').toLowerCase().includes(ql));
-    }
-
-    // Sort
-    filtered = [...filtered].sort((a, b) => {
-      let va = a[sortCol] || '', vb = b[sortCol] || '';
-      if (sortCol === 'Confidence') {
-        va = CONF_ORDER[va.toLowerCase()] ?? 99;
-        vb = CONF_ORDER[vb.toLowerCase()] ?? 99;
-      } else if (sortCol === DEPOSIT_KEY || sortCol === WITHDRAWAL_KEY || sortCol === 'Balance') {
-        va = parseFloat(va) || 0; vb = parseFloat(vb) || 0;
-      }
-      if (va < vb) return sortAsc ? -1 : 1;
-      if (va > vb) return sortAsc ? 1 : -1;
-      return 0;
-    });
-
-    // Render rows
-    tbody.innerHTML = '';
-    filtered.forEach(r => {
-      const tr = document.createElement('tr');
-      if (selected.has(r._idx)) tr.classList.add('selected');
-      if (r._contra) {
-        tr.classList.add('contra-row');
-        if (r._contra_status) tr.classList.add(r._contra_status);
-      }
-      tr.dataset.idx = r._idx;
-
-      // confirmed => booked to bank (green "TRANSFER"); possible => amber hint.
-      const contraStatus = r._contra_status || 'possible';
-      const contraLabel = contraStatus === 'confirmed' ? 'TRANSFER' : 'POSSIBLE';
-
-      COLS.forEach(c => {
-        const td = document.createElement('td');
-        let val = r[c.key] || '';
-        if (c.key === 'Date' && r._contra) {
-          // Badge on the leftmost cell so it is never clipped by the Reason
-          // column's max-width/ellipsis. title carries the match explanation.
-          td.innerHTML = '<span class="contra-badge ' + esc(contraStatus) +
-            '" title="' + esc(r._contra) + '">' + contraLabel + '</span> ' + esc(val);
-          td.title = r._contra;
-        } else if (c.key === 'Confidence') {
-          const cls = 'conf-' + (val||'none').toLowerCase();
-          td.innerHTML = '<span class="' + cls + '">' + esc(val) + '</span>';
-          if (r._changed) td.innerHTML += '<span class="changed-marker">*</span>';
-        } else if (c.key === 'Account' && r._changed) {
-          td.innerHTML = esc(val) + '<span class="changed-marker"> *</span>';
-          td.title = 'Changed from: ' + r._origAccount;
-        } else if (c.key === 'MatchReason' && r._contra) {
-          td.innerHTML = esc(val) + '<span class="contra-badge ' + esc(contraStatus) +
-            '" title="' + esc(r._contra) + '">' + contraLabel + '</span>';
-          td.title = r._contra;
-        } else {
-          td.textContent = val;
-          td.title = val;
+    if contra:
+        tags.append("contra")
+        status = contra.get("status") or (
+            "confirmed" if contra.get("confidence") == "high" else "possible"
+        )
+        rowclass = "tone-green" if status == "confirmed" else "tone-amber"
+        badges["Date"] = {
+            "text": "TRANSFER" if status == "confirmed" else "POSSIBLE",
+            "cls": "green" if status == "confirmed" else "amber",
         }
-        tr.appendChild(td);
-      });
+        note = contra.get("reason") or "Possible contra"
 
-      tr.onclick = (e) => handleRowClick(r._idx, e);
-      tbody.appendChild(tr);
-    });
-
-    // Stats
-    const changed = rows.filter(r => r._changed).length;
-    const stats = document.getElementById('rv-stats');
-    stats.textContent = filtered.length + '/' + rows.length + ' rows' +
-      (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '') +
-      (contraCount ? ' | ⚠ ' + contraSummary() + ' transfer' : '');
-
-    // Re-focus the filter input that was being typed in
-    if (activeFilterCol) {
-      const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
-      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
-    }
-  }
-
-  function handleRowClick(idx, e) {
-    if (e.shiftKey && lastClickIdx !== null) {
-      // Range select
-      const allIdxs = [...document.querySelectorAll('#rv-tbody tr')].map(tr => parseInt(tr.dataset.idx));
-      const startPos = allIdxs.indexOf(lastClickIdx);
-      const endPos = allIdxs.indexOf(idx);
-      if (startPos >= 0 && endPos >= 0) {
-        const from = Math.min(startPos, endPos);
-        const to = Math.max(startPos, endPos);
-        for (let i = from; i <= to; i++) selected.add(allIdxs[i]);
-      }
-    } else if (e.ctrlKey || e.metaKey) {
-      // Toggle single
-      if (selected.has(idx)) selected.delete(idx); else selected.add(idx);
-    } else {
-      // Single select
-      selected.clear();
-      selected.add(idx);
-    }
-    lastClickIdx = idx;
-    renderTable();
-  }
-
-  // Initial render
-  renderTable();
-})();
-</script>
-<img src="data:," onerror="eval(document.getElementById('rv-init-code').textContent)" style="display:none">
-"""
-
-
-# ---------------------------------------------------------------------------
-# Python backend: load CSV + account tree → HTML, save handler
-# ---------------------------------------------------------------------------
-
-def _load_review_data(csv_path: str, gnucash_path: str) -> str:
-    """Load mapped CSV + GnuCash account tree, return interactive HTML."""
-    if not csv_path or not gnucash_path:
-        return "<p>Select both a mapped CSV and a GnuCash file, then click Load.</p>"
-
-    csv_p = Path(csv_path)
-    gc_p = Path(gnucash_path)
-
-    if not csv_p.is_file():
-        return f"<p>CSV not found: {csv_p.name}</p>"
-    if not gc_p.is_file():
-        return f"<p>GnuCash file not found: {gc_p.name}</p>"
-
-    # Read CSV
-    with open(csv_p, "r", encoding="utf-8", errors="replace") as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
-
-    if not rows:
-        return "<p>CSV is empty — no rows to review.</p>"
-
-    # Extract account tree
-    accounts = _extract_account_tree(str(gc_p))
-    if not accounts:
-        accounts = sorted({r.get("Account", "") for r in rows if r.get("Account")})
-
-    # Load contra sidecar if it exists
-    contra_path = csv_p.with_suffix('.contra.json')
-    contra_flags = {}
-    if contra_path.is_file():
-        try:
-            with open(contra_path, "r", encoding="utf-8") as cf:
-                raw = json.load(cf)
-                # Keys are stringified row indices → convert for lookup
-                contra_flags = {str(k): v for k, v in raw.items()}
-        except Exception:
-            pass
-
-    # Merge contra info into rows. status is "confirmed" (high-confidence,
-    # reference-matched, and the Account has already been booked to the
-    # counterparty bank) or "possible" (amount+date only — a review hint that
-    # left the mapper's account untouched).
-    for i, row in enumerate(rows):
-        ci = contra_flags.get(str(i))
-        if ci:
-            row['_contra'] = ci.get('reason', 'Possible contra')
-            row['_contra_conf'] = ci.get('confidence', 'medium')
-            row['_contra_status'] = ci.get(
-                'status',
-                'confirmed' if ci.get('confidence') == 'high' else 'possible',
-            )
-        else:
-            row['_contra'] = ''
-            row['_contra_conf'] = ''
-            row['_contra_status'] = ''
-
-    # Build HTML with data embedded
-    html = _REVIEW_HTML
-    html = html.replace("%%DATA_JSON%%", _js_json(rows))
-    html = html.replace("%%ACCOUNTS_JSON%%", _js_json(accounts))
-    html = html.replace("%%GNUCASH_FILE_JSON%%", _js_json(str(gc_p)))
-    html = html.replace("%%CSV_PATH_JSON%%", _js_json(str(csv_p)))
-    return html
+    row["_tags"] = tags
+    row["_rowclass"] = rowclass
+    if badges:
+        row["_badges"] = badges
+    row["_note"] = note
 
 
 def _generalize_pattern(desc: str) -> str:
@@ -695,7 +163,10 @@ def _generalize_pattern(desc: str) -> str:
 
     Strips trailing reference numbers (5+ digits), dates (DD-MM-YYYY,
     DD/MM/YYYY), and trailing whitespace/punctuation so that future
-    transactions with different ref numbers still match.
+    transactions with different ref numbers still match. Applied only at
+    SAVE time (when persisting an override), not at "Apply to matching"
+    time — that button matches on the exact Description text, same as
+    before.
     """
     s = desc.strip()
     # Strip trailing reference numbers (e.g. -5150102, /8089934)
@@ -711,26 +182,118 @@ def _generalize_pattern(desc: str) -> str:
     return re.escape(s) + r'.*'
 
 
-def _save_changes(changes_json: str) -> tuple[str, str | None]:
+# ---------------------------------------------------------------------------
+# Spec + load
+# ---------------------------------------------------------------------------
+
+def _spec(
+    picker_items: list[PickerItem], csv_path: str, gnucash_path: str,
+    deposit_key: str, withdrawal_key: str,
+) -> ReviewSpec:
+    return ReviewSpec(
+        app_id=APP_ID,
+        columns=[
+            Column("Date", "Date"),
+            Column("Description", "Description"),
+            Column(TARGET_COL, "Account"),
+            Column("Transfer Account", "Transfer Acct", sortable=False),
+            Column(deposit_key, "Deposit", sort="number"),
+            Column(withdrawal_key, "Withdrawal", sort="number"),
+            Column("Balance", "Balance", sortable=False),
+            Column("Confidence", "Conf", sort="order", order=CONF_ORDER),
+            Column("MatchReason", "Reason"),
+        ],
+        target_col=TARGET_COL,
+        payload_var=PAYLOAD_VAR,
+        picker_label="Assign account:",
+        picker_placeholder="Type to search accounts…",
+        picker_items=picker_items,
+        status_options=[
+            ("suspense", "Suspense"),
+            ("low", "Low"),
+            ("none", "Unmatched"),
+            ("smart", "Smart"),
+            ("override", "Override"),
+            ("medium", "Medium"),
+            ("high", "High"),
+            ("contra", "Contra"),
+        ],
+        status_label="Filter:",
+        default_sort="Confidence",
+        apply_matching_on="Description",
+        apply_matching_label="Apply to matching",
+        also_set={"Confidence": "override", "MatchReason": "User override (review)"},
+        also_set_matching={"Confidence": "override", "MatchReason": "User override (batch match)"},
+        context={"csv_path": csv_path, "gnucash_file": gnucash_path},
+    )
+
+
+def _load_review_data(csv_path: str, gnucash_path: str) -> str:
+    """Load mapped CSV + GnuCash account tree, return interactive HTML."""
+    if not csv_path or not gnucash_path:
+        return "<p>Select both a mapped CSV and a GnuCash file, then click Load.</p>"
+
+    csv_p = Path(csv_path)
+    gc_p = Path(gnucash_path)
+
+    if not csv_p.is_file():
+        return f"<p>CSV not found: {csv_p.name}</p>"
+    if not gc_p.is_file():
+        return f"<p>GnuCash file not found: {gc_p.name}</p>"
+
+    with open(csv_p, "r", encoding="utf-8", errors="replace") as f:
+        rows = list(csv.DictReader(f))
+
+    if not rows:
+        return "<p>CSV is empty — no rows to review.</p>"
+
+    accounts = _extract_account_tree(str(gc_p))
+    if not accounts:
+        accounts = sorted({r.get(TARGET_COL, "") for r in rows if r.get(TARGET_COL)})
+
+    contra_flags = _load_contra_sidecar(csv_p)
+    for i, row in enumerate(rows):
+        _row_presentation(row, contra_flags.get(str(i)))
+
+    # Fallback column keys for older CSVs.
+    deposit_key = "Deposit - Amount Negated" if "Deposit - Amount Negated" in rows[0] else "Deposit"
+    withdrawal_key = "Withdrawal - Amount" if "Withdrawal - Amount" in rows[0] else "Withdrawal"
+
+    picker_items = [PickerItem(value=a, primary=a) for a in accounts]
+    spec = _spec(picker_items, str(csv_p), str(gc_p), deposit_key, withdrawal_key)
+    return payload_box_css(spec.payload_box_id) + build_html(spec, rows)
+
+
+# ---------------------------------------------------------------------------
+# Save logic
+# ---------------------------------------------------------------------------
+
+def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     """Process save from the review UI — write overrides + re-export CSV.
 
-    Returns (status_markdown, csv_path_or_None).
+    `changes_json` is the engine's syncPayload() shape: {context, changes,
+    all_rows}. Each `changes` entry carries {_idx, _orig, <one key per
+    declared Column>, plus guid/Sr/'Transaction ID'/'CN No' when present on
+    the row} — `_orig` is the Account value BEFORE this edit.
+
+    Returns (status_markdown, download_file_update).
     """
     if not changes_json or not changes_json.strip():
-        return "No changes to save.", gr.update(visible=False)
+        return "No changes to save.", gr.update(interactive=False, value=None)
 
     try:
-        payload = json.loads(changes_json)
-    except json.JSONDecodeError as e:
-        return f"Error parsing changes: {e}", gr.update(visible=False)
+        payload = parse_payload(changes_json)
+    except ValueError as e:
+        return f"Error parsing changes: {e}", gr.update(interactive=False, value=None)
 
-    gnucash_file = payload.get("gnucash_file", "")
-    csv_path = payload.get("csv_path", "")
-    changes = payload.get("changes", [])
-    all_rows = payload.get("all_rows", [])
+    changes = payload["changes"]
+    context = payload["context"]
+    all_rows = payload["all_rows"]
+    gnucash_file = context.get("gnucash_file", "")
+    csv_path = context.get("csv_path", "")
 
     if not changes:
-        return "No changes to save.", gr.update(visible=False)
+        return "No changes to save.", gr.update(interactive=False, value=None)
 
     # ── Save overrides YAML ──
     try:
@@ -755,14 +318,14 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
 
         new_overrides = []
         for ch in changes:
-            desc = ch.get("description", "")
-            account = ch.get("account", "")
+            desc = ch.get("Description", "")
+            account = ch.get(TARGET_COL, "")
             if not desc or not account:
                 continue
-            # Never save overrides that map to Suspense — those are unresolved rows
+            # Never save overrides that map to Suspense — those are unresolved rows.
             if "Suspense" in account:
                 continue
-            # Generalize pattern — strip trailing refs/dates for broader matching
+            # Generalize pattern — strip trailing refs/dates for broader matching.
             pattern = _generalize_pattern(desc)
             if pattern not in existing_patterns:
                 new_overrides.append({"pattern": pattern, "account": account})
@@ -809,7 +372,6 @@ def _save_changes(changes_json: str) -> tuple[str, str | None]:
                 writer.writerows(all_rows)
             export_msg = f"CSV re-exported: {csv_p.name} ({len(all_rows)} rows)"
             # Copy to download staging dir so Gradio's file server can serve it
-            import shutil
             try:
                 staging = _config_mod.download_staging_dir()
                 staging.mkdir(parents=True, exist_ok=True)
@@ -892,7 +454,7 @@ def render(container_tab=None) -> None:
     # gr.State has no frontend element, so the js parameter can't inject into it.
     _payload_box = gr.Textbox(
         value="", show_label=False, container=False, lines=1,
-        elem_id="rv-payload-box",
+        elem_id=f"{APP_ID}-payload-box",
     )
 
     load_btn.click(
@@ -904,7 +466,7 @@ def render(container_tab=None) -> None:
         fn=_save_changes,
         inputs=[_payload_box],
         outputs=[save_result, download_file],
-        js="(x) => window._rvSavePayload || ''",
+        js=f"(x) => window.{PAYLOAD_VAR} || ''",
     )
 
     # ── Reset: clear the loaded review + logs, reset pickers to defaults.
@@ -926,5 +488,5 @@ def render(container_tab=None) -> None:
         inputs=[],
         outputs=[csv_dropdown, gnucash_file, review_html, save_result,
                  download_file, _payload_box],
-        js="() => { window._rvSavePayload = ''; }",
+        js=f"() => {{ window.{PAYLOAD_VAR} = ''; }}",
     )
