@@ -40,6 +40,15 @@ from __future__ import annotations
 import re, sys, glob, subprocess
 from pathlib import Path
 
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_qpdf  # noqa: E402
+
 
 # ---------- helpers ----------
 def num(s):
@@ -109,7 +118,8 @@ def _anchored_line(cn_no, leg):
 
 
 def decrypt(pdf, pw, out):
-    r = subprocess.run(["qpdf", f"--password={pw}", "--decrypt", pdf, out],
+    qpdf_path = resolve_qpdf()
+    r = subprocess.run([qpdf_path, f"--password={pw}", "--decrypt", pdf, out],
                        capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"qpdf failed on {pdf}: {r.stderr.strip()}")

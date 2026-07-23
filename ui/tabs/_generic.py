@@ -230,21 +230,31 @@ def _default_model_value(choices: list[tuple[str, str]]):
 
 
 def _check_native_binaries(skill: SkillInfo) -> str | None:
-    """Return an error string if required native binaries are missing, else None."""
+    """Return an error string if required native binaries are missing, else None.
+
+    PATH injection (ensure_native_path()) runs for EVERY skill unconditionally,
+    regardless of what it declares in skill.yaml — a skill that shells out to a
+    native binary without declaring it must still get the vendored copy ahead
+    of any system-installed one on PATH (see the 26AS/Xpdf incident this
+    guards against). Only the "missing binaries" error reporting below stays
+    gated on the skill's declared `needed` list.
+    """
+    from .. import _native
+    status = _native.ensure_native_path()
+
     needed = skill.requires.native_binaries
     if not needed:
         return None
-
-    from .. import _native
-    status = _native.ensure_native_path()
     if status.ok:
         return None
 
     missing = []
     if "tesseract" in needed and status.tesseract_exe is None:
         missing.append("Tesseract OCR")
-    if "poppler" in needed and status.pdftoppm_exe is None:
-        missing.append("Poppler (pdftoppm)")
+    if "poppler" in needed and (status.pdftoppm_exe is None or status.pdftotext_exe is None):
+        missing.append("Poppler (pdftoppm/pdftotext)")
+    if "qpdf" in needed and status.qpdf_exe is None:
+        missing.append("qpdf")
     if missing:
         return (
             f"Error: this build is missing native binaries — {', '.join(missing)}. "

@@ -18,12 +18,22 @@ This script handles:
 import os
 import re
 import subprocess
+import sys
 import json
 import hashlib
 from pathlib import Path
 from collections import defaultdict
 import shutil
 from datetime import datetime
+
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_qpdf  # noqa: E402
 
 def calculate_md5(filepath):
     """Calculate MD5 hash of a file."""
@@ -379,6 +389,11 @@ def decrypt_pdf(pdf_path, passwords, output_path):
     # Always try empty password first (handles unencrypted or owner-only PDFs)
     all_passwords = [''] + list(passwords)
 
+    # Resolve the vendored qpdf by absolute path (not a bare name trusted to
+    # PATH) once per call; raises loudly if neither the vendored copy nor a
+    # PATH fallback is found.
+    qpdf_path = resolve_qpdf()
+
     last_error = ''
     for password in all_passwords:
         # Try each password with multiple qpdf flag combinations to handle malformed PDFs
@@ -390,7 +405,7 @@ def decrypt_pdf(pdf_path, passwords, output_path):
         ]
         for extra_flags in flag_sets:
             try:
-                cmd = ['qpdf', '--password=' + password] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
+                cmd = [qpdf_path, '--password=' + password] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 # Exit code 0 = success, 3 = success with warnings
                 if result.returncode in (0, 3):
@@ -666,3 +681,29 @@ if __name__ == "__main__":
     print(f"  Decrypted_PDFs_Correct/ - {sum(results['organization'].values())} organized PDFs")
     print(f"  Duplicates_Backup/ - {results['duplicates_removed']} archived duplicates")
     print(f"  verification_checksums.json - MD5 hashes for {len(results['checksums'])} files")
+
+    # PROMINENT (not fatal) warning: PDFs were found but NONE decrypted
+    # successfully. This is the "zero result" case analogous to zero
+    # transactions in create_cc_transaction_list.py -- it can legitimately
+    # happen (e.g. every password tried is wrong), but it looks identical to
+    # a broken qpdf resolution, so it must never pass by quietly. Carries
+    # the same diagnostics style: resolved binary path.
+    if results['total_analyzed'] > 0 and results['successfully_decrypted'] == 0:
+        try:
+            resolved_qpdf = resolve_qpdf()
+        except FileNotFoundError as e:
+            resolved_qpdf = f"<could not resolve: {e}>"
+        print(
+            "\n"
+            "*" * 80 + "\n"
+            "*** WARNING: ZERO PDFs SUCCESSFULLY DECRYPTED ***\n"
+            "*" * 80 + "\n"
+            f"  PDFs analyzed        : {results['total_analyzed']}\n"
+            f"  Successfully decrypted: 0\n"
+            f"  Resolved qpdf binary : {resolved_qpdf}\n"
+            "  This can legitimately happen if every password tried is wrong for\n"
+            "  every PDF in this batch -- but it is ALSO exactly what a broken qpdf\n"
+            "  resolution would produce. Verify the password list and the qpdf\n"
+            "  binary above before trusting an empty Decrypted_PDFs_Correct/.\n"
+            + "*" * 80 + "\n"
+        )

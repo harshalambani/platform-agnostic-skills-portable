@@ -52,6 +52,7 @@ class NativeStatus:
     tessdata_dir: Path | None
     poppler_bin:  Path | None      # the bin/ folder, not pdftoppm.exe itself
     pdftoppm_exe: Path | None
+    pdftotext_exe: Path | None     # same poppler bin/ folder — used by 26AS/CC skills
     qpdf_bin:     Path | None      # the bin/ folder containing qpdf.exe
     qpdf_exe:     Path | None
     mode: str                      # "frozen" or "source"
@@ -70,6 +71,10 @@ class NativeStatus:
             parts.append(f"pdftoppm={self.pdftoppm_exe.name}")
         else:
             parts.append("pdftoppm=MISSING")
+        if self.pdftotext_exe and self.pdftotext_exe.is_file():
+            parts.append(f"pdftotext={self.pdftotext_exe.name}")
+        else:
+            parts.append("pdftotext=MISSING")
         if self.qpdf_exe and self.qpdf_exe.is_file():
             parts.append(f"qpdf={self.qpdf_exe.name}")
         else:
@@ -136,6 +141,9 @@ def native_status() -> NativeStatus:
     pdftoppm = (pop_bin / "pdftoppm.exe") if pop_bin else None
     if pdftoppm is not None and not pdftoppm.is_file():
         pdftoppm = None
+    pdftotext = (pop_bin / "pdftotext.exe") if pop_bin else None
+    if pdftotext is not None and not pdftotext.is_file():
+        pdftotext = None
     qpdf_bin = (qpdf_root / "bin") if qpdf_root else None
     if qpdf_bin is not None and not qpdf_bin.is_dir():
         qpdf_bin = None
@@ -147,6 +155,7 @@ def native_status() -> NativeStatus:
         tessdata_dir=tessdata,
         poppler_bin=pop_bin,
         pdftoppm_exe=pdftoppm,
+        pdftotext_exe=pdftotext,
         qpdf_bin=qpdf_bin,
         qpdf_exe=qpdf_exe,
         mode=mode,
