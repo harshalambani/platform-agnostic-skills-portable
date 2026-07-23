@@ -67,6 +67,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   module name instead, so it no longer collides with other skills' same-named
   `agent.py` modules regardless of collection order.
 
+## [2.18.1] — 2026-07-23
+
+### Added
+- **The 26AS Journal review screen now regenerates a Part-I-only journal on every
+  save.** Part II (15G/15H) rows carry their own `15GJ` transaction-ID series, and
+  in books where those entries were posted by hand they must be dropped before
+  import or the reclassification double-books. Filtering them out was a manual
+  step, and worse, a step that silently expired: the review screen rewrites the
+  *full* journal, so any hand-filtered import-ready copy went stale the moment
+  anyone used the screen. The screen now writes a sibling
+  `…-tds-journals-partI.csv` alongside the full journal every time it saves, with
+  its own download button, so the filtered file can never lag the reviewed one.
+  Partitioning happens per whole transaction — a transaction is assigned to Part I
+  or Part II once, by its Transaction ID, so a multi-split entry can never be
+  half-dropped — and both sides are re-verified to sum to zero. When a run has no
+  Part II rows at all, no sibling is written and any stale one from a previous save
+  is deleted rather than left behind.
+
+### Fixed
+- **The Part I split's error path claimed the full journal was safe to import.**
+  If the splitter failed to load, the save handler could not distinguish "this run
+  has no Part II rows" from "the split never ran" — both left the output path
+  unset — and fell into the reassuring branch, telling the user the full journal
+  was the only file to import. That is precisely the double-booking the feature
+  exists to prevent, reintroduced inside its own error handler, and it left a stale
+  `-partI.csv` on disk to be mistaken for a fresh one. Failure is now tracked
+  explicitly rather than inferred from a missing path: the screen says plainly that
+  the split could not be regenerated, refuses to name any file as safe, and deletes
+  the stale sibling (reporting the exact path if the delete itself fails).
+
 ## [2.18.0] — 2026-07-23
 
 ### Added
