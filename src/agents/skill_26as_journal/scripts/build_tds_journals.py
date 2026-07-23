@@ -129,6 +129,14 @@ CATEGORY_SERIES = {
 }
 
 
+# Part II's series token, derived from CATEGORY_SERIES rather than restated
+# as the literal "15GJ" -- split_part_ii() (below) and anything that needs to
+# recognise a Part II Transaction ID must key off this constant, so a future
+# rename of the series in CATEGORY_SERIES can't silently desync the splitter
+# from the id the journal was actually built with.
+PART_II_SERIES = CATEGORY_SERIES["G"]
+
+
 def series_for_category(category: str) -> str:
     """Resolve a Journal.category to its Transaction ID series prefix.
 
@@ -799,44 +807,164 @@ def _fmt(x: float) -> str:
     return f"{x:.2f}" if x else ""
 
 
-def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
+# Column order for the GnuCash multi-split journal CSV. Shared by
+# build_csv_rows()/write_csv() here and by ui/tabs/tds_journal_review.py's
+# _JOURNAL_HEADERS (restated there, not imported, because that module reads
+# rows back with csv.DictReader rather than building them from Journal
+# objects -- but the two lists must stay in the same order and shape).
+JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description", "Account",
+                   "Amount", "Currency"]
+
+
+def build_csv_rows(journals: list[Journal], fy: str) -> list[dict]:
+    """Build one row dict per split, in JOURNAL_HEADERS order/shape.
+
+    This is the single place that turns Journal objects into the CSV row
+    shape everything else operates on: write_csv() writes these rows
+    verbatim, and split_part_ii() (below) partitions this exact shape -- the
+    review screen's Save path partitions the same shape read back off disk
+    via csv.DictReader, so one splitter serves both call sites.
+    """
     date = journal_date()
+    fy_pfx = fy_prefix(fy)
+    rows: list[dict] = []
+    for j in journals:
+        # Each category gets its own ID series (see CATEGORY_SERIES): Part
+        # I Sr.1, Part II Sr.1 and Part VI Sr.1 are different parties, and
+        # a shared prefix would make GnuCash's multi-split importer fuse
+        # their splits into one unbalanced transaction.
+        kind = series_for_category(j.category)
+        if j.category == "T":
+            tag, part_label = "TCS", "Part VI"
+        elif j.category == "G":
+            tag, part_label = "15G/15H TDS", "Part II (15G/15H)"
+        else:
+            tag, part_label = "TDS", "Part I"
+        txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
+        desc = (f"{part_label} {tag} FY {fy} - {j.deductor} (Sec {j.section_label})"
+                 if fy else
+                 f"{part_label} {tag} - {j.deductor} (Sec {j.section_label})")
+        # Repeat Date / Transaction ID / Description on EVERY split row.
+        # GnuCash's multi-split importer groups splits by matching
+        # transaction fields (and the Transaction ID), NOT by blank-date
+        # continuation rows -- blank rows show up as parse errors.
+        for s in j.splits:
+            signed = round(s.debit - s.credit, 2)   # Dr +, Cr -
+            # Number duplicates Transaction ID -> GnuCash visible Num field.
+            rows.append({
+                "Date": date, "Transaction ID": txn_id, "Number": txn_id,
+                "Description": desc, "Account": s.account,
+                "Amount": f"{signed:.2f}", "Currency": CURRENCY,
+            })
+    return rows
+
+
+def write_rows_csv(rows: list[dict], out_path: Path) -> None:
+    """Write JOURNAL_HEADERS-shaped row dicts to out_path (multi-split
+    GnuCash layout). Shared by write_csv() and the Part-I-only split file so
+    the two files are byte-for-byte the same dialect."""
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        # GnuCash-native multi-split layout. One signed "Amount" column per
-        # split (maps to the importer's "Amount" column type). GnuCash's sign
-        # convention: Debit = positive, Credit = negative; per transaction the
-        # Amounts sum to zero. (If a given build of GnuCash imports the signs
-        # reversed, map this column to "Amount (Negated)" instead.)
-        w.writerow(["Date", "Transaction ID", "Number", "Description", "Account",
-                    "Amount", "Currency"])
-        fy_pfx = fy_prefix(fy)
-        for j in journals:
-            # Each category gets its own ID series (see CATEGORY_SERIES): Part
-            # I Sr.1, Part II Sr.1 and Part VI Sr.1 are different parties, and
-            # a shared prefix would make GnuCash's multi-split importer fuse
-            # their splits into one unbalanced transaction.
-            kind = series_for_category(j.category)
-            if j.category == "T":
-                tag, part_label = "TCS", "Part VI"
-            elif j.category == "G":
-                tag, part_label = "15G/15H TDS", "Part II (15G/15H)"
-            else:
-                tag, part_label = "TDS", "Part I"
-            txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
-            desc = (f"{part_label} {tag} FY {fy} - {j.deductor} (Sec {j.section_label})"
-                     if fy else
-                     f"{part_label} {tag} - {j.deductor} (Sec {j.section_label})")
-            # Repeat Date / Transaction ID / Description on EVERY split row.
-            # GnuCash's multi-split importer groups splits by matching
-            # transaction fields (and the Transaction ID), NOT by blank-date
-            # continuation rows — blank rows show up as parse errors.
-            for s in j.splits:
-                signed = round(s.debit - s.credit, 2)   # Dr +, Cr -
-                # Number duplicates Transaction ID -> GnuCash visible Num field.
-                w.writerow([date, txn_id, txn_id, desc, s.account,
-                            f"{signed:.2f}", CURRENCY])
+        w = csv.DictWriter(f, fieldnames=JOURNAL_HEADERS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
+    # GnuCash-native multi-split layout. One signed "Amount" column per split
+    # (maps to the importer's "Amount" column type). GnuCash's sign
+    # convention: Debit = positive, Credit = negative; per transaction the
+    # Amounts sum to zero. (If a given build of GnuCash imports the signs
+    # reversed, map this column to "Amount (Negated)" instead.)
+    write_rows_csv(build_csv_rows(journals, fy), out_path)
+
+
+def _series_token(txn_id: str) -> Optional[str]:
+    """Parse the series token out of a Transaction ID shaped
+    f"{fy_prefix}-{kind}{sr:02d}" -- everything after the LAST '-', with
+    trailing digits stripped. fy_prefix itself may contain '-' (it doesn't
+    today, but nothing guarantees that), so splitting on the FIRST '-' would
+    be wrong; rsplit(..., 1) is deliberate. Returns None if txn_id has no '-'
+    or the tail is entirely digits (no series letters survive the strip)."""
+    txn_id = (txn_id or "").strip()
+    if "-" not in txn_id:
+        return None
+    tail = txn_id.rsplit("-", 1)[1]
+    token = tail.rstrip("0123456789")
+    return token or None
+
+
+def split_part_ii(journal_rows: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    """Partition JOURNAL_HEADERS-shaped CSV row dicts into
+    (part_i_rows, part_ii_rows, problems).
+
+    Whole TRANSACTIONS are partitioned, never individual splits: every row
+    sharing a Transaction ID goes to the same side, decided once per id (the
+    first row seen for that id) rather than per row -- splitting a
+    transaction across both files would silently unbalance whichever file
+    lost a split, the exact failure this feature exists to prevent.
+
+    A Transaction ID whose series token cannot be parsed is kept in
+    part_i_rows -- NOT dropped. Silently discarding a real journal entry
+    because its id looked strange is a far worse failure than leaving it in
+    a file the user reviews before import; the id is also appended to
+    `problems` so the anomaly is never silent either.
+    """
+    problems: list[str] = []
+    side_by_txn: dict[str, str] = {}   # txn_id -> "II" or "I"
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        if txn_id in side_by_txn:
+            continue
+        token = _series_token(txn_id)
+        if token is None:
+            side_by_txn[txn_id] = "I"
+            problems.append(
+                f"Transaction ID {txn_id!r} has no parseable series -- "
+                "kept in the Part I file rather than dropped"
+            )
+        elif token == PART_II_SERIES:
+            side_by_txn[txn_id] = "II"
+        else:
+            side_by_txn[txn_id] = "I"
+
+    part_i_rows: list[dict] = []
+    part_ii_rows: list[dict] = []
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        if side_by_txn.get(txn_id) == "II":
+            part_ii_rows.append(row)
+        else:
+            part_i_rows.append(row)
+    return part_i_rows, part_ii_rows, problems
+
+
+def part_i_path_for(out_path: Path) -> Path:
+    """<stem>-tds-journals.csv -> <stem>-tds-journals-partI.csv (sibling),
+    same naming convention as the existing -review.csv sibling."""
+    return out_path.with_name(out_path.stem + "-partI.csv")
+
+
+def write_part_i_split(rows: list[dict], out_path: Path) -> tuple[Optional[str], list[str]]:
+    """Write/delete the Part-I-only sibling of out_path, given the FULL set
+    of just-written journal rows.
+
+    Returns (part_i_output_path_or_None, problems). If no Part II rows exist
+    in `rows`, no file is written -- and if a stale one from a PREVIOUS run
+    is sitting there, it is deleted, because a leftover Part-I file the
+    current run didn't need is exactly the hand-filtered-copy-goes-stale bug
+    this feature replaces. Called both by run() (generation time) and by
+    ui/tabs/tds_journal_review.py's _save_changes() (every re-save), so a
+    hand-filtered copy can never exist without being regenerated in lockstep.
+    """
+    part_i_path = part_i_path_for(out_path)
+    part_i_rows, part_ii_rows, problems = split_part_ii(rows)
+    if not part_ii_rows:
+        if part_i_path.exists():
+            part_i_path.unlink()
+        return None, problems
+    write_rows_csv(part_i_rows, part_i_path)
+    return str(part_i_path), problems
 
 
 def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -> None:
@@ -874,10 +1002,18 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     journals += build_tcs_journals(collectors, accounts,
                                    credit_account=tcs_credit_account,
                                    overrides=tcs_overrides)
-    write_csv(journals, out_path, fy)
+    csv_rows = build_csv_rows(journals, fy)
+    write_rows_csv(csv_rows, out_path)
 
     review_path = out_path.with_name(out_path.stem + "-review.csv")
     write_review(journals, review_path, accounts)
+
+    # Part-I-only sibling for users who post 15G/15H (Part II) by hand in
+    # GnuCash: importing the full journal's 15GJ rows on top of a hand-posted
+    # entry double-books the Interest-on-FD -> NBFC reclassification. This
+    # file is ALWAYS regenerated from the journal just written (never a
+    # stale hand-filtered copy) -- see write_part_i_split's docstring.
+    part_i_output, part_ii_problems = write_part_i_split(csv_rows, out_path)
 
     existing = {a.path for a in accounts}
 
@@ -910,6 +1046,8 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "rows": review_rows,
         "output": str(out_path),
         "review": str(review_path),
+        "part_i_output": part_i_output,
+        "part_ii_problems": part_ii_problems,
     }
 
 
@@ -947,8 +1085,16 @@ def main(argv: list[str]) -> int:
         print("\nAccounts to CREATE in GnuCash before import:")
         for acc in stats["missing_accounts"]:
             print(f"  - {acc}")
+    if stats["part_ii_problems"]:
+        print("\nWarning: could not determine the series for some Transaction "
+              "ID(s) -- kept in the Part I file, not dropped:")
+        for p in stats["part_ii_problems"]:
+            print(f"  - {p}")
     print(f"Saved: {stats['output']}")
     print(f"Review: {stats['review']}")
+    if stats["part_i_output"]:
+        print(f"Part I only (excludes 15G/15H, for hand-posted Part II): "
+              f"{stats['part_i_output']}")
     return 0
 
 

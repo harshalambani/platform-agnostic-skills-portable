@@ -341,6 +341,149 @@ def test_series_for_category_maps_g_to_15gj_and_rejects_unknown():
 
 
 # ---------------------------------------------------------------------------
+# split_part_ii -- the Part-I-only sibling file that fixes the stale
+# hand-filtered-copy bug (see build_tds_journals.py module docstring and
+# split_part_ii's own docstring).
+# ---------------------------------------------------------------------------
+
+def test_part_ii_series_derived_not_hardcoded():
+    # PART_II_SERIES must track CATEGORY_SERIES["G"], not restate "15GJ"
+    # independently -- a rename of the series in one place must not desync
+    # the splitter from the id the journal was actually built with.
+    assert m.PART_II_SERIES == m.CATEGORY_SERIES["G"] == "15GJ"
+
+
+def _row(txn_id, account, amount):
+    return {"Date": "2026-03-31", "Transaction ID": txn_id, "Number": txn_id,
+            "Description": "x", "Account": account, "Amount": f"{amount:.2f}",
+            "Currency": "INR"}
+
+
+def test_split_part_ii_partitions_mixed_journal_tcs_stays_with_part_i():
+    rows = [
+        # TDSJ01 -- Part I, 2 splits
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 100.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -100.0),
+        # TCSJ01 -- Part VI, stays with Part I
+        _row("2526-TCSJ01", "Expense:TCS on Foreign Trip", 50.0),
+        _row("2526-TCSJ01", "Expense:Drawings", -50.0),
+        # 15GJ01 -- Part II, dropped to its own side
+        _row("2526-15GJ01", "Income:Interest:Generic FD", 200.0),
+        _row("2526-15GJ01", "Income:Interest:Bajaj Finance", -200.0),
+    ]
+    part_i, part_ii, problems = m.split_part_ii(rows)
+    assert problems == []
+    assert {r["Transaction ID"] for r in part_i} == {"2526-TDSJ01", "2526-TCSJ01"}
+    assert {r["Transaction ID"] for r in part_ii} == {"2526-15GJ01"}
+    assert len(part_i) == 4 and len(part_ii) == 2
+
+
+def test_split_part_ii_every_side_balances_per_transaction():
+    rows = [
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 25024.0),
+        _row("2526-TDSJ01", "Income:Interest:FD", 225213.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -250237.0),
+        _row("2526-15GJ01", "Income:Interest:FD", 50000.0),
+        _row("2526-15GJ01", "Income:Interest:Bajaj", -50000.0),
+    ]
+    part_i, part_ii, _problems = m.split_part_ii(rows)
+
+    def _totals(side):
+        totals: dict[str, float] = {}
+        for r in side:
+            totals[r["Transaction ID"]] = totals.get(r["Transaction ID"], 0.0) + float(r["Amount"])
+        return totals
+
+    for tid, total in {**_totals(part_i), **_totals(part_ii)}.items():
+        assert abs(total) < 0.01, f"{tid} does not sum to zero: {total}"
+
+
+def test_split_part_ii_drops_multi_split_15gj_transaction_whole():
+    """A 3-split 15GJ transaction (nonzero tax -- Category G's 3-split path)
+    must move to part_ii in its entirety, never half of it left in part_i."""
+    rows = [
+        _row("2526-15GJ01", "Expense:TDS on Interest", 1000.0),
+        _row("2526-15GJ01", "Income:Interest:FD", 24000.0),
+        _row("2526-15GJ01", "Income:Interest:Bajaj", -25000.0),
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 10.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -10.0),
+    ]
+    part_i, part_ii, _problems = m.split_part_ii(rows)
+    assert len(part_ii) == 3
+    assert all(r["Transaction ID"] == "2526-15GJ01" for r in part_ii)
+    assert not any(r["Transaction ID"] == "2526-15GJ01" for r in part_i)
+
+
+def test_split_part_ii_unparseable_id_kept_in_part_i_and_reported():
+    rows = [
+        _row("garbage-with-no-dash-removed", "Expense:X", 10.0),
+    ]
+    rows[0]["Transaction ID"] = "nodashhere"   # no '-' at all -- unparseable
+    part_i, part_ii, problems = m.split_part_ii(rows)
+    assert len(part_i) == 1 and part_ii == []
+    assert problems and "nodashhere" in problems[0]
+
+
+def test_split_part_ii_fy_prefix_containing_dash_still_parses():
+    """fy_prefix may itself contain '-' -- the token must be parsed off the
+    LAST '-', not the first, or a prefix like '25-26' would break the split."""
+    rows = [
+        _row("25-26-15GJ01", "Income:Interest:FD", 100.0),
+        _row("25-26-15GJ01", "Income:Interest:Bajaj", -100.0),
+        _row("25-26-TDSJ01", "Expense:TDS on Interest", 5.0),
+        _row("25-26-TDSJ01", "Income:Interest:BOB", -5.0),
+    ]
+    part_i, part_ii, problems = m.split_part_ii(rows)
+    assert problems == []
+    assert {r["Transaction ID"] for r in part_ii} == {"25-26-15GJ01"}
+    assert {r["Transaction ID"] for r in part_i} == {"25-26-TDSJ01"}
+
+
+def test_split_part_ii_no_part_ii_rows_returns_empty_second_side():
+    rows = [
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 10.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -10.0),
+    ]
+    part_i, part_ii, problems = m.split_part_ii(rows)
+    assert part_ii == [] and problems == []
+    assert len(part_i) == 2
+
+
+def test_write_part_i_split_writes_file_only_when_part_ii_present(tmp_path):
+    out_path = tmp_path / "run-tds-journals.csv"
+    rows_with_g = [
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 10.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -10.0),
+        _row("2526-15GJ01", "Income:Interest:FD", 100.0),
+        _row("2526-15GJ01", "Income:Interest:Bajaj", -100.0),
+    ]
+    part_i_path, problems = m.write_part_i_split(rows_with_g, out_path)
+    assert problems == []
+    assert part_i_path is not None
+    written = Path(part_i_path)
+    assert written.name == "run-tds-journals-partI.csv"
+    assert written.exists()
+    with written.open(newline="", encoding="utf-8") as f:
+        written_rows = list(csv.DictReader(f))
+    assert {r["Transaction ID"] for r in written_rows} == {"2526-TDSJ01"}
+
+
+def test_write_part_i_split_no_part_ii_writes_nothing_and_deletes_stale(tmp_path):
+    out_path = tmp_path / "run-tds-journals.csv"
+    stale = m.part_i_path_for(out_path)
+    stale.write_text("stale content from a previous run\n", encoding="utf-8")
+    assert stale.exists()
+
+    rows_without_g = [
+        _row("2526-TDSJ01", "Expense:TDS on Interest", 10.0),
+        _row("2526-TDSJ01", "Income:Interest:BOB", -10.0),
+    ]
+    part_i_path, problems = m.write_part_i_split(rows_without_g, out_path)
+    assert part_i_path is None and problems == []
+    assert not stale.exists(), "a stale Part I file from a previous run must be deleted"
+
+
+# ---------------------------------------------------------------------------
 # Overrides + unknown section
 # ---------------------------------------------------------------------------
 

@@ -396,10 +396,12 @@ def test_save_changes_rewrites_both_csvs_and_verifies_balance(tmp_path):
         "all_rows": [],
     })
 
-    status, download_update = tjr._save_changes(payload)
+    status, download_update, part_i_download_update = tjr._save_changes(payload)
 
     assert "Applied 1 of 1 change" in status
     assert "all transactions sum to 0.00" in status
+    # No 15GJ rows in this fixture -- the Part I split has nothing to do.
+    assert "nothing to exclude" in status
 
     saved_review = list(csv.DictReader(open(review_p, encoding="utf-8")))
     saved_journal = list(csv.DictReader(open(journal_p, encoding="utf-8")))
@@ -415,8 +417,202 @@ def test_save_changes_rewrites_both_csvs_and_verifies_balance(tmp_path):
 
 
 def test_save_changes_no_changes_is_a_noop():
-    status, download_update = tjr._save_changes("")
+    status, download_update, part_i_download_update = tjr._save_changes("")
     assert "No changes to save" in status
+
+
+# ---------------------------------------------------------------------------
+# Part I split regeneration on Save -- the core of this feature: a
+# hand-filtered copy must be structurally impossible because Save always
+# rewrites it from the journal rows just written, not from whatever was on
+# disk before.
+# ---------------------------------------------------------------------------
+
+def test_save_changes_regenerates_part_i_split_reflecting_the_edit(tmp_path):
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+    part_i_p = tmp_path / "2026-FY2526-tds-journals-partI.csv"
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [
+        _review_row(sr="1", category="A", credit_account="Liabilities:Suspense"),
+        _review_row(sr="1", category="G", credit_account="Liabilities:Suspense"),
+    ])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        # Part I -- Category A, the one we'll reassign.
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Expense:TDS on Interest", "Amount": "10.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Income:Interest Income:Interest on FD", "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Liabilities:Suspense", "Amount": "-100.00", "Currency": "INR"},
+        # Part II -- Category G (15G/15H), must be excluded from the split.
+        {"Date": "2026-03-31", "Transaction ID": "2526-15GJ01", "Number": "2526-15GJ01",
+         "Description": "15G/15H TDS FY 2025-26 - BAJAJ FINANCE (Sec 194A)",
+         "Account": "Income:Interest Income:Interest on FD", "Amount": "50000.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-15GJ01", "Number": "2526-15GJ01",
+         "Description": "15G/15H TDS FY 2025-26 - BAJAJ FINANCE (Sec 194A)",
+         "Account": "Liabilities:Suspense", "Amount": "-50000.00", "Currency": "INR"},
+    ])
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p)},
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    status, download_update, part_i_download_update = tjr._save_changes(payload)
+
+    assert "1 transaction(s) excluded" in status
+    assert part_i_p.name in status
+    assert part_i_p.exists(), "Save must write the Part I split when a 15GJ row exists"
+
+    part_i_rows = list(csv.DictReader(open(part_i_p, encoding="utf-8")))
+    txn_ids = {r["Transaction ID"] for r in part_i_rows}
+    assert txn_ids == {"2526-TDSJ01"}, "the 15GJ transaction must not appear in the split"
+
+    # The edit made on this screen (reassigning the credit account) must be
+    # reflected in the regenerated split -- proving it isn't a stale copy.
+    accounts_in_split = {r["Account"] for r in part_i_rows}
+    assert "Income:Interest:ACME FD" in accounts_in_split
+    assert "Liabilities:Suspense" not in accounts_in_split
+
+    # The split itself still balances.
+    assert tjr._verify_balanced(part_i_rows) == []
+
+    # The download button for the Part I file must be interactive now that a
+    # Part II row existed in this run.
+    assert part_i_download_update["interactive"] is True
+    assert part_i_download_update["value"] is not None
+
+
+def test_save_changes_no_part_ii_rows_leaves_part_i_button_disabled(tmp_path):
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Expense:TDS on Interest", "Amount": "10.00",
+         "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Income:Interest Income:Interest on FD",
+         "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Liabilities:Suspense", "Amount": "-100.00",
+         "Currency": "INR"},
+    ])
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p)},
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    status, download_update, part_i_download_update = tjr._save_changes(payload)
+
+    assert "nothing to exclude" in status
+    assert part_i_download_update["interactive"] is False
+    assert part_i_download_update["value"] is None
+
+
+def test_save_changes_deletes_stale_part_i_file_when_no_longer_needed(tmp_path):
+    """If a previous run's Part I split is still on disk but this journal now
+    carries no 15GJ rows (e.g. the 26AS was re-run without Part II data), Save
+    must delete it -- a leftover Part I file the current data doesn't support
+    is exactly the stale-derivative bug this feature removes."""
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+    part_i_p = tmp_path / "2026-FY2526-tds-journals-partI.csv"
+    part_i_p.write_text("stale from a previous run with 15G/15H data\n", encoding="utf-8")
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Expense:TDS on Interest", "Amount": "10.00",
+         "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Income:Interest Income:Interest on FD",
+         "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Liabilities:Suspense", "Amount": "-100.00",
+         "Currency": "INR"},
+    ])
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p)},
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    tjr._save_changes(payload)
+
+    assert not part_i_p.exists()
+
+
+def test_save_changes_import_error_does_not_claim_full_journal_is_safe(tmp_path, monkeypatch):
+    """If the Part I splitter fails to load, _save_changes must not fall into
+    the "no Part II transactions" reassurance -- that branch previously
+    triggered whenever part_i_path was None, which is also what an ImportError
+    produces, so it silently told the user the full journal was the only file
+    needed even though we have no idea whether Part II rows exist. It must
+    instead warn loudly that the split did not run, and must delete (not
+    leave behind) any stale -partI.csv from a previous save."""
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+    part_i_p = tmp_path / "2026-FY2526-tds-journals-partI.csv"
+    part_i_p.write_text("stale from a previous run with 15G/15H data\n", encoding="utf-8")
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Expense:TDS on Interest", "Amount": "10.00",
+         "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Income:Interest Income:Interest on FD",
+         "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Liabilities:Suspense", "Amount": "-100.00",
+         "Currency": "INR"},
+    ])
+
+    def _raise():
+        raise ImportError("simulated: build_tds_journals not importable")
+
+    monkeypatch.setattr(tjr, "_load_split_part_ii", _raise)
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p)},
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    status, download_update, part_i_download_update = tjr._save_changes(payload)
+
+    assert "nothing to exclude" not in status
+    assert "could not be regenerated" in status
+    assert "do NOT assume" in status or "do not assume" in status.lower()
+    assert part_i_download_update["interactive"] is False
+    assert part_i_download_update["value"] is None
+    assert not part_i_p.exists()
 
 
 def test_journal_path_for_derives_sibling_journal_csv():

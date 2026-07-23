@@ -36,6 +36,7 @@ Data/outputs/YYYY-MM-DD-HHMMSS-<input>-tds-journals.csv
 Files produced:
 
 - **`YYYY-MM-DD-HHMMSS-<input>-tds-journals.csv`** — One balanced journal transaction per TDS entry (every transaction's amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.
+- **`YYYY-MM-DD-HHMMSS-<input>-tds-journals-partI.csv`** — Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Journal Review screen, so it can never go stale.
 
 ## Tips
 
