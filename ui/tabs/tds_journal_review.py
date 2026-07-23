@@ -561,12 +561,43 @@ def _save_changes(
     # made on this screen (e.g. a credit-account reassignment) is reflected
     # in it immediately -- a hand-filtered copy of the pre-edit journal would
     # otherwise silently go stale the moment this Save runs.
+    # split_failed is tracked separately from part_i_path is None -- the two
+    # are NOT the same thing. part_i_path is None legitimately means "no
+    # Part II rows this run, nothing to exclude" (safe to say the full
+    # journal is the only file needed). split_failed means "we don't know" --
+    # the splitter didn't run at all, so we have no idea whether Part II rows
+    # exist, and must not claim either answer. Collapsing these two into one
+    # None-check is exactly the bug this block used to have: on ImportError
+    # it fell into the "no Part II transactions" branch and told the user
+    # the full journal was the only file to import -- the same
+    # double-booking risk this whole feature exists to eliminate.
+    split_failed = False
+    stale_part_i_path = None
+    stale_part_i_deleted = False
     try:
         part_i_path, part_i_rows, part_ii_rows, split_problems = \
             _regenerate_part_i_split(journal_rows, journal_p)
     except ImportError as e:
         part_i_path, part_i_rows, part_ii_rows, split_problems = None, [], [], []
+        split_failed = True
         problems = list(problems) + [f"Part I split not regenerated: {e}"]
+        # part_i_path_for() came from the same failed import, so its naming
+        # rule (stem + "-partI.csv") is reproduced locally here rather than
+        # calling a helper we know just failed to load. A stale file we
+        # cannot vouch for is worse than no file: if one exists, it is
+        # deleted rather than left to be mistaken for a fresh regeneration.
+        candidate = journal_p.with_name(journal_p.stem + "-partI.csv")
+        if candidate.exists():
+            try:
+                candidate.unlink()
+                stale_part_i_deleted = True
+            except OSError as unlink_err:
+                stale_part_i_path = str(candidate)
+                problems.append(
+                    f"Could not delete stale {candidate} after the Part I "
+                    f"split failed to regenerate -- treat it as stale, do "
+                    f"not import it ({unlink_err})"
+                )
 
     part_i_balance_problems = _verify_balanced(part_i_rows) if part_i_rows else []
     excluded_txns = sorted({(r.get("Transaction ID") or "").strip()
@@ -620,6 +651,23 @@ def _save_changes(
                 f"Part I split re-verification: all {len(part_i_rows)} "
                 "row(s) sum to 0.00 per transaction (ok)."
             )
+    elif split_failed:
+        lines.append(
+            "**WARNING: the Part I split could not be regenerated -- we do "
+            "not know whether this run has 15G/15H (Part II) transactions, "
+            f"so we cannot say whether {journal_p.name} is safe to import "
+            "on its own. Do NOT assume it is the only file to import.** "
+            + (
+                f"A stale -partI.csv on disk could not be deleted either "
+                f"({stale_part_i_path}) -- treat it as stale and do not "
+                "import it."
+                if stale_part_i_path else
+                "A stale -partI.csv left over from a previous save was "
+                "deleted so it cannot be mistaken for a fresh regeneration."
+                if stale_part_i_deleted else
+                "There was no -partI.csv on disk to worry about."
+            )
+        )
     else:
         lines.append(
             "No 15G/15H (Part II) transactions in this run -- there is "
