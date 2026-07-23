@@ -67,6 +67,142 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   module name instead, so it no longer collides with other skills' same-named
   `agent.py` modules regardless of collection order.
 
+## [2.18.0] — 2026-07-23
+
+### Added
+- **One shared review engine for all four review screens, `ui/_review_engine.py`.**
+  Bank matching, ITR mapping, 26AS TDS journals, and KRC/GnuCash review had each
+  grown their own copy of the same row-rendering/picker/save-round-trip
+  machinery, including the two Gradio workarounds needed to make any of it work
+  (`gr.HTML` strips `<script>`; `gr.State` has no DOM node, so the save payload
+  rides a hidden textbox). A bug fixed in one screen stayed broken in the other
+  three. All four screens now run on the one engine, and per-row presentation
+  (tags, row class, badges, locked state, notes) is computed in Python instead
+  of JavaScript, so it is unit-testable — the screens are now covered by tests
+  that actually render them, closing a gap where a `NameError` had previously
+  shipped with a green suite because nothing exercised the render path.
+- **26AS TDS journals and KRC/GnuCash now have a review UI.** Both previously
+  had no screen at all — a row flagged "needs review" that nothing lets you
+  actually review is just a file nobody opens.
+- **Native binary resolution, `src/agents/_native_resolve.py`.** Resolves
+  vendored Poppler/qpdf/Tesseract to absolute paths for the standalone skill
+  scripts, which run as subprocesses and cannot import from `ui/`. Prompted by
+  an incident where Xpdf's `pdftotext` sat earlier on PATH than Poppler's:
+  both binaries share the same name, both exit 0, both emit text — only
+  `-layout` column spacing differs, and the only reliable way to tell them
+  apart is the version banner on stderr — so the resulting 26AS extraction
+  silently produced zero deductor rows with no error at all. An identity gate
+  now verifies the resolved `pdftotext` really is Poppler and fails loudly,
+  naming what it found and where, instead of quietly falling back.
+- **26AS Part II (15G/15H) parsing.** Previously ignored entirely. Now parsed
+  and routed into TDS journals as reclassification entries, under its own
+  transaction-ID series so the GnuCash importer keeps it separate from Part I.
+
+### Changed
+- **PATH injection for native binaries now runs unconditionally for every
+  skill**, rather than only for skills that declared a native dependency in
+  their manifest — the declaration itself was the thing most likely to be
+  wrong. Manifests were also corrected against what the scripts actually
+  invoke, and the remaining bare-name shellouts converted to go through the
+  resolver; one of them sat behind a correct manifest and would have failed
+  only when run standalone.
+
+### Fixed
+- **Review screen saves now re-read from disk and re-validate server-side**
+  instead of trusting the posted payload: row identity, whether the row is
+  editable, and whether the chosen account actually exists are all checked
+  again at save time. Rejections are reported per row rather than swallowed.
+- **Unknown input on a review screen now classifies to the locked branch,
+  never the editable one.** If the underlying reason text changes and the
+  classifier stops recognising it, the screen refuses to edit rather than
+  quietly allowing an edit it shouldn't.
+- **26AS extractor refuses to write a vacuous extraction.** An extraction
+  with no rows in any part now raises instead of silently producing an empty
+  workbook — the failure mode that motivated the native-binary identity gate
+  above.
+
+## [2.17.0] — 2026-07-22
+
+### Added
+- **Balance Sheet now tallies against the Income Statement.** A GnuCash
+  balance sheet exported mid-year cannot balance on its own: the year's
+  income and expenses are still sitting in the Income Statement and have not
+  been closed to capital, so Assets exceed Liabilities + Equity by exactly
+  the net income — previously shown as an unexplained gap, which on a
+  document handed to a CA or a bank reads as an error in the books. The IS
+  now closes with a bottom line, "Net Income / (Loss) for the Year"; the BS
+  brings that figure over under Equity as a live reference, restates "Total
+  Equity including Current Year Income", and closes with "Total Liabilities
+  and Equity" and a difference row against Total Assets. The difference row
+  is printed rather than left to the reader, so if a later change breaks the
+  tie the sheet says so instead of looking clean.
+
+### Changed
+- **BS/IS sections are located by name rather than by position**, so a book
+  with a different top-level section order still tallies against the right
+  sections. When there is no IS bottom line to source from, the tally rows
+  are omitted rather than showing a tie that quietly treats the year's
+  income as nil.
+- **Docs reorganised behind a new index**, and the "Closing the app"
+  instructions removed from the README and from release notes going
+  forward.
+
+## [2.16.0] — 2026-07-22
+
+### Added
+- **TCS now flows end to end, from 26AS Part VI through to the tax
+  computation.** It was being lost at the first step: Part VI of Form 26AS
+  was never extracted, so the credit never reached the workbook, never
+  reached GnuCash, and never reduced tax payable — understating taxes paid
+  and overstating the balance due, the same as leaving out a TDS credit.
+  Convert now parses and renders Part VI (TCS) with per-collector
+  sub-totals and the same reconciliation guard Part I already had. Journal
+  now builds TCS entries — Dr the TCS account, Cr Drawings, tax only, since
+  the spend it was collected on is already in the books — with both
+  accounts resolved from the entity's own chart and the credit leg
+  configurable for TCS paid across separately rather than bundled into a
+  purchase. To use it: map `TAXPAID_TCS` to the TCS account in the entity's
+  mapping YAML; until that mapping is added, nothing flows into the ITR
+  workbook.
+
+### Changed
+- **234A/B/C workings now disclose that the "26AS" TDS credit figure
+  includes salary TDS and TCS on their BOOK figures**, since the 26AS reader
+  classifies only interest and dividend. The Statement of Income and the
+  234A/B/C charges already counted TCS correctly, so no computation change
+  was needed there — this is a disclosure-only addition to the Workings
+  section.
+
+### Fixed
+- **Convert help text corrected.** It claimed the workbook lays out advance
+  tax and self-assessment tax; a modern Form 26AS carries neither.
+
+## [2.15.0] — 2026-07-22
+
+### Added
+- **ITR workbook — interest u/s 234A / 234B / 234C.** The Statement of
+  Income now computes interest, and the headline Refund / (Tax Payable)
+  figure is net of it; previously the workbook stopped at the tax liability
+  and understated what was actually due at filing. Covers 234A late
+  furnishing, 234B advance-tax default (90% cliff), and 234C instalment
+  deferment (15/45/75/100% with the 12%/36% safe harbours), with Rule 119A
+  (base rounds down to the nearest 100) and part-month-counts-as-full
+  applied throughout. The s.234C first proviso is derived from each lot's
+  actual sale date, so a March capital gain does not retrospectively short
+  the June instalment and an April gain gets no relief at all. Form 26AS is
+  used as the TDS credit basis when available, since 234B/234C are charged
+  on tax less TDS and crediting book TDS that 26AS does not support would
+  understate the interest the department will actually compute. Rendered as
+  live Excel formulas over editable inputs (filing date, due date, TDS
+  credit, advance tax, per-instalment figures) in a new Workings section, so
+  changing the filing date moves the interest and the refund.
+
+### Known limitations
+- The due date defaults to 31 July (non-audit) and is editable rather than
+  driven by per-entity config.
+- Instalment-wise advance tax is derived from the book's posting dates,
+  since a modern Form 26AS no longer carries advance-tax challans at all.
+
 ## [2.14.0] — 2026-07-21
 
 ### Changed
