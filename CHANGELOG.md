@@ -74,17 +74,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   understating the TDS credit and overstating tax payable and the 234B/234C
   interest that would be computed on it. Added `193` to both Rules-config
   files alongside `194A`, with a comment distinguishing the two. Also added a
-  fail-loud guard for the underlying class of bug, not just this one section:
-  `build_taxes_paid()` now records every 26AS transaction whose section code
-  is *not* in the Rules-config `tds_sections` map and whose `tax_deducted` is
-  non-zero (`TaxesPaidSchedule.unclassified_sections`) — a prominent ERROR
-  banner is written on the Statement of Income and TaxesPaid sheets naming
-  the section code(s) and amount at stake, `agent.py`'s run summary reports
-  it, and the CLI exits non-zero, mirroring the existing CG-reconciliation
-  fail-loud pattern. An unrecognised section with zero TDS at stake stays
-  silent — nothing is at stake, so nothing to flag. Nothing is hardcoded:
-  the fix is a config addition plus a guard against the next unclassified
-  section, not a hardcoded `"193"` anywhere in Python.
+  visible-but-non-fatal guard for the underlying class of bug, not just this
+  one section: `build_taxes_paid()` now records every 26AS Part I transaction
+  whose section code is in *none* of the Rules-config `tds_sections`
+  categories and whose `tax_deducted` is non-zero
+  (`TaxesPaidSchedule.unclassified_sections`) — a WARNING banner (amber, not
+  red) is written on the Statement of Income and TaxesPaid sheets naming the
+  section code(s) and amount at stake, and `agent.py`'s run summary reports
+  it on stderr. Unlike the CG-reconciliation ERROR banner, this is
+  deliberately non-fatal and does **not** set a non-zero exit code — an
+  early version of this fix treated *any* section outside `interest`/
+  `dividend` as unclassified, which meant every ordinary s.192 salary-TDS row
+  (present in every salaried taxpayer's 26AS) tripped a false-positive ERROR
+  and exit-1 on a completely correct workbook. `tds_sections` now also
+  carries a `salary: ["192", "192A"]` category — recognised as accounted-for
+  (reconciled separately via Form16 / the Salary schedule) rather than fed
+  into this interest/dividend tie-out — so a section landing in *any*
+  `tds_sections` category, not just `interest`/`dividend`, is treated as
+  classified. TCS (206C..., added in #112) was checked and confirmed to
+  never reach this guard at all: it lives on the 26AS workbook's separate
+  "Part VI" sheet, and `as26.parse_as26_workbook()` only ever reads "Part I",
+  so no TCS codes were added to `tds_sections`. An unrecognised section with
+  zero TDS at stake stays silent — nothing is at stake, so nothing to flag.
+  Nothing is hardcoded: the fix is a config addition plus a guard against the
+  next unclassified section, not a hardcoded `"193"`/`"192"` anywhere in
+  Python.
 - **ITR workbook — a renamed GnuCash account produced a path-drift warning
   that never cleared.** `configs.load_mapping()` compares a mapping entry's
   stored `path:` against the parsed tree's current path per GUID and warns

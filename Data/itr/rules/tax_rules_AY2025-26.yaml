@@ -157,8 +157,20 @@ common:
                                           # FDs etc). 193 was missing here (bug fix,
                                           # 2026-07-23) -- it silently dropped s.193 TDS from
                                           # the tie-out and understated the TDS credit.
+                                          # 192/192A (salary/premature PF withdrawal TDS) are
+                                          # NOT part of this interest/dividend tie-out -- they
+                                          # reconcile separately through Form16 / the Salary
+                                          # schedule -- but are listed here (2026-07-24 fix) so
+                                          # every 26AS Part I row a normal salaried taxpayer has
+                                          # is recognised as "accounted for elsewhere" rather
+                                          # than flagged as an unclassified section. Part VI
+                                          # (TCS, 206C...) lives on its own workbook sheet and
+                                          # never reaches this Part I transaction stream at all
+                                          # (see as26.parse_as26_workbook), so no TCS codes
+                                          # belong in this map.
     dividend: ["194", "194K"]
     interest: ["193", "194A"]
+    salary: ["192", "192A"]
 
   schedule_al:
     total_income_threshold: 10000000     # raised 50L -> 1cr from AY 2025-26 [src-4]
