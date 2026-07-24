@@ -66,6 +66,10 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   loading `skill_gnucash_import`'s `agent.py` via `importlib` under a unique
   module name instead, so it no longer collides with other skills' same-named
   `agent.py` modules regardless of collection order.
+
+## [2.18.2] — 2026-07-24
+
+### Fixed
 - **ITR workbook — 26AS silently dropped s.193 TDS from the TaxesPaid tie-out.**
   `tds_sections.interest` in both `tax_rules_AY2025-26.yaml` and
   `tax_rules_AY2026-27.yaml` listed only `194A` (interest other than
