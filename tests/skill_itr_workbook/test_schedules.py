@@ -655,7 +655,7 @@ def test_round_288a_and_288b():
 # the TaxesPaid book<->26AS tie-out (deliberate-conflict case).
 # ---------------------------------------------------------------------------
 
-_TDS_SECTIONS = {"dividend": ["194", "194K"], "interest": ["194A"]}
+_TDS_SECTIONS = {"dividend": ["194", "194K"], "interest": ["193", "194A"]}
 
 
 def test_classify_section_maps_dividend_and_interest_codes():
@@ -664,6 +664,127 @@ def test_classify_section_maps_dividend_and_interest_codes():
     assert as26_engine.classify_section("194A", _TDS_SECTIONS) == "interest"
     assert as26_engine.classify_section("192", _TDS_SECTIONS) is None
     assert as26_engine.classify_section(None, _TDS_SECTIONS) is None
+
+
+def test_classify_section_193_interest_on_securities(syn_ind_resolved):
+    # Regression (2026-07-23 s.193-drop fix): s.193 (interest on securities,
+    # e.g. bonds/debentures) must classify as "interest", not fall through
+    # to None -- the bug that silently dropped it from the TaxesPaid tie-out.
+    assert as26_engine.classify_section("193", _TDS_SECTIONS) == "interest"
+
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction("TAN1", "Bond House", "193", date(2024, 6, 1), 50000.0, 5000.0, 5000.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert tp.as26_tds_interest == pytest.approx(5000.0)
+    assert tp.unclassified_sections == []
+
+
+def test_build_taxes_paid_unknown_section_nonzero_tds_flags_loud(syn_ind_resolved):
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        # "195" is not in tds_sections at all -- and carries real TDS, so it
+        # must surface as a loud, visible signal rather than vanish.
+        as26_engine.As26Transaction("TAN9", "Foreign Payer", "195", date(2024, 6, 1), 20000.0, 2000.0, 2000.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert len(tp.unclassified_sections) == 1
+    item = tp.unclassified_sections[0]
+    assert item["section"] == "195"
+    assert item["amount"] == pytest.approx(2000.0)
+    assert tp.as26_tds_interest == 0.0
+    assert tp.as26_tds_dividend == 0.0
+
+
+def test_build_taxes_paid_unknown_section_zero_tds_stays_quiet(syn_ind_resolved):
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    as26_data = as26_engine.As26Data(transactions=[
+        # Unrecognised section but ZERO tax_deducted -- nothing at stake, so
+        # this must NOT be flagged (would just be noise).
+        as26_engine.As26Transaction("TAN9", "Some Payer", "206C", date(2024, 6, 1), 20000.0, 0.0, 0.0),
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert tp.unclassified_sections == []
+
+
+def test_build_taxes_paid_salary_192_rows_no_false_positive_warning(syn_ind_resolved):
+    # Regression (2026-07-24 false-positive fix): a normal salaried
+    # taxpayer's 26AS Part I carries many s.192 (salary TDS) rows with large
+    # amounts -- e.g. 13 rows totalling ~11.5 lakh TDS in the real report
+    # that caught this. s.192/192A are recognised in tds_sections under the
+    # "salary" category (reconciled via Form16 / the Salary schedule, NOT
+    # this interest/dividend tie-out) and must NEVER be treated as an
+    # unclassified section, no matter how large tax_deducted is.
+    tree, resolved = syn_ind_resolved
+    node_by_guid = sch._node_by_guid(tree)
+    rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
+    per_row_tds = 11500000.0 / 13
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction(
+            "TAN_EMP", "Synthetic Employer Pvt Ltd", "192", date(2024, 4, i + 1),
+            100000.0, per_row_tds, per_row_tds,
+        )
+        for i in range(13)  # 13 synthetic monthly-ish rows, ~11.5 lakh total TDS
+    ])
+    tp = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data)
+    assert tp.unclassified_sections == []
+    assert tp.as26_tds_interest == 0.0
+    assert tp.as26_tds_dividend == 0.0
+
+    # 192A (premature PF withdrawal TDS) is also recognised under "salary".
+    as26_data_192a = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction("TAN_PF", "Synthetic PF Trust", "192A", date(2024, 7, 1), 500000.0, 50000.0, 50000.0),
+    ])
+    tp2 = sch.build_taxes_paid(resolved, node_by_guid, rules, as26_data_192a)
+    assert tp2.unclassified_sections == []
+
+
+def test_parse_as26_workbook_ignores_part_vi_tcs_sheet_entirely(tmp_path):
+    # Architectural pin (2026-07-24 false-positive fix, verified per
+    # coordinator instruction rather than assumed): commit 44c0767 ("bring
+    # TCS into the books and into the tax computation", PR #112) writes TCS
+    # (206C... codes) to skill_26as's "Part VI" sheet, built with the SAME
+    # row layout as Part I (extract_26as_to_xlsx.build_part_i(..., title=
+    # "Part VI", headers=P6_HEADERS, ...)) but as a structurally distinct
+    # sheet. as26.parse_as26_workbook only ever opens "Part I" -- so even a
+    # TCS row with identical column geometry to a genuine Part I row must
+    # NEVER reach As26Data.transactions, and therefore can never trip the
+    # unclassified-section guard. No TCS codes need to be (or should be)
+    # added to tds_sections for this guard's purposes.
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws1 = wb.active
+    ws1.title = "Part I"
+    for _ in range(3):
+        ws1.append([None] * 15)
+    ws1.append([
+        "1", "Salary Payer Pvt Ltd", "TAN1", None, None, None, None, "192",
+        "01-06-2024", None, None, None, 100000.0, 10000.0, 10000.0,
+    ])
+
+    ws2 = wb.create_sheet("Part VI")
+    for _ in range(3):
+        ws2.append([None] * 15)
+    ws2.append([
+        "1", "Some Collector", "TAN2", None, None, None, None, "206C",
+        "01-06-2024", None, None, None, 50000.0, 500.0, 500.0,
+    ])
+
+    path = tmp_path / "as26.xlsx"
+    wb.save(path)
+
+    data = as26_engine.parse_as26_workbook(str(path))
+    assert len(data.transactions) == 1
+    assert data.transactions[0].tan == "TAN1"
+    assert data.transactions[0].section == "192"
 
 
 def test_bucket_as26_transactions_uses_txn_date_for_quarter_index():

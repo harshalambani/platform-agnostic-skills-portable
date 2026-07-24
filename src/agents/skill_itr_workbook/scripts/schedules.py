@@ -536,6 +536,24 @@ class TaxesPaidSchedule:
     as26_tds_dividend: float = 0.0
     tie_out_ok: bool = True
     tie_out_conflicts: list = field(default_factory=list)   # list[dict]
+    #: Fail-loud-but-not-fatal (2026-07-23 26AS s.193-drop fix, downgraded to
+    #: a WARNING 2026-07-24): as26.classify_section returns None for any TDS
+    #: section code not present in ANY category of the Rules-config
+    #: tds_sections map. tds_sections carries several categories --
+    #: dividend/interest (which DO feed this tie-out) and salary (which does
+    #: NOT -- it reconciles separately through Form16 / the Salary schedule)
+    #: -- and a section landing in any of them counts as recognised, not
+    #: unclassified. This field only ever holds sections in NONE of those
+    #: categories: every such transaction that carries non-zero tax_deducted
+    #: is captured here so the next genuinely unrecognised section produces
+    #: a visible warning instead of a silent understatement. A zero-TDS
+    #: unknown section (nothing at stake) is NOT recorded. This is a WARNING,
+    #: not an ERROR -- unlike the CG-reconciliation banner it must NOT set a
+    #: non-zero exit code (a false positive here -- e.g. treating every
+    #: salaried taxpayer's ordinary s.192 rows as unclassified -- would have
+    #: blocked a completely correct workbook).
+    unclassified_sections: list = field(default_factory=list)   # list[dict]:
+    #: {"section", "amount", "deductor_name", "tan"}
     #: s.234C needs advance tax CUMULATIVE as at each instalment due date
     #: (15 Jun / 15 Sep / 15 Dec / 15 Mar), not the annual total -- an
     #: instalment paid late is still a deferment even though the year-end
@@ -605,6 +623,7 @@ def build_taxes_paid(
     as26_tds_int = 0.0
     as26_tds_div = 0.0
     conflicts: list = []
+    unclassified_sections: list = []
     if as26_data is not None and as26_data.transactions and rules is not None:
         tds_sections = rules.common.get("tds_sections", {})
         as26_available = True
@@ -614,6 +633,23 @@ def build_taxes_paid(
                 as26_tds_int += txn.tax_deducted
             elif category == "dividend":
                 as26_tds_div += txn.tax_deducted
+            elif category is not None:
+                # Recognised (e.g. "salary") but deliberately NOT part of
+                # this interest/dividend tie-out -- reconciled elsewhere
+                # (Form16 / Salary schedule). Accounted for; not unclassified.
+                pass
+            elif txn.tax_deducted:
+                # Section code in NONE of the tds_sections categories,
+                # carrying real TDS -- warn loud (see
+                # TaxesPaidSchedule.unclassified_sections docstring) rather
+                # than silently dropping it from the tie-out. A zero-TDS
+                # unknown section is not noise-worthy and is skipped.
+                unclassified_sections.append({
+                    "section": txn.section or "(blank)",
+                    "amount": txn.tax_deducted,
+                    "deductor_name": txn.deductor_name,
+                    "tan": txn.tan,
+                })
 
         if abs(as26_tds_int - tds_int) > _TIE_OUT_TOLERANCE:
             conflicts.append({
@@ -634,6 +670,7 @@ def build_taxes_paid(
         as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
         tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
         advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
+        unclassified_sections=unclassified_sections,
     )
 
 

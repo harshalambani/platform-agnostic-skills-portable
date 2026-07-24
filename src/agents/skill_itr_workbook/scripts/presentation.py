@@ -86,6 +86,16 @@ CG_RECONCILIATION_ERROR_MARKER = "ERROR: Capital Gains do not reconcile to books
 _CG_ERROR_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 _CG_ERROR_FONT_COLOR = "9C0006"
 
+#: Non-fatal WARNING banner styling -- distinct from the red ERROR styling
+#: above. Same soft amber ("flag for manual review") the rest of the
+#: codebase already uses for non-fatal review flags (e.g. presentation.py's
+#: own _PARKED_FILL, skill_hsbc's CORRECTED_FILL, skill_26as's SUBTOTAL_FILL
+#: -- all FFF2CC). A WARNING banner is visible but must never be mistaken
+#: for the CG-reconciliation ERROR banner, and must never affect the
+#: process exit code.
+_WARN_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+_WARN_FONT_COLOR = "7F6000"
+
 
 #: Sign-safe replacement for Excel's MROUND(number, multiple): MROUND raises
 #: #NUM! whenever `number` and `multiple` have OPPOSITE signs. Every
@@ -369,6 +379,51 @@ def _write_salary_error_banner(ws, row: int, salary_schedule, ncols: int) -> int
     c = ws.cell(row=row, column=1, value=salary_mismatch_banner_text(salary_schedule))
     c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
     c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
+
+#: Visible-but-non-fatal WARNING (2026-07-23 26AS unclassified-TDS-section
+#: fix; downgraded from ERROR/exit-1 to WARNING on 2026-07-24 -- see
+#: schedules.py's TaxesPaidSchedule.unclassified_sections docstring for why):
+#: schedules.py's build_taxes_paid routes any 26AS transaction whose TDS
+#: section code is in NONE of the Rules-config tds_sections categories into
+#: TaxesPaidSchedule.unclassified_sections -- but ONLY when its tax_deducted
+#: is non-zero (a zero-TDS unknown section carries nothing at stake and
+#: stays quiet), and NEVER for a section recognised under any category
+#: (dividend/interest/salary/...), even one that -- like salary -- is
+#: deliberately excluded from this tie-out and reconciled elsewhere. This is
+#: the control that would have caught the missing s.193 (interest on
+#: securities) entry before it shipped; the next genuinely unrecognised
+#: section now surfaces here instead of silently understating the
+#: TaxesPaid tie-out / TDS credit. Unlike CG_RECONCILIATION_ERROR_MARKER,
+#: this marker's presence does NOT change agent.py's exit code -- it is a
+#: "worth a human's attention" signal, not a "this workbook may be wrong"
+#: one.
+TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER = "WARNING: 26AS has unrecognised TDS section(s) with tax deducted"
+
+
+def taxes_paid_unclassified_banner_text(tp_schedule) -> str:
+    total = sum(item["amount"] for item in tp_schedule.unclassified_sections)
+    sections = ", ".join(sorted({item["section"] for item in tp_schedule.unclassified_sections}))
+    return (
+        f"*** {TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER} "
+        f"(section(s) {sections}, Rs {total:,.2f} TDS at stake) -- review before filing ***"
+    )
+
+
+def _write_taxes_paid_unclassified_banner(ws, row: int, tp_schedule, ncols: int) -> int:
+    """Top-of-sheet WARNING banner (soft amber, not red -- see _WARN_FILL),
+    present only when build_taxes_paid found a 26AS transaction with a
+    genuinely unrecognised TDS section code AND non-zero tax_deducted.
+    'Banner, no abort': the workbook is ALWAYS still produced; omitted
+    entirely (returns `row` unchanged) when there is nothing unclassified."""
+    if not tp_schedule.unclassified_sections:
+        return row
+    c = ws.cell(row=row, column=1, value=taxes_paid_unclassified_banner_text(tp_schedule))
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_WARN_FONT_COLOR)
+    c.fill = _WARN_FILL
     c.alignment = Alignment(horizontal="center")
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
     return row + 2
@@ -865,6 +920,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row = 1
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     row = _write_salary_error_banner(ws, row, model.salary, OUTER)
+    row = _write_taxes_paid_unclassified_banner(ws, row, model.taxes_paid, OUTER)
     title = ws.cell(row=row, column=1, value="STATEMENT OF INCOME")
     title.font = _font(14, bold=True)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=OUTER)

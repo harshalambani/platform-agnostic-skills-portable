@@ -443,6 +443,12 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
                 f"book={c['book']:.2f} 26AS={c['as26']:.2f} diff={c['diff']:.2f}",
                 number_format=None,
             )
+        if tp.unclassified_sections:
+            sw.label_value(
+                "UNRECOGNISED TDS section(s) (fail-loud, add to Rules tds_sections)",
+                ", ".join(f"{i['section']} Rs{i['amount']:.2f}" for i in tp.unclassified_sections),
+                number_format=None,
+            )
     sw.blank()
     sw.cell(1, "Total taxes paid")
     sw.cell(2, tp.total, number_format=INR_FORMAT)

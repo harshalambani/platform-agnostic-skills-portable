@@ -295,3 +295,59 @@ def test_main_exits_zero_when_marker_absent(monkeypatch, capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert captured.err == ""
+
+
+# ---------------------------------------------------------------------------
+# Part 3: 2026-07-23 26AS unclassified-TDS-section fix, exercised end-to-end
+# (schedules -> presentation -> agent). Downgraded 2026-07-24 from an
+# ERROR/exit-1 banner to a non-fatal WARNING banner: a section recognised
+# under ANY tds_sections category (e.g. ordinary s.192 salary TDS, which
+# every salaried taxpayer's 26AS carries) never reaches unclassified_sections
+# at all -- see TaxesPaidSchedule.unclassified_sections and
+# presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER docstrings.
+# ---------------------------------------------------------------------------
+
+def test_no_unclassified_sections_has_no_warning_banner(tmp_path, syn_ind_model_and_paths):
+    tree, model, rules, user_rules, entity, result, loaded = syn_ind_model_and_paths
+    assert model.taxes_paid.unclassified_sections == []
+    wb = _write_and_load(tmp_path, tree, model, rules, user_rules, entity, result, loaded)
+    text = " ".join(str(v) for v in _cell_values(wb["Statement of Income"]))
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER not in text
+
+
+def test_unclassified_section_writes_warning_banner_on_statement_of_income(tmp_path, syn_ind_model_and_paths):
+    tree, model, rules, user_rules, entity, result, loaded = syn_ind_model_and_paths
+
+    # Simulate a genuine, already-detected unrecognised-section signal (the
+    # mechanics of HOW unclassified_sections gets populated are
+    # build_taxes_paid's job, exercised in test_schedules.py and unchanged
+    # by this fix -- this test is about what the presentation layer DOES
+    # with that signal: banner, no abort).
+    model.taxes_paid.unclassified_sections = [
+        {"section": "195", "amount": 2000.0, "deductor_name": "Foreign Payer", "tan": "TAN9"},
+    ]
+
+    wb = _write_and_load(tmp_path, tree, model, rules, user_rules, entity, result, loaded)
+
+    assert "Statement of Income" in wb.sheetnames  # workbook still fully produced
+    text = " ".join(str(v) for v in _cell_values(wb["Statement of Income"]))
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER in text
+    assert "195" in text
+
+
+def test_main_exits_zero_when_unclassified_section_marker_present(monkeypatch, capsys):
+    """The WARNING marker is visible on stderr but does NOT flip the exit
+    code -- unlike the CG/Salary ERROR markers. This is the regression test
+    for the 2026-07-24 downgrade (a false-positive here, e.g. every ordinary
+    s.192 salary row, must never fail a correct workbook's build)."""
+    monkeypatch.setattr(
+        agent, "run",
+        lambda *a, **kw: (
+            f"STATUS: OK\n\n{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER} "
+            "(section(s) 195, Rs 2,000.00 TDS at stake) -- review before filing."
+        ),
+    )
+    rc = agent.main(["bs.html", "out.xlsx"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER in captured.err

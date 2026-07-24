@@ -503,6 +503,32 @@ def _build_and_write_workbook(
             f"(diff {model.capital_gains.reconciliation_diff:,.2f}) -- workbook still written "
             "(see ERROR banner on CG / Statement of Income sheets) -- DO NOT FILE without review."
         )
+    if model.taxes_paid.unclassified_sections:
+        # Visible, non-fatal WARNING (2026-07-23 26AS s.193-drop fix;
+        # downgraded from an ERROR/exit-1 banner to a WARNING on 2026-07-24
+        # -- a genuinely unrecognised section is worth a human's attention,
+        # but must NOT be confused with an actual reconciliation failure
+        # like the CG/Salary checks above, and must NOT flip the process
+        # exit code: a section recognised under any tds_sections category
+        # -- e.g. ordinary s.192 salary TDS, which every salaried taxpayer's
+        # 26AS carries -- is never routed here at all (see
+        # TaxesPaidSchedule.unclassified_sections docstring), so this only
+        # fires for a section in none of them). The workbook has ALREADY
+        # been written in full, with a matching top-of-sheet WARNING banner
+        # on the Statement of Income sheet (see
+        # presentation._write_taxes_paid_unclassified_banner) and a detail
+        # row on the TaxesPaid working sheet. This line's job is only to
+        # carry presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER
+        # into the run() summary for visibility (unlike the ERROR markers,
+        # main() does NOT grep for this one to set the exit code).
+        total_at_stake = sum(i["amount"] for i in model.taxes_paid.unclassified_sections)
+        sections = ", ".join(sorted({i["section"] for i in model.taxes_paid.unclassified_sections}))
+        lines.append(
+            f"{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER} "
+            f"(section(s) {sections}, Rs {total_at_stake:,.2f} TDS at stake) -- workbook still "
+            "written (see WARNING banner on Statement of Income / TaxesPaid sheets) -- review "
+            "before filing."
+        )
     if not model.salary.reconciliation_ok:
         # "Banner, no abort" (2026-07-22 salary-gross fix), same contract as
         # the CG reconciliation check above: the workbook has ALREADY been
@@ -709,6 +735,20 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         exit_code = 1
+    if presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER in summary:
+        # Non-fatal by design (2026-07-24 downgrade -- see
+        # TaxesPaidSchedule.unclassified_sections and the presentation.py
+        # marker docstrings): visible on stderr and on the workbook's WARNING
+        # banner, but does NOT set exit_code -- a section recognised under
+        # any tds_sections category (e.g. ordinary s.192 salary TDS) never
+        # reaches this marker at all, so what does reach it is worth a look,
+        # not a build failure.
+        print(
+            f"{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER} -- workbook was "
+            "written; review before filing (see WARNING banner on Statement of Income / "
+            "TaxesPaid sheets).",
+            file=sys.stderr,
+        )
     return exit_code
 
 

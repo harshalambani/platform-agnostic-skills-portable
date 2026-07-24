@@ -134,8 +134,21 @@ def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLo
 
     Raises MappingValidationError on an unknown tag or a duplicate GUID.
     If `known_paths` (guid -> current account path from the parsed tree) is
-    supplied, a GUID whose stored `path` no longer matches produces a
-    warning (rename detection, plan section 3.1) rather than a failure.
+    supplied, every entry is checked against it (rename detection, plan
+    section 3.1) -- never a failure, but the two outcomes are deliberately
+    worded differently (2026-07-23 path-drift fix):
+
+      * GUID found in `known_paths` but the stored `path` differs -- a
+        benign rename. The GUID is identity; `path` is descriptive metadata
+        that has simply gone stale, and it self-heals the moment
+        apply_mapping_corrections.py next writes the mapping file (or is
+        run with `--refresh-paths`) -- so the warning points at that fix
+        rather than reading like a defect.
+      * GUID absent from `known_paths` entirely -- the account this entry
+        names is not in the currently-parsed tree at all (deleted, or the
+        wrong book was loaded). This is a real problem, not a rename, and
+        is NEVER auto-healed -- it must stay loud on every run until a
+        human resolves it.
     """
     p = Path(path)
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or []
@@ -167,11 +180,22 @@ def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLo
             suggested_by_llm=item.get("suggested_by_llm"),
         )
 
-        if known_paths is not None and guid in known_paths and known_paths[guid] != entries[guid].path:
-            warnings.append(
-                f"GUID {guid} path changed: mapping has {entries[guid].path!r}, "
-                f"tree has {known_paths[guid]!r} (rename? mapping still applies by GUID)"
-            )
+        if known_paths is not None:
+            if guid in known_paths:
+                if known_paths[guid] != entries[guid].path:
+                    warnings.append(
+                        f"GUID {guid} path drifted (benign rename, auto-fixable): mapping has "
+                        f"{entries[guid].path!r}, tree now has {known_paths[guid]!r} -- the "
+                        "mapping still applies by GUID; refresh the stored path via "
+                        "apply_mapping_corrections.py --refresh-paths (or any correction run, "
+                        "which refreshes drifted paths for free)."
+                    )
+            else:
+                warnings.append(
+                    f"GUID {guid} (mapping path {entries[guid].path!r}) NOT FOUND in the "
+                    "parsed tree -- account deleted, or the wrong book was loaded. This is "
+                    "NEVER auto-healed; verify manually before proceeding."
+                )
 
     return MappingLoadResult(entries=entries, warnings=warnings)
 
