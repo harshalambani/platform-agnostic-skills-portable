@@ -14,7 +14,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
@@ -131,6 +131,36 @@ def test_resolve_residency_declared_tokens_and_default():
     assert rules_engine.resolve_residency("Resident") == ("R/OR", False)
     assert rules_engine.resolve_residency(None) == ("R/OR", False)
     assert rules_engine.resolve_residency("") == ("R/OR", False)
+
+
+def test_load_rules_overlay_wins_over_canonical_base(tmp_path):
+    """2026-07-24 handover regression (ship canonical ITR rules inside App\\,
+    Data\\itr\\rules becomes a read-time overlay): a file in the overlay dir
+    for a given AY must win over the canonical (shipped) base for that same
+    AY. Uses a synthetic temp-dir overlay -- never writes into the real
+    Data\\itr\\rules."""
+    overlay_dir = tmp_path / "overlay"
+    overlay_dir.mkdir()
+    (overlay_dir / "tax_rules_AY2026-27.yaml").write_text(
+        "meta:\n"
+        "  fy: '2025-26'\n"
+        "  act: '1961'\n"
+        "  year_label: 'AY 2026-27 (FY 2025-26) [OVERLAY]'\n"
+        "  version: 'overlay-test'\n"
+        "regimes: {}\n",
+        encoding="utf-8",
+    )
+    base_dir = rules_engine.canonical_rules_dir()
+
+    overlaid = rules_engine.load_rules([overlay_dir, base_dir], "2025-26")
+    assert overlaid.version == "overlay-test"
+    assert "[OVERLAY]" in overlaid.year_label
+
+    # Sanity: with no overlay entry for this AY, the same search still falls
+    # through to the real canonical file underneath (base-then-overlay, not
+    # overlay-only).
+    base_only = rules_engine.load_rules([base_dir], "2025-26")
+    assert base_only.version != "overlay-test"
 
 
 def test_load_user_rules_rule1_present():

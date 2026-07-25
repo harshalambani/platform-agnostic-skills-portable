@@ -25,7 +25,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
 for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
@@ -67,12 +67,12 @@ def _build(tmp_path, *, dob: str | None = None, no_capital_gains: bool = False,
     result = mapping_engine.resolve_tree(tree, loaded)
     form16 = parse_form16.parse_form16(FIXTURES / "syn_ind_form16.pdf")
     rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
-    entity = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")["SYN-IND"]
+    entity = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")["SYN-IND"]
     if dob is not None:
         entity = dataclasses.replace(entity, dob=dob)
     if entity_overrides:
         entity = dataclasses.replace(entity, **entity_overrides)
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     fmv_tables = sch.load_fmv_tables()
     user_rules = rules_engine.load_user_rules(RULES_DIR / "user_rules.yaml")
 
@@ -307,7 +307,7 @@ def test_aadhaar_value_never_appears_literally_outside_its_own_entity_cell(wb):
     coordinate."""
     import configs as configs_mod
     entity = configs_mod.load_entities(
-        ROOT / "Data" / "itr" / "entities.example.yaml"
+        ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml"
     )["SYN-IND"]
     raw = entity.aadhaar
     assert raw is not None and raw.isdigit()
@@ -374,7 +374,7 @@ def test_declared_nr_entity_drops_the_assumptions_footnote_end_to_end(tmp_path):
     """SYN-IND-NR (Data/itr/entities.example.yaml) declares residency: NR.
     End to end, the header line shows 'NR' with no footnote marker and the
     whole Assumptions block is gone -- someone asserted this."""
-    entity = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")["SYN-IND-NR"]
+    entity = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")["SYN-IND-NR"]
     assert entity.residency == "NR"
     built = _build(tmp_path, entity_overrides={
         "residency": entity.residency, "dob": entity.dob,
@@ -991,7 +991,7 @@ def test_configured_but_missing_business_subtree_raises_not_silently_omits():
 
 
 def test_business_subtree_config_field_round_trips_through_load_entities():
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     assert entities["SYN-IND-BIZ"].business_subtree == "Income/xBusiness Income"
     # Unconfigured entities keep the field absent, not a hardcoded literal.
     assert entities["SYN-IND"].business_subtree is None

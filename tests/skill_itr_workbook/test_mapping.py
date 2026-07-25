@@ -98,18 +98,18 @@ def test_load_mapping_flags_path_drift_as_warning_not_failure(tmp_path):
 
 
 def test_load_entities_example_and_scrips_example():
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     assert "SYN-IND" in entities and entities["SYN-IND"].status == "Individual"
     assert "SYN-HUF" in entities and entities["SYN-HUF"].status == "HUF"
 
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     assert scrips["SYNCORP.NS"].isin == "INE000A00000"
 
 
 def test_entity_profile_doi_field_loads_and_resolves_no_age_class():
     # CF6: HUF profile carries doi (date of incorporation), never dob; age
     # class must resolve to 'general' regardless of doi's value.
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     huf = entities["SYN-HUF"]
     assert huf.doi == "1975-06-15"
     assert huf.dob is None
