@@ -44,6 +44,18 @@ Cascade + integrity (the hard part):
     (Harshal's 2026-07-23 decision: a mapping file is hours of review-loop
     work, the entity row is thirty seconds of retyping). Filed-return files
     are archived the same way (see above).
+  - Atomicity (2026-07-25 review fix): all pre-write collision checks above
+    still run FIRST and block before anything is touched. Given that, the
+    filesystem cascade (mapping rename/archive + filed-return renames/
+    archives) is executed BEFORE entities.yaml is rewritten, via
+    _move_with_rollback() -- if any single move in the cascade fails
+    partway through, every move already completed is undone (moved back)
+    before a clean Gradio-facing error is returned, and entities.yaml is
+    never touched. entities.yaml is written LAST, only once the whole
+    cascade has succeeded; if that final write itself fails, the cascade is
+    rolled back too. Invariant: after any failure, entities.yaml and the
+    on-disk mapping/filed-return files are mutually consistent (either
+    all-old or all-new), never mixed.
 """
 from __future__ import annotations
 
@@ -208,6 +220,43 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Atomic-enough filesystem cascade: move a batch of (src, dst) pairs, and if
+# any move partway through fails, undo every move already completed (best
+# effort) before raising -- so a caller that only writes entities.yaml AFTER
+# this returns successfully can never end up with entities.yaml pointing at
+# files that don't match what's actually on disk.
+# ---------------------------------------------------------------------------
+
+def _move_with_rollback(pairs: list[tuple[Path, Path]]) -> None:
+    """Move each (src, dst) in `pairs` in order via shutil.move (works for
+    both same-directory renames and cross-directory archive moves). On
+    failure, every move already completed is moved back before a clean
+    RuntimeError is raised -- never leaves a partial cascade on disk."""
+    done: list[tuple[Path, Path]] = []
+    try:
+        for src, dst in pairs:
+            shutil.move(str(src), str(dst))
+            done.append((src, dst))
+    except Exception as exc:
+        rollback_errors: list[str] = []
+        for src, dst in reversed(done):
+            try:
+                shutil.move(str(dst), str(src))
+            except Exception as rollback_exc:  # noqa: BLE001
+                rollback_errors.append(f"{dst} -> {src}: {rollback_exc}")
+        if rollback_errors:
+            raise RuntimeError(
+                f"filesystem operation failed ({exc}) and the rollback also hit "
+                "error(s) -- on-disk state may be inconsistent, please check "
+                "manually before retrying: " + "; ".join(rollback_errors)
+            ) from exc
+        raise RuntimeError(
+            f"filesystem operation failed and was fully rolled back -- nothing "
+            f"was changed: {exc}"
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # Save (Add / Modify / Rename).
 # ---------------------------------------------------------------------------
 
@@ -262,7 +311,9 @@ def _save_entity(
 
     filed_renames: list[tuple[Path, Path]] = []
     if is_rename:
-        old_filed = configs.find_filed_returns(orig_key, _itrfiled_dir())
+        old_filed = configs.find_filed_returns(
+            orig_key, _itrfiled_dir(), all_entity_keys=set(entities.keys())
+        )
         for src in old_filed:
             token_and_suffix = src.name[len(orig_key):]
             target = src.with_name(f"{new_key}{token_and_suffix}")
@@ -307,6 +358,26 @@ def _save_entity(
     if is_rename:
         del entities[orig_key]
 
+    # Filesystem cascade FIRST, entities.yaml LAST (2026-07-25 atomicity
+    # fix): if any move in the cascade fails partway through, everything
+    # already moved is rolled back and entities.yaml is never touched --
+    # see _move_with_rollback() and the module docstring's "Atomicity" note.
+    mapping_cascaded = bool(is_rename and old_mapping.is_file())
+    cascade_pairs: list[tuple[Path, Path]] = []
+    if mapping_cascaded:
+        cascade_pairs.append((old_mapping, new_mapping))
+    cascade_pairs.extend(filed_renames)
+
+    if cascade_pairs:
+        try:
+            _move_with_rollback(cascade_pairs)
+        except RuntimeError as exc:
+            return (
+                "**Not saved -- the rename cascade hit a filesystem error and "
+                "was rolled back. Nothing changed (entities.yaml untouched, "
+                f"files back in their original place):**\n\n- {exc}"
+            )
+
     entities_file = _entities_path()
     entities_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -317,22 +388,29 @@ def _save_entity(
         shutil.copy2(entities_file, backup_path)
         backup_msg = f"Backup written: {backup_path}"
 
-    entities_file.write_text(configs.dump_entities(entities), encoding="utf-8")
+    try:
+        entities_file.write_text(configs.dump_entities(entities), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        rolled_back = ""
+        if cascade_pairs:
+            try:
+                _move_with_rollback([(dst, src) for src, dst in reversed(cascade_pairs)])
+                rolled_back = " The filesystem cascade was rolled back too -- nothing changed."
+            except RuntimeError as rollback_exc:
+                rolled_back = f" WARNING: the filesystem cascade rollback also failed ({rollback_exc}) -- check disk state manually."
+        return f"**Not saved -- writing entities.yaml failed: {exc}.**{rolled_back}"
 
     lines = ["**Saved**", "", backup_msg]
     action = "Added" if is_add else ("Renamed + updated" if is_rename else "Updated")
     lines.append(f"{action} entity `{new_key}` -> {entities_file}")
 
     if is_rename:
-        if old_mapping.is_file():
-            old_mapping.rename(new_mapping)
+        if mapping_cascaded:
             lines.append(f"Cascaded: {old_mapping.name} -> {new_mapping.name}")
         else:
             lines.append("No existing mapping file to cascade (cold-start entity).")
 
         if filed_renames:
-            for src, target in filed_renames:
-                src.rename(target)
             renamed_names = ", ".join(f"{src.name} -> {target.name}" for src, target in filed_renames)
             lines.append(f"Cascaded filed return(s): {renamed_names}")
         else:
@@ -356,43 +434,71 @@ def _delete_entity(key: str, confirm_1: bool, confirm_2: bool) -> str:
     if key not in entities:
         return f"Error: entity '{key}' not found -- nothing was deleted."
 
+    configs = _configs_mod()
+    all_keys = set(entities.keys())
     del entities[key]
 
-    entities_file = _entities_path()
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    # Filesystem cascade FIRST, entities.yaml LAST (2026-07-25 atomicity
+    # fix, same discipline as _save_entity): archive moves are executed
+    # before entities.yaml is rewritten, and rolled back on any failure.
+    mapping_file = _mapping_path(key)
+    mapping_archived = mapping_file.is_file()
+    archive_dir = _archive_dir()
+    mapping_target = archive_dir / f"{key}.mapping.yaml.archived-{stamp}"
+
+    filed_returns = configs.find_filed_returns(key, _itrfiled_dir(), all_entity_keys=all_keys)
+    filed_targets = [
+        (src, archive_dir / f"{src.name}.archived-{stamp}") for src in filed_returns
+    ]
+
+    cascade_pairs: list[tuple[Path, Path]] = []
+    if mapping_archived:
+        cascade_pairs.append((mapping_file, mapping_target))
+    cascade_pairs.extend(filed_targets)
+
+    if cascade_pairs:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _move_with_rollback(cascade_pairs)
+        except RuntimeError as exc:
+            return (
+                "**Not deleted -- the archive cascade hit a filesystem error "
+                "and was rolled back. Nothing changed (entities.yaml "
+                f"untouched, files back in their original place):**\n\n- {exc}"
+            )
+
+    entities_file = _entities_path()
     backup_msg = "No existing entities.yaml -- nothing to back up."
     if entities_file.is_file():
         backup_path = entities_file.with_name(f"{entities_file.name}.bak-{stamp}")
         shutil.copy2(entities_file, backup_path)
         backup_msg = f"Backup written: {backup_path}"
 
-    configs = _configs_mod()
-    entities_file.write_text(configs.dump_entities(entities), encoding="utf-8")
+    try:
+        entities_file.write_text(configs.dump_entities(entities), encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        rolled_back = ""
+        if cascade_pairs:
+            try:
+                _move_with_rollback([(dst, src) for src, dst in reversed(cascade_pairs)])
+                rolled_back = " The archive cascade was rolled back too -- nothing changed."
+            except RuntimeError as rollback_exc:
+                rolled_back = f" WARNING: the archive cascade rollback also failed ({rollback_exc}) -- check disk state manually."
+        return f"**Not deleted -- writing entities.yaml failed: {exc}.**{rolled_back}"
 
     lines = ["**Deleted**", "", backup_msg, f"Removed `{key}` from {entities_file}"]
 
-    mapping_file = _mapping_path(key)
-    if mapping_file.is_file():
-        archive_dir = _archive_dir()
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archive_target = archive_dir / f"{key}.mapping.yaml.archived-{stamp}"
-        shutil.move(str(mapping_file), str(archive_target))
-        lines.append(f"Archived mapping file -> {archive_target} (never deleted).")
+    if mapping_archived:
+        lines.append(f"Archived mapping file -> {mapping_target} (never deleted).")
     else:
         lines.append("No mapping file existed for this entity -- nothing to archive.")
 
-    filed_returns = configs.find_filed_returns(key, _itrfiled_dir())
-    if filed_returns:
-        archive_dir = _archive_dir()
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archived_names = []
-        for src in filed_returns:
-            archive_target = archive_dir / f"{src.name}.archived-{stamp}"
-            shutil.move(str(src), str(archive_target))
-            archived_names.append(archive_target.name)
+    if filed_targets:
+        archived_names = ", ".join(target.name for _, target in filed_targets)
         lines.append(
-            "Archived filed-return file(s) (never deleted) -> "
-            + ", ".join(archived_names)
+            "Archived filed-return file(s) (never deleted) -> " + archived_names
         )
     else:
         lines.append("No filed-return files existed for this entity -- nothing to archive.")

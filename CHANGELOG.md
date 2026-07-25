@@ -42,6 +42,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   filename already exists. Delete archives (moves, timestamped) each
   matched file to `Data/itr/_archive/` alongside the mapping-file archive —
   filed returns are never deleted, only moved.
+- **ITR Entities tab: atomic save/delete cascade (review fix).** Save and
+  delete now run the filesystem cascade (`.mapping.yaml` rename/archive +
+  filed-return renames/archives) *before* rewriting `entities.yaml`, and
+  roll every completed move back if a later step in the cascade — or the
+  final `entities.yaml` write itself — fails, surfacing a clean Gradio
+  error instead of a stack trace. Previously `entities.yaml` was rewritten
+  first with no exception handling around the cascade, so a mid-cascade OS
+  failure (locked file, AV, permission error) could leave `entities.yaml`
+  updated while the on-disk mapping/filed-return files were still under
+  their old names. `find_filed_returns()` also gains an optional
+  `all_entity_keys` param for longest-match disambiguation of
+  digit-extended key collisions (e.g. `Prop1` vs `Prop12`) and matches
+  filenames case-insensitively (Windows casing).
 
 ## [Unreleased]
 

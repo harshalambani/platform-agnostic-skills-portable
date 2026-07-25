@@ -132,6 +132,8 @@ ENTITIES_YAML_HEADER = (
     "# edits survive individual field values but NOT comments or key ordering: this\n"
     "# header is re-emitted verbatim on every save, and entity blocks + fields are\n"
     "# written in a deterministic (sorted-key) order via configs.dump_entities().\n"
+    "# Unknown/extra top-level fields on an entity are also silently dropped on\n"
+    "# save (EntityProfile is a closed dataclass) -- only fields it declares survive.\n"
     "# See bundling/canonical/itr/entities.example.yaml for field documentation.\n"
     "# =============================================================================\n"
 )
@@ -174,7 +176,20 @@ def _entity_to_dict(e: EntityProfile) -> dict:
     return d
 
 
-def find_filed_returns(entity_key: str, itrfiled_dir: str | Path) -> list[Path]:
+def _filed_return_boundary_pattern(entity_key: str) -> re.Pattern:
+    """The boundary-rule regex used by find_filed_returns(): `entity_key`
+    must be immediately followed by a non-letter (digit) or end-of-stem.
+    Case-insensitive (Windows filesystems are case-preserving but not
+    case-sensitive, and files are only ever moved/archived, never deleted,
+    so matching loosely here is safe)."""
+    return re.compile(rf"^{re.escape(entity_key)}(?![A-Za-z])", re.IGNORECASE)
+
+
+def find_filed_returns(
+    entity_key: str,
+    itrfiled_dir: str | Path,
+    all_entity_keys: set[str] | None = None,
+) -> list[Path]:
     """Find filed-return files (Data/ITRFiled/<entity_key><token>.{json,pdf})
     belonging to `entity_key`.
 
@@ -185,10 +200,23 @@ def find_filed_returns(entity_key: str, itrfiled_dir: str | Path) -> list[Path]:
 
     CRITICAL collision rule: entity keys can be prefixes of one another
     (e.g. "Vaikunth" vs "VaikunthHUF"). A file belongs to `entity_key` iff
-    its stem matches ``^{re.escape(entity_key)}(?![A-Za-z])`` -- i.e.
-    `entity_key` must be immediately followed by a non-letter (digit) or the
-    end of the stem. This makes "Vaikunth2425" match entity_key="Vaikunth"
-    but NOT "VaikunthHUF", and "VaikunthHUF2425" match only "VaikunthHUF".
+    its stem matches ``^{re.escape(entity_key)}(?![A-Za-z])`` (case
+    -insensitive) -- i.e. `entity_key` must be immediately followed by a
+    non-letter (digit) or the end of the stem. This makes "Vaikunth2425"
+    match entity_key="Vaikunth" but NOT "VaikunthHUF", and "VaikunthHUF2425"
+    match only "VaikunthHUF".
+
+    That boundary rule alone does NOT separate digit-extended key collisions
+    -- keys like "Prop1" and "Prop12" both match a "Prop12425.json" stem
+    (the character after "Prop1" is a digit, same as after "Prop12"). Pass
+    `all_entity_keys` (the full set of currently-defined entity keys) to
+    disambiguate: when supplied, a file is attributed to `entity_key` only
+    if `entity_key` is the LONGEST key in `all_entity_keys` whose boundary
+    rule matches the file's stem -- so "Prop12425.json" resolves to "Prop12"
+    only, never "Prop1", once both keys are known. Without `all_entity_keys`
+    (None, the default), the single-key boundary rule above is used as-is --
+    existing callers that don't have the full key set keep their prior
+    behaviour.
 
     Matches both .json and .pdf extensions (case-insensitive on extension).
     Returns [] (not an error) if `itrfiled_dir` doesn't exist. Deterministic:
@@ -198,15 +226,27 @@ def find_filed_returns(entity_key: str, itrfiled_dir: str | Path) -> list[Path]:
     d = Path(itrfiled_dir)
     if not d.is_dir():
         return []
-    pattern = re.compile(rf"^{re.escape(entity_key)}(?![A-Za-z])")
+    pattern = _filed_return_boundary_pattern(entity_key)
+    key_patterns = (
+        [(k, _filed_return_boundary_pattern(k)) for k in all_entity_keys]
+        if all_entity_keys
+        else None
+    )
     matches: list[Path] = []
     for p in d.iterdir():
         if not p.is_file():
             continue
         if p.suffix.lower() not in (".json", ".pdf"):
             continue
-        if pattern.match(p.stem):
-            matches.append(p)
+        if not pattern.match(p.stem):
+            continue
+        if key_patterns:
+            candidates = [k for k, pat in key_patterns if pat.match(p.stem)]
+            if candidates:
+                longest = max(candidates, key=len)
+                if longest.lower() != entity_key.lower():
+                    continue
+        matches.append(p)
     return sorted(matches)
 
 

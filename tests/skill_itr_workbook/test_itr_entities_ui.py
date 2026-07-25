@@ -566,3 +566,112 @@ def test_delete_missing_itrfiled_dir_is_noop_not_error(tmp_path):
         msg = ui_mod._delete_entity("SYN-IND", True, True)
     assert "Deleted" in msg
     assert "No filed-return files existed" in msg
+
+
+# ---------------------------------------------------------------------------
+# Atomicity (2026-07-25 review fix): a mid-cascade OS failure must roll back
+# every move already completed and leave entities.yaml untouched -- never a
+# half-applied state where entities.yaml and the on-disk files disagree.
+# ---------------------------------------------------------------------------
+
+def test_save_rename_rollback_on_mid_cascade_failure(tmp_path):
+    data_root = _seed(tmp_path)
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    old_mapping = mappings_dir / "SYN-IND.mapping.yaml"
+    old_mapping.write_text(
+        yaml.safe_dump([{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}]),
+        encoding="utf-8",
+    )
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SYN-IND2425.json").write_text("{}", encoding="utf-8")
+
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+    mapping_before = old_mapping.read_text(encoding="utf-8")
+    filed_before = (itrfiled_dir / "SYN-IND2425.json").read_text(encoding="utf-8")
+
+    real_move = ui_mod.shutil.move
+    call_count = {"n": 0}
+
+    def _flaky_move(src, dst):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("simulated mid-cascade failure")
+        return real_move(src, dst)
+
+    with patch("ui._config.data_root_dir", return_value=data_root), \
+         patch.object(ui_mod.shutil, "move", side_effect=_flaky_move):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+
+    assert "not saved" in msg.lower()
+    assert "rolled back" in msg.lower()
+
+    # entities.yaml is byte-identical to before -- never touched.
+    assert entities_path.read_text(encoding="utf-8") == before_text
+    assert not list(entities_path.parent.glob("entities.yaml.bak-*"))
+
+    # The mapping rename (call #1, which succeeded) was undone.
+    assert old_mapping.is_file()
+    assert old_mapping.read_text(encoding="utf-8") == mapping_before
+    assert not (mappings_dir / "SYN-IND-RENAMED.mapping.yaml").exists()
+
+    # The filed-return rename (call #2, which failed) never took effect.
+    assert (itrfiled_dir / "SYN-IND2425.json").is_file()
+    assert (itrfiled_dir / "SYN-IND2425.json").read_text(encoding="utf-8") == filed_before
+    assert not (itrfiled_dir / "SYN-IND-RENAMED2425.json").exists()
+
+
+def test_delete_rollback_on_mid_cascade_failure(tmp_path):
+    data_root = _seed(tmp_path)
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    mapping_file = mappings_dir / "SYN-IND.mapping.yaml"
+    mapping_file.write_text(
+        yaml.safe_dump([{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}]),
+        encoding="utf-8",
+    )
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SYN-IND2425.json").write_text("{}", encoding="utf-8")
+
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+    mapping_before = mapping_file.read_text(encoding="utf-8")
+    filed_before = (itrfiled_dir / "SYN-IND2425.json").read_text(encoding="utf-8")
+
+    real_move = ui_mod.shutil.move
+    call_count = {"n": 0}
+
+    def _flaky_move(src, dst):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise OSError("simulated mid-cascade failure")
+        return real_move(src, dst)
+
+    with patch("ui._config.data_root_dir", return_value=data_root), \
+         patch.object(ui_mod.shutil, "move", side_effect=_flaky_move):
+        msg = ui_mod._delete_entity("SYN-IND", True, True)
+
+    assert "not deleted" in msg.lower()
+    assert "rolled back" in msg.lower()
+
+    # entities.yaml is byte-identical to before -- never touched.
+    assert entities_path.read_text(encoding="utf-8") == before_text
+    assert not list(entities_path.parent.glob("entities.yaml.bak-*"))
+
+    # The mapping archive-move (call #1, which succeeded) was undone.
+    assert mapping_file.is_file()
+    assert mapping_file.read_text(encoding="utf-8") == mapping_before
+
+    # The filed-return archive-move (call #2, which failed) never took effect.
+    assert (itrfiled_dir / "SYN-IND2425.json").is_file()
+    assert (itrfiled_dir / "SYN-IND2425.json").read_text(encoding="utf-8") == filed_before
+
+    archive_dir = data_root / "itr" / "_archive"
+    assert not archive_dir.exists() or not list(archive_dir.iterdir())

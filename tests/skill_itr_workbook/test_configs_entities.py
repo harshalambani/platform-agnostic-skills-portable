@@ -287,3 +287,39 @@ def test_find_filed_returns_prefix_collision_boundary(tmp_path):
     huf_matches = configs.find_filed_returns("SynEntHUF", d)
     assert [p.name for p in huf_matches] == ["SynEntHUF2425.json"]
     assert "SynEnt2425.json" not in [p.name for p in huf_matches]
+
+
+def test_find_filed_returns_digit_extended_key_collision_needs_all_keys(tmp_path):
+    """CRITICAL (review fix): the boundary rule alone does not separate
+    digit-extended key collisions -- "SynP1" and "SynP12" both match a
+    "SynP12425.json" stem, since the character right after each key is a
+    digit either way. Passing all_entity_keys disambiguates by longest
+    match; without it, the old (documented) limitation still applies."""
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    (d / "SynP12425.json").write_text("{}", encoding="utf-8")
+
+    all_keys = {"SynP1", "SynP12"}
+
+    # Without all_entity_keys: both keys match under the plain boundary rule.
+    short_alone = configs.find_filed_returns("SynP1", d)
+    assert [p.name for p in short_alone] == ["SynP12425.json"]
+
+    # With all_entity_keys: attributed only to the longest matching key.
+    short_disambiguated = configs.find_filed_returns("SynP1", d, all_entity_keys=all_keys)
+    assert short_disambiguated == []
+
+    long_disambiguated = configs.find_filed_returns("SynP12", d, all_entity_keys=all_keys)
+    assert [p.name for p in long_disambiguated] == ["SynP12425.json"]
+
+
+def test_find_filed_returns_case_insensitive_stem(tmp_path):
+    """Windows filesystems are case-preserving but not case-sensitive; a
+    differently-cased filename must still resolve to the entity key so the
+    rename/archive cascade doesn't silently skip it."""
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    (d / "synent2425.json").write_text("{}", encoding="utf-8")
+
+    found = configs.find_filed_returns("SynEnt", d)
+    assert [p.name for p in found] == ["synent2425.json"]
