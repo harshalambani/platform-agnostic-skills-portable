@@ -19,6 +19,7 @@ Loader validation (mapping.py's resolution engine builds on top of this):
 """
 from __future__ import annotations
 
+import re
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -171,6 +172,42 @@ def _entity_to_dict(e: EntityProfile) -> dict:
     if e.extra_items:
         d["extra_items"] = dict(e.extra_items)
     return d
+
+
+def find_filed_returns(entity_key: str, itrfiled_dir: str | Path) -> list[Path]:
+    """Find filed-return files (Data/ITRFiled/<entity_key><token>.{json,pdf})
+    belonging to `entity_key`.
+
+    The `<token>` suffix (e.g. "2425") is a human filing-batch label, not a
+    reliable assessment year -- this function does not parse or trust any AY
+    out of it, and the caller does not need one either; it keys on the
+    entity-key prefix only.
+
+    CRITICAL collision rule: entity keys can be prefixes of one another
+    (e.g. "Vaikunth" vs "VaikunthHUF"). A file belongs to `entity_key` iff
+    its stem matches ``^{re.escape(entity_key)}(?![A-Za-z])`` -- i.e.
+    `entity_key` must be immediately followed by a non-letter (digit) or the
+    end of the stem. This makes "Vaikunth2425" match entity_key="Vaikunth"
+    but NOT "VaikunthHUF", and "VaikunthHUF2425" match only "VaikunthHUF".
+
+    Matches both .json and .pdf extensions (case-insensitive on extension).
+    Returns [] (not an error) if `itrfiled_dir` doesn't exist. Deterministic:
+    results are sorted. Pure aside from the one directory listing -- no other
+    I/O.
+    """
+    d = Path(itrfiled_dir)
+    if not d.is_dir():
+        return []
+    pattern = re.compile(rf"^{re.escape(entity_key)}(?![A-Za-z])")
+    matches: list[Path] = []
+    for p in d.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".json", ".pdf"):
+            continue
+        if pattern.match(p.stem):
+            matches.append(p)
+    return sorted(matches)
 
 
 def dump_entities(entities: dict[str, EntityProfile]) -> str:

@@ -29,18 +29,21 @@ Cascade + integrity (the hard part):
     <new>.mapping.yaml. If a file already exists at the target name, the
     ENTIRE save (including the entities.yaml rewrite) is BLOCKED with a
     clear message -- never a half-applied rename.
-  - Filed-return references: src/agents/skill_itr_workbook/scripts/
-    filed_return.py takes `entity_key` as a caller-supplied argument to
-    parse_filed_json/parse_filed_pdf -- there is no filename-derived lookup
-    of "Data/ITRFiled/<entity_key>.*" anywhere in the codebase to cascade
-    (verified: `git grep -n ITRFiled` outside filed_return.py's own
-    docstring returns nothing). A rename or delete therefore surfaces a
-    manual-check note pointing at Data/ITRFiled/ rather than attempting an
-    automated cascade that has no convention to act on.
+  - Filed-return files: Data/ITRFiled/<entity_key><token>.{json,pdf} (e.g.
+    "Harshal2425.json") are matched by entity-key PREFIX only via
+    configs.find_filed_returns() -- the trailing <token> is a human
+    filing-batch label, never a parsed/trusted assessment year. On rename,
+    each matched file's leading entity-key is swapped (token + extension
+    preserved) and the ENTIRE save is BLOCKED if any target filename already
+    exists (same no-half-apply discipline as the mapping-file rename). On
+    delete, each matched file is ARCHIVED (moved, timestamped) to
+    Data/itr/_archive/ alongside the mapping-file archive -- never deleted,
+    since filed returns are read-only ground truth.
   - Delete (after double-confirm): the entity's .mapping.yaml, if any, is
     ARCHIVED (moved, timestamped) to Data/itr/_archive/ -- never deleted
     (Harshal's 2026-07-23 decision: a mapping file is hours of review-loop
-    work, the entity row is thirty seconds of retyping).
+    work, the entity row is thirty seconds of retyping). Filed-return files
+    are archived the same way (see above).
 """
 from __future__ import annotations
 
@@ -100,12 +103,8 @@ def _archive_dir() -> Path:
     return _config_mod.data_root_dir() / "itr" / "_archive"
 
 
-_FILED_RETURN_NOTE = (
-    "Data/ITRFiled/ has no filename convention this tab can cascade "
-    "automatically (filed_return.py takes entity_key as a caller-supplied "
-    "argument, not a path derived from it) -- check that folder manually "
-    "if this entity has a filed return on file."
-)
+def _itrfiled_dir() -> Path:
+    return _config_mod.data_root_dir() / "ITRFiled"
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +260,22 @@ def _save_entity(
             "before renaming; nothing was written."
         )
 
+    filed_renames: list[tuple[Path, Path]] = []
+    if is_rename:
+        old_filed = configs.find_filed_returns(orig_key, _itrfiled_dir())
+        for src in old_filed:
+            token_and_suffix = src.name[len(orig_key):]
+            target = src.with_name(f"{new_key}{token_and_suffix}")
+            filed_renames.append((src, target))
+        collisions = [t for _, t in filed_renames if t.exists()]
+        if collisions:
+            names = ", ".join(p.name for p in collisions)
+            return (
+                f"Error: rename blocked -- target filed-return file(s) already "
+                f"exist in Data/ITRFiled/: {names}. Resolve the conflict "
+                "manually before renaming; nothing was written."
+            )
+
     extra_items = {}
     bf_losses = _parse_list_lines(bf_losses_text)
     clubbing_notes = _parse_list_lines(clubbing_notes_text)
@@ -314,7 +329,14 @@ def _save_entity(
             lines.append(f"Cascaded: {old_mapping.name} -> {new_mapping.name}")
         else:
             lines.append("No existing mapping file to cascade (cold-start entity).")
-        lines.append(_FILED_RETURN_NOTE)
+
+        if filed_renames:
+            for src, target in filed_renames:
+                src.rename(target)
+            renamed_names = ", ".join(f"{src.name} -> {target.name}" for src, target in filed_renames)
+            lines.append(f"Cascaded filed return(s): {renamed_names}")
+        else:
+            lines.append("No filed-return files to cascade in Data/ITRFiled/.")
 
     return "\n\n".join(lines)
 
@@ -359,7 +381,22 @@ def _delete_entity(key: str, confirm_1: bool, confirm_2: bool) -> str:
     else:
         lines.append("No mapping file existed for this entity -- nothing to archive.")
 
-    lines.append(_FILED_RETURN_NOTE)
+    filed_returns = configs.find_filed_returns(key, _itrfiled_dir())
+    if filed_returns:
+        archive_dir = _archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archived_names = []
+        for src in filed_returns:
+            archive_target = archive_dir / f"{src.name}.archived-{stamp}"
+            shutil.move(str(src), str(archive_target))
+            archived_names.append(archive_target.name)
+        lines.append(
+            "Archived filed-return file(s) (never deleted) -> "
+            + ", ".join(archived_names)
+        )
+    else:
+        lines.append("No filed-return files existed for this entity -- nothing to archive.")
+
     return "\n\n".join(lines)
 
 
@@ -376,9 +413,9 @@ def render(container_tab=None) -> None:
         "selected to add one. A new entity has no mapping yet -- that's "
         "fine, the ITR Workbook cold-starts it.\n\n"
         "> **Rename note:** changing the entity key on an existing entity "
-        "renames its `.mapping.yaml` file to match. If a file already "
-        "exists at the new name, the rename is blocked rather than "
-        "half-applied."
+        "renames its `.mapping.yaml` file and any filed returns in "
+        "`Data/ITRFiled/` to match. If a file already exists at any new "
+        "name, the rename is blocked rather than half-applied."
     )
 
     initial_choices = _entity_choices()

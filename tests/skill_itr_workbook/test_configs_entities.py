@@ -225,3 +225,65 @@ def test_validate_rejects_blank_name_and_key():
 def test_validate_rejects_key_with_path_separator():
     errors = configs.validate_entity_fields(key="a/b", name="N", pan="AAAAA0000A", status="Individual")
     assert any("key" in e.lower() for e in errors)
+
+
+# ---------------------------------------------------------------------------
+# find_filed_returns -- entity-key-prefix matching over Data/ITRFiled/.
+# ---------------------------------------------------------------------------
+
+def test_find_filed_returns_matches_json_and_pdf(tmp_path):
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    (d / "SynEnt2425.json").write_text("{}", encoding="utf-8")
+    (d / "SynEnt2425.pdf").write_text("x", encoding="utf-8")
+    (d / "SynEnt2324.json").write_text("{}", encoding="utf-8")
+
+    found = configs.find_filed_returns("SynEnt", d)
+    assert [p.name for p in found] == ["SynEnt2324.json", "SynEnt2425.json", "SynEnt2425.pdf"]
+
+
+def test_find_filed_returns_is_sorted_and_deterministic(tmp_path):
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    for name in ("SynEnt2425.json", "SynEnt2223.json", "SynEnt2324.pdf"):
+        (d / name).write_text("{}", encoding="utf-8")
+
+    found1 = configs.find_filed_returns("SynEnt", d)
+    found2 = configs.find_filed_returns("SynEnt", d)
+    assert [p.name for p in found1] == [p.name for p in found2]
+    assert [p.name for p in found1] == sorted(p.name for p in found1)
+
+
+def test_find_filed_returns_missing_dir_is_noop(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    assert configs.find_filed_returns("SynEnt", missing) == []
+
+
+def test_find_filed_returns_ignores_unrelated_files(tmp_path):
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    (d / "SynEnt2425.json").write_text("{}", encoding="utf-8")
+    (d / "OtherEnt2425.json").write_text("{}", encoding="utf-8")
+    (d / "SynEnt2425.txt").write_text("x", encoding="utf-8")  # not json/pdf -- excluded
+    (d / "readme.md").write_text("x", encoding="utf-8")
+
+    found = configs.find_filed_returns("SynEnt", d)
+    assert [p.name for p in found] == ["SynEnt2425.json"]
+
+
+def test_find_filed_returns_prefix_collision_boundary(tmp_path):
+    """CRITICAL: entity keys can be prefixes of each other (e.g.
+    "SynEnt" vs "SynEntHUF"). A file belongs to `key` iff `key` is
+    immediately followed by a non-letter (digit) or end-of-stem."""
+    d = tmp_path / "ITRFiled"
+    d.mkdir()
+    (d / "SynEnt2425.json").write_text("{}", encoding="utf-8")
+    (d / "SynEntHUF2425.json").write_text("{}", encoding="utf-8")
+
+    short_matches = configs.find_filed_returns("SynEnt", d)
+    assert [p.name for p in short_matches] == ["SynEnt2425.json"]
+    assert "SynEntHUF2425.json" not in [p.name for p in short_matches]
+
+    huf_matches = configs.find_filed_returns("SynEntHUF", d)
+    assert [p.name for p in huf_matches] == ["SynEntHUF2425.json"]
+    assert "SynEnt2425.json" not in [p.name for p in huf_matches]

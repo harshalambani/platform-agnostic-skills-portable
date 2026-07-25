@@ -28,6 +28,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and archives (never deletes) the entity's `.mapping.yaml` to
   `Data/itr/_archive/`.
 
+### Changed
+- **ITR Entities tab: filed-return rename/delete cascade.** Renaming or
+  deleting an entity now cascades over its filed returns in
+  `Data/ITRFiled/<entity_key><token>.{json,pdf}` (e.g. `Harshal2425.json`),
+  replacing the earlier manual-check note. `configs.find_filed_returns()`
+  matches files by entity-key prefix only — the trailing `<token>` is a
+  human filing-batch label, never a parsed/trusted assessment year — with a
+  strict boundary rule so prefix-colliding keys (`Vaikunth` vs
+  `VaikunthHUF`) never cross-match. Rename swaps the leading entity-key
+  segment of each matched filename (token + extension preserved) and blocks
+  the *entire* save, same as the `.mapping.yaml` cascade, if any target
+  filename already exists. Delete archives (moves, timestamped) each
+  matched file to `Data/itr/_archive/` alongside the mapping-file archive —
+  filed returns are never deleted, only moved.
+
 ## [Unreleased]
 
 > **Note.** The entries below were never rolled into a released section at

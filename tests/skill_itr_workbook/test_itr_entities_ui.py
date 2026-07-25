@@ -431,3 +431,138 @@ def test_entities_path_anchored_in_both_layouts(tmp_path, layout):
     assert p == data_root / "itr" / "entities.yaml"
     doubled = data_root / "Data" / "itr" / "entities.yaml"
     assert p != doubled
+
+
+# ---------------------------------------------------------------------------
+# Filed-return cascade (rename swaps the entity-key prefix; delete archives).
+# ---------------------------------------------------------------------------
+
+def test_rename_cascades_filed_returns(tmp_path):
+    data_root = _seed(tmp_path)
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SYN-IND2425.json").write_text("{}", encoding="utf-8")
+    (itrfiled_dir / "SYN-IND2425.pdf").write_text("x", encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+
+    assert "Saved" in msg
+    assert "Cascaded filed return" in msg
+    assert not (itrfiled_dir / "SYN-IND2425.json").exists()
+    assert not (itrfiled_dir / "SYN-IND2425.pdf").exists()
+    assert (itrfiled_dir / "SYN-IND-RENAMED2425.json").is_file()
+    assert (itrfiled_dir / "SYN-IND-RENAMED2425.pdf").is_file()
+
+
+def test_rename_no_filed_returns_reports_noop(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-HUF", "SYN-HUF-2", "Synthetic HUF", "BBBBB1111B",
+            "HUF", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+    assert "Saved" in msg
+    assert "No filed-return files to cascade" in msg
+
+
+def test_rename_blocked_on_filed_return_target_collision(tmp_path):
+    data_root = _seed(tmp_path)
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SYN-IND2425.json").write_text("{}", encoding="utf-8")
+    # A leftover/orphan filed-return file already sitting at the rename
+    # target name, even though "SYN-NEW" is not (yet) an entity key.
+    (itrfiled_dir / "SYN-NEW2425.json").write_text("{}", encoding="utf-8")
+
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-NEW", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+
+    assert "blocked" in msg.lower()
+    assert entities_path.read_text(encoding="utf-8") == before_text
+    assert (itrfiled_dir / "SYN-IND2425.json").is_file()
+    assert (itrfiled_dir / "SYN-NEW2425.json").is_file()
+
+
+def test_rename_does_not_cascade_prefix_colliding_entity_filed_returns(tmp_path):
+    """CRITICAL: renaming "SynBase" must not touch "SynBaseHUF2425.json" --
+    prefix-collision boundary rule, mirrored from
+    test_configs_entities.test_find_filed_returns_prefix_collision_boundary."""
+    data_root = _seed(tmp_path, extra={
+        "SynBase": {
+            "name": "Syn Base", "pan": "HHHHH7777H", "status": "Individual",
+            "residency": "Resident", "default_regime": "new",
+        },
+        "SynBaseHUF": {
+            "name": "Syn Base HUF", "pan": "IIIII8888I", "status": "HUF",
+            "residency": "Resident", "default_regime": "new",
+        },
+    })
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SynBase2425.json").write_text("{}", encoding="utf-8")
+    (itrfiled_dir / "SynBaseHUF2425.json").write_text("{}", encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SynBase", "SynBaseRenamed", "Syn Base", "HHHHH7777H",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+
+    assert "Saved" in msg
+    assert not (itrfiled_dir / "SynBase2425.json").exists()
+    assert (itrfiled_dir / "SynBaseRenamed2425.json").is_file()
+    # The HUF entity's filed return is untouched.
+    assert (itrfiled_dir / "SynBaseHUF2425.json").is_file()
+
+
+def test_delete_archives_filed_return_files(tmp_path):
+    data_root = _seed(tmp_path)
+    itrfiled_dir = data_root / "ITRFiled"
+    itrfiled_dir.mkdir(parents=True, exist_ok=True)
+    (itrfiled_dir / "SYN-IND2425.json").write_text("{}", encoding="utf-8")
+    (itrfiled_dir / "SYN-IND2425.pdf").write_text("x", encoding="utf-8")
+    (itrfiled_dir / "SYN-HUF2425.json").write_text("{}", encoding="utf-8")  # unrelated
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("SYN-IND", True, True)
+
+    assert "Deleted" in msg
+    assert "Archived filed-return file(s)" in msg
+    assert not (itrfiled_dir / "SYN-IND2425.json").exists()
+    assert not (itrfiled_dir / "SYN-IND2425.pdf").exists()
+    assert (itrfiled_dir / "SYN-HUF2425.json").is_file()  # unrelated untouched
+
+    archive_dir = data_root / "itr" / "_archive"
+    archived = list(archive_dir.glob("SYN-IND2425.*.archived-*"))
+    assert len(archived) == 2
+
+
+def test_delete_no_filed_returns_reports_noop(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("SYN-HUF", True, True)
+    assert "Deleted" in msg
+    assert "No filed-return files existed" in msg
+
+
+def test_delete_missing_itrfiled_dir_is_noop_not_error(tmp_path):
+    data_root = _seed(tmp_path)
+    # Data/ITRFiled/ is never created in this test.
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("SYN-IND", True, True)
+    assert "Deleted" in msg
+    assert "No filed-return files existed" in msg
