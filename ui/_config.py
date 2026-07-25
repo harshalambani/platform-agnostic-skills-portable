@@ -244,6 +244,20 @@ def _resolve_default_template() -> Path:
 _DEFAULT_TEMPLATE = _resolve_default_template()
 
 
+def canonical_itr_rules_dir() -> Path:
+    """Canonical (shipped) ITR rules tree -- read-only base layer of the
+    overlay-then-base search list (2026-07-24 handover: ship canonical ITR
+    rules inside App\\, Data\\itr\\rules becomes a pure overlay). Mirrors
+    _resolve_default_template()'s frozen/source split, but points at a
+    non-DefaultData tree so the Launcher's first-run copy never touches it
+    -- rules must be replaced wholesale on every update, not frozen at
+    first run like DefaultData-sourced config."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "itr" / "rules"
+    return PROJECT_ROOT / "bundling" / "canonical" / "itr" / "rules"
+
+
 def _resolve_config_path() -> Path:
     """
     Resolution order:

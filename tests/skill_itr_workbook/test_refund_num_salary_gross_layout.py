@@ -57,7 +57,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
 for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
@@ -90,9 +90,9 @@ def syn_ind_model_and_paths():
     result = mapping_engine.resolve_tree(tree, loaded)
     form16 = parse_form16.parse_form16(FIXTURES / "syn_ind_form16.pdf")
     rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     entity = entities["SYN-IND"]
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     fmv_tables = sch.load_fmv_tables()
     user_rules = rules_engine.load_user_rules(RULES_DIR / "user_rules.yaml")
 

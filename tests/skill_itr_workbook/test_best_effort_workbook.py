@@ -45,9 +45,9 @@ import parse_eguile as pe  # noqa: E402
 import rules as rules_engine  # noqa: E402
 import schedules as sch  # noqa: E402
 
-ENTITIES_EXAMPLE = ROOT / "Data" / "itr" / "entities.example.yaml"
-SCRIPS_EXAMPLE = ROOT / "Data" / "itr" / "scrips.example.yaml"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+ENTITIES_EXAMPLE = ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml"
+SCRIPS_EXAMPLE = ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 YEAR_KEY = "2024-25"
 
 # From fixture_gen.build_syn_ind_html: the 3 leaves dropped by

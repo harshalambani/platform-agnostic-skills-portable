@@ -18,7 +18,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
 for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
@@ -54,8 +54,8 @@ def syn_ind_book():
 
 @pytest.fixture(scope="module")
 def entity_and_scrips():
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     return entities["SYN-IND"], scrips
 
 
@@ -924,7 +924,7 @@ def test_shipped_rules_files_carry_filing_due_dates():
 
 
 def test_entity_profile_loads_audit_case_and_per_ay_override():
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     biz = entities["SYN-IND-BIZ"]
     assert biz.audit_case is True
     assert biz.audit_case_by_ay.get("2025-26") is False

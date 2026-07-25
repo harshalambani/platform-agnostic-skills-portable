@@ -10,6 +10,8 @@ slab, or section number -- every figure comes from the loaded YAML.
 from __future__ import annotations
 
 import re
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -19,6 +21,21 @@ import yaml
 
 class RulesError(Exception):
     pass
+
+
+def canonical_rules_dir() -> Path:
+    """Canonical (shipped) ITR rules tree -- the read-only base layer of the
+    overlay-then-base search list (2026-07-24 handover: ship canonical ITR
+    rules inside App\\, Data\\itr\\rules becomes a pure overlay). Bundled at
+    _MEIPASS/itr/rules in a frozen build (bundling/paskills.spec `datas`);
+    bundling/canonical/itr/rules in source mode. Deliberately NOT
+    DefaultData -- the PortableApps Launcher only copies DefaultData into
+    Data\\ once, on first run, so rules placed there would freeze forever
+    instead of being replaced on every update."""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        return Path(meipass) / "itr" / "rules"
+    return Path(__file__).resolve().parents[4] / "bundling" / "canonical" / "itr" / "rules"
 
 
 @dataclass
@@ -52,24 +69,37 @@ def _year_key_from_filename(path: Path) -> str | None:
     return None
 
 
-def load_rules(rules_dir: str | Path, year_key: str) -> RulesConfig:
-    """Load Data/itr/rules/tax_rules_<AY|TY>.yaml whose canonical income-year
-    key (derived from meta.ay/meta.fy, D19) matches `year_key` (e.g.
-    '2025-26'). Raises RulesError if no file matches."""
-    rules_dir = Path(rules_dir)
-    for p in sorted(rules_dir.glob("tax_rules_*.yaml")):
-        raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        meta = raw.get("meta", {})
-        fy = meta.get("fy")
-        if fy == year_key:
-            return RulesConfig(
-                year_key=year_key,
-                act=meta.get("act", "1961"),
-                year_label=meta.get("year_label", f"AY {year_key}"),
-                version=meta.get("version", "unknown"),
-                raw=raw,
-            )
-    raise RulesError(f"no tax_rules_*.yaml under {rules_dir} matches income year {year_key!r}")
+def load_rules(rules_dir: str | Path | Sequence[str | Path], year_key: str) -> RulesConfig:
+    """Load tax_rules_<AY|TY>.yaml whose canonical income-year key (derived
+    from meta.ay/meta.fy, D19) matches `year_key` (e.g. '2025-26'). Raises
+    RulesError if no file matches.
+
+    `rules_dir` accepts either:
+      - a single directory (unchanged, hermetic behavior -- every caller
+        that passes one explicit dir, e.g. a temp dir in tests, sees ONLY
+        that dir); or
+      - an ordered sequence of directories, e.g. [overlay, canonical_base]
+        (2026-07-24 handover: base-then-overlay) -- each is globbed in
+        order and the first meta.fy match wins, so an overlay file with the
+        same AY as a canonical one takes precedence.
+    """
+    dirs: list[Path] = [Path(rules_dir)] if isinstance(rules_dir, (str, Path)) else [Path(d) for d in rules_dir]
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for p in sorted(d.glob("tax_rules_*.yaml")):
+            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            meta = raw.get("meta", {})
+            fy = meta.get("fy")
+            if fy == year_key:
+                return RulesConfig(
+                    year_key=year_key,
+                    act=meta.get("act", "1961"),
+                    year_label=meta.get("year_label", f"AY {year_key}"),
+                    version=meta.get("version", "unknown"),
+                    raw=raw,
+                )
+    raise RulesError(f"no tax_rules_*.yaml under {dirs} matches income year {year_key!r}")
 
 
 @dataclass
@@ -82,8 +112,20 @@ class UserRule:
     status: str = "active"
 
 
-def load_user_rules(path: str | Path) -> list[UserRule]:
-    p = Path(path)
+def load_user_rules(path: str | Path | Sequence[str | Path]) -> list[UserRule]:
+    """`path` accepts either:
+      - a literal file path to user_rules.yaml (unchanged); or
+      - an ordered sequence of directories, e.g. [overlay, canonical_base]
+        (2026-07-24 handover) -- the first directory containing
+        user_rules.yaml wins.
+    """
+    if isinstance(path, (str, Path)):
+        p = Path(path)
+    else:
+        candidates = [Path(d) / "user_rules.yaml" for d in path]
+        p = next((c for c in candidates if c.is_file()), None)
+        if p is None:
+            raise RulesError(f"no user_rules.yaml found under any of {candidates}")
     raw = yaml.safe_load(p.read_text(encoding="utf-8")) or []
     return [
         UserRule(

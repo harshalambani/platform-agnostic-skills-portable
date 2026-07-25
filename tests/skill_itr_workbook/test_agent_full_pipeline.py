@@ -32,8 +32,8 @@ import as26  # noqa: E402
 import agent  # noqa: E402
 import fixture_gen  # noqa: E402
 
-ENTITIES_EXAMPLE = ROOT / "Data" / "itr" / "entities.example.yaml"
-SCRIPS_EXAMPLE = ROOT / "Data" / "itr" / "scrips.example.yaml"
+ENTITIES_EXAMPLE = ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml"
+SCRIPS_EXAMPLE = ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml"
 
 
 def _run_full(tmp_path, html_build_fn, book_build_fn, mapping_path, entity_key, form16_pdf=None):

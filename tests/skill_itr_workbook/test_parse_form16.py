@@ -230,7 +230,7 @@ def test_agent_run_form16_encrypted_pan_auto_derived_from_entity(tmp_path):
 
     summary = agent.run(
         str(html_path), str(out_path), form16_pdf=str(form16_path),
-        entities_path=str(ROOT / "Data" / "itr" / "entities.example.yaml"), entity_key="SYN-IND",
+        entities_path=str(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml"), entity_key="SYN-IND",
     )
     assert "Form16: PARSE ERROR" not in summary
     assert "internal consistency OK" in summary

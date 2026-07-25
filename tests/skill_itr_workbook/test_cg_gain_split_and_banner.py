@@ -39,7 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-RULES_DIR = ROOT / "Data" / "itr" / "rules"
+RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
 for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
@@ -153,7 +153,7 @@ class _FakeNode:
 
 def test_genuine_control_mismatch_sets_reconciliation_not_ok():
     rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     fmv_tables = sch.load_fmv_tables()
     book = pg.parse_book(FIXTURES / "syn_ind.gnucash")
 
@@ -181,9 +181,9 @@ def syn_ind_model_and_paths():
     result = mapping_engine.resolve_tree(tree, loaded)
     form16 = parse_form16.parse_form16(FIXTURES / "syn_ind_form16.pdf")
     rules = rules_engine.load_rules(RULES_DIR, YEAR_KEY)
-    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    entities = configs.load_entities(ROOT / "bundling" / "canonical" / "itr" / "entities.example.yaml")
     entity = entities["SYN-IND"]
-    scrips = configs.load_scrips(ROOT / "Data" / "itr" / "scrips.example.yaml")
+    scrips = configs.load_scrips(ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml")
     fmv_tables = sch.load_fmv_tables()
     user_rules = rules_engine.load_user_rules(RULES_DIR / "user_rules.yaml")
 
@@ -270,7 +270,7 @@ def test_build_and_write_workbook_appends_marker_line_on_mismatch(tmp_path, monk
     lines = agent._build_and_write_workbook(
         tree, pg.parse_book(FIXTURES / "syn_ind.gnucash"), result, None, YEAR_KEY,
         [], [], str(out_path), FIXTURES / "syn_ind.mapping.yaml", entity,
-        str(RULES_DIR), ROOT / "Data" / "itr" / "scrips.example.yaml",
+        str(RULES_DIR), ROOT / "bundling" / "canonical" / "itr" / "scrips.example.yaml",
     )
     joined = "\n".join(lines)
     assert presentation.CG_RECONCILIATION_ERROR_MARKER in joined

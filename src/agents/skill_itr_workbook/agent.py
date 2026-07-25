@@ -425,8 +425,13 @@ def _build_and_write_workbook(
     if result is None or year_key is None:
         return []
 
+    # Base-then-overlay (2026-07-24 handover): `rules_dir` is the overlay
+    # (normally-empty, user-hand-tunable) dir; the canonical, shipped-in-App
+    # base is always appended underneath so a bare/empty overlay still
+    # resolves rules, and an overlay file with a matching AY wins.
+    rules_search_dirs = [rules_dir, rules_engine.canonical_rules_dir()]
     try:
-        rules = rules_engine.load_rules(rules_dir, year_key)
+        rules = rules_engine.load_rules(rules_search_dirs, year_key)
     except rules_engine.RulesError as e:
         return [f"Workbook: rules config unavailable ({e}) -- stub workbook only."]
 
@@ -457,7 +462,7 @@ def _build_and_write_workbook(
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
-    user_rules = rules_engine.load_user_rules(str(Path(rules_dir) / "user_rules.yaml"))
+    user_rules = rules_engine.load_user_rules(rules_search_dirs)
 
     write_workbook.write_workbook(
         output_path, tree, model, rules, user_rules, entity, regime, year_key,

@@ -119,25 +119,34 @@ def _options_from_itr_entities() -> list[tuple[str, str]]:
 
 
 def _options_from_itr_ay_years() -> list[tuple[str, str]]:
-    """(year_label, year_key) pairs from Data/itr/rules/tax_rules_*.yaml, for
-    the ITR Workbook skill's `ay` dropdown (options_from: itr_ay_years).
-    year_key is the canonical income-year key (e.g. "2025-26") used by
-    rules.load_rules() and the hard-fail year-mismatch check in agent.py."""
-    rules_dir = _config.data_root_dir() / "itr" / "rules"
-    if not rules_dir.is_dir():
-        return []
+    """(year_label, year_key) pairs from the canonical (shipped) rules base
+    and the Data/itr/rules overlay, for the ITR Workbook skill's `ay`
+    dropdown (options_from: itr_ay_years). year_key is the canonical
+    income-year key (e.g. "2025-26") used by rules.load_rules() and the
+    hard-fail year-mismatch check in agent.py.
+
+    2026-07-24 handover (ship canonical ITR rules inside App\\): scans base
+    UNION overlay, deduped by meta.fy with the overlay winning on a
+    collision, so the dropdown is populated from shipped rules even when
+    Data\\itr\\rules is empty (the normal case)."""
+    search_dirs = [_config.canonical_itr_rules_dir(), _config.data_root_dir() / "itr" / "rules"]
     try:
         import yaml
-        pairs = []
-        for p in sorted(rules_dir.glob("tax_rules_*.yaml")):
-            raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-            meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
-            fy = meta.get("fy")
-            if fy:
-                pairs.append((meta.get("year_label", fy), fy))
+        pairs: dict[str, tuple[str, str]] = {}
+        # Base first, overlay last -- overlay's entry overwrites on a
+        # matching fy, so the overlay wins the dedup.
+        for rules_dir in search_dirs:
+            if not rules_dir.is_dir():
+                continue
+            for p in sorted(rules_dir.glob("tax_rules_*.yaml")):
+                raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
+                fy = meta.get("fy")
+                if fy:
+                    pairs[fy] = (meta.get("year_label", fy), fy)
         # Newest year first (matches the plan's "default first option = live
         # filing year" convention).
-        return sorted(pairs, key=lambda pair: pair[1], reverse=True)
+        return sorted(pairs.values(), key=lambda pair: pair[1], reverse=True)
     except Exception:
         return []
 
