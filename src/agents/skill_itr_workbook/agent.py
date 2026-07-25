@@ -431,6 +431,7 @@ def _build_and_write_workbook(
         return [f"Workbook: rules config unavailable ({e}) -- stub workbook only."]
 
     regime = regime_override or entity.regime_by_ay.get(_fy_to_ay(year_key), entity.default_regime)
+    audit_case = entity.audit_case_by_ay.get(_fy_to_ay(year_key), entity.audit_case)
 
     scrips = {}
     if Path(scrips_path).is_file():
@@ -452,7 +453,7 @@ def _build_and_write_workbook(
     model = sch.build_all_schedules(
         tree, result.resolved, book, form16_data, year_key, rules, regime,
         entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
-        residency=entity.residency,
+        residency=entity.residency, audit_case=audit_case,
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []

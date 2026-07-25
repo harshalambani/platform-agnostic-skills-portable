@@ -53,6 +53,13 @@ SYN-IND-BIZ:
   address: "789 Example Lane, Example City"
   business_subtree: "Income/xBusiness Income"
   default_regime: "new"
+  # audit_case: entity liable to audit under s.44AB -> s.139(1) due date is
+  # 31 October (not 31 July), which changes 234A/234B/234C interest. Defaults
+  # to false when omitted. Use audit_case_by_ay for a per-year override, e.g.
+  # only one AY was under audit:
+  audit_case: true
+  audit_case_by_ay:
+    "2025-26": false
   extra_items:
     bf_losses: []
     clubbing_notes: []

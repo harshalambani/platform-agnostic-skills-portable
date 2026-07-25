@@ -867,3 +867,66 @@ def test_build_taxes_paid_26as_conflict_flagged_on_book_vs_26as_mismatch(syn_ind
     assert conflict["book"] == pytest.approx(book_only.tds_interest)
     assert conflict["as26"] == pytest.approx(conflicting_amount)
     assert conflict["diff"] == pytest.approx(book_only.tds_interest - conflicting_amount)
+
+
+# ---------------------------------------------------------------------------
+# Filing due date resolved from config (audit_case + rules.filing_due_dates),
+# no longer the old hardcoded 31 July for everyone.
+# ---------------------------------------------------------------------------
+
+def _rules_with_due_dates(due_dates) -> rules_engine.RulesConfig:
+    """A minimal RulesConfig whose common block carries (or omits) the
+    filing_due_dates map -- exercises resolve_due_date without a rules file."""
+    common = {} if due_dates is None else {"filing_due_dates": due_dates}
+    return rules_engine.RulesConfig(
+        year_key="2025-26", act="1961", year_label="AY 2026-27",
+        version="test", raw={"common": common},
+    )
+
+
+def test_resolve_due_date_reads_config_for_non_audit():
+    rules = _rules_with_due_dates({"non_audit": "07-31", "audit": "10-31"})
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=False) == date(2026, 7, 31)
+
+
+def test_resolve_due_date_audit_case_is_31_october():
+    rules = _rules_with_due_dates({"non_audit": "07-31", "audit": "10-31"})
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=True) == date(2026, 10, 31)
+
+
+def test_resolve_due_date_honours_a_cbdt_extension_in_config():
+    # An extended date set per-AY in the rules file must win over the fallback.
+    rules = _rules_with_due_dates({"non_audit": "09-15", "audit": "11-30"})
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=False) == date(2026, 9, 15)
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=True) == date(2026, 11, 30)
+
+
+@pytest.mark.parametrize("rules", [None, _rules_with_due_dates(None)])
+def test_resolve_due_date_falls_back_when_block_absent(rules):
+    # No rules object at all, or a rules file predating the block -> statutory
+    # fallback (31 July / 31 October), never a hard failure.
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=False) == date(2026, 7, 31)
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=True) == date(2026, 10, 31)
+
+
+def test_resolve_due_date_malformed_entry_keeps_fallback():
+    rules = _rules_with_due_dates({"non_audit": "not-a-date"})
+    assert sch.resolve_due_date(rules, "2025-26", audit_case=False) == date(2026, 7, 31)
+
+
+def test_shipped_rules_files_carry_filing_due_dates():
+    # The two tracked rules files must expose the block so a real run resolves
+    # the date from config, not the fallback.
+    for year_key in ("2024-25", "2025-26"):
+        rules = rules_engine.load_rules(RULES_DIR, year_key)
+        due_dates = rules.common.get("filing_due_dates")
+        assert due_dates and due_dates.get("audit") and due_dates.get("non_audit"), year_key
+
+
+def test_entity_profile_loads_audit_case_and_per_ay_override():
+    entities = configs.load_entities(ROOT / "Data" / "itr" / "entities.example.yaml")
+    biz = entities["SYN-IND-BIZ"]
+    assert biz.audit_case is True
+    assert biz.audit_case_by_ay.get("2025-26") is False
+    # An entity without the flag defaults to non-audit.
+    assert entities["SYN-IND"].audit_case is False

@@ -69,6 +69,9 @@ class EntityProfile:
                                        # render a zero sheet (2026-07-19 PL for Business prompt)
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
+    audit_case: bool = False             # liable to audit -> 31 Oct s.139(1) due date
+                                         # (else 31 July); drives 234A/B/C interest.
+    audit_case_by_ay: dict = field(default_factory=dict)  # per-AY override, {"2026-27": true}
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
 
 
@@ -101,6 +104,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             business_subtree=fields_.get("business_subtree"),
             default_regime=fields_.get("default_regime", "new"),
             regime_by_ay=fields_.get("regime_by_ay") or {},
+            audit_case=bool(fields_.get("audit_case", False)),
+            audit_case_by_ay=fields_.get("audit_case_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},
         )
     return entities

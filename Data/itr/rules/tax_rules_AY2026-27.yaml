@@ -93,6 +93,13 @@ common:
     total_income: {section: "288A", nearest: 10}
     tax_payable_refund: {section: "288B", nearest: 10}
 
+  filing_due_dates:                        # s.139(1) furnishing due date, "MM-DD"
+    non_audit: "07-31"                     # individuals not liable to audit
+    audit: "10-31"                         # audit case (per-entity audit_case flag)
+    # CBDT extends these by notification most years -- override here per AY when
+    # it does. Optional block: schedules.resolve_due_date falls back to the same
+    # two dates if omitted (so an older rules file never hard-fails).
+
   capital_gains:                         # NO split year — post-23-07-2024 rates all FY [src-3]
     split_date: null
     s111a_stcg_equity_stt: {rate: 0.20}
