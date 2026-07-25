@@ -678,15 +678,34 @@ def build_taxes_paid(
 # Interest u/s 234A / 234B / 234C
 # ---------------------------------------------------------------------------
 
-#: Statutory due date for furnishing a non-audit individual return: 31 July
-#: of the assessment year. Audit cases (31 October) and the various extended
-#: dates are NOT auto-detected -- the due date is an input the filer can
-#: override on the workbook, and this is only the default.
-_DUE_DATE_MONTH_DAY = (7, 31)
+#: Fallback s.139(1) furnishing due dates, month-day, used ONLY when the rules
+#: file omits common.filing_due_dates. The rules files live under untracked
+#: Data/, so a REQUIRED key would hard-fail every pre-existing book -- hence a
+#: fallback rather than a mandatory key. 31 July for non-audit individuals,
+#: 31 October for audit cases (audit_case flag on the entity). The various
+#: CBDT-extended dates are set per-AY in the rules file, not auto-detected;
+#: the filer can still override the resolved default on the workbook.
+_DUE_DATE_FALLBACK = {"non_audit": (7, 31), "audit": (10, 31)}
 
 
-def default_due_date(year_key: str) -> date:
-    return date(int(year_key[:4]) + 1, *_DUE_DATE_MONTH_DAY)
+def resolve_due_date(
+    rules: "rules_engine.RulesConfig | None", year_key: str, audit_case: bool = False,
+) -> date:
+    """Statutory furnishing due date, resolved from rules.common.filing_due_dates
+    (keys 'non_audit'/'audit', values 'MM-DD') with a hardcoded fallback. Nothing
+    hardcodes the date when the rules file supplies it; the fallback exists only
+    so a rules file predating the block still builds."""
+    key = "audit" if audit_case else "non_audit"
+    month, day = _DUE_DATE_FALLBACK[key]
+    if rules is not None:
+        spec = (rules.common.get("filing_due_dates") or {}).get(key)
+        if spec:
+            try:
+                m, d = str(spec).split("-")
+                month, day = int(m), int(d)
+            except (ValueError, TypeError):
+                pass          # malformed entry -- keep the statutory fallback
+    return date(int(year_key[:4]) + 1, month, day)
 
 
 def cg_proviso_exclusions(
@@ -748,6 +767,8 @@ def build_interest_234(
     year_key: str | None, filing_date: date | None = None,
     due_date: date | None = None,
     capital_gains: "CapitalGainsSchedule | None" = None,
+    rules: "rules_engine.RulesConfig | None" = None,
+    audit_case: bool = False,
 ) -> Interest234Schedule:
     """Assemble the inputs s.234A/B/C need out of the already-built model.
 
@@ -765,7 +786,7 @@ def build_interest_234(
     if year_key is None:
         return Interest234Schedule()
 
-    due = due_date or default_due_date(year_key)
+    due = due_date or resolve_due_date(rules, year_key, audit_case)
 
     # Creditable TDS/TCS. The book's own TDS lines are the fallback basis;
     # 26AS overrides them when present -- but ONLY for interest and dividend,
@@ -1297,6 +1318,7 @@ def build_all_schedules(
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
     residency: str | None = None, filing_date: date | None = None,
+    audit_case: bool = False,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -1326,6 +1348,7 @@ def build_all_schedules(
     schedule_fa = build_schedule_fa(resolved, node_by_guid)
     interest = build_interest_234(
         computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
+        rules=rules, audit_case=audit_case,
     )
 
     return ITRModel(

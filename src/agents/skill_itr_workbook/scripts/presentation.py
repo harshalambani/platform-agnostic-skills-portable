@@ -61,18 +61,27 @@ PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG
 HIDDEN_SHEETS = ("Rules", "Mapping Review", "IS_Transcript", "BS_Transcript")
 
 _STATUS_FOOTNOTE = "*"
-_ASSUMPTION_NOTE = (
-    "* Residential status is ASSUMED to be R/OR (Resident and Ordinarily Resident). "
-    "It is not determined by this tool -- no day-count test or RNOR analysis is "
-    "performed. Confirm before filing: R/OR vs RNOR vs NR changes what income is "
-    "taxable at all.\n"
-    "* Interest u/s 234A / 234B / 234C IS computed and is included in the "
-    "Aggregate liability and Refund lines above. It depends on inputs the tool "
-    "cannot know: the ACTUAL DATE OF FILING (assumed to be the due date unless "
-    "you set it), the due date itself (31 July, i.e. the non-audit case), and "
-    "the instalment-wise advance tax. All are editable in the Workings section "
-    "-- check them, since 234A and 234B both grow for every part-month of delay."
-)
+def _assumption_note(due_date: "date | None") -> str:
+    """The Assumptions footnote. The 234-interest clause names the ACTUAL
+    resolved due date rather than asserting 31 July -- that hardcode was a lie
+    on an audit workbook (31 October), and the date now comes from the entity's
+    audit_case flag + the rules file (schedules.resolve_due_date)."""
+    if due_date is not None:
+        due_clause = f"the due date itself ({due_date.day} {due_date.strftime('%B %Y')})"
+    else:
+        due_clause = "the due date itself"
+    return (
+        "* Residential status is ASSUMED to be R/OR (Resident and Ordinarily Resident). "
+        "It is not determined by this tool -- no day-count test or RNOR analysis is "
+        "performed. Confirm before filing: R/OR vs RNOR vs NR changes what income is "
+        "taxable at all.\n"
+        "* Interest u/s 234A / 234B / 234C IS computed and is included in the "
+        "Aggregate liability and Refund lines above. It depends on inputs the tool "
+        "cannot know: the ACTUAL DATE OF FILING (assumed to be the due date unless "
+        f"you set it), {due_clause}, and "
+        "the instalment-wise advance tax. All are editable in the Workings section "
+        "-- check them, since 234A and 234B both grow for every part-month of delay."
+    )
 
 #: Fail-loud (2026-07-19 CG gain-split-vs-action fix), "banner, no abort":
 #: schedules.py's build_capital_gains already computes reconciliation_ok /
@@ -1440,7 +1449,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     if not residency_declared:
         ws.cell(row=row, column=1, value="Assumptions").font = _font(bold=True, underline="single")
         row += 1
-        note = ws.cell(row=row, column=1, value=_ASSUMPTION_NOTE)
+        note = ws.cell(row=row, column=1, value=_assumption_note(model.interest_234.due_date))
         note.font = _font(8, italic=True)
         note.alignment = Alignment(wrap_text=True, vertical="top")
         ws.merge_cells(start_row=row, start_column=1, end_row=row + 1, end_column=OUTER)
