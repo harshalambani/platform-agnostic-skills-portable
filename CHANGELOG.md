@@ -4,6 +4,30 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0] — 2026-07-25
+
+### Added
+- **ITR Entities CRUD tab.** New "ITR Entities" sub-tab under GnuCash > ITR
+  (alongside "ITR Workbook" and "ITR Mapping") for adding, modifying, and
+  deleting taxpayer entities in `Data/itr/entities.yaml` through the UI —
+  no more hand-edited YAML for the roster. Full form over every
+  `EntityProfile` field: PAN (`[A-Z]{5}\d{4}[A-Z]`), status enum, dob/doi
+  dates, default regime + a `regime_by_ay` per-AY editor, the `audit_case` /
+  `audit_case_by_ay` fields added in v2.19.0 (#117), and `extra_items`
+  (b/f losses, clubbing notes). Validation runs before every write and
+  blocks bad PAN/date/enum values with an inline error; a blank entity key
+  never touches disk. `configs.py` gains `dump_entities()` (a deterministic,
+  sorted-key `yaml.safe_dump` re-emitting a stable header — no `ruamel.yaml`
+  dependency added, per the 2026-07-23 decision) and
+  `validate_entity_fields()`. Save discipline mirrors `itr_mapping_review.py`:
+  a timestamped backup of `entities.yaml` before every rewrite, anchored via
+  `data_root_dir()` (works in both source and frozen layouts). Renaming an
+  entity's key cascades its `.mapping.yaml` file to the new name, or blocks
+  the whole save with a clear message if a file already exists at the target
+  name (never a half-applied rename). Delete requires a double confirmation
+  and archives (never deletes) the entity's `.mapping.yaml` to
+  `Data/itr/_archive/`.
+
 ## [Unreleased]
 
 > **Note.** The entries below were never rolled into a released section at

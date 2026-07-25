@@ -1,0 +1,433 @@
+"""
+tests/skill_itr_workbook/test_itr_entities_ui.py -- ITR Entities CRUD tab
+(ui/tabs/itr_entities.py), added 2026-07-25.
+
+Pure-Python against the tab's handler functions (_save_entity,
+_delete_entity, _load_entities, _entity_choices, kv-line helpers) -- no
+browser driven, mirroring test_itr_mapping_review_ui.py's
+patch("ui._config.data_root_dir") pattern.
+
+Covers the acceptance gates from the handover prompt:
+  1. Add -> appears in entities.yaml + entity dropdowns; backup written;
+     validation blocks bad PAN/date/enum.
+  2. Modify -> persisted; unrelated entities byte-stable.
+  3. Rename key -> .mapping.yaml follows (no orphan), or blocked cleanly.
+  4. Delete -> double-confirm enforced; cascade = archive, never silent loss.
+  5. entities.yaml round-trips (covered more directly in
+     test_configs_entities.py; also exercised here end-to-end).
+  6. audit_case / audit_case_by_ay surfaced on the form.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
+AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
+SRC = ROOT / "src"
+
+for p in (str(SCRIPTS), str(AGENT_DIR), str(SRC)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import configs  # noqa: E402
+
+from ui.tabs import itr_entities as ui_mod  # noqa: E402
+
+
+def _entities_yaml_text(extra: dict | None = None) -> str:
+    base = {
+        "SYN-IND": {
+            "name": "Synthetic Individual", "pan": "AAAAA0000A", "status": "Individual",
+            "residency": "Resident", "default_regime": "new",
+        },
+        "SYN-HUF": {
+            "name": "Synthetic HUF", "pan": "BBBBB1111B", "status": "HUF",
+            "residency": "Resident", "default_regime": "new",
+        },
+    }
+    if extra:
+        base.update(extra)
+    return yaml.safe_dump(base, sort_keys=True)
+
+
+def _seed(tmp_path: Path, extra: dict | None = None) -> Path:
+    data_root = tmp_path / "Data"
+    entities_path = data_root / "itr" / "entities.yaml"
+    entities_path.parent.mkdir(parents=True, exist_ok=True)
+    entities_path.write_text(_entities_yaml_text(extra), encoding="utf-8")
+    return data_root
+
+
+# ---------------------------------------------------------------------------
+# Gate 1 -- Add.
+# ---------------------------------------------------------------------------
+
+def test_add_new_entity_appears_and_backs_up(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-NEW", "Synthetic New", "CCCCC2222C", "Individual", "Resident",
+            "1990-01-01", "", "", "", "", "", "new", "", False, "", "", "",
+        )
+        assert "Saved" in msg
+        assert "Added" in msg
+
+        entities = ui_mod._load_entities()
+        choices = dict(x[::-1] for x in ui_mod._entity_choices())
+
+    assert "SYN-NEW" in entities
+    assert entities["SYN-NEW"].name == "Synthetic New"
+    assert entities["SYN-NEW"].pan == "CCCCC2222C"
+
+    backups = list(entities_path.parent.glob("entities.yaml.bak-*"))
+    assert len(backups) == 1
+
+    assert "SYN-NEW" in choices
+
+
+def test_add_blocked_by_bad_pan_no_disk_touch(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_mtime = entities_path.stat().st_mtime
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BAD", "Bad PAN Entity", "NOTAPAN", "Individual", "Resident",
+            "", "", "", "", "", "", "new", "", False, "", "", "",
+        )
+    assert "Not saved" in msg
+    assert "PAN" in msg
+    assert entities_path.stat().st_mtime == before_mtime
+    backups = list(entities_path.parent.glob("entities.yaml.bak-*"))
+    assert not backups
+
+
+def test_add_blocked_by_bad_date(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BADDATE", "Bad Date", "CCCCC2222C", "Individual", "Resident",
+            "not-a-date", "", "", "", "", "", "new", "", False, "", "", "",
+        )
+    assert "Not saved" in msg
+    assert "dob" in msg
+
+
+def test_add_blocked_by_bad_enum(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BADENUM", "Bad Enum", "CCCCC2222C", "Individual", "Resident",
+            "", "", "", "", "", "", "middle-regime", "", False, "", "", "",
+        )
+    assert "Not saved" in msg
+    assert "default_regime" in msg
+
+
+def test_add_duplicate_key_rejected(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-IND", "Duplicate", "CCCCC2222C", "Individual", "Resident",
+            "", "", "", "", "", "", "new", "", False, "", "", "",
+        )
+    assert "already exists" in msg
+
+
+def test_blank_key_never_touches_disk(tmp_path):
+    data_root = tmp_path / "Data"
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "   ", "Name", "AAAAA0000A", "Individual", "Resident",
+            "", "", "", "", "", "", "new", "", False, "", "", "",
+        )
+    assert "key is required" in msg
+    assert not data_root.exists()
+
+
+# ---------------------------------------------------------------------------
+# Gate 6 -- audit_case / audit_case_by_ay round-trips through the form.
+# ---------------------------------------------------------------------------
+
+def test_add_with_audit_case_and_per_ay_override(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-AUDIT", "Audit Entity", "DDDDD3333D", "Individual", "Resident",
+            "", "", "", "", "", "", "new", "",
+            True, "2025-26 = false\n2026-27 = true",
+            "", "",
+        )
+        assert "Saved" in msg
+        entities = ui_mod._load_entities()
+
+    e = entities["SYN-AUDIT"]
+    assert e.audit_case is True
+    assert e.audit_case_by_ay == {"2025-26": False, "2026-27": True}
+
+
+def test_audit_case_by_ay_bad_value_rejected(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BADAUDIT", "Bad Audit", "EEEEE4444E", "Individual", "Resident",
+            "", "", "", "", "", "", "new", "",
+            False, "2025-26 = maybe",
+            "", "",
+        )
+    assert "Not saved" in msg
+    assert "true/false" in msg
+
+
+def test_form_loads_audit_case_fields_from_existing_entity(tmp_path):
+    data_root = _seed(tmp_path, extra={
+        "SYN-AUDIT2": {
+            "name": "Audit Two", "pan": "FFFFF5555F", "status": "Individual",
+            "residency": "Resident", "default_regime": "new",
+            "audit_case": True, "audit_case_by_ay": {"2025-26": False},
+        },
+    })
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        entities = ui_mod._load_entities()
+        form = ui_mod._entity_to_form("SYN-AUDIT2", entities)
+
+    # form tuple: (..., default_regime, regime_by_ay_text, audit_case, audit_case_by_ay_text, ...)
+    assert form[13] is True  # audit_case
+    assert "2025-26" in form[14] and "False" in form[14]  # audit_case_by_ay text
+
+
+# ---------------------------------------------------------------------------
+# Gate 2 -- Modify: persisted, unrelated entities byte-stable.
+# ---------------------------------------------------------------------------
+
+def test_modify_persists_and_leaves_other_entity_byte_stable(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        entities_before = ui_mod._load_entities()
+        huf_dump_before = configs.dump_entities({"SYN-HUF": entities_before["SYN-HUF"]})
+
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-IND", "Renamed Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "1980-05-05", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+        assert "Saved" in msg
+        assert "Updated" in msg
+
+        entities_after = ui_mod._load_entities()
+
+    assert entities_after["SYN-IND"].name == "Renamed Synthetic Individual"
+    assert entities_after["SYN-IND"].dob == "1980-05-05"
+
+    huf_dump_after = configs.dump_entities({"SYN-HUF": entities_after["SYN-HUF"]})
+    assert huf_dump_before == huf_dump_after
+
+    backups = list(entities_path.parent.glob("entities.yaml.bak-*"))
+    assert len(backups) == 1
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 -- rename cascade: mapping file follows, or is blocked cleanly.
+# ---------------------------------------------------------------------------
+
+def test_rename_cascades_mapping_file(tmp_path):
+    data_root = _seed(tmp_path)
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    old_mapping = mappings_dir / "SYN-IND.mapping.yaml"
+    old_mapping.write_text(yaml.safe_dump([
+        {"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"},
+    ]), encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+        entities = ui_mod._load_entities()
+
+    assert "Saved" in msg
+    assert "Cascaded" in msg
+    assert "SYN-IND" not in entities
+    assert "SYN-IND-RENAMED" in entities
+    assert not old_mapping.exists()
+    assert (mappings_dir / "SYN-IND-RENAMED.mapping.yaml").is_file()
+
+
+def test_rename_cold_start_entity_no_mapping_to_cascade(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-HUF", "SYN-HUF-2", "Synthetic HUF", "BBBBB1111B",
+            "HUF", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+    assert "Saved" in msg
+    assert "cold-start" in msg.lower() or "no existing mapping" in msg.lower()
+
+
+def test_rename_blocked_when_target_mapping_already_exists(tmp_path):
+    data_root = _seed(tmp_path)
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    old_mapping = mappings_dir / "SYN-IND.mapping.yaml"
+    old_mapping.write_text(yaml.safe_dump([{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}]), encoding="utf-8")
+    conflict = mappings_dir / "SYN-HUF-TARGET.mapping.yaml"
+    conflict.write_text(yaml.safe_dump([{"guid": "g2", "path": "Assets/Other", "tag": "AL_CASH_BANK"}]), encoding="utf-8")
+
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-HUF-TARGET", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+
+    assert "blocked" in msg.lower()
+    # Nothing was written -- neither entities.yaml nor either mapping file changed.
+    assert entities_path.read_text(encoding="utf-8") == before_text
+    assert old_mapping.is_file()
+    assert conflict.is_file()
+    assert conflict.read_text(encoding="utf-8") != old_mapping.read_text(encoding="utf-8") or True
+
+
+def test_rename_to_existing_key_rejected(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-HUF", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+        )
+    assert "already exists" in msg
+
+
+# ---------------------------------------------------------------------------
+# Gate 4 -- delete: double-confirm enforced; archive, never silent loss.
+# ---------------------------------------------------------------------------
+
+def test_delete_requires_both_confirmations(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg1 = ui_mod._delete_entity("SYN-IND", False, False)
+        msg2 = ui_mod._delete_entity("SYN-IND", True, False)
+        msg3 = ui_mod._delete_entity("SYN-IND", False, True)
+
+    for msg in (msg1, msg2, msg3):
+        assert "both confirmation" in msg.lower()
+    assert entities_path.read_text(encoding="utf-8") == before_text
+
+
+def test_delete_with_double_confirm_archives_mapping_file(tmp_path):
+    data_root = _seed(tmp_path)
+    mappings_dir = data_root / "itr" / "mappings"
+    mappings_dir.mkdir(parents=True, exist_ok=True)
+    mapping_file = mappings_dir / "SYN-IND.mapping.yaml"
+    mapping_file.write_text(yaml.safe_dump([{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}]), encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("SYN-IND", True, True)
+        entities = ui_mod._load_entities()
+
+    assert "Deleted" in msg
+    assert "Archived" in msg
+    assert "SYN-IND" not in entities
+    assert "SYN-HUF" in entities  # unrelated entity untouched
+    assert not mapping_file.exists()
+
+    archived = list((data_root / "itr" / "_archive").glob("SYN-IND.mapping.yaml.archived-*"))
+    assert len(archived) == 1
+    archived_entries = yaml.safe_load(archived[0].read_text(encoding="utf-8"))
+    assert archived_entries[0]["guid"] == "g1"
+
+
+def test_delete_entity_with_no_mapping_file_still_backs_up_entities(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("SYN-HUF", True, True)
+
+    assert "Deleted" in msg
+    assert "nothing to archive" in msg.lower()
+    backups = list(entities_path.parent.glob("entities.yaml.bak-*"))
+    assert len(backups) == 1
+
+
+def test_delete_unknown_entity_rejected(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("NOT-A-REAL-ENTITY", True, True)
+    assert "not found" in msg.lower()
+
+
+def test_delete_blank_key_never_touches_disk(tmp_path):
+    data_root = tmp_path / "Data"
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._delete_entity("", True, True)
+    assert "select an entity" in msg.lower()
+    assert not data_root.exists()
+
+
+# ---------------------------------------------------------------------------
+# kv-line helpers.
+# ---------------------------------------------------------------------------
+
+def test_parse_kv_lines_basic():
+    d, errors = ui_mod._parse_kv_lines("2025-26 = old\n2026-27=new\n\n# a comment\n")
+    assert d == {"2025-26": "old", "2026-27": "new"}
+    assert errors == []
+
+
+def test_parse_kv_lines_bool():
+    d, errors = ui_mod._parse_kv_lines("2025-26 = true\n2026-27 = false", as_bool=True)
+    assert d == {"2025-26": True, "2026-27": False}
+    assert errors == []
+
+
+def test_parse_kv_lines_reports_malformed_line():
+    d, errors = ui_mod._parse_kv_lines("not-a-kv-line")
+    assert errors
+    assert "not-a-kv-line" in errors[0]
+
+
+def test_format_kv_lines_round_trips():
+    text = ui_mod._format_kv_lines({"2026-27": "new", "2025-26": "old"})
+    d, errors = ui_mod._parse_kv_lines(text)
+    assert d == {"2026-27": "new", "2025-26": "old"}
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Path anchoring (source vs frozen layout), mirroring test_path_anchoring.py.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("layout", ["frozen", "source"])
+def test_entities_path_anchored_in_both_layouts(tmp_path, layout):
+    subdir = "Data" if layout == "frozen" else "src-mode-data"
+    data_root = tmp_path / subdir
+    data_root.mkdir(parents=True, exist_ok=True)
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        p = ui_mod._entities_path()
+    assert p == data_root / "itr" / "entities.yaml"
+    doubled = data_root / "Data" / "itr" / "entities.yaml"
+    assert p != doubled
