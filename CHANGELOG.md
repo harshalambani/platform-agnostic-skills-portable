@@ -67,6 +67,46 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   module name instead, so it no longer collides with other skills' same-named
   `agent.py` modules regardless of collection order.
 
+## [2.19.0] — 2026-07-25
+
+### Added
+- **ITR statutory rules now ship *inside* the app and update with every release.**
+  (#118) The five canonical rule files (`tax_rules_AY2025-26.yaml`,
+  `tax_rules_AY2026-27.yaml`, `user_rules.yaml`, and the `entities.example.yaml` /
+  `scrips.example.yaml` templates) moved out of the git-tracked `Data\itr\rules`
+  tree into a new `bundling/canonical/itr/` source tree that is bundled into the
+  frozen build (`_MEIPASS/itr/`, via `paskills.spec` `datas`) and read directly at
+  runtime. `Data\itr\rules` is now a normally-empty, read-time **overlay**:
+  `rules.load_rules()` / `load_user_rules()` accept either a single directory
+  (unchanged, hermetic call shape the tests rely on) or an ordered
+  `[overlay, canonical_base]` search list where the first per-AY match wins, so a
+  file dropped into `Data\itr\rules` still overrides the shipped copy for
+  hand-tuning one book. Rationale: the PortableApps.com Launcher copies
+  `DefaultData\` into `Data\` only once, on first run, so statutory fixes shipped
+  there would freeze forever after a user's first launch — canonical rules now
+  live outside `DefaultData` and are replaced wholesale each update. The AY
+  dropdown (`ui/tabs/_generic.py`) now scans base ∪ overlay (deduped by
+  `meta.fy`, overlay wins) so it populates from shipped rules even with an empty
+  overlay. `.gitignore` collapses to a single `Data/.gitkeep` carve-out —
+  `git ls-files Data/` now returns nothing, so `Data\` is 100% user data with no
+  allow-list negations a stray PII file could slip through. New regression test
+  proves overlay-wins.
+
+### Changed
+- **ITR s.234A/B/C interest — the filing due date is resolved from config, not a
+  hardcoded 31 July.** (#117) The interest calc previously hardcoded 31 July as
+  the furnishing due date for every entity, so an audit-case return (statutory
+  31 October) was computed against the wrong due date and the Assumptions note
+  asserted "31 July, i.e. the non-audit case" even on an audit workbook.
+  `schedules.py` now calls `resolve_due_date(rules, year_key, audit_case)`,
+  reading `common.filing_due_dates` from the rules file with a 31-Jul / 31-Oct
+  fallback (a CBDT extension can override per-AY); `EntityProfile` gains
+  `audit_case` / `audit_case_by_ay` (mirroring `default_regime` / `regime_by_ay`),
+  resolved per-AY in `agent.py` and threaded through `build_all_schedules` ->
+  `build_interest_234`; and the Assumptions note prints the actual resolved due
+  date. Both shipped `tax_rules_*.yaml` gain an optional `common.filing_due_dates`
+  block.
+
 ## [2.18.2] — 2026-07-24
 
 ### Fixed
