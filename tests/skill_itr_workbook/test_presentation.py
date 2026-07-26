@@ -137,7 +137,7 @@ def _is_input_cell(c) -> bool:
     return rgb == "00DDEBF7"
 
 
-@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG"])
+@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI"])
 def test_no_numeric_literal_anywhere_on_presentation_sheets(wb, sheet):
     """The strongest form of "every money cell is a formula": no cell on these
     sheets holds a numeric type at all. Amounts, quantities, dates and even the
@@ -1001,7 +1001,7 @@ def test_business_subtree_config_field_round_trips_through_load_entities():
 # Gate 7 -- widths and print setup on every sheet
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG"])
+@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI"])
 def test_every_presentation_sheet_has_explicit_widths_and_print_setup(wb, sheet):
     ws = wb[sheet]
     widths = {k: d.width for k, d in ws.column_dimensions.items() if d.width}
@@ -1026,3 +1026,109 @@ def test_indian_number_format_is_preserved(wb):
     money = [c for row in ws.iter_rows(min_row=4, min_col=2) for c in row if c.value]
     assert money
     assert all(c.number_format == presentation.INR_FORMAT for c in money)
+
+
+# ---------------------------------------------------------------------------
+# Gate 8 -- Schedule EI (2026-07-26 Schedule EI / Sch.No prompt)
+# ---------------------------------------------------------------------------
+
+def _exact_label_row(ws, text: str, col: int = 1) -> int:
+    """Like `_find_label`, but an EXACT match on `col` -- needed where a
+    substring search would ambiguously hit more than one row (e.g. "Total"
+    is a substring of "Total Income")."""
+    for row in ws.iter_rows(min_col=col, max_col=col):
+        for c in row:
+            if c.value == text:
+                return c.row
+    raise AssertionError(f"no exact label {text!r} in column {col}")
+
+
+def test_schedule_ei_sheet_is_present_and_positioned_after_cg(wb):
+    assert "Schedule EI" in wb.sheetnames
+    # Last of the presentation sheets -- appended at the end of
+    # PRESENTATION_SHEETS deliberately, so it disturbs none of the existing
+    # sheetnames[:N] order assertions elsewhere in this file.
+    assert wb.sheetnames.index("Schedule EI") > wb.sheetnames.index("CG")
+
+
+def test_schedule_ei_book_lines_are_formulas_tying_back_to_exempt_income_sheet(wb):
+    ws = wb["Schedule EI"]
+    book_formulas = [
+        c.value for row in ws.iter_rows(min_col=2, max_col=2) for c in row
+        if isinstance(c.value, str) and c.value.startswith("='ExemptIncome'!")
+    ]
+    # PPF/EPF interest, tax-free bond interest, share of firm profit
+    # (s.10(2A)), other exempt -- all four book-tagged buckets.
+    assert len(book_formulas) == 4
+
+
+def test_schedule_ei_agricultural_income_is_a_real_editable_input_cell_not_a_formula():
+    """Agricultural income has no book tag (no GnuCash leaf a personal book
+    would carry for it) -- the "editable input" half of Schedule EI's "both"
+    sourcing, styled exactly like the Statement of Income b/f-loss buckets."""
+    import openpyxl as oxl
+    wb_ = oxl.Workbook()
+    wb_.remove(wb_.active)
+    ei_layout = {
+        "ppf": _Coord("B1"), "firm_profit": _Coord("B2"),
+        "taxfree_bond": _Coord("B3"), "other": _Coord("B4"),
+    }
+    ei = sch.ExemptIncomeSchedule()
+    layout = presentation.write_schedule_ei(wb_, ei, ei_layout, "print-title")
+    ws = wb_["Schedule EI"]
+    label = _find_label(ws, "Agricultural income")
+    cell = ws.cell(row=label.row, column=2)
+    assert cell.value == 0
+    assert cell.fill.start_color.rgb == "00DDEBF7" or cell.fill.fgColor.rgb == "00DDEBF7"
+    assert "total" in layout
+
+
+def test_schedule_ei_total_is_a_sum_formula_spanning_book_lines_and_agri_input(wb):
+    ws = wb["Schedule EI"]
+    total_label_row = _exact_label_row(ws, "Total exempt income")
+    total_formula = ws.cell(row=total_label_row, column=2).value
+    assert isinstance(total_formula, str) and total_formula.startswith("=SUM(")
+    agri_row = _find_label(ws, "Agricultural income").row
+    assert agri_row < total_label_row
+
+
+def test_sch_no_column_present_and_populated_for_cg_and_exempt_income(wb):
+    ws = wb["Statement of Income"]
+    sch_header_rows = [
+        c.row for row in ws.iter_rows(min_col=6, max_col=6, max_row=30) for c in row
+        if c.value == "Sch."
+    ]
+    assert sch_header_rows, "Sch. cross-reference column header not found"
+
+    cg_row = _find_label(ws, "Capital Gains").row
+    assert ws.cell(row=cg_row, column=6).value == "CG"
+
+    memo_row = _find_label(ws, "Exempt income (Schedule EI)").row
+    assert ws.cell(row=memo_row, column=6).value == "EI"
+
+
+def test_exempt_income_memo_line_never_flows_into_total_income_or_tax(wb):
+    """The whole point of Schedule EI's disclosure line: it must read FROM
+    the Schedule EI total but never feed INTO Gross Total Income, Total
+    Income or the tax ladder -- proven on the formula graph (this module
+    never evaluates formulas), not on a computed number."""
+    ws = wb["Statement of Income"]
+    gti_row = _exact_label_row(ws, "Total", col=2)
+    ti_row = _exact_label_row(ws, "Total Income", col=2)
+    gti_formula = ws.cell(row=gti_row, column=5).value
+    ti_formula = ws.cell(row=ti_row, column=5).value
+    for formula in (gti_formula, ti_formula):
+        assert "Schedule EI" not in formula
+        assert "ExemptIncome" not in formula
+
+    memo_row = _find_label(ws, "Exempt income (Schedule EI)").row
+    memo_formula = ws.cell(row=memo_row, column=5).value
+    assert isinstance(memo_formula, str) and memo_formula.startswith("='Schedule EI'!")
+    # Written strictly after Total Income in the same top-to-bottom pass --
+    # structurally incapable of being an input to a formula composed earlier.
+    assert memo_row == ti_row + 1
+
+    tax_row = _exact_label_row(ws, "Tax on total income", col=2)
+    tax_formula = ws.cell(row=tax_row, column=4).value
+    assert "Schedule EI" not in tax_formula
+    assert "ExemptIncome" not in tax_formula

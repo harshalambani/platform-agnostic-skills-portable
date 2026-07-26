@@ -62,6 +62,8 @@ _TAG_LINE_LABEL: dict[str, str] = {
     "CG_ST_CONTROL": "Books STCG control total",
     "EXEMPT_PPF_INTEREST": "PPF interest",
     "EXEMPT_10_2A": "Share of firm profit (s.10(2A))",
+    "EXEMPT_TAXFREE_BOND_INTEREST": "Tax-free bond interest",
+    "EXEMPT_OTHER": "Other exempt income",
     "HP_RENT": "Gross Annual Value (rent)",
     "HP_MUNICIPAL_TAX": "Municipal taxes paid by owner",
     "HP_INTEREST": "Interest on housing loan (s.24(b))",
@@ -415,6 +417,12 @@ def write_exempt_income_sheet(wb: Workbook, ei: sch.ExemptIncomeSchedule) -> dic
     sw.header("Exempt Income")
     layout["ppf"] = sw.label_value("PPF interest", ei.ppf_interest)
     layout["firm_profit"] = sw.label_value("Share of firm profit (s.10(2A))", ei.share_of_firm_profit)
+    layout["taxfree_bond"] = sw.label_value("Tax-free bond interest", ei.tax_free_bond_interest)
+    layout["other"] = sw.label_value("Other exempt income", ei.other_exempt)
+    sw.cell(1, "Total exempt income (book-sourced)")
+    sw.cell(2, ei.total, number_format=INR_FORMAT)
+    layout["total"] = f"B{sw.row}"
+    sw.row += 1
     return layout
 
 
@@ -1100,7 +1108,7 @@ def write_workbook(
     write_schedule_fa_sheet(wb, model.schedule_fa)
     os_layout = write_other_sources_sheet(wb, model.other_sources)
     cg_layout = write_capital_gains_sheet(wb, model.capital_gains, rules_layout)
-    write_exempt_income_sheet(wb, model.exempt_income)
+    ei_layout = write_exempt_income_sheet(wb, model.exempt_income)
     tp_layout = write_taxes_paid_sheet(wb, model.taxes_paid)
     ded_layout = write_deductions_sheet(wb, model.deductions)
     write_schedule_al_sheet(wb, model.schedule_al)
@@ -1151,7 +1159,7 @@ def write_workbook(
         year_key, rules.year_label, _computation_tail_fn,
         father_name=entity.father_name, aadhaar=entity.aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
-        business_subtree=entity.business_subtree,
+        business_subtree=entity.business_subtree, ei_layout=ei_layout,
     )
 
     wb.save(output_path)

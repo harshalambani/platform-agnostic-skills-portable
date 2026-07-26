@@ -63,6 +63,8 @@ TAGS: dict[str, TagMeta] = {
     # --- Exempt income ---------------------------------------------------------
     "EXEMPT_PPF_INTEREST": TagMeta(RE, "ExemptIncome", "PPF interest; exempt, shown for completeness."),
     "EXEMPT_10_2A": TagMeta(RE, "ExemptIncome", "Share of firm profit exempt under s.10(2A); copied."),
+    "EXEMPT_TAXFREE_BOND_INTEREST": TagMeta(RE, "ExemptIncome", "Tax-free bond interest; exempt, shown for completeness."),
+    "EXEMPT_OTHER": TagMeta(RE, "ExemptIncome", "Other exempt income not otherwise tagged; summed, flagged for review."),
 
     # --- House property ------------------------------------------------------
     "HP_RENT": TagMeta(RE, "HouseProperty", "Gross rent received; feeds HP annual value computation."),

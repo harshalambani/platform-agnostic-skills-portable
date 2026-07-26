@@ -6,9 +6,10 @@ The workbook write_workbook.py produces is a *calculation engine*: 17 sheets,
 every figure traceable, none of it printable. This module ADDS presentable
 sheets in front of those 17, in this order -- `Statement of Income`, `BS`,
 `IS`, `PL for Business` (present only for an entity with a configured
-`business_subtree`, 2026-07-19 "PL for Business" prompt), `CG` -- and hides
-the four raw working sheets. It changes no computation, no rule, no rate and
-no tax logic, and it overwrites no existing sheet's values.
+`business_subtree`, 2026-07-19 "PL for Business" prompt), `CG`, `Schedule EI`
+(2026-07-26 Schedule EI / Sch.No prompt) -- and hides the four raw working
+sheets. It changes no computation, no rule, no rate and no tax logic, and it
+overwrites no existing sheet's values.
 
 **Every money cell written here is an Excel formula pointing back at the
 existing sheets** (`Computation`, `CapitalGains`, `OtherSources`,
@@ -55,7 +56,7 @@ INDENT = " " * 6          # CA file indents ~6 spaces per hierarchy level
 #: and `PL for Business` already are) and a further sheet may later be
 #: inserted at any position by adding its name here -- nothing downstream
 #: assumes a fixed count or that any particular sheet is present.
-PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG")
+PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG", "Schedule EI")
 
 #: Raw working sheets hidden (never deleted) once the four above exist.
 HIDDEN_SHEETS = ("Rules", "Mapping Review", "IS_Transcript", "BS_Transcript")
@@ -878,7 +879,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
                               age_class: str, period_label: str, print_title: str,
                               computation_tail_fn, *,
                               father_name: str | None = None, aadhaar: str | None = None,
-                              residency_value: str = "R/OR", residency_declared: bool = False):
+                              residency_value: str = "R/OR", residency_declared: bool = False,
+                              ei_layout: dict | None = None):
     """Mirrors the CA reference's `ITWorking`: a letterhead header block, then
     three money columns (line items / sub-totals / running total) showing ONLY
     the selected regime.
@@ -924,6 +926,15 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         return f"=IF({regime_ref}=\"old\",{old_expr},{new_expr})"
 
     LBL, INNER, SUB, OUTER = 2, 3, 4, 5
+    #: Sch.No cross-reference column (2026-07-26 Schedule EI / Sch.No prompt).
+    #: Column F was reserved-but-unused before this change (width pre-set in
+    #: the `apply_sheet_chrome` call below, no body writer touched it) -- the
+    #: least-disruptive slot, since the money-column formula-invariant test
+    #: only scans columns 3-5. Populated today for Capital Gains ("CG") and
+    #: the new exempt-income memo line ("EI"); interest/dividend/TDS rows have
+    #: no per-payer detail sheet yet (parked for Build B), so those cells are
+    #: left blank rather than guessing a label for a sheet that doesn't exist.
+    SCH_NO = 6
 
     # -- header block -------------------------------------------------------
     row = 1
@@ -988,14 +999,22 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         c.font = _font(bold=True)
         c.alignment = Alignment(horizontal="center")
         c.border = _BOTTOM_RULE
+    sch_hdr = ws.cell(row=row, column=SCH_NO, value="Sch.")
+    sch_hdr.font = _font(bold=True)
+    sch_hdr.alignment = Alignment(horizontal="center")
+    sch_hdr.border = _BOTTOM_RULE
     row += 1
 
     # -- body ---------------------------------------------------------------
-    def section(name: str):
+    def section(name: str, sch_no: str | None = None):
         c = ws.cell(row=row, column=1, value="•")
         c.font = _font(bold=True)
         h = ws.cell(row=row, column=LBL, value=name)
         h.font = _font(bold=True, underline="single")
+        if sch_no:
+            s = ws.cell(row=row, column=SCH_NO, value=sch_no)
+            s.font = _font(bold=True)
+            s.alignment = Alignment(horizontal="center")
 
     def money(col: int, formula: str, *, bold: bool = False, rule: Border | None = None):
         c = ws.cell(row=row, column=col, value=formula)
@@ -1103,6 +1122,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         # PLUS the one extra blank row the normal-income line's `row += 2`
         # (instead of `+= 1`) leaves behind.
         n += 6
+        if ei_layout is not None:
+            n += 1                              # exempt-income memo line
         # Tax ladder -- 7 lines (slab/rebate/marginal/cg/surcharge/cess/
         # liability), each its own row, then the four interest lines (234A/
         # 234B/234C/aggregate liability), PLUS the one extra blank row the
@@ -1184,7 +1205,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     cg = model.capital_gains
     if cg.lt_taxable_gross or cg.st_taxable_gross:
-        section("Capital Gains" + _BF_NOTE); row += 1
+        section("Capital Gains" + _BF_NOTE, sch_no="CG"); row += 1
         first = row
         if cg.lt_taxable_gross:
             item("Long Term Capital Gain / (Loss)", f"={net_ltcg_expr}"); row += 1
@@ -1241,6 +1262,21 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     ti_row = row
     ti_ref = f"{get_column_letter(OUTER)}{ti_row}"
     row += 1
+
+    # Exempt income memo (2026-07-26 Schedule EI prompt): a disclosure line
+    # only -- it reads the Schedule EI total but is NOT summed into GTI or
+    # Total Income above, nor into anything below. Rendered whenever the
+    # orchestrator supplies `ei_layout` (i.e. the Schedule EI sheet exists),
+    # regardless of whether this year's figure is nil, so the row position
+    # (and hence `_predict_pre_workings_rows`) is fixed rather than
+    # data-dependent.
+    if ei_layout is not None:
+        ws.cell(row=row, column=LBL, value="Exempt income (Schedule EI) -- memo, not included above").font = _font(italic=True)
+        money(OUTER, f"='Schedule EI'!{ei_layout['total']}")
+        s = ws.cell(row=row, column=SCH_NO, value="EI")
+        s.font = _font()
+        s.alignment = Alignment(horizontal="center")
+        row += 1
 
     # Special-rate CG base and normal-income base -- the correctness-trap
     # carve-out (design doc section 5): Total Income (above) INCLUDES
@@ -1458,7 +1494,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     apply_sheet_chrome(
         ws,
         {"A": 3.5, "B": fit_label_width(ws, LBL, 46), "C": 15, "D": 15, "E": 16, "F": 12},
-        last_row=row, last_col=OUTER,
+        last_row=row, last_col=SCH_NO,
         freeze=f"A{header_end + 1}", print_title=print_title,
     )
     return ws
@@ -1846,6 +1882,78 @@ def write_cg_sheet(wb, cg_schedule, entity_layout: dict, lot_start_row: int, pri
     return ws
 
 
+def write_schedule_ei(wb, ei, ei_layout: dict, print_title: str) -> dict:
+    """Schedule EI -- Details of Exempt Income (2026-07-26 Schedule EI /
+    Sch.No prompt). Sourcing is deliberately BOTH:
+
+    - PPF/EPF interest, tax-free bond interest, share of profit u/s 10(2A)
+      and any other book-tagged exempt item are FORMULAS tying back to the
+      hidden `ExemptIncome` sheet (`ei_layout`), exactly like every other
+      presentation-sheet money cell -- the audit trail this module exists
+      for (see module docstring).
+    - Agricultural income has no book tag (plan section 3 has no leaf for
+      it -- s.10(1) agricultural income is not something a personal GnuCash
+      book would carry a distinct account for) so it is a real, editable
+      `_input_cell` instead, the same "type here, it means something"
+      pattern as the b/f-loss buckets on Statement of Income.
+
+    Always rendered -- unlike `CG`/`PL for Business`, which are omitted when
+    a year has no activity, every ITR return has a Schedule EI page even
+    when every line is nil, mirroring the CA reference.
+    """
+    ws = wb.create_sheet("Schedule EI")
+    LBL, VAL = 1, 2
+
+    row = 1
+    title = ws.cell(row=row, column=1, value="SCHEDULE EI -- DETAILS OF EXEMPT INCOME")
+    title.font = _font(12, bold=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=VAL)
+    title.alignment = Alignment(horizontal="center")
+    row += 2
+
+    cap = ws.cell(row=row, column=VAL, value="Rs.")
+    cap.font = _font(bold=True)
+    cap.alignment = Alignment(horizontal="center")
+    cap.border = _BOTTOM_RULE
+    row += 1
+
+    first_row = row
+
+    def book_line(label: str, key: str) -> None:
+        nonlocal row
+        ws.cell(row=row, column=LBL, value=label).font = _font()
+        c = ws.cell(row=row, column=VAL, value=f"='ExemptIncome'!{ei_layout[key].coordinate}")
+        c.number_format = INR_FORMAT
+        c.font = _font()
+        row += 1
+
+    book_line("Interest on PPF / EPF (exempt, s.10(11)/10(12))", "ppf")
+    book_line("Interest on tax-free bonds", "taxfree_bond")
+    book_line("Share of profit from firm (s.10(2A))", "firm_profit")
+    book_line("Other exempt income (book-tagged)", "other")
+
+    # Agricultural income -- no book tag, so this is the "editable input"
+    # half of the "both" sourcing (see docstring above), not a formula.
+    ws.cell(row=row, column=LBL, value="Agricultural income").font = _font()
+    _input_cell(ws, row, VAL)
+    row += 1
+
+    total_row = row
+    ws.cell(row=row, column=LBL, value="Total exempt income").font = _font(bold=True)
+    letter = get_column_letter(VAL)
+    t = ws.cell(row=row, column=VAL, value=f"=SUM({letter}{first_row}:{letter}{row - 1})")
+    t.number_format = INR_FORMAT
+    t.font = _font(bold=True)
+    t.border = _TOP_RULE
+    row += 1
+
+    apply_sheet_chrome(
+        ws, {"A": fit_label_width(ws, LBL, 46), "B": 16, "C": 3},
+        last_row=row, last_col=VAL, print_title=print_title,
+    )
+    return {"total": f"{letter}{total_row}"}
+
+
 # ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
@@ -1872,8 +1980,9 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
                              father_name: str | None = None,
                              aadhaar: str | None = None, residency_value: str = "R/OR",
                              residency_declared: bool = False,
-                             business_subtree: str | None = None) -> None:
-    """Add the four deliverable sheets in front of the calculation sheets and
+                             business_subtree: str | None = None,
+                             ei_layout: dict | None = None) -> None:
+    """Add the deliverable sheets in front of the calculation sheets and
     hide the raw working sheets. Adds only -- restyles and overwrites nothing.
 
     `comp_layout` is the LEAF-only Computation layout (2026-07-20 on-page-totals
@@ -1890,11 +1999,24 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
     as_at_text = f"31-03-{start_year + 1}"
     print_title = f"&\"{FONT_NAME},Bold\"&A  --  {year_label}"
 
+    # Schedule EI is written FIRST so its total's coordinate is known before
+    # Statement of Income needs to reference it in the exempt-income memo
+    # line below -- `ei_layout` here is the hidden `ExemptIncome` engine
+    # sheet's layout (write_workbook.write_exempt_income_sheet); `sch_ei_layout`
+    # is this new presentation sheet's own layout (just `total`). Optional
+    # (`None` when a caller has no exempt-income data to wire up, e.g. the
+    # lightweight stub tests) -- Statement of Income simply omits the memo
+    # line in that case (see its docstring/`ei_layout is not None` guard).
+    sch_ei_layout = None
+    if ei_layout is not None:
+        sch_ei_layout = write_schedule_ei(wb, model.exempt_income, ei_layout, print_title)
+
     write_statement_of_income(
         wb, model, entity_layout, comp_layout, os_layout, tp_layout, ded_layout,
         rules_layout, cg_layout, age_class, period_text, print_title, computation_tail_fn,
         father_name=father_name, aadhaar=aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
+        ei_layout=sch_ei_layout,
     )
     # BS brings the IS bottom line over under Equity and proves the tally --
     # a GnuCash balance sheet is short by exactly the year's net income until
