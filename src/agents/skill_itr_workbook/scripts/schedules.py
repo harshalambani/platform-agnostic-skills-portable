@@ -509,12 +509,27 @@ def _term(lot, book: Book) -> str:
 class ExemptIncomeSchedule:
     ppf_interest: float = 0.0
     share_of_firm_profit: float = 0.0
+    tax_free_bond_interest: float = 0.0
+    other_exempt: float = 0.0
+    #: Sum of the four book-tagged buckets above. Deliberately EXCLUDES
+    #: agricultural income and any other purely-manual disclosure item --
+    #: those have no book tag and live only as a `Schedule EI`-sheet input
+    #: cell (see `write_schedule_ei`), never in this dataclass, so this total
+    #: stays exactly what the `ExemptIncome` engine sheet's own SUM proves.
+    total: float = 0.0
 
 
 def build_exempt_income(resolved: dict, node_by_guid: dict) -> ExemptIncomeSchedule:
+    ppf_interest = _sum_tag(resolved, node_by_guid, "EXEMPT_PPF_INTEREST")
+    share_of_firm_profit = _sum_tag(resolved, node_by_guid, "EXEMPT_10_2A")
+    tax_free_bond_interest = _sum_tag(resolved, node_by_guid, "EXEMPT_TAXFREE_BOND_INTEREST")
+    other_exempt = _sum_tag(resolved, node_by_guid, "EXEMPT_OTHER")
     return ExemptIncomeSchedule(
-        ppf_interest=_sum_tag(resolved, node_by_guid, "EXEMPT_PPF_INTEREST"),
-        share_of_firm_profit=_sum_tag(resolved, node_by_guid, "EXEMPT_10_2A"),
+        ppf_interest=ppf_interest,
+        share_of_firm_profit=share_of_firm_profit,
+        tax_free_bond_interest=tax_free_bond_interest,
+        other_exempt=other_exempt,
+        total=ppf_interest + share_of_firm_profit + tax_free_bond_interest + other_exempt,
     )
 
 

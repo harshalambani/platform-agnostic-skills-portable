@@ -442,6 +442,26 @@ def test_exempt_income_ppf_interest_excluded_from_taxable_other_sources():
     assert other_sources.taxable_total == 1000.0  # PPF interest excluded entirely
 
 
+def test_build_exempt_income_sums_all_four_tags_into_total():
+    # 2026-07-26 Schedule EI prompt: EXEMPT_TAXFREE_BOND_INTEREST and
+    # EXEMPT_OTHER are new tags alongside the pre-existing
+    # EXEMPT_PPF_INTEREST / EXEMPT_10_2A -- all four must land on their own
+    # ExemptIncomeSchedule field AND be summed into `.total`, which is what
+    # the Schedule EI presentation sheet's engine-sheet total cell reports.
+    resolved, node_by_guid = _fake_resolved_and_nodes({
+        "EXEMPT_PPF_INTEREST": 10000.0,
+        "EXEMPT_10_2A": 20000.0,
+        "EXEMPT_TAXFREE_BOND_INTEREST": 30000.0,
+        "EXEMPT_OTHER": 40000.0,
+        "OS_INTEREST_SB": 1000.0,   # unrelated tag -- must not leak in
+    })
+    exempt = sch.build_exempt_income(resolved, node_by_guid)
+    assert exempt.ppf_interest == 10000.0
+    assert exempt.share_of_firm_profit == 20000.0
+    assert exempt.tax_free_bond_interest == 30000.0
+    assert exempt.other_exempt == 40000.0
+    assert exempt.total == 100000.0
+
 
 # ---------------------------------------------------------------------------
 # CF4: split-year 112A exemption pro-rata allocation
