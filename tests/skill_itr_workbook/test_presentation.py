@@ -137,7 +137,8 @@ def _is_input_cell(c) -> bool:
     return rgb == "00DDEBF7"
 
 
-@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI"])
+@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI",
+                                   "Interest Schedule", "Dividend Schedule", "TDS Schedule"])
 def test_no_numeric_literal_anywhere_on_presentation_sheets(wb, sheet):
     """The strongest form of "every money cell is a formula": no cell on these
     sheets holds a numeric type at all. Amounts, quantities, dates and even the
@@ -901,7 +902,23 @@ _STUB_COMP_LAYOUT = {
     "salary": "'Computation'!B1", "hp": "'Computation'!B2", "business": "'Computation'!B3",
     "os": "'Computation'!B4", "cg_lt": "'Computation'!B5", "cg_st": "'Computation'!B6",
 }
-_STUB_TP_LAYOUT = {"total": "B1"}
+_STUB_TP_LAYOUT = {
+    "total": "B1",
+    # 2026-07-26 Build B: `TDS Schedule` is now written unconditionally by
+    # build_presentation_layer, so every tp_layout stub needs these four
+    # category keys plus `unclassified_rows` (empty is fine -- exercises the
+    # "no unclassified 26AS rows" branch).
+    "tds_salary": _Coord("B2"), "tds_interest": _Coord("B3"),
+    "tds_dividend": _Coord("B4"), "tcs": _Coord("B5"),
+    "unclassified_rows": [],
+}
+# 2026-07-26 Build B: `Interest Schedule` / `Dividend Schedule` are now
+# written unconditionally too, so os_layout can no longer be `{}` -- these
+# are the five OtherSources leaves the two new sheets reference (quarter
+# lists omitted -- write_interest_schedule/write_dividend_schedule fall back
+# to a "not available" note when `interest_q`/`dividend_q` are absent).
+_STUB_OS_LAYOUT = {k: _Coord(f"B{i}") for i, k in
+                   enumerate(("sb", "bank", "nbfc", "epf", "refund_interest", "dividend"), start=20)}
 _STUB_DED_LAYOUT = {"total": "B1"}
 # 2026-07-21 on-page-totals change: write_statement_of_income now builds the
 # full standard tax computation (slab/rebate/marginal-relief/surcharge/cess)
@@ -948,7 +965,7 @@ def _minimal_presentation_layer(is_entries, bs_entries, business_subtree):
     wb_ = openpyxl.Workbook()
     wb_.remove(wb_.active)
     presentation.build_presentation_layer(
-        wb_, _stub_model(), _STUB_ENTITY_LAYOUT, _STUB_COMP_LAYOUT, {}, _STUB_TP_LAYOUT,
+        wb_, _stub_model(), _STUB_ENTITY_LAYOUT, _STUB_COMP_LAYOUT, _STUB_OS_LAYOUT, _STUB_TP_LAYOUT,
         _STUB_DED_LAYOUT, _STUB_RULES_LAYOUT, _STUB_CG_LAYOUT, is_entries, bs_entries, 10, "general",
         "2024-25", "AY 2025-26", _stub_computation_tail_fn, business_subtree=business_subtree,
     )
@@ -1001,7 +1018,8 @@ def test_business_subtree_config_field_round_trips_through_load_entities():
 # Gate 7 -- widths and print setup on every sheet
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI"])
+@pytest.mark.parametrize("sheet", ["Statement of Income", "IS", "BS", "CG", "Schedule EI",
+                                   "Interest Schedule", "Dividend Schedule", "TDS Schedule"])
 def test_every_presentation_sheet_has_explicit_widths_and_print_setup(wb, sheet):
     ws = wb[sheet]
     widths = {k: d.width for k, d in ws.column_dimensions.items() if d.width}
@@ -1132,3 +1150,128 @@ def test_exempt_income_memo_line_never_flows_into_total_income_or_tax(wb):
     tax_formula = ws.cell(row=tax_row, column=4).value
     assert "Schedule EI" not in tax_formula
     assert "ExemptIncome" not in tax_formula
+
+
+# ---------------------------------------------------------------------------
+# Gate 9 -- Interest / Dividend / TDS detail schedules (2026-07-26 Build B)
+# ---------------------------------------------------------------------------
+
+def test_three_detail_schedules_present_and_after_schedule_ei(wb):
+    for name in ("Interest Schedule", "Dividend Schedule", "TDS Schedule"):
+        assert name in wb.sheetnames
+        assert wb.sheetnames.index(name) > wb.sheetnames.index("Schedule EI")
+
+
+def test_interest_schedule_categories_tie_back_to_other_sources_by_formula(wb):
+    ws = wb["Interest Schedule"]
+    deposits_row = _find_label(ws, "Deposits").row
+    savings_row = _find_label(ws, "Savings Bank interest").row
+    other_row = _find_label(ws, "Other (Interest on IT refund").row
+    deposits_formula = ws.cell(row=deposits_row, column=2).value
+    savings_formula = ws.cell(row=savings_row, column=2).value
+    other_formula = ws.cell(row=other_row, column=2).value
+    for formula in (deposits_formula, savings_formula, other_formula):
+        assert isinstance(formula, str) and formula.startswith("='OtherSources'!")
+
+
+def test_interest_schedule_total_ties_to_other_sources_interest_leaves(wb):
+    ws = wb["Interest Schedule"]
+    total_row = _exact_label_row(ws, "Total interest income")
+    total_formula = ws.cell(row=total_row, column=2).value
+    assert isinstance(total_formula, str) and total_formula.startswith("=SUM(")
+    deposits_row = _find_label(ws, "Deposits").row
+    assert deposits_row < total_row
+
+
+def test_dividend_schedule_gross_ties_back_to_other_sources_by_formula(wb):
+    ws = wb["Dividend Schedule"]
+    gross_row = _find_label(ws, "Dividend income (gross)").row
+    gross_formula = ws.cell(row=gross_row, column=2).value
+    assert isinstance(gross_formula, str) and gross_formula.startswith("='OtherSources'!")
+    total_row = _exact_label_row(ws, "Total dividend income")
+    total_formula = ws.cell(row=total_row, column=2).value
+    assert isinstance(total_formula, str) and total_formula.startswith("=")
+    assert gross_row < total_row
+
+
+def test_tds_schedule_categories_tie_back_to_taxes_paid_by_formula(wb):
+    ws = wb["TDS Schedule"]
+    # Exact match (col 1) rather than _find_label -- "TCS" is a substring of
+    # the sheet's own title ("TDS / TCS SCHEDULE ...") in row 1, which
+    # _find_label's row-major scan would hit first.
+    for label in ("TDS on Salary", "TDS on Interest", "TDS on Dividend", "TCS"):
+        row = _exact_label_row(ws, label, col=1)
+        formula = ws.cell(row=row, column=6).value
+        assert isinstance(formula, str) and formula.startswith("='TaxesPaid'!"), \
+            f"{label} amount cell is not a formula: {formula!r}"
+
+
+def test_tds_schedule_total_sums_this_sheets_own_category_and_unclassified_cells(wb):
+    ws = wb["TDS Schedule"]
+    total_row = _exact_label_row(ws, "Total TDS/TCS credit (this schedule)")
+    total_formula = ws.cell(row=total_row, column=6).value
+    assert isinstance(total_formula, str) and total_formula.startswith("=")
+    salary_row = _exact_label_row(ws, "TDS on Salary", col=1)
+    assert salary_row < total_row
+
+
+def test_sch_no_column_populated_for_interest_dividend_tds_leaves(wb):
+    """The SYN-IND synthetic fixture has zero savings-bank/NBFC/EPF interest
+    and zero dividend/TDS-on-dividend/TCS (see build_all_schedules output for
+    this fixture) -- os_items/prepaid only emit a Statement of Income row for
+    a nonzero leaf, so only the leaves that ARE nonzero here can be checked
+    against the real wb fixture. The remaining leaves (dividend, TDS on
+    dividend, TCS) are covered by
+    test_sch_no_column_populated_for_dividend_and_remaining_tds_leaves below,
+    against a stub model built specifically to make them nonzero -- the
+    sch_no wiring itself is the same `item(..., sch_no=...)` call site for
+    every leaf in both tuples, so together these two tests cover all of
+    them."""
+    ws = wb["Statement of Income"]
+    for label in ("Bank FD interest", "Interest on Income Tax refund"):
+        row = _find_label(ws, label).row
+        assert ws.cell(row=row, column=6).value == "INT", f"{label} Sch.No not populated"
+
+    for label in ("TDS on salary", "TDS on interest"):
+        row = _find_label(ws, label).row
+        assert ws.cell(row=row, column=6).value == "TDS", f"{label} Sch.No not populated"
+
+
+def test_sch_no_column_populated_for_dividend_and_remaining_tds_leaves():
+    import dataclasses as dc
+    wb_ = openpyxl.Workbook()
+    wb_.remove(wb_.active)
+    model = _stub_model()
+    model.other_sources = dc.replace(model.other_sources, dividend_gross=5000.0)
+    model.taxes_paid = dc.replace(model.taxes_paid, tds_dividend=500.0, tcs=100.0)
+    presentation.build_presentation_layer(
+        wb_, model, _STUB_ENTITY_LAYOUT, _STUB_COMP_LAYOUT, _STUB_OS_LAYOUT, _STUB_TP_LAYOUT,
+        _STUB_DED_LAYOUT, _STUB_RULES_LAYOUT, _STUB_CG_LAYOUT, [], [], 10, "general",
+        "2024-25", "AY 2025-26", _stub_computation_tail_fn, business_subtree=None,
+    )
+    ws = wb_["Statement of Income"]
+    dividend_row = _find_label(ws, "Dividend income (gross)").row
+    assert ws.cell(row=dividend_row, column=6).value == "DIV"
+    tds_dividend_row = _find_label(ws, "TDS on dividend").row
+    assert ws.cell(row=tds_dividend_row, column=6).value == "TDS"
+    tcs_row = _find_label(ws, "TCS").row
+    assert ws.cell(row=tcs_row, column=6).value == "TDS"
+
+
+def test_detail_schedules_do_not_change_total_income_or_tax_computation(wb):
+    """Formula-graph proof, same technique as
+    test_exempt_income_memo_line_never_flows_into_total_income_or_tax: adding
+    these three presentation-only sheets must not alter Gross Total Income,
+    Total Income or the tax-on-total-income formula -- they only read FROM
+    OtherSources/TaxesPaid (same as Statement of Income itself already did),
+    never from the new sheets."""
+    ws = wb["Statement of Income"]
+    gti_row = _exact_label_row(ws, "Total", col=2)
+    ti_row = _exact_label_row(ws, "Total Income", col=2)
+    tax_row = _exact_label_row(ws, "Tax on total income", col=2)
+    gti_formula = ws.cell(row=gti_row, column=5).value
+    ti_formula = ws.cell(row=ti_row, column=5).value
+    tax_formula = ws.cell(row=tax_row, column=4).value
+    for formula in (gti_formula, ti_formula, tax_formula):
+        for name in ("Interest Schedule", "Dividend Schedule", "TDS Schedule"):
+            assert name not in formula

@@ -337,11 +337,20 @@ def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> di
     layout["refund_principal"] = sw.label_value("IT refund principal (excluded, not income -- RULE-1)", os_.refund_principal_excluded)
     layout["dividend"] = sw.label_value("Dividend income (gross)", os_.dividend_gross)
     sw.label_value("  Dividend quarter-bucket source", os_.dividend_quarters_source, number_format=None)
-    for i, q in enumerate(os_.dividend_quarters, start=1):
-        sw.label_value(f"  Dividend Q{i} (234C bucket)", q)
+    # 2026-07-26 Build B (Interest/Dividend/TDS detail schedules) -- these
+    # quarter cells were always written but never captured into `layout`
+    # before; the new `Dividend Schedule` / `Interest Schedule` presentation
+    # sheets need their coordinates to render the 234C quarter split as a
+    # formula tie-back rather than restating the numbers.
+    layout["dividend_q"] = [
+        sw.label_value(f"  Dividend Q{i} (234C bucket)", q).coordinate
+        for i, q in enumerate(os_.dividend_quarters, start=1)
+    ]
     sw.label_value("  Interest quarter-bucket source", os_.interest_quarters_source, number_format=None)
-    for i, q in enumerate(os_.interest_quarters, start=1):
-        sw.label_value(f"  Interest Q{i} (234C bucket)", q)
+    layout["interest_q"] = [
+        sw.label_value(f"  Interest Q{i} (234C bucket)", q).coordinate
+        for i, q in enumerate(os_.interest_quarters, start=1)
+    ]
     layout["slbs"] = sw.label_value("SLBS income", os_.slbs)
     sw.cell(1, "Taxable Other Sources total")
     sw.cell(2, os_.taxable_total, number_format=INR_FORMAT)
@@ -437,6 +446,7 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     layout["tds_interest"] = sw.label_value("TDS on interest", tp.tds_interest)
     layout["tds_dividend"] = sw.label_value("TDS on dividend", tp.tds_dividend)
     layout["tcs"] = sw.label_value("TCS", tp.tcs)
+    layout["unclassified_rows"] = []   # populated below only when non-empty
     sw.blank()
     sw.header("26AS tie-out")
     if not tp.as26_available:
@@ -457,6 +467,23 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
                 ", ".join(f"{i['section']} Rs{i['amount']:.2f}" for i in tp.unclassified_sections),
                 number_format=None,
             )
+            # 2026-07-26 Build B (TDS detail schedule) -- one real row per
+            # unclassified item, each cell its own reference so the new `TDS
+            # Schedule` presentation sheet can tie back to these by formula
+            # instead of re-parsing the joined summary string above (which
+            # stays, for a human skimming this working sheet directly).
+            for item in tp.unclassified_sections:
+                section_c = sw.cell(1, f"  unclassified -- {item['section']}")
+                deductor_c = sw.cell(2, item["deductor_name"], number_format=None)
+                amount_c = sw.cell(3, item["amount"], number_format=INR_FORMAT)
+                tan_c = sw.cell(4, item["tan"], number_format=None)
+                layout["unclassified_rows"].append({
+                    "section": item["section"], "section_ref": section_c.coordinate,
+                    "deductor_name": item["deductor_name"], "deductor_ref": deductor_c.coordinate,
+                    "tan": item["tan"], "tan_ref": tan_c.coordinate,
+                    "amount_ref": amount_c.coordinate,
+                })
+                sw.row += 1
     sw.blank()
     sw.cell(1, "Total taxes paid")
     sw.cell(2, tp.total, number_format=INR_FORMAT)

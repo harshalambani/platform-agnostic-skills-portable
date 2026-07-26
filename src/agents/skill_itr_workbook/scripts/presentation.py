@@ -11,6 +11,19 @@ sheets in front of those 17, in this order -- `Statement of Income`, `BS`,
 sheets. It changes no computation, no rule, no rate and no tax logic, and it
 overwrites no existing sheet's values.
 
+Same-day follow-up (2026-07-26 "Statement of Income detail schedules" / Build
+B, stacked on the Schedule EI / Sch.No branch): three more detail sheets --
+`Interest Schedule`, `Dividend Schedule`, `TDS Schedule` -- each a
+category-level formula tie-back to `OtherSources`/`TaxesPaid` for the
+interest/dividend/TDS leaves on `Statement of Income`, whose Sch.No column is
+now populated for those leaves too ("INT"/"DIV"/"TDS"). Per-payer interest
+rows, per-company dividend rows, and full per-deductor TDS rows remain PARKED
+(the calc layer does not carry payer/deductor names through to leaf level);
+each new sheet says so via one styled note row. The one exception is
+`TaxesPaidSchedule.unclassified_sections` (26AS TDS sections matching none of
+the Rules-config categories), which already carries section/deductor/TAN
+per-row and is rendered on `TDS Schedule` as real formula-backed rows.
+
 **Every money cell written here is an Excel formula pointing back at the
 existing sheets** (`Computation`, `CapitalGains`, `OtherSources`,
 `IS_Transcript`, `BS_Transcript`, `TaxesPaid`, `Entity`). Nothing is
@@ -56,7 +69,8 @@ INDENT = " " * 6          # CA file indents ~6 spaces per hierarchy level
 #: and `PL for Business` already are) and a further sheet may later be
 #: inserted at any position by adding its name here -- nothing downstream
 #: assumes a fixed count or that any particular sheet is present.
-PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG", "Schedule EI")
+PRESENTATION_SHEETS = ("Statement of Income", "BS", "IS", "PL for Business", "CG", "Schedule EI",
+                       "Interest Schedule", "Dividend Schedule", "TDS Schedule")
 
 #: Raw working sheets hidden (never deleted) once the four above exist.
 HIDDEN_SHEETS = ("Rules", "Mapping Review", "IS_Transcript", "BS_Transcript")
@@ -930,10 +944,14 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     #: Column F was reserved-but-unused before this change (width pre-set in
     #: the `apply_sheet_chrome` call below, no body writer touched it) -- the
     #: least-disruptive slot, since the money-column formula-invariant test
-    #: only scans columns 3-5. Populated today for Capital Gains ("CG") and
-    #: the new exempt-income memo line ("EI"); interest/dividend/TDS rows have
-    #: no per-payer detail sheet yet (parked for Build B), so those cells are
-    #: left blank rather than guessing a label for a sheet that doesn't exist.
+    #: only scans columns 3-5. Populated for Capital Gains ("CG"), the
+    #: exempt-income memo line ("EI"), and -- as of the same-day Build B
+    #: detail-schedules follow-up -- the interest/dividend/TDS leaves under
+    #: "Income from other sources" and "Less - Prepaid Taxes" ("INT"/"DIV"/
+    #: "TDS", one label per leaf, wired via `item()`'s `sch_no` kwarg and the
+    #: 4th element of the `os_items`/`prepaid` tuples below). SLBS, Advance
+    #: Tax and Self-Assessment Tax have no detail schedule (no deductor/
+    #: section detail to schedule) and stay unlabelled.
     SCH_NO = 6
 
     # -- header block -------------------------------------------------------
@@ -1024,9 +1042,13 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
             c.border = rule
         return c
 
-    def item(label: str, formula: str):
+    def item(label: str, formula: str, sch_no: str | None = None):
         ws.cell(row=row, column=LBL, value=INDENT + label).font = _font()
         money(INNER, formula)
+        if sch_no:
+            s = ws.cell(row=row, column=SCH_NO, value=sch_no)
+            s.font = _font()
+            s.alignment = Alignment(horizontal="center")
 
     def line(label: str, col: int, formula: str, *, bold: bool = False,
              rule: Border | None = None):
@@ -1078,23 +1100,32 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # generation raises immediately instead of silently shipping a
     # `#REF!`-producing offset.
     os_ = model.other_sources
+    # 2026-07-26 Build B: sch_no is the 4th tuple element, wired into `item()`
+    # below -- "INT" for the interest sub-set of other-sources leaves (ties to
+    # the new `Interest Schedule`), "DIV" for the dividend leaf (`Dividend
+    # Schedule`). SLBS has no detail schedule (out of Build B's scope), so it
+    # stays unlabelled, same as before.
     os_items = (
-        ("Savings bank interest", "sb", os_.interest_sb),
-        ("Bank FD interest", "bank", os_.interest_bank),
-        ("NBFC/HFC interest", "nbfc", os_.interest_nbfc),
-        ("EPF taxable interest", "epf", os_.interest_epf_taxable),
-        ("Interest on Income Tax refund", "refund_interest", os_.refund_interest),
-        ("Dividend income (gross)", "dividend", os_.dividend_gross),
-        ("SLBS income", "slbs", os_.slbs),
+        ("Savings bank interest", "sb", os_.interest_sb, "INT"),
+        ("Bank FD interest", "bank", os_.interest_bank, "INT"),
+        ("NBFC/HFC interest", "nbfc", os_.interest_nbfc, "INT"),
+        ("EPF taxable interest", "epf", os_.interest_epf_taxable, "INT"),
+        ("Interest on Income Tax refund", "refund_interest", os_.refund_interest, "INT"),
+        ("Dividend income (gross)", "dividend", os_.dividend_gross, "DIV"),
+        ("SLBS income", "slbs", os_.slbs, None),
     )
     tp = model.taxes_paid
+    # 2026-07-26 Build B: "TDS" ties to the new `TDS Schedule` for the four
+    # TDS/TCS leaves it covers; Advance Tax / Self-Assessment Tax are self-paid
+    # taxes with no deductor/section detail to schedule, so they stay
+    # unlabelled -- out of the TDS Schedule's scope by definition.
     prepaid = (
-        ("TDS on salary", "tds_salary", tp.tds_salary),
-        ("TDS on interest", "tds_interest", tp.tds_interest),
-        ("TDS on dividend", "tds_dividend", tp.tds_dividend),
-        ("TCS", "tcs", tp.tcs),
-        ("Advance Tax", "advance", tp.advance_tax),
-        ("Self-assessment Tax", "sat", tp.self_assessment_tax),
+        ("TDS on salary", "tds_salary", tp.tds_salary, "TDS"),
+        ("TDS on interest", "tds_interest", tp.tds_interest, "TDS"),
+        ("TDS on dividend", "tds_dividend", tp.tds_dividend, "TDS"),
+        ("TCS", "tcs", tp.tcs, "TDS"),
+        ("Advance Tax", "advance", tp.advance_tax, None),
+        ("Self-assessment Tax", "sat", tp.self_assessment_tax, None),
     )
 
     def _predict_pre_workings_rows() -> int:
@@ -1115,8 +1146,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
             n += 3
         if cg.lt_taxable_gross or cg.st_taxable_gross:
             n += 2 + (1 if cg.lt_taxable_gross else 0) + (1 if cg.st_taxable_gross else 0)
-        if any(v for _, _, v in os_items):
-            n += 2 + sum(1 for _, _, v in os_items if v)
+        if any(v for _, _, v, _ in os_items):
+            n += 2 + sum(1 for _, _, v, _ in os_items if v)
         n += 1                                  # blank before GTI
         # GTI, VIA, TI, special-CG, normal-income -- 5 lines, each its own row,
         # PLUS the one extra blank row the normal-income line's `row += 2`
@@ -1129,7 +1160,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         # 234B/234C/aggregate liability), PLUS the one extra blank row the
         # aggregate line's `row += 2` (instead of `+= 1`) leaves behind.
         n += 12
-        n += 2 + max(sum(1 for _, _, v in prepaid if v), 1)  # prepaid section (incl. close_section total)
+        n += 2 + max(sum(1 for _, _, v, _ in prepaid if v), 1)  # prepaid section (incl. close_section total)
         n += 1                                  # "Total prepaid taxes" line
         n += 1                                  # Refund Due / (Tax Payable)
         return n
@@ -1213,12 +1244,12 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
             item("Short Term Capital Gain / (Loss)", f"={net_stcg_expr}"); row += 1
         close_section(first)
 
-    if any(v for _, _, v in os_items):
+    if any(v for _, _, v, _ in os_items):
         section("Income from other sources"); row += 1
         first = row
-        for label, key, value in os_items:
+        for label, key, value, sch_no in os_items:
             if value:
-                item(label, f"='OtherSources'!{os_layout[key].coordinate}")
+                item(label, f"='OtherSources'!{os_layout[key].coordinate}", sch_no=sch_no)
                 row += 1
         close_section(first)
 
@@ -1385,9 +1416,9 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # them too -- see the Workings/Inputs placement comment above).
     section("Less - Prepaid Taxes"); row += 1
     first = row
-    for label, key, value in prepaid:
+    for label, key, value, sch_no in prepaid:
         if value:
-            item(label, f"='TaxesPaid'!{tp_layout[key].coordinate}")
+            item(label, f"='TaxesPaid'!{tp_layout[key].coordinate}", sch_no=sch_no)
             row += 1
     if row == first:                      # nothing prepaid -- still show the head
         item("Prepaid taxes", f"='TaxesPaid'!{tp_layout['total']}")
@@ -1955,6 +1986,322 @@ def write_schedule_ei(wb, ei, ei_layout: dict, print_title: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Sheets 7-9 -- Interest / Dividend / TDS detail schedules (2026-07-26 Build B
+# "Statement of Income detail schedules" prompt, stacked on the Schedule EI /
+# Sch.No branch). All three follow the SAME contract as every other sheet in
+# this module: every money cell is a formula tying back to `OtherSources` or
+# `TaxesPaid`, nothing is recomputed, and the grand total on each sheet is
+# itself a formula (a SUM over the sheet's own category rows) rather than a
+# restated leaf value.
+#
+# Deliberately PARKED (Harshal's explicit scope, 2026-07-26): per-payer
+# interest rows, per-company dividend rows, and full per-deductor TDS rows.
+# The calc layer does not carry payer/deductor names through to
+# OtherSourcesSchedule/TaxesPaidSchedule at the leaf level (only category
+# totals), so a per-payer row here would have to be fabricated. Each sheet
+# below renders a single, clearly-styled note row saying so instead. The one
+# exception already carrying real per-row detail is
+# `TaxesPaidSchedule.unclassified_sections` (26AS transactions whose TDS
+# section code matched none of the Rules-config categories) -- those rows
+# ARE rendered, tying back to the per-row cells `write_taxes_paid_sheet` now
+# writes on `TaxesPaid` (see write_workbook.py, same 2026-07-26 change).
+# ---------------------------------------------------------------------------
+
+#: Shared note styling for the "detail is parked" rows -- reuses the same
+#: soft-amber styling as `_PARKED_FILL`/`_WARN_FILL` elsewhere in this module
+#: (a visible-but-not-alarming flag), not the red CG/Salary error styling.
+_DETAIL_PARKED_NOTE_FILL = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+
+
+def _write_parked_detail_note(ws, row: int, text: str, last_col: int) -> int:
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = _font(9, italic=True)
+    c.fill = _DETAIL_PARKED_NOTE_FILL
+    c.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=last_col)
+    return row + 2
+
+
+#: 5 quarter-bucket windows quarters.py's bucket_receipts/bucket_as26_
+#: transactions always return (<=15 Jun, 16 Jun-15 Sep, 16 Sep-15 Dec,
+#: 16 Dec-15 Mar, 16-31 Mar) -- see build_advance_tax_cumulative's docstring
+#: in schedules.py for the same five windows used for 234C.
+_QUARTER_LABELS = ("Q1 (up to 15 Jun)", "Q2 (16 Jun-15 Sep)", "Q3 (16 Sep-15 Dec)",
+                   "Q4 (16 Dec-15 Mar)", "Q5 (16-31 Mar)")
+
+
+def _write_quarter_split_block(ws, row: int, title: str, source_sheet: str,
+                               quarter_coords: list, source: str) -> int:
+    """Renders the 5-bucket 234C quarter split as formula tie-backs to
+    `source_sheet`'s own quarter cells (written by write_other_sources_sheet).
+    `quarter_coords` may be empty (stub/minimal callers, e.g. the lightweight
+    presentation tests) -- rendered as a note instead of five blank formulas."""
+    ws.cell(row=row, column=1, value=title).font = _font(10, bold=True)
+    row += 1
+    if not quarter_coords:
+        ws.cell(row=row, column=1,
+                value="(quarter-bucket detail not available for this sheet)").font = _font(italic=True)
+        return row + 2
+    ws.cell(row=row, column=1, value=f"Bucket source: {source}").font = _font(8, italic=True)
+    row += 1
+    for label, coord in zip(_QUARTER_LABELS, quarter_coords):
+        ws.cell(row=row, column=1, value=INDENT + label).font = _font()
+        c = ws.cell(row=row, column=2, value=f"='{source_sheet}'!{coord}")
+        c.number_format = INR_FORMAT
+        c.font = _font()
+        row += 1
+    return row + 1
+
+
+def write_interest_schedule(wb, os_, os_layout: dict, print_title: str) -> dict:
+    """`Interest Schedule` -- category-level detail behind the "Income from
+    other sources" interest lines on Statement of Income (2026-07-26 Build B).
+
+    Grouped exactly as OtherSourcesSchedule's own leaves group (see
+    schedules.py): Deposits (bank FD + NBFC/HFC), Savings bank interest
+    (s.80TTA/80TTB-eligible), and Other (refund interest + taxable EPF
+    interest). Every category cell is a formula over two `OtherSources`
+    leaves at most; the grand total is a SUM of this sheet's own three
+    category cells, so it can never drift from what Statement of Income's
+    "Income from other sources" section itself totals for these five leaves.
+    """
+    ws = wb.create_sheet("Interest Schedule")
+    LBL, VAL = 1, 2
+
+    row = 1
+    title = ws.cell(row=row, column=1, value="INTEREST SCHEDULE -- DETAIL OF INTEREST INCOME (Other Sources)")
+    title.font = _font(12, bold=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=VAL)
+    title.alignment = Alignment(horizontal="center")
+    row += 2
+
+    cap = ws.cell(row=row, column=VAL, value="Rs.")
+    cap.font = _font(bold=True)
+    cap.alignment = Alignment(horizontal="center")
+    cap.border = _BOTTOM_RULE
+    row += 1
+    first_row = row
+
+    def cat_row(label: str, formula: str) -> None:
+        nonlocal row
+        ws.cell(row=row, column=LBL, value=label).font = _font()
+        c = ws.cell(row=row, column=VAL, value=formula)
+        c.number_format = INR_FORMAT
+        c.font = _font()
+        row += 1
+
+    def os_ref(key: str) -> str:
+        return f"'OtherSources'!{os_layout[key].coordinate}"
+
+    cat_row("Deposits (Bank FD + NBFC/HFC interest)", f"={os_ref('bank')}+{os_ref('nbfc')}")
+    cat_row("Savings Bank interest (s.80TTA/80TTB-eligible)", f"={os_ref('sb')}")
+    cat_row("Other (Interest on IT refund + EPF taxable interest)",
+            f"={os_ref('refund_interest')}+{os_ref('epf')}")
+
+    total_row = row
+    letter = get_column_letter(VAL)
+    ws.cell(row=row, column=LBL, value="Total interest income").font = _font(bold=True)
+    t = ws.cell(row=row, column=VAL, value=f"=SUM({letter}{first_row}:{letter}{row - 1})")
+    t.number_format = INR_FORMAT
+    t.font = _font(bold=True)
+    t.border = _TOP_RULE
+    row += 2
+
+    row = _write_quarter_split_block(
+        ws, row, "234C instalment-bucket split (quarter-wise, all interest sources combined)",
+        "OtherSources", os_layout.get("interest_q", []), os_.interest_quarters_source,
+    )
+
+    row = _write_parked_detail_note(
+        ws, row,
+        "Per-payer interest detail (bank-wise / NBFC-wise) is not yet captured by this tool -- "
+        "the calc layer only carries category totals, not individual payer names, through to this "
+        "schedule. Parked for a future build; only the category-level totals above are available.",
+        VAL,
+    )
+
+    apply_sheet_chrome(
+        ws, {"A": fit_label_width(ws, LBL, 50), "B": 16, "C": 3},
+        last_row=row, last_col=VAL, print_title=print_title,
+    )
+    return {"total": f"{letter}{total_row}"}
+
+
+def write_dividend_schedule(wb, os_, os_layout: dict, print_title: str) -> dict:
+    """`Dividend Schedule` -- detail behind Statement of Income's "Dividend
+    income (gross)" line (2026-07-26 Build B). Gross dividend is a single
+    formula tie-back to `OtherSources`; the quarter split below it is the
+    same 234C bucketing Statement of Income's workings already consume for
+    the aggregate interest+dividend picture, rendered here per-schedule."""
+    ws = wb.create_sheet("Dividend Schedule")
+    LBL, VAL = 1, 2
+
+    row = 1
+    title = ws.cell(row=row, column=1, value="DIVIDEND SCHEDULE -- DETAIL OF DIVIDEND INCOME (Other Sources)")
+    title.font = _font(12, bold=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=VAL)
+    title.alignment = Alignment(horizontal="center")
+    row += 2
+
+    cap = ws.cell(row=row, column=VAL, value="Rs.")
+    cap.font = _font(bold=True)
+    cap.alignment = Alignment(horizontal="center")
+    cap.border = _BOTTOM_RULE
+    row += 1
+
+    gross_row = row
+    ws.cell(row=row, column=LBL, value="Dividend income (gross)").font = _font()
+    c = ws.cell(row=row, column=VAL, value=f"='OtherSources'!{os_layout['dividend'].coordinate}")
+    c.number_format = INR_FORMAT
+    c.font = _font()
+    row += 1
+
+    total_row = row
+    letter = get_column_letter(VAL)
+    ws.cell(row=row, column=LBL, value="Total dividend income").font = _font(bold=True)
+    t = ws.cell(row=row, column=VAL, value=f"={letter}{gross_row}")
+    t.number_format = INR_FORMAT
+    t.font = _font(bold=True)
+    t.border = _TOP_RULE
+    row += 2
+
+    row = _write_quarter_split_block(
+        ws, row, "234C instalment-bucket split (quarter-wise)",
+        "OtherSources", os_layout.get("dividend_q", []), os_.dividend_quarters_source,
+    )
+
+    row = _write_parked_detail_note(
+        ws, row,
+        "Per-company dividend detail (company-wise breakup) is not yet captured by this tool -- "
+        "the calc layer only carries the gross total, not individual payer names, through to this "
+        "schedule. Parked for a future build; only the gross total and quarter split above are available.",
+        VAL,
+    )
+
+    apply_sheet_chrome(
+        ws, {"A": fit_label_width(ws, LBL, 50), "B": 16, "C": 3},
+        last_row=row, last_col=VAL, print_title=print_title,
+    )
+    return {"total": f"{letter}{total_row}"}
+
+
+#: `TDS Schedule` table columns: Category | Section | Deductor | TAN |
+#: Gross receipt offered | TDS/TCS Amount. "Gross receipt offered" is laid
+#: out now but populated nowhere yet -- neither the four category totals nor
+#: TaxesPaidSchedule.unclassified_sections carry a gross-receipt figure
+#: today (only the TDS/TCS amount itself); the full per-deductor
+#: gross-receipt tie-out is parked for a future build (2026-07-26 Build B
+#: prompt).
+_TDS_CATEGORY, _TDS_SECTION, _TDS_DEDUCTOR, _TDS_TAN, _TDS_GROSS, _TDS_AMOUNT = 1, 2, 3, 4, 5, 6
+_TDS_HEADERS = ("Category", "Section", "Deductor", "TAN", "Gross receipt offered", "TDS/TCS Amount")
+
+#: (label, TaxesPaidSchedule/tp_layout key) for the four categorised rows.
+_TDS_CATEGORIES = (
+    ("TDS on Salary", "tds_salary"),
+    ("TDS on Interest", "tds_interest"),
+    ("TDS on Dividend", "tds_dividend"),
+    ("TCS", "tcs"),
+)
+
+
+def write_tds_schedule(wb, tp, tp_layout: dict, print_title: str) -> dict:
+    """`TDS Schedule` -- category-level tie-out behind Statement of Income's
+    "Less - Prepaid Taxes" section (2026-07-26 Build B). Each category row is
+    a formula over `TaxesPaid`'s own total cell for that category; the
+    already-itemized `unclassified_sections` rows (26AS TDS sections that
+    matched none of the Rules-config categories) are rendered too, each
+    field -- Section/Deductor/TAN/Amount -- a formula tying back to the
+    per-row cells `write_taxes_paid_sheet` now writes on `TaxesPaid` for
+    exactly this purpose (see write_workbook.py). A memo line at the foot
+    ties to `TaxesPaid`'s own grand total (which additionally includes
+    Advance Tax and Self-Assessment Tax, both out of scope for a TDS/TCS
+    schedule) for a reader who wants the full reconciliation in one place."""
+    ws = wb.create_sheet("TDS Schedule")
+
+    row = 1
+    title = ws.cell(row=row, column=1, value="TDS / TCS SCHEDULE -- DETAIL OF TAXES DEDUCTED / COLLECTED AT SOURCE")
+    title.font = _font(12, bold=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=_TDS_AMOUNT)
+    title.alignment = Alignment(horizontal="center")
+    row += 2
+
+    header_row = row
+    for col, h in enumerate(_TDS_HEADERS, start=1):
+        c = ws.cell(row=header_row, column=col, value=h)
+        c.font = _font(bold=True)
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+        c.border = _BOTTOM_RULE
+    row += 1
+    first_row = row
+
+    category_amount_cells: list[str] = []
+    for label, key in _TDS_CATEGORIES:
+        ws.cell(row=row, column=_TDS_CATEGORY, value=label).font = _font()
+        c = ws.cell(row=row, column=_TDS_AMOUNT, value=f"='TaxesPaid'!{tp_layout[key].coordinate}")
+        c.number_format = INR_FORMAT
+        c.font = _font()
+        category_amount_cells.append(c.coordinate)
+        row += 1
+
+    unclassified_amount_cells: list[str] = []
+    for item in tp_layout.get("unclassified_rows", []):
+        ws.cell(row=row, column=_TDS_CATEGORY, value="(unclassified 26AS section)").font = _font(italic=True)
+        for col, ref_key in ((_TDS_SECTION, "section_ref"), (_TDS_DEDUCTOR, "deductor_ref"),
+                             (_TDS_TAN, "tan_ref")):
+            c = ws.cell(row=row, column=col, value=f"='TaxesPaid'!{item[ref_key]}")
+            c.font = _font()
+        # Gross receipt offered -- deliberately left blank, see module note
+        # above `_TDS_HEADERS`.
+        c = ws.cell(row=row, column=_TDS_AMOUNT, value=f"='TaxesPaid'!{item['amount_ref']}")
+        c.number_format = INR_FORMAT
+        c.font = _font()
+        unclassified_amount_cells.append(c.coordinate)
+        row += 1
+
+    total_row = row
+    letter = get_column_letter(_TDS_AMOUNT)
+    ws.cell(row=row, column=_TDS_CATEGORY, value="Total TDS/TCS credit (this schedule)").font = _font(bold=True)
+    all_cells = category_amount_cells + unclassified_amount_cells
+    total_formula = "=" + "+".join(all_cells) if all_cells else "=0"
+    t = ws.cell(row=row, column=_TDS_AMOUNT, value=total_formula)
+    t.number_format = INR_FORMAT
+    t.font = _font(bold=True)
+    t.border = _TOP_RULE
+    row += 1
+
+    memo_row = row
+    ws.cell(row=row, column=_TDS_CATEGORY,
+            value="Memo: Total taxes paid per TaxesPaid sheet (incl. Advance Tax & Self-Assessment Tax)"
+            ).font = _font(italic=True)
+    m = ws.cell(row=row, column=_TDS_AMOUNT, value=f"='TaxesPaid'!{tp_layout['total']}")
+    m.number_format = INR_FORMAT
+    m.font = _font(italic=True)
+    row += 2
+
+    if not tp_layout.get("unclassified_rows"):
+        row = _write_parked_detail_note(
+            ws, row,
+            "Full per-deductor gross-receipt tie-out (every TDS/TCS deductor, not just unclassified "
+            "26AS sections) is not yet captured by this tool -- parked for a future build.",
+            _TDS_AMOUNT,
+        )
+    else:
+        row = _write_parked_detail_note(
+            ws, row,
+            "Full per-deductor detail for the categorised rows above (salary/interest/dividend/TCS "
+            "deductor-wise) is not yet captured by this tool -- only the unclassified 26AS rows carry "
+            "per-deductor detail today. Parked for a future build.",
+            _TDS_AMOUNT,
+        )
+
+    apply_sheet_chrome(
+        ws, {"A": 26, "B": 12, "C": fit_label_width(ws, _TDS_DEDUCTOR, 22), "D": 14, "E": 18, "F": 16},
+        last_row=row, last_col=_TDS_AMOUNT, freeze=f"A{first_row}", print_title=print_title,
+    )
+    return {"total": f"{letter}{total_row}"}
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -2038,6 +2385,16 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
     # a document handed to a CA or a bank is worse than no sheet.
     if has_capital_gains_activity(model.capital_gains):
         write_cg_sheet(wb, model.capital_gains, entity_layout, lot_start_row, print_title)
+
+    # Interest / Dividend / TDS detail schedules (2026-07-26 Build B). Written
+    # unconditionally -- unlike CG/PL for Business, there is no "this entity
+    # has none of this" case worth special-casing: every entity has at least
+    # the four TDS/TCS categories and the OtherSources leaves on this sheet,
+    # and a schedule showing all-zero category rows still ties out cleanly
+    # (matches how Schedule EI always renders even when agri income is nil).
+    write_interest_schedule(wb, model.other_sources, os_layout, print_title)
+    write_dividend_schedule(wb, model.other_sources, os_layout, print_title)
+    write_tds_schedule(wb, model.taxes_paid, tp_layout, print_title)
 
     hide_working_sheets(wb)
     move_presentation_sheets_first(wb)
