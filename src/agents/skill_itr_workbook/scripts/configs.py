@@ -19,6 +19,7 @@ Loader validation (mapping.py's resolution engine builds on top of this):
 """
 from __future__ import annotations
 
+import re
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -109,6 +110,221 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             extra_items=fields_.get("extra_items") or {},
         )
     return entities
+
+
+# ---------------------------------------------------------------------------
+# entities.yaml -- writer (ITR Entities CRUD tab, 2026-07-25).
+#
+# DECISION (Harshal, 2026-07-23, see the itr-entities-crud handover prompt's
+# "Decisions -- RESOLVED" section -- do not re-litigate): no ruamel.yaml.
+# `entities.yaml` carries only 3 comment lines out of 77 in the live file;
+# re-emitting a stable header + `yaml.safe_dump(..., sort_keys=True)` is a
+# better trade than adding a comment-preserving YAML dependency to a
+# PyInstaller-frozen build. Output is a pure function of the entities dict
+# (sorted entity keys, sorted field names, sorted nested dict keys) --
+# saving one entity never perturbs another entity's emitted block.
+# ---------------------------------------------------------------------------
+
+ENTITIES_YAML_HEADER = (
+    "# =============================================================================\n"
+    "# entities.yaml -- Data/itr/entities.yaml (per-entity ITR profile).\n"
+    "# Managed via the \"ITR Entities\" tab in the app (Add/Modify/Delete) -- hand\n"
+    "# edits survive individual field values but NOT comments or key ordering: this\n"
+    "# header is re-emitted verbatim on every save, and entity blocks + fields are\n"
+    "# written in a deterministic (sorted-key) order via configs.dump_entities().\n"
+    "# Unknown/extra top-level fields on an entity are also silently dropped on\n"
+    "# save (EntityProfile is a closed dataclass) -- only fields it declares survive.\n"
+    "# See bundling/canonical/itr/entities.example.yaml for field documentation.\n"
+    "# =============================================================================\n"
+)
+
+
+def _entity_to_dict(e: EntityProfile) -> dict:
+    """EntityProfile -> plain dict for serialization. Required fields plus
+    `residency`/`default_regime` (both carry non-obvious defaults, so the
+    live convention -- see entities.example.yaml -- always spells them out)
+    are always emitted; everything else is emitted only when it carries a
+    real (non-empty/non-default) value, so a field nobody has ever touched
+    never appears as a stray `null` or empty collection in the file."""
+    d: dict = {
+        "name": e.name,
+        "pan": e.pan,
+        "status": e.status,
+        "residency": e.residency,
+        "default_regime": e.default_regime,
+    }
+    if e.dob:
+        d["dob"] = e.dob
+    if e.doi:
+        d["doi"] = e.doi
+    if e.address:
+        d["address"] = e.address
+    if e.father_name:
+        d["father_name"] = e.father_name
+    if e.aadhaar:
+        d["aadhaar"] = e.aadhaar
+    if e.business_subtree:
+        d["business_subtree"] = e.business_subtree
+    if e.regime_by_ay:
+        d["regime_by_ay"] = dict(e.regime_by_ay)
+    if e.audit_case:
+        d["audit_case"] = True
+    if e.audit_case_by_ay:
+        d["audit_case_by_ay"] = dict(e.audit_case_by_ay)
+    if e.extra_items:
+        d["extra_items"] = dict(e.extra_items)
+    return d
+
+
+def _filed_return_boundary_pattern(entity_key: str) -> re.Pattern:
+    """The boundary-rule regex used by find_filed_returns(): `entity_key`
+    must be immediately followed by a non-letter (digit) or end-of-stem.
+    Case-insensitive (Windows filesystems are case-preserving but not
+    case-sensitive, and files are only ever moved/archived, never deleted,
+    so matching loosely here is safe)."""
+    return re.compile(rf"^{re.escape(entity_key)}(?![A-Za-z])", re.IGNORECASE)
+
+
+def find_filed_returns(
+    entity_key: str,
+    itrfiled_dir: str | Path,
+    all_entity_keys: set[str] | None = None,
+) -> list[Path]:
+    """Find filed-return files (Data/ITRFiled/<entity_key><token>.{json,pdf})
+    belonging to `entity_key`.
+
+    The `<token>` suffix (e.g. "2425") is a human filing-batch label, not a
+    reliable assessment year -- this function does not parse or trust any AY
+    out of it, and the caller does not need one either; it keys on the
+    entity-key prefix only.
+
+    CRITICAL collision rule: entity keys can be prefixes of one another
+    (e.g. "Vaikunth" vs "VaikunthHUF"). A file belongs to `entity_key` iff
+    its stem matches ``^{re.escape(entity_key)}(?![A-Za-z])`` (case
+    -insensitive) -- i.e. `entity_key` must be immediately followed by a
+    non-letter (digit) or the end of the stem. This makes "Vaikunth2425"
+    match entity_key="Vaikunth" but NOT "VaikunthHUF", and "VaikunthHUF2425"
+    match only "VaikunthHUF".
+
+    That boundary rule alone does NOT separate digit-extended key collisions
+    -- keys like "Prop1" and "Prop12" both match a "Prop12425.json" stem
+    (the character after "Prop1" is a digit, same as after "Prop12"). Pass
+    `all_entity_keys` (the full set of currently-defined entity keys) to
+    disambiguate: when supplied, a file is attributed to `entity_key` only
+    if `entity_key` is the LONGEST key in `all_entity_keys` whose boundary
+    rule matches the file's stem -- so "Prop12425.json" resolves to "Prop12"
+    only, never "Prop1", once both keys are known. Without `all_entity_keys`
+    (None, the default), the single-key boundary rule above is used as-is --
+    existing callers that don't have the full key set keep their prior
+    behaviour.
+
+    Matches both .json and .pdf extensions (case-insensitive on extension).
+    Returns [] (not an error) if `itrfiled_dir` doesn't exist. Deterministic:
+    results are sorted. Pure aside from the one directory listing -- no other
+    I/O.
+    """
+    d = Path(itrfiled_dir)
+    if not d.is_dir():
+        return []
+    pattern = _filed_return_boundary_pattern(entity_key)
+    key_patterns = (
+        [(k, _filed_return_boundary_pattern(k)) for k in all_entity_keys]
+        if all_entity_keys
+        else None
+    )
+    matches: list[Path] = []
+    for p in d.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".json", ".pdf"):
+            continue
+        if not pattern.match(p.stem):
+            continue
+        if key_patterns:
+            candidates = [k for k, pat in key_patterns if pat.match(p.stem)]
+            if candidates:
+                longest = max(candidates, key=len)
+                if longest.lower() != entity_key.lower():
+                    continue
+        matches.append(p)
+    return sorted(matches)
+
+
+def dump_entities(entities: dict[str, EntityProfile]) -> str:
+    """Serialize {entity_key: EntityProfile} -> entities.yaml text.
+
+    Deterministic: entity keys and all mapping keys (including nested dicts
+    like regime_by_ay/extra_items) are sorted, so re-dumping after touching
+    only one entity leaves every other entity's block byte-identical. See
+    the module-level DECISION note above for why this doesn't use
+    ruamel.yaml despite dropping hand-written comments.
+    """
+    body = {key: _entity_to_dict(entities[key]) for key in sorted(entities.keys())}
+    payload = yaml.safe_dump(body, sort_keys=True, allow_unicode=True, default_flow_style=False)
+    return ENTITIES_YAML_HEADER + "\n" + payload
+
+
+_PAN_RE_SRC = r"[A-Z]{5}\d{4}[A-Z]"
+_ENTITY_STATUS_CHOICES = ("Individual", "HUF")
+_ENTITY_REGIME_CHOICES = ("old", "new")
+
+
+def validate_entity_fields(
+    key: str,
+    name: str,
+    pan: str,
+    status: str,
+    dob: str | None = None,
+    doi: str | None = None,
+    default_regime: str = "new",
+    regime_by_ay: dict | None = None,
+    audit_case_by_ay: dict | None = None,
+) -> list[str]:
+    """Validate the fields of one entity before a write. Returns a list of
+    human-readable error strings (empty list == valid). Pure/side-effect-free
+    so the UI layer and tests can both call it directly."""
+    import re as _re
+    import datetime as _dt
+
+    errors: list[str] = []
+
+    if not key or not key.strip():
+        errors.append("Entity key is required.")
+    elif _re.search(r"[\\/]", key):
+        errors.append(f"Entity key {key!r} must not contain '/' or '\\\\' (it becomes a filename).")
+
+    if not name or not name.strip():
+        errors.append("Name is required.")
+
+    if not pan or not _re.fullmatch(_PAN_RE_SRC, pan.strip().upper()):
+        errors.append(f"PAN {pan!r} is invalid -- expected format AAAAA0000A ({_PAN_RE_SRC}).")
+
+    if status not in _ENTITY_STATUS_CHOICES:
+        errors.append(f"Status {status!r} must be one of {_ENTITY_STATUS_CHOICES}.")
+
+    if default_regime not in _ENTITY_REGIME_CHOICES:
+        errors.append(f"default_regime {default_regime!r} must be one of {_ENTITY_REGIME_CHOICES}.")
+
+    def _check_date(label: str, value: str | None) -> None:
+        if not value:
+            return
+        try:
+            _dt.date.fromisoformat(value.strip())
+        except ValueError:
+            errors.append(f"{label} {value!r} is not a valid ISO date (YYYY-MM-DD).")
+
+    _check_date("dob", dob)
+    _check_date("doi", doi)
+
+    for ay, regime in (regime_by_ay or {}).items():
+        if regime not in _ENTITY_REGIME_CHOICES:
+            errors.append(f"regime_by_ay[{ay!r}] = {regime!r} must be one of {_ENTITY_REGIME_CHOICES}.")
+
+    for ay, flag in (audit_case_by_ay or {}).items():
+        if not isinstance(flag, bool):
+            errors.append(f"audit_case_by_ay[{ay!r}] = {flag!r} must be true/false.")
+
+    return errors
 
 
 # ---------------------------------------------------------------------------

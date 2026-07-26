@@ -4,6 +4,58 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.20.0] — 2026-07-25
+
+### Added
+- **ITR Entities CRUD tab.** New "ITR Entities" sub-tab under GnuCash > ITR
+  (alongside "ITR Workbook" and "ITR Mapping") for adding, modifying, and
+  deleting taxpayer entities in `Data/itr/entities.yaml` through the UI —
+  no more hand-edited YAML for the roster. Full form over every
+  `EntityProfile` field: PAN (`[A-Z]{5}\d{4}[A-Z]`), status enum, dob/doi
+  dates, default regime + a `regime_by_ay` per-AY editor, the `audit_case` /
+  `audit_case_by_ay` fields added in v2.19.0 (#117), and `extra_items`
+  (b/f losses, clubbing notes). Validation runs before every write and
+  blocks bad PAN/date/enum values with an inline error; a blank entity key
+  never touches disk. `configs.py` gains `dump_entities()` (a deterministic,
+  sorted-key `yaml.safe_dump` re-emitting a stable header — no `ruamel.yaml`
+  dependency added, per the 2026-07-23 decision) and
+  `validate_entity_fields()`. Save discipline mirrors `itr_mapping_review.py`:
+  a timestamped backup of `entities.yaml` before every rewrite, anchored via
+  `data_root_dir()` (works in both source and frozen layouts). Renaming an
+  entity's key cascades its `.mapping.yaml` file to the new name, or blocks
+  the whole save with a clear message if a file already exists at the target
+  name (never a half-applied rename). Delete requires a double confirmation
+  and archives (never deletes) the entity's `.mapping.yaml` to
+  `Data/itr/_archive/`.
+
+### Changed
+- **ITR Entities tab: filed-return rename/delete cascade.** Renaming or
+  deleting an entity now cascades over its filed returns in
+  `Data/ITRFiled/<entity_key><token>.{json,pdf}` (e.g. `Harshal2425.json`),
+  replacing the earlier manual-check note. `configs.find_filed_returns()`
+  matches files by entity-key prefix only — the trailing `<token>` is a
+  human filing-batch label, never a parsed/trusted assessment year — with a
+  strict boundary rule so prefix-colliding keys (`Vaikunth` vs
+  `VaikunthHUF`) never cross-match. Rename swaps the leading entity-key
+  segment of each matched filename (token + extension preserved) and blocks
+  the *entire* save, same as the `.mapping.yaml` cascade, if any target
+  filename already exists. Delete archives (moves, timestamped) each
+  matched file to `Data/itr/_archive/` alongside the mapping-file archive —
+  filed returns are never deleted, only moved.
+- **ITR Entities tab: atomic save/delete cascade (review fix).** Save and
+  delete now run the filesystem cascade (`.mapping.yaml` rename/archive +
+  filed-return renames/archives) *before* rewriting `entities.yaml`, and
+  roll every completed move back if a later step in the cascade — or the
+  final `entities.yaml` write itself — fails, surfacing a clean Gradio
+  error instead of a stack trace. Previously `entities.yaml` was rewritten
+  first with no exception handling around the cascade, so a mid-cascade OS
+  failure (locked file, AV, permission error) could leave `entities.yaml`
+  updated while the on-disk mapping/filed-return files were still under
+  their old names. `find_filed_returns()` also gains an optional
+  `all_entity_keys` param for longest-match disambiguation of
+  digit-extended key collisions (e.g. `Prop1` vs `Prop12`) and matches
+  filenames case-insensitively (Windows casing).
+
 ## [Unreleased]
 
 > **Note.** The entries below were never rolled into a released section at
