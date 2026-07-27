@@ -26,6 +26,7 @@ pandas>=2.2.0
 extract-msg>=0.41.0           # CDFV2 binary Outlook MSG (used by cc_sort skill)
 pyyaml>=6.0
 python-dotenv>=1.0.0
+cryptography>=44              # AES-256-CBC/PBKDF2 decryption of AIS JSON (skill_ais_reconcile)
 
 # --- Web UI ---
 gradio>=6.0,<7.0              # Gradio 6.x; API differs from 4.x (theme/css live on launch(), show_api removed)

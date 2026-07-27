@@ -1,0 +1,150 @@
+# skill.yaml — AIS Reconcile skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+#
+# v0.1.0 (alpha): decrypts an Income-Tax AIS JSON export in-process (no
+# manual password entry -- the entity is resolved from the export's own
+# masked-PAN filename prefix, and the decrypt password derives from that
+# entity's PAN + DOB/DOI on file), then runs up to three reconciliations
+# (AIS-internal always; AIS<->26AS and AIS<->GnuCash books when their
+# optional inputs are supplied) plus a set of ADVISORY portal-feedback
+# suggestions derived from the deltas. Nothing here submits anything to
+# the AIS portal -- every suggestion is for a human (a CA) to review.
+
+name: "AIS Reconcile"
+display_name: "Reconcile"
+description: >
+  Decrypt an Indian Income-Tax AIS (Annual Information Statement) JSON
+  export and reconcile it against itself, an optional 26AS workbook, and
+  an optional GnuCash book, producing one Excel workbook with a tie-out
+  sheet per reconciliation plus advisory (never auto-submitted) suggestions
+  for the AIS portal's own feedback mechanism.
+category: "itr"
+version: "0.1.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "ais_path"
+    type: "file"
+    label: "AIS JSON export (encrypted, as downloaded from the portal)"
+    file_types: [".json"]
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (optional, must be the SAME FY as the AIS -- enables the books tie-out)"
+    file_types: [".gnucash"]
+    required: false
+  - name: "xlsx_path"
+    type: "output_file"
+    label: "26AS workbook (optional, from the 26AS skill -- enables the TDS-credit tie-out)"
+    match: "*-26AS.xlsx"
+    required: false
+
+run_args:
+  ais_path: "{inputs.ais_path}"
+  gnucash_path: "{inputs.gnucash_path}"
+  xlsx_path: "{inputs.xlsx_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  # Anchored to the same Data\ root as the ITR Workbook skill's entity
+  # dropdown (ui/_config.data_root_dir(), via the {data_root} run_args
+  # token) so this skill resolves the SAME entities.yaml / mapping file /
+  # rules config in both source and frozen builds -- agent.py's own
+  # defaults are a source-mode-only fallback for direct/programmatic
+  # callers (tests).
+  entities_path: "{data_root}/itr/entities.yaml"
+  rules_dir: "{data_root}/itr/rules"
+
+output:
+  extension: ".xlsx"
+  suffix: "ais-reconciliation"
+  download_label: "Download AIS Reconciliation"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Decrypts an AIS (Annual Information Statement) JSON export entirely
+    in-process -- no manual password entry. The entity is resolved from
+    the export's own filename (the portal names it with a masked PAN
+    prefix, e.g. "XXXPA3059X_2025-26_AIS.json"); that masked prefix is
+    matched against entities.yaml's real PANs, and the decrypt password is
+    derived from the resolved entity's PAN plus DOB (Individual) or DOI
+    (HUF). Always runs the AIS-internal check (l1 detail vs l2 aggregate
+    per element, cross-section TDS-credit total). If a 26AS workbook (this
+    repo's own "26AS" skill output) is also supplied, ties out AIS-reported
+    TDS credit against 26AS's tds_deposited at the aggregate, per-quarter,
+    and per-income-category grain. If a GnuCash book for the SAME financial
+    year is also supplied, ties out AIS income (interest/dividend/salary)
+    and TDS credit against what's actually posted in the books -- this is
+    the primary reconciliation, since the books are the taxpayer's own
+    record of truth. A book for the wrong FY still produces a tie-out sheet
+    but the summary carries an impossible-to-miss WARNING banner. Finally,
+    every flagged delta across all three reconciliations is distilled into
+    a set of ADVISORY suggestions for the AIS portal's own feedback
+    mechanism (e.g. "Information is correct", "Information is not fully
+    correct") -- these are for a human to review before acting on the
+    portal; nothing is ever auto-submitted, and confidence is always capped
+    at low/medium, never high.
+  when_to_use: >
+    Use once you've downloaded your AIS JSON export from the income-tax
+    portal, to check it against itself and (when available) your 26AS and
+    your GnuCash books before relying on it for filing. The books tie-out
+    is the most useful check if your books are kept current -- it's the
+    only one of the three that can actually tell you the AIS is missing or
+    overstating something, not just disagreeing with another government
+    document.
+  inputs:
+    - name: "ais_path"
+      tooltip: "The AIS JSON export exactly as downloaded from the portal (still encrypted -- decrypted in-process)."
+      accepts: "JSON (.json), one export per entity/FY."
+      gotchas: >
+        The filename must keep the portal's own masked-PAN + FY prefix
+        (e.g. "XXXPA3059X_2025-26_..."). If no entity in entities.yaml has
+        a matching PAN, or the matching entity has no DOB/DOI on file, the
+        run fails loud rather than guessing which taxpayer this is.
+    - name: "gnucash_path"
+      tooltip: "GnuCash book for the SAME financial year as the AIS export."
+      accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."
+      gotchas: >
+        Must be the matching-FY book. A book with no transactions in that
+        FY window still produces a tie-out sheet, but the run summary
+        carries a loud WARNING -- the numbers on that sheet are almost
+        certainly meaningless for a wrong-year book.
+    - name: "xlsx_path"
+      tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
+      accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
+      gotchas: "A workbook for the wrong entity/year will tie out against the wrong TDS figures without a hard error -- double-check before relying on it."
+  steps:
+    - "Pick the AIS JSON export."
+    - "Optionally supply the matching-FY GnuCash book and/or the entity's 26AS workbook."
+    - "Click Run -- it decrypts and reconciles offline in a few seconds."
+    - "Open the Excel workbook: Books Reconciliation and 26AS Tie-out sheets first, then Feedback Suggestions."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-ais-reconciliation.xlsx"
+        tooltip: >
+          Summary, Books Reconciliation (if a book was supplied), one sheet
+          per AIS section, Flags, 26AS Tie-out (if a workbook was
+          supplied), and Feedback Suggestions (advisory only).
+  tips: >
+    The Feedback Suggestions sheet is a starting point for the AIS
+    portal's own feedback form, not something to paste in verbatim --
+    read the Rationale column and confirm each suggestion against the
+    underlying document before acting on the portal. Confidence is
+    deliberately capped at "low"/"medium": nothing here is ever certain
+    enough to call "high" without a human's own review.
+  troubleshooting:
+    - problem: "\"ERROR: no entity ... has a PAN matching the masked prefix\"."
+      fix: "Add or correct the entity's pan in entities.yaml, or confirm the AIS filename wasn't renamed away from the portal's own masked-PAN_FY_... convention."
+    - problem: "\"ERROR: could not decrypt ...\"."
+      fix: "The resolved entity's dob/doi in entities.yaml doesn't match what the portal used to encrypt this export -- double-check the date (ISO YYYY-MM-DD) on file."
+    - problem: "WARNING about the GnuCash book having no transactions in the AIS's FY."
+      fix: "You picked the wrong .gnucash book (or the wrong-year one) -- re-run with the book covering the same financial year as the AIS export."

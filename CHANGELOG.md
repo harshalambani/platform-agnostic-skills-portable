@@ -4,6 +4,41 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **AIS Reconcile skill (v0.1.0, alpha).** New "AIS Reconcile" skill
+  (`src/agents/skill_ais_reconcile/`) decrypts an Income-Tax AIS (Annual
+  Information Statement) JSON export entirely in-process — the entity is
+  resolved from the export's own masked-PAN filename prefix (matched
+  against `entities.yaml`'s real PANs) and the decrypt password is derived
+  from that entity's PAN plus DOB (Individual) or DOI (HUF/non-individual),
+  reusing `decrypt.py`'s existing PBKDF2/AES-256-CBC implementation — no
+  manual password entry. Runs up to four reconciliations: (1) AIS-internal
+  — l1 detail vs l2 aggregate per element, cross-section TDS-credit total;
+  (2) AIS vs 26AS — TDS-credit tie-out at the aggregate, per-quarter, and
+  per-income-category grain when a 26AS workbook is supplied; (3) AIS vs
+  GnuCash books — the primary reconciliation, tying AIS-reported
+  interest/dividend/salary income and TDS credit against what's actually
+  posted in the books via nearest-ancestor account-tag resolution, when a
+  matching-FY `.gnucash` book + entity mapping are supplied (a book with no
+  transactions in the AIS's FY still produces a tie-out sheet but the run
+  summary carries an unmissable WARNING); (4) advisory portal-feedback
+  suggestions distilled from every flagged delta across the first three —
+  conservative by design (confidence capped at low/medium, never high;
+  ambiguous cases suggest "review" rather than a definitive portal action)
+  and explicitly never auto-submitted, for a human (a CA) to review before
+  acting on the AIS portal's own feedback mechanism. All four
+  reconciliation/feedback modules are pure functions with no I/O;
+  `agent.py` is the only file in the skill that touches the filesystem
+  (reading the AIS export, `entities.yaml`, the entity's mapping file, the
+  rules config, and the optional 26AS workbook). v1 scope note: the AIS
+  side of the books tie-out only considers `tdsTcs`-reported income, to
+  avoid double-counting against other AIS sections describing the same
+  underlying transaction. Output is a single Excel workbook (Summary,
+  Books Reconciliation, one sheet per AIS section, Flags, 26AS Tie-out,
+  Feedback Suggestions).
+
 ## [2.20.0] — 2026-07-26
 
 ### Added
