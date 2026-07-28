@@ -23,15 +23,49 @@ Data sources for the review table (per entity):
   - Data/itr/mappings/<entity>.mapping.yaml -- already-resolved entries
     (anchored via ui._config.data_root_dir(), never a bare "Data/" prefix --
     see docs/history/2026-07-xx path-anchoring fix).
-  - the most-recently-modified *-proposed-mappings.yaml under
-    <data_root>/outputs -- unmapped leaves + any LLM suggestion from the
-    latest ITR Workbook run. The proposed-mappings snippet isn't
-    entity-tagged by filename (the ITR Workbook output stem is derived from
-    the uploaded HTML, not the entity key), so "latest run's snippet" is
-    read literally: the single most recent one in the outputs folder. A
-    guid already present in the entity's own mapping file always wins over
-    a stale snippet entry for the same guid (it's fully resolved, so it
-    isn't shown as unmapped regardless of what an older snippet says).
+  - the newest *-proposed-mappings.yaml under <data_root>/outputs that is
+    ATTRIBUTABLE TO THIS ENTITY -- unmapped leaves + any LLM suggestion from
+    that entity's latest ITR Workbook run. This used to be "the single most
+    recent snippet in the whole outputs folder, no entity filter", which
+    leaked one entity's accounts into every other entity's review the
+    moment two entities' runs landed in the same outputs folder (reported
+    symptom: an account from one family member's book appearing under a
+    different member's review -- impossible, since GnuCash account GUIDs
+    are only unique WITHIN one book, not across the family's cloned-from-
+    template books). Fixed in two independent layers (2026-07-28):
+
+    Layer A (filename attribution) -- _latest_proposed_mappings_path()
+    scans outputs newest-first and returns the first snippet whose filename
+    stem is attributable to `entity_key` via _snippet_entity_key(): a key
+    matches iff it appears in the stem with a non-letter boundary on both
+    sides (same discipline as configs.find_filed_returns()'s prefix-
+    collision handling), longest/most-specific match wins, and a genuine
+    tie between two equally-specific keys attributes to NEITHER (loads no
+    snippet rather than guessing). This also means a short individual key
+    that happens to be a literal prefix of a longer relative's stem (e.g.
+    an individual key prefixing an HUF's) is excluded by the boundary check
+    itself -- it was never eligible for the tie-break. No snippet
+    attributable to the entity -> no snippet rows loaded (mapping file
+    only), never an old/foreign one shown as a fallback.
+
+    Layer B (book GUID validation, optional) -- when the entity has a
+    `book:` path configured in entities.yaml and it's readable,
+    _apply_book_validation() cross-checks every surviving snippet row's
+    GUID against that entity's OWN parsed book: a GUID absent from the book
+    is dropped outright (belt-and-suspenders against a cross-entity leak
+    even if two entities' snippet filenames happened to collide under
+    Layer A), and a GUID that IS present has its displayed `path`
+    overwritten with the book's own current account path for that GUID --
+    so a GUID that's shared/cloned across the family's template books (the
+    GUIDs are not globally unique) always shows this entity's local account
+    name, never a foreign one. No `book:` configured, or the file is
+    missing/unreadable -- Layer B is skipped silently; Layer A's result
+    stands as-is. `book:` is a manually-added, purely optional entities.yaml
+    field (see configs.py); nothing ships with a real path pre-filled.
+
+    A guid already present in the entity's own mapping file always wins
+    over a snippet entry for the same guid (it's fully resolved, so it
+    isn't shown as unmapped regardless of what the snippet says).
 
 Save discipline (mirrors gnucash_review._save_changes): write a timestamped
 backup of the current mapping file BEFORE any in-place rewrite; a blank/
@@ -51,6 +85,7 @@ from __future__ import annotations
 
 import datetime
 import html as _html
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -120,18 +155,165 @@ def _outputs_dir() -> Path:
     return _config_mod.data_root_dir() / "outputs"
 
 
-def _latest_proposed_mappings_path() -> Path | None:
-    """Most-recently-modified *-proposed-mappings.yaml under the outputs
-    folder, or None if there isn't one yet (e.g. no ITR Workbook run at all)."""
-    out_dir = _outputs_dir()
-    if not out_dir.is_dir():
+def _all_entity_keys() -> list[str]:
+    """Every entity key currently defined in Data/itr/entities.yaml, for
+    _snippet_entity_key()'s longest-match disambiguation. A lightweight,
+    key-only read (mirrors _generic._options_from_itr_entities()'s
+    tolerance): a missing/malformed file just yields no candidate keys."""
+    path = _config_mod.data_root_dir() / "itr" / "entities.yaml"
+    if not path.is_file():
+        return []
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    return [k for k in raw.keys() if isinstance(k, str)]
+
+
+def _snippet_entity_key(stem: str, entity_keys: list[str]) -> str | None:
+    """Attribute a proposed-mappings filename stem to exactly one entity
+    key from `entity_keys`, or None if no key is attributable / the match
+    is ambiguous.
+
+    A key matches iff it occurs in `stem` (case-insensitive) with a
+    non-letter character (or the string edge) on BOTH sides -- the same
+    boundary discipline configs.find_filed_returns() already uses for the
+    identical collision on Data/ITRFiled/ filenames (an individual entity
+    key can be a literal prefix of a relative's longer key, e.g. an
+    individual key prefixing that person's HUF's key). Because the
+    boundary check requires a non-letter after the match, a key that only
+    matches as a *prefix* of a longer word in the stem is excluded
+    outright -- it's never even a candidate, so it can't win a tie-break
+    it was never eligible for.
+
+    When more than one key matches, the LONGEST (most specific) one wins.
+    If several keys tied for that longest length all match, the
+    attribution is genuinely ambiguous and None is returned rather than
+    guessing.
+    """
+    candidates: list[str] = []
+    for key in entity_keys:
+        if not key:
+            continue
+        pattern = re.escape(key)
+        for m in re.finditer(pattern, stem, re.IGNORECASE):
+            start, end = m.start(), m.end()
+            before_ok = start == 0 or not stem[start - 1].isalpha()
+            after_ok = end == len(stem) or not stem[end].isalpha()
+            if before_ok and after_ok:
+                candidates.append(key)
+                break
+    if not candidates:
         return None
+    max_len = max(len(k) for k in candidates)
+    longest = [k for k in candidates if len(k) == max_len]
+    return longest[0] if len(longest) == 1 else None
+
+
+def _latest_proposed_mappings_path(
+    entity_key: str, all_entity_keys: list[str] | None = None,
+) -> Path | None:
+    """Newest *-proposed-mappings.yaml under the outputs folder that is
+    ATTRIBUTABLE TO `entity_key` by filename (Layer A -- see the module
+    docstring), or None if there isn't one yet (no ITR Workbook run for
+    this entity at all, or the only snippets present belong to other
+    entities). Snippet filenames look like
+    "<stamp>-<WorkbookStem>-proposed-mappings.yaml"; the "<WorkbookStem>"
+    portion is matched against entity keys via _snippet_entity_key().
+
+    `all_entity_keys` lets callers pass a pre-loaded key list (tests use
+    this to avoid re-reading entities.yaml); defaults to
+    _all_entity_keys(). `entity_key` itself is always treated as a
+    candidate even if it isn't (yet) listed in entities.yaml, so a caller
+    can look up a snippet for an entity key that doesn't have an
+    entities.yaml row yet.
+    """
+    out_dir = _outputs_dir()
+    if not out_dir.is_dir() or not entity_key:
+        return None
+    if all_entity_keys is None:
+        all_entity_keys = _all_entity_keys()
+    if entity_key not in all_entity_keys:
+        all_entity_keys = [*all_entity_keys, entity_key]
+
+    suffix = "-proposed-mappings.yaml"
     candidates = sorted(
-        out_dir.glob("*-proposed-mappings.yaml"),
+        out_dir.glob(f"*{suffix}"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
-    return candidates[0] if candidates else None
+    for p in candidates:
+        stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.stem
+        matched = _snippet_entity_key(stem, all_entity_keys)
+        if matched is not None and matched == entity_key:
+            return p
+    return None
+
+
+def _entity_book_path(entity_key: str) -> Path | None:
+    """Optional per-entity `book:` path from entities.yaml (Layer B -- see
+    the module docstring). Deliberately read straight out of the raw YAML
+    dict here rather than added to configs.EntityProfile, so this stays
+    purely additive plumbing with zero blast radius on the entities CRUD
+    tab's dataclass/dump/validate surface. Returns None whenever entities.
+    yaml is missing/malformed, `entity_key` isn't defined in it, or the
+    entity has no `book:` key -- every case falls back to Layer A only,
+    never an error."""
+    path = _config_mod.data_root_dir() / "itr" / "entities.yaml"
+    if not path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    fields = raw.get(entity_key)
+    if not isinstance(fields, dict):
+        return None
+    book = fields.get("book")
+    if not book or not str(book).strip():
+        return None
+    return Path(str(book))
+
+
+def _apply_book_validation(entity_key: str, snippet_rows: list[dict]) -> list[dict]:
+    """Layer B (optional, graceful -- see the module docstring): when
+    `entity_key` has a configured + readable `book:` in entities.yaml,
+    cross-check every snippet row's GUID against that entity's OWN parsed
+    book. A GUID absent from the book is dropped outright (belt-and-
+    suspenders against a cross-entity leak even if two entities' snippet
+    filenames happened to collide under Layer A); a GUID that IS present
+    has its `path` overwritten with the book's own current account path
+    for that GUID (GnuCash account GUIDs are not globally unique across
+    the family's cloned-from-template books, so a shared GUID must always
+    display THIS entity's local account name, never a foreign one).
+
+    No `book:` configured, the file is missing/unreadable, or it fails to
+    parse -- Layer B is skipped silently and `snippet_rows` passes through
+    unchanged (Layer A's result stands as-is)."""
+    book_path = _entity_book_path(entity_key)
+    if book_path is None or not book_path.is_file():
+        return snippet_rows
+    try:
+        from agents.gnucash_accounts import load_accounts  # noqa: PLC0415
+        accounts = {a.id: a for a in load_accounts(book_path)}
+    except Exception:
+        return snippet_rows
+    if not accounts:
+        return snippet_rows
+
+    validated: list[dict] = []
+    for row in snippet_rows:
+        acct = accounts.get(row["guid"])
+        if acct is None:
+            continue
+        if acct.path:
+            row["path"] = acct.path
+        validated.append(row)
+    return validated
 
 
 # ---------------------------------------------------------------------------
@@ -190,12 +372,13 @@ def _load_review_rows(entity_key: str) -> list[dict]:
             "note": entry.note or "",
         })
 
-    snippet_path = _latest_proposed_mappings_path()
+    snippet_path = _latest_proposed_mappings_path(entity_key)
     if snippet_path is not None:
         try:
             raw = yaml.safe_load(snippet_path.read_text(encoding="utf-8")) or []
         except Exception:
             raw = []
+        snippet_rows: list[dict] = []
         if isinstance(raw, list):
             for item in raw:
                 if not isinstance(item, dict):
@@ -208,7 +391,7 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                 suggested_tag = item.get("tag")
                 if suggested_tag == "REPLACE_ME":
                     suggested_tag = None
-                rows.append({
+                snippet_rows.append({
                     "guid": guid,
                     "path": item.get("path", ""),
                     "tag": None,
@@ -217,6 +400,7 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                     "suggested": suggested_tag,
                     "note": item.get("note", ""),
                 })
+        rows.extend(_apply_book_validation(entity_key, snippet_rows))
 
     rows.sort(key=lambda r: (r["path"] or "", r["guid"]))
     return rows
@@ -352,6 +536,11 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         apply_matching_on="",
         extra_panel_html=glossary_html,
         context={"entity_key": entity_key},
+        # Row-level "delete this mapping entry" -- see _save_changes()'s
+        # docstring for the persistence semantics (a row that exists in the
+        # entity's mapping file is actually removed from it; an unmapped/
+        # snippet-only row is view-only, nothing to persist).
+        allow_delete=True,
     )
 
 
@@ -392,12 +581,23 @@ def _save_changes(changes_json: str) -> str:
     the filesystem. Returns a status markdown string.
 
     `changes_json` is the engine's syncPayload() shape: {context, changes,
-    all_rows}. Each `changes` entry carries {_idx, _orig, guid, path, tag}
-    (guid/path/tag are the row's guid plus the two declared Columns whose
-    values the entry needs at save time -- `path` for a previously-unmapped
-    leaf that has no existing mapping-file entry to source it from, `tag`
-    for the corrected value). `entity_key` travels in `context` rather than
-    a second Gradio input -- see the module docstring for why.
+    all_rows}. Each `changes` entry carries {_idx, _orig, guid, path, tag,
+    _deleted} (guid/path/tag are the row's guid plus the two declared
+    Columns whose values the entry needs at save time -- `path` for a
+    previously-unmapped leaf that has no existing mapping-file entry to
+    source it from, `tag` for the corrected value; `_deleted` is set by the
+    engine's "Remove selected" toolbar button, spec.allow_delete=True).
+    `entity_key` travels in `context` rather than a second Gradio input --
+    see the module docstring for why.
+
+    Delete semantics: a deleted row whose guid EXISTS in the entity's
+    mapping file is actually removed from that file (the real need this
+    covers: noise entries a user must be able to delete, not just hide).
+    A deleted row whose guid is NOT in the mapping file (an unmapped/
+    snippet-only suggestion) has nothing to persist -- the client already
+    dropped it from the table, so it's counted separately and not written
+    anywhere. A row can't be both deleted and corrected; `_deleted` always
+    wins over a `tag` value on the same change entry.
     """
     if not changes_json or not changes_json.strip():
         return "No changes to save."
@@ -422,6 +622,17 @@ def _save_changes(changes_json: str) -> str:
     mapping_file = _mapping_path(entity_key)
     mapping_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Existing mapping-file guids BEFORE this save -- needed to tell a real
+    # deletion (guid is persisted, must be removed from the file) from a
+    # snippet-only "remove from view" delete (guid was never persisted, so
+    # there's nothing to delete server-side).
+    existing_guids: set[str] = set()
+    if mapping_file.is_file():
+        try:
+            existing_guids = set(_configs.load_mapping(mapping_file).entries)
+        except Exception:
+            existing_guids = set()
+
     backup_msg = "No existing mapping file -- nothing to back up (cold start)."
     if mapping_file.is_file():
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -431,18 +642,34 @@ def _save_changes(changes_json: str) -> str:
 
     corrections: dict[str, str] = {}
     paths: dict[str, str] = {}
+    deletions: set[str] = set()
     skipped_blank = 0
     for ch in changes:
         guid = ch.get("guid")
+        if not guid:
+            skipped_blank += 1
+            continue
+        if ch.get("_deleted"):
+            deletions.add(guid)
+            continue
         tag = ch.get(TARGET_COL)
-        if not guid or not tag or not str(tag).strip():
+        if not tag or not str(tag).strip():
             skipped_blank += 1
             continue
         corrections[guid] = str(tag).strip()
         if ch.get("path"):
             paths[guid] = ch["path"]
 
-    if not corrections:
+    persisted_deletions = deletions & existing_guids
+    view_only_deletions = deletions - existing_guids
+
+    if not corrections and not persisted_deletions:
+        if deletions:
+            return (
+                f"Removed {len(view_only_deletions)} unmapped row(s) from view "
+                "(not present in the mapping file -- nothing to save). "
+                f"{backup_msg}"
+            )
         return (
             "No valid changes to save (all selections were blank). "
             f"{backup_msg}"
@@ -450,6 +677,7 @@ def _save_changes(changes_json: str) -> str:
 
     applied, invalid = amc.apply_corrections_map(
         str(mapping_file), corrections, str(mapping_file), paths=paths,
+        deletions=persisted_deletions,
     )
 
     lines = [
@@ -458,6 +686,14 @@ def _save_changes(changes_json: str) -> str:
         f"{backup_msg}",
         f"Applied {applied} correction(s) -> {mapping_file}",
     ]
+    if persisted_deletions:
+        noun = "entry" if len(persisted_deletions) == 1 else "entries"
+        lines.append(f"Deleted {len(persisted_deletions)} {noun} from the mapping file.")
+    if view_only_deletions:
+        lines.append(
+            f"Removed {len(view_only_deletions)} unmapped row(s) from view "
+            "(not persisted -- not present in the mapping file)."
+        )
     if skipped_blank:
         lines.append(f"Skipped {skipped_blank} row(s) with a blank tag selection.")
     if invalid:

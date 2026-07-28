@@ -218,6 +218,32 @@ def test_build_html_also_set_matching_distinct_when_declared():
     assert also_set != also_set_matching
 
 
+def test_build_html_allow_delete_default_false_no_button_and_no_row_deleted_css():
+    """Every existing screen (gnucash_review, tds_journal_review, ...) leaves
+    allow_delete at its default False -- confirm build_html() emits nothing
+    delete-related for them, byte-for-byte unaffected by the new field."""
+    spec = _make_spec()
+    assert spec.allow_delete is False
+    html = engine.build_html(spec, [{"Security": "INFY", "Account": "Assets:X"}])
+    assert f'id="{spec.app_id}-remove-sel"' not in html
+
+
+def test_build_html_allow_delete_true_renders_remove_button():
+    spec = _make_spec("delapp")
+    spec.allow_delete = True
+    html = engine.build_html(spec, [{"Security": "INFY", "Account": "Assets:X"}])
+    assert 'id="delapp-remove-sel"' in html
+    assert "row-deleted" in html  # CSS rule always present, harmless when unused
+
+
+def test_build_html_allow_delete_leaves_no_unreplaced_tokens_either_way():
+    for flag in (False, True):
+        spec = _make_spec()
+        spec.allow_delete = flag
+        html = engine.build_html(spec, [{"Security": "INFY", "Account": "Assets:X"}])
+        assert re.findall(r"%%[A-Z_]+%%", html) == []
+
+
 def test_build_html_works_with_no_status_options_or_apply_matching():
     spec = engine.ReviewSpec(
         app_id="bare",
@@ -265,6 +291,20 @@ def test_parse_payload_malformed_json_raises_value_error():
     import pytest
     with pytest.raises(ValueError):
         engine.parse_payload("{not valid json")
+
+
+def test_parse_payload_deleted_flag_on_a_change_survives_roundtrip():
+    """parse_payload() is a generic JSON pass-through -- a change entry
+    carrying `_deleted` (set by the allow_delete toolbar button's JS) must
+    survive exactly like any other declared column value."""
+    import json
+    raw = json.dumps({
+        "context": {"entity_key": "SYN"},
+        "changes": [{"_idx": 0, "_orig": "", "guid": "g1", "_deleted": True}],
+        "all_rows": [],
+    })
+    out = engine.parse_payload(raw)
+    assert out["changes"][0]["_deleted"] is True
 
 
 def test_parse_payload_non_object_top_level_raises_value_error():

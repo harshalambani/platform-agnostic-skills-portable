@@ -108,7 +108,11 @@ def test_load_rows_flags_unmapped_and_shows_suggestion(tmp_path):
     data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
     out_dir = data_root / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    snippet_path = out_dir / "2026-07-16-000000-bs-ITR.xlsx-proposed-mappings.yaml"
+    # Filename must be attributable to "SYN-IND" (Layer A entity-scoping --
+    # see ui.tabs.itr_mapping_review's module docstring): a real workbook
+    # run names its snippet after the uploaded file, which in practice
+    # carries the entity key (that's the whole premise Layer A relies on).
+    snippet_path = out_dir / "2026-07-16-000000-SYN-IND-bs-ITR.xlsx-proposed-mappings.yaml"
     snippet_path.write_text(yaml.safe_dump([
         {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)",
          "tag": "AL_CASH_BANK", "note": "LLM suggestion", "suggested_by_llm": "2026-07-16"},
@@ -164,7 +168,7 @@ def test_load_rows_replace_me_suggestion_shown_as_none(tmp_path):
     data_root = _setup_data_root(tmp_path, "syn_ind_unmapped.mapping.yaml")
     out_dir = data_root / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    snippet_path = out_dir / "run-ITR.xlsx-proposed-mappings.yaml"
+    snippet_path = out_dir / "SYN-IND-run-ITR.xlsx-proposed-mappings.yaml"
     snippet_path.write_text(yaml.safe_dump([
         {"guid": UNMAPPED_GUID, "path": "Assets/Misc Holding (unmapped)",
          "tag": "REPLACE_ME", "note": "unmapped -- needs review"},
@@ -185,7 +189,7 @@ def test_load_rows_cold_start_all_unmapped(tmp_path):
     _entities_yaml(data_root / "itr" / "entities.yaml")
     out_dir = data_root / "outputs"
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "run-ITR.xlsx-proposed-mappings.yaml").write_text(yaml.safe_dump([
+    (out_dir / "SYN-IND-run-ITR.xlsx-proposed-mappings.yaml").write_text(yaml.safe_dump([
         {"guid": "guid-a", "path": "Assets/Cash", "tag": "REPLACE_ME", "note": "unmapped"},
         {"guid": "guid-b", "path": "Income/Salary", "tag": "SALARY_GROSS",
          "note": "LLM suggestion", "suggested_by_llm": "2026-07-16"},
@@ -338,7 +342,9 @@ def test_saved_correction_resolves_on_workbook_rerun(tmp_path):
 
     html_path = tmp_path / "bs.html"
     html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
-    out_path = out_dir / "2026-07-16-000000-bs-ITR.xlsx"
+    # Output stem carries the entity key, as a real upload would (Layer A
+    # entity-scoping attributes the proposed-mappings snippet by filename).
+    out_path = out_dir / "2026-07-16-000000-SYN-IND-bs-ITR.xlsx"
 
     # First run: partial mapping -- one leaf unresolved, best-effort build.
     summary_before = agent.run(
@@ -362,7 +368,7 @@ def test_saved_correction_resolves_on_workbook_rerun(tmp_path):
 
     # Second run: mapping_file omitted -- agent auto-derives the entity's
     # (now-corrected) mapping file, same as gate 3 in test_path_anchoring.py.
-    out_path2 = out_dir / "2026-07-16-000001-bs-ITR.xlsx"
+    out_path2 = out_dir / "2026-07-16-000001-SYN-IND-bs-ITR.xlsx"
     summary_after = agent.run(
         str(html_path), str(out_path2),
         entity_key="SYN-IND", entities_path=str(entities_path),
