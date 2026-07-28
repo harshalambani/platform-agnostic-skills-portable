@@ -114,6 +114,13 @@ class ReviewSpec:
     also_set_matching: dict[str, str] | None = None
     extra_panel_html: str = ""
     context: dict[str, Any] = field(default_factory=dict)
+    # When True, renders a "Remove selected" toolbar button that marks the
+    # current selection as deleted (client-side `_deleted=true`, struck
+    # through/dimmed) rather than reassigning TARGET. Default False keeps
+    # every existing screen (gnucash_review, tds_journal_review, ...)
+    # byte-for-byte unchanged. See itr_mapping_review.py for the first
+    # consumer (row-level "delete this mapping entry").
+    allow_delete: bool = False
 
     @property
     def payload_box_id(self) -> str:
@@ -231,6 +238,7 @@ _CSS = r"""
 #%%APP%%-app tbody tr.selected { background: #1e3a5f; }
 #%%APP%%-app tbody tr.selected:hover { background: #254a73; }
 #%%APP%%-app tbody tr.locked { opacity: 0.75; cursor: not-allowed; }
+#%%APP%%-app tbody tr.row-deleted td { text-decoration: line-through; opacity: 0.55; }
 #%%APP%%-app tbody td {
   padding: 5px 8px; font-size: 12px; max-width: 420px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd;
@@ -313,6 +321,7 @@ _BODY = r"""
     </div>
     <button id="%%APP%%-apply-sel" class="primary" title="Apply to selected rows">Apply to selected</button>
     %%APPLY_MATCH_HTML%%
+    %%DELETE_BTN_HTML%%
     <span class="spacer"></span>
   </div>
 
@@ -350,7 +359,7 @@ _BODY = r"""
   }
 
   let rows = DATA.map((r, i) => ({
-    ...r, _idx: i, _changed: false, _orig: r[TARGET] || ''
+    ...r, _idx: i, _changed: false, _orig: r[TARGET] || '', _deleted: false
   }));
   let selected = new Set();
   let lastClickIdx = null;
@@ -428,11 +437,28 @@ _BODY = r"""
     };
   }
 
+  // ── Delete selected (opt-in via spec.allow_delete) ──
+  const removeBtn = $('remove-sel');
+  if (removeBtn) {
+    removeBtn.onclick = () => {
+      if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
+      if (!confirm('Remove ' + selected.size + ' selected row' + (selected.size === 1 ? '' : 's') + '? ' +
+                    'This marks them for deletion and cannot be undone here.')) return;
+      rows.forEach(r => {
+        if (r._locked || !selected.has(r._idx)) return;
+        r._deleted = true;
+        r._changed = true;
+      });
+      syncPayload();
+      renderTable();
+    };
+  }
+
   // ── JS → Python bridge. gr.State has no DOM node, so the save handler
   //    reads this global via its js= parameter at click time.
   function syncPayload() {
     const changes = rows.filter(r => r._changed).map(r => {
-      const out = { _idx: r._idx, _orig: r._orig };
+      const out = { _idx: r._idx, _orig: r._orig, _deleted: !!r._deleted };
       for (const c of COLS) out[c.key] = r[c.key];
       for (const k of ['guid', 'Sr', 'Transaction ID', 'CN No']) {
         if (r[k] !== undefined) out[k] = r[k];
@@ -519,8 +545,10 @@ _BODY = r"""
       if (r._rowclass) r._rowclass.split(/\s+/).forEach(c => c && tr.classList.add(c));
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
+      if (r._deleted) tr.classList.add('row-deleted');
       tr.dataset.idx = r._idx;
-      if (r._note) tr.title = r._note;
+      if (r._deleted) tr.title = 'Marked for deletion';
+      else if (r._note) tr.title = r._note;
 
       COLS.forEach(c => {
         const td = document.createElement('td');
@@ -533,7 +561,7 @@ _BODY = r"""
                   esc(badge.text) + '</span>';
         }
         html += esc(val);
-        if (c.key === TARGET && r._changed) {
+        if (c.key === TARGET && r._changed && !r._deleted) {
           html += '<span class="changed-marker">*</span>';
           td.title = 'Changed from: ' + r._orig;
         } else {
@@ -547,11 +575,13 @@ _BODY = r"""
       tbody.appendChild(tr);
     });
 
-    const changed = rows.filter(r => r._changed).length;
+    const changed = rows.filter(r => r._changed && !r._deleted).length;
+    const deleted = rows.filter(r => r._deleted).length;
     $('stats').textContent =
       filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '');
+      (changed ? ' | ' + changed + ' changed' : '') +
+      (deleted ? ' | ' + deleted + ' deleted' : '');
 
     if (activeFilterCol) {
       const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
@@ -608,12 +638,19 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         if spec.apply_matching_on else ""
     )
 
+    delete_btn_html = (
+        f'<button id="{spec.app_id}-remove-sel" '
+        f'title="Mark selected rows for deletion">Remove selected</button>'
+        if spec.allow_delete else ""
+    )
+
     default_sort = spec.default_sort or (spec.columns[0].key if spec.columns else "")
 
     html = _CSS + _BODY
     for token, value in (
         ("%%STATUS_FILTER_HTML%%", status_html),
         ("%%APPLY_MATCH_HTML%%", apply_match_html),
+        ("%%DELETE_BTN_HTML%%", delete_btn_html),
         ("%%EXTRA_PANEL%%", spec.extra_panel_html),
         ("%%PICKER_LABEL%%", _attr(spec.picker_label)),
         ("%%PICKER_PLACEHOLDER%%", _attr(spec.picker_placeholder)),

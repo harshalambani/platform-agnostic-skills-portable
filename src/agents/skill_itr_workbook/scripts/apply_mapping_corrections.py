@@ -153,6 +153,7 @@ def apply_corrections_map(
     output_yaml: str,
     paths: dict | None = None,
     known_paths: dict | None = None,
+    deletions: set | None = None,
 ) -> tuple[int, list]:
     """Load `mapping_file` (an empty/missing file is treated as zero
     entries -- lets a true cold-start entity, which has no mapping file yet,
@@ -179,8 +180,17 @@ def apply_corrections_map(
     next correction run). Omitting it (the default) leaves stored paths
     exactly as loaded, same as before this option existed.
 
+    `deletions`, if supplied (a set of guids), removes those entries from
+    the written result entirely -- applied AFTER `corrections`, so a guid
+    named in both wins as a deletion, never a correction (the itr_mapping_
+    review.py UI never sends both for the same row, but this keeps the
+    contract unambiguous either way). A guid in `deletions` that has no
+    existing entry is simply a no-op (nothing to remove).
+
     Returns (count applied, invalid corrections as [(path, guid, bad_tag)]),
-    mirroring apply_corrections()'s return shape.
+    mirroring apply_corrections()'s return shape. Deletion count isn't part
+    of this return value -- callers that need it already know `deletions`
+    and can diff it against the entries that existed before the call.
     """
     mp = Path(mapping_file)
     if mp.is_file():
@@ -211,6 +221,10 @@ def apply_corrections_map(
             suggested_by_llm=None,
         )
         applied += 1
+
+    if deletions:
+        for guid in deletions:
+            entries.pop(guid, None)
 
     if known_paths:
         entries, _ = refresh_drifted_paths(entries, known_paths)
