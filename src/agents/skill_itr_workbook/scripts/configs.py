@@ -68,6 +68,10 @@ class EntityProfile:
                                        # walks as a subtree -- never a hardcoded literal in
                                        # presentation.py, so a book rename can't silently
                                        # render a zero sheet (2026-07-19 PL for Business prompt)
+    workbook_match: str | None = None     # ITR Mapping Review Layer A attribution token --
+                                       # the name portion of the workbook filename WITHOUT
+                                       # the year (e.g. "KiranAmbani") -- consumed by
+                                       # _workbook_match_map() in ui/tabs/itr_mapping_review.py
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
     audit_case: bool = False             # liable to audit -> 31 Oct s.139(1) due date
@@ -103,6 +107,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             father_name=fields_.get("father_name"),
             aadhaar=fields_.get("aadhaar"),
             business_subtree=fields_.get("business_subtree"),
+            workbook_match=fields_.get("workbook_match"),
             default_regime=fields_.get("default_regime", "new"),
             regime_by_ay=fields_.get("regime_by_ay") or {},
             audit_case=bool(fields_.get("audit_case", False)),
@@ -165,6 +170,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["aadhaar"] = e.aadhaar
     if e.business_subtree:
         d["business_subtree"] = e.business_subtree
+    if e.workbook_match:
+        d["workbook_match"] = e.workbook_match
     if e.regime_by_ay:
         d["regime_by_ay"] = dict(e.regime_by_ay)
     if e.audit_case:
