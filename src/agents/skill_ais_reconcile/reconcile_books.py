@@ -125,8 +125,23 @@ def _resolve_tag(guid: str, accounts: dict, mapping_entries: dict) -> str | None
 
 def _books_totals_by_tag(book, mapping, year_key: str) -> tuple[dict[str, Decimal], int]:
     """Sum account_fy_sum into resolved-tag buckets, plus the count of
-    untagged INCOME accounts with a nonzero FY sum."""
-    from agents.skill_itr_workbook.scripts.parse_gnucash import account_fy_sum
+    untagged INCOME accounts with a nonzero FY sum.
+
+    SIGN NOTE for TDS-credit tags: account_fy_sum applies parse_gnucash's ITR
+    presentation-sign normalization, which FLIPS FLIP_TYPES accounts
+    (INCOME/EXPENSE/LIABILITY/EQUITY/CREDIT/PAYABLE). Income accounts flip to
+    a positive presentation, which is exactly what the income tie-out wants.
+    But TDS credit is a tax-WITHHELD amount -- a positive credit against tax
+    payable -- and in real books it is commonly posted to an EXPENSE account
+    ("TDS on Interest", "TDS on Dividend"), whose debit the flip turns
+    NEGATIVE. For TDS_CREDIT_TAGS we therefore un-flip FLIP_TYPES accounts so
+    the credit lands debit-positive regardless of whether the book models TDS
+    as an EXPENSE or as an ASSET receivable (ASSET is not a FLIP_TYPE, so it
+    is already debit-positive and left as-is). This keeps the TDS bucket on
+    the same positive footing as the AIS and 26AS sides it's compared to. The
+    income tags in by_tag stay presentation-normalized -- the two never share
+    a bucket (see _books_by_category vs _books_tds_credit)."""
+    from agents.skill_itr_workbook.scripts.parse_gnucash import account_fy_sum, FLIP_TYPES
 
     by_tag: dict[str, Decimal] = {}
     untagged_income_count = 0
@@ -135,6 +150,8 @@ def _books_totals_by_tag(book, mapping, year_key: str) -> tuple[dict[str, Decima
         tag = _resolve_tag(guid, book.accounts, mapping.entries)
         fy_sum = _as_decimal(account_fy_sum(book, guid, year_key)) or Decimal("0")
         if tag is not None:
+            if tag in TDS_CREDIT_TAGS and acct.type in FLIP_TYPES:
+                fy_sum = -fy_sum
             by_tag[tag] = by_tag.get(tag, Decimal("0")) + fy_sum
         elif acct.type == "INCOME" and fy_sum != Decimal("0"):
             untagged_income_count += 1
