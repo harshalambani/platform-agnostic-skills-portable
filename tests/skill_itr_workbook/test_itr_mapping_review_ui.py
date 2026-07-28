@@ -57,7 +57,7 @@ def _entities_yaml(path: Path) -> None:
     path.write_text(yaml.safe_dump({
         "SYN-IND": {
             "name": "Synthetic Individual", "pan": "AAAAA0000A", "status": "Individual",
-            "default_regime": "new",
+            "default_regime": "new", "workbook_match": "SYN-IND",
         },
     }), encoding="utf-8")
 

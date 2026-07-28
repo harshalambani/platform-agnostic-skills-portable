@@ -36,17 +36,26 @@ Data sources for the review table (per entity):
 
     Layer A (filename attribution) -- _latest_proposed_mappings_path()
     scans outputs newest-first and returns the first snippet whose filename
-    stem is attributable to `entity_key` via _snippet_entity_key(): a key
-    matches iff it appears in the stem with a non-letter boundary on both
-    sides (same discipline as configs.find_filed_returns()'s prefix-
-    collision handling), longest/most-specific match wins, and a genuine
-    tie between two equally-specific keys attributes to NEITHER (loads no
-    snippet rather than guessing). This also means a short individual key
-    that happens to be a literal prefix of a longer relative's stem (e.g.
-    an individual key prefixing an HUF's) is excluded by the boundary check
-    itself -- it was never eligible for the tie-break. No snippet
-    attributable to the entity -> no snippet rows loaded (mapping file
-    only), never an old/foreign one shown as a fallback.
+    stem is attributable to `entity_key` via _snippet_entity_key(), driven
+    by an explicit, optional per-entity `workbook_match:` field in
+    entities.yaml (real-world validation showed workbook output stems are
+    user-controlled CamelCase `<First><Last>[HUF]<year>`, e.g.
+    "KiranAmbani25626" / "VaikunthAmbaniHUF2526" -- neither the entity key
+    itself nor a boundary-delimited-substring match against it is reliable
+    against that shape, so attribution is config-driven instead).
+    `_workbook_match_map()` reads {entity_key: workbook_match} for every
+    entity with a non-empty `workbook_match:` string; `_snippet_entity_key()`
+    then returns the entity key whose token is a case-insensitive SUBSTRING
+    of the stem (the token is deliberately year-agnostic -- just the name
+    portion, e.g. "AliceSmith" -- so it matches every year's snippet for
+    that entity), with the LONGEST matching token winning the individual-
+    vs-HUF collision (e.g. token "AliceSmithHUF" beats "AliceSmith" for
+    stem "AliceSmith2526-...-HUF..." style overlaps). A genuine tie between
+    two equally-long matching tokens attributes to NEITHER (returns None
+    rather than guessing). An entity with no `workbook_match:` configured
+    can never match anything -- it simply gets no snippet, never a foreign
+    one. No snippet attributable to the entity -> no snippet rows loaded
+    (mapping file only), never an old/foreign one shown as a fallback.
 
     Layer B (book GUID validation, optional) -- when the entity has a
     `book:` path configured in entities.yaml and it's readable,
@@ -85,7 +94,6 @@ from __future__ import annotations
 
 import datetime
 import html as _html
-import re
 import shutil
 import sys
 from pathlib import Path
@@ -155,88 +163,85 @@ def _outputs_dir() -> Path:
     return _config_mod.data_root_dir() / "outputs"
 
 
-def _all_entity_keys() -> list[str]:
-    """Every entity key currently defined in Data/itr/entities.yaml, for
-    _snippet_entity_key()'s longest-match disambiguation. A lightweight,
-    key-only read (mirrors _generic._options_from_itr_entities()'s
-    tolerance): a missing/malformed file just yields no candidate keys."""
+def _workbook_match_map() -> dict[str, str]:
+    """{entity_key: workbook_match} for every entity in Data/itr/entities.yaml
+    that has a non-empty string `workbook_match:` field (Layer A's config-
+    driven attribution token -- see the module docstring). A lightweight,
+    tolerant read straight off the raw YAML dict (mirrors _entity_book_path's
+    style): a missing/malformed file, or an entity with no/blank
+    `workbook_match`, just yields no entry for that entity -- never an
+    error."""
     path = _config_mod.data_root_dir() / "itr" / "entities.yaml"
     if not path.is_file():
-        return []
+        return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception:
-        return []
+        return {}
     if not isinstance(raw, dict):
-        return []
-    return [k for k in raw.keys() if isinstance(k, str)]
+        return {}
+    out: dict[str, str] = {}
+    for key, fields in raw.items():
+        if not isinstance(key, str) or not isinstance(fields, dict):
+            continue
+        token = fields.get("workbook_match")
+        if token and str(token).strip():
+            out[key] = str(token).strip()
+    return out
 
 
-def _snippet_entity_key(stem: str, entity_keys: list[str]) -> str | None:
+def _snippet_entity_key(stem: str, match_map: dict[str, str]) -> str | None:
     """Attribute a proposed-mappings filename stem to exactly one entity
-    key from `entity_keys`, or None if no key is attributable / the match
-    is ambiguous.
+    key, via `match_map` ({entity_key: workbook_match} from
+    _workbook_match_map()), or None if no token is attributable / the
+    match is ambiguous.
 
-    A key matches iff it occurs in `stem` (case-insensitive) with a
-    non-letter character (or the string edge) on BOTH sides -- the same
-    boundary discipline configs.find_filed_returns() already uses for the
-    identical collision on Data/ITRFiled/ filenames (an individual entity
-    key can be a literal prefix of a relative's longer key, e.g. an
-    individual key prefixing that person's HUF's key). Because the
-    boundary check requires a non-letter after the match, a key that only
-    matches as a *prefix* of a longer word in the stem is excluded
-    outright -- it's never even a candidate, so it can't win a tie-break
-    it was never eligible for.
-
-    When more than one key matches, the LONGEST (most specific) one wins.
-    If several keys tied for that longest length all match, the
-    attribution is genuinely ambiguous and None is returned rather than
-    guessing.
+    A token matches iff it occurs in `stem` as a case-insensitive
+    SUBSTRING -- no boundary discipline, because real workbook stems are
+    user-controlled CamelCase with no separators (e.g. "KiranAmbani25626",
+    "VaikunthAmbaniHUF2526") where a boundary check would never fire.
+    When more than one token matches, the LONGEST one wins (e.g. an HUF's
+    longer token beats the individual's shorter token when both are
+    substrings of the HUF's own stem). If several tokens tied for that
+    longest length all match, the attribution is genuinely ambiguous and
+    None is returned rather than guessing.
     """
     candidates: list[str] = []
-    for key in entity_keys:
-        if not key:
+    for key, token in match_map.items():
+        if not key or not token:
             continue
-        pattern = re.escape(key)
-        for m in re.finditer(pattern, stem, re.IGNORECASE):
-            start, end = m.start(), m.end()
-            before_ok = start == 0 or not stem[start - 1].isalpha()
-            after_ok = end == len(stem) or not stem[end].isalpha()
-            if before_ok and after_ok:
-                candidates.append(key)
-                break
+        if token.lower() in stem.lower():
+            candidates.append(key)
     if not candidates:
         return None
-    max_len = max(len(k) for k in candidates)
-    longest = [k for k in candidates if len(k) == max_len]
+    max_len = max(len(match_map[k]) for k in candidates)
+    longest = [k for k in candidates if len(match_map[k]) == max_len]
     return longest[0] if len(longest) == 1 else None
 
 
 def _latest_proposed_mappings_path(
-    entity_key: str, all_entity_keys: list[str] | None = None,
+    entity_key: str, match_map: dict[str, str] | None = None,
 ) -> Path | None:
     """Newest *-proposed-mappings.yaml under the outputs folder that is
     ATTRIBUTABLE TO `entity_key` by filename (Layer A -- see the module
     docstring), or None if there isn't one yet (no ITR Workbook run for
-    this entity at all, or the only snippets present belong to other
-    entities). Snippet filenames look like
-    "<stamp>-<WorkbookStem>-proposed-mappings.yaml"; the "<WorkbookStem>"
-    portion is matched against entity keys via _snippet_entity_key().
+    this entity at all, the entity has no `workbook_match:` configured, or
+    the only snippets present belong to other entities). Snippet filenames
+    look like "<stamp>-<WorkbookStem>-proposed-mappings.yaml"; the
+    "<WorkbookStem>" portion is matched against `match_map`'s tokens via
+    _snippet_entity_key().
 
-    `all_entity_keys` lets callers pass a pre-loaded key list (tests use
-    this to avoid re-reading entities.yaml); defaults to
-    _all_entity_keys(). `entity_key` itself is always treated as a
-    candidate even if it isn't (yet) listed in entities.yaml, so a caller
-    can look up a snippet for an entity key that doesn't have an
-    entities.yaml row yet.
+    `match_map` lets callers pass a pre-loaded {entity_key: workbook_match}
+    dict (tests use this to avoid re-reading entities.yaml); defaults to
+    _workbook_match_map(). If `entity_key` has no token in `match_map`, it
+    can never match any stem, so this always returns None for it -- safe
+    by construction, never a foreign snippet.
     """
     out_dir = _outputs_dir()
     if not out_dir.is_dir() or not entity_key:
         return None
-    if all_entity_keys is None:
-        all_entity_keys = _all_entity_keys()
-    if entity_key not in all_entity_keys:
-        all_entity_keys = [*all_entity_keys, entity_key]
+    if match_map is None:
+        match_map = _workbook_match_map()
 
     suffix = "-proposed-mappings.yaml"
     candidates = sorted(
@@ -246,7 +251,7 @@ def _latest_proposed_mappings_path(
     )
     for p in candidates:
         stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.stem
-        matched = _snippet_entity_key(stem, all_entity_keys)
+        matched = _snippet_entity_key(stem, match_map)
         if matched is not None and matched == entity_key:
             return p
     return None

@@ -45,7 +45,8 @@ def _entities_yaml(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump({
         "SYN-IND": {"name": "Synthetic Individual", "pan": "AAAAA0000A",
-                    "status": "Individual", "default_regime": "new"},
+                    "status": "Individual", "default_regime": "new",
+                    "workbook_match": "SYN-IND"},
     }), encoding="utf-8")
 
 
@@ -390,38 +391,54 @@ def test_save_changes_fields_survive_shape_translation_guid_path_tag(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Layer A -- filename attribution (_snippet_entity_key /
-# _latest_proposed_mappings_path). Fixes the global-newest-snippet leak:
-# a snippet from one entity's ITR Workbook run must never be attributed to
-# a different entity, even when its filename stem is a superstring/substring
-# of another entity's key (e.g. an individual key that's a literal prefix
-# of that person's HUF's key).
+# Layer A -- config-driven filename attribution (_workbook_match_map /
+# _snippet_entity_key / _latest_proposed_mappings_path). Real-data
+# validation showed workbook output stems are user-controlled CamelCase
+# "<First><Last>[HUF]<year>" (e.g. "KiranAmbani25626",
+# "VaikunthAmbaniHUF2526") which the old entity-key-as-boundary-substring
+# scheme could never match (the entity key itself, e.g. "VaikunthHUF", isn't
+# even a substring of the stem). Attribution is now driven by an explicit,
+# optional `workbook_match:` token per entity in entities.yaml, matched as a
+# plain case-insensitive substring with longest-match-wins.
 # ---------------------------------------------------------------------------
 
-def test_snippet_entity_key_individual_and_huf_never_cross_attribute():
-    keys = ["SYN-IND", "SYN-INDHUF"]
-    # The HUF's own stem must resolve to the HUF, never the individual --
-    # even though "SYN-IND" is a literal prefix of "SYN-INDHUF".
-    assert ui_mod._snippet_entity_key("2026-07-25-144004-SYN-INDHUF2526", keys) == "SYN-INDHUF"
-    # The individual's own stem (key immediately followed by a digit, a
-    # boundary) must resolve to the individual, never the HUF.
-    assert ui_mod._snippet_entity_key("2026-07-25-144004-SYN-IND2526", keys) == "SYN-IND"
+def test_snippet_entity_key_individual_and_huf_longest_match_wins():
+    match_map = {"Alice": "AliceSmith", "AliceHUF": "AliceSmithHUF"}
+    # The HUF's own stem contains BOTH tokens ("AliceSmith" is a substring
+    # of "AliceSmithHUF2526") -- the longer token must win.
+    assert ui_mod._snippet_entity_key("AliceSmithHUF2526", match_map) == "AliceHUF"
+    # The individual's own stem only contains the shorter token.
+    assert ui_mod._snippet_entity_key("AliceSmith2526", match_map) == "Alice"
+
+
+def test_snippet_entity_key_year_agnostic_same_token_both_years():
+    match_map = {"Alice": "AliceSmith"}
+    assert ui_mod._snippet_entity_key("AliceSmith2526", match_map) == "Alice"
+    assert ui_mod._snippet_entity_key("AliceSmith2627", match_map) == "Alice"
 
 
 def test_snippet_entity_key_foreign_stem_matches_nothing():
-    keys = ["SYN-IND", "SYN-INDHUF"]
-    assert ui_mod._snippet_entity_key("2026-07-25-144004-SomeoneElse2526", keys) is None
+    match_map = {"Alice": "AliceSmith", "AliceHUF": "AliceSmithHUF"}
+    assert ui_mod._snippet_entity_key("2026-07-25-144004-SomeoneElse2526", match_map) is None
 
 
 def test_snippet_entity_key_ambiguous_tie_returns_none():
-    # Two distinct, equally-specific keys both present in the same stem --
-    # genuinely ambiguous, must not guess either way.
-    keys = ["Alpha", "Beta5"]
-    assert ui_mod._snippet_entity_key("2026-Alpha-Beta5-2526", keys) is None
+    # Two distinct entities configured with equally-long tokens, both
+    # present in the same stem -- genuinely ambiguous, must not guess.
+    match_map = {"Ent1": "Alpha", "Ent2": "Beta5"}
+    assert ui_mod._snippet_entity_key("2026-Alpha-Beta5-2526", match_map) is None
 
 
-def test_snippet_entity_key_no_keys_matches_nothing():
-    assert ui_mod._snippet_entity_key("2026-07-25-144004-SYN-IND2526", []) is None
+def test_snippet_entity_key_no_match_map_matches_nothing():
+    assert ui_mod._snippet_entity_key("AliceSmith2526", {}) is None
+
+
+def test_snippet_entity_key_entity_with_no_workbook_match_never_matches():
+    # Alice has no entry in match_map at all (no workbook_match configured)
+    # -- even though "Bob" is a substring elsewhere, Alice's stem must not
+    # resolve to anything.
+    match_map = {"Bob": "BobJones"}
+    assert ui_mod._snippet_entity_key("AliceSmith2526", match_map) is None
 
 
 def _write_outputs_snippet(data_root: Path, name: str, guids: list[str], mtime: float) -> Path:
@@ -442,24 +459,76 @@ def test_latest_proposed_mappings_path_never_returns_a_newer_foreign_snippet(tmp
     but must never be selected for this entity -- entity-scoping, not
     global-newest, decides the winner."""
     data_root = _setup_data_root(tmp_path)
-    _write_outputs_snippet(data_root, "2026-07-25-100000-SYN-IND2526-proposed-mappings.yaml", ["gA"], mtime=1000)
-    _write_outputs_snippet(data_root, "2026-07-25-200000-SYN-OTHER2526-proposed-mappings.yaml", ["gB"], mtime=2000)
+    _write_outputs_snippet(data_root, "2026-07-25-100000-AliceSmith2526-proposed-mappings.yaml", ["gA"], mtime=1000)
+    _write_outputs_snippet(data_root, "2026-07-25-200000-BobJones2526-proposed-mappings.yaml", ["gB"], mtime=2000)
 
+    match_map = {"Alice": "AliceSmith", "Bob": "BobJones"}
     with patch("ui._config.data_root_dir", return_value=data_root):
-        found = ui_mod._latest_proposed_mappings_path("SYN-IND", ["SYN-IND", "SYN-OTHER"])
+        found = ui_mod._latest_proposed_mappings_path("Alice", match_map)
 
     assert found is not None
-    assert "SYN-IND2526" in found.name
+    assert "AliceSmith2526" in found.name
 
 
 def test_latest_proposed_mappings_path_none_when_only_foreign_snippets_exist(tmp_path):
     data_root = _setup_data_root(tmp_path)
-    _write_outputs_snippet(data_root, "2026-07-25-200000-SYN-OTHER2526-proposed-mappings.yaml", ["gB"], mtime=2000)
+    _write_outputs_snippet(data_root, "2026-07-25-200000-BobJones2526-proposed-mappings.yaml", ["gB"], mtime=2000)
 
+    match_map = {"Alice": "AliceSmith", "Bob": "BobJones"}
     with patch("ui._config.data_root_dir", return_value=data_root):
-        found = ui_mod._latest_proposed_mappings_path("SYN-IND", ["SYN-IND", "SYN-OTHER"])
+        found = ui_mod._latest_proposed_mappings_path("Alice", match_map)
 
     assert found is None
+
+
+def test_latest_proposed_mappings_path_none_when_entity_has_no_workbook_match(tmp_path):
+    """An entity with no `workbook_match:` configured can never match any
+    stem -- it gets no snippet, never a foreign one, by construction."""
+    data_root = _setup_data_root(tmp_path)
+    _write_outputs_snippet(data_root, "2026-07-25-100000-AliceSmith2526-proposed-mappings.yaml", ["gA"], mtime=1000)
+
+    match_map: dict[str, str] = {}  # "Alice" has no entry
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        found = ui_mod._latest_proposed_mappings_path("Alice", match_map)
+
+    assert found is None
+
+
+def test_latest_proposed_mappings_path_newest_first_among_own_snippets(tmp_path):
+    """When two snippets are both attributable to the same entity, the
+    newer (by mtime) one is returned."""
+    data_root = _setup_data_root(tmp_path)
+    _write_outputs_snippet(data_root, "2026-07-25-100000-AliceSmith2526-proposed-mappings.yaml", ["gOld"], mtime=1000)
+    _write_outputs_snippet(data_root, "2026-07-26-100000-AliceSmith2627-proposed-mappings.yaml", ["gNew"], mtime=2000)
+
+    match_map = {"Alice": "AliceSmith"}
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        found = ui_mod._latest_proposed_mappings_path("Alice", match_map)
+
+    assert found is not None
+    assert "AliceSmith2627" in found.name
+
+
+def test_workbook_match_map_reads_entities_yaml(tmp_path):
+    data_root = _setup_data_root(tmp_path)
+    import yaml
+    entities_path = data_root / "itr" / "entities.yaml"
+    entities_path.write_text(yaml.safe_dump({
+        "Alice": {"name": "Alice Smith", "pan": "AAAAA0000A",
+                  "status": "Individual", "default_regime": "new",
+                  "workbook_match": "AliceSmith"},
+        "AliceHUF": {"name": "Alice Smith HUF", "pan": "BBBBB0000B",
+                     "status": "HUF", "default_regime": "new",
+                     "workbook_match": "AliceSmithHUF"},
+        "Bob": {"name": "Bob Jones", "pan": "CCCCC0000C",
+                "status": "Individual", "default_regime": "new"},
+    }), encoding="utf-8")
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        match_map = ui_mod._workbook_match_map()
+
+    assert match_map == {"Alice": "AliceSmith", "AliceHUF": "AliceSmithHUF"}
+    assert "Bob" not in match_map  # no workbook_match configured
 
 
 def test_load_review_rows_foreign_snippet_guid_never_leaks_into_this_entity(tmp_path):
@@ -470,18 +539,20 @@ def test_load_review_rows_foreign_snippet_guid_never_leaks_into_this_entity(tmp_
     import yaml
     entities_path = data_root / "itr" / "entities.yaml"
     entities_path.write_text(yaml.safe_dump({
-        "SYN-IND": {"name": "Synthetic Individual", "pan": "AAAAA0000A",
-                    "status": "Individual", "default_regime": "new"},
-        "SYN-INDHUF": {"name": "Synthetic Individual HUF", "pan": "BBBBB0000B",
-                       "status": "HUF", "default_regime": "new"},
+        "Alice": {"name": "Alice Smith", "pan": "AAAAA0000A",
+                  "status": "Individual", "default_regime": "new",
+                  "workbook_match": "AliceSmith"},
+        "AliceHUF": {"name": "Alice Smith HUF", "pan": "BBBBB0000B",
+                     "status": "HUF", "default_regime": "new",
+                     "workbook_match": "AliceSmithHUF"},
     }), encoding="utf-8")
 
-    _write_outputs_snippet(data_root, "2026-07-25-100000-SYN-IND2526-proposed-mappings.yaml", ["g-ind"], mtime=1000)
-    _write_outputs_snippet(data_root, "2026-07-25-200000-SYN-INDHUF2526-proposed-mappings.yaml", ["g-huf"], mtime=2000)
+    _write_outputs_snippet(data_root, "2026-07-25-100000-AliceSmith2526-proposed-mappings.yaml", ["g-ind"], mtime=1000)
+    _write_outputs_snippet(data_root, "2026-07-25-200000-AliceSmithHUF2526-proposed-mappings.yaml", ["g-huf"], mtime=2000)
 
     with patch("ui._config.data_root_dir", return_value=data_root):
-        ind_rows = ui_mod._load_review_rows("SYN-IND")
-        huf_rows = ui_mod._load_review_rows("SYN-INDHUF")
+        ind_rows = ui_mod._load_review_rows("Alice")
+        huf_rows = ui_mod._load_review_rows("AliceHUF")
 
     assert [r["guid"] for r in ind_rows] == ["g-ind"]
     assert [r["guid"] for r in huf_rows] == ["g-huf"]
@@ -601,7 +672,7 @@ def test_load_review_rows_layer_b_drops_snippet_row_not_in_entity_book(tmp_path)
     entities_path.write_text(yaml.safe_dump({
         "SYN-IND": {"name": "Synthetic Individual", "pan": "AAAAA0000A",
                     "status": "Individual", "default_regime": "new",
-                    "book": str(book_path)},
+                    "workbook_match": "SYN-IND", "book": str(book_path)},
     }), encoding="utf-8")
     _write_outputs_snippet(
         data_root, "2026-07-25-100000-SYN-IND2526-proposed-mappings.yaml",
