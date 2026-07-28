@@ -52,6 +52,13 @@ SYN-IND-BIZ:
   dob: "1978-01-01"
   address: "789 Example Lane, Example City"
   business_subtree: "Income/xBusiness Income"
+  # workbook_match: the ITR Mapping Review Layer A attribution token -- the
+  # name portion of the workbook filename WITHOUT the year (e.g. a workbook
+  # named "SynIndBiz2026.gnucash" would use "SynIndBiz"). Matching is
+  # longest-match-wins, so a more specific HUF token (e.g. "SynIndBizHUF")
+  # beats a shorter individual-name token ("SynIndBiz") when both could
+  # match the same workbook filename.
+  workbook_match: "SynIndBiz"
   default_regime: "new"
   # audit_case: entity liable to audit under s.44AB -> s.139(1) due date is
   # 31 October (not 31 July), which changes 234A/234B/234C interest. Defaults

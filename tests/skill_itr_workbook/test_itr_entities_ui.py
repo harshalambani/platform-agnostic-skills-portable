@@ -77,7 +77,7 @@ def test_add_new_entity_appears_and_backs_up(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-NEW", "Synthetic New", "CCCCC2222C", "Individual", "Resident",
-            "1990-01-01", "", "", "", "", "", "new", "", False, "", "", "",
+            "1990-01-01", "", "", "", "", "", "", "new", "", False, "", "", "",
         )
         assert "Saved" in msg
         assert "Added" in msg
@@ -103,7 +103,7 @@ def test_add_blocked_by_bad_pan_no_disk_touch(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-BAD", "Bad PAN Entity", "NOTAPAN", "Individual", "Resident",
-            "", "", "", "", "", "", "new", "", False, "", "", "",
+            "", "", "", "", "", "", "", "new", "", False, "", "", "",
         )
     assert "Not saved" in msg
     assert "PAN" in msg
@@ -117,7 +117,7 @@ def test_add_blocked_by_bad_date(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-BADDATE", "Bad Date", "CCCCC2222C", "Individual", "Resident",
-            "not-a-date", "", "", "", "", "", "new", "", False, "", "", "",
+            "not-a-date", "", "", "", "", "", "", "new", "", False, "", "", "",
         )
     assert "Not saved" in msg
     assert "dob" in msg
@@ -128,7 +128,7 @@ def test_add_blocked_by_bad_enum(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-BADENUM", "Bad Enum", "CCCCC2222C", "Individual", "Resident",
-            "", "", "", "", "", "", "middle-regime", "", False, "", "", "",
+            "", "", "", "", "", "", "", "middle-regime", "", False, "", "", "",
         )
     assert "Not saved" in msg
     assert "default_regime" in msg
@@ -139,7 +139,7 @@ def test_add_duplicate_key_rejected(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-IND", "Duplicate", "CCCCC2222C", "Individual", "Resident",
-            "", "", "", "", "", "", "new", "", False, "", "", "",
+            "", "", "", "", "", "", "", "new", "", False, "", "", "",
         )
     assert "already exists" in msg
 
@@ -149,7 +149,7 @@ def test_blank_key_never_touches_disk(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "   ", "Name", "AAAAA0000A", "Individual", "Resident",
-            "", "", "", "", "", "", "new", "", False, "", "", "",
+            "", "", "", "", "", "", "", "new", "", False, "", "", "",
         )
     assert "key is required" in msg
     assert not data_root.exists()
@@ -164,7 +164,7 @@ def test_add_with_audit_case_and_per_ay_override(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-AUDIT", "Audit Entity", "DDDDD3333D", "Individual", "Resident",
-            "", "", "", "", "", "", "new", "",
+            "", "", "", "", "", "", "", "new", "",
             True, "2025-26 = false\n2026-27 = true",
             "", "",
         )
@@ -181,12 +181,28 @@ def test_audit_case_by_ay_bad_value_rejected(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-BADAUDIT", "Bad Audit", "EEEEE4444E", "Individual", "Resident",
-            "", "", "", "", "", "", "new", "",
+            "", "", "", "", "", "", "", "new", "",
             False, "2025-26 = maybe",
             "", "",
         )
     assert "Not saved" in msg
     assert "true/false" in msg
+
+
+def test_add_with_workbook_match_persists_and_repopulates(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-WBM", "Workbook Match Entity", "GGGGG6666G", "Individual", "Resident",
+            "", "", "", "", "", "", "KiranAmbani", "new", "", False, "", "", "",
+        )
+        assert "Saved" in msg
+
+        entities = ui_mod._load_entities()
+        form = ui_mod._entity_to_form("SYN-WBM", entities)
+
+    assert entities["SYN-WBM"].workbook_match == "KiranAmbani"
+    assert form[11] == "KiranAmbani"  # workbook_match re-populates in the form
 
 
 def test_form_loads_audit_case_fields_from_existing_entity(tmp_path):
@@ -201,9 +217,10 @@ def test_form_loads_audit_case_fields_from_existing_entity(tmp_path):
         entities = ui_mod._load_entities()
         form = ui_mod._entity_to_form("SYN-AUDIT2", entities)
 
-    # form tuple: (..., default_regime, regime_by_ay_text, audit_case, audit_case_by_ay_text, ...)
-    assert form[13] is True  # audit_case
-    assert "2025-26" in form[14] and "False" in form[14]  # audit_case_by_ay text
+    # form tuple: (..., business_subtree, workbook_match, default_regime, regime_by_ay_text,
+    #              audit_case, audit_case_by_ay_text, ...)
+    assert form[14] is True  # audit_case
+    assert "2025-26" in form[15] and "False" in form[15]  # audit_case_by_ay text
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +237,7 @@ def test_modify_persists_and_leaves_other_entity_byte_stable(tmp_path):
 
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-IND", "Renamed Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "1980-05-05", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "1980-05-05", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
         assert "Saved" in msg
@@ -254,7 +271,7 @@ def test_rename_cascades_mapping_file(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
         entities = ui_mod._load_entities()
@@ -272,7 +289,7 @@ def test_rename_cold_start_entity_no_mapping_to_cascade(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-HUF", "SYN-HUF-2", "Synthetic HUF", "BBBBB1111B",
-            "HUF", "Resident", "", "", "", "", "", "", "new", "",
+            "HUF", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
     assert "Saved" in msg
@@ -294,7 +311,7 @@ def test_rename_blocked_when_target_mapping_already_exists(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-HUF-TARGET", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
 
@@ -311,7 +328,7 @@ def test_rename_to_existing_key_rejected(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-HUF", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
     assert "already exists" in msg
@@ -447,7 +464,7 @@ def test_rename_cascades_filed_returns(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
 
@@ -464,7 +481,7 @@ def test_rename_no_filed_returns_reports_noop(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-HUF", "SYN-HUF-2", "Synthetic HUF", "BBBBB1111B",
-            "HUF", "Resident", "", "", "", "", "", "", "new", "",
+            "HUF", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
     assert "Saved" in msg
@@ -486,7 +503,7 @@ def test_rename_blocked_on_filed_return_target_collision(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-NEW", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
 
@@ -518,7 +535,7 @@ def test_rename_does_not_cascade_prefix_colliding_entity_filed_returns(tmp_path)
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "SynBase", "SynBaseRenamed", "Syn Base", "HHHHH7777H",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
 
@@ -605,7 +622,7 @@ def test_save_rename_rollback_on_mid_cascade_failure(tmp_path):
          patch.object(ui_mod.shutil, "move", side_effect=_flaky_move):
         msg = ui_mod._save_entity(
             "SYN-IND", "SYN-IND-RENAMED", "Synthetic Individual", "AAAAA0000A",
-            "Individual", "Resident", "", "", "", "", "", "", "new", "",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
             False, "", "", "",
         )
 

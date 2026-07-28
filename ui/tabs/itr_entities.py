@@ -207,12 +207,12 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
     if e is None:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
-            "", "new", "", False, "", "", "",
+            "", "", "new", "", False, "", "", "",
         )
     return (
         e.key, e.name, e.pan, e.status, e.residency,
         e.dob or "", e.doi or "", e.address or "", e.father_name or "", e.aadhaar or "",
-        e.business_subtree or "", e.default_regime, _format_kv_lines(e.regime_by_ay),
+        e.business_subtree or "", e.workbook_match or "", e.default_regime, _format_kv_lines(e.regime_by_ay),
         e.audit_case, _format_kv_lines(e.audit_case_by_ay),
         _format_list_lines((e.extra_items or {}).get("bf_losses") or []),
         _format_list_lines((e.extra_items or {}).get("clubbing_notes") or []),
@@ -263,7 +263,7 @@ def _move_with_rollback(pairs: list[tuple[Path, Path]]) -> None:
 def _save_entity(
     orig_key: str, new_key: str, name: str, pan: str, status: str, residency: str,
     dob: str, doi: str, address: str, father_name: str, aadhaar: str,
-    business_subtree: str, default_regime: str, regime_by_ay_text: str,
+    business_subtree: str, workbook_match: str, default_regime: str, regime_by_ay_text: str,
     audit_case: bool, audit_case_by_ay_text: str,
     bf_losses_text: str, clubbing_notes_text: str,
 ) -> str:
@@ -347,6 +347,7 @@ def _save_entity(
         father_name=(father_name or "").strip() or None,
         aadhaar=(aadhaar or "").strip() or None,
         business_subtree=(business_subtree or "").strip() or None,
+        workbook_match=(workbook_match or "").strip() or None,
         default_regime=default_regime,
         regime_by_ay=regime_by_ay,
         audit_case=bool(audit_case),
@@ -560,6 +561,10 @@ def render(container_tab=None) -> None:
             business_subtree_box = gr.Textbox(
                 label="Business subtree (GnuCash account path prefix, optional)", interactive=True,
             )
+            workbook_match_box = gr.Textbox(
+                label="Workbook match (optional) -- filename name w/o year, e.g. KiranAmbani",
+                interactive=True,
+            )
 
         with gr.Column(scale=1):
             default_regime_dd = gr.Dropdown(
@@ -599,7 +604,7 @@ def render(container_tab=None) -> None:
     _form_outputs = [
         key_box, name_box, pan_box, status_dd, residency_box,
         dob_box, doi_box, address_box, father_name_box, aadhaar_box,
-        business_subtree_box, default_regime_dd, regime_by_ay_box,
+        business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
         audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box,
     ]
 
@@ -617,12 +622,12 @@ def render(container_tab=None) -> None:
 
     def _on_save(
         orig_key, new_key, name, pan, status, residency, dob, doi, address,
-        father_name, aadhaar, business_subtree, default_regime, regime_by_ay_text,
+        father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
         audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
-            father_name, aadhaar, business_subtree, default_regime, regime_by_ay_text,
+            father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
             audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
         )
         new_choices = _entity_choices()
@@ -633,7 +638,7 @@ def render(container_tab=None) -> None:
         fn=_on_save,
         inputs=[orig_key_state, key_box, name_box, pan_box, status_dd, residency_box,
                 dob_box, doi_box, address_box, father_name_box, aadhaar_box,
-                business_subtree_box, default_regime_dd, regime_by_ay_box,
+                business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
                 audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )

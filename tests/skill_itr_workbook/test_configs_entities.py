@@ -44,7 +44,8 @@ def _make_entities() -> dict:
         "SYN-IND-BIZ": configs.EntityProfile(
             key="SYN-IND-BIZ", name="Synthetic Business Individual", pan="DDDDD3333D",
             status="Individual", residency="Resident", dob="1978-01-01",
-            business_subtree="Income/xBusiness Income", default_regime="new",
+            business_subtree="Income/xBusiness Income",
+            workbook_match="SynIndBiz", default_regime="new",
             audit_case=True, audit_case_by_ay={"2025-26": False},
         ),
     }
@@ -72,6 +73,7 @@ def test_dump_then_load_round_trips_all_fields(tmp_path):
         assert got.doi == orig.doi
         assert got.address == orig.address
         assert got.business_subtree == orig.business_subtree
+        assert got.workbook_match == orig.workbook_match
         assert got.default_regime == orig.default_regime
         assert got.regime_by_ay == orig.regime_by_ay
         assert got.audit_case == orig.audit_case
@@ -102,9 +104,20 @@ def test_dump_omits_default_and_empty_optional_fields():
     assert "doi" not in text
     assert "address" not in text
     assert "aadhaar" not in text
+    assert "business_subtree" not in text
+    assert "workbook_match" not in text  # not set -> no stray key in the dump
     assert "audit_case" not in text  # False is default -> omitted entirely
     assert "regime_by_ay" not in text
     assert "extra_items" not in text
+
+
+def test_dump_emits_workbook_match_when_set():
+    e = configs.EntityProfile(
+        key="SYN-WBM", name="Workbook Match", pan="FFFFF5555F", status="Individual",
+        workbook_match="SynWbm",
+    )
+    text = configs.dump_entities({"SYN-WBM": e})
+    assert "workbook_match: SynWbm" in text
 
 
 def test_dump_emits_audit_case_true_explicitly():
