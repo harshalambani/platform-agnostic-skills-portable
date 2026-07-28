@@ -1520,6 +1520,51 @@ def test_reconcile_books_tds_credit_tie_out_mismatch():
     assert report.flag_tds_mismatch
 
 
+def test_reconcile_books_tds_credit_expense_account_is_debit_positive():
+    """Regression: real family books post TDS to an EXPENSE account ("TDS on
+    Interest"), not an ASSET receivable. account_fy_sum flips EXPENSE to ITR
+    presentation sign (a debit of +74 becomes -74), which used to make
+    books_tds_credit NEGATIVE and fire a spurious mismatch against the
+    (positive) AIS/26AS sides. The TDS bucket must land debit-positive
+    regardless of whether TDS is modelled as EXPENSE or ASSET."""
+    acct = _acct("t1", "TDS on Interest", "EXPENSE")
+    book = Book(
+        accounts={"t1": acct},
+        transactions=[_txn_book("tx1", posted=date(2025, 7, 1), splits=[_split("t1", 74)])],
+    )
+    mapping = _mapping({"t1": "TAXPAID_TDS_INTEREST"})
+
+    report = RB.reconcile_ais_vs_books(
+        _reco_report([], total_tds_credit=Decimal("74")),
+        book, mapping, YEAR_KEY,
+    )
+    assert report.books_tds_credit == Decimal("74")
+    assert not report.flag_tds_mismatch
+
+
+def test_reconcile_books_tds_credit_mixed_expense_and_asset_accounts():
+    """A book that splits TDS across an EXPENSE account and an ASSET
+    receivable must sum both as positive credits (74 + 26 = 100), not net
+    them against each other via the sign flip."""
+    exp = _acct("t1", "TDS on Interest", "EXPENSE")
+    asset = _acct("t2", "TDS Receivable", "ASSET")
+    book = Book(
+        accounts={"t1": exp, "t2": asset},
+        transactions=[
+            _txn_book("tx1", posted=date(2025, 7, 1), splits=[_split("t1", 74)]),
+            _txn_book("tx2", posted=date(2025, 8, 1), splits=[_split("t2", 26)]),
+        ],
+    )
+    mapping = _mapping({"t1": "TAXPAID_TDS_INTEREST", "t2": "TAXPAID_TDS_DIVIDEND"})
+
+    report = RB.reconcile_ais_vs_books(
+        _reco_report([], total_tds_credit=Decimal("100")),
+        book, mapping, YEAR_KEY,
+    )
+    assert report.books_tds_credit == Decimal("100")
+    assert not report.flag_tds_mismatch
+
+
 def test_reconcile_books_income_not_in_ais_completeness_list():
     """Books show salary income; AIS reports none -- informational list."""
     acct = _acct("s1", "Salary Income", "INCOME")

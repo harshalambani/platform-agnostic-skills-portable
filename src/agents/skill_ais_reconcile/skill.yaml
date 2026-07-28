@@ -19,7 +19,7 @@ description: >
   sheet per reconciliation plus advisory (never auto-submitted) suggestions
   for the AIS portal's own feedback mechanism.
 category: "itr"
-version: "0.1.0"
+version: "0.1.1"
 
 mode: "direct"
 entry_point: "agent:run"

@@ -4,6 +4,24 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.21.1] — 2026-07-28
+
+### Fixed
+- **AIS Reconcile — books TDS-credit sign (v0.1.1).** Phase C (AIS vs
+  GnuCash books) summed the TDS-credit tags straight off `account_fy_sum`,
+  which applies the ITR presentation-sign normalization that FLIPS
+  EXPENSE (and the other credit-normal) account types. Real family books
+  post TDS to an EXPENSE account ("TDS on Interest", "TDS on Dividend")
+  rather than to an ASSET receivable, so the flip turned `books_tds_credit`
+  NEGATIVE and fired a spurious mismatch against the (positive) AIS/26AS
+  sides on every entity. The TDS bucket is now un-flipped to debit-positive
+  for FLIP_TYPES accounts, so it lands positive whether TDS is modelled as
+  an EXPENSE or an ASSET receivable (ASSET was already correct). Validated
+  against the FY2025-26 books: books TDS now ties to 26AS exactly for the
+  entities where the book agrees (e.g. 37074.15, 11879.60). The prior tests
+  only exercised ASSET-typed TDS accounts, which is why the flip escaped —
+  regression tests for the EXPENSE and mixed EXPENSE+ASSET cases were added.
+
 ## [2.21.0] — 2026-07-27
 
 ### Added
