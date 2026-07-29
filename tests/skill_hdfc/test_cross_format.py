@@ -8,9 +8,9 @@ Covers, all offline / synthetic-only:
   - Password-protected PDF: correct password succeeds; missing/wrong
     password raises a clear, actionable error (never echoing the password).
   - Garbled-text detection unit tests with constructed junk strings.
-  - @pytest.mark.local_samples smoke tests over the 4 real Khyati files
-    (skipped when Data/Khyati/2026 is absent -- never run in CI, never
-    prints the PDF password).
+  - @pytest.mark.local_samples smoke tests over a small set of real bank
+    samples (skipped when Data/local_bank_samples is absent -- never run in
+    CI, never prints the PDF password).
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 import hdfc_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_hdfc import agent  # noqa: E402
 
-REAL_SAMPLES_DIR = ROOT / "Data" / "Khyati" / "2026"
+REAL_SAMPLES_DIR = ROOT / "Data" / "local_bank_samples"
 REAL_PDF_PASSWORD = "9017470"
 
 
@@ -152,17 +152,20 @@ def test_text_layer_usable_rejects_empty_text():
 
 
 # ---------------------------------------------------------------------------
-# local_samples: the 4 real Khyati files (never run in CI; skip if absent)
+# local_samples: a small set of real bank samples (never run in CI; skip if absent)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.local_samples
 def test_real_password_pdf_matches_real_xls():
     if not REAL_SAMPLES_DIR.is_dir():
         pytest.skip(f"{REAL_SAMPLES_DIR} not present -- local-only smoke test")
+    xls_candidates = sorted(REAL_SAMPLES_DIR.glob("*.xls"))
+    if not xls_candidates:
+        pytest.skip(f"no *.xls sample found in {REAL_SAMPLES_DIR} -- local-only smoke test")
     import tempfile
 
     pdf_path = REAL_SAMPLES_DIR / "Bank stmnt FY26.pdf"
-    xls_path = REAL_SAMPLES_DIR / "Khyati HDFC-FY26.xls"
+    xls_path = xls_candidates[0]
     with tempfile.TemporaryDirectory() as tmp:
         pdf_out = Path(tmp) / "pdf.csv"
         xls_out = Path(tmp) / "xls.csv"
@@ -185,10 +188,14 @@ def test_real_password_pdf_matches_real_xls():
 def test_real_csv_matches_real_xls_row_count_and_closing_balance():
     if not REAL_SAMPLES_DIR.is_dir():
         pytest.skip(f"{REAL_SAMPLES_DIR} not present -- local-only smoke test")
+    csv_candidates = sorted(REAL_SAMPLES_DIR.glob("*clean*.csv")) or sorted(REAL_SAMPLES_DIR.glob("*.csv"))
+    xls_candidates = sorted(REAL_SAMPLES_DIR.glob("*.xls"))
+    if not csv_candidates or not xls_candidates:
+        pytest.skip(f"no *.csv/*.xls sample found in {REAL_SAMPLES_DIR} -- local-only smoke test")
     import tempfile
 
-    csv_path = REAL_SAMPLES_DIR / "Khyati HDFC-FY26clean.csv"
-    xls_path = REAL_SAMPLES_DIR / "Khyati HDFC-FY26.xls"
+    csv_path = csv_candidates[0]
+    xls_path = xls_candidates[0]
     with tempfile.TemporaryDirectory() as tmp:
         csv_out = Path(tmp) / "csv.csv"
         xls_out = Path(tmp) / "xls.csv"

@@ -562,7 +562,7 @@ def render(container_tab=None) -> None:
                 label="Business subtree (GnuCash account path prefix, optional)", interactive=True,
             )
             workbook_match_box = gr.Textbox(
-                label="Workbook match (optional) -- filename name w/o year, e.g. KiranAmbani",
+                label="Workbook match (optional) -- filename name w/o year, e.g. AliceDoe",
                 interactive=True,
             )
 

@@ -12,7 +12,7 @@ excel_writer.py are all pure functions over already-loaded data.
 
 Entity resolution (no chicken-and-egg with the encrypted PAN): the AIS
 export's own filename carries a *masked* PAN prefix (e.g.
-"XXXPA3059X_2025-26_AIS.json" -> prefix "XXXPA3059X", FY "2025-26").
+"XXXDE1234X_2025-26_AIS.json" -> prefix "XXXDE1234X", FY "2025-26").
 We load entities.yaml, mask each candidate's real PAN the same way
 ("XXX" + pan[3:9] + "X"), and match. No entity_key input is needed (or
 possible) up front -- if no entity's masked PAN matches the prefix, the
@@ -57,7 +57,7 @@ from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 def _masked_prefix(pan: str) -> str:
     """Mirror the AIS portal's own PAN-masking convention for the filename
     prefix: first 3 + last 1 char literal "X", middle 6 chars of the real
-    PAN kept -- e.g. real PAN "ABCPA3059X" -> masked "XXXPA3059X"."""
+    PAN kept -- e.g. real PAN "ABCDE1234X" -> masked "XXXDE1234X"."""
     return "XXX" + pan[3:9] + "X"
 
 
@@ -133,7 +133,7 @@ def run(
     if len(parts) < 2:
         return (
             f"ERROR: AIS filename {Path(ais_path).name!r} doesn't match the expected "
-            f"<maskedPAN>_<FY>_... convention (e.g. XXXPA3059X_2025-26_AIS.json) -- "
+            f"<maskedPAN>_<FY>_... convention (e.g. XXXDE1234X_2025-26_AIS.json) -- "
             "can't infer the entity or the FY from it."
         )
     prefix, year_key = parts[0], parts[1]

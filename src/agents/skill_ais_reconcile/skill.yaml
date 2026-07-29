@@ -73,7 +73,7 @@ help:
     Decrypts an AIS (Annual Information Statement) JSON export entirely
     in-process -- no manual password entry. The entity is resolved from
     the export's own filename (the portal names it with a masked PAN
-    prefix, e.g. "XXXPA3059X_2025-26_AIS.json"); that masked prefix is
+    prefix, e.g. "XXXDE1234X_2025-26_AIS.json"); that masked prefix is
     matched against entities.yaml's real PANs, and the decrypt password is
     derived from the resolved entity's PAN plus DOB (Individual) or DOI
     (HUF). Always runs the AIS-internal check (l1 detail vs l2 aggregate
@@ -106,7 +106,7 @@ help:
       accepts: "JSON (.json), one export per entity/FY."
       gotchas: >
         The filename must keep the portal's own masked-PAN + FY prefix
-        (e.g. "XXXPA3059X_2025-26_..."). If no entity in entities.yaml has
+        (e.g. "XXXDE1234X_2025-26_..."). If no entity in entities.yaml has
         a matching PAN, or the matching entity has no DOB/DOI on file, the
         run fails loud rather than guessing which taxpayer this is.
     - name: "gnucash_path"

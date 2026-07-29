@@ -17,9 +17,9 @@ still needs a human's REPLACE_ME-or-approve pass (plan section 4.1:
 
 Usage (from the repo root, with the venv active):
     python src/agents/skill_itr_workbook/scripts/bootstrap_mappings.py \\
-        Data/GNUCashReports/HarshalAmbani2425.html \\
-        Data/GNUCashReports/HarshalAmbani2425.gnucash \\
-        Data/itr/mappings/HarshalAmbani.proposed-mappings.yaml
+        Data/GNUCashReports/DaveDoe2425.html \\
+        Data/GNUCashReports/DaveDoe2425.gnucash \\
+        Data/itr/mappings/DaveDoe.proposed-mappings.yaml
 """
 from __future__ import annotations
 

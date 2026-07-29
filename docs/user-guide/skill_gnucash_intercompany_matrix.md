@@ -13,7 +13,7 @@ Run at year-end to see, at a glance, which family members' books agree and which
 
 - **GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash** (required) — accepts: GnuCash files (.gnucash).
   - Two or more people's GnuCash books.
-  - ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Vaikunth vs Vaikunth-HUF is its own pair.
+  - ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair.
 - **Reconciliation period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a calendar year, Auto, or a custom date range.
   - Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar.
   - ⚠️ 'Auto' reads the FY from the file names; use a fixed FY if the names disagree.

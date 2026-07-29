@@ -90,8 +90,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   replacing the earlier manual-check note. `configs.find_filed_returns()`
   matches files by entity-key prefix only — the trailing `<token>` is a
   human filing-batch label, never a parsed/trusted assessment year — with a
-  strict boundary rule so prefix-colliding keys (`Vaikunth` vs
-  `VaikunthHUF`) never cross-match. Rename swaps the leading entity-key
+  strict boundary rule so prefix-colliding keys (`Bob` vs
+  `BobHUF`) never cross-match. Rename swaps the leading entity-key
   segment of each matched filename (token + extension preserved) and blocks
   the *entire* save, same as the `.mapping.yaml` cascade, if any target
   filename already exists. Delete archives (moves, timestamped) each

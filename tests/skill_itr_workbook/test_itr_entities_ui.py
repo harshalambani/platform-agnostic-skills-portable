@@ -194,15 +194,15 @@ def test_add_with_workbook_match_persists_and_repopulates(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         msg = ui_mod._save_entity(
             "", "SYN-WBM", "Workbook Match Entity", "GGGGG6666G", "Individual", "Resident",
-            "", "", "", "", "", "", "KiranAmbani", "new", "", False, "", "", "",
+            "", "", "", "", "", "", "AliceDoe", "new", "", False, "", "", "",
         )
         assert "Saved" in msg
 
         entities = ui_mod._load_entities()
         form = ui_mod._entity_to_form("SYN-WBM", entities)
 
-    assert entities["SYN-WBM"].workbook_match == "KiranAmbani"
-    assert form[11] == "KiranAmbani"  # workbook_match re-populates in the form
+    assert entities["SYN-WBM"].workbook_match == "AliceDoe"
+    assert form[11] == "AliceDoe"  # workbook_match re-populates in the form
 
 
 def test_form_loads_audit_case_fields_from_existing_entity(tmp_path):

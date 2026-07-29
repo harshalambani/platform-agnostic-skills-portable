@@ -7,7 +7,7 @@ name: "gnucash_intercompany_matrix"
 display_name: "Intercompany Matrix"
 description: >
   Optional all-family roll-up: reconcile EVERY pair among several GnuCash books
-  in one run (e.g. Vaikunth, Kiran, Khyati, Vaikunth-HUF). Produces a single
+  in one run (e.g. Bob, Alice, Carol, Bob-HUF). Produces a single
   workbook with an owner-by-owner difference grid, a per-pair summary, and a
   consolidated exceptions list. Reuses the pairwise Intercompany Reco engine.
   Read-only -- never modifies your .gnucash files.
@@ -84,7 +84,7 @@ help:
     - name: "books"
       tooltip: "Two or more people's GnuCash books."
       accepts: "GnuCash files (.gnucash)."
-      gotchas: "Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Vaikunth vs Vaikunth-HUF is its own pair."
+      gotchas: "Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair."
     - name: "period"
       tooltip: "Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar."
       accepts: "A FY, a calendar year, Auto, or a custom date range."

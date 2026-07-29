@@ -3,14 +3,14 @@
 reconcile_intercompany.py -- Intercompany (inter-person) reconciliation between
 two GnuCash books. DIRECT mode, deterministic, no LLM.
 
-Given two .gnucash files (e.g. Vaikunth <-> Kiran), it:
+Given two .gnucash files (e.g. Bob <-> Alice), it:
 
-  1. Derives each book's OWNER entity from the filename (VaikunthAmbani2526 ->
-     "Vaikunth Ambani", FY 2025-26). "X HUF" is treated as a DISTINCT entity
+  1. Derives each book's OWNER entity from the filename (BobDoe2526 ->
+     "Bob Doe", FY 2025-26). "X HUF" is treated as a DISTINCT entity
      from "X".
   2. Finds the CONTRA accounts in each book that refer to the OTHER book's owner
-     -- all purpose-accounts for that entity (e.g. "Kiran Ambani" AND
-     "Rent receivable -Kiran Ambani"), while excluding a same-surname HUF.
+     -- all purpose-accounts for that entity (e.g. "Alice Doe" AND
+     "Rent receivable -Alice Doe"), while excluding a same-surname HUF.
   3. Computes an opening balance carried forward (net of all splits dated before
      the FY start) per side.
   4. Matches the FY movements between the two books: equal-and-opposite amount,
@@ -81,7 +81,7 @@ class Movement:
 @dataclass
 class Book:
     path: Path
-    owner: str                                 # derived entity, e.g. "Kiran Ambani"
+    owner: str                                 # derived entity, e.g. "Alice Doe"
     fy_from_name: Optional[tuple[int, int]]    # (2025, 2026) if detectable
     accounts: dict[str, Account]               # guid -> Account
     root: ET.Element
@@ -91,7 +91,7 @@ class Book:
 # Owner / FY derivation from filename.
 # --------------------------------------------------------------------------- #
 def _split_camel(s: str) -> str:
-    """VaikunthAmbaniHUF -> 'Vaikunth Ambani HUF'."""
+    """BobDoeHUF -> 'Bob Doe HUF'."""
     s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", s)
     s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)
     return re.sub(r"\s+", " ", s).strip()
@@ -99,8 +99,8 @@ def _split_camel(s: str) -> str:
 
 def derive_owner_and_fy(path: Path) -> tuple[str, Optional[tuple[int, int]]]:
     """
-    'VaikunthAmbani2526.gnucash'     -> ('Vaikunth Ambani', (2025, 2026))
-    'VaikunthAmbaniHUF2526.gnucash'  -> ('Vaikunth Ambani HUF', (2025, 2026))
+    'BobDoe2526.gnucash'     -> ('Bob Doe', (2025, 2026))
+    'BobDoeHUF2526.gnucash'  -> ('Bob Doe HUF', (2025, 2026))
     """
     stem = path.stem
     fy = None
@@ -164,11 +164,11 @@ def account_path(book: Book, guid: str) -> str:
 # --------------------------------------------------------------------------- #
 # Entity-aware contra account detection.
 # --------------------------------------------------------------------------- #
-_STOP = {"ambani", "the", "a"}   # surname alone is not distinguishing
+_STOP = {"doe", "the", "a"}   # surname alone is not distinguishing
 
 
 def _core_tokens(entity: str) -> tuple[set[str], bool]:
-    """'Vaikunth Ambani HUF' -> ({'vaikunth','ambani'}, is_huf=True)."""
+    """'Bob Doe HUF' -> ({'bob','doe'}, is_huf=True)."""
     toks = re.findall(r"[a-z0-9]+", entity.lower())
     is_huf = "huf" in toks
     core = {t for t in toks if t != "huf"}

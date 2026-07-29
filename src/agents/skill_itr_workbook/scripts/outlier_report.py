@@ -145,7 +145,7 @@ def reference_from_ca_working_excel(path: str | Path, sheet: str, entity_key: st
     """Best-effort reference for an entity with NO filed return, built from a
     CA's own working Excel. openpyxl reads cached formula values only
     (data_only=True) -- when the sheet's own subtotal/total formulas were
-    never recalculated by Excel (observed on Khyati's sheet: Gross Total
+    never recalculated by Excel (observed on Carol's sheet: Gross Total
     Income / Total Income / Total Tax / REFUND DUE cells all cache as None),
     this falls back to summing the labeled COMPONENT cells that do carry a
     cached value, and leaves a line NOT-EXTRACTED when even its components

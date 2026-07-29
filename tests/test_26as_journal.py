@@ -196,7 +196,7 @@ def test_find_generic_fd_account_variants():
     assert m.find_generic_fd_account([acc("Income:Interest Income:Interest on FD"),
                                       acc("Income:Interest Income:Interest on BOB - FD")]) \
         == "Income:Interest Income:Interest on FD"
-    # Vaikunth-style ('Interest on Fixed Deposit') + specific accounts present
+    # Bob-style ('Interest on Fixed Deposit') + specific accounts present
     fd = m.find_generic_fd_account([
         acc("Income:Interest Income:Interest on Fixed Deposit"),
         acc("Income:Interest Income:Interest on HDFC - FD"),

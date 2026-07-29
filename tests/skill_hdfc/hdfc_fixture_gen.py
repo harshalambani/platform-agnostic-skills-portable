@@ -79,7 +79,7 @@ def build_pdf(password: str | None = None) -> bytes:
 
 # ---------------------------------------------------------------------------
 # Shape 3: XLS/XLSX net-banking export -- preamble rows + '****' separator
-# before the real header row (HDFC's own quirk, see Khyati sample).
+# before the real header row (HDFC's own quirk, see a real bank sample).
 # ---------------------------------------------------------------------------
 
 def _tabular_rows() -> list[list[str]]:
@@ -112,7 +112,7 @@ def build_xlsx_bytes() -> bytes:
 
 # ---------------------------------------------------------------------------
 # Shape 4: CSV export with renamed headers (Value Date/Description/Number),
-# ISO dates -- mirrors the Khyati "clean" CSV export.
+# ISO dates -- mirrors a real bank "clean" CSV export.
 # ---------------------------------------------------------------------------
 
 def build_csv_text() -> str:

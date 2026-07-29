@@ -70,7 +70,7 @@ class EntityProfile:
                                        # render a zero sheet (2026-07-19 PL for Business prompt)
     workbook_match: str | None = None     # ITR Mapping Review Layer A attribution token --
                                        # the name portion of the workbook filename WITHOUT
-                                       # the year (e.g. "KiranAmbani") -- consumed by
+                                       # the year (e.g. "AliceDoe") -- consumed by
                                        # _workbook_match_map() in ui/tabs/itr_mapping_review.py
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
@@ -206,12 +206,12 @@ def find_filed_returns(
     entity-key prefix only.
 
     CRITICAL collision rule: entity keys can be prefixes of one another
-    (e.g. "Vaikunth" vs "VaikunthHUF"). A file belongs to `entity_key` iff
+    (e.g. "Bob" vs "BobHUF"). A file belongs to `entity_key` iff
     its stem matches ``^{re.escape(entity_key)}(?![A-Za-z])`` (case
     -insensitive) -- i.e. `entity_key` must be immediately followed by a
-    non-letter (digit) or the end of the stem. This makes "Vaikunth2425"
-    match entity_key="Vaikunth" but NOT "VaikunthHUF", and "VaikunthHUF2425"
-    match only "VaikunthHUF".
+    non-letter (digit) or the end of the stem. This makes "Bob2425"
+    match entity_key="Bob" but NOT "BobHUF", and "BobHUF2425"
+    match only "BobHUF".
 
     That boundary rule alone does NOT separate digit-extended key collisions
     -- keys like "Prop1" and "Prop12" both match a "Prop12425.json" stem
