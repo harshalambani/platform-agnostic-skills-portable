@@ -41,7 +41,7 @@ def test_derive_workbook_match_strips_trailing_year_digits():
 
 def test_derive_workbook_match_keeps_huf_suffix():
     assert configs.derive_workbook_match("BobDoeHUF2526.gnucash") == "BobDoeHUF"
-    assert configs.derive_workbook_match("BobDoeHUF2526.gnucash") == "BobDoeHUF"
+    assert configs.derive_workbook_match("DaveDoeHUF25.gnucash") == "DaveDoeHUF"
 
 
 def test_derive_workbook_match_no_trailing_digits_passthrough():

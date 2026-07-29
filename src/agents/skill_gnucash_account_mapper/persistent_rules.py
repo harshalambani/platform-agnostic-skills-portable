@@ -72,8 +72,8 @@ def _yearless_stem(stem: str) -> str:
     preserved.
 
     Examples:
-        "CarolDoe2526"      -> "CarolDoe"
-        "BobDoeHUF2526" -> "BobDoeHUF"
+        "CarolDoe2526"          -> "CarolDoe"
+        "BobDoeHUF2526"         -> "BobDoeHUF"
         "NoDigitsHere"          -> "NoDigitsHere"
     """
     return _TRAILING_YEAR_DIGITS_RE.sub("", stem)

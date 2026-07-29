@@ -299,10 +299,10 @@ def derive_workbook_match(path: str | Path) -> str:
     handle that themselves.
 
     Examples:
-        "AliceDoe25626.gnucash"        -> "AliceDoe"
-        "BobDoe2526.gnucash"      -> "BobDoe"
-        "BobDoeHUF2526.gnucash"   -> "BobDoeHUF"
-        "CarolDoe2526.gnucash"        -> "CarolDoe"
+        "AliceDoe25626.gnucash"           -> "AliceDoe"
+        "BobDoe2526.gnucash"              -> "BobDoe"
+        "BobDoeHUF2526.gnucash"           -> "BobDoeHUF"
+        "CarolDoe2526.gnucash"            -> "CarolDoe"
         "NoDigitsHere.gnucash"            -> "NoDigitsHere"
     """
     stem = Path(path).stem
