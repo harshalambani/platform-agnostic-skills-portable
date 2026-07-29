@@ -320,6 +320,38 @@ def _colorize_status(md: str) -> str:
     return "\n".join(out)
 
 
+def _registry_book_fill(skill, inp_def, input_map) -> str:
+    """Auto-fill an empty, optional `book_file` input for the ITR Workbook
+    skill from the app-side GnuCash book registry (ui/_book_registry.py),
+    keyed off the entity + FY already chosen earlier in the same run (the
+    ITR Workbook skill.yaml orders inputs bs_html(0)/entity(1)/ay(2)/
+    regime(3)/book_file(4), so both are already in `input_map` by the time
+    this runs). Note: the `ay` select actually carries the FY string (e.g.
+    "2025-26", populated from meta.fy) -- exactly the key resolve_book()
+    expects -- so no AY->FY conversion happens here.
+
+    Deliberately narrow: only fires for skill.name == "ITR Workbook" and
+    inp_def.name == "book_file", so the generic runner stays generic for
+    every other skill/input. Returns "" (never raises) whenever the entity
+    is unset, unknown, has no registered/legacy book, or the resolved path
+    doesn't exist on disk -- the book stays optional and the run proceeds
+    book-less exactly as before this seam existed.
+    """
+    if getattr(skill, "name", "") != "ITR Workbook" or getattr(inp_def, "name", "") != "book_file":
+        return ""
+    entity_key = input_map.get("entity")
+    if not entity_key:
+        return ""
+    try:
+        from .. import _book_registry  # noqa: PLC0415
+        resolved = _book_registry.resolve_book(entity_key, input_map.get("ay") or None)
+    except Exception:
+        return ""
+    if resolved is not None and resolved.is_file():
+        return str(resolved)
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
@@ -361,7 +393,13 @@ def _make_run_handler(skill: SkillInfo):
                     if inp_def.required:
                         yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                         return
-                    input_map[inp_def.name] = ""
+                    registry_book = _registry_book_fill(skill, inp_def, input_map)
+                    input_map[inp_def.name] = registry_book
+                    if registry_book:
+                        yield add(
+                            f"Using registered book for {input_map.get('entity')} "
+                            f"(FY {input_map.get('ay')})."
+                        ), gr.update(interactive=False, value=None), gr.update()
                 else:
                     fpath = Path(val.name if hasattr(val, "name") else val)
                     if not fpath.is_file():

@@ -258,30 +258,15 @@ def _latest_proposed_mappings_path(
 
 
 def _entity_book_path(entity_key: str) -> Path | None:
-    """Optional per-entity `book:` path from entities.yaml (Layer B -- see
-    the module docstring). Deliberately read straight out of the raw YAML
-    dict here rather than added to configs.EntityProfile, so this stays
-    purely additive plumbing with zero blast radius on the entities CRUD
-    tab's dataclass/dump/validate surface. Returns None whenever entities.
-    yaml is missing/malformed, `entity_key` isn't defined in it, or the
-    entity has no `book:` key -- every case falls back to Layer A only,
-    never an error."""
-    path = _config_mod.data_root_dir() / "itr" / "entities.yaml"
-    if not path.is_file():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return None
-    if not isinstance(raw, dict):
-        return None
-    fields = raw.get(entity_key)
-    if not isinstance(fields, dict):
-        return None
-    book = fields.get("book")
-    if not book or not str(book).strip():
-        return None
-    return Path(str(book))
+    """Optional per-entity book path for Layer B (see the module docstring).
+    Delegates to ui._book_registry.resolve_book() (fy=None -> newest
+    registered FY in `books`, else the legacy raw `book:` key, else None) --
+    a strict superset of this function's pre-registry behaviour (which read
+    only the legacy `book:` key), so legacy-only entities are unaffected and
+    entities with `books` now gain Layer B. Tolerant/never-raises contract
+    preserved: resolve_book() itself never raises."""
+    from .. import _book_registry  # noqa: PLC0415
+    return _book_registry.resolve_book(entity_key)
 
 
 def _apply_book_validation(entity_key: str, snippet_rows: list[dict]) -> list[dict]:
