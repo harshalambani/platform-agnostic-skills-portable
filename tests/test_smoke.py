@@ -82,7 +82,7 @@ def test_skill_cc_transactions_imports():
 # ---------------------------------------------------------------------------
 
 def test_registry_discovers_all_skills():
-    """Registry must find all 16 skills via skill.yaml manifests."""
+    """Registry must find all 22 skills via skill.yaml manifests."""
     from agents.registry import discover
     skills = discover(refresh=True)
     names = {s.name for s in skills}
@@ -107,7 +107,7 @@ def test_registry_discovers_all_skills():
     assert "ITR Workbook" in names
     # 5th bank onboarding (P4)
     assert "Kotak" in names
-    assert len(skills) == 21
+    assert len(skills) == 22
 
 
 def test_registry_get_by_name():
