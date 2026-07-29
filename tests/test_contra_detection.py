@@ -45,7 +45,7 @@ _ACCOUNTS = {
 
 
 def _cheque_row():
-    return [{"Date": "2025-05-29", "Description": "CHQ DEP KIRAN",
+    return [{"Date": "2025-05-29", "Description": "CHQ DEP ALICE",
              "Deposit": "300000.00", "Withdrawal": ""}]
 
 

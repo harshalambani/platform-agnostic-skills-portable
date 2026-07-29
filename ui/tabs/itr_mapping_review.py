@@ -40,7 +40,7 @@ Data sources for the review table (per entity):
     by an explicit, optional per-entity `workbook_match:` field in
     entities.yaml (real-world validation showed workbook output stems are
     user-controlled CamelCase `<First><Last>[HUF]<year>`, e.g.
-    "KiranAmbani25626" / "VaikunthAmbaniHUF2526" -- neither the entity key
+    "AliceDoe25626" / "BobDoeHUF2526" -- neither the entity key
     itself nor a boundary-delimited-substring match against it is reliable
     against that shape, so attribution is config-driven instead).
     `_workbook_match_map()` reads {entity_key: workbook_match} for every
@@ -198,8 +198,8 @@ def _snippet_entity_key(stem: str, match_map: dict[str, str]) -> str | None:
 
     A token matches iff it occurs in `stem` as a case-insensitive
     SUBSTRING -- no boundary discipline, because real workbook stems are
-    user-controlled CamelCase with no separators (e.g. "KiranAmbani25626",
-    "VaikunthAmbaniHUF2526") where a boundary check would never fire.
+    user-controlled CamelCase with no separators (e.g. "AliceDoe25626",
+    "BobDoeHUF2526") where a boundary check would never fire.
     When more than one token matches, the LONGEST one wins (e.g. an HUF's
     longer token beats the individual's shorter token when both are
     substrings of the HUF's own stem). If several tokens tied for that

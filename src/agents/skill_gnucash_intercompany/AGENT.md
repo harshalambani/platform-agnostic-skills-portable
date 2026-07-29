@@ -2,7 +2,7 @@
 
 ## Role
 Reconcile the contra ("counter-party") accounts that two people keep for each
-other across two GnuCash books (e.g. Vaikunth <-> Kiran). Read-only.
+other across two GnuCash books (e.g. Bob <-> Alice). Read-only.
 
 ## Inputs
 1. **book_a**, **book_b** -- two gzipped-XML `.gnucash` files.
@@ -12,12 +12,12 @@ other across two GnuCash books (e.g. Vaikunth <-> Kiran). Read-only.
 4. **date_tolerance** -- days two mirrored entries may differ by (default 7).
 
 ## Process
-1. **Owner & FY from filename** -- `VaikunthAmbani2526` -> owner `Vaikunth
-   Ambani`, FY 2025-26. `...HUF...` is a **distinct entity** from the individual.
+1. **Owner & FY from filename** -- `BobDoe2526` -> owner `Bob
+   Doe`, FY 2025-26. `...HUF...` is a **distinct entity** from the individual.
 2. **Find contra accounts** -- every account in book B whose name contains all
    of book A owner's core name tokens (and vice-versa). Includes multiple
-   purpose-accounts for one entity (`Kiran Ambani` + `Rent receivable -Kiran
-   Ambani`); excludes a same-surname HUF unless the owner *is* the HUF. Child
+   purpose-accounts for one entity (`Alice Doe` + `Rent receivable -Alice
+   Doe`); excludes a same-surname HUF unless the owner *is* the HUF. Child
    accounts are included.
 3. **Opening b/f** -- net of all contra splits dated before the period start,
    per side.

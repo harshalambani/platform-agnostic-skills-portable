@@ -430,11 +430,11 @@ def test_agent_run_built_cold_start_when_no_mapping_file_supplied(tmp_path):
 # ---------------------------------------------------------------------------
 
 _REAL_HTML = [
-    "HarshalAmbani2425.html",
-    "KhytaiAmbani2425.html",
-    "KiranAmbani2425.html",
-    "VaikunthAmbani2425.html",
-    "VaikunthAmbaniHUF2425.html",
+    "DaveDoe2425.html",
+    "CarolDoe2425.html",
+    "AliceDoe2425.html",
+    "BobDoe2425.html",
+    "BobDoeHUF2425.html",
 ]
 
 

@@ -6,7 +6,7 @@ name: "gnucash_intercompany"
 display_name: "Intercompany Reco"
 description: >
   Reconcile the accounts two people keep for each other across two GnuCash books
-  (e.g. Vaikunth <-> Kiran). Finds each person's contra account(s) in the other's
+  (e.g. Bob <-> Alice). Finds each person's contra account(s) in the other's
   book, carries forward the opening balance, matches the current financial year's
   movements (equal-and-opposite amount, within a date tolerance, bank account
   numbers as a tie-breaker), and for any unmatched item hunts the other book for

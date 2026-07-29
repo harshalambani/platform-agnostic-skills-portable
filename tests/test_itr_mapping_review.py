@@ -394,9 +394,9 @@ def test_save_changes_fields_survive_shape_translation_guid_path_tag(tmp_path):
 # Layer A -- config-driven filename attribution (_workbook_match_map /
 # _snippet_entity_key / _latest_proposed_mappings_path). Real-data
 # validation showed workbook output stems are user-controlled CamelCase
-# "<First><Last>[HUF]<year>" (e.g. "KiranAmbani25626",
-# "VaikunthAmbaniHUF2526") which the old entity-key-as-boundary-substring
-# scheme could never match (the entity key itself, e.g. "VaikunthHUF", isn't
+# "<First><Last>[HUF]<year>" (e.g. "AliceDoe25626",
+# "BobDoeHUF2526") which the old entity-key-as-boundary-substring
+# scheme could never match (the entity key itself, e.g. "BobHUF", isn't
 # even a substring of the stem). Attribution is now driven by an explicit,
 # optional `workbook_match:` token per entity in entities.yaml, matched as a
 # plain case-insensitive substring with longest-match-wins.

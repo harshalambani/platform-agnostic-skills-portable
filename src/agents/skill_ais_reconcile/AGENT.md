@@ -28,7 +28,7 @@ entity's PAN + DOB/DOI on file), then run up to four checks and write one Excel 
 
 ## Entity resolution -- no manual entity selection
 The AIS export's filename carries the portal's own masked PAN prefix (e.g.
-`XXXPA3059X_2025-26_AIS.json`). We match that mask against every entity's real PAN in
+`XXXDE1234X_2025-26_AIS.json`). We match that mask against every entity's real PAN in
 `entities.yaml`; the FY token in the same filename (`2025-26`) becomes the reconciliation year.
 No match -> a clear `ERROR:` string, never a guess at which taxpayer this belongs to.
 

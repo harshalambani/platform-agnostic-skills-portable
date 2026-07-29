@@ -65,6 +65,7 @@ padding-top:14px}
 <a href="#skill_kotak">Kotak</a>
 <a href="#skill_msg_parser">MSG / Email Parser</a>
 <a href="#skill_parser_generator">Parser Generator</a>
+<a href="#skill_ais_reconcile">Reconcile</a>
 <a href="#skill_krc_recon">Reconcile</a>
 <a href="#skill_translate">Text Translator</a>
 </nav>
@@ -388,7 +389,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <p class="overview">An optional roll-up over the pairwise Intercompany Reco: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.</p>
 <p class="whenuse"><b>When to use it.</b> Run at year-end to see, at a glance, which family members&#x27; books agree and which do not -- instead of running the two-book reconciliation for every combination by hand.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Two or more people&#x27;s GnuCash books. ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as &#x27;n/a&#x27;, not an error. &#x27;X HUF&#x27; is a separate entity from &#x27;X&#x27;, so Vaikunth vs Vaikunth-HUF is its own pair.">ℹ️</span><br><span class="fmt">accepts: GnuCash files (.gnucash).</span></li>
+<li><b>GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Two or more people&#x27;s GnuCash books. ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as &#x27;n/a&#x27;, not an error. &#x27;X HUF&#x27; is a separate entity from &#x27;X&#x27;, so Bob vs Bob-HUF is its own pair.">ℹ️</span><br><span class="fmt">accepts: GnuCash files (.gnucash).</span></li>
 <li><b>Reconciliation period (Indian FY = 1 Apr to 31 Mar)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar. ⚠️ &#x27;Auto&#x27; reads the FY from the file names; use a fixed FY if the names disagree.">ℹ️</span><br><span class="fmt">accepts: A FY, a calendar year, Auto, or a custom date range.</span></li>
 <li><b>Custom start date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="Start date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
 <li><b>Custom end date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="End date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
@@ -570,6 +571,34 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Tie-out still exits non-zero.</td><td>Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_ais_reconcile" class="skill">
+<h2>Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Decrypts an AIS (Annual Information Statement) JSON export entirely in-process -- no manual password entry. The entity is resolved from the export&#x27;s own filename (the portal names it with a masked PAN prefix, e.g. &quot;XXXDE1234X_2025-26_AIS.json&quot;); that masked prefix is matched against entities.yaml&#x27;s real PANs, and the decrypt password is derived from the resolved entity&#x27;s PAN plus DOB (Individual) or DOI (HUF). Always runs the AIS-internal check (l1 detail vs l2 aggregate per element, cross-section TDS-credit total). If a 26AS workbook (this repo&#x27;s own &quot;26AS&quot; skill output) is also supplied, ties out AIS-reported TDS credit against 26AS&#x27;s tds_deposited at the aggregate, per-quarter, and per-income-category grain. If a GnuCash book for the SAME financial year is also supplied, ties out AIS income (interest/dividend/salary) and TDS credit against what&#x27;s actually posted in the books -- this is the primary reconciliation, since the books are the taxpayer&#x27;s own record of truth. A book for the wrong FY still produces a tie-out sheet but the summary carries an impossible-to-miss WARNING banner. Finally, every flagged delta across all three reconciliations is distilled into a set of ADVISORY suggestions for the AIS portal&#x27;s own feedback mechanism (e.g. &quot;Information is correct&quot;, &quot;Information is not fully correct&quot;) -- these are for a human to review before acting on the portal; nothing is ever auto-submitted, and confidence is always capped at low/medium, never high.</p>
+<p class="whenuse"><b>When to use it.</b> Use once you&#x27;ve downloaded your AIS JSON export from the income-tax portal, to check it against itself and (when available) your 26AS and your GnuCash books before relying on it for filing. The books tie-out is the most useful check if your books are kept current -- it&#x27;s the only one of the three that can actually tell you the AIS is missing or overstating something, not just disagreeing with another government document.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>AIS JSON export (encrypted, as downloaded from the portal)</b> <em>(required)</em> <span class="pa-tip" data-tip="The AIS JSON export exactly as downloaded from the portal (still encrypted -- decrypted in-process). ⚠️ The filename must keep the portal&#x27;s own masked-PAN + FY prefix (e.g. &quot;XXXDE1234X_2025-26_...&quot;). If no entity in entities.yaml has a matching PAN, or the matching entity has no DOB/DOI on file, the run fails loud rather than guessing which taxpayer this is.">ℹ️</span><br><span class="fmt">accepts: JSON (.json), one export per entity/FY.</span></li>
+<li><b>GnuCash book (optional, must be the SAME FY as the AIS -- enables the books tie-out)</b> <em>(optional)</em> <span class="pa-tip" data-tip="GnuCash book for the SAME financial year as the AIS export. ⚠️ Must be the matching-FY book. A book with no transactions in that FY window still produces a tie-out sheet, but the run summary carries a loud WARNING -- the numbers on that sheet are almost certainly meaningless for a wrong-year book.">ℹ️</span><br><span class="fmt">accepts: GnuCash XML book (.gnucash), optionally gzip-compressed.</span></li>
+<li><b>26AS workbook (optional, from the 26AS skill -- enables the TDS-credit tie-out)</b> <em>(optional)</em> <span class="pa-tip" data-tip="26AS workbook produced by this repo&#x27;s &#x27;26AS&#x27; skill, for the same entity/year. ⚠️ A workbook for the wrong entity/year will tie out against the wrong TDS figures without a hard error -- double-check before relying on it.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) with a Part I (TDS) sheet.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the AIS JSON export.</li>
+<li>Optionally supply the matching-FY GnuCash book and/or the entity&#x27;s 26AS workbook.</li>
+<li>Click Run -- it decrypts and reconciles offline in a few seconds.</li>
+<li>Open the Excel workbook: Books Reconciliation and 26AS Tie-out sheets first, then Feedback Suggestions.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-ais-reconciliation.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-ais-reconciliation.xlsx</code><span class="pa-tip" data-tip="Summary, Books Reconciliation (if a book was supplied), one sheet per AIS section, Flags, 26AS Tie-out (if a workbook was supplied), and Feedback Suggestions (advisory only).">ℹ️</span> — Summary, Books Reconciliation (if a book was supplied), one sheet per AIS section, Flags, 26AS Tie-out (if a workbook was supplied), and Feedback Suggestions (advisory only).</li>
+</ul>
+<h3>Tips</h3><p>The Feedback Suggestions sheet is a starting point for the AIS portal&#x27;s own feedback form, not something to paste in verbatim -- read the Rationale column and confirm each suggestion against the underlying document before acting on the portal. Confidence is deliberately capped at &quot;low&quot;/&quot;medium&quot;: nothing here is ever certain enough to call &quot;high&quot; without a human&#x27;s own review.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>&quot;ERROR: no entity ... has a PAN matching the masked prefix&quot;.</td><td>Add or correct the entity&#x27;s pan in entities.yaml, or confirm the AIS filename wasn&#x27;t renamed away from the portal&#x27;s own masked-PAN_FY_... convention.</td></tr>
+<tr><td>&quot;ERROR: could not decrypt ...&quot;.</td><td>The resolved entity&#x27;s dob/doi in entities.yaml doesn&#x27;t match what the portal used to encrypt this export -- double-check the date (ISO YYYY-MM-DD) on file.</td></tr>
+<tr><td>WARNING about the GnuCash book having no transactions in the AIS&#x27;s FY.</td><td>You picked the wrong .gnucash book (or the wrong-year one) -- re-run with the book covering the same financial year as the AIS export.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_krc_recon" class="skill">
 <h2>Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM memos and trade notes) against the Part I Simplified Ledger and produces a &quot;Bills&quot; workbook. Runs fully offline (deterministic, no LLM).</p>
@@ -623,7 +652,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 21 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 22 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];

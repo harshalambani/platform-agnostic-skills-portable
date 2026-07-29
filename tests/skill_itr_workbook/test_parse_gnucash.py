@@ -236,11 +236,11 @@ def test_b1_adversarial_tests_present():
 # ---------------------------------------------------------------------------
 
 _REAL_PAIRS = [
-    ("HarshalAmbani2425.html", "HarshalAmbani2425.gnucash"),
-    ("KhytaiAmbani2425.html", "KhyatiAmbani2425.gnucash"),
-    ("KiranAmbani2425.html", "KiranAmbani2425.gnucash"),
-    ("VaikunthAmbani2425.html", "VaikunthAmbani2425.gnucash"),
-    ("VaikunthAmbaniHUF2425.html", "VaikunthAmbaniHUF2425.gnucash"),
+    ("DaveDoe2425.html", "DaveDoe2425.gnucash"),
+    ("CarolDoe2425.html", "CarolDoe2425.gnucash"),
+    ("AliceDoe2425.html", "AliceDoe2425.gnucash"),
+    ("BobDoe2425.html", "BobDoe2425.gnucash"),
+    ("BobDoeHUF2425.html", "BobDoeHUF2425.gnucash"),
 ]
 
 
@@ -258,7 +258,7 @@ def test_real_corpus_cross_check_green_for_all_5_entities():
 
 
 @pytest.mark.local_samples
-def test_real_corpus_harshal_lots_reproduce_capgain_sheet():
+def test_real_corpus_dave_lots_reproduce_capgain_sheet():
     """FY24-25 lot reconstruction for the richest real book must reproduce
     the CA's CapGain sheet: 2 lots on Sterlite Tech (one a loss), 1 old-lot
     LTCG row (Ramco Cements), 1 STCG row (SPIC) -- Sigma gains == the books'
@@ -267,7 +267,12 @@ def test_real_corpus_harshal_lots_reproduce_capgain_sheet():
     book, not the sheet."""
     if not REAL_SAMPLES_DIR.is_dir():
         pytest.skip("Data/GNUCashReports/ not present -- real-file smoke test skipped")
-    book = pg.parse_book(REAL_SAMPLES_DIR / "HarshalAmbani2425.gnucash")
+    _dave_books = sorted(
+        p for p in REAL_SAMPLES_DIR.glob("DaveDoe*.gnucash") if "HUF" not in p.stem
+    )
+    if not _dave_books:
+        pytest.skip("no DaveDoe*.gnucash sample found -- real-file smoke test skipped")
+    book = pg.parse_book(_dave_books[0])
     recs = lots.reconstruct_lots(book, YEAR_KEY)
     assert len(recs) == 3
     assert all(r.ok for r in recs)
