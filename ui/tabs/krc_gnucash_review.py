@@ -62,6 +62,7 @@ import gradio as gr
 import yaml
 
 from .. import _config as _config_mod
+from .. import _filedialog
 from .._review_engine import (
     Column,
     PickerItem,
@@ -70,6 +71,7 @@ from .._review_engine import (
     parse_payload,
     payload_box_css,
 )
+from ._generic import _MAX_UPLOAD_SIZE_BYTES
 
 APP_ID = "krc"
 TARGET_COL = "Account"
@@ -447,6 +449,7 @@ def render(container_tab=None) -> None:
             file_types=[".gnucash"],
             type="filepath",
         )
+        gnucash_browse_btn = gr.Button("Browse...", scale=0, min_width=110)
 
     load_btn = gr.Button("Load for Review", variant="primary")
 
@@ -455,6 +458,34 @@ def render(container_tab=None) -> None:
         inputs=[],
         outputs=[review_dropdown],
     )
+
+    # Native OS file picker for the GnuCash book — a bare gr.File stages a
+    # *temp copy* in the browser and hands the handler that temp path, which
+    # is catastrophic for a live .gnucash (wrong path, breaks the book GUID).
+    # This mirrors ui/tabs/_generic.py's "Browse..." wiring exactly: it opens
+    # at the box's remembered folder, validates the pick server-side (the
+    # browser's type filter and upload caps are bypassed by a native pick),
+    # and sets gnucash_file's value to the REAL absolute path. Drag-drop into
+    # the box is untouched — this is additive.
+    # NOTE: persisting the picked path into ui/_book_registry.py (per-entity
+    # book memory) is deferred to the Entities registration UI — these tabs
+    # have no entity/FY context to key it on.
+    def _browse_gnucash_book():
+        valid, warnings = _filedialog.pick_files(
+            f"{APP_ID}.gnucash_book",
+            multiple=False,
+            file_types=(".gnucash",),
+            max_size_bytes=_MAX_UPLOAD_SIZE_BYTES,
+            title="Select the GnuCash book (.gnucash)",
+        )
+        for w in warnings:
+            gr.Warning(w)
+        if not valid:
+            # Cancelled, or the pick was rejected — keep the current value.
+            return gr.update()
+        return gr.update(value=valid[0])
+
+    gnucash_browse_btn.click(fn=_browse_gnucash_book, inputs=[], outputs=[gnucash_file])
 
     if container_tab is not None:
         def _rescan_newest():
