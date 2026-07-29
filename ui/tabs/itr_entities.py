@@ -68,6 +68,8 @@ from pathlib import Path
 import gradio as gr
 
 from .. import _config as _config_mod
+from .. import _filedialog
+from ._generic import _MAX_UPLOAD_SIZE_BYTES
 
 # ---------------------------------------------------------------------------
 # Import the ITR Workbook skill's flat (non-package) scripts/ modules, same
@@ -207,7 +209,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
     if e is None:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
-            "", "", "new", "", False, "", "", "",
+            "", "", "new", "", False, "", "", "", "",
         )
     return (
         e.key, e.name, e.pan, e.status, e.residency,
@@ -216,7 +218,61 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         e.audit_case, _format_kv_lines(e.audit_case_by_ay),
         _format_list_lines((e.extra_items or {}).get("bf_losses") or []),
         _format_list_lines((e.extra_items or {}).get("clubbing_notes") or []),
+        _format_kv_lines(e.books),
     )
+
+
+# ---------------------------------------------------------------------------
+# Per-FY GnuCash book registry: browse-to-append + derived-match preview.
+# ---------------------------------------------------------------------------
+
+_FY_KEY_RE = re.compile(r"^\d{4}-\d{2}$")
+
+
+def _browse_append_book(current_books_text: str, fy: str):
+    """Browse for a .gnucash book and add/replace its line for `fy` in the
+    books textbox. Pure-ish (one native dialog call via _filedialog) --
+    returns a gr.update() so the caller can wire it straight to books_box."""
+    fy = (fy or "").strip()
+    if not _FY_KEY_RE.match(fy):
+        gr.Warning("Enter the financial year as YYYY-YY (e.g. 2025-26) before browsing.")
+        return gr.update()
+
+    valid, warnings = _filedialog.pick_files(
+        "itr_entities.gnucash_book",
+        multiple=False,
+        file_types=(".gnucash",),
+        max_size_bytes=_MAX_UPLOAD_SIZE_BYTES,
+        title="Select the GnuCash book (.gnucash)",
+    )
+    for w in warnings:
+        gr.Warning(w)
+    if not valid:
+        return gr.update()
+
+    books, _errors = _parse_kv_lines(current_books_text)
+    books[fy] = valid[0]
+    return gr.update(value=_format_kv_lines(books))
+
+
+def _derived_match_text(books_text: str, override_text: str) -> str:
+    """Pure preview of the Layer-A workbook-match token that would be
+    effective given the current (unsaved) form state -- mirrors
+    configs.effective_workbook_match()'s precedence without needing a
+    saved EntityProfile."""
+    override = (override_text or "").strip()
+    if override:
+        return f"**Effective workbook match:** `{override}` (explicit override)"
+
+    books, _errors = _parse_kv_lines(books_text)
+    fy_books = {k: v for k, v in books.items() if _FY_KEY_RE.match(k)}
+    if fy_books:
+        newest_fy = max(fy_books.keys())
+        configs = _configs_mod()
+        derived = configs.derive_workbook_match(fy_books[newest_fy])
+        return f"**Effective workbook match:** `{derived}` (derived from the {newest_fy} book filename)"
+
+    return "**Effective workbook match:** _(none yet -- register a book or set an override above)_"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +322,7 @@ def _save_entity(
     business_subtree: str, workbook_match: str, default_regime: str, regime_by_ay_text: str,
     audit_case: bool, audit_case_by_ay_text: str,
     bf_losses_text: str, clubbing_notes_text: str,
+    books_text: str = "",
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -275,7 +332,14 @@ def _save_entity(
 
     regime_by_ay, kv_errors_1 = _parse_kv_lines(regime_by_ay_text)
     audit_case_by_ay, kv_errors_2 = _parse_kv_lines(audit_case_by_ay_text, as_bool=True)
-    kv_errors = kv_errors_1 + kv_errors_2
+    books, kv_errors_3 = _parse_kv_lines(books_text)
+    fy_key_re = re.compile(r"^\d{4}-\d{2}$")
+    for k in books:
+        if not fy_key_re.match(k):
+            kv_errors_3.append(
+                f"books: '{k}' is not a valid financial year (expected YYYY-YY, e.g. 2025-26)."
+            )
+    kv_errors = kv_errors_1 + kv_errors_2 + kv_errors_3
 
     configs = _configs_mod()
     field_errors = configs.validate_entity_fields(
@@ -348,6 +412,7 @@ def _save_entity(
         aadhaar=(aadhaar or "").strip() or None,
         business_subtree=(business_subtree or "").strip() or None,
         workbook_match=(workbook_match or "").strip() or None,
+        books=books,
         default_regime=default_regime,
         regime_by_ay=regime_by_ay,
         audit_case=bool(audit_case),
@@ -565,6 +630,19 @@ def render(container_tab=None) -> None:
                 label="Workbook match (optional) -- filename name w/o year, e.g. AliceDoe",
                 interactive=True,
             )
+            books_box = gr.Textbox(
+                label=(
+                    "Financial-year books (one per line, 'FY = path', e.g. "
+                    "2025-26 = C:\\books\\AliceDoe2526.gnucash)"
+                ),
+                lines=3, interactive=True,
+            )
+            with gr.Row():
+                fy_browse_box = gr.Textbox(label="FY for Browse", placeholder="2025-26", scale=1)
+                books_browse_btn = gr.Button("Browse for book...", scale=0, min_width=140)
+            derived_match_md = gr.Markdown(
+                "**Effective workbook match:** _(none yet -- register a book or set an override above)_"
+            )
 
         with gr.Column(scale=1):
             default_regime_dd = gr.Dropdown(
@@ -606,7 +684,24 @@ def render(container_tab=None) -> None:
         dob_box, doi_box, address_box, father_name_box, aadhaar_box,
         business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
         audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box,
+        books_box,
     ]
+
+    books_browse_btn.click(
+        fn=_browse_append_book,
+        inputs=[books_box, fy_browse_box],
+        outputs=[books_box],
+    )
+    books_box.change(
+        fn=_derived_match_text,
+        inputs=[books_box, workbook_match_box],
+        outputs=[derived_match_md],
+    )
+    workbook_match_box.change(
+        fn=_derived_match_text,
+        inputs=[books_box, workbook_match_box],
+        outputs=[derived_match_md],
+    )
 
     def _on_select(key):
         entities = _load_entities()
@@ -624,11 +719,13 @@ def render(container_tab=None) -> None:
         orig_key, new_key, name, pan, status, residency, dob, doi, address,
         father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
         audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
+        books_text,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
             father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
             audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
+            books_text,
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -639,7 +736,8 @@ def render(container_tab=None) -> None:
         inputs=[orig_key_state, key_box, name_box, pan_box, status_dd, residency_box,
                 dob_box, doi_box, address_box, father_name_box, aadhaar_box,
                 business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
-                audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box],
+                audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box,
+                books_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )
 

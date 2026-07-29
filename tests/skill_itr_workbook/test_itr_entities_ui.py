@@ -644,6 +644,171 @@ def test_save_rename_rollback_on_mid_cascade_failure(tmp_path):
     assert not (itrfiled_dir / "SYN-IND-RENAMED2425.json").exists()
 
 
+# ---------------------------------------------------------------------------
+# Phase 3 -- per-FY GnuCash book registry (books_box / _browse_append_book /
+# _derived_match_text). Synthetic paths only -- _save_entity stores strings,
+# it never stats them.
+# ---------------------------------------------------------------------------
+
+def test_save_entity_with_books_round_trips(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BOOKS", "Books Entity", "CCCCC2222C", "Individual", "Resident",
+            "", "", "", "", "", "", "", "new", "", False, "", "", "",
+            "2025-26 = C:\\books\\AliceDoe2526.gnucash\n2024-25 = C:\\books\\AliceDoe2425.gnucash",
+        )
+        assert "Saved" in msg
+        entities = ui_mod._load_entities()
+
+    e = entities["SYN-BOOKS"]
+    assert e.books == {
+        "2025-26": "C:\\books\\AliceDoe2526.gnucash",
+        "2024-25": "C:\\books\\AliceDoe2425.gnucash",
+    }
+
+
+def test_save_entity_rejects_malformed_fy_key(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+    before_text = entities_path.read_text(encoding="utf-8")
+
+    for bad_line in (
+        "2025 = C:\\books\\x.gnucash",
+        "AY2025-26 = C:\\books\\x.gnucash",
+        "2026-27-1 = C:\\books\\x.gnucash",
+    ):
+        with patch("ui._config.data_root_dir", return_value=data_root):
+            msg = ui_mod._save_entity(
+                "", "SYN-BADFY", "Bad FY", "DDDDD3333D", "Individual", "Resident",
+                "", "", "", "", "", "", "", "new", "", False, "", "", "",
+                bad_line,
+            )
+        assert "Not saved" in msg
+        assert "financial year" in msg
+        assert entities_path.read_text(encoding="utf-8") == before_text
+
+
+def test_entity_to_form_books_line_present_and_blank(tmp_path):
+    data_root = _seed(tmp_path, extra={
+        "SYN-BOOKS2": {
+            "name": "Books Two", "pan": "EEEEE4444E", "status": "Individual",
+            "residency": "Resident", "default_regime": "new",
+            "books": {"2025-26": "C:\\books\\BobDoe2526.gnucash"},
+        },
+    })
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        entities = ui_mod._load_entities()
+        form_with_books = ui_mod._entity_to_form("SYN-BOOKS2", entities)
+        form_without_books = ui_mod._entity_to_form("SYN-IND", entities)
+        form_new = ui_mod._entity_to_form("", entities)
+
+    assert form_with_books[-1] == "2025-26 = C:\\books\\BobDoe2526.gnucash"
+    assert form_without_books[-1] == ""
+    assert form_new[-1] == ""
+    assert len(form_new) == len(form_with_books)
+
+
+def test_derived_match_text_override_wins():
+    text = ui_mod._derived_match_text(
+        "2025-26 = C:\\books\\AliceDoe2526.gnucash", "ManualOverride"
+    )
+    assert "ManualOverride" in text
+    assert "explicit override" in text
+
+
+def test_derived_match_text_newest_fy_derived():
+    books_text = (
+        "2024-25 = C:\\books\\AliceDoe2425.gnucash\n"
+        "2025-26 = C:\\books\\AliceDoe2526.gnucash"
+    )
+    text = ui_mod._derived_match_text(books_text, "")
+    assert "`AliceDoe`" in text
+    assert "2025-26" in text
+
+
+def test_derived_match_text_huf_suffix_preserved():
+    text = ui_mod._derived_match_text("2025-26 = C:\\books\\BobDoeHUF2526.gnucash", "")
+    assert "`BobDoeHUF`" in text
+
+
+def test_derived_match_text_none_yet():
+    text = ui_mod._derived_match_text("", "")
+    assert "none yet" in text
+
+
+def test_browse_append_book_valid_fy(monkeypatch):
+    called = {"n": 0}
+
+    def _fake_pick_files(*args, **kwargs):
+        called["n"] += 1
+        return (["C:\\books\\AliceDoe2526.gnucash"], [])
+
+    monkeypatch.setattr(ui_mod._filedialog, "pick_files", _fake_pick_files)
+    monkeypatch.setattr(ui_mod.gr, "Warning", lambda *a, **k: None)
+
+    result = ui_mod._browse_append_book("2024-25 = C:\\books\\AliceDoe2425.gnucash", "2025-26")
+
+    assert called["n"] == 1
+    books, errors = ui_mod._parse_kv_lines(result["value"])
+    assert errors == []
+    assert books["2025-26"] == "C:\\books\\AliceDoe2526.gnucash"
+    assert books["2024-25"] == "C:\\books\\AliceDoe2425.gnucash"
+
+
+def test_browse_append_book_replaces_existing_fy_line(monkeypatch):
+    def _fake_pick_files(*args, **kwargs):
+        return (["C:\\books\\AliceDoe2526-v2.gnucash"], [])
+
+    monkeypatch.setattr(ui_mod._filedialog, "pick_files", _fake_pick_files)
+    monkeypatch.setattr(ui_mod.gr, "Warning", lambda *a, **k: None)
+
+    result = ui_mod._browse_append_book("2025-26 = C:\\books\\AliceDoe2526-v1.gnucash", "2025-26")
+    books, _errors = ui_mod._parse_kv_lines(result["value"])
+    assert books["2025-26"] == "C:\\books\\AliceDoe2526-v2.gnucash"
+
+
+def test_browse_append_book_malformed_fy_leaves_text_unchanged(monkeypatch):
+    called = {"n": 0}
+
+    def _fake_pick_files(*args, **kwargs):
+        called["n"] += 1
+        return (["C:\\books\\AliceDoe2526.gnucash"], [])
+
+    monkeypatch.setattr(ui_mod._filedialog, "pick_files", _fake_pick_files)
+    monkeypatch.setattr(ui_mod.gr, "Warning", lambda *a, **k: None)
+
+    original_text = "2024-25 = C:\\books\\AliceDoe2425.gnucash"
+    result = ui_mod._browse_append_book(original_text, "not-a-fy")
+
+    assert called["n"] == 0
+    # gr.update() with no value set carries no "value" key -- box unchanged.
+    assert "value" not in result or result.get("value") is None
+
+
+def test_books_added_to_one_entity_leaves_other_byte_stable(tmp_path):
+    data_root = _seed(tmp_path)
+    entities_path = data_root / "itr" / "entities.yaml"
+
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        entities_before = ui_mod._load_entities()
+        huf_dump_before = configs.dump_entities({"SYN-HUF": entities_before["SYN-HUF"]})
+
+        msg = ui_mod._save_entity(
+            "SYN-IND", "SYN-IND", "Synthetic Individual", "AAAAA0000A",
+            "Individual", "Resident", "", "", "", "", "", "", "", "new", "",
+            False, "", "", "",
+            "2025-26 = C:\\books\\AliceDoe2526.gnucash",
+        )
+        assert "Saved" in msg
+
+        entities_after = ui_mod._load_entities()
+
+    assert entities_after["SYN-IND"].books == {"2025-26": "C:\\books\\AliceDoe2526.gnucash"}
+    huf_dump_after = configs.dump_entities({"SYN-HUF": entities_after["SYN-HUF"]})
+    assert huf_dump_before == huf_dump_after
+
+
 def test_delete_rollback_on_mid_cascade_failure(tmp_path):
     data_root = _seed(tmp_path)
     mappings_dir = data_root / "itr" / "mappings"
