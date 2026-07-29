@@ -72,6 +72,14 @@ class EntityProfile:
                                        # the name portion of the workbook filename WITHOUT
                                        # the year (e.g. "AliceDoe") -- consumed by
                                        # _workbook_match_map() in ui/tabs/itr_mapping_review.py
+    books: dict[str, str] = field(default_factory=dict)   # {"2025-26": "<path to .gnucash>", ...} --
+                                       # Phase 1 (book-registry) pure-logic groundwork: the
+                                       # per-financial-year GnuCash book path registry.
+                                       # Purely additive/inert in this phase -- nothing reads
+                                       # it yet except effective_workbook_match() below; not
+                                       # consumed by _entity_book_path()/_workbook_match_map()
+                                       # in ui/tabs/itr_mapping_review.py (those still use their
+                                       # own standalone `book:`/`workbook_match:` reads).
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
     audit_case: bool = False             # liable to audit -> 31 Oct s.139(1) due date
@@ -108,6 +116,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             aadhaar=fields_.get("aadhaar"),
             business_subtree=fields_.get("business_subtree"),
             workbook_match=fields_.get("workbook_match"),
+            books=fields_.get("books") or {},
             default_regime=fields_.get("default_regime", "new"),
             regime_by_ay=fields_.get("regime_by_ay") or {},
             audit_case=bool(fields_.get("audit_case", False)),
@@ -172,6 +181,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["business_subtree"] = e.business_subtree
     if e.workbook_match:
         d["workbook_match"] = e.workbook_match
+    if e.books:
+        d["books"] = dict(e.books)
     if e.regime_by_ay:
         d["regime_by_ay"] = dict(e.regime_by_ay)
     if e.audit_case:
@@ -269,6 +280,57 @@ def dump_entities(entities: dict[str, EntityProfile]) -> str:
     body = {key: _entity_to_dict(entities[key]) for key in sorted(entities.keys())}
     payload = yaml.safe_dump(body, sort_keys=True, allow_unicode=True, default_flow_style=False)
     return ENTITIES_YAML_HEADER + "\n" + payload
+
+
+_TRAILING_YEAR_DIGITS_RE = re.compile(r"\d+$")
+
+
+def derive_workbook_match(path: str | Path) -> str:
+    """Derive a Layer-A-style workbook_match token from a GnuCash file path:
+    the filename stem with any trailing run of digits stripped (the digits
+    being a year/FY suffix, e.g. "2526" or "25626").
+
+    Pure/side-effect-free -- does not touch the filesystem or require the
+    file to exist. Strips ONLY a trailing digit run; digits that are
+    followed by letters (e.g. embedded mid-name) are left alone, and a
+    stem with no trailing digits is returned unchanged. Case is preserved
+    (never lowercased) -- callers that need case-insensitive comparison
+    (e.g. the existing substring matching in ui/tabs/itr_mapping_review.py)
+    handle that themselves.
+
+    Examples:
+        "AliceDoe25626.gnucash"        -> "AliceDoe"
+        "BobDoe2526.gnucash"      -> "BobDoe"
+        "BobDoeHUF2526.gnucash"   -> "BobDoeHUF"
+        "CarolDoe2526.gnucash"        -> "CarolDoe"
+        "NoDigitsHere.gnucash"            -> "NoDigitsHere"
+    """
+    stem = Path(path).stem
+    return _TRAILING_YEAR_DIGITS_RE.sub("", stem)
+
+
+def effective_workbook_match(profile: "EntityProfile", fy: str | None = None) -> str | None:
+    """Resolve the Layer-A attribution token to use for `profile`.
+
+    Precedence:
+      1. `profile.workbook_match` if explicitly set (truthy) -- an explicit
+         override always wins.
+      2. Else, if `profile.books` is non-empty: derive the token (via
+         `derive_workbook_match`) from the book path for `fy` if `fy` is
+         given and present in `profile.books`; otherwise from the book for
+         the newest FY key (sorted descending -- deterministic, not an
+         arbitrary dict-iteration-order pick).
+      3. Else None (nothing to attribute from).
+
+    Pure -- does not touch the filesystem."""
+    if profile.workbook_match:
+        return profile.workbook_match
+    if profile.books:
+        if fy is not None and fy in profile.books:
+            return derive_workbook_match(profile.books[fy])
+        newest_fy = sorted(profile.books.keys(), reverse=True)[0]
+        return derive_workbook_match(profile.books[newest_fy])
+    return None
 
 
 _PAN_RE_SRC = r"[A-Z]{5}\d{4}[A-Z]"
