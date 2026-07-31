@@ -4,10 +4,10 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> **Gap notice:** entries for 2.22.0, 2.23.0, 2.23.1 and 3.0.0 were never
-> written up here. Those releases shipped and are tagged; the changelog simply
-> was not updated at the time. The git history between the tags is the record
-> until they are backfilled.
+> **Note on release tags:** on 2026-07-31 every tag below `v2.23.1` was deleted
+> to remove the publicly downloadable source archives GitHub generates per tag.
+> The commits all remain on `main`, so the history behind older entries is
+> intact, but the version links no longer resolve to a tag.
 
 ## [3.1.0] — 2026-07-31
 
@@ -76,6 +76,68 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `-Intercompany-Recon` → `-Inter-entity-Recon` and `-Intercompany-Matrix`
   → `-Inter-entity-Matrix`. No code globs those suffixes, so this only
   orphans previously generated output files — accepted deliberately.
+
+## [3.0.0] — 2026-07-29
+
+### Added
+- **Per-entity, per-financial-year GnuCash book registry.** Each entity in
+  `entities.yaml` can now record which `.gnucash` book is theirs for a given
+  FY, under a `books:` map keyed by FY (`"2025-26": <path>`). A new
+  `ui/_book_registry.py` answers "where is this person's book?" via
+  `resolve_book(entity_key, fy)`, falling back to the newest registered FY
+  when none is given, and still honouring the older single `book:` key so
+  existing configs keep working. Books are registered from the Entities tab.
+- **Mapping learnings are scoped per entity instead of per workbook name.**
+  Rules sidecars lost their year component, so a learning taught in one
+  financial year survives the roll into the next — previously a year-roll
+  silently orphaned roughly 2,600 lines of accumulated mapping rules,
+  because the sidecar name embedded the year. A self-heal migration
+  (Phase 0b) rewrites the old year-bearing sidecar to the new name on first
+  use. It fires **per book, on a GnuCash Pipeline run or a Save in Review
+  Mappings** — not at app start — so a book you have not touched since
+  upgrading is migrated the first time you use it, not before.
+- **Native "Browse" buttons for every GnuCash book picker**, replacing
+  paste-the-path-in with a real file dialog.
+- Read-only book snapshots, so a reconciliation reads a consistent view.
+
+### Changed
+- **Breaking: `EntityProfile` gains `books:` and the ITR flow resolves the
+  book through the registry** rather than from the workbook filename. ITR
+  Workbook auto-fills an empty book field from the registry; other surfaces
+  still required the path by hand until 3.1.0.
+- Skill-registry count assertion updated 21 → 22.
+
+## [2.23.1] — 2026-07-29
+
+### Fixed
+- **Scrubbed real personal data from example data, comments and tests.**
+  Example configs, docstrings and test fixtures had accumulated real family
+  names. All of it was replaced with synthetic placeholders. This is a
+  forward-only scrub: this release is the clean waterline, and everything
+  from here on is checked before it ships. Earlier history still carries the
+  original values and was deliberately not rewritten.
+
+## [2.23.0] — 2026-07-28
+
+### Added
+- **`workbook_match` is now a first-class `EntityProfile` field.** Which ITR
+  workbook belongs to which entity had been inferred from the entity key or
+  display name, which broke for entities whose workbook is named differently
+  and needed longest-match-wins handling for the HUF. It is now declared
+  explicitly in `entities.yaml` and edited from the Entities tab, so the
+  match is configuration rather than a naming convention.
+
+## [2.22.0] — 2026-07-28
+
+### Fixed
+- **Review Mapping showed another entity's proposed mappings.** Proposed
+  mappings were pooled across all entities rather than scoped to the one
+  being reviewed, so suggestions from an unrelated book could be accepted
+  into the wrong workbook. Proposals are now entity-scoped.
+
+### Added
+- **Row delete in Review Mapping**, so a bad proposed mapping can be removed
+  outright instead of only being edited or ignored.
 
 ## [2.21.1] — 2026-07-28
 
