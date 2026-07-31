@@ -1,5 +1,5 @@
 """
-agent.py -- Intercompany reconciliation between two GnuCash books.
+agent.py -- Inter-entity reconciliation between two GnuCash books.
 DIRECT mode, deterministic, no LLM (so the output file is always written and the
 UI download button appears reliably).
 
@@ -69,7 +69,7 @@ def run(
     diff = result["difference"]
     tie = "TIES OUT" if diff == 0 else f"OUT OF BALANCE by {diff:,.2f}"
     lines = [
-        f"Intercompany reconciliation: {a.owner} <-> {b.owner}  [{result['fy_label']}]",
+        f"Inter-entity reconciliation: {a.owner} <-> {b.owner}  [{result['fy_label']}]",
         f"  Contra in {a.path.name}: {', '.join(x.name for x in result['a_contra'])}",
         f"  Contra in {b.path.name}: {', '.join(x.name for x in result['b_contra'])}",
         f"  Opening b/f : {a.owner} {result['a_open']:,.2f}  |  {b.owner} {result['b_open']:,.2f}",

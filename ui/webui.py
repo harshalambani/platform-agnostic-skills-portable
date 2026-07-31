@@ -345,7 +345,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
     from collections import defaultdict  # noqa: PLC0415
 
     GROUP_ORDER = [
-        ("banks",       "Banks"),
+        # "Bank Skills" (not "Banks") because GnuCash > Banks is a different
+        # tab: this one holds the individual per-bank statement parsers, that
+        # one holds the end-to-end book pipeline.
+        ("banks",       "Bank Skills"),
         ("credit_card", "Credit Card"),
         ("26as",        "26AS"),
         ("gnucash",     "GnuCash"),
@@ -353,11 +356,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
     ]
     # "krc" and "intercompany" have no top-level GROUP_ORDER entry of their
     # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
-    # "Intercompany" sub-tab, both inside "gnucash" (see below). "itr" is
+    # "Inter-entity" sub-tab, both inside "gnucash" (see below). "itr" is
     # likewise nested inside "gnucash" as its own "ITR" sub-tab (mirroring
-    # "Banks"), containing "ITR Workbook", "ITR Mapping", and "ITR Entities"
-    # as sub-sub-tabs,
-    # rather than getting a flat top-level tab. Exclude them here too,
+    # "Banks"), containing "ITR Workbook", "Review Mapping" and "AIS Reconcile"
+    # as sub-sub-tabs, rather than getting a flat top-level tab. Exclude them here too,
     # otherwise the fallback loop at the end of this function (for skills
     # whose category isn't in _known_cats) renders them a second time as
     # flat top-level tabs.
@@ -411,10 +413,12 @@ def build_app(launch: bool = False) -> gr.Blocks:
 
                 _cat_skills = _grouped.get(_cat_key, [])
 
-                # GnuCash is a container: a "Banks" sub-tab (statement import +
-                # Review Mappings), an "Intercompany" sub-tab (Reco + Matrix),
-                # a "26AS" sub-tab (Convert + Journal), a "KRChoksey" sub-tab,
-                # and an "ITR" sub-tab (ITR Workbook + ITR Mapping + ITR Entities).
+                # GnuCash is a container: a "Banks" sub-tab (Convert to GnuCash
+                # + Review), an "Inter-entity" sub-tab (Reconcile + Matrix), a
+                # "26AS" sub-tab (Convert + Convert to GnuCash + Review), a
+                # "KRChoksey" sub-tab, an "ITR" sub-tab (ITR Workbook + Review
+                # Mapping + AIS Reconcile), and an app-wide "Entities" sub-tab
+                # last. Every group ends in a "Review" tab.
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
@@ -423,15 +427,15 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     for _skill in _cat_skills:
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
-                                    with gr.Tab("Review Mappings") as _rt:
+                                    with gr.Tab("Review") as _rt:
                                         tab_gnucash_review.render(container_tab=_rt)
-                            with gr.Tab("Intercompany"):
+                            with gr.Tab("Inter-entity"):
                                 with gr.Tabs():
-                                    # Pairwise Reco is the primary tool per the
-                                    # skills' own manifests; Matrix is the
-                                    # optional all-family roll-up built on it.
-                                    _ic_order = {"Intercompany Reco": 0,
-                                                 "Intercompany Matrix": 1}
+                                    # The pairwise Reconcile is the primary tool
+                                    # per the skills' own manifests; Matrix is
+                                    # the optional all-family roll-up on it.
+                                    _ic_order = {"Inter-entity Reconcile": 0,
+                                                 "Inter-entity Matrix": 1}
                                     for _skill in sorted(
                                         _grouped.get("intercompany", []),
                                         key=lambda s: _ic_order.get(s.display_name, 99),
@@ -443,14 +447,14 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     for _skill in _grouped.get("26as", []):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
-                                    with gr.Tab("Journal Review") as _jt:
+                                    with gr.Tab("Review") as _jt:
                                         tab_tds_journal_review.render(container_tab=_jt)
                             with gr.Tab("KRChoksey"):
                                 with gr.Tabs():
                                     # Order the KRChoksey sub-tabs by workflow
                                     # (Part I -> II -> III), not alphabetically.
-                                    _krc_order = {"KRChoksey": 0, "Reconcile": 1,
-                                                  "GnuCash Import": 2}
+                                    _krc_order = {"Convert": 0, "Reconcile": 1,
+                                                  "Convert to GnuCash": 2}
                                     for _skill in sorted(
                                         _grouped.get("krc", []),
                                         key=lambda s: _krc_order.get(s.display_name, 99),
@@ -463,12 +467,38 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             if _itr_skills:
                                 with gr.Tab("ITR"):
                                     with gr.Tabs():
-                                        with gr.Tab("ITR Workbook") as _t:
-                                            tab_generic.render(_itr_skills[0], container_tab=_t)
-                                        with gr.Tab("ITR Mapping") as _mt:
+                                        # Every skill in the "itr" category gets a
+                                        # sub-tab. This used to render _itr_skills[0]
+                                        # only, which silently hid AIS Reconcile from
+                                        # the UI from the day it shipped (85e0100).
+                                        #
+                                        # Workflow order: build the workbook, fix its
+                                        # account mapping, then reconcile against the
+                                        # AIS last -- so the hand-written "Review Mapping"
+                                        # tab renders BETWEEN the skills, which is why
+                                        # the skill list is split around it rather than
+                                        # iterated once. Ranks >= 50 sort after it;
+                                        # unknown skills land at 99 (last).
+                                        _itr_order = {"ITR Workbook": 0,
+                                                      "AIS Reconcile": 50}
+                                        _rank = lambda s: _itr_order.get(s.display_name, 99)  # noqa: E731
+                                        _itr_sorted = sorted(_itr_skills, key=_rank)
+                                        for _skill in [s for s in _itr_sorted if _rank(s) < 50]:
+                                            with gr.Tab(_skill.display_name) as _t:
+                                                tab_generic.render(_skill, container_tab=_t)
+                                        with gr.Tab("Review Mapping") as _mt:
                                             tab_itr_mapping_review.render(container_tab=_mt)
-                                        with gr.Tab("ITR Entities") as _et:
-                                            tab_itr_entities.render(container_tab=_et)
+                                        for _skill in [s for s in _itr_sorted if _rank(s) >= 50]:
+                                            with gr.Tab(_skill.display_name) as _t:
+                                                tab_generic.render(_skill, container_tab=_t)
+                            # Entities is master data for the WHOLE app, not an
+                            # ITR sub-feature: entities.yaml feeds the Entity
+                            # dropdown on Banks, Inter-entity, 26AS, KRChoksey
+                            # and ITR alike, and its books: registry is what
+                            # auto-fills every GnuCash book field. Kept last so
+                            # the workflow tabs stay in reading order.
+                            with gr.Tab("Entities") as _et:
+                                tab_itr_entities.render(container_tab=_et)
                     continue
 
                 if not _cat_skills:

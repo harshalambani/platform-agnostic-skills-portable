@@ -44,8 +44,8 @@ help:
     GnuCash-importable CSV in canonical columns.
   when_to_use: >
     Use this for the .xls statements ICICI lets you download from net-banking.
-    To also map rows to GnuCash accounts in one step, use GnuCash Import and
-    choose ICICI instead.
+    To also map rows to GnuCash accounts in one step, use Banks > Convert to
+    GnuCash and choose ICICI instead.
   inputs:
     - name: "statement_files"
       tooltip: "One or more ICICI .xls statement downloads."

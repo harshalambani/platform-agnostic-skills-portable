@@ -7,7 +7,7 @@ Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a fla
 
 ## When to use it
 
-Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import pipeline (choose "Kotak" there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.
+Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks "Convert to GnuCash" pipeline (choose "Kotak" there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.
 
 ## Inputs
 

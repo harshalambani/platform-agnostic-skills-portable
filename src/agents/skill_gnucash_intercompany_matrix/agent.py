@@ -66,7 +66,7 @@ def run(
     with_exc = [p for p in ok if p["res"]["a_exc"] or p["res"]["b_exc"]]
 
     lines = [
-        f"Intercompany matrix [{m['fy_label']}] -- {len(paths)} books, "
+        f"Inter-entity matrix [{m['fy_label']}] -- {len(paths)} books, "
         f"{len(m['pairs'])} pairs.",
         f"  Reconciled: {len(ok)}   |   n/a (no mutual contra): {len(na)}",
         f"  Out of balance: {len(out_of_balance)}   |   With exceptions: {len(with_exc)}",

@@ -1094,7 +1094,7 @@ def run(
                     log_lines.append(
                         f"Contra check — {len(contras)} cross-bank "
                         f"transfer(s) detected ({', '.join(parts)}). "
-                        f"Review in **Review Mappings** tab."
+                        f"Review in the **Banks > Review** tab."
                     )
                     _emit_progress(4, f"{bank}: {len(contras)} contra(s) flagged")
                 else:
@@ -1191,5 +1191,5 @@ def run(
         f"{steps_summary}\n\n"
         f"---\n\n"
         f"{mapping_result}\n\n"
-        f"**Next:** check the **Review Mappings** tab to verify/correct account assignments, then import into GnuCash."
+        f"**Next:** check the **Banks > Review** tab to verify/correct account assignments, then import into GnuCash."
     )

@@ -214,5 +214,34 @@ def test_webui_constructs():
     tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
     assert "ITR" in tab_labels
     assert "ITR Workbook" in tab_labels
-    assert "ITR Mapping" in tab_labels
+    assert "Review Mapping" in tab_labels
     assert "GnuCash" in tab_labels
+
+    # Entities is app-wide master data (it feeds every Entity dropdown), so it
+    # sits at the GnuCash level as "Entities", NOT inside ITR as "ITR Entities".
+    assert "Entities" in tab_labels
+    assert "ITR Entities" not in tab_labels
+
+
+def test_every_registered_skill_gets_a_tab():
+    """Every skill the registry discovers must be reachable in the UI.
+
+    Regression guard: the ITR group used to render `_itr_skills[0]` only, so
+    AIS Reconcile was registered, documented and help-covered but had no tab
+    at all -- invisible from the day it shipped. Any future group that indexes
+    into its skill list instead of iterating it fails here.
+    """
+    try:
+        import gradio  # noqa: F401
+        if not hasattr(gradio, "Blocks"):
+            pytest.skip("gradio not fully installed")
+    except ImportError:
+        pytest.skip("gradio not installed")
+    from agents import registry
+    from ui import webui
+
+    app = webui.build_app(launch=False)
+    tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
+    missing = [s.display_name for s in registry.discover(refresh=True)
+               if s.display_name not in tab_labels]
+    assert not missing, f"registered skills with no tab in the UI: {missing}"

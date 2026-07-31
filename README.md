@@ -17,7 +17,7 @@ your data local.
 ## Skills
 
 16 skills are exposed in the UI (a further 6 internal pipeline steps run only
-as part of GnuCash Import — see [src/agents](src/agents)).
+as part of Banks → Convert to GnuCash — see [src/agents](src/agents)).
 
 | Skill | Mode | LLM | What it does |
 |-------|------|-----|--------------|
@@ -27,12 +27,12 @@ as part of GnuCash Import — see [src/agents](src/agents)).
 | ICICI → GnuCash CSV | agent | yes | Convert ICICI XLS statement downloads → GnuCash-importable CSV |
 | CC Sort — Extract & Organize | direct | no | Sort credit-card statement PDFs by bank/issuer, extract from .msg |
 | CC Transactions → Excel | direct | no | Extract transaction tables from sorted CC PDFs → consolidated Excel |
-| GnuCash Import | agent | yes | End-to-end: bank statement + GnuCash book → mapped, import-ready CSV in one step |
+| Banks → Convert to GnuCash | agent | yes | End-to-end: bank statement + GnuCash book → mapped, import-ready CSV in one step |
 | 26AS → Excel (Convert) | direct | no | Parse Indian tax Form 26AS PDF → structured Excel workbook |
-| 26AS Journal | agent | yes | Build GnuCash TDS journal entries from a 26AS workbook + your .gnucash file |
-| KRChoksey Ledger | direct | no | Simplify a KR Choksey broker ledger PDF into a tied-out "Simplified Ledger" workbook |
-| KRChoksey GnuCash Import | direct | no | Convert KR Choksey Bills workbook → GnuCash multi-split CSVs (Purchase/SLBM/Sale) |
-| KRChoksey Reconcile | direct | no | Reconcile KR Choksey contract notes against the Simplified Ledger |
+| 26AS → Convert to GnuCash | agent | yes | Build GnuCash TDS journal entries from a 26AS workbook + your .gnucash file |
+| KRChoksey → Convert | direct | no | Simplify a KR Choksey broker ledger PDF into a tied-out "Simplified Ledger" workbook |
+| KRChoksey → Convert to GnuCash | direct | no | Convert KR Choksey Bills workbook → GnuCash multi-split CSVs (Purchase/SLBM/Sale) |
+| KRChoksey → Reconcile | direct | no | Reconcile KR Choksey contract notes against the Simplified Ledger |
 | CSV Data Analyzer | agent | yes | Ask natural-language questions about any CSV file |
 | Document Summarizer | direct | yes | Summarise any PDF or text file → Markdown |
 | MSG / Email Parser | direct | no | Parse .msg or .eml → structured JSON (sender, date, body, attachments) |

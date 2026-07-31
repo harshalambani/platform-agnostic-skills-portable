@@ -1,9 +1,9 @@
-# skill.yaml -- Intercompany Reconciliation manifest.
+# skill.yaml -- Inter-entity Reconciliation manifest.
 # Read by the skill registry (agents/registry.py) at startup and rendered as a
 # tab under the "intercompany" category.
 
 name: "gnucash_intercompany"
-display_name: "Intercompany Reco"
+display_name: "Inter-entity Reconcile"
 description: >
   Reconcile the accounts two people keep for each other across two GnuCash books
   (e.g. Bob <-> Alice). Finds each person's contra account(s) in the other's
@@ -26,11 +26,23 @@ inputs:
     label: "First person's GnuCash book (.gnucash) -- must be closed in GnuCash"
     file_types: [".gnucash"]
     required: true
+    book_from: "entity_a"
+  - name: "entity_a"
+    type: "select"
+    label: "First entity (optional -- auto-fills the first GnuCash book from the registry)"
+    options_from: "itr_entities"
+    required: false
   - name: "book_b"
     type: "file"
     label: "Second person's GnuCash book (.gnucash) -- must be closed in GnuCash"
     file_types: [".gnucash"]
     required: true
+    book_from: "entity_b"
+  - name: "entity_b"
+    type: "select"
+    label: "Second entity (optional -- auto-fills the second GnuCash book from the registry)"
+    options_from: "itr_entities"
+    required: false
   - name: "period"
     type: "select"
     label: "Reconciliation period (Indian FY = 1 Apr to 31 Mar)"
@@ -70,7 +82,7 @@ run_args:
 
 output:
   extension: ".xlsx"
-  suffix: "Intercompany-Recon"
+  suffix: "Inter-entity-Recon"
   download_label: "Download Reconciliation Workbook"
 
 requires:
@@ -98,6 +110,14 @@ help:
       tooltip: "The second person's GnuCash book -- the counter-party."
       accepts: "GnuCash file (.gnucash)."
       gotchas: "Each person's own name in the OTHER book's account tree is how contra accounts are found. 'X HUF' is treated as a different entity from 'X'."
+    - name: "entity_a"
+      tooltip: "Optional -- pick the first person's entity to auto-fill their GnuCash book from the registry."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "UI convenience only; leave unset to pick the file manually as before."
+    - name: "entity_b"
+      tooltip: "Optional -- pick the second person's entity to auto-fill their GnuCash book from the registry."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "UI convenience only; leave unset to pick the file manually as before. Does not affect the Period select below -- that still needs choosing separately."
     - name: "period"
       tooltip: "Which period to reconcile. Indian financial year runs 1 Apr to 31 Mar."
       accepts: "A FY, a calendar year, Auto, or a custom date range."
@@ -122,7 +142,7 @@ help:
   outputs:
     folder: "Data/outputs/"
     files:
-      - name: "YYYY-MM-DD-HHMMSS-<input>-Intercompany-Recon.xlsx"
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Inter-entity-Recon.xlsx"
         tooltip: >
           The reconciliation statement: a Summary (opening, movements, closing,
           and the balance difference), a Matched sheet pairing both books'

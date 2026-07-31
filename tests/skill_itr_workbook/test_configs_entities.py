@@ -84,7 +84,7 @@ def test_dump_includes_stable_header():
     text = configs.dump_entities(_make_entities())
     assert text.startswith(configs.ENTITIES_YAML_HEADER)
     assert "entities.yaml" in text
-    assert "ITR Entities" in text
+    assert "GnuCash > Entities" in text
 
 
 def test_dump_is_idempotent():

@@ -142,7 +142,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
 ENTITIES_YAML_HEADER = (
     "# =============================================================================\n"
     "# entities.yaml -- Data/itr/entities.yaml (per-entity ITR profile).\n"
-    "# Managed via the \"ITR Entities\" tab in the app (Add/Modify/Delete) -- hand\n"
+    "# Managed via the \"Entities\" tab in the app (GnuCash > Entities;\n"
+    "# Add/Modify/Delete) -- hand\n"
     "# edits survive individual field values but NOT comments or key ordering: this\n"
     "# header is re-emitted verbatim on every save, and entity blocks + fields are\n"
     "# written in a deterministic (sorted-key) order via configs.dump_entities().\n"

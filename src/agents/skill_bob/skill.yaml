@@ -54,8 +54,8 @@ help:
     to the top of the next is captured as a single clean row.
   when_to_use: >
     Use this when you have BoB account statements as PDFs and want them as a
-    tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import
-    pipeline (choose "Bank of Baroda" there to do extraction + account mapping
+    tidy CSV you can open in Excel, reconcile, or feed into the Banks "Convert
+    to GnuCash" pipeline (choose "Bank of Baroda" there to do extraction + account mapping
     in one step instead). This skill is extraction only — it does not categorise
     or assign accounts.
   inputs:

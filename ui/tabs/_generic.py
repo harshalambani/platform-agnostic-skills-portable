@@ -45,6 +45,7 @@ from .. import _help
 from .. import _review_csv
 from .. import _runner
 from .. import _runlog
+from . import _entity_book
 
 if TYPE_CHECKING:
     from agents.registry import SkillInfo
@@ -98,24 +99,15 @@ def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[st
 
 def _options_from_itr_entities() -> list[tuple[str, str]]:
     """(label, entity_key) pairs from Data/itr/entities.yaml, for the ITR
-    Workbook skill's `entity` dropdown (options_from: itr_entities). Reads
-    fresh on every call so entities.yaml edits show up on refresh without a
-    restart; gracefully empty when the file is absent (first run) or
-    malformed (caller keeps the dropdown usable via allow_custom_value)."""
-    path = _config.data_root_dir() / "itr" / "entities.yaml"
-    if not path.is_file():
-        return []
-    try:
-        import yaml
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        if not isinstance(raw, dict):
-            return []
-        return sorted(
-            (f"{key} ({fields_.get('status', '?')})" if isinstance(fields_, dict) else key, key)
-            for key, fields_ in raw.items()
-        )
-    except Exception:
-        return []
+    Workbook skill's `entity` dropdown (options_from: itr_entities).
+
+    Backward-compat wrapper: the actual logic now lives in
+    `_entity_book.entity_choices()` (Phase 5 core, 2026-07-30 handover),
+    shared with the new book_from/fy_from prefill plumbing. Kept here so
+    existing call sites (e.g. ui/tabs/itr_mapping_review.py's
+    `_entity_choices()`) and the `options_from: "itr_entities"` resolver
+    below keep working unchanged."""
+    return _entity_book.entity_choices()
 
 
 def _options_from_itr_ay_years() -> list[tuple[str, str]]:
@@ -769,10 +761,21 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         with gr.Column(scale=2):
             # Build input components from skill.inputs.
             input_components = []
+            input_by_name: dict[str, object] = {}  # inp.name -> its component, for book_from/fy_from wiring below
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
+            # Entity selects that drive a `book_from` prefill must NOT pre-select
+            # their first choice. Gradio's .change() does not fire for an initial
+            # value, so a pre-selected name would sit above an empty book field —
+            # reading as "this book belongs to that person" when nothing was
+            # resolved. Start blank; the first real pick fires .change() and fills
+            # the book. Selects that are not book_from sources (e.g. ITR Workbook's
+            # `entity`) keep their existing pre-select behaviour.
+            _book_from_sources = {
+                inp.book_from for inp in skill.inputs if inp.type == "file" and inp.book_from
+            }
             for inp in skill.inputs:
                 if inp.type == "file":
                     with gr.Row():
@@ -837,7 +840,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                             comp = gr.Dropdown(
                                 label=inp.label,
                                 choices=_dchoices,
-                                value=_dchoices[0][1] if _dchoices else None,
+                                value=(
+                                    None
+                                    if inp.name in _book_from_sources
+                                    else (_dchoices[0][1] if _dchoices else None)
+                                ),
                                 allow_custom_value=True,
                                 interactive=True,
                                 scale=5,
@@ -872,6 +879,55 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
                     )
                 input_components.append(comp)
+                input_by_name[inp.name] = comp
+
+            # Entity -> GnuCash book prefill wiring (Phase 5 core, 2026-07-30
+            # handover): for each `file` input declaring `book_from`, wire the
+            # named entity select's `.change()` to auto-fill this file field via
+            # _entity_book.book_update(). Done after ALL components are built so
+            # book_from/fy_from can reference any input regardless of declaration
+            # order in skill.yaml. This is independent of, and does not replace,
+            # the existing run-time `_registry_book_fill()` belt-and-braces path
+            # for ITR Workbook (left untouched above/below).
+            for inp in skill.inputs:
+                if inp.type != "file" or not inp.book_from:
+                    continue
+                file_comp = input_by_name[inp.name]
+                entity_comp = input_by_name.get(inp.book_from)
+                if entity_comp is None:
+                    raise ValueError(
+                        f"skill.yaml error in '{skill.name}': input '{inp.name}' declares "
+                        f"book_from: '{inp.book_from}', but no input named '{inp.book_from}' "
+                        f"exists on this skill. Fix the skill.yaml: book_from must name "
+                        f"another input's `name` (typically a `select` carrying the entity key)."
+                    )
+                wiring_inputs = [entity_comp]
+                if inp.fy_from:
+                    fy_comp = input_by_name.get(inp.fy_from)
+                    if fy_comp is None:
+                        raise ValueError(
+                            f"skill.yaml error in '{skill.name}': input '{inp.name}' declares "
+                            f"fy_from: '{inp.fy_from}', but no input named '{inp.fy_from}' "
+                            f"exists on this skill. Fix the skill.yaml: fy_from must name "
+                            f"another input's `name` (typically a `select` carrying a bare FY "
+                            f"string, e.g. '2025-26')."
+                        )
+                    wiring_inputs.append(fy_comp)
+
+                def _make_book_from_handler():
+                    if len(wiring_inputs) == 2:
+                        def _handler(entity_val, fy_val):
+                            return _entity_book.book_update(entity_val, fy_val)
+                    else:
+                        def _handler(entity_val):
+                            return _entity_book.book_update(entity_val)
+                    return _handler
+
+                entity_comp.change(
+                    fn=_make_book_from_handler(),
+                    inputs=wiring_inputs,
+                    outputs=[file_comp],
+                )
 
             # Model dropdown — only meaningful for LLM-powered skills; deterministic
             # skills ignore model_override entirely, so hide it there.

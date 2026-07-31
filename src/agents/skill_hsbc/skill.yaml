@@ -49,7 +49,7 @@ help:
   when_to_use: >
     Use this when you have one or more HSBC statement PDFs (savings or Premier)
     and want a single tidy, reconciled spreadsheet. For account-mapped output
-    into GnuCash, use GnuCash Import and choose HSBC instead.
+    into GnuCash, use Banks > Convert to GnuCash and choose HSBC instead.
   inputs:
     - name: "pdf_dir"
       tooltip: "A folder containing one or more HSBC statement PDFs."

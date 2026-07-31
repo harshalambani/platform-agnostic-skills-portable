@@ -4,6 +4,79 @@ All notable changes to this project are recorded here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+> **Gap notice:** entries for 2.22.0, 2.23.0, 2.23.1 and 3.0.0 were never
+> written up here. Those releases shipped and are tagged; the changelog simply
+> was not updated at the time. The git history between the tags is the record
+> until they are backfilled.
+
+## [3.1.0] — 2026-07-31
+
+### Added
+- **Entity selector auto-fills the GnuCash book on every book surface**
+  (book registry, Phase 5). v3.0.0 let each entity register its `.gnucash`
+  book per financial year, but only ITR Workbook consumed it — every other
+  surface still demanded the path by hand, because those tabs had no entity
+  context to key `resolve_book()` on. Each surface that asks for a book now
+  gets an optional Entity dropdown; picking a person fills the book field
+  from the registry. The file field stays visible and fully overridable —
+  Browse still wins, and a registry miss (no `books:`, unregistered entity,
+  or a registered path that no longer exists on disk) deliberately leaves
+  the field untouched rather than blanking a path the user picked manually.
+  Eight surfaces wired: Banks Convert to GnuCash, Banks Review,
+  Inter-entity Reconcile (both sides), 26AS Convert to GnuCash, 26AS Review,
+  KRChoksey Convert to GnuCash, KRChoksey Review, AIS Reconcile.
+  Inter-entity Matrix is deliberately excluded — its `books` input is
+  `type: "files"` (many books), which `book_from` cannot serve. Wiring is
+  declarative (`book_from:` on a file input paired with an
+  `options_from: itr_entities` select) and happens at render time via
+  `.change()`, not run time. Entity inputs are UI-only; no skill `run()`
+  signatures changed. Explicit non-goal: no CSV→book provenance record, so
+  a wrong entity/book pairing is still possible and is not flagged.
+- **"Entities" promoted to a GnuCash-level tab.** `entities.yaml` stopped
+  being ITR-only data once it began feeding every Entity dropdown and every
+  book auto-fill, so its editor moved up one level out of ITR and now sits
+  as the last sub-tab under GnuCash. The tab also gains a read-only
+  "Other dropdown data" panel explaining where the AY, bank and model lists
+  come from (shipped rules + overlay, installed parsers, configured LLM
+  endpoint) — none of those has a file to edit, so the panel reports rather
+  than pretends to be an editor.
+
+### Fixed
+- **AIS Reconcile had no tab — it was invisible from the day it shipped.**
+  The ITR group rendered `_itr_skills[0]` only, so whichever skill sorted
+  first ("ITR Workbook") got a tab and the rest silently vanished. The
+  indexing predates AIS Reconcile (8c91927, 2026-07-13) by two weeks, so the
+  skill had been registered, documented and help-covered but unreachable in
+  the UI for its entire life. The group is now iterated rather than indexed,
+  and a new `test_every_registered_skill_gets_a_tab` fails CI if any future
+  group repeats the mistake.
+
+### Changed
+- **Tab labels standardised so the same verb means the same thing in every
+  group.** Banks "Import Statement" → "Convert to GnuCash"; Banks "Review
+  Mappings" → "Review" (every group now ends in a tab called "Review"); 26AS
+  "Journal" → "Convert to GnuCash" and "Journal Review" → "Review";
+  KRChoksey "KRChoksey" → "Convert" and "GnuCash Import" → "Convert to
+  GnuCash"; ITR "ITR Mapping" → "Review Mapping"; the top-level "Banks" tab
+  → "Bank Skills" (it holds the per-bank statement parsers, while
+  GnuCash → Banks holds the end-to-end book pipeline — the two were
+  indistinguishable by name). AIS Reconcile now renders last within ITR.
+- **"Intercompany" → "Inter-entity" in everything user-visible** — display
+  names ("Inter-entity Reconcile", "Inter-entity Matrix"), report titles,
+  CLI descriptions, AGENT.md and help text. "Reco" → "Reconcile"
+  throughout. Internal `name:` keys, module paths and directory names are
+  unchanged (`skill_gnucash_intercompany`, `reconcile_intercompany.py`), so
+  nothing on disk or in the registry moves.
+- **The five entity dropdowns had five different labels.** All now read
+  "Entity (optional -- auto-fills the GnuCash book from the registry)"; the
+  two-book Inter-entity Reconcile uses First/Second variants.
+
+### Breaking
+- **Output filename suffixes renamed** with the Inter-entity rename:
+  `-Intercompany-Recon` → `-Inter-entity-Recon` and `-Intercompany-Matrix`
+  → `-Inter-entity-Matrix`. No code globs those suffixes, so this only
+  orphans previously generated output files — accepted deliberately.
+
 ## [2.21.1] — 2026-07-28
 
 ### Fixed

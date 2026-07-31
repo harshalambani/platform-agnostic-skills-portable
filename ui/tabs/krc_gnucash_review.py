@@ -1,5 +1,5 @@
 """
-ui/tabs/krc_gnucash_review.py — KRChoksey GnuCash Import: Review tab.
+ui/tabs/krc_gnucash_review.py — KRChoksey Convert to GnuCash: Review tab.
 
 Built on the shared ui._review_engine skeleton — see ui/tabs/gnucash_review.py
 (closest analogue: a picker that reassigns one column) and
@@ -63,6 +63,7 @@ import yaml
 
 from .. import _config as _config_mod
 from .. import _filedialog
+from . import _entity_book
 from .._review_engine import (
     Column,
     PickerItem,
@@ -107,7 +108,7 @@ def _classify_reason(reason: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _scan_review_csvs() -> list[tuple[str, str]]:
-    """Find */Review.csv under KRChoksey GnuCash Import output folders,
+    """Find */Review.csv under KRChoksey Convert to GnuCash output folders,
     newest first. label = "<run folder name>/Review.csv"."""
     try:
         out_dir = _config_mod.output_dir()
@@ -421,19 +422,30 @@ def _save_changes(changes_json: str) -> str:
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the KRChoksey GnuCash Import Review tab. Must be called inside
+    """Render the KRChoksey Convert to GnuCash Review tab. Must be called inside
     gr.Tab(). Pass that gr.Tab as ``container_tab`` so the Review.csv picker
     re-scans and auto-selects the newest run whenever the tab is opened."""
 
     gr.Markdown(
-        "## Review KRChoksey GnuCash Import\n\n"
-        "Select a Review.csv (from a GnuCash Import run) and your GnuCash book, "
+        "## Review\n\n"
+        "Select a Review.csv (from a Convert to GnuCash run) and your GnuCash book, "
         "then click Load. Only **Needs mapping** rows can be fixed here — "
         "**Data issue** and **Judgment** rows are locked; fix the Bills workbook "
         "or the book's purchase history and re-run the skill instead."
     )
 
     initial_reviews = _scan_review_csvs()
+
+    with gr.Row():
+        entity_dd = gr.Dropdown(
+            label="Entity (optional -- auto-fills the GnuCash book from the registry)",
+            choices=_entity_book.entity_choices(),
+            value=None,
+            allow_custom_value=True,
+            interactive=True,
+            scale=4,
+        )
+        entity_refresh_btn = gr.Button("↻", scale=0, min_width=40)
 
     with gr.Row():
         review_dropdown = gr.Dropdown(
@@ -459,6 +471,17 @@ def render(container_tab=None) -> None:
         outputs=[review_dropdown],
     )
 
+    entity_dd.change(
+        fn=lambda entity_val: _entity_book.book_update(entity_val, None),
+        inputs=[entity_dd],
+        outputs=[gnucash_file],
+    )
+    entity_refresh_btn.click(
+        fn=lambda: gr.update(choices=_entity_book.entity_choices()),
+        inputs=[],
+        outputs=[entity_dd],
+    )
+
     # Native OS file picker for the GnuCash book — a bare gr.File stages a
     # *temp copy* in the browser and hands the handler that temp path, which
     # is catastrophic for a live .gnucash (wrong path, breaks the book GUID).
@@ -467,9 +490,13 @@ def render(container_tab=None) -> None:
     # browser's type filter and upload caps are bypassed by a native pick),
     # and sets gnucash_file's value to the REAL absolute path. Drag-drop into
     # the box is untouched — this is additive.
-    # NOTE: persisting the picked path into ui/_book_registry.py (per-entity
-    # book memory) is deferred to the Entities registration UI — these tabs
-    # have no entity/FY context to key it on.
+    # NOTE: the Entity dropdown above resolves a registered book via
+    # _entity_book.book_update() (registry hit fills gnucash_file; a miss
+    # leaves it untouched). Browse still wins if used afterward — it always
+    # overwrites with the picked path, no validation blocks that. The picked
+    # path itself is still not written back into ui/_book_registry.py; that
+    # remains the Entities registration UI's job — these tabs only consume
+    # the registry, they don't update it.
     def _browse_gnucash_book():
         valid, warnings = _filedialog.pick_files(
             f"{APP_ID}.gnucash_book",

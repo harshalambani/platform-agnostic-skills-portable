@@ -74,7 +74,7 @@ def _fmt_suggestions(suggs) -> str:
 def _summary_sheet(ws, r):
     a, b = r["book_a"], r["book_b"]
     ws.sheet_view.showGridLines = False
-    ws["A1"] = "Intercompany Reconciliation"
+    ws["A1"] = "Inter-entity Reconciliation"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = f"{a.owner}  <->  {b.owner}"
     ws["A2"].font = Font(bold=True, size=12)

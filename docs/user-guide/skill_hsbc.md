@@ -7,7 +7,7 @@ Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel wo
 
 ## When to use it
 
-Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use GnuCash Import and choose HSBC instead.
+Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks > Convert to GnuCash and choose HSBC instead.
 
 ## Inputs
 

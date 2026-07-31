@@ -61,8 +61,8 @@ help:
     memos and trade notes) against the Part I Simplified Ledger and produces a
     "Bills" workbook. Runs fully offline (deterministic, no LLM).
   when_to_use: >
-    Run this second, after "KRChoksey" (Part I). Its Bills workbook is the input
-    to "GnuCash Import" (Part III).
+    Run this second, after "Convert" (Part I). Its Bills workbook is the input
+    to "Convert to GnuCash" (Part III).
   inputs:
     - name: "ledger_xlsx"
       tooltip: "The Part I Simplified Ledger — pick it from the list of prior outputs."
@@ -87,7 +87,7 @@ help:
       - name: "YYYY-MM-DD-HHMMSS-<input>-KRC-Bills-Recon.xlsx"
         tooltip: >
           The reconciled Bills workbook tying contract notes to the ledger. This
-          is the file you pick in the GnuCash Import (Part III) tab.
+          is the file you pick in the Convert to GnuCash (Part III) tab.
   tips: >
     A complete set of contract notes is what makes Part II tie out — missing
     notes show up as unmatched bills.

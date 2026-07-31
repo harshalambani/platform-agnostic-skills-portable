@@ -7,7 +7,7 @@ Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM mem
 
 ## When to use it
 
-Run this second, after "KRChoksey" (Part I). Its Bills workbook is the input to "GnuCash Import" (Part III).
+Run this second, after "Convert" (Part I). Its Bills workbook is the input to "Convert to GnuCash" (Part III).
 
 ## Inputs
 
@@ -38,7 +38,7 @@ Data/outputs/YYYY-MM-DD-HHMMSS-<input>-KRC-Bills-Recon.xlsx
 
 Files produced:
 
-- **`YYYY-MM-DD-HHMMSS-<input>-KRC-Bills-Recon.xlsx`** — The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the GnuCash Import (Part III) tab.
+- **`YYYY-MM-DD-HHMMSS-<input>-KRC-Bills-Recon.xlsx`** — The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the Convert to GnuCash (Part III) tab.
 
 ## Tips
 

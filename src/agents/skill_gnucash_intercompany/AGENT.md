@@ -1,4 +1,4 @@
-# Intercompany Reconciliation Agent (DIRECT mode, no LLM)
+# Inter-entity Reconciliation Agent (DIRECT mode, no LLM)
 
 ## Role
 Reconcile the contra ("counter-party") accounts that two people keep for each
@@ -34,7 +34,7 @@ other across two GnuCash books (e.g. Bob <-> Alice). Read-only.
    while exceptions remain, when unmatched items net to zero.
 
 ## Output
-`...-Intercompany-Recon.xlsx` in `Data/outputs/`:
+`...-Inter-entity-Recon.xlsx` in `Data/outputs/`:
 - **Summary** -- owners, period, contra accounts, opening/movements/closing per
   side, the difference (green ties / red out-of-balance), and counts.
 - **Matched** -- paired entries side by side with day-gap and match basis.
