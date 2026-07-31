@@ -463,8 +463,19 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             if _itr_skills:
                                 with gr.Tab("ITR"):
                                     with gr.Tabs():
-                                        with gr.Tab("ITR Workbook") as _t:
-                                            tab_generic.render(_itr_skills[0], container_tab=_t)
+                                        # Every skill in the "itr" category gets a
+                                        # sub-tab. This used to render _itr_skills[0]
+                                        # only, which silently hid AIS Reconcile from
+                                        # the UI from the day it shipped (85e0100).
+                                        # Order by workflow, unknown names last.
+                                        _itr_order = {"ITR Workbook": 0,
+                                                      "AIS Reconcile": 1}
+                                        for _skill in sorted(
+                                            _itr_skills,
+                                            key=lambda s: _itr_order.get(s.display_name, 99),
+                                        ):
+                                            with gr.Tab(_skill.display_name) as _t:
+                                                tab_generic.render(_skill, container_tab=_t)
                                         with gr.Tab("ITR Mapping") as _mt:
                                             tab_itr_mapping_review.render(container_tab=_mt)
                                         with gr.Tab("ITR Entities") as _et:

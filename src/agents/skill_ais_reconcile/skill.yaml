@@ -11,7 +11,9 @@
 # the AIS portal -- every suggestion is for a human (a CA) to review.
 
 name: "AIS Reconcile"
-display_name: "Reconcile"
+# Sub-tab label under GnuCash -> ITR. Spelled out rather than a bare
+# "Reconcile" so it is not confused with KRChoksey -> Reconcile.
+display_name: "AIS Reconcile"
 description: >
   Decrypt an Indian Income-Tax AIS (Annual Information Statement) JSON
   export and reconcile it against itself, an optional 26AS workbook, and
