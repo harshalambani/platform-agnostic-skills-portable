@@ -17,7 +17,7 @@ Use once you've downloaded your AIS JSON export from the income-tax portal, to c
 - **GnuCash book (optional, must be the SAME FY as the AIS -- enables the books tie-out)** (optional) — accepts: GnuCash XML book (.gnucash), optionally gzip-compressed.
   - GnuCash book for the SAME financial year as the AIS export.
   - ⚠️ Must be the matching-FY book. A book with no transactions in that FY window still produces a tie-out sheet, but the run summary carries a loud WARNING -- the numbers on that sheet are almost certainly meaningless for a wrong-year book.
-- **Entity (optional -- auto-fills the GnuCash book above from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+- **Entity (optional -- auto-fills the GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
   - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
   - ⚠️ UI convenience only; leave unset to pick the file manually as before. This does not resolve the AIS export's own entity -- that is always inferred from the AIS filename's masked PAN.
 - **26AS workbook (optional, from the 26AS skill -- enables the TDS-credit tie-out)** (optional) — accepts: Excel (.xlsx) with a Part I (TDS) sheet.

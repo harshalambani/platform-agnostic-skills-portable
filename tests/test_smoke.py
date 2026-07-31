@@ -214,7 +214,7 @@ def test_webui_constructs():
     tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
     assert "ITR" in tab_labels
     assert "ITR Workbook" in tab_labels
-    assert "ITR Mapping" in tab_labels
+    assert "Review Mapping" in tab_labels
     assert "GnuCash" in tab_labels
 
     # Entities is app-wide master data (it feeds every Entity dropdown), so it

@@ -86,7 +86,7 @@ def main(argv=None) -> int:
     out_of_balance = [p for p in ok if p["res"]["difference"] != 0]
     with_exc = [p for p in ok if p["res"]["a_exc"] or p["res"]["b_exc"]]
 
-    print(f"Intercompany matrix  [{m['fy_label']}]  --  {len(m['paths'])} books, "
+    print(f"Inter-entity matrix  [{m['fy_label']}]  --  {len(m['paths'])} books, "
           f"{len(m['pairs'])} pairs")
     for p in ok:
         r = p["res"]

@@ -13,7 +13,7 @@
 # 'YYYY-YY' key, e.g. "2025-26", NOT "FY 2025-26" -- to that entity's
 # `.gnucash` book path. Register a book once per FY on the Entities tab
 # and the app fills the book in for you wherever one is asked for (ITR
-# Workbook, Convert to GnuCash, Review Mappings, Inter-entity, 26AS, KRChoksey);
+# Workbook, Convert to GnuCash, Review, Inter-entity, 26AS, KRChoksey);
 # every file field stays overridable via Browse. `workbook_match` is DERIVED
 # from the registered book's filename (trailing year digits stripped), so an
 # explicit `workbook_match:` is only an override.

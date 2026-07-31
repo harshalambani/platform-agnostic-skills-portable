@@ -438,7 +438,7 @@ def render(container_tab=None) -> None:
 
     with gr.Row():
         entity_dd = gr.Dropdown(
-            label="Entity (fills the book below)",
+            label="Entity (optional -- auto-fills the GnuCash book from the registry)",
             choices=_entity_book.entity_choices(),
             value=None,
             allow_custom_value=True,

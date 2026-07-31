@@ -3,7 +3,7 @@
 
 *Mode: direct · 🔌 offline (no LLM)*
 
-An optional roll-up over the pairwise Inter-entity Reco: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.
+An optional roll-up over the pairwise Inter-entity Reconcile: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.
 
 ## When to use it
 
@@ -38,12 +38,12 @@ Run at year-end to see, at a glance, which family members' books agree and which
 Output is written to the **`Data/outputs/`** folder, named:
 
 ```
-Data/outputs/YYYY-MM-DD-HHMMSS-<input>-Intercompany-Matrix.xlsx
+Data/outputs/YYYY-MM-DD-HHMMSS-<input>-Inter-entity-Matrix.xlsx
 ```
 
 Files produced:
 
-- **`YYYY-MM-DD-HHMMSS-<input>-Intercompany-Matrix.xlsx`** — Matrix sheet (owner-by-owner difference grid, green ties / red out of balance / grey n/a), Pairs sheet (balances and counts per pair), and All Exceptions (every unmatched item across all pairs with the best probable posting found in the other book).
+- **`YYYY-MM-DD-HHMMSS-<input>-Inter-entity-Matrix.xlsx`** — Matrix sheet (owner-by-owner difference grid, green ties / red out of balance / grey n/a), Pairs sheet (balances and counts per pair), and All Exceptions (every unmatched item across all pairs with the best probable posting found in the other book).
 
 ## Tips
 
@@ -54,4 +54,4 @@ Start from the Matrix grid: any red cell is a pair to open. The All Exceptions s
 | If… | Then… |
 |------|-------|
 | A pair shows 'n/a'. | Those two books do not each keep an account named for the other. That is normal for people who do not transact. |
-| A pair is red (out of balance) with a large difference. | Open it in the two-book Inter-entity Reco for full Matched / Exceptions detail, then fix the mis-postings it lists. |
+| A pair is red (out of balance) with a large difference. | Open it in the two-book Inter-entity Reconcile for full Matched / Exceptions detail, then fix the mis-postings it lists. |

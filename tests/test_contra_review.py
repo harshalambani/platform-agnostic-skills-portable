@@ -1,10 +1,10 @@
 """
 tests/test_contra_review.py — regression guards for contra (cross-bank
-transfer) surfacing in the Review Mappings tab.
+transfer) surfacing in the Banks > Review tab.
 
 Background: contra entries are detected by the pipeline and persisted to a
 ``<csv-stem>.contra.json`` sidecar next to the import-ready CSV. The Review
-Mappings loader must read that sidecar and merge the reason/confidence onto
+loader must read that sidecar and merge the reason/confidence onto
 the matching row (by 0-based index).
 
 A prior release detected + saved contras correctly but they were effectively

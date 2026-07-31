@@ -32,7 +32,7 @@ def _matrix_sheet(ws, m):
     owners = m["owners"]
     n = len(owners)
     ws.sheet_view.showGridLines = False
-    ws["A1"] = "Intercompany Matrix -- balance difference per pair"
+    ws["A1"] = "Inter-entity Matrix -- balance difference per pair"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = (f"Period: {m['fy_label']}   |   date tolerance: +/-{m['tol_days']} days"
                 f"   |   0 = ties, blank = same book, n/a = no mutual contra")

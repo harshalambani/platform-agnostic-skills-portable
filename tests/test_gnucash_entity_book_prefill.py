@@ -4,9 +4,11 @@ added to the three hand-written GnuCash review tabs (GnuCash book registry
 architecture, Phase 5 handover follow-on, 2026-07-30).
 
 Each of ui/tabs/gnucash_review.py, ui/tabs/krc_gnucash_review.py, and
-ui/tabs/tds_journal_review.py now renders an optional "Entity (fills the
-book below)" gr.Dropdown + refresh button above its existing GnuCash-book
-gr.File row. Selecting an entity calls _entity_book.book_update(entity_key,
+ui/tabs/tds_journal_review.py now renders an optional "Entity (optional --
+auto-fills the GnuCash book from the registry)" gr.Dropdown + refresh
+button above its existing GnuCash-book gr.File row. That label is the
+canonical entity-dropdown wording shared with the skill.yaml-driven tabs.
+Selecting an entity calls _entity_book.book_update(entity_key,
 None) to prefill the book path from the registry; a registry miss leaves
 the field untouched (never blanks a manually-picked path), and using
 "Browse..." afterward always wins because it unconditionally overwrites the
@@ -54,7 +56,7 @@ for p in (str(SCRIPTS), str(SRC), str(ROOT)):
 import configs  # noqa: E402
 
 PAN = "ABCDE1234X"
-ENTITY_DD_LABEL = "Entity (fills the book below)"
+ENTITY_DD_LABEL = "Entity (optional -- auto-fills the GnuCash book from the registry)"
 
 MODULES = [
     "ui.tabs.gnucash_review",

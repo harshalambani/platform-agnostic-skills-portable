@@ -399,7 +399,7 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the Review Mappings tab. Must be called inside gr.Tab(). Pass that
+    """Render the Banks > Review tab. Must be called inside gr.Tab(). Pass that
     gr.Tab as ``container_tab`` so the Mapped-CSV picker re-scans and auto-selects
     the newest import-ready CSV whenever the tab is opened."""
 
@@ -409,7 +409,7 @@ def render(container_tab=None) -> None:
 
     with gr.Row():
         entity_dd = gr.Dropdown(
-            label="Entity (fills the book below)",
+            label="Entity (optional -- auto-fills the GnuCash book from the registry)",
             choices=_entity_book.entity_choices(),
             value=None,
             allow_custom_value=True,

@@ -63,7 +63,7 @@ def test_book_from_only_on_file_inputs():
                     f"{skill.name}: input '{inp.name}' has type '{inp.type}' "
                     f"but declares book_from -- the UI only wires book_from "
                     f"for type: \"file\" inputs. (Known exception: skills "
-                    f"whose GnuCash input is type \"files\", e.g. Intercompany "
+                    f"whose GnuCash input is type \"files\", e.g. Inter-entity "
                     f"Matrix, cannot use book_from at all.)"
                 )
 

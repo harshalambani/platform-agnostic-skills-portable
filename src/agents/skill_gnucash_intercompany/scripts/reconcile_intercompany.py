@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-reconcile_intercompany.py -- Intercompany (inter-person) reconciliation between
+reconcile_intercompany.py -- Inter-entity (inter-person) reconciliation between
 two GnuCash books. DIRECT mode, deterministic, no LLM.
 
 Given two .gnucash files (e.g. Bob <-> Alice), it:
@@ -466,7 +466,7 @@ def reconcile(book_a_path: str, book_b_path: str,
 # CLI (Excel writing lives in excel_report.py; imported lazily).
 # --------------------------------------------------------------------------- #
 def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="Intercompany GnuCash reconciliation")
+    ap = argparse.ArgumentParser(description="Inter-entity GnuCash reconciliation")
     ap.add_argument("book_a")
     ap.add_argument("book_b")
     ap.add_argument("out_xlsx")

@@ -38,7 +38,7 @@ inputs:
 
   - name: "entity"
     type: "select"
-    label: "Entity (optional — auto-fills the GnuCash book from the registry)"
+    label: "Entity (optional -- auto-fills the GnuCash book from the registry)"
     options_from: "itr_entities"
     required: false
 

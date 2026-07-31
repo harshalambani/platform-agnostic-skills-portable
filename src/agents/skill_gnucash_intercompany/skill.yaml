@@ -1,9 +1,9 @@
-# skill.yaml -- Intercompany Reconciliation manifest.
+# skill.yaml -- Inter-entity Reconciliation manifest.
 # Read by the skill registry (agents/registry.py) at startup and rendered as a
 # tab under the "intercompany" category.
 
 name: "gnucash_intercompany"
-display_name: "Inter-entity Reco"
+display_name: "Inter-entity Reconcile"
 description: >
   Reconcile the accounts two people keep for each other across two GnuCash books
   (e.g. Bob <-> Alice). Finds each person's contra account(s) in the other's
@@ -29,7 +29,7 @@ inputs:
     book_from: "entity_a"
   - name: "entity_a"
     type: "select"
-    label: "First person (optional -- auto-fills the book above from the registry)"
+    label: "First entity (optional -- auto-fills the first GnuCash book from the registry)"
     options_from: "itr_entities"
     required: false
   - name: "book_b"
@@ -40,7 +40,7 @@ inputs:
     book_from: "entity_b"
   - name: "entity_b"
     type: "select"
-    label: "Second person (optional -- auto-fills the book above from the registry)"
+    label: "Second entity (optional -- auto-fills the second GnuCash book from the registry)"
     options_from: "itr_entities"
     required: false
   - name: "period"
@@ -82,7 +82,7 @@ run_args:
 
 output:
   extension: ".xlsx"
-  suffix: "Intercompany-Recon"
+  suffix: "Inter-entity-Recon"
   download_label: "Download Reconciliation Workbook"
 
 requires:
@@ -142,7 +142,7 @@ help:
   outputs:
     folder: "Data/outputs/"
     files:
-      - name: "YYYY-MM-DD-HHMMSS-<input>-Intercompany-Recon.xlsx"
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Inter-entity-Recon.xlsx"
         tooltip: >
           The reconciliation statement: a Summary (opening, movements, closing,
           and the balance difference), a Matched sheet pairing both books'

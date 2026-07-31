@@ -1,7 +1,7 @@
-# Intercompany Matrix Agent (OPTIONAL roll-up, DIRECT mode, no LLM)
+# Inter-entity Matrix Agent (OPTIONAL roll-up, DIRECT mode, no LLM)
 
 ## Role
-An optional all-family overview built on the pairwise Intercompany Reco engine.
+An optional all-family overview built on the pairwise Inter-entity Reconcile engine.
 Reconciles **every unordered pair** among N GnuCash books and rolls the results
 into one workbook. Read-only.
 
@@ -22,7 +22,7 @@ into one workbook. Read-only.
    exception.
 
 ## Output
-`...-Intercompany-Matrix.xlsx` in `Data/outputs/`:
+`...-Inter-entity-Matrix.xlsx` in `Data/outputs/`:
 - **Matrix** -- owner x owner grid of the balance difference per pair
   (green = ties, red = out of balance, grey = n/a, `-` on the diagonal).
 - **Pairs** -- one row per pair: contra accounts, opening/closing per side,

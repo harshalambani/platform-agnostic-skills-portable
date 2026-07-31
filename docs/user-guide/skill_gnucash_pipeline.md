@@ -20,7 +20,7 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used to learn your accounts and map transactions.
   - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
-- **Entity (optional — auto-fills the GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+- **Entity (optional -- auto-fills the GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
   - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
   - ⚠️ UI convenience only; leave unset to pick the file manually as before.
 - **PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID.
