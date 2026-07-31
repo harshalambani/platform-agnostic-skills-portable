@@ -1,5 +1,5 @@
 """
-ui/tabs/krc_gnucash_review.py — KRChoksey GnuCash Import: Review tab.
+ui/tabs/krc_gnucash_review.py — KRChoksey Convert to GnuCash: Review tab.
 
 Built on the shared ui._review_engine skeleton — see ui/tabs/gnucash_review.py
 (closest analogue: a picker that reassigns one column) and
@@ -108,7 +108,7 @@ def _classify_reason(reason: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _scan_review_csvs() -> list[tuple[str, str]]:
-    """Find */Review.csv under KRChoksey GnuCash Import output folders,
+    """Find */Review.csv under KRChoksey Convert to GnuCash output folders,
     newest first. label = "<run folder name>/Review.csv"."""
     try:
         out_dir = _config_mod.output_dir()
@@ -422,13 +422,13 @@ def _save_changes(changes_json: str) -> str:
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the KRChoksey GnuCash Import Review tab. Must be called inside
+    """Render the KRChoksey Convert to GnuCash Review tab. Must be called inside
     gr.Tab(). Pass that gr.Tab as ``container_tab`` so the Review.csv picker
     re-scans and auto-selects the newest run whenever the tab is opened."""
 
     gr.Markdown(
-        "## Review KRChoksey GnuCash Import\n\n"
-        "Select a Review.csv (from a GnuCash Import run) and your GnuCash book, "
+        "## Review\n\n"
+        "Select a Review.csv (from a Convert to GnuCash run) and your GnuCash book, "
         "then click Load. Only **Needs mapping** rows can be fixed here — "
         "**Data issue** and **Judgment** rows are locked; fix the Bills workbook "
         "or the book's purchase history and re-run the skill instead."

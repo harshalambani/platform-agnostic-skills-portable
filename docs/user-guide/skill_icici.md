@@ -7,7 +7,7 @@ Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-i
 
 ## When to use it
 
-Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use GnuCash Import and choose ICICI instead.
+Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use Banks > Convert to GnuCash and choose ICICI instead.
 
 ## Inputs
 

@@ -3,7 +3,7 @@
 # tab under the "intercompany" category.
 
 name: "gnucash_intercompany"
-display_name: "Intercompany Reco"
+display_name: "Inter-entity Reco"
 description: >
   Reconcile the accounts two people keep for each other across two GnuCash books
   (e.g. Bob <-> Alice). Finds each person's contra account(s) in the other's

@@ -678,9 +678,9 @@ def render(container_tab=None) -> None:
 
     Despite the module name this is app-wide master data, not an ITR-only
     editor: `entities.yaml` also drives the entity dropdown on every skill
-    that asks for a GnuCash book (Banks Import + Review Mappings,
-    Intercompany Reco, 26AS Journal + Journal Review, KRChoksey Import +
-    Review, AIS Reconcile), which is why the tab sits alongside those
+    that asks for a GnuCash book (Banks Convert to GnuCash + Review Mappings,
+    Inter-entity Reco, 26AS Convert to GnuCash + Review, KRChoksey Convert to
+    GnuCash + Review, AIS Reconcile), which is why the tab sits alongside those
     workflows rather than inside ITR.
     """
     gr.Markdown(

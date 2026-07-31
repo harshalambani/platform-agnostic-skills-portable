@@ -2,7 +2,7 @@
 # Read by the skill registry (agents/registry.py) at startup.
 
 name: "26AS Journal"
-display_name: "Journal"
+display_name: "Convert to GnuCash"
 description: >
   Create GnuCash TDS/TCS journal entries from a 26AS Convert workbook and your
   .gnucash file. One balanced transaction per Part I deductor (Interest /
@@ -95,7 +95,7 @@ help:
           journal with every 15G/15H transaction dropped whole. Import this
           instead of the full journal if you post 15G/15H entries by hand in
           GnuCash yourself, so the Interest-on-FD reclassification is not
-          double-booked. Regenerated on every save from the Journal Review
+          double-booked. Regenerated on every save from the Review
           screen, so it can never go stale.
   tips: >
     Entries whose deductor could not be matched to an account are flagged so you

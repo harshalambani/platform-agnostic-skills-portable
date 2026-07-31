@@ -1,7 +1,7 @@
 # skill.yaml — GnuCash Import Pipeline manifest
 
 name: "gnucash_pipeline"
-display_name: "Import Statement"
+display_name: "Convert to GnuCash"
 description: >
   End-to-end import pipeline: upload a raw bank statement and your GnuCash book,
   get back a GnuCash-ready mapped CSV in one click. No intermediate steps.

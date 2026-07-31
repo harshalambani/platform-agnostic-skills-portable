@@ -1,5 +1,5 @@
 """
-ui/tabs/tds_journal_review.py -- "Journal Review" tab for the 26AS Journal
+ui/tabs/tds_journal_review.py -- 26AS "Review" tab for the 26AS journal
 skill's TDS/TCS output.
 
 The skill (src/agents/skill_26as_journal) parses a 26AS workbook and emits
@@ -714,10 +714,10 @@ def _save_changes(
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the Journal Review tab. Must be called inside gr.Tab()."""
+    """Render the 26AS Review tab. Must be called inside gr.Tab()."""
     gr.Markdown(
-        "## Journal Review\n\n"
-        "Review deductors the 26AS Journal skill routed to "
+        "## Review\n\n"
+        "Review deductors the 26AS Convert to GnuCash skill routed to "
         "`Liabilities:Suspense` (or otherwise flagged Needs Review). Select "
         "a review CSV and GnuCash book, click Load, assign the correct "
         "credit account via the searchable dropdown, select rows, Apply to "

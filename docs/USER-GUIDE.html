@@ -50,19 +50,19 @@ padding-top:14px}
 <a href="#skill_bob">Bank of Baroda</a>
 <a href="#skill_csv_analyzer">CSV Data Analyzer</a>
 <a href="#skill_26as">Convert</a>
+<a href="#skill_krc">Convert</a>
+<a href="#skill_26as_journal">Convert to GnuCash</a>
+<a href="#skill_gnucash_pipeline">Convert to GnuCash</a>
+<a href="#skill_krc_gnucash">Convert to GnuCash</a>
 <a href="#skill_cc_sort">Credit Card — Sort PDFs</a>
 <a href="#skill_cc_transactions">Credit Card — Transactions</a>
 <a href="#skill_summarize">Document Summarizer</a>
-<a href="#skill_krc_gnucash">GnuCash Import</a>
 <a href="#skill_hdfc">HDFC</a>
 <a href="#skill_hsbc">HSBC</a>
 <a href="#skill_icici">ICICI</a>
 <a href="#skill_itr_workbook">ITR Workbook</a>
-<a href="#skill_gnucash_pipeline">Import Statement</a>
-<a href="#skill_gnucash_intercompany_matrix">Intercompany Matrix</a>
-<a href="#skill_gnucash_intercompany">Intercompany Reco</a>
-<a href="#skill_26as_journal">Journal</a>
-<a href="#skill_krc">KRChoksey</a>
+<a href="#skill_gnucash_intercompany_matrix">Inter-entity Matrix</a>
+<a href="#skill_gnucash_intercompany">Inter-entity Reco</a>
 <a href="#skill_kotak">Kotak</a>
 <a href="#skill_msg_parser">MSG / Email Parser</a>
 <a href="#skill_parser_generator">Parser Generator</a>
@@ -105,7 +105,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_bob" class="skill">
 <h2>Bank of Baroda <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Turns one or more Bank of Baroda transaction-statement PDFs into a single flat CSV — one row per transaction. Runs fully offline (no LLM, no internet) and correctly stitches tables that overflow across pages without repeating the column header, so a transaction that wraps from the bottom of one page to the top of the next is captured as a single clean row.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import pipeline (choose &quot;Bank of Baroda&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Convert to GnuCash&quot; pipeline (choose &quot;Bank of Baroda&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Bank of Baroda statement PDF(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your BoB statement PDF(s). You can select several at once. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one or many, in any order.</span></li>
 </ul>
@@ -174,6 +174,119 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Sheets are empty or the text is garbled.</td><td>The PDF is a scan. Re-download the text 26AS from TRACES; this skill does not OCR.</td></tr>
 <tr><td>Columns look wrong / parts are missing.</td><td>The file is likely an AIS or TIS, not a 26AS. Use the correct 26AS PDF.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_krc" class="skill">
+<h2>Convert <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey broker ledger-statement PDF into a clean, tied-out &quot;Simplified Ledger&quot; Excel workbook. Runs fully offline (deterministic, no LLM).</p>
+<p class="whenuse"><b>When to use it.</b> Run this first of the three KRChoksey sub-tabs. Its workbook is the input to &quot;Reconcile&quot; (Part II), which in turn feeds &quot;Convert to GnuCash&quot; (Part III).</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>KR Choksey Ledger Statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your KR Choksey annual ledger statement PDF. ⚠️ The PDF is password-protected; you must supply the password below.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — the ledger statement.</span></li>
+<li><b>PDF password (account holder&#x27;s PAN)</b> <em>(required)</em> <span class="pa-tip" data-tip="The PDF password — the account holder&#x27;s PAN. ⚠️ Decryption uses qpdf (bundled in the frozen build; on PATH for source mode).">ℹ️</span><br><span class="fmt">accepts: Text — the account holder&#x27;s PAN.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Select the KR Choksey ledger statement PDF.</li>
+<li>Enter the PDF password (the account holder&#x27;s PAN).</li>
+<li>Click Run and download the Simplified Ledger workbook.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Ledger.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Ledger.xlsx</code><span class="pa-tip" data-tip="The Simplified Ledger: the annual statement re-laid as a clean, tied-out workbook. This is the file you pick in the Reconcile (Part II) tab.">ℹ️</span> — The Simplified Ledger: the annual statement re-laid as a clean, tied-out workbook. This is the file you pick in the Reconcile (Part II) tab.</li>
+</ul>
+<h3>Tips</h3><p>Run the three KRChoksey tabs in order — Convert, then Reconcile, then Convert to GnuCash. Each later tab picks this output from a dropdown of prior runs.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>Run fails opening the PDF.</td><td>Check the password is the correct PAN. Ensure qpdf is available in source mode.</td></tr>
+<tr><td>Rows look incomplete.</td><td>Confirm you selected the full annual ledger statement, not a single contract note.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_26as_journal" class="skill">
+<h2>Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books.</p>
+<p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>26AS workbook (Convert output)</b> <em>(required)</em> <span class="pa-tip" data-tip="The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs. ⚠️ Run 26AS Convert first; the picker only shows workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-26AS.xlsx.</span></li>
+<li><b>GnuCash file</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used only to read account names for matching. ⚠️ Close the book in GnuCash before running so the file is not locked. It is never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Entity (optional -- auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the 26AS workbook from the dropdown of prior outputs.</li>
+<li>Select your .gnucash book (make sure GnuCash has it closed).</li>
+<li>Click Run; review any deductors flagged as unmatched.</li>
+<li>Import the CSV into GnuCash: File &gt; Import &gt; Import Transactions from CSV.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals.csv</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals.csv</code><span class="pa-tip" data-tip="One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.">ℹ️</span> — One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals-partI.csv</code><span class="pa-tip" data-tip="Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Review screen, so it can never go stale.">ℹ️</span> — Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Review screen, so it can never go stale.</li>
+</ul>
+<h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
+<tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_gnucash_pipeline" class="skill">
+<h2>Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when your goal is to get transactions into GnuCash. Use the individual bank skills (BoB, HDFC, etc.) instead only when you want the extracted CSV without account mapping.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Bank</b> <em>(required)</em> <span class="pa-tip" data-tip="Which bank the statement is from — this picks the right extractor. ⚠️ Pick &#x27;Other Bank (CSV)&#x27; for any bank without a dedicated extractor; columns are normalised with LLM help.">ℹ️</span><br><span class="fmt">accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).</span></li>
+<li><b>Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other</b> <em>(required)</em> <span class="pa-tip" data-tip="The statement file(s), matching the bank you chose. ⚠️ File type must match the selected bank, or extraction will fail.">ℹ️</span><br><span class="fmt">accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other.</span></li>
+<li><b>GnuCash book (.gnucash) — must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used to learn your accounts and map transactions. ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Entity (optional — auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
+<li><b>PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Only used for HDFC when the statement PDF itself is password-protected. ⚠️ Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password — for HDFC this is often the Cust ID.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Choose the bank.</li>
+<li>Upload the matching statement file(s).</li>
+<li>Select your .gnucash book (closed in GnuCash).</li>
+<li>Click Run, then import the resulting CSV via File &gt; Import in GnuCash.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</code><span class="pa-tip" data-tip="The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.">ℹ️</span> — The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.</li>
+</ul>
+<h3>Tips</h3><p>Account mapping learns from your existing GnuCash history, so the more you have categorised before, the better the auto-mapping. Review a few rows after import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export over a password-protected PDF when you have the choice — extraction is equally deterministic either way, but if HDFC ever hands you a PDF whose text layer is garbled (rare, seen on some re-downloaded statements), the skill auto-detects it and falls back to OCR, which is typically ~90%+ accurate rather than exact; re-check the running/closing balance in that case.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
+<tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_krc_gnucash" class="skill">
+<h2>Convert to GnuCash <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Part III of the KR Choksey → GnuCash flow. Converts the Part II Bills workbook into importable GnuCash multi-split CSVs — Purchase, SLBM and Sale — using FIFO cost basis and the long-term holding threshold from your .gnucash book and an editable config in Data/settings/. Runs fully offline.</p>
+<p class="whenuse"><b>When to use it.</b> Run this last of the three KRChoksey tabs, after Reconcile (Part II). It produces the CSVs you import into GnuCash.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Part II Bills workbook</b> <em>(required)</em> <span class="pa-tip" data-tip="The Part II Bills workbook — pick it from the list of prior outputs. ⚠️ Run Part II first; the picker only lists Bills workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-KRC-Bills-Recon.xlsx.</span></li>
+<li><b>GnuCash book (.gnucash)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used for account paths and FIFO cost basis. ⚠️ Close the book in GnuCash before running. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Entity (optional -- auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the Part II Bills workbook from the dropdown.</li>
+<li>Select your .gnucash book (closed in GnuCash).</li>
+<li>Click Run, then open the output folder.</li>
+<li>Import each CSV into GnuCash (File &gt; Import &gt; Import Transactions from CSV).</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-KRC-GnuCash/</pre>
+<ul class="outputs">
+<li><code>Purchase.csv</code><span class="pa-tip" data-tip="One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount.">ℹ️</span> — One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount.</li>
+<li><code>SLBM.csv</code><span class="pa-tip" data-tip="One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income).">ℹ️</span> — One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income).</li>
+<li><code>Sale.csv</code><span class="pa-tip" data-tip="Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit).">ℹ️</span> — Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit).</li>
+<li><code>Review.csv</code><span class="pa-tip" data-tip="Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots.">ℹ️</span> — Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots.</li>
+</ul>
+<h3>Tips</h3><p>Every transaction&#x27;s Amount column sums to zero, so each imports as a balanced GnuCash transaction. The long-term threshold and account paths come from your book plus the editable config in Data/settings/.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>A Review.csv appears.</td><td>Open it: either a security name didn&#x27;t match an account (add/rename it) or a sale lacked enough FIFO lots (check earlier purchases were imported).</td></tr>
+<tr><td>Capital gain looks wrong.</td><td>Confirm the holding-period threshold and account paths in Data/settings/ match your setup.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
@@ -248,36 +361,6 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Summary is thin or generic.</td><td>The PDF may be a scan with no text layer. Use a text-based document.</td></tr>
 </tbody></table>
 </section>
-<section id="skill_krc_gnucash" class="skill">
-<h2>GnuCash Import <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Part III of the KR Choksey → GnuCash flow. Converts the Part II Bills workbook into importable GnuCash multi-split CSVs — Purchase, SLBM and Sale — using FIFO cost basis and the long-term holding threshold from your .gnucash book and an editable config in Data/settings/. Runs fully offline.</p>
-<p class="whenuse"><b>When to use it.</b> Run this last of the three KRChoksey tabs, after Reconcile (Part II). It produces the CSVs you import into GnuCash.</p>
-<h3>Inputs</h3><ul class="inputs">
-<li><b>Part II Bills workbook</b> <em>(required)</em> <span class="pa-tip" data-tip="The Part II Bills workbook — pick it from the list of prior outputs. ⚠️ Run Part II first; the picker only lists Bills workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-KRC-Bills-Recon.xlsx.</span></li>
-<li><b>GnuCash book (.gnucash)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used for account paths and FIFO cost basis. ⚠️ Close the book in GnuCash before running. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
-<li><b>Entity (optional -- auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
-</ul>
-<h3>How to run</h3><ol>
-<li>Pick the Part II Bills workbook from the dropdown.</li>
-<li>Select your .gnucash book (closed in GnuCash).</li>
-<li>Click Run, then open the output folder.</li>
-<li>Import each CSV into GnuCash (File &gt; Import &gt; Import Transactions from CSV).</li>
-</ol>
-<h3>Output</h3>
-<p>Written to <code>Data/outputs/</code>:</p>
-<pre>Data/outputs/YYYY-MM-DD-HHMMSS-KRC-GnuCash/</pre>
-<ul class="outputs">
-<li><code>Purchase.csv</code><span class="pa-tip" data-tip="One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount.">ℹ️</span> — One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount.</li>
-<li><code>SLBM.csv</code><span class="pa-tip" data-tip="One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income).">ℹ️</span> — One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income).</li>
-<li><code>Sale.csv</code><span class="pa-tip" data-tip="Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit).">ℹ️</span> — Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit).</li>
-<li><code>Review.csv</code><span class="pa-tip" data-tip="Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots.">ℹ️</span> — Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots.</li>
-</ul>
-<h3>Tips</h3><p>Every transaction&#x27;s Amount column sums to zero, so each imports as a balanced GnuCash transaction. The long-term threshold and account paths come from your book plus the editable config in Data/settings/.</p>
-<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>A Review.csv appears.</td><td>Open it: either a security name didn&#x27;t match an account (add/rename it) or a sale lacked enough FIFO lots (check earlier purchases were imported).</td></tr>
-<tr><td>Capital gain looks wrong.</td><td>Confirm the holding-period threshold and account paths in Data/settings/ match your setup.</td></tr>
-</tbody></table>
-</section>
 <section id="skill_hdfc" class="skill">
 <h2>HDFC <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Converts HDFC statements — digital PDF, password-protected PDF, scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a GnuCash-ready canonical CSV. All four shapes are parsed deterministically (no LLM). A garbled/unusable PDF text layer (custom font encoding) is auto-detected and routed to OCR with Tesseract automatically. Runs offline.</p>
@@ -308,7 +391,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_hsbc" class="skill">
 <h2>HSBC <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel workbook: it OCRs scanned pages (Tesseract + Poppler) while skipping pages that already have text, extracts the transaction ID, splits out the transaction date, scrubs the description, and adds an Extra Information column plus a Summary sheet.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use GnuCash Import and choose HSBC instead.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks &gt; Convert to GnuCash and choose HSBC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Folder containing HSBC statement PDF(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing one or more HSBC statement PDFs. ⚠️ Select the folder, not a single PDF. Scanned PDFs are OCR&#x27;d, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build).">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC PDF statements.</span></li>
 </ul>
@@ -332,7 +415,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_icici" class="skill">
 <h2>ICICI <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
 <p class="overview">Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-importable CSV in canonical columns.</p>
-<p class="whenuse"><b>When to use it.</b> Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use GnuCash Import and choose ICICI instead.</p>
+<p class="whenuse"><b>When to use it.</b> Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use Banks &gt; Convert to GnuCash and choose ICICI instead.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Use the original .xls export from ICICI net-banking. If you re-saved it as .xlsx, export a fresh .xls — the layout this skill expects is the net-banking .xls.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many.</span></li>
 </ul>
@@ -385,39 +468,9 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>&quot;ERROR: selected Assessment Year does not match&quot; and only a stub workbook is produced.</td><td>Pick the Assessment Year that matches the uploaded HTML&#x27;s as-of date, or upload the HTML for the selected year, then run again.</td></tr>
 </tbody></table>
 </section>
-<section id="skill_gnucash_pipeline" class="skill">
-<h2>Import Statement <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when your goal is to get transactions into GnuCash. Use the individual bank skills (BoB, HDFC, etc.) instead only when you want the extracted CSV without account mapping.</p>
-<h3>Inputs</h3><ul class="inputs">
-<li><b>Bank</b> <em>(required)</em> <span class="pa-tip" data-tip="Which bank the statement is from — this picks the right extractor. ⚠️ Pick &#x27;Other Bank (CSV)&#x27; for any bank without a dedicated extractor; columns are normalised with LLM help.">ℹ️</span><br><span class="fmt">accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).</span></li>
-<li><b>Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other</b> <em>(required)</em> <span class="pa-tip" data-tip="The statement file(s), matching the bank you chose. ⚠️ File type must match the selected bank, or extraction will fail.">ℹ️</span><br><span class="fmt">accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other.</span></li>
-<li><b>GnuCash book (.gnucash) — must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used to learn your accounts and map transactions. ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
-<li><b>Entity (optional — auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
-<li><b>PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Only used for HDFC when the statement PDF itself is password-protected. ⚠️ Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password — for HDFC this is often the Cust ID.</span></li>
-</ul>
-<h3>How to run</h3><ol>
-<li>Choose the bank.</li>
-<li>Upload the matching statement file(s).</li>
-<li>Select your .gnucash book (closed in GnuCash).</li>
-<li>Click Run, then import the resulting CSV via File &gt; Import in GnuCash.</li>
-</ol>
-<h3>Output</h3>
-<p>Written to <code>Data/outputs/</code>:</p>
-<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</pre>
-<ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</code><span class="pa-tip" data-tip="The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.">ℹ️</span> — The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.</li>
-</ul>
-<h3>Tips</h3><p>Account mapping learns from your existing GnuCash history, so the more you have categorised before, the better the auto-mapping. Review a few rows after import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export over a password-protected PDF when you have the choice — extraction is equally deterministic either way, but if HDFC ever hands you a PDF whose text layer is garbled (rare, seen on some re-downloaded statements), the skill auto-detects it and falls back to OCR, which is typically ~90%+ accurate rather than exact; re-check the running/closing balance in that case.</p>
-<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
-<tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
-<tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
-</tbody></table>
-</section>
 <section id="skill_gnucash_intercompany_matrix" class="skill">
-<h2>Intercompany Matrix <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">An optional roll-up over the pairwise Intercompany Reco: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.</p>
+<h2>Inter-entity Matrix <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">An optional roll-up over the pairwise Inter-entity Reco: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.</p>
 <p class="whenuse"><b>When to use it.</b> Run at year-end to see, at a glance, which family members&#x27; books agree and which do not -- instead of running the two-book reconciliation for every combination by hand.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Two or more people&#x27;s GnuCash books. ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as &#x27;n/a&#x27;, not an error. &#x27;X HUF&#x27; is a separate entity from &#x27;X&#x27;, so Bob vs Bob-HUF is its own pair.">ℹ️</span><br><span class="fmt">accepts: GnuCash files (.gnucash).</span></li>
@@ -440,11 +493,11 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <h3>Tips</h3><p>Start from the Matrix grid: any red cell is a pair to open. The All Exceptions sheet is the single actionable to-do list across the whole family.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>A pair shows &#x27;n/a&#x27;.</td><td>Those two books do not each keep an account named for the other. That is normal for people who do not transact.</td></tr>
-<tr><td>A pair is red (out of balance) with a large difference.</td><td>Open it in the two-book Intercompany Reco for full Matched / Exceptions detail, then fix the mis-postings it lists.</td></tr>
+<tr><td>A pair is red (out of balance) with a large difference.</td><td>Open it in the two-book Inter-entity Reco for full Matched / Exceptions detail, then fix the mis-postings it lists.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_gnucash_intercompany" class="skill">
-<h2>Intercompany Reco <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>Inter-entity Reco <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Reconciles the contra accounts two people keep for each other across their two GnuCash books. It matches the current financial year&#x27;s movements, carries the opening balance forward, and for every unmatched item searches the other book for a probable mis-posting -- then writes an Excel reconciliation statement. Fully offline and deterministic (no LLM); read-only on your books.</p>
 <p class="whenuse"><b>When to use it.</b> Run at year-end (or before filing) to confirm that what one person&#x27;s book shows as due to/from the other agrees with the other person&#x27;s book -- and to catch entries one side recorded that the other missed or mis-posted.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -476,63 +529,10 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Too many unmatched items that clearly correspond.</td><td>Increase the date tolerance -- the payments are landing in the other book more than a week apart.</td></tr>
 </tbody></table>
 </section>
-<section id="skill_26as_journal" class="skill">
-<h2>Journal <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books.</p>
-<p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.</p>
-<h3>Inputs</h3><ul class="inputs">
-<li><b>26AS workbook (Convert output)</b> <em>(required)</em> <span class="pa-tip" data-tip="The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs. ⚠️ Run 26AS Convert first; the picker only shows workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-26AS.xlsx.</span></li>
-<li><b>GnuCash file</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used only to read account names for matching. ⚠️ Close the book in GnuCash before running so the file is not locked. It is never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
-<li><b>Entity (optional -- auto-fills the GnuCash book from the registry)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
-</ul>
-<h3>How to run</h3><ol>
-<li>Pick the 26AS workbook from the dropdown of prior outputs.</li>
-<li>Select your .gnucash book (make sure GnuCash has it closed).</li>
-<li>Click Run; review any deductors flagged as unmatched.</li>
-<li>Import the CSV into GnuCash: File &gt; Import &gt; Import Transactions from CSV.</li>
-</ol>
-<h3>Output</h3>
-<p>Written to <code>Data/outputs/</code>:</p>
-<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals.csv</pre>
-<ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals.csv</code><span class="pa-tip" data-tip="One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.">ℹ️</span> — One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.</li>
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals-partI.csv</code><span class="pa-tip" data-tip="Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Journal Review screen, so it can never go stale.">ℹ️</span> — Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Journal Review screen, so it can never go stale.</li>
-</ul>
-<h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run.</p>
-<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
-<tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
-</tbody></table>
-</section>
-<section id="skill_krc" class="skill">
-<h2>KRChoksey <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey broker ledger-statement PDF into a clean, tied-out &quot;Simplified Ledger&quot; Excel workbook. Runs fully offline (deterministic, no LLM).</p>
-<p class="whenuse"><b>When to use it.</b> Run this first of the three KRChoksey sub-tabs. Its workbook is the input to &quot;Reconcile&quot; (Part II), which in turn feeds &quot;GnuCash Import&quot; (Part III).</p>
-<h3>Inputs</h3><ul class="inputs">
-<li><b>KR Choksey Ledger Statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your KR Choksey annual ledger statement PDF. ⚠️ The PDF is password-protected; you must supply the password below.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — the ledger statement.</span></li>
-<li><b>PDF password (account holder&#x27;s PAN)</b> <em>(required)</em> <span class="pa-tip" data-tip="The PDF password — the account holder&#x27;s PAN. ⚠️ Decryption uses qpdf (bundled in the frozen build; on PATH for source mode).">ℹ️</span><br><span class="fmt">accepts: Text — the account holder&#x27;s PAN.</span></li>
-</ul>
-<h3>How to run</h3><ol>
-<li>Select the KR Choksey ledger statement PDF.</li>
-<li>Enter the PDF password (the account holder&#x27;s PAN).</li>
-<li>Click Run and download the Simplified Ledger workbook.</li>
-</ol>
-<h3>Output</h3>
-<p>Written to <code>Data/outputs/</code>:</p>
-<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Ledger.xlsx</pre>
-<ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Ledger.xlsx</code><span class="pa-tip" data-tip="The Simplified Ledger: the annual statement re-laid as a clean, tied-out workbook. This is the file you pick in the Reconcile (Part II) tab.">ℹ️</span> — The Simplified Ledger: the annual statement re-laid as a clean, tied-out workbook. This is the file you pick in the Reconcile (Part II) tab.</li>
-</ul>
-<h3>Tips</h3><p>Run the three KRChoksey tabs in order — Ledger, then Reconcile, then GnuCash Import. Each later tab picks this output from a dropdown of prior runs.</p>
-<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run fails opening the PDF.</td><td>Check the password is the correct PAN. Ensure qpdf is available in source mode.</td></tr>
-<tr><td>Rows look incomplete.</td><td>Confirm you selected the full annual ledger statement, not a single contract note.</td></tr>
-</tbody></table>
-</section>
 <section id="skill_kotak" class="skill">
 <h2>Kotak <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV — one row per transaction. Runs fully offline (no LLM, no internet) and reads the statement&#x27;s ruled/bordered table structure directly, so a table that overflows from one page to the next (without repeating the column header) is still captured correctly, and the trailing abbreviation-legend page is excluded rather than mistaken for transaction rows.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Convert to GnuCash&quot; pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Kotak statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Kotak statement PDF. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first, or the run will report the file could not be opened.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one statement per run.</span></li>
 </ul>
@@ -608,7 +608,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_krc_recon" class="skill">
 <h2>Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM memos and trade notes) against the Part I Simplified Ledger and produces a &quot;Bills&quot; workbook. Runs fully offline (deterministic, no LLM).</p>
-<p class="whenuse"><b>When to use it.</b> Run this second, after &quot;KRChoksey&quot; (Part I). Its Bills workbook is the input to &quot;GnuCash Import&quot; (Part III).</p>
+<p class="whenuse"><b>When to use it.</b> Run this second, after &quot;Convert&quot; (Part I). Its Bills workbook is the input to &quot;Convert to GnuCash&quot; (Part III).</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Part I Simplified Ledger workbook</b> <em>(required)</em> <span class="pa-tip" data-tip="The Part I Simplified Ledger — pick it from the list of prior outputs. ⚠️ Run Part I first; the picker only lists Ledger workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-KRC-Ledger.xlsx.</span></li>
 <li><b>Contract Notes (SLBM memos + trade notes)</b> <em>(required)</em> <span class="pa-tip" data-tip="The contract-note PDFs — SLBM memos plus trade notes. ⚠️ Include every contract note for the period so the reconciliation is complete.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one or many contract notes.</span></li>
@@ -624,7 +624,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <p>Written to <code>Data/outputs/</code>:</p>
 <pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Bills-Recon.xlsx</pre>
 <ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Bills-Recon.xlsx</code><span class="pa-tip" data-tip="The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the GnuCash Import (Part III) tab.">ℹ️</span> — The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the GnuCash Import (Part III) tab.</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-KRC-Bills-Recon.xlsx</code><span class="pa-tip" data-tip="The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the Convert to GnuCash (Part III) tab.">ℹ️</span> — The reconciled Bills workbook tying contract notes to the ledger. This is the file you pick in the Convert to GnuCash (Part III) tab.</li>
 </ul>
 <h3>Tips</h3><p>A complete set of contract notes is what makes Part II tie out — missing notes show up as unmatched bills.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>

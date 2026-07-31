@@ -7,7 +7,7 @@ Turns one or more Bank of Baroda transaction-statement PDFs into a single flat C
 
 ## When to use it
 
-Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the GnuCash Import pipeline (choose "Bank of Baroda" there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.
+Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the Banks "Convert to GnuCash" pipeline (choose "Bank of Baroda" there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.
 
 ## Inputs
 
