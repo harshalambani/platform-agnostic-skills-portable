@@ -17,6 +17,9 @@ Run this last of the three KRChoksey tabs, after Reconcile (Part II). It produce
 - **GnuCash book (.gnucash)** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used for account paths and FIFO cost basis.
   - ⚠️ Close the book in GnuCash before running. It is read only, never modified.
+- **Entity (optional -- auto-fills the GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
+  - ⚠️ UI convenience only; leave unset to pick the file manually as before.
 
 ## How to run
 

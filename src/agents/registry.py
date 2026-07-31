@@ -50,6 +50,15 @@ class SkillInput:
     match: str = ""
     options_from: str = ""   # named dynamic option source (e.g. "itr_entities"),
                               # resolved by the UI layer; empty = use static `options`
+    book_from: str = ""      # (file inputs only) name of another `select` input
+                              # in this skill whose value is an entity key; the UI
+                              # layer auto-fills this file field from that entity's
+                              # registered GnuCash book. Empty = no auto-fill.
+    fy_from: str = ""        # (file inputs only, optional) name of another input
+                              # in this skill whose value is a bare FY string (e.g.
+                              # "2025-26"), used together with book_from to pick the
+                              # right book when an entity has more than one. Empty =
+                              # resolve to the entity's newest registered FY.
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,8 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             options=tuple(inp.get("options") or ()),
             match=inp.get("match", ""),
             options_from=inp.get("options_from", ""),
+            book_from=inp.get("book_from", ""),
+            fy_from=inp.get("fy_from", ""),
         ))
 
     out_raw = raw.get("output") or {}

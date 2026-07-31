@@ -63,6 +63,7 @@ import yaml
 
 from .. import _config as _config_mod
 from .. import _filedialog
+from . import _entity_book
 from .._review_engine import (
     Column,
     PickerItem,
@@ -436,6 +437,17 @@ def render(container_tab=None) -> None:
     initial_reviews = _scan_review_csvs()
 
     with gr.Row():
+        entity_dd = gr.Dropdown(
+            label="Entity (fills the book below)",
+            choices=_entity_book.entity_choices(),
+            value=None,
+            allow_custom_value=True,
+            interactive=True,
+            scale=4,
+        )
+        entity_refresh_btn = gr.Button("↻", scale=0, min_width=40)
+
+    with gr.Row():
         review_dropdown = gr.Dropdown(
             label="Review.csv",
             choices=initial_reviews,
@@ -459,6 +471,17 @@ def render(container_tab=None) -> None:
         outputs=[review_dropdown],
     )
 
+    entity_dd.change(
+        fn=lambda entity_val: _entity_book.book_update(entity_val, None),
+        inputs=[entity_dd],
+        outputs=[gnucash_file],
+    )
+    entity_refresh_btn.click(
+        fn=lambda: gr.update(choices=_entity_book.entity_choices()),
+        inputs=[],
+        outputs=[entity_dd],
+    )
+
     # Native OS file picker for the GnuCash book — a bare gr.File stages a
     # *temp copy* in the browser and hands the handler that temp path, which
     # is catastrophic for a live .gnucash (wrong path, breaks the book GUID).
@@ -467,9 +490,13 @@ def render(container_tab=None) -> None:
     # browser's type filter and upload caps are bypassed by a native pick),
     # and sets gnucash_file's value to the REAL absolute path. Drag-drop into
     # the box is untouched — this is additive.
-    # NOTE: persisting the picked path into ui/_book_registry.py (per-entity
-    # book memory) is deferred to the Entities registration UI — these tabs
-    # have no entity/FY context to key it on.
+    # NOTE: the Entity dropdown above resolves a registered book via
+    # _entity_book.book_update() (registry hit fills gnucash_file; a miss
+    # leaves it untouched). Browse still wins if used afterward — it always
+    # overwrites with the picked path, no validation blocks that. The picked
+    # path itself is still not written back into ui/_book_registry.py; that
+    # remains the Entities registration UI's job — these tabs only consume
+    # the registry, they don't update it.
     def _browse_gnucash_book():
         valid, warnings = _filedialog.pick_files(
             f"{APP_ID}.gnucash_book",

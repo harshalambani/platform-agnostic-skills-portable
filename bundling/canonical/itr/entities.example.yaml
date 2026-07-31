@@ -8,6 +8,19 @@
 # `residency` only takes effect when set to exactly one of R/OR, RNOR, NR --
 # any other value (including the legacy free text below) is undeclared and
 # defaults to R/OR (rules.resolve_residency()).
+#
+# `books:` (GnuCash book registry, v3.0.0) maps a financial year -- the bare
+# 'YYYY-YY' key, e.g. "2025-26", NOT "FY 2025-26" -- to that entity's
+# `.gnucash` book path. Register a book once per FY on the ITR Entities tab
+# and the app fills the book in for you wherever one is asked for (ITR
+# Workbook, Import Statement, Review Mappings, Intercompany, 26AS, KRChoksey);
+# every file field stays overridable via Browse. `workbook_match` is DERIVED
+# from the registered book's filename (trailing year digits stripped), so an
+# explicit `workbook_match:` is only an override.
+# Resolution precedence (ui/_book_registry.py::resolve_book): books[fy] ->
+# newest FY in `books` (keys sort lexically == chronologically) -> the legacy
+# top-level `book:` single path -> nothing. The legacy `book:` form is still
+# honoured for entities that predate `books:` (see SYN-IND-NR below).
 # =============================================================================
 SYN-IND:
   name: "Synthetic Individual"
@@ -18,6 +31,9 @@ SYN-IND:
   aadhaar: "000011112222"
   dob: "1980-01-01"
   address: "123 Example Street, Example City"
+  books:
+    "2025-26": "C:/Example/Books/SynIndividual2526.gnucash"
+    "2026-27": "C:/Example/Books/SynIndividual2627.gnucash"
   default_regime: "new"
   regime_by_ay:
     "2026-27": "new"
@@ -83,6 +99,13 @@ SYN-IND-NR:
   aadhaar: "333344445555"
   dob: "1955-01-01"
   address: "456 Example Avenue, Example Town"
+  # Legacy single-book form, kept working for entities registered before
+  # `books:` existed. Prefer `books:` (see SYN-IND) -- this one is not
+  # FY-keyed, so it is only consulted after `books:` is exhausted, and it is
+  # deliberately NOT reported by list_books(). It is not an EntityProfile
+  # field, so saving this entity from the ITR Entities tab DROPS it -- one
+  # more reason to move to `books:`.
+  book: "C:/Example/Books/SynNonResident.gnucash"
   default_regime: "new"
   extra_items:
     bf_losses: []

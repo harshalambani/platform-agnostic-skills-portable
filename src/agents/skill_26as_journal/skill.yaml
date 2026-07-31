@@ -27,6 +27,12 @@ inputs:
     label: "GnuCash file"
     file_types: [".gnucash"]
     required: true
+    book_from: "entity"
+  - name: "entity"
+    type: "select"
+    label: "Entity (optional -- auto-fills the GnuCash book from the registry)"
+    options_from: "itr_entities"
+    required: false
 
 run_args:
   xlsx_path: "{inputs.xlsx_path}"
@@ -66,6 +72,10 @@ help:
       tooltip: "Your GnuCash book — used only to read account names for matching."
       accepts: "GnuCash file (.gnucash)."
       gotchas: "Close the book in GnuCash before running so the file is not locked. It is never modified."
+    - name: "entity"
+      tooltip: "Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "UI convenience only; leave unset to pick the file manually as before."
   steps:
     - "Pick the 26AS workbook from the dropdown of prior outputs."
     - "Select your .gnucash book (make sure GnuCash has it closed)."
