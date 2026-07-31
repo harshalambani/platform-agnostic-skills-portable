@@ -11,7 +11,7 @@
 #
 # `books:` (GnuCash book registry, v3.0.0) maps a financial year -- the bare
 # 'YYYY-YY' key, e.g. "2025-26", NOT "FY 2025-26" -- to that entity's
-# `.gnucash` book path. Register a book once per FY on the ITR Entities tab
+# `.gnucash` book path. Register a book once per FY on the Entities tab
 # and the app fills the book in for you wherever one is asked for (ITR
 # Workbook, Import Statement, Review Mappings, Intercompany, 26AS, KRChoksey);
 # every file field stays overridable via Browse. `workbook_match` is DERIVED
@@ -103,7 +103,7 @@ SYN-IND-NR:
   # `books:` existed. Prefer `books:` (see SYN-IND) -- this one is not
   # FY-keyed, so it is only consulted after `books:` is exhausted, and it is
   # deliberately NOT reported by list_books(). It is not an EntityProfile
-  # field, so saving this entity from the ITR Entities tab DROPS it -- one
+  # field, so saving this entity from the Entities tab DROPS it -- one
   # more reason to move to `books:`.
   book: "C:/Example/Books/SynNonResident.gnucash"
   default_regime: "new"

@@ -355,9 +355,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
     # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
     # "Intercompany" sub-tab, both inside "gnucash" (see below). "itr" is
     # likewise nested inside "gnucash" as its own "ITR" sub-tab (mirroring
-    # "Banks"), containing "ITR Workbook", "ITR Mapping", and "ITR Entities"
-    # as sub-sub-tabs,
-    # rather than getting a flat top-level tab. Exclude them here too,
+    # "Banks"), containing "ITR Workbook", "AIS Reconcile" and "ITR Mapping"
+    # as sub-sub-tabs, rather than getting a flat top-level tab. Exclude them here too,
     # otherwise the fallback loop at the end of this function (for skills
     # whose category isn't in _known_cats) renders them a second time as
     # flat top-level tabs.
@@ -414,7 +413,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 # GnuCash is a container: a "Banks" sub-tab (statement import +
                 # Review Mappings), an "Intercompany" sub-tab (Reco + Matrix),
                 # a "26AS" sub-tab (Convert + Journal), a "KRChoksey" sub-tab,
-                # and an "ITR" sub-tab (ITR Workbook + ITR Mapping + ITR Entities).
+                # an "ITR" sub-tab (ITR Workbook + AIS Reconcile + ITR Mapping),
+                # and an app-wide "Entities" sub-tab last.
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
@@ -478,8 +478,14 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                                 tab_generic.render(_skill, container_tab=_t)
                                         with gr.Tab("ITR Mapping") as _mt:
                                             tab_itr_mapping_review.render(container_tab=_mt)
-                                        with gr.Tab("ITR Entities") as _et:
-                                            tab_itr_entities.render(container_tab=_et)
+                            # Entities is master data for the WHOLE app, not an
+                            # ITR sub-feature: entities.yaml feeds the Entity
+                            # dropdown on Banks, Intercompany, 26AS, KRChoksey
+                            # and ITR alike, and its books: registry is what
+                            # auto-fills every GnuCash book field. Kept last so
+                            # the workflow tabs stay in reading order.
+                            with gr.Tab("Entities") as _et:
+                                tab_itr_entities.render(container_tab=_et)
                     continue
 
                 if not _cat_skills:

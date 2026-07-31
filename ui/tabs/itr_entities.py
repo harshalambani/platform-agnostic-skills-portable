@@ -1,5 +1,10 @@
 """
-ui/tabs/itr_entities.py -- ITR Entities CRUD tab.
+ui/tabs/itr_entities.py -- the "Entities" CRUD tab (GnuCash > Entities).
+
+Module name is historical: this started life as an ITR-only editor and was
+promoted to a GnuCash-level sub-tab once entities.yaml became app-wide master
+data (it feeds every Entity dropdown, and its books: registry auto-fills every
+GnuCash book field).
 
 Add/modify/delete taxpayer entities in Data/itr/entities.yaml through the UI
 so the roster is managed like ITR Mapping manages tags -- no hand-edited
@@ -573,17 +578,120 @@ def _delete_entity(key: str, confirm_1: bool, confirm_2: bool) -> str:
 
 
 # ---------------------------------------------------------------------------
+# "Other dropdown data" panel -- read-only provenance for the dropdowns that
+# are NOT backed by entities.yaml.
+# ---------------------------------------------------------------------------
+
+_DROPDOWN_SOURCES_PLACEHOLDER = "_Open this tab (or click Refresh) to inspect the other dropdown sources._"
+
+_MAX_LISTED = 12
+
+
+def _fmt_choices(choices, empty: str) -> str:
+    """One-line, truncated rendering of an (label, value) option list."""
+    if not choices:
+        return f"_{empty}_"
+    labels = [str(c[0]) if isinstance(c, (list, tuple)) else str(c) for c in choices]
+    shown = ", ".join(f"`{lab}`" for lab in labels[:_MAX_LISTED])
+    if len(labels) > _MAX_LISTED:
+        shown += f", ... (+{len(labels) - _MAX_LISTED} more)"
+    return f"{len(labels)} option(s): {shown}"
+
+
+def _dropdown_sources_md() -> str:
+    """Markdown describing every non-entity dropdown source and its current
+    values.
+
+    Deliberately read-only. Unlike Entity, none of these is hand-maintained
+    data: the AY list is derived from the shipped tax-rules files plus the
+    Data\\itr\\rules overlay, the bank list from the parsers actually
+    installed, and the model list from the configured LLM endpoint. There is
+    no file to edit for any of them -- you change them by shipping a rules
+    file, adding a parser, or pulling a model -- so this panel explains where
+    each one comes from instead of pretending to be an editor.
+    """
+    from . import _generic
+
+    try:
+        ay = _generic._options_from_itr_ay_years()
+    except Exception as exc:  # noqa: BLE001
+        ay = []
+        ay_err = f" (lookup failed: {exc})"
+    else:
+        ay_err = ""
+
+    try:
+        banks = _generic._options_from_banks()
+    except Exception as exc:  # noqa: BLE001
+        banks = []
+        banks_err = f" (lookup failed: {exc})"
+    else:
+        banks_err = ""
+
+    try:
+        models = _generic._refresh_models(use_cache=True)
+    except Exception as exc:  # noqa: BLE001
+        models = []
+        models_err = f" (lookup failed: {exc})"
+    else:
+        models_err = ""
+
+    try:
+        entities = _entity_choices()
+    except Exception:  # noqa: BLE001
+        entities = []
+
+    data_root = _config_mod.data_root_dir()
+    try:
+        rules_base = _config_mod.canonical_itr_rules_dir()
+    except Exception:  # noqa: BLE001
+        rules_base = "(unavailable)"
+
+    return "\n\n".join([
+        "#### Entity  -- *editable, right here*",
+        f"Source: `{data_root / 'itr' / 'entities.yaml'}` (this tab).  "
+        f"{_fmt_choices(entities, 'no entities defined yet')}",
+        "#### Assessment / financial year  -- *derived, not editable*",
+        f"Source: `tax_rules_*.yaml` keyed on `meta.fy`, read from the shipped base "
+        f"`{rules_base}` **union** the overlay `{data_root / 'itr' / 'rules'}` "
+        f"(overlay wins on a collision). Add a year by shipping or dropping in a rules "
+        f"file -- there is no list to maintain.{ay_err}  \n{_fmt_choices(ay, 'no rules files found')}",
+        "#### Bank  -- *derived, not editable*",
+        f"Source: `agents.banks.discover()` -- the statement parsers actually installed, "
+        f"by `display_name`, plus a trailing `Other Bank (CSV)` for the generic "
+        f"LLM-normalised path. Add a bank by adding its parser.{banks_err}  \n"
+        f"{_fmt_choices(banks, 'no parsers discovered')}",
+        "#### Model  -- *derived, not editable*",
+        f"Source: the active LLM endpoint in `config.yaml` (Settings tab), queried live; "
+        f"falls back to the configured default model when the endpoint is unreachable. "
+        f"Add a model by pulling it on the endpoint.{models_err}  \n"
+        f"{_fmt_choices(models, 'endpoint unreachable and no default configured')}",
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Gradio tab renderer.
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the ITR Entities tab. Must be called inside gr.Tab()."""
+    """Render the Entities tab. Must be called inside gr.Tab().
+
+    Despite the module name this is app-wide master data, not an ITR-only
+    editor: `entities.yaml` also drives the entity dropdown on every skill
+    that asks for a GnuCash book (Banks Import + Review Mappings,
+    Intercompany Reco, 26AS Journal + Journal Review, KRChoksey Import +
+    Review, AIS Reconcile), which is why the tab sits alongside those
+    workflows rather than inside ITR.
+    """
     gr.Markdown(
-        "## ITR Entities\n\n"
+        "## Entities\n\n"
         "Add, modify, or delete taxpayer entities in `entities.yaml`. "
         "Select an entity below to edit it, or leave `(new entity)` "
         "selected to add one. A new entity has no mapping yet -- that's "
         "fine, the ITR Workbook cold-starts it.\n\n"
+        "This is the single source for every **Entity** dropdown in the "
+        "app, and the per-financial-year **books** registered below are "
+        "what those dropdowns auto-fill the GnuCash book path from.\n\n"
         "> **Rename note:** changing the entity key on an existing entity "
         "renames its `.mapping.yaml` file and any filed returns in "
         "`Data/ITRFiled/` to match. If a file already exists at any new "
@@ -757,3 +865,20 @@ def render(container_tab=None) -> None:
         inputs=[entity_dropdown, confirm_1_cb, confirm_2_cb],
         outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, confirm_1_cb, confirm_2_cb],
     )
+
+    # --- Other dropdown data (read-only) -----------------------------------
+    # Entities is the only dropdown source in the app that is hand-maintained
+    # data; the other three are DERIVED and have no file to edit. Rather than
+    # invent editors for them, surface where each one comes from and what it
+    # currently resolves to, so this tab answers "where is this dropdown
+    # managed?" for every dropdown, not just Entity.
+    with gr.Accordion("Other dropdown data (read-only)", open=False):
+        sources_md = gr.Markdown(_DROPDOWN_SOURCES_PLACEHOLDER)
+        sources_refresh_btn = gr.Button("Refresh", scale=0, min_width=100)
+        sources_refresh_btn.click(fn=_dropdown_sources_md, inputs=[], outputs=[sources_md])
+
+    if container_tab is not None:
+        # Populated on tab open rather than at build time: the model list can
+        # reach out to the LLM endpoint, and app construction must not block
+        # on a network call.
+        container_tab.select(fn=_dropdown_sources_md, inputs=[], outputs=[sources_md])

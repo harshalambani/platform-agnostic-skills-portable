@@ -217,6 +217,11 @@ def test_webui_constructs():
     assert "ITR Mapping" in tab_labels
     assert "GnuCash" in tab_labels
 
+    # Entities is app-wide master data (it feeds every Entity dropdown), so it
+    # sits at the GnuCash level as "Entities", NOT inside ITR as "ITR Entities".
+    assert "Entities" in tab_labels
+    assert "ITR Entities" not in tab_labels
+
 
 def test_every_registered_skill_gets_a_tab():
     """Every skill the registry discovers must be reachable in the UI.
