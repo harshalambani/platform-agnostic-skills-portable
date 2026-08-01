@@ -741,10 +741,10 @@ def render(container_tab=None) -> None:
         )
         entity_refresh_btn = gr.Button("↻", scale=0, min_width=40)
 
-    # The book field below fills silently on a registry hit and is left
-    # untouched on a miss -- indistinguishable to anyone who hasn't memorised
-    # the registry. This line says which of the two happened, and in
-    # particular that a filled field needs nothing further.
+    # A registry hit writes the path into the field below in plain sight and
+    # says nothing here. A miss leaves that field exactly as it was, which is
+    # indistinguishable from "nothing happened" -- that case gets a line.
+    # See _entity_book.book_status().
     book_status_md = gr.Markdown("", visible=False, elem_classes=["pa-book-status"])
 
     with gr.Row():
@@ -785,6 +785,15 @@ def render(container_tab=None) -> None:
         ),
         inputs=[entity_dd],
         outputs=[gnucash_file, book_status_md],
+    )
+
+    # ...and the moment the field holds a path -- from Browse..., typing, or
+    # the prefill above -- the "pick a book" line has been answered and goes
+    # away, rather than sitting there contradicting the field beside it.
+    gnucash_file.change(
+        fn=_entity_book.book_status_clear_if_filled,
+        inputs=[gnucash_file],
+        outputs=[book_status_md],
     )
     entity_refresh_btn.click(
         fn=lambda: gr.update(choices=_entity_book.entity_choices()),

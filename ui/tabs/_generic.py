@@ -966,10 +966,10 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         )
                     wiring_inputs.append(fy_comp)
 
-                # The book field fills silently on a hit and is left untouched on
-                # a miss — indistinguishable to anyone who hasn't memorised the
-                # registry. The status line says which of the two happened, and
-                # in particular that a filled field needs nothing further.
+                # A hit writes the path into the field in plain sight and says
+                # nothing. A miss leaves the field exactly as it was, which is
+                # indistinguishable from "nothing happened" — that one gets a
+                # line. See _entity_book.book_status().
                 status_md = book_status_md.get(inp.name)
 
                 def _make_book_from_handler():
@@ -991,6 +991,15 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     fn=_make_book_from_handler(),
                     inputs=wiring_inputs,
                     outputs=[file_comp, status_md],
+                )
+
+                # ...and the moment the field holds a path — from Browse…,
+                # typing, or the prefill above — the "pick a book" line has
+                # been answered and goes away.
+                file_comp.change(
+                    fn=_entity_book.book_status_clear_if_filled,
+                    inputs=[file_comp],
+                    outputs=[status_md],
                 )
 
             # Model dropdown — only meaningful for LLM-powered skills; deterministic

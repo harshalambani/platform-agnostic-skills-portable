@@ -144,6 +144,37 @@ def test_book_field_is_not_a_served_file_component(module_path, tmp_path):
     )
 
 
+@pytest.mark.parametrize("module_path", MODULES)
+def test_status_line_clears_once_the_book_field_is_filled(module_path, tmp_path):
+    """A status line must never outlive the condition it describes.
+
+    The miss message asks the user to pick a book. Once anything is in the
+    field -- Browse..., typing, paste -- it has been answered, and leaving it
+    up means the line can end up describing a book that is not the one in the
+    field. That is exactly the reported bug, in its surviving half.
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+    importlib.reload(module)
+    fn = _entity_book_module().book_status_clear_if_filled
+
+    assert fn("C:/books/Someone2526.gnucash") == {
+        "value": "", "visible": False, "__type__": "update",
+    }
+    # Empty (or whitespace) leaves the line alone -- a miss message must
+    # survive until it is actually satisfied.
+    assert fn("") == {"__type__": "update"}
+    assert fn("   ") == {"__type__": "update"}
+    assert fn(None) == {"__type__": "update"}
+
+
+def _entity_book_module():
+    import importlib
+
+    return importlib.import_module("ui.tabs._entity_book")
+
+
 def _capture_reset(tmp_path: Path, render_module_path: str):
     """Render and return (fn, outputs) registered on the Reset button's
     .click(...), or (None, None) if the tab has no Reset button."""
@@ -213,10 +244,13 @@ def test_entity_change_registry_hit_carries_book_path(module_path, tmp_path):
         book_upd, status_upd = fn("AliceDoe")
 
     assert book_upd == {"value": str(book_path), "__type__": "update"}
-    # ...and the user is told the field below is already answered for, since
-    # a silently-filled box is otherwise indistinguishable from a stale one.
-    assert status_upd["visible"] is True
-    assert "do not need to pick" in status_upd["value"]
+    # ...and the status line stays silent. The resolved path is now sitting in
+    # a visible textbox: a line underneath announcing that it filled only
+    # repeats what the user can read, and it went stale the moment anyone hit
+    # Browse... -- still vouching for the registry while the field beside it
+    # held a different book entirely. That is what the user reported.
+    assert status_upd["visible"] is False
+    assert status_upd["value"] == ""
 
 
 @pytest.mark.parametrize("module_path", MODULES)

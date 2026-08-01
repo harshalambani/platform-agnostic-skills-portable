@@ -91,26 +91,24 @@ def book_update(entity_key: str | None, fy: str | None = None):
 
 
 def book_status(entity_key: str | None, fy: str | None = None) -> str:
-    """One-line Markdown telling the user whether the book field below still
-    needs their attention.
+    """One-line Markdown for the *miss* case only -- otherwise "".
 
-    The book field stays visible and overridable in every case (Browse always
-    wins), but a user who has just picked an entity has no way of knowing
-    whether the registry answered -- the file box simply fills, or doesn't.
-    This says so out loud:
+    A registry hit says nothing, deliberately. The book field is a path
+    textbox, so a hit writes the resolved path in plain sight: the filled
+    field is its own acknowledgement, and a line underneath announcing that
+    it filled is just repeating what the user can already read.
 
-      - no entity picked        -> "" (renders as nothing)
-      - registry hit            -> filled from the registry, nothing more to do
-      - registry miss           -> pick the book manually, and how to fix it
-                                   permanently (register it on Entities)
+    Worse, that line went stale the moment anyone used Browse... -- it went
+    on claiming the registry had the book covered while the field beside it
+    held a completely different one. A status that can contradict the field
+    it describes is worse than no status.
+
+    A miss is the case with no visible evidence: the field simply stays as
+    it was, which looks identical to "the registry answered with nothing".
+    So that one is said out loud, along with how to stop it recurring.
     """
-    if not entity_key:
+    if not entity_key or resolve_for_ui(entity_key, fy):
         return ""
-    if resolve_for_ui(entity_key, fy):
-        return (
-            f"GnuCash book filled from the registry for **{entity_key}** -- "
-            "you do not need to pick a file below."
-        )
     return (
         f"No registered book for **{entity_key}** -- pick the GnuCash book "
         "below. Register it once on the **Entities** tab to skip this step "
@@ -122,3 +120,16 @@ def book_status_update(entity_key: str | None, fy: str | None = None):
     """`book_status()` as a Gradio update, hiding the row when it is empty."""
     msg = book_status(entity_key, fy)
     return gr.update(value=msg, visible=bool(msg))
+
+
+def book_status_clear_if_filled(book_value: str | None):
+    """Hide the status line once the book field holds anything at all.
+
+    Wired to the book textbox's own .change(), so it fires however the path
+    arrived -- Browse..., typing, pasting. The miss message asks the user to
+    pick a book; once they have, it has served its purpose and must not sit
+    there still asking.
+    """
+    if (book_value or "").strip():
+        return gr.update(value="", visible=False)
+    return gr.update()
