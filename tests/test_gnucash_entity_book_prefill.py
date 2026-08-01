@@ -102,6 +102,48 @@ def _capture_entity_change(tmp_path: Path, render_module_path: str, render_kwarg
     return module, captured["fn"]
 
 
+@pytest.mark.parametrize("module_path", MODULES)
+def test_book_field_is_not_a_served_file_component(module_path, tmp_path):
+    """The GnuCash book field must never be a gr.File.
+
+    A gr.File makes Gradio move whatever path it is given into its own cache
+    and serve it over the local HTTP route. For a book outside the working
+    directory that raises InvalidPathError -- the whole event fails, the box
+    renders a red "Error", and the value never lands, so the run then fails
+    too. Every registered book in a real install lives outside the working
+    directory, so this broke entity prefill on every tab for every entity.
+
+    Widening launch()'s allowed_paths is not the fix: it would expose whole
+    book folders over that route (security finding MP-05) and would still
+    copy the live .gnucash on every pick. The book is read in place; nothing
+    about it should reach the browser. A path textbox satisfies that.
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+    importlib.reload(module)
+
+    file_labels: list[str] = []
+    orig_init = gr.File.__init__
+
+    def _tracking_init(self, *args, **kwargs):
+        file_labels.append(str(kwargs.get("label", "")))
+        return orig_init(self, *args, **kwargs)
+
+    with patch.object(gr.File, "__init__", _tracking_init):
+        with patch.object(module._config_mod, "output_dir", return_value=tmp_path):
+            with gr.Blocks():
+                module.render()
+
+    offenders = [lbl for lbl in file_labels if "gnucash" in lbl.lower()]
+    assert not offenders, (
+        f"{module_path}: the GnuCash book field is a gr.File ({offenders}). "
+        f"Gradio cannot serve a book outside the working directory, so this "
+        f"renders as an Error box and discards the value. Use a path "
+        f"textbox."
+    )
+
+
 def _capture_reset(tmp_path: Path, render_module_path: str):
     """Render and return (fn, outputs) registered on the Reset button's
     .click(...), or (None, None) if the tab has no Reset button."""

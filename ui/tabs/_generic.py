@@ -796,13 +796,39 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             }
             book_status_md: dict[str, object] = {}  # file input name -> its status Markdown
             for inp in skill.inputs:
-                if inp.type == "file":
+                if inp.type == "file" and inp.book_from:
+                    # A GnuCash book is NOT an upload — it is a live file on
+                    # disk that the skill opens read-only, in place. Handing
+                    # its path to a gr.File makes Gradio try to move it into
+                    # its own cache and serve it to the browser, which fails
+                    # outright (InvalidPathError) for any book outside the
+                    # working directory — the red "Error" box, on every tab,
+                    # for every entity. Widening launch()'s allowed_paths
+                    # would "fix" the error by exposing whole book folders
+                    # over the local HTTP route (re-opening security finding
+                    # MP-05) AND would still copy the book on every pick.
+                    # A path textbox needs neither: nothing is served,
+                    # nothing is copied, and the resolved path is visible as
+                    # text — which is better feedback than a filled-in file
+                    # chip anyway. Browse… still sets it; so does typing or
+                    # pasting a path.
+                    book_status_md[inp.name] = gr.Markdown(
+                        "", visible=False, elem_classes=["pa-book-status"],
+                    )
+                    with gr.Row():
+                        comp = gr.Textbox(
+                            label=inp.label,
+                            placeholder="Pick an entity above, or Browse… to a .gnucash file",
+                            lines=1,
+                            max_lines=1,
+                            scale=5,
+                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                        )
+                        _brbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    browse_buttons.append((_brbtn, comp, inp, False))
+                elif inp.type == "file":
                     # A single-file box can only ever hold one file, so the tall
                     # multi-file drop zone is wasted space — pin it to one row.
-                    if inp.book_from:
-                        book_status_md[inp.name] = gr.Markdown(
-                            "", visible=False, elem_classes=["pa-book-status"],
-                        )
                     with gr.Row():
                         comp = gr.File(
                             label=inp.label,
@@ -1108,7 +1134,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # click handler can return updates that line up with the outputs list.
     reset_specs: list = []  # (component, reset_update_callable)
     for _inp, _comp in zip(skill.inputs, input_components):
-        if _inp.type in ("file", "files"):
+        if _inp.type == "file" and _inp.book_from:
+            # This one is a path Textbox, not a gr.File -- value=None leaves a
+            # textbox showing whatever it already had.
+            reset_specs.append((_comp, lambda: gr.update(value="")))
+        elif _inp.type in ("file", "files"):
             reset_specs.append((_comp, lambda: gr.update(value=None)))
         elif _inp.type == "output_file":
             reset_specs.append((
@@ -1129,6 +1159,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             ))
         else:  # directory, text
             reset_specs.append((_comp, lambda: gr.update(value="")))
+
+    # The entity select resets to blank, so its "book filled from the registry"
+    # line must go with it -- otherwise it keeps vouching for a field that has
+    # just been cleared.
+    for _status_md in book_status_md.values():
+        reset_specs.append((_status_md, lambda: gr.update(value="", visible=False)))
 
     def _handle_reset():
         from .. import _runner

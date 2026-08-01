@@ -433,13 +433,17 @@ def render(container_tab=None) -> None:
             scale=4,
         )
         refresh_btn = gr.Button("↻", scale=0, min_width=40)
-        # One book, one file -- Gradio's default drop zone is sized for a
-        # scrolling list of uploads, so the extra height is dead space.
-        gnucash_file = gr.File(
+        # A path textbox, not a gr.File: the book is a live file opened
+        # read-only in place, never an upload. A gr.File would try to move it
+        # into Gradio's cache and serve it to the browser, which fails
+        # outright for any book outside the working directory. See the
+        # matching comment in ui/tabs/_generic.py for the full reasoning.
+        gnucash_file = gr.Textbox(
             label="GnuCash book (.gnucash)",
-            file_types=[".gnucash"],
-            type="filepath",
-            height=95,
+            placeholder="Pick an entity above, or Browse… to a .gnucash file",
+            lines=1,
+            max_lines=1,
+            scale=4,
         )
         gnucash_browse_btn = gr.Button("Browse...", scale=0, min_width=110)
 
@@ -546,8 +550,9 @@ def render(container_tab=None) -> None:
         choices = _scan_import_ready_csvs()
         return (
             gr.update(choices=choices, value=(choices[0][1] if choices else None)),
-            gr.update(value=None),                                   # gnucash_file
+            gr.update(value=""),                                     # gnucash_file
             gr.update(value=None),                                   # entity_dd
+            gr.update(value="", visible=False),                       # book_status_md
             "<p><em>Load a CSV to begin reviewing.</em></p>",        # review_html
             "",                                                       # save_result
             gr.update(interactive=False, value=None),                 # download_file
@@ -557,7 +562,7 @@ def render(container_tab=None) -> None:
     reset_btn.click(
         fn=_handle_reset_review,
         inputs=[],
-        outputs=[csv_dropdown, gnucash_file, entity_dd, review_html, save_result,
-                 download_file, _payload_box],
+        outputs=[csv_dropdown, gnucash_file, entity_dd, book_status_md, review_html,
+                 save_result, download_file, _payload_box],
         js=f"() => {{ window.{PAYLOAD_VAR} = ''; }}",
     )
