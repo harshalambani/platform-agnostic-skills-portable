@@ -168,9 +168,13 @@ def test_entity_change_registry_hit_carries_book_path(module_path, tmp_path):
     data_root = _write_entities(tmp_path, entities)
 
     with patch("ui._config.data_root_dir", return_value=data_root):
-        result = fn("AliceDoe")
+        book_upd, status_upd = fn("AliceDoe")
 
-    assert result == {"value": str(book_path), "__type__": "update"}
+    assert book_upd == {"value": str(book_path), "__type__": "update"}
+    # ...and the user is told the field below is already answered for, since
+    # a silently-filled box is otherwise indistinguishable from a stale one.
+    assert status_upd["visible"] is True
+    assert "do not need to pick" in status_upd["value"]
 
 
 @pytest.mark.parametrize("module_path", MODULES)
@@ -181,9 +185,13 @@ def test_entity_change_registry_miss_is_no_change_not_blank(module_path, tmp_pat
 
     data_root = tmp_path / "Data"
     with patch("ui._config.data_root_dir", return_value=data_root):
-        result = fn("NoSuchEntity")
+        book_upd, status_upd = fn("NoSuchEntity")
 
-    assert result == {"__type__": "update"}
+    assert book_upd == {"__type__": "update"}
+    # An untouched field looks identical to a filled one that happens to be
+    # empty, so the miss has to be said out loud.
+    assert status_upd["visible"] is True
+    assert "No registered book" in status_upd["value"]
 
 
 @pytest.mark.parametrize("module_path", MODULES)
@@ -194,9 +202,13 @@ def test_entity_change_empty_selection_is_no_change(module_path, tmp_path):
 
     data_root = tmp_path / "Data"
     with patch("ui._config.data_root_dir", return_value=data_root):
-        result = fn("")
+        book_upd, status_upd = fn("")
 
-    assert result == {"__type__": "update"}
+    assert book_upd == {"__type__": "update"}
+    # Nothing picked, nothing to say -- the status line stays hidden rather
+    # than nagging about a book for an entity the user never chose.
+    assert status_upd["visible"] is False
+    assert status_upd["value"] == ""
 
 
 # ---------------------------------------------------------------------------

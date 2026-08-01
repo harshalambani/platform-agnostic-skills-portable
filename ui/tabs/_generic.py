@@ -69,6 +69,12 @@ if TYPE_CHECKING:
 _MAX_UPLOAD_SIZE_BYTES: int = 100 * 1024 * 1024  # 100 MB per file
 _MAX_FILE_COUNT: int = 20                          # max files per run
 
+# Height (px) for single-file gr.File boxes. Gradio's default drop zone is
+# sized for a scrolling list of uploads; a type: "file" input accepts exactly
+# one, so the extra height is dead space that pushes the rest of the form
+# below the fold. Multi-file ("files") boxes keep the default.
+_SINGLE_FILE_HEIGHT: int = 95
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers (same as the old hand-coded tabs).
@@ -507,9 +513,21 @@ def _make_run_handler(skill: SkillInfo):
             out_path = out_dir / f"{stamp}-{skill.output.suffix}"
             out_path.mkdir(parents=True, exist_ok=True)
         else:
+            # Only inputs the skill actually consumes may name the output file.
+            # UI-only inputs — ones that appear in no `{inputs.<name>}` token in
+            # run_args, i.e. the `entity` selects — are pure convenience and must
+            # never hijack the filename. Skipping them is what frees an entity
+            # select to be declared FIRST in skill.yaml (where the user expects
+            # it) instead of being pushed to the bottom of the form to keep it
+            # out of the way. Falls back to the old any-input behaviour if no
+            # consumed input has a value, so nothing regresses to "output".
+            consumed = {
+                inp.name for inp in skill.inputs
+                if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
+            }
             primary_input = next(
-                (v for k, v in input_map.items() if v),
-                "output",
+                (v for k, v in input_map.items() if v and k in consumed),
+                next((v for v in input_map.values() if v), "output"),
             )
             # Use .stem for files (strips extension), .name for dirs/paths
             # (takes last component only — avoids embedding full paths in filename).
@@ -776,13 +794,21 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             _book_from_sources = {
                 inp.book_from for inp in skill.inputs if inp.type == "file" and inp.book_from
             }
+            book_status_md: dict[str, object] = {}  # file input name -> its status Markdown
             for inp in skill.inputs:
                 if inp.type == "file":
+                    # A single-file box can only ever hold one file, so the tall
+                    # multi-file drop zone is wasted space — pin it to one row.
+                    if inp.book_from:
+                        book_status_md[inp.name] = gr.Markdown(
+                            "", visible=False, elem_classes=["pa-book-status"],
+                        )
                     with gr.Row():
                         comp = gr.File(
                             label=inp.label,
                             file_types=list(inp.file_types) if inp.file_types else None,
                             type="filepath",
+                            height=_SINGLE_FILE_HEIGHT,
                             scale=5,
                             **_help.maybe_info(gr.File, _info.get(inp.name)),
                         )
@@ -914,19 +940,31 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         )
                     wiring_inputs.append(fy_comp)
 
+                # The book field fills silently on a hit and is left untouched on
+                # a miss — indistinguishable to anyone who hasn't memorised the
+                # registry. The status line says which of the two happened, and
+                # in particular that a filled field needs nothing further.
+                status_md = book_status_md.get(inp.name)
+
                 def _make_book_from_handler():
                     if len(wiring_inputs) == 2:
                         def _handler(entity_val, fy_val):
-                            return _entity_book.book_update(entity_val, fy_val)
+                            return (
+                                _entity_book.book_update(entity_val, fy_val),
+                                _entity_book.book_status_update(entity_val, fy_val),
+                            )
                     else:
                         def _handler(entity_val):
-                            return _entity_book.book_update(entity_val)
+                            return (
+                                _entity_book.book_update(entity_val),
+                                _entity_book.book_status_update(entity_val),
+                            )
                     return _handler
 
                 entity_comp.change(
                     fn=_make_book_from_handler(),
                     inputs=wiring_inputs,
-                    outputs=[file_comp],
+                    outputs=[file_comp, status_md],
                 )
 
             # Model dropdown — only meaningful for LLM-powered skills; deterministic

@@ -11,6 +11,9 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 
 ## Inputs
 
+- **Entity (optional) -- fills in the GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
+  - ⚠️ UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found.
 - **Bank** (required) — accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).
   - Which bank the statement is from — this picks the right extractor.
   - ⚠️ Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help.
@@ -20,19 +23,17 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used to learn your accounts and map transactions.
   - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
-- **Entity (optional -- auto-fills the GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
-  - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
-  - ⚠️ UI convenience only; leave unset to pick the file manually as before.
 - **PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID.
   - Only used for HDFC when the statement PDF itself is password-protected.
   - ⚠️ Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output.
 
 ## How to run
 
-1. Choose the bank.
-2. Upload the matching statement file(s).
-3. Select your .gnucash book (closed in GnuCash).
-4. Click Run, then import the resulting CSV via File > Import in GnuCash.
+1. Pick the entity (optional) — this fills in the GnuCash book for you.
+2. Choose the bank.
+3. Upload the matching statement file(s).
+4. Select your .gnucash book (closed in GnuCash), unless the entity already filled it in.
+5. Click Run, then import the resulting CSV via File > Import in GnuCash.
 
 ## Output
 

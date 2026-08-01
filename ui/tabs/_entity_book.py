@@ -88,3 +88,37 @@ def book_update(entity_key: str | None, fy: str | None = None):
     if resolved:
         return gr.update(value=resolved)
     return gr.update()
+
+
+def book_status(entity_key: str | None, fy: str | None = None) -> str:
+    """One-line Markdown telling the user whether the book field below still
+    needs their attention.
+
+    The book field stays visible and overridable in every case (Browse always
+    wins), but a user who has just picked an entity has no way of knowing
+    whether the registry answered -- the file box simply fills, or doesn't.
+    This says so out loud:
+
+      - no entity picked        -> "" (renders as nothing)
+      - registry hit            -> filled from the registry, nothing more to do
+      - registry miss           -> pick the book manually, and how to fix it
+                                   permanently (register it on Entities)
+    """
+    if not entity_key:
+        return ""
+    if resolve_for_ui(entity_key, fy):
+        return (
+            f"GnuCash book filled from the registry for **{entity_key}** -- "
+            "you do not need to pick a file below."
+        )
+    return (
+        f"No registered book for **{entity_key}** -- pick the GnuCash book "
+        "below. Register it once on the **Entities** tab to skip this step "
+        "next time."
+    )
+
+
+def book_status_update(entity_key: str | None, fy: str | None = None):
+    """`book_status()` as a Gradio update, hiding the row when it is empty."""
+    msg = book_status(entity_key, fy)
+    return gr.update(value=msg, visible=bool(msg))

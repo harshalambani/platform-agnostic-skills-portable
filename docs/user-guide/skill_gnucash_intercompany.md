@@ -11,18 +11,18 @@ Run at year-end (or before filing) to confirm that what one person's book shows 
 
 ## Inputs
 
+- **First entity (optional) -- fills in the first GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - Optional -- pick the first person's entity to auto-fill their GnuCash book from the registry.
+  - ⚠️ UI convenience only; leave unset to pick the file manually as before.
 - **First person's GnuCash book (.gnucash) -- must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - The first person's GnuCash book.
   - ⚠️ Close it in GnuCash first so the file is not locked. It is read only, never modified.
-- **First entity (optional -- auto-fills the first GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
-  - Optional -- pick the first person's entity to auto-fill their GnuCash book from the registry.
-  - ⚠️ UI convenience only; leave unset to pick the file manually as before.
+- **Second entity (optional) -- fills in the second GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - Optional -- pick the second person's entity to auto-fill their GnuCash book from the registry.
+  - ⚠️ UI convenience only; leave unset to pick the file manually as before. Does not affect the Period select below -- that still needs choosing separately.
 - **Second person's GnuCash book (.gnucash) -- must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - The second person's GnuCash book -- the counter-party.
   - ⚠️ Each person's own name in the OTHER book's account tree is how contra accounts are found. 'X HUF' is treated as a different entity from 'X'.
-- **Second entity (optional -- auto-fills the second GnuCash book from the registry)** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
-  - Optional -- pick the second person's entity to auto-fill their GnuCash book from the registry.
-  - ⚠️ UI convenience only; leave unset to pick the file manually as before. Does not affect the Period select below -- that still needs choosing separately.
 - **Reconciliation period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a calendar year, Auto, or a custom date range.
   - Which period to reconcile. Indian financial year runs 1 Apr to 31 Mar.
   - ⚠️ 'Auto' reads the FY from the file names (e.g. ...2526 -> FY 2025-26).

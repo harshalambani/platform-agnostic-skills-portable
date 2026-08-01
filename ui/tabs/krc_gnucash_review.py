@@ -447,6 +447,12 @@ def render(container_tab=None) -> None:
         )
         entity_refresh_btn = gr.Button("↻", scale=0, min_width=40)
 
+    # The book field below fills silently on a registry hit and is left
+    # untouched on a miss -- indistinguishable to anyone who hasn't memorised
+    # the registry. This line says which of the two happened, and in
+    # particular that a filled field needs nothing further.
+    book_status_md = gr.Markdown("", visible=False, elem_classes=["pa-book-status"])
+
     with gr.Row():
         review_dropdown = gr.Dropdown(
             label="Review.csv",
@@ -456,10 +462,13 @@ def render(container_tab=None) -> None:
             scale=4,
         )
         refresh_btn = gr.Button("↻", scale=0, min_width=40)
+        # One book, one file -- Gradio's default drop zone is sized for a
+        # scrolling list of uploads, so the extra height is dead space.
         gnucash_file = gr.File(
             label="GnuCash book (.gnucash)",
             file_types=[".gnucash"],
             type="filepath",
+            height=95,
         )
         gnucash_browse_btn = gr.Button("Browse...", scale=0, min_width=110)
 
@@ -472,9 +481,12 @@ def render(container_tab=None) -> None:
     )
 
     entity_dd.change(
-        fn=lambda entity_val: _entity_book.book_update(entity_val, None),
+        fn=lambda entity_val: (
+            _entity_book.book_update(entity_val, None),
+            _entity_book.book_status_update(entity_val, None),
+        ),
         inputs=[entity_dd],
-        outputs=[gnucash_file],
+        outputs=[gnucash_file, book_status_md],
     )
     entity_refresh_btn.click(
         fn=lambda: gr.update(choices=_entity_book.entity_choices()),

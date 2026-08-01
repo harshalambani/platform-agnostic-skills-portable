@@ -6,13 +6,13 @@ Guards two things that are easy to get wrong when editing a skill.yaml:
 
 1. Output-filename hazard: ui/tabs/_generic.py derives the output filename
    from the first input (in skill.yaml declaration order) that has a
-   non-empty value at run time. A `select` with `options_from: "itr_entities"`
-   always renders with a non-empty default (the first entity in the
-   registry), even when `required: false` -- so if such a select is placed
-   BEFORE the input that currently supplies the output name (typically the
-   first `required: true` input), it silently hijacks the output filename.
-   This test asserts every itr_entities select comes after the first
-   required input in its skill.
+   non-empty value at run time AND is consumed by the skill (referenced by a
+   `{inputs.<name>}` token in run_args). The book_from entity selects are
+   UI-only, which is what lets them lead the form without hijacking the
+   filename -- these tests pin that: a consumed entity select is never the
+   first consumed input (ITR Workbook is the one skill that does consume
+   its entity, and `bs_html` leads it), and each entity select is declared
+   above the book field it fills.
 
 2. Dangling book_from: every `book_from` value must name another input that
    actually exists on the same skill (ui/tabs/_generic.py raises a
@@ -69,39 +69,66 @@ def test_book_from_only_on_file_inputs():
 
 
 def test_itr_entities_select_does_not_hijack_output_filename():
-    """No `options_from: "itr_entities"` select may appear before the first
-    required input in its skill's declaration order.
+    """A *consumed* entity select may never be the first consumed input.
 
-    Rationale: ui/tabs/_generic.py picks
-        primary_input = next((v for k, v in input_map.items() if v), "output")
-    walking inputs in skill.yaml declaration order. A required input is
-    guaranteed non-empty by the time this runs (the UI blocks the run
-    otherwise). An itr_entities select is non-empty as soon as the user picks
-    someone -- and, unless it is a `book_from` source (those render blank on
-    purpose), it is non-empty from the very first render because it
-    pre-selects the first registered entity. Either way, if it is declared
-    earlier than the first required input it silently becomes the
-    output-filename source instead.
+    ui/tabs/_generic.py picks
+
+        consumed = {inputs referenced by a {inputs.<name>} token in run_args}
+        primary_input = next((v for k, v in input_map.items()
+                              if v and k in consumed), ...)
+
+    walking inputs in skill.yaml declaration order. An itr_entities select is
+    non-empty as soon as the user picks someone, so a select that is both
+    consumed and declared first would silently become the output-filename
+    source -- files would come out named after the taxpayer instead of the
+    statement.
+
+    Two ways to be safe, and both are in use:
+
+      - UI-only (no `{inputs.<name>}` token anywhere in run_args). This is
+        what lets the select sit at the TOP of the form, where it belongs --
+        it answers for the book field below it, so the user should meet it
+        first. All five book_from skills work this way.
+      - Consumed, but declared after an input that already supplies the
+        output name. ITR Workbook does this: it genuinely passes the entity
+        key through to run(), and `bs_html` leads the form.
     """
     for skill in _skills():
-        required_idx = next(
-            (i for i, inp in enumerate(skill.inputs) if inp.required),
-            None,
-        )
-        if required_idx is None:
-            # No required input on this skill -- nothing to protect against
-            # being pre-empted; skip.
-            continue
-        for i, inp in enumerate(skill.inputs):
-            if inp.options_from == "itr_entities":
-                assert i > required_idx, (
-                    f"{skill.name}: input '{inp.name}' (options_from: "
-                    f"itr_entities) is declared at index {i}, before the "
-                    f"first required input '{skill.inputs[required_idx].name}' "
-                    f"at index {required_idx}. This select always has a "
-                    f"non-empty default value and would hijack the output "
-                    f"filename. Move it after the required input."
-                )
+        consumed = [
+            inp.name for inp in skill.inputs
+            if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
+        ]
+        for inp in skill.inputs:
+            if inp.options_from != "itr_entities" or inp.name not in consumed:
+                continue
+            assert consumed[0] != inp.name, (
+                f"{skill.name}: input '{inp.name}' (options_from: "
+                f"itr_entities) is consumed by run_args AND is the first "
+                f"consumed input, so it would name the output file. Either "
+                f"drop the run_args reference (making it UI-only, the usual "
+                f"choice) or declare it after the input that supplies the "
+                f"output name."
+            )
+
+
+def test_book_from_source_precedes_its_book_field():
+    """Each entity select is declared before the book input it fills.
+
+    Cosmetic but the whole point of the placement change: a control that
+    fills a field belongs above that field, not buried at the bottom of the
+    form where it reads as an afterthought.
+    """
+    for skill in _skills():
+        order = {inp.name: i for i, inp in enumerate(skill.inputs)}
+        for inp in skill.inputs:
+            if not inp.book_from or inp.book_from not in order:
+                continue
+            assert order[inp.book_from] < order[inp.name], (
+                f"{skill.name}: entity select '{inp.book_from}' is declared "
+                f"at index {order[inp.book_from]}, AFTER the book input "
+                f"'{inp.name}' it fills (index {order[inp.name]}). Move the "
+                f"select above the book field."
+            )
 
 
 def test_intercompany_matrix_has_no_book_from():

@@ -16,6 +16,15 @@ mode: "agent"
 entry_point: "agent:run"
 
 inputs:
+  # Entity leads the form: picking someone here fills in the GnuCash book
+  # below, so it belongs before the field it answers for. Safe to declare
+  # first because it is UI-only (absent from run_args) and ui/tabs/_generic.py
+  # only lets inputs the skill actually consumes name the output file.
+  - name: "entity"
+    type: "select"
+    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: false
   - name: "xlsx_path"
     type: "output_file"
     label: "26AS workbook (Convert output)"
@@ -28,11 +37,6 @@ inputs:
     file_types: [".gnucash"]
     required: true
     book_from: "entity"
-  - name: "entity"
-    type: "select"
-    label: "Entity (optional -- auto-fills the GnuCash book from the registry)"
-    options_from: "itr_entities"
-    required: false
 
 run_args:
   xlsx_path: "{inputs.xlsx_path}"

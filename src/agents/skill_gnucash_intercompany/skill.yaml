@@ -21,15 +21,25 @@ mode: "direct"
 entry_point: "agent:run"
 
 inputs:
+  # Each entity leads the book it answers for, so the form reads
+  # "first person -> their book, second person -> their book". Safe to
+  # declare first because entity selects are UI-only (absent from run_args)
+  # and ui/tabs/_generic.py only lets inputs the skill actually consumes
+  # name the output file.
+  - name: "entity_a"
+    type: "select"
+    label: "First entity (optional) -- fills in the first GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: false
   - name: "book_a"
     type: "file"
     label: "First person's GnuCash book (.gnucash) -- must be closed in GnuCash"
     file_types: [".gnucash"]
     required: true
     book_from: "entity_a"
-  - name: "entity_a"
+  - name: "entity_b"
     type: "select"
-    label: "First entity (optional -- auto-fills the first GnuCash book from the registry)"
+    label: "Second entity (optional) -- fills in the second GnuCash book below from the registry"
     options_from: "itr_entities"
     required: false
   - name: "book_b"
@@ -38,11 +48,6 @@ inputs:
     file_types: [".gnucash"]
     required: true
     book_from: "entity_b"
-  - name: "entity_b"
-    type: "select"
-    label: "Second entity (optional -- auto-fills the second GnuCash book from the registry)"
-    options_from: "itr_entities"
-    required: false
   - name: "period"
     type: "select"
     label: "Reconciliation period (Indian FY = 1 Apr to 31 Mar)"
