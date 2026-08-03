@@ -766,9 +766,9 @@ gradio==6.20.0 \
     --hash=sha256:8672866e9225a1f8297325a6742bb525a3a0ddc8aa4d75d99beb10a27ea2915f \
     --hash=sha256:91d2ec29c37917d55b18dba87aa15bb15c4796d84dce9a9ef4ec7d87453a7fee
     # via -r requirements.txt
-gradio-client==2.5.0 \
-    --hash=sha256:4cde99bad62149595c30c90876ca2e405e3a13687ecf895474f3412cb476673d \
-    --hash=sha256:d43e2179c29076292a76485ad7ed2e6eaa19d14ac58283bd7f5beabfe4ca958c
+gradio-client==2.6.0 \
+    --hash=sha256:4493a6425560dd23d1eb5427a13290819135c664c5ed9f184eb517b1ea263291 \
+    --hash=sha256:e648110efa31347bb8b1abda150a7a975b40a9658fdd8562803e2ad6a300d033
     # via
     #   gradio
     #   hf-gradio
