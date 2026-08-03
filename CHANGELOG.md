@@ -9,6 +9,60 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [3.2.0] — 2026-08-03
+
+### Added
+- **Inter-entity Matrix gains the entity selector**, completing the Phase 5
+  wiring that v3.1.0 explicitly left out. Its `books` input takes many books
+  rather than one, which `book_from` could not serve at the time; a multi-book
+  field is now simply the plural of the single-book one. Pick two or more
+  entities from a multiselect dropdown and their registered books fill in, one
+  path per line. Entities with no registered book are named under the field
+  instead of being left as blank lines, and Browse **adds** to the list rather
+  than replacing it — so books can be gathered a few at a time — and never
+  lists the same book twice.
+
+### Fixed
+- **The Inter-entity Matrix could never complete a run.** Its `books` input is
+  `type: "files"`, which the generic renderer served as an upload component:
+  the run handler staged every picked file into a temporary directory and put
+  *that directory's* path into the input map, run-args substitution flattened
+  it to a single string, and the skill then saw one path where it needed two —
+  returning "select at least two .gnucash books for a matrix" on every run,
+  whatever you picked. The tab has been broken since it shipped. Books are now
+  paths opened in place, and the skill accepts the newline-separated list.
+- **The Matrix was copying live `.gnucash` books into `%TEMP%`** as part of
+  that same upload staging, and refused outright any book over the 100 MB
+  upload cap — a limit that exists to bound uploads and has no business
+  applying to a file opened read-only where it already lies. Real books pass
+  100 MB routinely.
+
+## [3.1.2] — 2026-08-01
+
+### Fixed
+- **A filled-in book path is its own acknowledgement.** The "found a
+  registered book" status line stayed on screen after the path appeared,
+  restating what the field already showed — and kept showing after a manual
+  override, where it was simply wrong.
+
+### Changed
+- Dependency bumps: `cffi`, `typer`, `regex`, `xxhash`, `langsmith`,
+  `beautifulsoup4`, `extract-msg`, `soupsieve`, and the langchain-ecosystem
+  group.
+
+## [3.1.1] — 2026-08-01
+
+### Fixed
+- **The GnuCash book field is a path, not an upload.** Registered books live
+  outside the paths Gradio is allowed to serve, so rendering the field as a
+  file component made it raise an error and silently drop the value — the
+  v3.1.0 auto-fill could not land a path on any surface. The field is a text
+  box holding the path, with a native Browse button beside it.
+
+### Changed
+- The entity dropdown leads the form, above the book field it fills, and says
+  whether a registered book was found.
+
 ## [3.1.0] — 2026-07-31
 
 ### Added
