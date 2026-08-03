@@ -187,7 +187,7 @@ def pick_files(
     *,
     multiple: bool,
     file_types: tuple[str, ...],
-    max_size_bytes: int,
+    max_size_bytes: int | None,
     title: str = "Select a file",
     path: Path | None = None,
 ) -> tuple[list[str], list[str]]:
@@ -198,6 +198,10 @@ def pick_files(
     browser's file-type filter and the upload staging path, extension and size
     limits are re-enforced here on the real path (mirrors the caps the run
     handler applies to browser uploads). Rejected picks come back as warnings.
+
+    ``max_size_bytes=None`` skips the size check entirely -- for fields that
+    take a path to a file opened in place rather than an upload to be copied
+    (GnuCash books), where a cap would only mean refusing to open a big one.
     """
     initial = last_dir_for(box_key, path=path)
     picked = _native_open_dialog(

@@ -18,10 +18,20 @@ mode: "direct"
 entry_point: "agent:run"
 
 inputs:
+  # UI-only (no {inputs.entities} token in run_args): its whole job is to fill
+  # the books field below it, which is why it can lead the form without
+  # becoming the output-filename source. See tests/test_entity_book_wiring.py.
+  - name: "entities"
+    type: "select"
+    label: "Entities (pick 2 or more -- fills their registered books below)"
+    options_from: "itr_entities"
+    multiselect: true
+    required: false
   - name: "books"
     type: "files"
     label: "GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash"
     file_types: [".gnucash"]
+    book_from: "entities"
     required: true
   - name: "period"
     type: "select"
@@ -81,10 +91,14 @@ help:
     which do not -- instead of running the two-book reconciliation for every
     combination by hand.
   inputs:
+    - name: "entities"
+      tooltip: "Pick the people to cross-reconcile; their registered books fill in below."
+      accepts: "Two or more entities from the Entities tab. Optional -- you can Browse to the books instead."
+      gotchas: "Only entities with a registered book fill in; any that have none are named under the field, and you can Browse to those. 'X HUF' is a separate entity from 'X'."
     - name: "books"
-      tooltip: "Two or more people's GnuCash books."
-      accepts: "GnuCash files (.gnucash)."
-      gotchas: "Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair."
+      tooltip: "Two or more people's GnuCash books, one path per line."
+      accepts: "Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse."
+      gotchas: "Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair."
     - name: "period"
       tooltip: "Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar."
       accepts: "A FY, a calendar year, Auto, or a custom date range."
@@ -102,7 +116,8 @@ help:
       accepts: "A whole number of days. Default 7."
       gotchas: "Applies to every pair in the matrix."
   steps:
-    - "Select all the .gnucash books to cross-reconcile (closed in GnuCash)."
+    - "Pick the entities to cross-reconcile -- their registered books fill in automatically."
+    - "Browse to any book that did not fill in (closed in GnuCash)."
     - "Choose the period (or leave on Auto)."
     - "Click Run and download the matrix workbook."
   outputs:

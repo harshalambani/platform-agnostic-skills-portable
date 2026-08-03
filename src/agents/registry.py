@@ -50,10 +50,17 @@ class SkillInput:
     match: str = ""
     options_from: str = ""   # named dynamic option source (e.g. "itr_entities"),
                               # resolved by the UI layer; empty = use static `options`
-    book_from: str = ""      # (file inputs only) name of another `select` input
-                              # in this skill whose value is an entity key; the UI
-                              # layer auto-fills this file field from that entity's
-                              # registered GnuCash book. Empty = no auto-fill.
+    book_from: str = ""      # (file/files inputs only) name of another `select`
+                              # input in this skill whose value is an entity key;
+                              # the UI layer auto-fills this file field from that
+                              # entity's registered GnuCash book. Empty = no
+                              # auto-fill. On a `files` input the named select is
+                              # expected to be `multiselect: true`, and every
+                              # picked entity's book is filled in, one per line.
+    multiselect: bool = False  # (select inputs only) let the dropdown hold more
+                              # than one value; its value is then a list of keys
+                              # rather than a single key. Used by the Inter-entity
+                              # Matrix, which reconciles every pair among N books.
     fy_from: str = ""        # (file inputs only, optional) name of another input
                               # in this skill whose value is a bare FY string (e.g.
                               # "2025-26"), used together with book_from to pick the
@@ -226,6 +233,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             options_from=inp.get("options_from", ""),
             book_from=inp.get("book_from", ""),
             fy_from=inp.get("fy_from", ""),
+            multiselect=bool(inp.get("multiselect", False)),
         ))
 
     out_raw = raw.get("output") or {}

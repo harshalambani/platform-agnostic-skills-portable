@@ -230,12 +230,12 @@ def _make_book_from_skill(book_from: str, fy_from: str = ""):
     entity_inp = SimpleNamespace(
         name="entity", type="select", label="Entity",
         required=True, file_types=None, options=[], match="",
-        options_from="", book_from="", fy_from="",
+        options_from="", book_from="", fy_from="", multiselect=False,
     )
     file_inp = SimpleNamespace(
         name="book_file", type="file", label="GnuCash Book",
         required=False, file_types=(".gnucash",), options=[], match="",
-        options_from="", book_from=book_from, fy_from=fy_from,
+        options_from="", book_from=book_from, fy_from=fy_from, multiselect=False,
     )
     output = SimpleNamespace(type="directory", suffix="out", extension=".txt", download_label="Download")
     requires = SimpleNamespace(native_binaries=[], external_tools=[], llm=False, network=False)
@@ -338,12 +338,12 @@ def _make_options_from_skill(*, wire_book_from: bool):
     entity_inp = SimpleNamespace(
         name="entity", type="select", label="Entity",
         required=False, file_types=None, options=[], match="",
-        options_from="itr_entities", book_from="", fy_from="",
+        options_from="itr_entities", book_from="", fy_from="", multiselect=False,
     )
     file_inp = SimpleNamespace(
         name="book_file", type="file", label="GnuCash Book",
         required=False, file_types=(".gnucash",), options=[], match="",
-        options_from="", book_from=("entity" if wire_book_from else ""), fy_from="",
+        options_from="", book_from=("entity" if wire_book_from else ""), fy_from="", multiselect=False,
     )
     output = SimpleNamespace(type="directory", suffix="out", extension=".txt", download_label="Download")
     requires = SimpleNamespace(native_binaries=[], external_tools=[], llm=False, network=False)

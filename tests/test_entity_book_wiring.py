@@ -53,19 +53,36 @@ def test_book_from_targets_exist():
 
 
 def test_book_from_only_on_file_inputs():
-    """book_from is only honoured by the UI for single 'file' inputs, never
-    'files' (multi-upload) -- wiring it onto a 'files' input is a silent
-    no-op in ui/tabs/_generic.py, so guard against that mistake here."""
+    """book_from is honoured by the UI for 'file' and 'files' inputs only --
+    on anything else it is a silent no-op in ui/tabs/_generic.py, so guard
+    against that mistake here."""
     for skill in _skills():
         for inp in skill.inputs:
             if inp.book_from:
-                assert inp.type == "file", (
+                assert inp.type in ("file", "files"), (
                     f"{skill.name}: input '{inp.name}' has type '{inp.type}' "
                     f"but declares book_from -- the UI only wires book_from "
-                    f"for type: \"file\" inputs. (Known exception: skills "
-                    f"whose GnuCash input is type \"files\", e.g. Inter-entity "
-                    f"Matrix, cannot use book_from at all.)"
+                    f"for type: \"file\" and type: \"files\" inputs."
                 )
+
+
+def test_files_book_from_source_is_multiselect():
+    """A multi-book field is filled from a MULTI-select entity dropdown.
+
+    `books_update()` resolves every picked entity into one path per line; a
+    single-select source would only ever supply one of the two books the
+    matrix needs, which looks like the fill quietly failing.
+    """
+    for skill in _skills():
+        by_name = {inp.name: inp for inp in skill.inputs}
+        for inp in skill.inputs:
+            if inp.type != "files" or not inp.book_from:
+                continue
+            src = by_name.get(inp.book_from)
+            assert src is not None and src.multiselect, (
+                f"{skill.name}: '{inp.name}' is a multi-book field fed by "
+                f"'{inp.book_from}', which is not multiselect: true."
+            )
 
 
 def test_itr_entities_select_does_not_hijack_output_filename():
@@ -131,12 +148,15 @@ def test_book_from_source_precedes_its_book_field():
             )
 
 
-def test_intercompany_matrix_has_no_book_from():
-    """Documents a known, deliberate gap: the Matrix skill's GnuCash input
-    ('books') is type: "files" (2+ books), not type: "file", so it cannot
-    receive book_from wiring the way the single-book skills do -- there is
-    no per-book entity select for it. If this ever changes (e.g. the UI
-    gains multi-file book_from support), update this test alongside it."""
+def test_intercompany_matrix_is_entity_wired():
+    """The Matrix skill's multi-book input is filled from a multiselect entity
+    picker.
+
+    This test previously documented the opposite -- that 'books', being
+    type: "files", could not carry book_from at all -- and asked to be updated
+    alongside the UI gaining multi-file support. It has, so this is the
+    positive form: one dropdown, N entities, N book paths.
+    """
     matrix = next(
         (s for s in _skills() if s.name == "gnucash_intercompany_matrix"),
         None,
@@ -145,5 +165,12 @@ def test_intercompany_matrix_has_no_book_from():
     books_input = next((i for i in matrix.inputs if i.name == "books"), None)
     assert books_input is not None
     assert books_input.type == "files"
-    assert books_input.book_from == ""
-    assert not any(i.options_from == "itr_entities" for i in matrix.inputs)
+    assert books_input.book_from == "entities"
+
+    entities = next((i for i in matrix.inputs if i.name == "entities"), None)
+    assert entities is not None
+    assert entities.options_from == "itr_entities"
+    assert entities.multiselect is True
+    assert entities.required is False
+    # UI-only: it must not reach run(), which takes no `entities` kwarg.
+    assert not any("{inputs.entities}" in t for t in matrix.run_args.values())

@@ -11,9 +11,12 @@ Run at year-end to see, at a glance, which family members' books agree and which
 
 ## Inputs
 
-- **GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash** (required) — accepts: GnuCash files (.gnucash).
-  - Two or more people's GnuCash books.
-  - ⚠️ Close them in GnuCash first. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair.
+- **Entities (pick 2 or more -- fills their registered books below)** (optional) — accepts: Two or more entities from the Entities tab. Optional -- you can Browse to the books instead.
+  - Pick the people to cross-reconcile; their registered books fill in below.
+  - ⚠️ Only entities with a registered book fill in; any that have none are named under the field, and you can Browse to those. 'X HUF' is a separate entity from 'X'.
+- **GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash** (required) — accepts: Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse.
+  - Two or more people's GnuCash books, one path per line.
+  - ⚠️ Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair.
 - **Reconciliation period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a calendar year, Auto, or a custom date range.
   - Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar.
   - ⚠️ 'Auto' reads the FY from the file names; use a fixed FY if the names disagree.
@@ -29,9 +32,10 @@ Run at year-end to see, at a glance, which family members' books agree and which
 
 ## How to run
 
-1. Select all the .gnucash books to cross-reconcile (closed in GnuCash).
-2. Choose the period (or leave on Auto).
-3. Click Run and download the matrix workbook.
+1. Pick the entities to cross-reconcile -- their registered books fill in automatically.
+2. Browse to any book that did not fill in (closed in GnuCash).
+3. Choose the period (or leave on Auto).
+4. Click Run and download the matrix workbook.
 
 ## Output
 

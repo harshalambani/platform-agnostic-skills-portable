@@ -90,6 +90,69 @@ def book_update(entity_key: str | None, fy: str | None = None):
     return gr.update()
 
 
+def _as_keys(entity_keys) -> list[str]:
+    """Normalise a multiselect dropdown's value to a list of entity keys.
+
+    Gradio hands back a list when `multiselect=True`, but a bare string when
+    the component was built without it (and `None` when nothing is picked),
+    so every caller would otherwise have to re-do this dance.
+    """
+    if not entity_keys:
+        return []
+    if isinstance(entity_keys, str):
+        entity_keys = [entity_keys]
+    return [k for k in (str(e).strip() for e in entity_keys) if k]
+
+
+def books_update(entity_keys, fy: str | None = None):
+    """Gradio update for a multi-book path textbox -- one path per line.
+
+    The multi-book counterpart of `book_update()`, for inputs that take
+    several books at once (Inter-entity Matrix). Entities with no resolvable
+    book are skipped rather than written as a blank line, so the field only
+    ever holds paths that exist; `books_status()` names the ones left out.
+
+    Follows `book_update()`'s rule on the empty case: when nothing resolves,
+    return a bare `gr.update()` rather than `value=""`, so clearing the
+    entity dropdown never wipes paths the user picked by hand.
+    """
+    resolved = [p for p in (resolve_for_ui(k, fy) for k in _as_keys(entity_keys)) if p]
+    if resolved:
+        return gr.update(value="\n".join(resolved))
+    return gr.update()
+
+
+def books_status(entity_keys, fy: str | None = None) -> str:
+    """One-line Markdown naming the picked entities with no registered book.
+
+    Same principle as `book_status()`: resolved books land in a visible field
+    and need no announcement, so only the gap is worth saying. The partial
+    case is the one this exists for -- pick three people, get two paths, and
+    without this the third's absence is invisible.
+    """
+    keys = _as_keys(entity_keys)
+    missing = [k for k in keys if not resolve_for_ui(k, fy)]
+    if not missing:
+        return ""
+    names = ", ".join(f"**{k}**" for k in missing)
+    if len(missing) == len(keys):
+        return (
+            f"No registered book for {names} -- add the books below, or "
+            "register them once on the **Entities** tab."
+        )
+    return (
+        f"Filled in {len(keys) - len(missing)} of {len(keys)} books. No "
+        f"registered book for {names} -- add those below, or register them "
+        "once on the **Entities** tab."
+    )
+
+
+def books_status_update(entity_keys, fy: str | None = None):
+    """`books_status()` as a Gradio update, hiding the row when it is empty."""
+    msg = books_status(entity_keys, fy)
+    return gr.update(value=msg, visible=bool(msg))
+
+
 def book_status(entity_key: str | None, fy: str | None = None) -> str:
     """One-line Markdown for the *miss* case only -- otherwise "".
 

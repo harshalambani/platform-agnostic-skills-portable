@@ -77,6 +77,11 @@ def _make_minimal_skill(input_type: str = "files") -> Any:
         required=True,
         file_types=None,
         options=[],
+        # A 'files' input carrying book_from is a multi-book path textbox that
+        # bypasses staging entirely (see ui/tabs/_generic.py) -- empty here is
+        # what keeps this fake on the upload-staging path these caps guard.
+        book_from="",
+        multiselect=False,
     )
     output = SimpleNamespace(
         type="file",

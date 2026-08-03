@@ -404,6 +404,30 @@ def _make_run_handler(skill: SkillInfo):
                         yield add(f"Warning: file not found at {fpath}"), gr.update(interactive=False, value=None), gr.update()
                         return
                     input_map[inp_def.name] = str(fpath)
+            elif inp_def.type == "files" and inp_def.book_from:
+                # Multi-book path textbox: one path per line, opened in place.
+                # Nothing is staged or copied — see the render branch for why.
+                lines = [ln.strip() for ln in str(val or "").splitlines() if ln.strip()]
+                if not lines:
+                    if inp_def.required:
+                        yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    input_map[inp_def.name] = ""
+                else:
+                    missing = [p for p in lines if not Path(p).is_file()]
+                    if missing:
+                        yield add(
+                            "Warning: file not found at "
+                            + ", ".join(missing)
+                        ), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    # De-duplicate: the same book twice would reconcile
+                    # someone against themselves.
+                    seen: list[str] = []
+                    for p in (str(Path(x)) for x in lines):
+                        if p not in seen:
+                            seen.append(p)
+                    input_map[inp_def.name] = "\n".join(seen)
             elif inp_def.type == "files":
                 # Multi-file upload: Gradio gives a list of file paths.
                 # Stage them into a temp directory so the skill receives
@@ -461,7 +485,14 @@ def _make_run_handler(skill: SkillInfo):
                 else:
                     input_map[inp_def.name] = str(val).strip()
             elif inp_def.type in ("select", "parser_file"):
-                input_map[inp_def.name] = str(val or "").strip()
+                # A multiselect dropdown hands back a list. Everything downstream
+                # -- run_args substitution, the output filename -- is str.replace()
+                # on strings, so join the keys rather than letting a list's repr
+                # ("['a', 'b']") become the value.
+                if isinstance(val, (list, tuple)):
+                    input_map[inp_def.name] = ", ".join(str(v).strip() for v in val if str(v).strip())
+                else:
+                    input_map[inp_def.name] = str(val or "").strip()
             else:  # text
                 input_map[inp_def.name] = str(val or "").strip()
 
@@ -529,6 +560,9 @@ def _make_run_handler(skill: SkillInfo):
                 (v for k, v in input_map.items() if v and k in consumed),
                 next((v for v in input_map.values() if v), "output"),
             )
+            # A multi-book field holds one path per line; name the output after
+            # the first of them rather than splicing a newline into a filename.
+            primary_input = (primary_input.splitlines() or [""])[0].strip() or "output"
             # Use .stem for files (strips extension), .name for dirs/paths
             # (takes last component only — avoids embedding full paths in filename).
             p = Path(primary_input)
@@ -792,7 +826,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # the book. Selects that are not book_from sources (e.g. ITR Workbook's
             # `entity`) keep their existing pre-select behaviour.
             _book_from_sources = {
-                inp.book_from for inp in skill.inputs if inp.type == "file" and inp.book_from
+                inp.book_from
+                for inp in skill.inputs
+                if inp.type in ("file", "files") and inp.book_from
             }
             book_status_md: dict[str, object] = {}  # file input name -> its status Markdown
             for inp in skill.inputs:
@@ -856,6 +892,32 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         )
                         _rbtn = gr.Button("↻", scale=0, min_width=40)
                     output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
+                elif inp.type == "files" and inp.book_from:
+                    # Several books at once (Inter-entity Matrix) — a path
+                    # textbox for exactly the reasons the single-book field is
+                    # one, only more so. The gr.File route stages uploads by
+                    # copying every picked file into a temp directory, which
+                    # for books means duplicating live .gnucash files onto
+                    # disk, and refusing outright any book over the upload size
+                    # cap. Books are opened read-only in place; none of that
+                    # should happen to them. One path per line.
+                    book_status_md[inp.name] = gr.Markdown(
+                        "", visible=False, elem_classes=["pa-book-status"],
+                    )
+                    with gr.Row():
+                        comp = gr.Textbox(
+                            label=inp.label,
+                            placeholder=(
+                                "Pick entities above, or Browse… to .gnucash "
+                                "files — one path per line"
+                            ),
+                            lines=4,
+                            max_lines=10,
+                            scale=5,
+                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                        )
+                        _brbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    browse_buttons.append((_brbtn, comp, inp, True))
                 elif inp.type == "files":
                     with gr.Row():
                         comp = gr.File(
@@ -897,7 +959,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                                     if inp.name in _book_from_sources
                                     else (_dchoices[0][1] if _dchoices else None)
                                 ),
-                                allow_custom_value=True,
+                                multiselect=inp.multiselect or None,
+                                # A multiselect dropdown with allow_custom_value
+                                # turns every stray keystroke into a new "entity"
+                                # that resolves to no book — the choices are the
+                                # registered entities, and that is the whole list.
+                                allow_custom_value=not inp.multiselect,
                                 interactive=True,
                                 scale=5,
                                 **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
@@ -942,8 +1009,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # the existing run-time `_registry_book_fill()` belt-and-braces path
             # for ITR Workbook (left untouched above/below).
             for inp in skill.inputs:
-                if inp.type != "file" or not inp.book_from:
+                if inp.type not in ("file", "files") or not inp.book_from:
                     continue
+                _multi = inp.type == "files"
                 file_comp = input_by_name[inp.name]
                 entity_comp = input_by_name.get(inp.book_from)
                 if entity_comp is None:
@@ -972,19 +1040,22 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 # line. See _entity_book.book_status().
                 status_md = book_status_md.get(inp.name)
 
-                def _make_book_from_handler():
+                def _make_book_from_handler(multi=_multi):
+                    # `files` resolves every picked entity into one path per
+                    # line and reports which of them had no book; `file`
+                    # resolves the one.
+                    fill = _entity_book.books_update if multi else _entity_book.book_update
+                    say = (
+                        _entity_book.books_status_update
+                        if multi
+                        else _entity_book.book_status_update
+                    )
                     if len(wiring_inputs) == 2:
                         def _handler(entity_val, fy_val):
-                            return (
-                                _entity_book.book_update(entity_val, fy_val),
-                                _entity_book.book_status_update(entity_val, fy_val),
-                            )
+                            return fill(entity_val, fy_val), say(entity_val, fy_val)
                     else:
                         def _handler(entity_val):
-                            return (
-                                _entity_book.book_update(entity_val),
-                                _entity_book.book_status_update(entity_val),
-                            )
+                            return fill(entity_val), say(entity_val)
                     return _handler
 
                 entity_comp.change(
@@ -1088,13 +1159,29 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     for _brbtn, _fcomp, _inp, _multiple in browse_buttons:
         _box_key = f"{skill.name}.{_inp.name}"
         _fts = tuple(_inp.file_types) if _inp.file_types else ()
+        # The upload size cap exists because uploads get copied into a staging
+        # directory. A book is never copied — it is opened read-only where it
+        # lies — so capping it only means refusing to open a big book. Real
+        # .gnucash files pass 100 MB routinely once a few years of splits are
+        # in them.
+        _is_book = bool(_inp.book_from)
+        # A multi-book field is a path textbox, not a gr.File: the picker's
+        # result is text, and it ADDS to what is already there. Books get
+        # gathered a few at a time (three from one folder, one from another),
+        # and a picker that wiped the previous picks would make that
+        # impossible.
+        _books_box = _multiple and _is_book
 
-        def _browse(bk=_box_key, mult=_multiple, fts=_fts, label=_inp.label):
+        # `current` leads: Gradio passes `inputs=[...]` positionally, so the
+        # textbox's own value has to be the first parameter. With inputs=[]
+        # it simply keeps its default.
+        def _browse(current=None, bk=_box_key, mult=_multiple, fts=_fts,
+                    label=_inp.label, books_box=_books_box, is_book=_is_book):
             valid, warnings = _filedialog.pick_files(
                 bk,
                 multiple=mult,
                 file_types=fts,
-                max_size_bytes=_MAX_UPLOAD_SIZE_BYTES,
+                max_size_bytes=None if is_book else _MAX_UPLOAD_SIZE_BYTES,
                 title=f"Select file{'s' if mult else ''} — {label}",
             )
             for w in warnings:
@@ -1102,9 +1189,21 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             if not valid:
                 # Cancelled, or every pick was rejected — keep the current value.
                 return gr.update()
+            if books_box:
+                kept = [ln.strip() for ln in (current or "").splitlines() if ln.strip()]
+                # Re-picking a book already listed should not list it twice —
+                # the matrix would then reconcile someone against themselves.
+                for p in valid:
+                    if str(p) not in kept:
+                        kept.append(str(p))
+                return gr.update(value="\n".join(kept))
             return gr.update(value=(valid if mult else valid[0]))
 
-        _brbtn.click(fn=_browse, inputs=[], outputs=[_fcomp])
+        _brbtn.click(
+            fn=_browse,
+            inputs=([_fcomp] if _books_box else []),
+            outputs=[_fcomp],
+        )
 
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.
@@ -1143,8 +1242,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # click handler can return updates that line up with the outputs list.
     reset_specs: list = []  # (component, reset_update_callable)
     for _inp, _comp in zip(skill.inputs, input_components):
-        if _inp.type == "file" and _inp.book_from:
-            # This one is a path Textbox, not a gr.File -- value=None leaves a
+        if _inp.type in ("file", "files") and _inp.book_from:
+            # These are path Textboxes, not gr.Files -- value=None leaves a
             # textbox showing whatever it already had.
             reset_specs.append((_comp, lambda: gr.update(value="")))
         elif _inp.type in ("file", "files"):

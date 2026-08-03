@@ -33,13 +33,23 @@ def run(
     model_override: str = None,
 ) -> str:
     """
-    Reconcile every pair among `books` (a list of .gnucash paths) and write the
-    matrix workbook to output_path. Returns a text summary for the UI.
+    Reconcile every pair among `books` and write the matrix workbook to
+    output_path. Returns a text summary for the UI.
+
+    `books` is either a list of .gnucash paths (direct/programmatic callers) or
+    a single newline-separated string of them -- the UI's multi-book field is a
+    path textbox holding one path per line, and run_args substitution makes every
+    kwarg a string on the way in.
     """
     from matrix_recon import run_matrix
     from matrix_report import write_matrix_workbook
 
-    paths = [books] if isinstance(books, str) else list(books)
+    if isinstance(books, str):
+        paths = [ln.strip() for ln in books.splitlines() if ln.strip()]
+    else:
+        paths = [str(b).strip() for b in (books or []) if str(b).strip()]
+    # The same book twice would reconcile someone against themselves.
+    paths = list(dict.fromkeys(paths))
     if len(paths) < 2:
         return "ERROR: select at least two .gnucash books for a matrix."
 
