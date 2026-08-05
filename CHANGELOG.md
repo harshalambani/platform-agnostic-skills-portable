@@ -9,6 +9,35 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [3.3.0] — 2026-08-05
+
+### Added
+- **An entity can now record *why* the 31 October due date applies to it.**
+  `audit_case: true` has always meant "the s.139(1) due date is 31 October",
+  but it is *named* for only one of the routes to that date — own liability to
+  audit u/s 44AB. s.139(1) Explanation 2 gives the same date to a working
+  partner of a firm whose accounts are audited, someone who is not an audit
+  case himself, and the workbook was printing the wrong statutory reason for
+  that filer. A new optional `audit_case_basis` (`self_44ab` or
+  `partner_of_audited_firm`) records the route, and the workbook spells it out
+  beside the due date: *"Due date for furnishing the return — working partner
+  of a firm whose accounts are liable to audit (s.139(1) Expl. 2)"*. Set it
+  from the Entities tab, or leave it blank.
+
+  The basis is **descriptive only** and can never move the date — every route
+  in Explanation 2 arrives at the same day, which is the whole reason this is a
+  label rather than a second flag. `resolve_due_date()` deliberately cannot see
+  it, and a test pins that.
+
+  Nothing migrates: an unstated basis reads as the s.44AB case, which is all
+  `audit_case: true` has ever meant, and an existing `entities.yaml` survives a
+  save byte-identically.
+
+### Changed
+- The two audit fields on the Entities tab are relabelled **"Extended due
+  date"** rather than "Audit case (s.44AB)" — the old label was the
+  mislabelling itself, since it named one route to a date reached by several.
+
 ## [3.2.0] — 2026-08-03
 
 ### Added
