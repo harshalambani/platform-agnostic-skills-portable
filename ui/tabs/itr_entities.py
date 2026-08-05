@@ -207,6 +207,17 @@ def _parse_list_lines(text: str) -> list[str]:
 _STATUS_CHOICES = ("Individual", "HUF")
 _REGIME_CHOICES = ("old", "new")
 
+#: `audit_case_basis` is optional and a Gradio Dropdown cannot hold "" as a
+#: choice cleanly, so the blank option is a sentinel label mapped back to ""
+#: on save. Blank means "unstated", which reads as the s.44AB default -- the
+#: only meaning `audit_case: true` ever had before this field existed.
+_AUDIT_BASIS_BLANK = "(not stated)"
+_AUDIT_BASIS_CHOICES = (
+    _AUDIT_BASIS_BLANK,
+    "self_44ab",
+    "partner_of_audited_firm",
+)
+
 
 def _entity_to_form(key: str, entities: dict) -> tuple:
     """Return the form field values for `key`, or blanks for a new entity."""
@@ -214,13 +225,14 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
     if e is None:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
-            "", "", "new", "", False, "", "", "", "",
+            "", "", "new", "", False, "", _AUDIT_BASIS_BLANK, "", "", "",
         )
     return (
         e.key, e.name, e.pan, e.status, e.residency,
         e.dob or "", e.doi or "", e.address or "", e.father_name or "", e.aadhaar or "",
         e.business_subtree or "", e.workbook_match or "", e.default_regime, _format_kv_lines(e.regime_by_ay),
         e.audit_case, _format_kv_lines(e.audit_case_by_ay),
+        e.audit_case_basis or _AUDIT_BASIS_BLANK,
         _format_list_lines((e.extra_items or {}).get("bf_losses") or []),
         _format_list_lines((e.extra_items or {}).get("clubbing_notes") or []),
         _format_kv_lines(e.books),
@@ -328,6 +340,9 @@ def _save_entity(
     audit_case: bool, audit_case_by_ay_text: str,
     bf_losses_text: str, clubbing_notes_text: str,
     books_text: str = "",
+    # Trailing + defaulted deliberately: every existing caller passes this
+    # function's arguments positionally, and the basis is optional metadata.
+    audit_case_basis: str = "",
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -346,11 +361,17 @@ def _save_entity(
             )
     kv_errors = kv_errors_1 + kv_errors_2 + kv_errors_3
 
+    # The dropdown's blank sentinel is a UI affordance, not a stored value.
+    audit_case_basis = (audit_case_basis or "").strip()
+    if audit_case_basis == _AUDIT_BASIS_BLANK:
+        audit_case_basis = ""
+
     configs = _configs_mod()
     field_errors = configs.validate_entity_fields(
         key=new_key, name=name, pan=pan, status=status,
         dob=dob or None, doi=doi or None, default_regime=default_regime,
         regime_by_ay=regime_by_ay, audit_case_by_ay=audit_case_by_ay,
+        audit_case_basis=audit_case_basis,
     )
     errors = field_errors + kv_errors
     if errors:
@@ -422,6 +443,7 @@ def _save_entity(
         regime_by_ay=regime_by_ay,
         audit_case=bool(audit_case),
         audit_case_by_ay=audit_case_by_ay,
+        audit_case_basis=audit_case_basis,
         extra_items=extra_items,
     )
 
@@ -762,13 +784,22 @@ def render(container_tab=None) -> None:
                 lines=3, interactive=True,
             )
             audit_case_cb = gr.Checkbox(
-                label="Audit case (s.44AB) -- s.139(1) due date is 31 Oct, not 31 Jul",
+                label="Extended due date -- s.139(1) due date is 31 Oct, not 31 Jul",
                 value=False,
             )
             audit_case_by_ay_box = gr.Textbox(
-                label="Audit case by AY (one per line, 'AY = true|false')",
+                label="Extended due date by AY (one per line, 'AY = true|false')",
                 placeholder="2025-26 = false",
                 lines=3, interactive=True,
+            )
+            audit_case_basis_dd = gr.Dropdown(
+                label="Why 31 Oct applies (optional -- wording only, never the date)",
+                choices=list(_AUDIT_BASIS_CHOICES),
+                value=_AUDIT_BASIS_BLANK,
+                interactive=True,
+                info="s.139(1) Expl. 2 gives 31 Oct by several routes. "
+                     "'partner_of_audited_firm' = working partner of a firm liable to "
+                     "audit, who is not an audit case himself. Blank reads as s.44AB.",
             )
             bf_losses_box = gr.Textbox(
                 label="B/f losses (one per line)", lines=3, interactive=True,
@@ -791,7 +822,8 @@ def render(container_tab=None) -> None:
         key_box, name_box, pan_box, status_dd, residency_box,
         dob_box, doi_box, address_box, father_name_box, aadhaar_box,
         business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
-        audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box,
+        audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
+        bf_losses_box, clubbing_notes_box,
         books_box,
     ]
 
@@ -826,14 +858,17 @@ def render(container_tab=None) -> None:
     def _on_save(
         orig_key, new_key, name, pan, status, residency, dob, doi, address,
         father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
-        audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
+        audit_case, audit_case_by_ay_text, audit_case_basis,
+        bf_losses_text, clubbing_notes_text,
         books_text,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
             father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
-            audit_case, audit_case_by_ay_text, bf_losses_text, clubbing_notes_text,
+            audit_case, audit_case_by_ay_text,
+            bf_losses_text, clubbing_notes_text,
             books_text,
+            audit_case_basis=audit_case_basis,
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -844,7 +879,8 @@ def render(container_tab=None) -> None:
         inputs=[orig_key_state, key_box, name_box, pan_box, status_dd, residency_box,
                 dob_box, doi_box, address_box, father_name_box, aadhaar_box,
                 business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
-                audit_case_cb, audit_case_by_ay_box, bf_losses_box, clubbing_notes_box,
+                audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
+                bf_losses_box, clubbing_notes_box,
                 books_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )

@@ -19,6 +19,7 @@ from datetime import date
 from pathlib import Path
 
 import as26 as as26_engine
+import configs
 import interest_234
 import lots as lots_engine
 import parse_eguile as pe
@@ -775,6 +776,9 @@ class Interest234Schedule:
     filing_date: date | None = None
     warnings: list = field(default_factory=list)
     computed: bool = False
+    due_date_reason: str = ""        # descriptive wording for WHY this due date applies
+                                     # (audit cases only). Rendered next to the due-date
+                                     # label; never an input to the date itself.
 
 
 def build_interest_234(
@@ -784,6 +788,7 @@ def build_interest_234(
     capital_gains: "CapitalGainsSchedule | None" = None,
     rules: "rules_engine.RulesConfig | None" = None,
     audit_case: bool = False,
+    audit_case_basis: str = "",
 ) -> Interest234Schedule:
     """Assemble the inputs s.234A/B/C need out of the already-built model.
 
@@ -876,9 +881,17 @@ def build_interest_234(
             f"{unforeseeable[2]:,.2f} from December and {unforeseeable[3]:,.2f} from March."
         )
 
+    # Descriptive only, and only when the extended date actually applies: a
+    # 31 July filer has nothing to explain. `due_date=` passed explicitly
+    # overrides audit_case, so don't claim a reason for a date we didn't derive.
+    reason = ""
+    if audit_case and due_date is None:
+        reason = configs.audit_basis_label(audit_case_basis)
+
     return Interest234Schedule(
         result=result, total=result.total, due_date=due,
         filing_date=filing_date, warnings=warnings, computed=True,
+        due_date_reason=reason,
     )
 
 
@@ -1333,7 +1346,7 @@ def build_all_schedules(
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
     residency: str | None = None, filing_date: date | None = None,
-    audit_case: bool = False,
+    audit_case: bool = False, audit_case_basis: str = "",
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -1363,7 +1376,7 @@ def build_all_schedules(
     schedule_fa = build_schedule_fa(resolved, node_by_guid)
     interest = build_interest_234(
         computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
-        rules=rules, audit_case=audit_case,
+        rules=rules, audit_case=audit_case, audit_case_basis=audit_case_basis,
     )
 
     return ITRModel(

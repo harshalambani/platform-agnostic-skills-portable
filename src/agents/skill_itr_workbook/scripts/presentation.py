@@ -80,7 +80,9 @@ def _assumption_note(due_date: "date | None") -> str:
     """The Assumptions footnote. The 234-interest clause names the ACTUAL
     resolved due date rather than asserting 31 July -- that hardcode was a lie
     on an audit workbook (31 October), and the date now comes from the entity's
-    audit_case flag + the rules file (schedules.resolve_due_date)."""
+    audit_case flag + the rules file (schedules.resolve_due_date). WHY the
+    extended date applies (own s.44AB audit vs working partner of an audited
+    firm) is spelled out next to the due-date input, not here."""
     if due_date is not None:
         due_clause = f"the due date itself ({due_date.day} {due_date.strftime('%B %Y')})"
     else:
@@ -238,7 +240,12 @@ def write_234_workings(ws, start_row: int, model, total_liability_ref: str) -> i
         c.font = _font()
 
     # -- inputs -------------------------------------------------------------
-    label("due_date", "Due date for furnishing the return")
+    # The reason clause is descriptive only -- the date beside it came from the
+    # entity's audit_case flag, not from this wording (see configs.audit_case_basis).
+    due_label = "Due date for furnishing the return"
+    if getattr(i234, "due_date_reason", ""):
+        due_label += f" -- {i234.due_date_reason}"
+    label("due_date", due_label)
     date_input("due_date", i234.due_date)
     label("filing_date", "Actual date of filing (edit me)")
     date_input("filing_date", i234.filing_date or i234.due_date)

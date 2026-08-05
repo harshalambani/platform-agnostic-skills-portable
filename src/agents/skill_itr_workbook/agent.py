@@ -459,6 +459,7 @@ def _build_and_write_workbook(
         tree, result.resolved, book, form16_data, year_key, rules, regime,
         entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
         residency=entity.residency, audit_case=audit_case,
+        audit_case_basis=entity.audit_case_basis,
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []

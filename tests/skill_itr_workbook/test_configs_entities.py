@@ -47,6 +47,7 @@ def _make_entities() -> dict:
             business_subtree="Income/xBusiness Income",
             workbook_match="SynIndBiz", default_regime="new",
             audit_case=True, audit_case_by_ay={"2025-26": False},
+            audit_case_basis="partner_of_audited_firm",
         ),
     }
 
@@ -78,6 +79,7 @@ def test_dump_then_load_round_trips_all_fields(tmp_path):
         assert got.regime_by_ay == orig.regime_by_ay
         assert got.audit_case == orig.audit_case
         assert got.audit_case_by_ay == orig.audit_case_by_ay
+        assert got.audit_case_basis == orig.audit_case_basis
 
 
 def test_dump_includes_stable_header():
@@ -127,6 +129,57 @@ def test_dump_emits_audit_case_true_explicitly():
     )
     text = configs.dump_entities({"SYN-AUDIT": e})
     assert "audit_case: true" in text
+
+
+# ---------------------------------------------------------------------------
+# audit_case_basis -- descriptive only. The whole point is that it explains a
+# date it must never be able to change, so these tests pin both halves: the
+# wording follows the basis, and the DATE ignores it.
+# ---------------------------------------------------------------------------
+
+def test_audit_case_basis_omitted_when_unstated():
+    """An entity that never states a basis emits no key -- a pre-existing
+    entities.yaml stays byte-identical through a save."""
+    e = configs.EntityProfile(
+        key="SYN-AUDIT", name="Audit Case", pan="EEEEE4444E", status="Individual",
+        audit_case=True,
+    )
+    assert e.audit_case_basis == ""
+    assert "audit_case_basis" not in configs.dump_entities({"SYN-AUDIT": e})
+
+
+def test_audit_basis_label_falls_back_to_44ab():
+    """Unstated (or unknown) reads exactly as a bare `audit_case: true` always
+    did -- the s.44AB case."""
+    for unstated in ("", None, "   "):
+        assert "44AB" in configs.audit_basis_label(unstated)
+    assert "44AB" in configs.audit_basis_label("something-nobody-defined")
+
+
+def test_audit_basis_label_names_the_partner_route():
+    label = configs.audit_basis_label("partner_of_audited_firm")
+    assert "partner" in label.lower()
+    assert "139(1)" in label
+    assert "44AB" not in label
+
+
+def test_validate_accepts_blank_or_known_audit_case_basis():
+    for basis in ("", "self_44ab", "partner_of_audited_firm"):
+        errors = configs.validate_entity_fields(
+            key="X", name="N", pan="AAAAA0000A", status="Individual",
+            audit_case_basis=basis,
+        )
+        assert errors == [], f"unexpected errors for basis {basis!r}: {errors}"
+
+
+def test_validate_rejects_unknown_audit_case_basis():
+    """A typo must fail loudly: it would otherwise print the wrong statutory
+    reason on a filed workbook."""
+    errors = configs.validate_entity_fields(
+        key="X", name="N", pan="AAAAA0000A", status="Individual",
+        audit_case_basis="partner_of_audited_form",
+    )
+    assert any("audit_case_basis" in e for e in errors)
 
 
 # ---------------------------------------------------------------------------
