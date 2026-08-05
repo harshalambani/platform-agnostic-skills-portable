@@ -39,6 +39,35 @@ class MappingValidationError(Exception):
 # entities.yaml
 # ---------------------------------------------------------------------------
 
+# Why the 31 Oct s.139(1) due date applies to an entity. Descriptive only: the
+# date is identical for every basis (that is the whole point of s.139(1)
+# Explanation 2 -- it lists several routes to the same date), so this NEVER
+# feeds resolve_due_date(). It exists because `audit_case: true` reads as
+# "liable to s.44AB audit", which is only one of the routes -- a working
+# partner of an audited firm gets 31 Oct without being an audit case himself.
+#
+# Adding a basis: add the token + its note wording here; nothing else changes.
+AUDIT_BASIS_SELF_44AB = "self_44ab"
+AUDIT_BASIS_PARTNER_OF_AUDITED_FIRM = "partner_of_audited_firm"
+
+_AUDIT_BASIS_LABELS: dict[str, str] = {
+    AUDIT_BASIS_SELF_44AB:
+        "accounts liable to audit u/s 44AB",
+    AUDIT_BASIS_PARTNER_OF_AUDITED_FIRM:
+        "working partner of a firm whose accounts are liable to audit "
+        "(s.139(1) Expl. 2)",
+}
+_AUDIT_BASIS_CHOICES = tuple(_AUDIT_BASIS_LABELS)
+
+
+def audit_basis_label(basis: str | None) -> str:
+    """Human wording for an `audit_case_basis` token, for the due-date note.
+    An empty/unknown basis falls back to the s.44AB wording -- that is what a
+    bare `audit_case: true` has always implied, so an unstated basis reads
+    exactly as it did before the field existed."""
+    return _AUDIT_BASIS_LABELS.get((basis or "").strip(), _AUDIT_BASIS_LABELS[AUDIT_BASIS_SELF_44AB])
+
+
 @dataclass
 class EntityProfile:
     key: str
@@ -82,9 +111,17 @@ class EntityProfile:
                                        # own standalone `book:`/`workbook_match:` reads).
     default_regime: str = "new"
     regime_by_ay: dict = field(default_factory=dict)   # {"2026-27": "old", ...}
-    audit_case: bool = False             # liable to audit -> 31 Oct s.139(1) due date
-                                         # (else 31 July); drives 234A/B/C interest.
+    audit_case: bool = False             # 31 Oct s.139(1) due date applies (else 31 July);
+                                         # drives 234A/B/C interest. NOTE: the flag means
+                                         # "31 Oct", not specifically "liable to s.44AB audit"
+                                         # -- see audit_case_basis for WHY it applies.
     audit_case_by_ay: dict = field(default_factory=dict)  # per-AY override, {"2026-27": true}
+    audit_case_basis: str = ""           # OPTIONAL, purely descriptive: why the 31 Oct date
+                                         # applies. One of _AUDIT_BASIS_CHOICES. Drives the
+                                         # wording of the due-date note only -- NEVER the date
+                                         # itself (resolve_due_date() reads audit_case alone).
+                                         # Empty == unstated; presented as the s.44AB default,
+                                         # which is what audit_case has always meant.
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
 
 
@@ -121,6 +158,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             regime_by_ay=fields_.get("regime_by_ay") or {},
             audit_case=bool(fields_.get("audit_case", False)),
             audit_case_by_ay=fields_.get("audit_case_by_ay") or {},
+            audit_case_basis=(fields_.get("audit_case_basis") or "").strip(),
             extra_items=fields_.get("extra_items") or {},
         )
     return entities
@@ -190,6 +228,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["audit_case"] = True
     if e.audit_case_by_ay:
         d["audit_case_by_ay"] = dict(e.audit_case_by_ay)
+    if e.audit_case_basis:
+        d["audit_case_basis"] = e.audit_case_basis
     if e.extra_items:
         d["extra_items"] = dict(e.extra_items)
     return d
@@ -349,6 +389,7 @@ def validate_entity_fields(
     default_regime: str = "new",
     regime_by_ay: dict | None = None,
     audit_case_by_ay: dict | None = None,
+    audit_case_basis: str = "",
 ) -> list[str]:
     """Validate the fields of one entity before a write. Returns a list of
     human-readable error strings (empty list == valid). Pure/side-effect-free
@@ -393,6 +434,14 @@ def validate_entity_fields(
     for ay, flag in (audit_case_by_ay or {}).items():
         if not isinstance(flag, bool):
             errors.append(f"audit_case_by_ay[{ay!r}] = {flag!r} must be true/false.")
+
+    # Blank is legal (unstated basis -- reads as the s.44AB default). A typo'd
+    # token is not: it would silently print the wrong statutory reason on the
+    # workbook's due-date note.
+    if (audit_case_basis or "").strip() and audit_case_basis.strip() not in _AUDIT_BASIS_CHOICES:
+        errors.append(
+            f"audit_case_basis {audit_case_basis!r} must be blank or one of {_AUDIT_BASIS_CHOICES}."
+        )
 
     return errors
 

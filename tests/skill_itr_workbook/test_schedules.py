@@ -934,6 +934,55 @@ def test_resolve_due_date_malformed_entry_keeps_fallback():
     assert sch.resolve_due_date(rules, "2025-26", audit_case=False) == date(2026, 7, 31)
 
 
+def _i234(**kwargs):
+    """build_interest_234 over a minimal stand-in computation -- only the two
+    tax_block figures it reads are needed."""
+    from types import SimpleNamespace
+    computation = SimpleNamespace(
+        tax_block=SimpleNamespace(tax_liability=100000.0, tax_on_special_rate_income=0.0),
+    )
+    return sch.build_interest_234(
+        computation, sch.TaxesPaidSchedule(), "2025-26",
+        rules=_rules_with_due_dates({"non_audit": "07-31", "audit": "10-31"}),
+        **kwargs,
+    )
+
+
+def test_interest_234_reason_names_the_partner_route():
+    got = _i234(audit_case=True, audit_case_basis="partner_of_audited_firm")
+    assert got.due_date == date(2026, 10, 31)
+    assert "partner" in got.due_date_reason.lower()
+
+
+def test_interest_234_basis_does_not_move_the_date():
+    """Same flag, different basis -> byte-identical date; only the wording moves."""
+    a = _i234(audit_case=True, audit_case_basis="self_44ab")
+    b = _i234(audit_case=True, audit_case_basis="partner_of_audited_firm")
+    assert a.due_date == b.due_date == date(2026, 10, 31)
+    assert a.due_date_reason != b.due_date_reason
+
+
+def test_interest_234_unstated_basis_reads_as_44ab():
+    got = _i234(audit_case=True)
+    assert got.due_date == date(2026, 10, 31)
+    assert "44AB" in got.due_date_reason
+
+
+def test_interest_234_non_audit_carries_no_reason():
+    """A 31 July filer has nothing to explain -- no stray clause on the sheet."""
+    got = _i234(audit_case=False, audit_case_basis="partner_of_audited_firm")
+    assert got.due_date == date(2026, 7, 31)
+    assert got.due_date_reason == ""
+
+
+def test_resolve_due_date_takes_no_basis_argument():
+    """audit_case_basis is descriptive only: s.139(1) Expl. 2 reaches 31 Oct by
+    several routes, so which route applies must never be able to move the date.
+    resolve_due_date deliberately cannot see it -- this pins that."""
+    import inspect
+    assert "audit_case_basis" not in inspect.signature(sch.resolve_due_date).parameters
+
+
 def test_shipped_rules_files_carry_filing_due_dates():
     # The two tracked rules files must expose the block so a real run resolves
     # the date from config, not the fallback.

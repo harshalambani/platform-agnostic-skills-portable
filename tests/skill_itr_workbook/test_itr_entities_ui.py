@@ -189,6 +189,60 @@ def test_audit_case_by_ay_bad_value_rejected(tmp_path):
     assert "true/false" in msg
 
 
+def test_audit_case_basis_round_trips_through_the_form(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-PARTNER", "Partner Entity", "HHHHH7777H", "Individual", "Resident",
+            "", "", "", "", "", "", "", "new", "",
+            True, "",
+            "", "", "",
+            audit_case_basis="partner_of_audited_firm",
+        )
+        assert "Saved" in msg
+        entities = ui_mod._load_entities()
+        form = ui_mod._entity_to_form("SYN-PARTNER", entities)
+
+    assert entities["SYN-PARTNER"].audit_case_basis == "partner_of_audited_firm"
+    assert form[16] == "partner_of_audited_firm"
+
+
+def test_audit_case_basis_blank_sentinel_stores_empty(tmp_path):
+    """The dropdown's '(not stated)' label is a UI affordance -- it must never
+    reach entities.yaml, or the loader would reject it as an unknown basis."""
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-NOBASIS", "No Basis", "IIIII8888I", "Individual", "Resident",
+            "", "", "", "", "", "", "", "new", "",
+            True, "",
+            "", "", "",
+            audit_case_basis=ui_mod._AUDIT_BASIS_BLANK,
+        )
+        assert "Saved" in msg
+        entities = ui_mod._load_entities()
+        form = ui_mod._entity_to_form("SYN-NOBASIS", entities)
+
+    assert entities["SYN-NOBASIS"].audit_case_basis == ""
+    assert form[16] == ui_mod._AUDIT_BASIS_BLANK  # blank re-presents as the sentinel
+    text = (data_root / "itr" / "entities.yaml").read_text(encoding="utf-8")
+    assert ui_mod._AUDIT_BASIS_BLANK not in text
+
+
+def test_audit_case_basis_typo_rejected(tmp_path):
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            "", "SYN-BADBASIS", "Bad Basis", "JJJJJ9999J", "Individual", "Resident",
+            "", "", "", "", "", "", "", "new", "",
+            True, "",
+            "", "", "",
+            audit_case_basis="partner_of_audited_form",
+        )
+    assert "Not saved" in msg
+    assert "audit_case_basis" in msg
+
+
 def test_add_with_workbook_match_persists_and_repopulates(tmp_path):
     data_root = _seed(tmp_path)
     with patch("ui._config.data_root_dir", return_value=data_root):
