@@ -14,8 +14,11 @@ Regenerate after an icon or theme change:
     cd "C:\\Users\\inabm\\Documents\\Cowork Playground\\platform-agnostic-skills-portable"
     python bundling/icons/make_splash.py
 
-The output is committed; the build only copies it into the staging tree, so a
-build machine never needs Pillow or fonts for this.
+The output is committed, but the build does not ship that copy: build.py runs
+this script under the build venv's interpreter to redraw the splash into the
+staging tree with the version being built, and falls back to the committed image
+only if that fails. So the committed copy is the safety net, not the artifact --
+keep it regenerated, since a fallback build ships whatever version line it holds.
 """
 from __future__ import annotations
 
@@ -94,7 +97,13 @@ def build(version: str, out: Path | None = None) -> Path:
         d.text(((W - w) // 2, y), text, font=font, fill=fill)
 
     centred(206, "PA Skills Portable", bold, TEXT)
-    centred(250, "Accounting and tax skills, offline", reg, MUTED)
+    # Expands the acronym, which is the one thing the title cannot do for a
+    # first-time user, and stays true as the skill set broadens -- unlike a
+    # domain claim ("accounting and tax") or a deployment claim ("offline",
+    # which this shipped with briefly and which is simply false whenever the
+    # active endpoint is a cloud one). What is in the box TODAY is said in
+    # appinfo.ini's Description instead, where being specific is the job.
+    centred(250, "Platform Agnostic Skills — LLM powered", reg, MUTED)
 
     # A thin accent rule -- the one piece of electric blue in the field, so the
     # splash reads as the same product as the window behind it.
@@ -129,5 +138,13 @@ def _version_from_changelog() -> str:
 
 
 if __name__ == "__main__":
+    # Usage: make_splash.py [VERSION] [OUT_PATH]
+    #
+    # build.py invokes this as a subprocess with BOTH arguments, run by the build
+    # venv's interpreter -- that venv has Pillow, whereas whatever interpreter is
+    # running build.py may not (a CI runner's bare setup-python does not). Run by
+    # hand with no arguments it redraws the committed image at the changelog
+    # version, which is what the module docstring describes.
     v = sys.argv[1] if len(sys.argv) > 1 else _version_from_changelog()
-    print(f"wrote {build(v)} (version {v!r})")
+    out = Path(sys.argv[2]) if len(sys.argv) > 2 else None
+    print(f"wrote {build(v, out)} (version {v!r})")

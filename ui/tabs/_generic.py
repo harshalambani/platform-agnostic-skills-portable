@@ -280,6 +280,37 @@ def wire_deferred_model_loads(app) -> None:
     app.load(fn=_fill, inputs=None, outputs=dropdowns)
 
 
+_LOADING_MODELS_LABEL = "Loading models…"
+
+
+def _startup_model_choices() -> tuple[list[tuple[str, str]], str | None]:
+    """(choices, value) for a Model dropdown that has not been filled yet.
+
+    The real list arrives on the deferred load (wire_deferred_model_loads),
+    anywhere from ~0.1s to ~2s later. What sat there in the meantime was a
+    *guess* — the configured default model, drawn exactly like a confirmed one
+    and with no badge — which then silently swapped for the real entry. That
+    swap is the flicker: same slot, different text, no explanation for it.
+
+    Seed instead with one entry that says what is actually going on. Its VALUE
+    is still the configured default, so a Run fired inside that window submits
+    precisely what it does today; only the LABEL stops claiming to be settled.
+    Keeping it a single non-empty choice also keeps the control the same width
+    and height across the swap.
+
+    Once the shared choices cache holds real data (a second tab, or any point
+    after the first fill), that is used directly — there is nothing to wait for.
+    """
+    known = _refresh_models(use_cache=True, allow_probe=False)
+    # _refresh_models only populates _choices_cache when it has REAL choices;
+    # the default-model guess is deliberately returned uncached so the deferred
+    # load still replaces it. So a non-None cache here means "confirmed".
+    if _choices_cache is not None:
+        return known, _default_model_value(known)
+    fallback = known[0][1] if known else ""
+    return [(_LOADING_MODELS_LABEL, fallback)], fallback
+
+
 def _default_model_value(choices: list[tuple[str, str]]):
     """Pre-select the configured default model when it is among the available
     models, so a fresh tab defaults to the config.yaml `default_model` knob
@@ -1133,13 +1164,14 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # Model dropdown — only meaningful for LLM-powered skills; deterministic
             # skills ignore model_override entirely, so hide it there.
             # Choices are (display_label, raw_name) tuples with capability badges.
-            # allow_probe=False: construction must not go to the wire. The
-            # real list arrives via the deferred load registered just below.
-            initial_choices = _refresh_models(use_cache=True, allow_probe=False)
+            # Construction must not go to the wire; the real list arrives via
+            # the deferred load registered just below. See _startup_model_choices
+            # for what stands in until then and why it is not a spinner.
+            initial_choices, initial_value = _startup_model_choices()
             model_dd = gr.Dropdown(
                 label="Model",
                 choices=initial_choices,
-                value=_default_model_value(initial_choices),
+                value=initial_value,
                 allow_custom_value=True,
                 interactive=True,
                 visible=skill.requires.llm,

@@ -12,13 +12,20 @@ SinglePortableAppInstance=true
 ; is ready -- and it is topmost, so overshooting parks it on top of a usable
 ; window, so it is set UNDER the expected start rather than over it: better to
 ; end a beat early than to cover the thing the user is waiting for.
-; Reference: with the endpoint probes moved off the startup path (prime_async in
-; ui/_health.py), warm source-mode start to a constructed app measures ~9s, of
-; which ~6.5s is the unavoidable `import gradio`. 6s therefore covers the stretch
-; where nothing at all is on screen, and clears as the window arrives.
+; Reference: measured on the FROZEN exe (not source -- source mode is markedly
+; faster and sizing against it is what left 3.4.0 with a splash that cleared
+; while the screen was still empty). Launcher start to a visible window:
+;   warm  14.6s
+;   cold  44.0s
+; Set just under the warm figure. Cold starts are deliberately left uncovered:
+; stretching to 44s would park a topmost splash over a usable window on every
+; warm start, which is the worse failure of the two -- an unresponsive-looking
+; overlay on top of the thing you are waiting for.
+; Re-measure after any change to the startup path; the previous value (6s) was
+; sized against a ~9s warm SOURCE start and undershot the real one by ~8.6s.
 ; LaunchAppAfterSplash is intentionally NOT set: it would run the splash to
-; completion BEFORE starting the app, adding 6s instead of hiding it.
-SplashTime=6000
+; completion BEFORE starting the app, adding the duration instead of hiding it.
+SplashTime=13000
 
 [Activate]
 Registry=false
