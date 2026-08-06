@@ -6,6 +6,19 @@ ProgramExecutable=PASkills\pa_skills.exe
 WorkingDirectory=%PAL:DataDir%
 WaitForProgram=true
 SinglePortableAppInstance=true
+; Splash shown while the app starts, from App\AppInfo\Launcher\splash.jpg
+; (staged by build.py). It is a TIMED overlay, not one that clears when the
+; window appears -- newadvsplash takes a duration and nothing tells it the app
+; is ready -- and it is topmost, so overshooting parks it on top of a usable
+; window, so it is set UNDER the expected start rather than over it: better to
+; end a beat early than to cover the thing the user is waiting for.
+; Reference: with the endpoint probes moved off the startup path (prime_async in
+; ui/_health.py), warm source-mode start to a constructed app measures ~9s, of
+; which ~6.5s is the unavoidable `import gradio`. 6s therefore covers the stretch
+; where nothing at all is on screen, and clears as the window arrives.
+; LaunchAppAfterSplash is intentionally NOT set: it would run the splash to
+; completion BEFORE starting the app, adding 6s instead of hiding it.
+SplashTime=6000
 
 [Activate]
 Registry=false

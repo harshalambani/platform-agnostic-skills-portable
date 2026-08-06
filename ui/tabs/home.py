@@ -27,8 +27,13 @@ _STATUS_DOT = {
 }
 
 
-def _format_endpoint_block(name: str, ep: dict, is_active: bool) -> str:
-    res = _health.check(ep)
+def _format_endpoint_block(name: str, ep: dict, is_active: bool, *, fresh: bool) -> str:
+    # `fresh` is what the Refresh button means: go and look again. Everything
+    # else reads the shared cache the background prime fills (ui/_health.py),
+    # because probing every configured endpoint here is what used to cost the
+    # startup path ~6 seconds — an unreachable one pays a full timeout, and
+    # none of it is needed to draw the panel.
+    res = _health.check(ep) if fresh else _health.check_cached(ep)
     dot = _STATUS_DOT.get(res.status, "⚪")
     flag = "  **(active)**" if is_active else ""
     base = ep.get("base_url", "")
@@ -41,7 +46,7 @@ def _format_endpoint_block(name: str, ep: dict, is_active: bool) -> str:
     )
 
 
-def _build_status_markdown() -> str:
+def _build_status_markdown(*, fresh: bool = False) -> str:
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
@@ -51,9 +56,46 @@ def _build_status_markdown() -> str:
             f"`{_config.PORTABLE_CONFIG_PATH}` _to add one._"
         )
     return "\n\n".join(
-        _format_endpoint_block(name, ep, name == active)
+        _format_endpoint_block(name, ep, name == active, fresh=fresh)
         for name, ep in endpoints.items()
     )
+
+
+def _refresh_status_markdown() -> str:
+    """Refresh button: re-probe every endpoint, ignoring the cache."""
+    return _build_status_markdown(fresh=True)
+
+
+# ---------------------------------------------------------------------------
+# Deferred status fill
+# ---------------------------------------------------------------------------
+#
+# Same arrangement as _generic's model dropdowns: the panel is registered here
+# at construction and filled by one Blocks.load once the browser connects, so
+# the probe overlaps the startup the user is already waiting through instead
+# of extending it.
+
+_PROBING_PLACEHOLDER = "_Checking endpoints…_"
+
+_deferred_status_panels: list = []
+
+
+def reset_deferred_status_panels() -> None:
+    """Drop registrations from a previous build_app() in this process."""
+    _deferred_status_panels.clear()
+
+
+def wire_deferred_status_loads(app) -> None:
+    """Attach the load event that fills the endpoint-status panel."""
+    panels = list(_deferred_status_panels)
+    if not panels:
+        return
+
+    def _fill():
+        md = _build_status_markdown()
+        return md if len(panels) == 1 else [md] * len(panels)
+
+    app.load(fn=_fill, inputs=None, outputs=panels)
 
 
 def _build_skills_markdown(skills: list[SkillInfo]) -> str:
@@ -92,9 +134,16 @@ def render(skills: list[SkillInfo] | None = None) -> None:
     with gr.Row():
         with gr.Column(scale=2):
             gr.Markdown("## LLM endpoint status")
-            status_md = gr.Markdown(value=_build_status_markdown())
+            # Rendered empty and filled by a load event (registered below,
+            # attached in webui.build_app). Note that Gradio's own callable-
+            # value shortcut — gr.Markdown(value=some_fn) — would NOT do:
+            # Component.get_load_fn_and_initial_value calls the function at
+            # construction time as well, so the probe would still be paid
+            # before the window appeared, which is the whole thing being fixed.
+            status_md = gr.Markdown(value=_PROBING_PLACEHOLDER)
+            _deferred_status_panels.append(status_md)
             refresh_btn = gr.Button("Refresh status", variant="secondary")
-            refresh_btn.click(fn=_build_status_markdown, outputs=status_md)
+            refresh_btn.click(fn=_refresh_status_markdown, outputs=status_md)
 
         with gr.Column(scale=1):
             gr.Markdown("## Available skills")

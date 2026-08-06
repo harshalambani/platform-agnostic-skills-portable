@@ -67,6 +67,33 @@ def _managed_note(message: str) -> str | None:
             return note
     return None
 
+# ── Endpoint probe, started before the heavy imports ─────────────────────────
+# `import gradio` is ~6.5s warm and far more cold — the single largest item in
+# startup, and nothing can be done about it. Probing the LLM endpoints takes a
+# few seconds of its own and is pure network wait, so starting it HERE, on a
+# daemon thread, hides it inside an import we are paying for anyway: by the
+# time the browser connects and asks for the status panel and the model lists,
+# the answer is usually already sitting in ui/_health's cache.
+#
+# Deliberately placed above `import gradio` rather than in build_app, where it
+# would start ~6.5s later and leave "Checking endpoints…" on screen. Only
+# stdlib + yaml are needed to get here.
+#
+# Best-effort: a failure here costs nothing but the head start, because
+# build_app primes again and every reader falls back to probing on demand.
+try:
+    _PROJECT_ROOT_EARLY = str(Path(__file__).resolve().parent.parent)
+    if _PROJECT_ROOT_EARLY not in sys.path:
+        sys.path.insert(0, _PROJECT_ROOT_EARLY)
+    from ui import _config as _early_config
+    from ui import _health as _early_health
+
+    _early_health.prime_async(
+        list((_early_config.load_portable_config().get("endpoints") or {}).values())
+    )
+except Exception:  # noqa: BLE001 - startup must never fail over a head start
+    pass
+
 import gradio as gr
 
 # Make `src/` importable when running in source mode (mirrors PyInstaller layout)
@@ -88,6 +115,7 @@ from ui.tabs import itr_entities as tab_itr_entities  # noqa: E402
 from ui.tabs import tds_journal_review as tab_tds_journal_review  # noqa: E402
 from ui.tabs import krc_gnucash_review as tab_krc_gnucash_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
+from ui import _health  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
 from ui import _update  # noqa: E402
 
@@ -334,9 +362,26 @@ def build_app(launch: bool = False) -> gr.Blocks:
 
     skills = _discover_skills()
 
-    # Prime the model-list cache once (avoids a 2-second health-check timeout
-    # per skill tab — see _generic._refresh_models).
-    tab_generic._refresh_models()
+    # Probe the LLM endpoints on a background thread rather than here.
+    #
+    # This line used to be a blocking prime of the model-list cache, and the
+    # Home tab then probed every configured endpoint again while building its
+    # status panel: together about 11 of the ~19 seconds between launching the
+    # app and having a window, spent on sockets, before anything was on screen.
+    # An endpoint that is merely switched off pays the whole timeout.
+    #
+    # None of it is needed to CONSTRUCT the UI, only to fill it in, so it now
+    # runs in parallel with the (unavoidable) Gradio import and tab building,
+    # and both consumers read the shared result when the browser connects, via
+    # the two load events wired at the end of this function: one fills Home's
+    # status panel, one fills every Model dropdown.
+    _cfg_for_prime = _config_mod.load_portable_config()
+    _health.prime_async(list((_cfg_for_prime.get("endpoints") or {}).values()))
+
+    # Components from a previous build_app() in this process must not be wired
+    # into this one's load event.
+    tab_generic.reset_deferred_model_dropdowns()
+    tab_home.reset_deferred_status_panels()
 
     # ── Grouped navigation ──────────────────────────────────────────────────
     # Ordered list of (category_key, tab_label). Skills within each group
@@ -524,6 +569,11 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 tab_history.render()
             with gr.Tab("Settings"):
                 tab_settings.render()
+
+        # Every Model dropdown built above is filled by this one load event,
+        # once, when the page connects — see _generic.wire_deferred_model_loads.
+        tab_generic.wire_deferred_model_loads(app)
+        tab_home.wire_deferred_status_loads(app)
 
     if launch:
         port = _pick_free_port()

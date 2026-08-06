@@ -729,6 +729,48 @@ def _ensure_appinfo_icons(log: _Log) -> None:
     log.warn(f"generated {len(missing)} placeholder icon(s) - drop real artwork into bundling/icons/ to override")
 
 
+def _ensure_launcher_splash(version: str, log: _Log) -> None:
+    """
+    Place App\\AppInfo\\Launcher\\splash.jpg, which is the ONLY thing that makes
+    the launcher show a splash at all -- see the generator's SplashScreen.nsh:
+    a missing splash.jpg silently sets DisableSplashScreen and the app starts
+    with no visible feedback for the ~8s it takes Gradio to come up.
+
+    The splash carries a baked-in version line -- the launcher paints the JPEG
+    and nothing else, so anything the user is meant to read has to be in the
+    image. Redraw it here, straight into the staging tree, so the line names
+    THIS build. If Pillow is missing, fall back to copying the committed image
+    rather than shipping no splash at all: a stale version line is a much
+    smaller problem than a blank screen, and unlike the icons this must never
+    fail a release build.
+    """
+    dest_dir = STAGING / "App" / "AppInfo" / "Launcher"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "splash.jpg"
+
+    try:
+        sys.path.insert(0, str(PROJECT_ROOT / "bundling" / "icons"))
+        import make_splash  # type: ignore[import-not-found]
+        # Explicit `out`: rendering into staging keeps the tracked
+        # bundling/icons/splash.jpg untouched, so a build never dirties the
+        # working tree.
+        make_splash.build(version, out=dest)
+        log.ok(f"rendered splash for {version} -> App\\AppInfo\\Launcher\\splash.jpg")
+        return
+    except Exception as exc:  # noqa: BLE001 - never fail a build over the splash
+        log.warn(f"could not render splash ({type(exc).__name__}); using committed image")
+    finally:
+        if sys.path and sys.path[0].endswith("icons"):
+            sys.path.pop(0)
+
+    src = PROJECT_ROOT / "bundling" / "icons" / "splash.jpg"
+    if not src.is_file():
+        log.warn("no splash.jpg available - launcher will start with no splash")
+        return
+    shutil.copy2(src, dest)
+    log.ok("copied committed splash -> App\\AppInfo\\Launcher\\splash.jpg")
+
+
 def step8_render_inis(version: str, log: _Log) -> None:
     log.step(8, "Render appinfo.ini + Launcher INI + icons")
 
@@ -757,6 +799,7 @@ def step8_render_inis(version: str, log: _Log) -> None:
     log.ok(f"wrote {launcher_out.relative_to(PROJECT_ROOT)}")
 
     _ensure_appinfo_icons(log)
+    _ensure_launcher_splash(version, log)
 
 
 def step9_copy_defaults(log: _Log) -> None:
