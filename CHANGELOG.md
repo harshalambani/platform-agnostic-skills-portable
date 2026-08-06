@@ -9,6 +9,39 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [3.4.0] — 2026-08-06
+
+### Changed
+- **The app starts in about half the time — measured 19.4s to 8.9s** (warm,
+  source mode, launch to a constructed UI). Almost all of the saving is one
+  thing: the LLM endpoint probe no longer runs on the startup path.
+
+  It used to run there five or more times over. The Home tab probed *every*
+  configured endpoint to draw its status dots, and each skill tab probed the
+  active one again for its Model dropdown — all synchronous, all before a
+  window existed, and an endpoint that is merely switched off pays a full
+  socket timeout rather than failing fast. That was roughly 11 of the 19
+  seconds, spent on sockets, with nothing on screen.
+
+  None of it is needed to *construct* the UI, only to fill it in. The probe now
+  runs once on a background thread started **before** `import gradio` — the
+  single biggest remaining cost at ~6.5s and not something that can be avoided
+  — so the network wait hides inside an import already being paid for. Home and
+  the Model dropdowns then read that one shared result through a load event
+  when the browser connects: both fills now measure at or under 0.05s, because
+  the probe has already finished. **"Refresh status" still means refresh** — it
+  ignores the cache and goes to the wire, and updates the shared result for
+  everyone else on the way back.
+
+- **The PortableApps launcher now shows a splash while the app starts.** Until
+  the Gradio server is up there is nothing to look at, which reads as "did it
+  launch?" — the same problem GnuCash Portable solves the same way. The splash
+  carries the version and is redrawn per build, since the launcher paints the
+  image and nothing else, so anything the user is meant to read has to be in
+  it. Its duration is deliberately set *under* the expected start: it is a
+  timed, topmost overlay with no way to know the app is ready, so overshooting
+  would park it on top of a usable window.
+
 ## [3.3.0] — 2026-08-05
 
 ### Added

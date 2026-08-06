@@ -10,6 +10,7 @@ template). Results are cached to avoid repeated queries.
 from __future__ import annotations
 
 import logging
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 from urllib import error, request
@@ -68,6 +69,96 @@ _capability_cache: dict[str, ModelInfo] = {}
 def clear_capability_cache() -> None:
     """Reset the cache (e.g. when the user switches endpoints)."""
     _capability_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Whole-endpoint result cache + background priming
+# ---------------------------------------------------------------------------
+#
+# A probe costs real wall-clock time: GET /api/tags, then a POST /api/show per
+# model, all sequential, each with a multi-second timeout — and an endpoint
+# that is simply switched off pays the full timeout. Startup used to spend
+# ~11 seconds on this because the Home tab probed every configured endpoint
+# while building its status panel, and the skill tabs probed the active one
+# again for the model dropdown, all of it synchronous, all of it before the
+# window appeared.
+#
+# Nothing here is needed to *build* the UI, only to fill it in, so the probe
+# now runs on a background thread (prime_async) started as early as possible,
+# and both consumers read the one shared result through check_cached() when
+# the page connects. Callers that mean "go and look again" — the Refresh
+# buttons, the Settings tab — keep calling check() and get a fresh probe.
+
+_result_cache: dict[tuple[str, str], HealthResult] = {}
+_probe_locks: dict[tuple[str, str], threading.Lock] = {}
+_cache_lock = threading.Lock()
+
+
+def _endpoint_key(endpoint: dict[str, Any]) -> tuple[str, str]:
+    """Identity of an endpoint for caching: what it is and where it lives.
+    Deliberately excludes the API key — a re-keyed endpoint is still the same
+    host, and the user re-probes from Settings after editing it anyway."""
+    return (
+        endpoint.get("provider") or "",
+        (endpoint.get("base_url") or "").rstrip("/"),
+    )
+
+
+def clear_result_cache() -> None:
+    """Forget every cached probe, so the next check_cached() goes to the wire."""
+    with _cache_lock:
+        _result_cache.clear()
+
+
+def cached_result(endpoint: dict[str, Any]) -> HealthResult | None:
+    """The cached probe for *endpoint*, or None if it has never been probed.
+    Never touches the network — for callers that want to render immediately
+    and say 'checking…' when nothing is known yet."""
+    with _cache_lock:
+        return _result_cache.get(_endpoint_key(endpoint))
+
+
+def check_cached(endpoint: dict[str, Any]) -> HealthResult:
+    """Return the cached probe for *endpoint*, probing only if there is none.
+
+    Concurrent callers for the same endpoint collapse onto one probe: the
+    second caller blocks on the first rather than opening its own sockets.
+    That is the point — when the page loads, the Home panel and the model
+    dropdowns both ask at once, and the background prime is usually already
+    in flight.
+    """
+    key = _endpoint_key(endpoint)
+    with _cache_lock:
+        hit = _result_cache.get(key)
+        if hit is not None:
+            return hit
+        lock = _probe_locks.setdefault(key, threading.Lock())
+
+    with lock:
+        with _cache_lock:
+            hit = _result_cache.get(key)
+        if hit is not None:
+            return hit
+        return check(endpoint)
+
+
+def prime_async(endpoints: list[dict[str, Any]]) -> threading.Thread:
+    """Probe *endpoints* on a daemon thread and return it (tests join on it).
+
+    Errors are swallowed by check() itself, which turns every failure into a
+    HealthResult, so this can never take the app down from a background
+    thread. Daemon so a probe against a hung host cannot delay quitting.
+    """
+    def _work() -> None:
+        for ep in endpoints:
+            try:
+                check_cached(ep)
+            except Exception:  # noqa: BLE001 - a warm cache is best-effort
+                _log.debug("background health prime failed", exc_info=True)
+
+    t = threading.Thread(target=_work, name="health-prime", daemon=True)
+    t.start()
+    return t
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +302,29 @@ def get_model_choices(endpoint: dict[str, Any]) -> list[tuple[str, str]]:
     Each entry is (display_label, raw_model_name) so the dropdown shows
     'model (tools)' but the value passed to the runner is the plain name.
     """
-    result = check(endpoint)
+    return _choices_from(check(endpoint), endpoint)
+
+
+def get_model_choices_cached(endpoint: dict[str, Any]) -> list[tuple[str, str]]:
+    """As get_model_choices, but served from the shared probe cache — this is
+    the startup path, where re-probing an endpoint the prime thread has
+    already answered for would just re-spend the seconds prime_async exists
+    to hide."""
+    return _choices_from(check_cached(endpoint), endpoint)
+
+
+def get_model_choices_if_known(endpoint: dict[str, Any]) -> list[tuple[str, str]] | None:
+    """Choices for an endpoint that has already been probed, else None.
+
+    Never opens a socket, so it is safe on the startup path: a None answer
+    means 'not known yet', which the caller renders as a placeholder rather
+    than waiting for the wire.
+    """
+    result = cached_result(endpoint)
+    return None if result is None else _choices_from(result, endpoint)
+
+
+def _choices_from(result: HealthResult, endpoint: dict[str, Any]) -> list[tuple[str, str]]:
     if not result.ok or not result.model_infos:
         # Fallback — no enrichment available
         fallback = endpoint.get("default_model")
@@ -231,7 +344,18 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
 
     For Ollama: GET <base_url>/api/tags, then POST /api/show per model.
     For OpenAI-compatible: GET <base_url>/models.
+
+    Always goes to the wire — this is what a Refresh button means. The result
+    is stored in the shared cache on the way out, so a fresh probe here also
+    updates what check_cached() will hand to everyone else.
     """
+    result = _check_uncached(endpoint)
+    with _cache_lock:
+        _result_cache[_endpoint_key(endpoint)] = result
+    return result
+
+
+def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
     provider = endpoint.get("provider")
     base = (endpoint.get("base_url") or "").rstrip("/")
     if not base:

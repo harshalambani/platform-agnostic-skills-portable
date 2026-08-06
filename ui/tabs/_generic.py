@@ -201,11 +201,17 @@ def _scan_parser_files() -> list[tuple[str, str]]:
     return pairs
 
 
-def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
+def _refresh_models(*, use_cache: bool = False, allow_probe: bool = True) -> list[tuple[str, str]]:
     """Return (display_label, raw_name) pairs with capability badges.
 
     Display labels look like 'gemma4:12b (tools)' or 'llama3.2:3b (text-only)'.
     The *value* sent to the runner is the plain model name.
+
+    With ``allow_probe=False`` this never touches the network: an endpoint the
+    background prime has not answered for yet yields the configured default
+    model alone, and — importantly — that guess is NOT cached, so the deferred
+    load event still replaces it with the real list. This is the startup path;
+    see wire_deferred_model_loads.
     """
     global _choices_cache
     if use_cache and _choices_cache is not None:
@@ -214,13 +220,64 @@ def _refresh_models(*, use_cache: bool = False) -> list[tuple[str, str]]:
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
-    choices = _health.get_model_choices(ep)
+
+    if allow_probe:
+        choices = _health.get_model_choices(ep)
+    else:
+        known = _health.get_model_choices_if_known(ep)
+        if known is None:
+            fallback = _config.default_model_for(ep, cfg)
+            return [(fallback, fallback)] if fallback else []
+        choices = known
+
     if choices:
         _choices_cache = choices
         return list(_choices_cache)
     fallback = _config.default_model_for(ep, cfg)
     _choices_cache = [(fallback, fallback)] if fallback else []
     return list(_choices_cache)
+
+
+# ---------------------------------------------------------------------------
+# Deferred model-dropdown fill
+# ---------------------------------------------------------------------------
+#
+# Every LLM skill tab has a Model dropdown, and every one of them wants the
+# same list. Building them all at construction time meant the first tab paid
+# for a full endpoint probe and the rest waited on it — seconds spent before
+# the window existed. Instead each tab registers its dropdown here, and
+# webui.build_app attaches ONE Blocks.load that fills them all once the
+# browser connects, by which time the background prime has usually answered.
+
+_deferred_model_dropdowns: list = []
+
+
+def reset_deferred_model_dropdowns() -> None:
+    """Drop registrations from a previous build_app().
+
+    build_app is called more than once in a process (the test suite builds it
+    repeatedly), and components from a torn-down Blocks must never be wired
+    into the next one.
+    """
+    _deferred_model_dropdowns.clear()
+
+
+def wire_deferred_model_loads(app) -> None:
+    """Attach the one load event that fills every registered Model dropdown."""
+    dropdowns = list(_deferred_model_dropdowns)
+    if not dropdowns:
+        return
+
+    def _fill():
+        # allow_probe stays True here: this runs on a request thread after the
+        # UI is up, and if the prime thread has already finished it is a cache
+        # read anyway.
+        choices = _refresh_models()
+        value = _default_model_value(choices)
+        update = gr.update(choices=choices, value=value)
+        return update if len(dropdowns) == 1 else [update] * len(dropdowns)
+
+    app.load(fn=_fill, inputs=None, outputs=dropdowns)
 
 
 def _default_model_value(choices: list[tuple[str, str]]):
@@ -1076,7 +1133,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # Model dropdown — only meaningful for LLM-powered skills; deterministic
             # skills ignore model_override entirely, so hide it there.
             # Choices are (display_label, raw_name) tuples with capability badges.
-            initial_choices = _refresh_models(use_cache=True)
+            # allow_probe=False: construction must not go to the wire. The
+            # real list arrives via the deferred load registered just below.
+            initial_choices = _refresh_models(use_cache=True, allow_probe=False)
             model_dd = gr.Dropdown(
                 label="Model",
                 choices=initial_choices,
@@ -1085,6 +1144,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 interactive=True,
                 visible=skill.requires.llm,
             )
+            if skill.requires.llm:
+                _deferred_model_dropdowns.append(model_dd)
             refresh_models_btn = gr.Button(
                 "Refresh model list", variant="secondary", visible=skill.requires.llm,
             )
