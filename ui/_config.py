@@ -204,9 +204,46 @@ def decrypt_api_key(stored: str) -> str:
 
 _LEGACY_TEMP_DIRS: list[Path] = []
 
+# Our own exit cleanups, kept addressable separately from the interpreter's
+# atexit set — see register_exit_cleanup().
+_EXIT_CLEANUPS: list = []
+
+
+def register_exit_cleanup(fn) -> None:
+    """Register *fn* to run at process exit — via atexit AND on its own.
+
+    Why both: the native-window close path cannot use atexit._run_exitfuncs().
+    That set includes concurrent.futures' _python_exit, which joins every
+    ThreadPoolExecutor worker; with Gradio's server threads still up, running it
+    measured 18.4s of dead time on a close — all of it after the window was
+    already off the screen, and all of it time the PortableApps launcher still
+    holds its single-instance mutex, so a relaunch in that window silently does
+    nothing. What actually has to happen before we exit is these cleanups: two
+    ignore_errors rmtree calls that owe nothing to that machinery. Keeping them
+    in their own list lets the close path run exactly them (run_exit_cleanups)
+    and then os._exit, while a normal interpreter shutdown still runs them the
+    ordinary way.
+    """
+    _EXIT_CLEANUPS.append(fn)
+    atexit.register(fn)
+
+
+def run_exit_cleanups() -> None:
+    """Run the registered cleanups, most-recent first (atexit's order).
+
+    Swallows everything, including BaseException: every caller is one line from
+    os._exit, so there is no failure here worth propagating. Cleanups must be
+    safe to run twice — this path and a normal shutdown can both reach them.
+    """
+    for fn in reversed(list(_EXIT_CLEANUPS)):
+        try:
+            fn()
+        except BaseException:
+            pass
+
 
 def _cleanup_legacy_temp_dirs() -> None:
-    """atexit handler — silently removes all legacy config temp dirs."""
+    """Exit handler — silently removes all legacy config temp dirs."""
     for d in _LEGACY_TEMP_DIRS:
         try:
             shutil.rmtree(d, ignore_errors=True)
@@ -214,7 +251,7 @@ def _cleanup_legacy_temp_dirs() -> None:
             pass
 
 
-atexit.register(_cleanup_legacy_temp_dirs)
+register_exit_cleanup(_cleanup_legacy_temp_dirs)
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +481,7 @@ def download_staging_dir() -> Path:
         def _cleanup_dl() -> None:
             shutil.rmtree(_dl_dir, ignore_errors=True)
 
-        atexit.register(_cleanup_dl)
+        register_exit_cleanup(_cleanup_dl)
     return _DOWNLOAD_STAGING_DIR
 
 

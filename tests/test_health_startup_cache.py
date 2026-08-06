@@ -187,6 +187,74 @@ def test_home_status_panel_starts_as_a_placeholder():
     assert "Checking" in home._PROBING_PLACEHOLDER
 
 
+def test_status_placeholder_matches_the_resolved_panel_shape():
+    """The placeholder must have the same line count and the same block shape
+    as the probed panel, per endpoint. If it does not, the panel changes size
+    when the deferred load lands and everything below it jumps."""
+    from ui.tabs import home
+
+    cfg = {
+        "active_endpoint": "local",
+        "endpoints": {"local": dict(EP_A), "cloud": dict(EP_A)},
+    }
+    fake, calls = _counting_check()
+    with patch.object(_health, "_check_uncached", fake), \
+         patch("ui._config.load_portable_config", return_value=cfg):
+        placeholder = home._build_status_placeholder()
+        assert calls == [], "drawing the placeholder must not open a socket"
+        resolved = home._build_status_markdown()
+
+    assert len(placeholder.splitlines()) == len(resolved.splitlines())
+    # Same skeleton: one heading + Provider/URL bullets per endpoint. Only the
+    # dot and the last bullet (the detail line) are allowed to differ.
+    for line_a, line_b in zip(placeholder.splitlines(), resolved.splitlines()):
+        if line_a.startswith("### "):
+            assert line_b.startswith("### ")
+            assert line_a.split("`", 1)[1] == line_b.split("`", 1)[1]
+        elif line_a.startswith("- Provider:") or line_a.startswith("- URL:"):
+            assert line_a == line_b
+
+
+def test_startup_model_choices_are_labelled_as_provisional():
+    """Before the deferred load, the dropdown must not present the configured
+    default as though it were a confirmed, probed model — but its VALUE must
+    still be that default, so a Run fired in the gap behaves as it always did."""
+    from ui.tabs import _generic
+
+    _generic._choices_cache = None
+    cfg = {
+        "active_endpoint": "local",
+        "endpoints": {"local": dict(EP_A, default_model="fallback-model")},
+    }
+    fake, calls = _counting_check()
+    with patch.object(_health, "_check_uncached", fake), \
+         patch("ui._config.load_portable_config", return_value=cfg), \
+         patch("ui._config.default_model_for", return_value="fallback-model"):
+        choices, value = _generic._startup_model_choices()
+
+    assert calls == [], "construction must not open a socket"
+    assert choices == [(_generic._LOADING_MODELS_LABEL, "fallback-model")]
+    assert value == "fallback-model"
+    assert _generic._choices_cache is None, "the placeholder must not be cached"
+
+
+def test_startup_model_choices_use_the_real_list_once_known():
+    """A warm cache means there is nothing to wait for — show it, no placeholder."""
+    from ui.tabs import _generic
+
+    _generic._choices_cache = None
+    cfg = {"active_endpoint": "local", "endpoints": {"local": dict(EP_A)}}
+    fake, _ = _counting_check()
+    with patch.object(_health, "_check_uncached", fake), \
+         patch("ui._config.load_portable_config", return_value=cfg):
+        _health.check_cached(EP_A)                       # prime answered
+        choices, value = _generic._startup_model_choices()
+
+    assert choices == [("m (text-only)", "m")]
+    assert _generic._LOADING_MODELS_LABEL not in [c[0] for c in choices]
+    assert value == "m"
+
+
 # ---------------------------------------------------------------------------
 # 3. Refresh still means refresh
 # ---------------------------------------------------------------------------

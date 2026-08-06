@@ -39,7 +39,6 @@ if _sys.stderr is None:
     _sys.stderr = open(_os.devnull, "w", encoding="utf-8")
 
 import argparse
-import atexit
 import json
 import os
 import socket
@@ -229,16 +228,23 @@ _shutdown_timer: threading.Timer | None = None
 
 
 def _terminate_process() -> None:
-    """Run registered atexit handlers, then hard-exit with code 0.
+    """Run our own exit cleanups, then hard-exit with code 0.
 
-    atexit._run_exitfuncs() fires the temp-dir cleanup registered by
-    ui._config (which wipes the %TEMP% legacy-config dirs holding decrypted
-    API keys) BEFORE we os._exit — os._exit alone would skip atexit and leave
-    those files behind. Exit code 0 lets the PA Launcher record a clean close.
+    The cleanups wipe the %TEMP% legacy-config dirs holding decrypted API keys
+    and the download staging dir; os._exit alone would skip them and leave those
+    files behind. Exit code 0 lets the PA Launcher record a clean close.
+
+    Deliberately NOT atexit._run_exitfuncs(). That runs the whole registered
+    set, including concurrent.futures' _python_exit, which joins every
+    ThreadPoolExecutor worker — with Gradio's server threads still up it does
+    not come back. Measured on a real close: 18.4s spent inside it, with the
+    window already gone and the launcher still holding its single-instance
+    mutex the whole time. ui._config.run_exit_cleanups() runs exactly the
+    handlers we registered and nothing else.
     """
     try:
-        atexit._run_exitfuncs()
-    except Exception:
+        _config_mod.run_exit_cleanups()
+    except BaseException:
         pass
     os._exit(0)
 
@@ -797,18 +803,38 @@ def _run_native_window(url: str) -> None:
     """Host *url* in a native window on the main thread; quit when it closes.
 
     webview.start() runs the GUI message pump and blocks until every window is
-    closed, then we route through _terminate_process() so the atexit wipe of the
-    decrypted-API-key %TEMP% dirs always runs. If the window fails to open at
-    runtime (rare — _native_window_available() pre-checks the WebView2 runtime),
-    fall back to opening the browser and keeping the already-running server alive
-    rather than stranding the user. Phase D hardens this fallback + CI wiring.
+    closed. We do NOT wait for it to return: the window's `closing` event exits
+    the process directly, and the start() -> _terminate_process() path below is
+    only the fallback for a window that goes away some other way.
+
+    Why: the old path measured 10.4s warm and 17.1s cold between the window
+    disappearing and the process going away. The launcher holds its
+    SinglePortableAppInstance mutex for that whole stretch, so relaunching in
+    those ten-odd seconds silently does nothing at all (InstanceManagement.nsh
+    Quits with no message) — which reads, correctly, as the app being broken.
+
+    Note this hook is only half the fix, and on its own it made things WORSE
+    (22.8s warm). Firing early only helps if what follows is actually short, and
+    _terminate_process used to call atexit._run_exitfuncs(), 18.4s of which was
+    concurrent.futures joining Gradio's still-running server threads. It now
+    runs only our own cleanups. Keep both halves or neither.
+
+    If the window fails to open at runtime (rare — _native_window_available()
+    pre-checks the WebView2 runtime), fall back to opening the browser and keeping
+    the already-running server alive rather than stranding the user. Phase D
+    hardens this fallback + CI wiring.
     """
     import webview  # noqa: PLC0415
 
     _enable_native_downloads()
     _wait_for_server(url)
     try:
-        webview.create_window(APP_TITLE, url, width=1200, height=820)
+        window = webview.create_window(APP_TITLE, url, width=1200, height=820)
+        # `closing` is a locking event, so this runs synchronously on the GUI
+        # thread the moment the close is requested — ahead of the teardown, not
+        # after it. Killing the process here is what destroys the window, which
+        # looks identical to the user and returns the mutex immediately.
+        window.events.closing += lambda: _terminate_process()
         icon = _window_icon_path()
         if icon:
             webview.start(icon=icon)

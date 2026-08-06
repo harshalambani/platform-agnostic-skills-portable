@@ -144,6 +144,83 @@ class TestNativeWindowDownloads:
 
 
 # ---------------------------------------------------------------------------
+# 1c. The native window must exit on `closing`, not on webview.start() returning.
+#     Waiting for start() to return means waiting out the WebView2 unwind, which
+#     measured 10.4s warm / 17.1s cold with the window already off screen. The
+#     PA launcher holds its SinglePortableAppInstance mutex for that whole time,
+#     so relaunching inside it silently does nothing at all.
+# ---------------------------------------------------------------------------
+
+class TestNativeWindowShutdown:
+
+    def _source(self) -> str:
+        return WEBUI_PATH.read_text(encoding="utf-8")
+
+    def test_closing_event_terminates_process(self):
+        """The window's `closing` event must be wired to process termination."""
+        source = self._source()
+        assert "events.closing" in source, (
+            "_run_native_window must subscribe to the window's `closing` event - "
+            "without it, shutdown waits out the WebView2 teardown (~10s) while "
+            "the launcher still holds its single-instance mutex, so relaunching "
+            "does nothing and the app looks broken"
+        )
+        # The handler has to actually exit; subscribing and doing something else
+        # would satisfy the check above while restoring the stall.
+        idx = source.index("events.closing")
+        assert "_terminate_process" in source[idx:idx + 200], (
+            "the `closing` handler must call _terminate_process() (which runs the "
+            "atexit temp-dir wipe before os._exit)"
+        )
+
+    def test_terminate_does_not_run_the_whole_atexit_set(self):
+        """_terminate_process must run OUR cleanups, not atexit._run_exitfuncs().
+
+        The full set includes concurrent.futures' _python_exit, which joins every
+        ThreadPoolExecutor worker; with Gradio's server threads still up that
+        measured 18.4s on a real close. Firing the `closing` hook without this
+        half made shutdown worse than before the fix (22.8s warm vs 10.4s), so
+        the two belong together.
+        """
+        source = self._source()
+        start = source.index("def _terminate_process")
+        body = source[start:start + 1600]
+        # The docstring names _run_exitfuncs to explain why it is NOT used, so
+        # look only at what follows it; a call there is the regression.
+        after_doc = body.split('"""')[2] if body.count('"""') >= 2 else body
+        assert "_run_exitfuncs" not in after_doc, (
+            "_terminate_process must not call atexit._run_exitfuncs() - it joins "
+            "Gradio's server threads and does not come back"
+        )
+        assert "run_exit_cleanups()" in after_doc, (
+            "_terminate_process must call _config.run_exit_cleanups() so the "
+            "temp dirs holding decrypted API keys are still wiped before os._exit"
+        )
+
+    def test_config_registers_cleanups_through_the_shared_registry(self):
+        """Both temp-dir cleanups must go through register_exit_cleanup, or
+        run_exit_cleanups() silently stops wiping them."""
+        source = CONFIG_PATH.read_text(encoding="utf-8")
+        assert source.count("register_exit_cleanup(") >= 3, (
+            "ui/_config.py must define register_exit_cleanup and route BOTH the "
+            "legacy-config and download-staging cleanups through it"
+        )
+        assert "atexit.register(_cleanup" not in source, (
+            "cleanups registered with atexit alone are invisible to "
+            "run_exit_cleanups(), so the native-window close path would skip them"
+        )
+
+    def test_window_handle_is_captured(self):
+        """create_window's return value must be bound - the event can only be
+        attached to the window object, not to the webview module."""
+        source = self._source()
+        assert "= webview.create_window(" in source, (
+            "_run_native_window must bind the created window to a name so its "
+            "`closing` event can be subscribed to"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. Functional checks on _config.download_staging_dir()
 # ---------------------------------------------------------------------------
 

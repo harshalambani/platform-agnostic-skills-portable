@@ -46,15 +46,19 @@ def _format_endpoint_block(name: str, ep: dict, is_active: bool, *, fresh: bool)
     )
 
 
+def _no_endpoints_markdown() -> str:
+    return (
+        "_No endpoints configured. Edit_ "
+        f"`{_config.PORTABLE_CONFIG_PATH}` _to add one._"
+    )
+
+
 def _build_status_markdown(*, fresh: bool = False) -> str:
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     if not endpoints:
-        return (
-            "_No endpoints configured. Edit_ "
-            f"`{_config.PORTABLE_CONFIG_PATH}` _to add one._"
-        )
+        return _no_endpoints_markdown()
     return "\n\n".join(
         _format_endpoint_block(name, ep, name == active, fresh=fresh)
         for name, ep in endpoints.items()
@@ -75,9 +79,39 @@ def _refresh_status_markdown() -> str:
 # the probe overlaps the startup the user is already waiting through instead
 # of extending it.
 
-_PROBING_PLACEHOLDER = "_Checking endpoints…_"
+_PROBING_PLACEHOLDER = "_Checking…_"
 
 _deferred_status_panels: list = []
+
+
+def _build_status_placeholder() -> str:
+    """The panel as it looks before anything has been probed.
+
+    Deliberately NOT a one-line "Checking endpoints…" and deliberately not a
+    spinner. The fill lands anywhere between 0.1s and ~2s (bounded by the
+    _health socket timeout), and for most of that range a spinner is a worse
+    experience than the answer arriving: it announces a wait that is already
+    over. What was actually jarring is the panel changing SIZE — a single
+    italic line growing into one heading plus three bullets per endpoint,
+    shoving everything below it down the page just as the eye lands on it.
+
+    So this emits the real block structure with the same line count and the
+    same badge shape, reading from config only (no network, free at
+    construction). When the load event lands, only the dot and the detail line
+    change; nothing moves.
+    """
+    cfg = _config.load_portable_config()
+    endpoints = cfg.get("endpoints") or {}
+    active = cfg.get("active_endpoint", "")
+    if not endpoints:
+        return _no_endpoints_markdown()
+    return "\n\n".join(
+        f"### ⚪ `{name}`{'  **(active)**' if name == active else ''}\n"
+        f"- Provider: `{ep.get('provider', '?')}`\n"
+        f"- URL: `{ep.get('base_url', '')}`\n"
+        f"- {_PROBING_PLACEHOLDER}\n"
+        for name, ep in endpoints.items()
+    )
 
 
 def reset_deferred_status_panels() -> None:
@@ -140,7 +174,7 @@ def render(skills: list[SkillInfo] | None = None) -> None:
             # Component.get_load_fn_and_initial_value calls the function at
             # construction time as well, so the probe would still be paid
             # before the window appeared, which is the whole thing being fixed.
-            status_md = gr.Markdown(value=_PROBING_PLACEHOLDER)
+            status_md = gr.Markdown(value=_build_status_placeholder())
             _deferred_status_panels.append(status_md)
             refresh_btn = gr.Button("Refresh status", variant="secondary")
             refresh_btn.click(fn=_refresh_status_markdown, outputs=status_md)

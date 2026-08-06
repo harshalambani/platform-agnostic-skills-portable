@@ -11,7 +11,14 @@ AppID=PASkillsPortable
 Publisher=Harshal
 Homepage=https://github.com/harshalambani/platform-agnostic-skills-portable
 Category=Office
-Description=LLM-powered PDF and statement processing skills, packaged portably.
+; Describes what is in the box TODAY, which is why it names a domain the
+; architecture itself does not: the skill registry is generic, and the shipped
+; skills merely all happen to be accounting and tax ones. Broaden this line when
+; that stops being true -- it is the only place that needs it. The splash
+; (bundling/icons/make_splash.py) deliberately makes the general claim instead,
+; so it never goes stale.
+; Note "any LLM" rather than "offline": the active endpoint can be a cloud one.
+Description=Platform-agnostic accounting and tax skills, powered by any LLM - local, LAN or cloud. No install; runs from a folder.
 Language=Multilingual
 Trademarks=
 InstallType=Portable

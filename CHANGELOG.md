@@ -9,6 +9,86 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [3.4.1] — 2026-08-06
+
+### Fixed
+- **Closing the app no longer blocks relaunching it for ten seconds.** The
+  window vanished on the first click, but the process lived on for a measured
+  **10.4s warm / 17.1s cold** afterwards, and the PortableApps launcher holds
+  its single-instance mutex for that whole time. Launching again inside it did
+  nothing whatsoever — no window, no error, no message (the launcher's
+  `SinglePortableAppInstance` guard quits silently by design) — which is
+  indistinguishable from the app being broken.
+
+  The fix is in two halves, and it only works as a pair — the first half on its
+  own was measured making things **worse** (22.8s warm).
+
+  1. *Exit on the window's `closing` event, not on `webview.start()` returning.*
+     `closing` is a locking pywebview event, so the handler runs synchronously on
+     the GUI thread the moment the close is requested — measured 65ms after
+     `WM_CLOSE` — rather than after the whole WebView2 unwind.
+  2. *Stop calling `atexit._run_exitfuncs()` on that path.* This is what made
+     half 1 backfire. The registered set is not only ours: it includes
+     `concurrent.futures.thread._python_exit`, which joins every
+     ThreadPoolExecutor worker, and with Gradio's server threads still up it does
+     not come back — **18.4s** of it on a real close, all of it with the window
+     already off screen and the mutex still held. The two cleanups that genuinely
+     have to run (they wipe the %TEMP% legacy-config dirs holding decrypted API
+     keys, and the download staging dir) now go through a small registry in
+     `ui/_config.py`, so the close path runs exactly those and then exits. A
+     normal interpreter shutdown still runs them the ordinary way.
+
+  Measured on the built app, from `WM_CLOSE` to the launcher releasing its
+  mutex: **23.43s → 2.82s** (2.20s of that the app, 0.62s the launcher's own
+  cleanup, cold and warm alike). Source mode, close to process exit: 18.39s →
+  2.39s.
+
+  (An earlier draft of this entry said the registered atexit handlers "total
+  0.000s". That probe wrapped `atexit.register` ahead of the heavy imports and so
+  never saw the handler that mattered; the 18.4s above is from a real close.)
+
+- **The Home status panel and the Model dropdowns no longer reflow when their
+  real values arrive.** The deferred startup probes fill both anywhere from ~0.1s
+  to ~2s after the window appears. Until then the status panel was a single
+  italic line that grew into a heading plus three bullets *per endpoint*, shoving
+  the page down just as the eye landed on it; and every Model dropdown showed the
+  *configured default* drawn exactly like a confirmed, probed entry, which then
+  silently swapped for the real one.
+
+  Both now start in the shape they finish in. The status panel emits the real
+  block structure from config alone — no socket — with a ⚪ dot and a "Checking…"
+  detail line, so only the dot and that line change on fill and nothing moves.
+  The dropdown seeds one "Loading models…" choice whose **value** is still the
+  configured default: a Run fired inside that window submits exactly what it
+  always did, only the label stops claiming to be settled. Deliberately not
+  spinners — on a 0.1s fill a spinner announces a wait that is already over.
+
+- **The splash was sized against the wrong measurement and cleared while the
+  screen was still empty.** It was set to 6s from a ~9s *source-mode* start; the
+  frozen exe actually takes **14.6s warm** to show a window, leaving ~8.6s of
+  nothing after the splash had gone — which is precisely the "is it starting?"
+  gap the splash was added to fill. Now 13s, measured on the frozen build.
+  Cold starts (44.0s) are still not fully covered, deliberately: stretching that
+  far would park a topmost splash over a usable window on every warm start.
+
+- **The splash showed the previous release's version number.** 3.4.0 shipped one
+  reading "Version 3.3.0". The build renders it with Pillow, which is a
+  dependency of the *app*, not of whatever interpreter runs `build.py` — on CI
+  that is a bare `setup-python` with no packages, so the render raised
+  `ModuleNotFoundError` and the fallback shipped the committed image. It is now
+  rendered by the build venv's interpreter, and the fallback says out loud that
+  its version line may be wrong.
+
+### Changed
+- **Reworded the splash subtitle and the package description.** The splash said
+  "accounting and tax skills - offline". "Offline" was simply untrue — the app
+  works against any OpenAI-compatible endpoint, cloud included, as its own Home
+  tab says. The splash now makes the durable claim ("Platform Agnostic Skills -
+  LLM powered", which also expands the acronym for a first-time user and stays
+  true as the skill set broadens), while `appinfo.ini`'s description carries the
+  specific, current one — accounting and tax — and is the single line to broaden
+  when that stops being what is in the box.
+
 ## [3.4.0] — 2026-08-06
 
 ### Changed
