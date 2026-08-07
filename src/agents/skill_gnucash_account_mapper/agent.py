@@ -1025,9 +1025,15 @@ def run(
     merged_total = sum(len(v) for v in merged.values())
     _emit_mapper_progress(f"persistent rules: {merged_total} total (in {persistent_rules_path(gnucash_file, config_path).name})")
 
-    # Write merged rules to a temp file for map_accounts() (expects a file path)
+    # Write merged rules to a temp file for map_accounts() (expects a file path).
+    # mkstemp() rather than the deprecated mktemp(): mktemp only reserves a
+    # NAME, leaving a window in which another process can create that path
+    # first. mkstemp creates the file atomically and hands back a descriptor.
+    import os
     import tempfile
-    rules_tmp = Path(tempfile.mktemp(suffix="_mapping_rules.yaml"))
+    _rules_fd, _rules_name = tempfile.mkstemp(suffix="_mapping_rules.yaml")
+    os.close(_rules_fd)
+    rules_tmp = Path(_rules_name)
     # map_accounts expects {BankKey: [rules...]} format — write merged (minus _overrides)
     rules_for_mapper = {k: v for k, v in merged.items() if k != "_overrides"}
     import yaml as _yaml
