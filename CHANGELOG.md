@@ -9,6 +9,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [Unreleased]
+
+### Changed
+- **Splash timer drops from 13s to 11s.** It was sized against a 14.6s warm
+  frozen start, but the startup work since brought warm start to a measured
+  11.77s, so 13s had quietly become an overshoot. The splash is a timed,
+  topmost overlay that nothing tells the app is ready, so overshooting parks
+  it on top of a window the user could already be using — undershooting just
+  ends it a beat early — which is why the value is set under the measured
+  figure rather than over it. Not re-measured on 3.5.0's dependency set; that
+  only errs in the tolerated direction.
+
+## [3.5.0] — 2026-08-07
+
+### Security
+- **Clears all four open dependency advisories:** cryptography 50.0.0 (1
+  high) and aiohttp 3.14.3 (1 high, 2 moderate). Because
+  `bundling/build.py` installs the lock with `--no-deps`, those vulnerable
+  versions were genuinely present in shipped artifacts, not merely named in
+  a resolution nobody used.
+
+### Fixed
+- **CI now installs `requirements-lock.txt` instead of the loose
+  `requirements.txt` pins** (#161), so the versions the test suite exercises
+  are the versions that ship. Every previous release tested a different
+  version set than it shipped. Adds `scripts/ci_lock_subset.py`, which drops
+  the native-window pair (`pywebview`, `pythonnet`) block-aware rather than
+  with grep, and refuses both to drop a package a kept one requires and to
+  accept an exclude name absent from the lock.
+
+### Changed
+- **22 packages moved in one resolved set** (#162), superseding ten
+  single-package dependabot PRs; 128 packages before and after, none added,
+  none removed. Notables: gradio 6.21.0 -> 6.22.0, openai 2.46.0 -> 2.53.0,
+  cryptography 49.0.0 -> 50.0.0, fastapi 0.139.0 -> 0.141.1, pandas 3.0.3 ->
+  3.0.5, starlette 1.3.1 -> 1.4.1, aiohttp 3.14.1 -> 3.14.3. `websockets`
+  deliberately holds at 15.0.1 because `langgraph-sdk` 0.4.2 caps it below
+  16; `tomlkit` 0.14.0 and `click` 8.4.2 were re-picked unchanged by a fresh
+  resolve, confirming the #150 hand-pins were right.
+- **A failing test now fails CI** (#163). The exit-1 tolerance was written
+  with its own removal condition attached ("once the suite is green on
+  CI"); #161 met it.
+
 ## [3.4.1] — 2026-08-06
 
 ### Fixed
