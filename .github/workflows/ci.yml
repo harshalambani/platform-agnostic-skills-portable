@@ -147,22 +147,46 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          # This used to install only pytest/pandas/numpy/pyyaml, on the stated
-          # grounds that "the test suite mocks" langchain_core and friends. It
-          # does not: 30 test modules import the real thing at collection time
-          # and errored out. Because the step swallowed failures, nobody saw it.
+          # Installs from the LOCK, not from requirements.txt, so the versions
+          # under test are the versions that ship.
           #
-          # So: install the actual runtime dependencies. The two exclusions are
-          # the native-window pair -- pythonnet needs a .NET toolchain and
-          # pywebview needs GTK/Qt, neither of which exists on a bare ubuntu
-          # runner. The app imports both lazily and degrades to browser mode
-          # without them, so the tests do not need them present.
+          # This used to install the loose pins. That made a green suite a
+          # statement about a version set nobody runs: bundling/build.py installs
+          # requirements-lock.txt, and the two files resolve differently -- the
+          # loose pins float to whatever is newest and compatible, the lock is
+          # pinned to whatever was last compiled. So the artifact's actual
+          # dependency set was never exercised by anything.
+          #
+          # It was worse than merely untested, because build.py passes --no-deps:
+          # pip installs the pinned list verbatim without evaluating anyone's
+          # metadata. requirements-lock.txt therefore shipped tomlkit==0.15.1
+          # against gradio's "tomlkit<0.15.0", and click==8.4.0 against
+          # huggingface-hub's "click>=8.4.2", for weeks. Every build installed
+          # exactly that and never complained.
+          #
+          # The native-window pair still has to come out -- pythonnet needs a
+          # .NET toolchain and pywebview needs GTK/Qt, neither of which exists
+          # on a bare ubuntu runner, and the lock carries no environment markers
+          # to skip them by. The app imports both lazily and degrades to browser
+          # mode without them, so the tests do not need them.
+          #
+          # scripts/ci_lock_subset.py rather than `grep -v`: a hashed lock is a
+          # multi-line format, and grep would strip the "name==ver \" line while
+          # leaving its --hash continuations behind for pip to misread as part of
+          # the PREVIOUS package. The script also refuses to drop a package that
+          # a kept one requires (pywebview requires pythonnet), and errors if an
+          # excluded name is absent, so an upstream rename cannot quietly turn
+          # the filter into a no-op.
           python -m pip install --upgrade pip
-          grep -vE '^(pywebview|pythonnet)' requirements.txt > "$RUNNER_TEMP/ci-reqs.txt"
-          pip install -r "$RUNNER_TEMP/ci-reqs.txt"
+          python scripts/ci_lock_subset.py \
+            --exclude pywebview pythonnet \
+            --out "$RUNNER_TEMP/ci-lock.txt"
+          pip install --require-hashes -r "$RUNNER_TEMP/ci-lock.txt"
           # Test-only, deliberately not in requirements.txt: the bank-parser
           # tests synthesise their own fixtures rather than committing real
           # statements -- reportlab writes the PDFs, xlwt the legacy .xls.
+          # Separate call: --require-hashes above applies per-command, and these
+          # are not in the lock.
           pip install pytest reportlab xlwt
 
       # A failing TEST stays advisory here (some need langchain_core, which we
