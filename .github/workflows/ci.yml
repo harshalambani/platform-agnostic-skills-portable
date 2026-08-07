@@ -59,35 +59,43 @@ jobs:
           n=$(grep -c -- "--hash=sha256:" requirements-lock.txt || true)
           echo "Lock file OK — ${n} hash entries found."
 
+      # This step is ADVISORY by design: exact pip-compile output varies by
+      # pip-tools version, so a difference is reported as a warning, never a
+      # failure. That has to include pip-compile failing to run at all --
+      # pip-tools reads pip's private internals, so a pip release can break it
+      # overnight with no change on our side (pip 26.2 removed
+      # pip._internal.utils.compat.stdlib_pkgs, which took this job down on
+      # 2026-08-06 and, via `needs: lock-check`, skipped the whole test job).
+      #
+      # The three checks above are the ones that genuinely gate; this one must
+      # not be able to. It stays loud in the log either way.
       - name: Lock file is in sync with requirements.txt
+        continue-on-error: true
         run: |
-          # Install pip-tools and do a dry-run compile. If the output would
-          # differ from the committed lock, report which packages changed.
-          pip install pip-tools --quiet
-          pip-compile \
-            --generate-hashes \
-            --resolver backtracking \
-            --no-header \
-            --annotate \
-            --dry-run \
-            --output-file /tmp/lock-check.txt \
-            requirements.txt 2>/dev/null || true
+          if ! pip install pip-tools --quiet; then
+            echo "::warning::Could not install pip-tools; skipping the lock-sync comparison."
+            exit 0
+          fi
 
-          # pip-compile --dry-run doesn't write the file; run without it to compare.
-          pip-compile \
+          if ! pip-compile \
             --generate-hashes \
             --resolver backtracking \
             --no-header \
             --annotate \
             --output-file /tmp/lock-fresh.txt \
             requirements.txt
+          then
+            echo "::warning::pip-compile failed to run, so the lock file could not be"
+            echo "  compared against requirements.txt. This is a pip/pip-tools"
+            echo "  compatibility problem, not a lock-file problem -- the lock file's"
+            echo "  presence, encoding and hashes were all verified above."
+            exit 0
+          fi
 
           if ! diff -q /tmp/lock-fresh.txt requirements-lock.txt > /dev/null 2>&1; then
             echo "::warning file=requirements-lock.txt::requirements-lock.txt may be out of date."
             diff /tmp/lock-fresh.txt requirements-lock.txt | head -40 || true
             echo "  If requirements.txt changed, run: python scripts/regen_lock.py"
-            # Warn only — don't fail. Exact pip-compile output can vary by
-            # pip-tools version; treat as advisory until we pin pip-tools too.
           else
             echo "Lock file is up to date with requirements.txt."
           fi
