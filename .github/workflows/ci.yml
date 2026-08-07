@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: ["main"]
 
+# The default GITHUB_TOKEN scope is broader than any job here needs: every
+# step only reads the checkout. Declaring it once at the top applies to all
+# jobs, so a compromised or careless action cannot write to the repo.
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Job 1: Verify the dependency lock file is present, UTF-8, and fully hashed.
