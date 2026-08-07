@@ -45,11 +45,26 @@ from typing import Optional
 
 try:
     import pdfplumber
-except ImportError:
-    sys.stderr.write(
-        "pdfplumber is required. Install with: pip install pdfplumber --break-system-packages\n"
-    )
-    sys.exit(2)
+except ImportError:  # pragma: no cover - only hit where the optional dep is absent
+    pdfplumber = None  # type: ignore[assignment]
+
+_PDFPLUMBER_HINT = (
+    "pdfplumber is required. Install with: pip install pdfplumber --break-system-packages\n"
+)
+
+
+def _require_pdfplumber() -> None:
+    """Fail with the install hint, but only once we are actually running.
+
+    Importing this module must never call sys.exit(). pytest imports it during
+    collection, and a SystemExit raised at collection time is an INTERNALERROR
+    that aborts the WHOLE session -- every other test in the run, silently.
+    Deferring the check to main() keeps the CLI's behaviour identical while
+    making the module safe to import anywhere.
+    """
+    if pdfplumber is None:
+        sys.stderr.write(_PDFPLUMBER_HINT)
+        raise SystemExit(2)
 
 # Runs as a subprocess entry point (not `python -m`), so agents.* isn't on
 # sys.path automatically -- bootstrap it the same way suggest.py does.
@@ -197,6 +212,7 @@ def write_csv(rows: list[Row], out_path: Path) -> None:
 
 
 def main(argv: list[str]) -> int:
+    _require_pdfplumber()
     if len(argv) != 3:
         sys.stderr.write(f"Usage: {argv[0]} <input.pdf> <output.csv>\n")
         return 2

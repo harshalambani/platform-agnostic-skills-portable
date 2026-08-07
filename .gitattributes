@@ -18,6 +18,12 @@ vendor/** filter=lfs diff=lfs merge=lfs -text
 *.bat       text eol=crlf
 *.cmd       text eol=crlf
 
+# Byte-exact test fixtures. `* text=auto` above normalises these to LF in the
+# repo and hands them back as CRLF on Windows but LF on Linux -- and the tests
+# compare them with read_bytes() precisely so a line-terminator regression
+# cannot hide. The checkout must therefore not translate them at all.
+tests/**/golden_*.csv -text
+
 # Binary file types that should never be diffed as text
 *.png       binary
 *.jpg       binary
