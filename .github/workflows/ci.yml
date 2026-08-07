@@ -118,12 +118,20 @@ jobs:
 
       - name: Install test dependencies
         run: |
+          # This used to install only pytest/pandas/numpy/pyyaml, on the stated
+          # grounds that "the test suite mocks" langchain_core and friends. It
+          # does not: 30 test modules import the real thing at collection time
+          # and errored out. Because the step swallowed failures, nobody saw it.
+          #
+          # So: install the actual runtime dependencies. The two exclusions are
+          # the native-window pair -- pythonnet needs a .NET toolchain and
+          # pywebview needs GTK/Qt, neither of which exists on a bare ubuntu
+          # runner. The app imports both lazily and degrades to browser mode
+          # without them, so the tests do not need them present.
           python -m pip install --upgrade pip
-          # Install only what the tests actually need. We don't install from
-          # the full lock here because langchain_core etc. are heavy and the
-          # test suite mocks them. pdfplumber is here because the bank-parser
-          # test modules import their script under test at collection time.
-          pip install pytest pandas numpy pyyaml pdfplumber
+          grep -vE '^(pywebview|pythonnet)' requirements.txt > "$RUNNER_TEMP/ci-reqs.txt"
+          pip install -r "$RUNNER_TEMP/ci-reqs.txt"
+          pip install pytest
 
       # A failing TEST stays advisory here (some need langchain_core, which we
       # deliberately don't install). A suite that could not RUN does not.
