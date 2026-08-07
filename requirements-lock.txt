@@ -762,9 +762,9 @@ fsspec==2026.4.0 \
     # via
     #   gradio-client
     #   huggingface-hub
-gradio==6.20.0 \
-    --hash=sha256:8672866e9225a1f8297325a6742bb525a3a0ddc8aa4d75d99beb10a27ea2915f \
-    --hash=sha256:91d2ec29c37917d55b18dba87aa15bb15c4796d84dce9a9ef4ec7d87453a7fee
+gradio==6.21.0 \
+    --hash=sha256:2342e186dc7c28c2681a4c84c386c88cf907894a77966511cc3d8f05363ca8f2 \
+    --hash=sha256:a27fe156ce971469b5104e8d8878f1cb136ae022b18abb1d99bce41f882e4e4a
     # via -r requirements.txt
 gradio-client==2.5.0 \
     --hash=sha256:4cde99bad62149595c30c90876ca2e405e3a13687ecf895474f3412cb476673d \
