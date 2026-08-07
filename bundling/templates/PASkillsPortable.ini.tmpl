@@ -15,17 +15,22 @@ SinglePortableAppInstance=true
 ; Reference: measured on the FROZEN exe (not source -- source mode is markedly
 ; faster and sizing against it is what left 3.4.0 with a splash that cleared
 ; while the screen was still empty). Launcher start to a visible window:
-;   warm  14.6s
-;   cold  44.0s
-; Set just under the warm figure. Cold starts are deliberately left uncovered:
-; stretching to 44s would park a topmost splash over a usable window on every
-; warm start, which is the worse failure of the two -- an unresponsive-looking
-; overlay on top of the thing you are waiting for.
-; Re-measure after any change to the startup path; the previous value (6s) was
-; sized against a ~9s warm SOURCE start and undershot the real one by ~8.6s.
+;   warm  11.77s  (3.4.1, after the health-probe deferral; was 14.6s before it)
+;   cold  44.0s   (measured when warm was 14.6s; not re-measured since)
+; Set just under the warm figure. 13000 was sized against the older 14.6s and
+; became an OVERSHOOT of ~1.2s once warm start improved -- a topmost splash
+; parked on top of a usable window, which is the worse of the two failures.
+; NOT re-measured on 3.5.0, whose dependency set moved (gradio 6.22, fastapi,
+; starlette). That only matters in the safe direction: a stale-low value
+; undershoots further and the splash clears early; it cannot overshoot by being
+; stale. Re-measure on the 3.5.0 frozen exe to claim the last second back.
+; Cold starts are deliberately left uncovered: stretching to 44s would park a
+; topmost splash over a usable window on every warm start, which is the worse
+; failure of the two -- an unresponsive-looking overlay on top of the thing you
+; are waiting for.
 ; LaunchAppAfterSplash is intentionally NOT set: it would run the splash to
 ; completion BEFORE starting the app, adding the duration instead of hiding it.
-SplashTime=13000
+SplashTime=11000
 
 [Activate]
 Registry=false
