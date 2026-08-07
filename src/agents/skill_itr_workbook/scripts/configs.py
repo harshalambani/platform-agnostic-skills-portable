@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import yaml
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import tags as tag_vocab
 
@@ -346,7 +346,12 @@ def derive_workbook_match(path: str | Path) -> str:
         "CarolDoe2526.gnucash"            -> "CarolDoe"
         "NoDigitsHere.gnucash"            -> "NoDigitsHere"
     """
-    stem = Path(path).stem
+    # PureWindowsPath, not Path: the values that arrive here are Windows paths,
+    # but the tests also run on the CI ubuntu runner, where posixpath does not
+    # treat "\" as a separator -- Path(r"C:\books\AliceDoe2526.gnucash").stem is
+    # the WHOLE string there. PureWindowsPath splits on both "\" and "/", so it
+    # is correct on either platform and unchanged in behaviour on Windows.
+    stem = PureWindowsPath(path).stem
     return _TRAILING_YEAR_DIGITS_RE.sub("", stem)
 
 
