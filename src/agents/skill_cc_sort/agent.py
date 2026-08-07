@@ -64,7 +64,11 @@ def run(
     if password:
         args.append(password)
 
-    print(f"\n[Running] {SCRIPT.name} {' '.join(args)}\n")
+    # The password is deliberately not echoed -- joining argv here put the live
+    # statement password into stdout on every run. See _pw_label() in
+    # scripts/extract_sort_cc_pdfs.py.
+    shown = [input_folder, output_folder] + (["<password hidden>"] if password else [])
+    print(f"\n[Running] {SCRIPT.name} {' '.join(shown)}\n")
     rc = _run_script(SCRIPT, args)
     if rc != 0:
         return f"Sort failed with exit code {rc}. Check output above for details."
