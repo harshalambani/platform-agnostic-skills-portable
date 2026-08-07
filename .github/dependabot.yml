@@ -51,6 +51,24 @@ updates:
       - dependency-name: "websockets"
         update-types: ["version-update:semver-major"]
 
+      # tomlkit is the same shape: transitive ("# via gradio"), and gradio
+      # 6.21.0 declares "tomlkit<0.15.0,>=0.12.0". #103 bumped it to 0.15.1
+      # anyway and the lock has been UNINSTALLABLE ever since -- unnoticed
+      # because nothing installs from the lock (the build resolves the loose
+      # pins in requirements.txt, where pip honours the ceiling and picks
+      # 0.14.0). So the lock was attesting hashes for a version the product
+      # never actually ran. Pinned back to 0.14.0 alongside this rule.
+      #
+      # tomlkit is pre-1.0, so the ceiling-crossing bump is a semver-MINOR one
+      # (0.14 -> 0.15); majors are ignored too for the same reason. Patch
+      # updates within 0.14.x still come through.
+      #
+      # REMOVE when gradio raises its tomlkit ceiling.
+      - dependency-name: "tomlkit"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
   # GitHub Actions versions
   - package-ecosystem: "github-actions"
     directory: "/"
