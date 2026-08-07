@@ -78,6 +78,19 @@ where = ["src"]
 testpaths = ["tests", "src/agents"]
 python_files = ["test_*.py"]
 addopts = "-q"
+# Build outputs contain a full copy of the app and its vendored packages. If
+# pytest walks them it imports that copy alongside the source tree, which is
+# how test_native_resolve started failing only when run as part of a wider
+# collection. pytest's defaults cover build/ and dist/ but not these.
+norecursedirs = [
+    ".*",
+    "build",
+    "dist",
+    "staging",
+    ".venv",
+    "bundling/launcher-gen",
+    "node_modules",
+]
 markers = [
     "local_samples: real-file smoke tests that only run when local sample data is present (never in CI)",
 ]

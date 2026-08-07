@@ -121,23 +121,50 @@ jobs:
           python -m pip install --upgrade pip
           # Install only what the tests actually need. We don't install from
           # the full lock here because langchain_core etc. are heavy and the
-          # test suite mocks them.
-          pip install pytest pandas numpy pyyaml
+          # test suite mocks them. pdfplumber is here because the bank-parser
+          # test modules import their script under test at collection time.
+          pip install pytest pandas numpy pyyaml pdfplumber
 
+      # A failing TEST stays advisory here (some need langchain_core, which we
+      # deliberately don't install). A suite that could not RUN does not.
+      #
+      # Those are different things, and the old `continue-on-error: true`
+      # flattened them into one. On 2026-08-06 a module-level sys.exit() in a
+      # collected file raised SystemExit during collection; pytest reported
+      # INTERNALERROR and collected nothing -- and this step reported success.
+      # CI had been showing a green check over a suite of zero tests.
+      #
+      # pytest exit codes: 0 = all passed, 1 = tests failed, 2 = interrupted
+      # (what INTERNALERROR produces), 3 = internal error, 4 = usage error,
+      # 5 = no tests collected. Only 0 and 1 mean the suite actually ran, so
+      # only those are tolerated.
+      #
+      # `-x` is gone deliberately: stopping at the first failure hides how much
+      # of the suite is broken, which is the thing this step exists to report.
       - name: Run tests (non-build-time-only)
         run: |
           cd src
+          set +e
           python -m pytest ../tests/ \
             --ignore=../tests/test_phase4_build.py \
             --ignore=../tests/test_phase4b_webui.py \
-            -x -q 2>&1 | head -100
-        continue-on-error: true   # tests may need langchain_core; don't block CI
+            -q > "$RUNNER_TEMP/pytest-out.txt" 2>&1
+          rc=$?
+          set -e
+          tail -120 "$RUNNER_TEMP/pytest-out.txt"
+          case "$rc" in
+            0) echo "All tests passed." ;;
+            1) echo "::warning::Tests failed (exit 1). Advisory only -- some tests need langchain_core, which CI does not install." ;;
+            5) echo "::error::pytest collected NO tests. The suite did not run."; exit 1 ;;
+            *) echo "::error::pytest could not complete the run (exit ${rc}) -- collection error, internal error, or bad invocation. This is NOT a test failure: the suite did not run."; exit 1 ;;
+          esac
 
+      # No tolerance here at all. These two files import cleanly with the deps
+      # installed above, so any non-zero exit is a real security regression.
       - name: Security static checks
         run: |
           cd src
           python -m pytest \
             ../tests/test_csv_analyzer_security.py \
             ../tests/test_dispatcher_security.py \
-            -x -q
-        continue-on-error: true   # same caveat as above
+            -q

@@ -1,5 +1,12 @@
 """
-test_4c_e2e_runner.py — End-to-end tests for Phase 4C skills.
+run_4c_e2e.py — End-to-end tests for Phase 4C skills.
+
+This is a hand-run script, not a pytest module: it executes top to bottom on
+import and calls sys.exit() when a pre-check fails. It was previously named
+test_4c_e2e_runner.py, which matched pytest's `python_files` pattern -- pytest
+collected it, ran the whole thing at import, and the sys.exit surfaced as an
+INTERNALERROR that aborted the entire suite. Hence the name: keep the `test_`
+prefix off anything pytest must not import.
 
 Requires:
   - Ollama running on localhost:11434
@@ -7,7 +14,7 @@ Requires:
   - Run from src/ directory
 
 Usage:
-  cd src && python test_4c_e2e_runner.py
+  cd src && python run_4c_e2e.py
 """
 import json
 import sys
