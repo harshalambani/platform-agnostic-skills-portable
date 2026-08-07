@@ -59,6 +59,35 @@ jobs:
           n=$(grep -c -- "--hash=sha256:" requirements-lock.txt || true)
           echo "Lock file OK — ${n} hash entries found."
 
+      # The three checks above prove the lock file is well-FORMED. None of them
+      # proves it is INSTALLABLE, and those are different things: a dependency
+      # bump can pin a version that contradicts another package's metadata, and
+      # the resulting lock is still present, UTF-8 and fully hashed. Dependabot
+      # #145 was exactly this -- websockets 17.0.1 against langgraph-sdk's
+      # "websockets<16,>=14". Nothing here would have caught it if merged; it
+      # would have surfaced at frozen-build time instead.
+      #
+      # --dry-run resolves and verifies hashes without installing, so this stays
+      # fast. It gates: an unresolvable lock is never a warning.
+      - name: Lock file is installable
+        run: |
+          set +e
+          pip install \
+            --require-hashes \
+            --dry-run \
+            --ignore-installed \
+            -r requirements-lock.txt > "$RUNNER_TEMP/lock-install.txt" 2>&1
+          rc=$?
+          set -e
+          tail -40 "$RUNNER_TEMP/lock-install.txt"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error file=requirements-lock.txt::requirements-lock.txt cannot be installed (pip exit ${rc})."
+            echo "  Usually a pinned version contradicting another package's"
+            echo "  metadata -- read the resolver output above for the conflicting pair."
+            exit 1
+          fi
+          echo "Lock file resolves and all hashes verify."
+
       # This step is ADVISORY by design: exact pip-compile output varies by
       # pip-tools version, so a difference is reported as a warning, never a
       # failure. That has to include pip-compile failing to run at all --

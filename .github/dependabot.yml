@@ -34,6 +34,40 @@ updates:
       ui:
         patterns:
           - "gradio"
+    ignore:
+      # websockets is a TRANSITIVE dependency -- it is not in requirements.txt;
+      # the lock records "# via langgraph-sdk, langsmith". langgraph-sdk 0.4.2
+      # (still the newest release as of 2026-08-07) declares
+      # "websockets<16,>=14", so any major bump produces a lock that pip cannot
+      # resolve at all -- that breaks the frozen build, not just a test. PR #145
+      # (15.0.1 -> 17.0.1) sat open for exactly this reason and was closed.
+      #
+      # Scoped to majors on purpose: a blanket ignore would also suppress
+      # security updates, and 15.x patches must keep flowing.
+      #
+      # REMOVE THIS as soon as langgraph-sdk lifts the <16 cap -- check with:
+      #   pip index versions langgraph-sdk
+      # then let the normal bump through.
+      - dependency-name: "websockets"
+        update-types: ["version-update:semver-major"]
+
+      # tomlkit is the same shape: transitive ("# via gradio"), and gradio
+      # 6.21.0 declares "tomlkit<0.15.0,>=0.12.0". #103 bumped it to 0.15.1
+      # anyway and the lock has been UNINSTALLABLE ever since -- unnoticed
+      # because nothing installs from the lock (the build resolves the loose
+      # pins in requirements.txt, where pip honours the ceiling and picks
+      # 0.14.0). So the lock was attesting hashes for a version the product
+      # never actually ran. Pinned back to 0.14.0 alongside this rule.
+      #
+      # tomlkit is pre-1.0, so the ceiling-crossing bump is a semver-MINOR one
+      # (0.14 -> 0.15); majors are ignored too for the same reason. Patch
+      # updates within 0.14.x still come through.
+      #
+      # REMOVE when gradio raises its tomlkit ceiling.
+      - dependency-name: "tomlkit"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   # GitHub Actions versions
   - package-ecosystem: "github-actions"
