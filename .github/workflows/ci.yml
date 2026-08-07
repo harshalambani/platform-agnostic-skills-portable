@@ -131,7 +131,10 @@ jobs:
           python -m pip install --upgrade pip
           grep -vE '^(pywebview|pythonnet)' requirements.txt > "$RUNNER_TEMP/ci-reqs.txt"
           pip install -r "$RUNNER_TEMP/ci-reqs.txt"
-          pip install pytest
+          # Test-only, deliberately not in requirements.txt: the bank-parser
+          # tests synthesise their own fixtures rather than committing real
+          # statements -- reportlab writes the PDFs, xlwt the legacy .xls.
+          pip install pytest reportlab xlwt
 
       # A failing TEST stays advisory here (some need langchain_core, which we
       # deliberately don't install). A suite that could not RUN does not.
@@ -162,7 +165,7 @@ jobs:
           tail -120 "$RUNNER_TEMP/pytest-out.txt"
           case "$rc" in
             0) echo "All tests passed." ;;
-            1) echo "::warning::Tests failed (exit 1). Advisory only -- some tests need langchain_core, which CI does not install." ;;
+            1) echo "::warning::Tests failed (exit 1) -- see the tally above. Advisory for now; this is intended to become a hard failure once the suite is green on CI." ;;
             5) echo "::error::pytest collected NO tests. The suite did not run."; exit 1 ;;
             *) echo "::error::pytest could not complete the run (exit ${rc}) -- collection error, internal error, or bad invocation. This is NOT a test failure: the suite did not run."; exit 1 ;;
           esac
