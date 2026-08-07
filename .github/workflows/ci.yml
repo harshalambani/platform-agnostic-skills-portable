@@ -189,19 +189,25 @@ jobs:
           # are not in the lock.
           pip install pytest reportlab xlwt
 
-      # A failing TEST stays advisory here (some need langchain_core, which we
-      # deliberately don't install). A suite that could not RUN does not.
+      # Nothing here is advisory any more. A failing TEST fails the job, and so
+      # does a suite that could not RUN -- but they are still reported as
+      # different things, because the old `continue-on-error: true` flattened
+      # them into one. On 2026-08-06 a module-level sys.exit() in a collected
+      # file raised SystemExit during collection; pytest reported INTERNALERROR
+      # and collected nothing -- and this step reported success. CI had been
+      # showing a green check over a suite of zero tests.
       #
-      # Those are different things, and the old `continue-on-error: true`
-      # flattened them into one. On 2026-08-06 a module-level sys.exit() in a
-      # collected file raised SystemExit during collection; pytest reported
-      # INTERNALERROR and collected nothing -- and this step reported success.
-      # CI had been showing a green check over a suite of zero tests.
+      # Exit 1 was tolerated with a ::warning:: until 2026-08-07, on the stated
+      # condition "once the suite is green on CI". That condition is now met.
+      # #161 made this job install requirements-lock.txt instead of the loose
+      # pins, which is what supplies langchain-core and friends, and the suite
+      # exited 0 for the first time. The old rationale -- "some tests need
+      # langchain_core, which we deliberately don't install" -- no longer holds,
+      # so the tolerance that rested on it is gone.
       #
       # pytest exit codes: 0 = all passed, 1 = tests failed, 2 = interrupted
       # (what INTERNALERROR produces), 3 = internal error, 4 = usage error,
-      # 5 = no tests collected. Only 0 and 1 mean the suite actually ran, so
-      # only those are tolerated.
+      # 5 = no tests collected.
       #
       # `-x` is gone deliberately: stopping at the first failure hides how much
       # of the suite is broken, which is the thing this step exists to report.
@@ -218,7 +224,7 @@ jobs:
           tail -120 "$RUNNER_TEMP/pytest-out.txt"
           case "$rc" in
             0) echo "All tests passed." ;;
-            1) echo "::warning::Tests failed (exit 1) -- see the tally above. Advisory for now; this is intended to become a hard failure once the suite is green on CI." ;;
+            1) echo "::error::Tests failed (exit 1) -- see the tally above."; exit 1 ;;
             5) echo "::error::pytest collected NO tests. The suite did not run."; exit 1 ;;
             *) echo "::error::pytest could not complete the run (exit ${rc}) -- collection error, internal error, or bad invocation. This is NOT a test failure: the suite did not run."; exit 1 ;;
           esac
