@@ -311,6 +311,24 @@ def extract_all_pdfs_from_msgs(msg_folder, extract_folder, folder_structure=None
     print(f"Total PDFs extracted: {len(all_extracted)}")
     return all_extracted
 
+def _pw_label(pw, passwords):
+    """
+    Describe WHICH password matched, without ever printing the password.
+
+    A statement password is a live credential: it is reused across all of a
+    cardholder's PDFs and is often derived from name + date of birth, so
+    echoing it to stdout puts it into any log capture, crash report, console
+    scrollback or screen-share of a run. The position in the caller's list
+    identifies it unambiguously to someone who already holds the list, and is
+    worthless to anyone who does not.
+    """
+    if not pw or pw == '(empty)':
+        return 'no password needed'
+    try:
+        return f"password #{list(passwords).index(pw) + 1}"
+    except ValueError:
+        return 'password (not from the supplied list)'
+
 def find_passwords(search_folder):
     """
     Find passwords from the input folder. Supports two formats:
@@ -347,7 +365,8 @@ def find_passwords(search_folder):
     for search_dir in [search_path, search_path.parent, search_path.parent.parent]:
         for txt_file in search_dir.glob('*.txt'):
             if txt_file.stem:
-                print(f"Found password from filename: {txt_file.stem}")
+                # The stem IS the password, so it is deliberately not echoed.
+                print(f"Found 1 password from a .txt filename in {search_dir}")
                 return [txt_file.stem]
 
     return []
@@ -516,7 +535,7 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
                 "  2. Create a 'passwords.txt' file in the input folder with one password per line"
             )
 
-    print(f"Will try {len(passwords)} password(s) per PDF: {', '.join(passwords)}")
+    print(f"Will try {len(passwords)} password(s) per PDF.")
 
     # Create temporary decrypted folder — always start fresh to avoid stale-file collisions
     temp_decrypted = output_path / '_temp_decrypted'
@@ -534,7 +553,7 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
         if working_pw:
             decrypted_map[pdf_path] = temp_output
             results['successfully_decrypted'] += 1
-            print(f"  [{i}/{len(pdf_files)}] [OK] Decrypted: {pdf_path.name[:50]} (pw: {working_pw})")
+            print(f"  [{i}/{len(pdf_files)}] [OK] Decrypted: {pdf_path.name[:50]} ({_pw_label(working_pw, passwords)})")
         else:
             results['failed_decryption'].append(pdf_path.name)
             print(f"  [{i}/{len(pdf_files)}] [FAIL] All passwords failed: {pdf_path.name[:50]}")
