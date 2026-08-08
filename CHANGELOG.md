@@ -9,7 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
-## [Unreleased]
+## [3.6.0] — 2026-08-08
+
+This release makes the launcher splash disappear when the app window is
+actually ready instead of when a timer runs out, which removes the need for
+the splash duration to double as a guess at how long startup takes on a given
+machine.
 
 ### Added
 - **The PortableApps.com Launcher splash now dismisses itself the moment the
