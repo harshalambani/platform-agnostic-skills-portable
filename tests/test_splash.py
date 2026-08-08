@@ -35,6 +35,21 @@ def _fast_search_budget(monkeypatch):
     monkeypatch.setattr(_splash, "_POLL_INTERVAL_SECONDS", 0.01)
 
 
+@pytest.fixture(autouse=True)
+def _pretend_windows(monkeypatch):
+    """Force the Windows gate open for every test by default.
+
+    CI runs on Linux, where `dismiss_launcher_splash()` returns False before
+    it looks at anything — which silently turns the monkeypatched-window
+    tests below into tests of the platform gate and nothing else. Three of
+    them assert False, so they would have gone green on Linux without ever
+    exercising a line of the logic they name. Pin the platform instead, and
+    let the one test that IS about the gate override this (it runs its own
+    setattr afterwards, which wins).
+    """
+    monkeypatch.setattr(_splash.sys, "platform", "win32")
+
+
 def test_noop_when_no_matching_window(monkeypatch):
     """No `_sp` window anywhere (source mode / splash disabled / no PAL):
     the function must no-op and report nothing was dismissed."""
