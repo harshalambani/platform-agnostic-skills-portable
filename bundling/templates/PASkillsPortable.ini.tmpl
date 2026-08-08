@@ -1,4 +1,4 @@
-; PASkillsPortable.ini — PortableApps.com Launcher config.
+; PASkillsPortable.ini - PortableApps.com Launcher config.
 ; Rendered by bundling/build.py; placed at App\AppInfo\Launcher\.
 
 [Launch]
@@ -7,30 +7,44 @@ WorkingDirectory=%PAL:DataDir%
 WaitForProgram=true
 SinglePortableAppInstance=true
 ; Splash shown while the app starts, from App\AppInfo\Launcher\splash.jpg
-; (staged by build.py). It is a TIMED overlay, not one that clears when the
-; window appears -- newadvsplash takes a duration and nothing tells it the app
-; is ready -- and it is topmost, so overshooting parks it on top of a usable
-; window, so it is set UNDER the expected start rather than over it: better to
-; end a beat early than to cover the thing the user is waiting for.
-; Reference: measured on the FROZEN exe (not source -- source mode is markedly
-; faster and sizing against it is what left 3.4.0 with a splash that cleared
-; while the screen was still empty). Launcher start to a visible window:
-;   warm  11.77s  (3.4.1, after the health-probe deferral; was 14.6s before it)
-;   cold  44.0s   (measured when warm was 14.6s; not re-measured since)
-; Set just under the warm figure. 13000 was sized against the older 14.6s and
-; became an OVERSHOOT of ~1.2s once warm start improved -- a topmost splash
-; parked on top of a usable window, which is the worse of the two failures.
-; NOT re-measured on 3.5.0, whose dependency set moved (gradio 6.22, fastapi,
-; starlette). That only matters in the safe direction: a stale-low value
-; undershoots further and the splash clears early; it cannot overshoot by being
-; stale. Re-measure on the 3.5.0 frozen exe to claim the last second back.
-; Cold starts are deliberately left uncovered: stretching to 44s would park a
-; topmost splash over a usable window on every warm start, which is the worse
-; failure of the two -- an unresponsive-looking overlay on top of the thing you
-; are waiting for.
+; (staged by build.py). This USED to be a purely timed overlay -- newadvsplash
+; takes a duration and nothing told it the app was ready -- which meant this
+; value had to double as an estimate of startup time: too low and it cleared
+; into a blank desktop, too high and a topmost splash parked itself on top of
+; an already-usable window. Neither failure was avoidable with a single
+; number, because a fixed duration necessarily encodes ONE machine's hardware
+; and ships it to every machine that runs the app.
+; That estimate role is gone. ui/_splash.py now dismisses this window itself,
+; the moment the app's real window fires pywebview's `shown` event, by
+; synthesizing the mouse click that the newadvsplash plugin already treats as
+; "dismiss" (see SplashScreen.nsh -- it is invoked without /NOCANCEL). So
+; SplashTime is no longer an estimate to land close to; it is a MAXIMUM, and
+; every run that isn't the slowest one on record ends the splash early
+; regardless of what this number says.
+; Reference measurements (frozen exe, not source -- source mode is markedly
+; faster): launcher start to a visible window was 11.77s warm and 44.0s cold.
+; Both of those undercount the true splash-visible duration by about 1.3s,
+; because the splash does not appear at launcher start (t=0) -- the launcher
+; does its own work first -- so every value ever tuned against "time to
+; visible window" was implicitly ~1.3s more generous than the number suggests.
+; Cold starts used to be deliberately left uncovered, because stretching the
+; timer to cover them would park a topmost splash over a usable window on
+; every warm run. That trade-off no longer exists once dismissal is
+; event-driven rather than timed, so this is now set to comfortably clear the
+; measured 44s cold start, confident that ui/_splash.py will cut it short on
+; every faster run instead.
+; This all depends on PAL continuing to launch newadvsplash without
+; /NOCANCEL. If a future PAL version adds it, ui/_splash.py's click will
+; simply stop landing (it already no-ops silently on any failure), the splash
+; will run the full duration below on every single run, and this value needs
+; to come back down to something warm-start-sized again.
 ; LaunchAppAfterSplash is intentionally NOT set: it would run the splash to
 ; completion BEFORE starting the app, adding the duration instead of hiding it.
-SplashTime=11000
+; A missing App\AppInfo\Launcher\splash.jpg silently sets DisableSplashScreen
+; to true (see bundling/build.py) -- the app then starts with no splash at
+; all rather than failing, so a build with the splash asset dropped will not
+; surface as an error here.
+SplashTime=45000
 
 [Activate]
 Registry=false

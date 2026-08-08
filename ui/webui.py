@@ -116,6 +116,7 @@ from ui.tabs import krc_gnucash_review as tab_krc_gnucash_review  # noqa: E402
 from ui import _config as _config_mod  # noqa: E402
 from ui import _health  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
+from ui import _splash  # noqa: E402
 from ui import _update  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
@@ -835,6 +836,18 @@ def _run_native_window(url: str) -> None:
         # after it. Killing the process here is what destroys the window, which
         # looks identical to the user and returns the mutex immediately.
         window.events.closing += lambda: _terminate_process()
+        # `shown` fires once this window is actually up on screen — precisely
+        # the event the PAL launcher splash should die on instead of running
+        # out its own fixed timer. See ui/_splash.py for why a synthesized
+        # click (not WM_CLOSE) is what dismisses it, and why this is safe to
+        # no-op when there's no splash to find (source mode, splash disabled
+        # in the build, or the app launched directly rather than via PAL).
+        # Unlike `closing` above, `shown` is NOT a locking event — pywebview
+        # runs it on its own thread — which is what makes it safe for this
+        # handler to spend its full search budget hunting for the splash
+        # window. Don't move it onto a locking event without making the
+        # dismissal asynchronous first.
+        window.events.shown += lambda: _splash.dismiss_launcher_splash()
         icon = _window_icon_path()
         if icon:
             webview.start(icon=icon)
@@ -842,6 +855,12 @@ def _run_native_window(url: str) -> None:
             webview.start()
     except Exception:
         import webbrowser  # noqa: PLC0415
+        # The native window never came up, so `shown` above will never fire
+        # for it either. Without this the splash would sit there, topmost,
+        # for the full SplashTime with no window underneath it to explain
+        # itself — dismiss it here too so the fallback browser tab is what
+        # the user actually sees instead of a stranded overlay.
+        _splash.dismiss_launcher_splash()
         try:
             webbrowser.open(url)
         except Exception:
