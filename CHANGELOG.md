@@ -11,6 +11,40 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+- **The PortableApps.com Launcher splash now dismisses itself the moment the
+  app's window is actually ready**, instead of running out a fixed timer
+  (`ui/_splash.py`). The splash is a separate window owned by the launcher
+  process, not this app, and it takes a duration with nothing telling it the
+  app has finished starting — so the old `SplashTime` had to double as a
+  guess at startup time, and a guess calibrated on one machine is wrong on
+  every machine with different hardware: too low and it clears into a blank
+  desktop, too high and a topmost splash sits on top of an already-usable
+  window. `PostMessage(WM_CLOSE)` does nothing to that window, but it turns
+  out the underlying NSIS splash plugin is launched without `/NOCANCEL`,
+  whose documented default is "exit on click" — so this module finds the
+  splash window (class `_sp`, owned by `PASkillsPortable.exe`) and
+  synthesizes the click, wired to pywebview's `window.events.shown` in
+  `ui/webui.py`. Everything about this is best-effort and self-contained: it
+  is gated to Windows, wrapped so no exception can ever escape it, and caps
+  its own search at a couple of seconds, so if the splash window can't be
+  found (source mode, splash disabled, launched without PAL, or a future PAL
+  version changes the class name or adds `/NOCANCEL`) it silently no-ops and
+  the splash simply runs out its timer as it always did.
+
+### Changed
+- **`SplashTime` raised from 11000 to 45000** (`bundling/templates/
+  PASkillsPortable.ini.tmpl`). With the splash now dismissed on window-ready
+  rather than timed out, this value stopped being an estimate to land close
+  to and became a maximum: it only needs to cover the slowest cold start
+  ever measured (44s) without penalizing anything faster, which the old
+  fixed-timer design explicitly gave up on because covering the cold-start
+  case would have meant overshooting every warm start instead. The
+  surrounding comment block was rewritten from scratch — it also corrects an
+  assumption baked into every prior tuning of this value, that the splash
+  appears at launcher start (t=0); it actually appears about 1.3s in, so
+  every earlier number was implicitly more generous than it looked.
+
 ## [3.5.1] — 2026-08-08
 
 A security release. Nothing in it changes what the app does; three separate
