@@ -424,8 +424,23 @@ def decrypt_pdf(pdf_path, passwords, output_path):
         ]
         for extra_flags in flag_sets:
             try:
-                cmd = [qpdf_path, '--password=' + password] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                # A statement password is a live credential, reused across all
+                # of a cardholder's PDFs. Passing it as a '--password=...' argv
+                # element used to put it in this process's command line, which
+                # on Windows any other local, unprivileged process can read out
+                # of the process table (e.g. via Process Explorer or WMI) for
+                # as long as qpdf is running. '--password-file=-' instead reads
+                # the password from stdin, so it never appears in argv. An
+                # empty password needs no option at all (qpdf's default), which
+                # also sidesteps any ambiguity about what an empty first line
+                # on stdin would mean.
+                stdin_input = None
+                if password:
+                    cmd = [qpdf_path, '--password-file=-'] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
+                    stdin_input = password + '\n'
+                else:
+                    cmd = [qpdf_path] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, input=stdin_input)
                 # Exit code 0 = success, 3 = success with warnings
                 if result.returncode in (0, 3):
                     return password if password else '(empty)'
