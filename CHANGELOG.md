@@ -11,6 +11,44 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.5.1] — 2026-08-08
+
+A security release. Nothing in it changes what the app does; three separate
+paths were leaking, or could leak, a live credential to somewhere it had no
+business being.
+
+### Security
+- **Statement passwords are no longer printed to stdout** (#165). Every
+  credit-card sort run echoed the working PDF password to the console, which
+  lands in logs, scrollback, and anything the operator pastes when asking for
+  help. The run summary now reports the password's *position* in the supplied
+  list (`password #2`) instead of its value — unambiguous to whoever holds the
+  list, worthless to anyone else, and strictly more useful than the value for
+  identifying which entry to fix. One instance was subtler than the rest and
+  was found by reading the code rather than from any alert: the code printed a
+  filename stem, and in the single-password format the stem *is* the password.
+  A source-level regression test now fails if any of the removed expressions
+  reappear, because copy-paste is how this class of bug comes back.
+- **Statement passwords no longer appear on the qpdf command line** (#167).
+  They were passed as a `--password=...` argument, and on Windows any other
+  local, unprivileged process can read another process's command line out of
+  the process table for as long as it runs. The password is now written to
+  qpdf's stdin via `--password-file=-`, so it never enters argv; an empty
+  password passes no password option at all, which is qpdf's default anyway.
+  Verified against the vendored qpdf 11.9.1 itself rather than its
+  documentation — correct password, wrong password, unencrypted file, and
+  direct argv inspection.
+- **The mapping-rules temp file is created with `mkstemp`** (#166), so it is
+  opened with an exclusive, unpredictable name instead of a guessable path in
+  a world-writable directory. The CI workflow token is also now scoped
+  explicitly rather than inheriting the default permission set.
+
+### Fixed
+- **CI fails the job when tests fail** (#163). A `continue-on-error` left over
+  from an earlier debugging pass meant a red suite still produced a green
+  check. This is the guard that should have caught the earlier
+  green-over-zero-tests episode, and it was itself disabled.
+
 ### Changed
 - **Splash timer drops from 13s to 11s.** It was sized against a 14.6s warm
   frozen start, but the startup work since brought warm start to a measured
