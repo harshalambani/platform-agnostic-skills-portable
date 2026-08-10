@@ -69,6 +69,24 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
 
+      # pydantic-core is the same shape: transitive (not in requirements.txt),
+      # and the lock records it via pydantic. pydantic 2.13.4 pins it with an
+      # exact "==", not a range: "pydantic-core==2.46.4". That means there is
+      # no independent bump of pydantic-core that can ever produce an
+      # installable lock, at ANY semver level -- patch, minor, or major --
+      # because pip will always reject it against the parent's exact pin.
+      # PR #171 (2.46.4 -> 2.48.0) proved exactly this and was closed.
+      #
+      # Unlike websockets and tomlkit above, this is a blanket ignore (no
+      # update-types filter) because there is no bump width where the parent
+      # pin would ever let it through. That also suppresses security updates
+      # for pydantic-core specifically -- but a pydantic-core security fix is
+      # only installable once pydantic itself releases against it, so the fix
+      # will still arrive, via the pydantic bump.
+      #
+      # REMOVE if pydantic ever loosens the "==" pin to a range.
+      - dependency-name: "pydantic-core"
+
   # GitHub Actions versions
   - package-ecosystem: "github-actions"
     directory: "/"
