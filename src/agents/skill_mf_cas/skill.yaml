@@ -1,0 +1,120 @@
+# skill.yaml -- MF CAS manifest.
+# Parses a CAMS/KFintech Consolidated Account Statement (mutual funds) and
+# derives FIFO realised capital gains. Output lands as standalone artifacts
+# only -- see AGENT.md's N1 assumption. Renders under GnuCash > ITR.
+
+name: "mf_cas"
+display_name: "MF CAS"
+description: >
+  Parses a CAMS/KFintech Consolidated Account Statement (CAS) PDF for mutual
+  funds and produces a transactions ledger, a holdings/reconciliation view,
+  and a FIFO-derived realised capital-gains feed -- one row per consumed buy
+  lot, raw facts only (no tax/rate/LT-ST computation). Anything it cannot
+  attribute with certainty (a disposal reaching into units held before the
+  statement's own window, a pre-2018 grandfathering FMV, a reconciliation
+  mismatch) is flagged for review rather than guessed. Output is a
+  standalone workbook -- it does not write into any .gnucash book or the
+  ITR workbook.
+category: "itr"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "cas_path"
+    type: "file"
+    label: "CAMS/KFintech Consolidated Account Statement (PDF)"
+    file_types: [".pdf"]
+    required: true
+  - name: "cas_password"
+    type: "password"
+    label: "CAS PDF password (usually your PAN in upper case, or date of birth DDMMYYYY)"
+    required: false
+
+run_args:
+  cas_path: "{inputs.cas_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  cas_password: "{inputs.cas_password}"
+
+output:
+  extension: ".xlsx"
+  suffix: "MF-CAS"
+  download_label: "Download MF CAS Report"
+
+requires:
+  native_binaries: []
+  python_packages: ["pdfplumber", "openpyxl"]
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Reads a detailed, transaction-wise CAMS or KFintech Consolidated Account
+    Statement PDF (the RTA-issued statement listing every purchase,
+    redemption, switch, and reinvestment across your folios) and turns it
+    into three things: a full transactions ledger, a per-folio/scheme
+    holdings view with a units-reconciliation check, and a FIFO-derived
+    realised capital-gains feed -- one row per consumed buy lot, split
+    across multiple lots when a single disposal draws from more than one.
+    Only raw facts are emitted (units, dates, NAVs, cost, proceeds, holding
+    days, gain) -- no tax rate, slab, exemption, indexation, or long/short
+    -term classification is computed; that is left to the ITR Workbook
+    skill's own tax-rules config. A disposal that reaches into units held
+    before the statement's own visible window (a nonzero opening balance
+    with no buy date/cost in this statement) is flagged "unattributed --
+    review" rather than guessed at, and a buy dated before 2018-02-01 is
+    flagged for the grandfathering FMV your CAS does not itself state.
+  when_to_use: >
+    Use this after receiving your annual (or as-needed) CAS PDF from CAMS or
+    KFintech, when you need a clean realised-capital-gains feed for mutual
+    funds to review or feed manually into the ITR Workbook -- GnuCash books
+    in this codebase hold mutual funds only as cash transfers to the AMC, so
+    there is no commodity-lot data inside GnuCash for capital gains to be
+    derived from automatically.
+  inputs:
+    - name: "cas_path"
+      tooltip: "Your CAMS or KFintech Consolidated Account Statement, as a PDF."
+      accepts: "PDF (.pdf) -- one statement, one entity, no multi-select."
+      gotchas: "Must be the DETAILED, transaction-wise CAS (not the summary-only holdings statement) -- capital gains are derived from the individual transaction rows, not from a pre-computed total."
+    - name: "cas_password"
+      tooltip: "Only needed if the CAS PDF is password-protected (the usual case for CAMS/KFintech emails)."
+      accepts: "The statement's open password -- typically your PAN in upper case, or date of birth in DDMMYYYY format."
+      gotchas: "Never logged, never included in any error message or output file. Left blank for an unprotected PDF."
+  steps:
+    - "Download your Consolidated Account Statement (detailed, transaction-wise) from CAMS or KFintech."
+    - "Pick the PDF and, if it is password-protected, enter its password."
+    - "Click Run."
+    - "Download the workbook and review the Exceptions sheet first."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-MF-CAS.xlsx"
+        tooltip: >
+          Four sheets: Transactions (every parsed row), Holdings (per
+          folio/scheme opening/closing units and reconciliation OK/BREACH),
+          RealisedGains (one row per consumed FIFO lot -- raw facts only),
+          and Exceptions (every flagged item collected in one place).
+      - name: "YYYY-MM-DD-HHMMSS-<input>-MF-CAS_transactions.csv"
+        tooltip: "CSV sibling of the Transactions sheet."
+      - name: "YYYY-MM-DD-HHMMSS-<input>-MF-CAS_realised_gains.csv"
+        tooltip: "CSV sibling of the RealisedGains sheet."
+  tips: >
+    Start with the Exceptions sheet -- it collects every units-reconciliation
+    breach, unattributed disposal, grandfathering flag, and RTA-realised-gain
+    variance in one place. A nonzero Opening Unit Balance on a folio (units
+    held before the statement's own window) will produce at least one
+    "unattributed -- review" lot the first time that folio's units are ever
+    sold within the statement -- this is expected, not a bug, and means the
+    buy date/cost for that portion must be sourced from an earlier statement.
+  troubleshooting:
+    - problem: "'PDF is password-protected' error."
+      fix: "Enter the CAS delivery password -- typically your PAN in upper case, or date of birth DDMMYYYY."
+    - problem: "'No text could be extracted from this PDF.'"
+      fix: "The statement is likely a scanned/image-only PDF; OCR is not supported in this skill's v1. Request a text-based CAS from CAMS/KFintech instead."
+    - problem: "'No folio/scheme blocks were recognised.'"
+      fix: "The PDF's text was extracted but did not match this skill's expected CAS layout. Confirm it is the DETAILED, transaction-wise statement, not a summary."
+    - problem: "A scheme shows a units-reconciliation BREACH."
+      fix: "Opening + acquisitions - disposals did not match the statement's own closing balance within tolerance. Check the Exceptions sheet for the exact numbers, and re-check the statement for a corporate action (merger/split) this v1 does not model."
