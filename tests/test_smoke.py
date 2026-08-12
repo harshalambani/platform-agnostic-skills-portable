@@ -110,7 +110,10 @@ def test_registry_discovers_all_skills():
     # v3.x dev-time skill: scaffolds new skill packages (exposed as a
     # top-level tab, category "dev")
     assert "Skill Scaffold" in names
-    assert len(skills) == 23
+    # Coverage Gap Detector: infers suspected missing-statement months from
+    # transaction dates already posted, no import ledger required
+    assert "gnucash_coverage" in names
+    assert len(skills) == 24
 
 
 def test_registry_get_by_name():
