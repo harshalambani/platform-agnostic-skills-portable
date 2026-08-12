@@ -107,7 +107,10 @@ def test_registry_discovers_all_skills():
     assert "ITR Workbook" in names
     # 5th bank onboarding (P4)
     assert "Kotak" in names
-    assert len(skills) == 22
+    # v3.x dev-time skill: scaffolds new skill packages (exposed as a
+    # top-level tab, category "dev")
+    assert "Skill Scaffold" in names
+    assert len(skills) == 23
 
 
 def test_registry_get_by_name():

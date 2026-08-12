@@ -62,6 +62,34 @@ def test_help_has_outputs_and_steps(skills):
     assert not thin, "\n".join(thin)
 
 
+def test_no_skill_ships_a_scaffold_marker(skills):
+    """No REGISTERED skill's help block may still carry the Skill Scaffolder's
+    placeholder marker -- that means someone shipped a scaffolded skill
+    (agents.skill_scaffold) without filling in the generated placeholders.
+    The marker legitimately appears only under src/agents/skill_scaffold/templates/
+    and as a constant in test files (never in a registered skill.yaml)."""
+    marker = "TODO(scaffold)"
+    offenders = []
+    for s in skills:
+        h = s.help
+        if not h:
+            continue
+        haystack = " ".join([
+            s.description or "",
+            h.overview, h.when_to_use, h.tips,
+            " ".join(h.steps),
+            " ".join(f"{i.tooltip} {i.accepts} {i.gotchas}" for i in h.inputs),
+            " ".join(f.tooltip for f in h.output_files),
+            " ".join(f"{t.problem} {t.fix}" for t in h.troubleshooting),
+        ])
+        if marker in haystack:
+            offenders.append(s.display_name)
+    assert not offenders, (
+        f"skill(s) still ship the Skill Scaffolder's placeholder marker: {offenders} "
+        "-- fill in the generated placeholders before this skill ships."
+    )
+
+
 def test_generated_docs_are_fresh():
     """gen_docs --check must pass; if this fails, run scripts/gen_docs.py."""
     result = subprocess.run(
