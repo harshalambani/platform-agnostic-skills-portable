@@ -67,6 +67,7 @@ padding-top:14px}
 <a href="#skill_msg_parser">MSG / Email Parser</a>
 <a href="#skill_parser_generator">Parser Generator</a>
 <a href="#skill_krc_recon">Reconcile</a>
+<a href="#skill_scaffold">Skill Scaffolder</a>
 <a href="#skill_translate">Text Translator</a>
 </nav>
 <main>
@@ -635,6 +636,38 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>PDF won&#x27;t open.</td><td>Check the PAN password and that qpdf is available in source mode.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_scaffold" class="skill">
+<h2>Skill Scaffolder <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Scaffolds a brand-new skill package under src/agents/ -- skill.yaml (a complete manifest with a full help: block), an agent.py stub, an AGENT.md, and a starter test module under tests/ -- entirely by plain text-template substitution. There is no LLM anywhere in the generation path and no network access, so the same inputs always render the exact same bytes. Every piece of prose in the generated files (descriptions, tooltips, steps, troubleshooting, the AGENT.md body) is a fixed placeholder marker rather than invented-sounding text -- a repo-wide guard test fails loudly if a scaffolded skill ever ships with that marker still in it, so a half-finished skill can never slip through silently.</p>
+<p class="whenuse"><b>When to use it.</b> Use this to start a new skill instead of hand-copying an existing package. It gets the manifest shape, the help: block structure, and the starter test right on the first try, then leaves clearly marked gaps for a human (or an LLM working under review) to fill in with the real behaviour.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>New package directory name (e.g. skill_foo -- must start with skill_, lowercase)</b> <em>(required)</em> <span class="pa-tip" data-tip="The new package&#x27;s directory name under src/agents/. ⚠️ Refuses outright if this directory already exists -- it never overwrites or merges into an existing skill.">ℹ️</span><br><span class="fmt">accepts: Must start with skill_ and contain only lowercase letters, digits and underscores after that.</span></li>
+<li><b>Display name for the new skill&#x27;s UI tab</b> <em>(required)</em> <span class="pa-tip" data-tip="The label the new skill&#x27;s tab will show once the app is restarted. ⚠️ Every scaffolded skill is UI-registered -- there is no &#x27;internal pipeline step&#x27; option here.">ℹ️</span><br><span class="fmt">accepts: Any non-blank text.</span></li>
+<li><b>Category for the new skill</b> <em>(required)</em> <span class="pa-tip" data-tip="Which group the new skill&#x27;s tab is filed under. ⚠️ Picking &#x27;dev&#x27; renders as a flat top-level tab, same as this skill; other categories may nest under a group tab depending on webui.py.">ℹ️</span><br><span class="fmt">accepts: One of the categories already used elsewhere in this repo.</span></li>
+<li><b>Mode for the new skill (direct = plain function, agent = LLM-driven)</b> <em>(required)</em> <span class="pa-tip" data-tip="direct = a plain Python function; agent = wired through the LangGraph agent machinery for LLM-driven work. ⚠️ Most new skills should start as direct -- switch to agent later if the skill genuinely needs multi-step LLM reasoning.">ℹ️</span><br><span class="fmt">accepts: direct or agent.</span></li>
+<li><b>Output type for the new skill (file or directory)</b> <em>(required)</em> <span class="pa-tip" data-tip="Whether the new skill&#x27;s run produces a single file or a folder of files. ⚠️ This only sets the manifest&#x27;s output.type -- the generated agent.py stub still just writes one placeholder artifact either way.">ℹ️</span><br><span class="fmt">accepts: file or directory.</span></li>
+<li><b>Does the new skill need an LLM endpoint?</b> <em>(required)</em> <span class="pa-tip" data-tip="Whether the new skill&#x27;s manifest declares requires.llm true. ⚠️ Deterministic, no-LLM skills (like this one) should stay &#x27;no&#x27; -- it changes whether the UI shows a Model dropdown and runs an LLM health check before Run.">ℹ️</span><br><span class="fmt">accepts: no or yes.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Fill in skill_dir, display_name, category, mode, output_type and needs_llm.</li>
+<li>Click Run -- it writes the new package under src/agents/ and a starter test under tests/, then runs scripts/gen_docs.py and reports its exit code.</li>
+<li>Restart the app -- the new tab only appears after a restart, since the skill registry caches its scan for the life of the process.</li>
+<li>Open the new skill&#x27;s files and replace every placeholder marker with the real implementation, description, and help text before it ships.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-skill-scaffold/</pre>
+<ul class="outputs">
+<li><code>skill-scaffold-report.md</code><span class="pa-tip" data-tip="Lists exactly which files were created, the gen_docs.py exit code, and the restart reminder.">ℹ️</span> — Lists exactly which files were created, the gen_docs.py exit code, and the restart reminder.</li>
+</ul>
+<h3>Tips</h3><p>Run the full test suite after filling in the placeholders -- the scaffolded test module and the repo-wide help-coverage/marker-guard tests will tell you exactly what is still incomplete.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>&quot;Refused: ... already exists&quot;.</td><td>Pick a different skill_dir -- this tool never overwrites or merges into an existing skill package.</td></tr>
+<tr><td>&quot;Refused: skill_dir ... is invalid&quot;.</td><td>skill_dir must match skill_[a-z0-9_]+ -- lowercase, starting with skill_, no path separators.</td></tr>
+<tr><td>The new tab doesn&#x27;t show up after Run.</td><td>Expected -- restart the app. The skill registry only rescans agents/ once per process.</td></tr>
+<tr><td>&quot;Error: the Skill Scaffolder is a source-checkout-only dev tool ...&quot;.</td><td>You&#x27;re running a frozen/packaged build. Run this from a source checkout instead -- the shipped app&#x27;s agents/ tree is read-only.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_translate" class="skill">
 <h2>Text Translator <span class="badge warn">needs LLM endpoint</span> <span class="badge">direct</span></h2>
 <p class="overview">Translates text between languages using your configured LLM, and saves the translation as a text file.</p>
@@ -661,7 +694,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 22 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 23 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];
