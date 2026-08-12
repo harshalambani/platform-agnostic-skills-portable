@@ -177,9 +177,19 @@ def _write_exceptions_sheet(wb: Workbook, recons: list[SchemeReconciliation]) ->
             _set(ws, row, 1, r.folio); _set(ws, row, 2, r.scheme)
             _set(ws, row, 3, "Matched-vs-disposed units breach",
                  fill=_RED_FILL, color=_RED_FONT_COLOR, bold=True)
-            _set(ws, row, 4, "sum of matched lot units != disposed units")
+            _set(ws, row, 4, "sum of matched lot units != disposed units "
+                              f"(unattributed shortfall={r.unattributed_shortfall_units})")
             row += 1
-        if r.rta_gain_variance not in (None, 0) and abs(r.rta_gain_variance) > 0.01:
+        if r.rta_gain_note:
+            # Explicit "cannot cross-check" state -- must never render as a
+            # blank/absent row, which would read as "no variance found"
+            # when the truth is "not derivable from this statement".
+            _set(ws, row, 1, r.folio); _set(ws, row, 2, r.scheme)
+            _set(ws, row, 3, "RTA realised-gain cross-check",
+                 fill=_YELLOW_FILL, color=_YELLOW_FONT_COLOR, bold=True)
+            _set(ws, row, 4, f"RTA reported={r.rta_gain_reported}, {r.rta_gain_note}")
+            row += 1
+        elif r.rta_gain_variance not in (None, 0) and abs(r.rta_gain_variance) > 0.01:
             _set(ws, row, 1, r.folio); _set(ws, row, 2, r.scheme)
             _set(ws, row, 3, "RTA realised-gain variance",
                  fill=_YELLOW_FILL, color=_YELLOW_FONT_COLOR, bold=True)
