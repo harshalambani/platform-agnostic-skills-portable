@@ -65,6 +65,7 @@ padding-top:14px}
 <a href="#skill_gnucash_intercompany_matrix">Inter-entity Matrix</a>
 <a href="#skill_gnucash_intercompany">Inter-entity Reconcile</a>
 <a href="#skill_kotak">Kotak</a>
+<a href="#skill_mf_cas">MF CAS</a>
 <a href="#skill_msg_parser">MSG / Email Parser</a>
 <a href="#skill_parser_generator">Parser Generator</a>
 <a href="#skill_krc_recon">Reconcile</a>
@@ -584,6 +585,36 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Closing balance in the CSV does not match my passbook.</td><td>Check the statement&#x27;s last page — the abbreviation legend on that page is intentionally excluded, but if any real transaction rows sit above it, make sure the whole document (all pages) was included when you selected the PDF.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_mf_cas" class="skill">
+<h2>MF CAS <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Reads a detailed, transaction-wise CAMS or KFintech Consolidated Account Statement PDF (the RTA-issued statement listing every purchase, redemption, switch, and reinvestment across your folios) and turns it into three things: a full transactions ledger, a per-folio/scheme holdings view with a units-reconciliation check, and a FIFO-derived realised capital-gains feed -- one row per consumed buy lot, split across multiple lots when a single disposal draws from more than one. Only raw facts are emitted (units, dates, NAVs, cost, proceeds, holding days, gain) -- no tax rate, slab, exemption, indexation, or long/short -term classification is computed; that is left to the ITR Workbook skill&#x27;s own tax-rules config. A disposal that reaches into units held before the statement&#x27;s own visible window (a nonzero opening balance with no buy date/cost in this statement) is flagged &quot;unattributed -- review&quot; rather than guessed at, and a buy dated before 2018-02-01 is flagged for the grandfathering FMV your CAS does not itself state.</p>
+<p class="whenuse"><b>When to use it.</b> Use this after receiving your annual (or as-needed) CAS PDF from CAMS or KFintech, when you need a clean realised-capital-gains feed for mutual funds to review or feed manually into the ITR Workbook -- GnuCash books in this codebase hold mutual funds only as cash transfers to the AMC, so there is no commodity-lot data inside GnuCash for capital gains to be derived from automatically.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>CAMS/KFintech Consolidated Account Statement (PDF)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your CAMS or KFintech Consolidated Account Statement, as a PDF. ⚠️ Must be the DETAILED, transaction-wise CAS (not the summary-only holdings statement) -- capital gains are derived from the individual transaction rows, not from a pre-computed total.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) -- one statement, one entity, no multi-select.</span></li>
+<li><b>CAS PDF password (usually your PAN in upper case, or date of birth DDMMYYYY)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Only needed if the CAS PDF is password-protected (the usual case for CAMS/KFintech emails). ⚠️ Never logged, never included in any error message or output file. Left blank for an unprotected PDF.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password -- typically your PAN in upper case, or date of birth in DDMMYYYY format.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Download your Consolidated Account Statement (detailed, transaction-wise) from CAMS or KFintech.</li>
+<li>Pick the PDF and, if it is password-protected, enter its password.</li>
+<li>Click Run.</li>
+<li>Download the workbook and review the Exceptions sheet first.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-MF-CAS.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-MF-CAS.xlsx</code><span class="pa-tip" data-tip="Four sheets: Transactions (every parsed row), Holdings (per folio/scheme opening/closing units and reconciliation OK/BREACH), RealisedGains (one row per consumed FIFO lot -- raw facts only), and Exceptions (every flagged item collected in one place).">ℹ️</span> — Four sheets: Transactions (every parsed row), Holdings (per folio/scheme opening/closing units and reconciliation OK/BREACH), RealisedGains (one row per consumed FIFO lot -- raw facts only), and Exceptions (every flagged item collected in one place).</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-MF-CAS_transactions.csv</code><span class="pa-tip" data-tip="CSV sibling of the Transactions sheet.">ℹ️</span> — CSV sibling of the Transactions sheet.</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-MF-CAS_realised_gains.csv</code><span class="pa-tip" data-tip="CSV sibling of the RealisedGains sheet.">ℹ️</span> — CSV sibling of the RealisedGains sheet.</li>
+</ul>
+<h3>Tips</h3><p>Start with the Exceptions sheet -- it collects every units-reconciliation breach, unattributed disposal, grandfathering flag, and RTA-realised-gain variance in one place. A nonzero Opening Unit Balance on a folio (units held before the statement&#x27;s own window) will produce at least one &quot;unattributed -- review&quot; lot the first time that folio&#x27;s units are ever sold within the statement -- this is expected, not a bug, and means the buy date/cost for that portion must be sourced from an earlier statement.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>&#x27;PDF is password-protected&#x27; error.</td><td>Enter the CAS delivery password -- typically your PAN in upper case, or date of birth DDMMYYYY.</td></tr>
+<tr><td>&#x27;No text could be extracted from this PDF.&#x27;</td><td>The statement is likely a scanned/image-only PDF; OCR is not supported in this skill&#x27;s v1. Request a text-based CAS from CAMS/KFintech instead.</td></tr>
+<tr><td>&#x27;No folio/scheme blocks were recognised.&#x27;</td><td>The PDF&#x27;s text was extracted but did not match this skill&#x27;s expected CAS layout. Confirm it is the DETAILED, transaction-wise statement, not a summary.</td></tr>
+<tr><td>A scheme shows a units-reconciliation BREACH.</td><td>Opening + acquisitions - disposals did not match the statement&#x27;s own closing balance within tolerance. Check the Exceptions sheet for the exact numbers, and re-check the statement for a corporate action (merger/split) this v1 does not model.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_msg_parser" class="skill">
 <h2>MSG / Email Parser <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Parses an Outlook .msg or standard .eml email into structured JSON: sender, date, subject, body text and the list of attachments. Pure deterministic extraction — no LLM, fully offline.</p>
@@ -720,7 +751,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 24 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 25 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];

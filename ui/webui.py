@@ -532,7 +532,8 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                         # iterated once. Ranks >= 50 sort after it;
                                         # unknown skills land at 99 (last).
                                         _itr_order = {"ITR Workbook": 0,
-                                                      "AIS Reconcile": 50}
+                                                      "AIS Reconcile": 50,
+                                                      "MF CAS": 60}  # renders after AIS Reconcile
                                         _rank = lambda s: _itr_order.get(s.display_name, 99)  # noqa: E731
                                         _itr_sorted = sorted(_itr_skills, key=_rank)
                                         for _skill in [s for s in _itr_sorted if _rank(s) < 50]:
