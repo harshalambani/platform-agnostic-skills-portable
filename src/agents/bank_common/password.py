@@ -28,9 +28,12 @@ def is_password_error(e: Exception) -> bool:
     )
 
 
-def password_error_message(hint: str = "") -> str:
-    """Uniform, actionable message for a password-protected PDF — never
-    echoes the password itself. ``hint`` is a bank-specific pointer to where
-    the password usually comes from (e.g. "for HDFC often the Cust ID")."""
-    base = "PDF is password-protected — supply the statement password"
+def password_error_message(hint: str = "", doc_type: str = "PDF") -> str:
+    """Uniform, actionable message for a password-protected document — never
+    echoes the password itself. ``hint`` is a bank/skill-specific pointer to
+    where the password usually comes from (e.g. "for HDFC often the Cust
+    ID"). ``doc_type`` defaults to "PDF" (every existing caller is a PDF
+    parser); pass e.g. "xlsx" for a non-PDF caller such as skill_mf_cas's
+    encrypted-workbook path."""
+    base = f"{doc_type} is password-protected — supply the statement password"
     return f"{base} ({hint})." if hint else f"{base}."
