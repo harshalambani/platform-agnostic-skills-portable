@@ -54,6 +54,7 @@ padding-top:14px}
 <a href="#skill_26as_journal">Convert to GnuCash</a>
 <a href="#skill_gnucash_pipeline">Convert to GnuCash</a>
 <a href="#skill_krc_gnucash">Convert to GnuCash</a>
+<a href="#skill_gnucash_coverage">Coverage Gap Detector</a>
 <a href="#skill_cc_sort">Credit Card — Sort PDFs</a>
 <a href="#skill_cc_transactions">Credit Card — Transactions</a>
 <a href="#skill_summarize">Document Summarizer</a>
@@ -289,6 +290,31 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>A Review.csv appears.</td><td>Open it: either a security name didn&#x27;t match an account (add/rename it) or a sale lacked enough FIFO lots (check earlier purchases were imported).</td></tr>
 <tr><td>Capital gain looks wrong.</td><td>Confirm the holding-period threshold and account paths in Data/settings/ match your setup.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_gnucash_coverage" class="skill">
+<h2>Coverage Gap Detector <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">This codebase has no ledger of which statements were ever imported, so this skill infers likely-missing months a different way: for every bank (BANK/ASSET) and credit-card (LIABILITY/CREDIT) account in the book(s) you select, it buckets that account&#x27;s own transactions by calendar month across its active window (first transaction to FY-end or today, whichever is earlier) and reports every zero-transaction month it finds. Each zero month is graded HIGH or LOW confidence from that account&#x27;s own median monthly transaction count (shown alongside so the grading is auditable) -- never silently suppressed. Months after an account&#x27;s LAST transaction get their own prominent trailing-gap flag, since that usually means the most recent statement was never imported. A zero month that falls on the book&#x27;s own FY-boundary (its first or last calendar month) is cross-checked against the adjacent FY&#x27;s registered book for the same entity/account before being reported, since postings are sometimes filed on the wrong side of a year rollover by mistake.</p>
+<p class="whenuse"><b>When to use it.</b> Run periodically (e.g. monthly, or before filing) to catch a bank or credit-card statement that was never imported into GnuCash -- something the per-statement opening-balance check in the GnuCash Pipeline skill cannot see, because it only ever compares one statement against one account and has nothing to compare against when a whole month&#x27;s statement is simply missing.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Entities (pick one or more -- fills their registered books below)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Pick the people/entities to scan; their registered books fill in below. ⚠️ Only entities with a registered book fill in; any that have none are named under the field, and you can Browse to those. &#x27;X HUF&#x27; is a separate entity from &#x27;X&#x27;.">ℹ️</span><br><span class="fmt">accepts: One or more entities from the Entities tab. Optional -- you can Browse to the books instead.</span></li>
+<li><b>GnuCash books (.gnucash) -- one or more; all must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more GnuCash books to scan, one path per line. ⚠️ Close each book in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Selecting several entities produces one consolidated report.">ℹ️</span><br><span class="fmt">accepts: Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the entities to scan -- their registered books fill in automatically.</li>
+<li>Browse to any book that did not fill in (closed in GnuCash).</li>
+<li>Click Run and download the coverage gap report.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-Coverage-Gaps.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Coverage-Gaps.xlsx</code><span class="pa-tip" data-tip="Gaps sheet (one row per suspected gap month: entity, book, account, account class, month, HIGH/LOW confidence, the account&#x27;s own median, and a TRAILING flag for gaps since the last transaction) and a Summary sheet (one row per in-scope account: first/last transaction, active-window end, median, confidence, and gap counts).">ℹ️</span> — Gaps sheet (one row per suspected gap month: entity, book, account, account class, month, HIGH/LOW confidence, the account&#x27;s own median, and a TRAILING flag for gaps since the last transaction) and a Summary sheet (one row per in-scope account: first/last transaction, active-window end, median, confidence, and gap counts).</li>
+</ul>
+<h3>Tips</h3><p>Start with the TRAILING rows in the Gaps sheet -- those are gaps since an account&#x27;s most recent transaction and are the most likely to mean a statement still needs importing. A LOW-confidence gap on a quiet account (e.g. a savings account paid quarterly interest) is often expected -- check the account&#x27;s own median in the Summary sheet before chasing it.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>An account I expect to see is missing from both sheets.</td><td>Accounts with NO transactions at all in the book are not reported -- there is nothing to grade a cadence against. Placeholder/hidden accounts are also excluded, same as elsewhere in the GnuCash skills.</td></tr>
+<tr><td>A gap I know about did not show up.</td><td>It may have been suppressed because the adjacent FY&#x27;s registered book has a transaction for the same account in that exact month -- a sign it was filed on the wrong side of the year rollover rather than missing. Check the Summary sheet&#x27;s &#x27;FY-Boundary Suppressed&#x27; column.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
@@ -694,7 +720,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 23 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 24 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];
