@@ -1,14 +1,24 @@
 """
-tests/test_mf_cas.py -- agents.skill_mf_cas (MF CAS: CAMS/KFintech
-Consolidated Account Statement parser + FIFO capital-gains derivation).
-Deterministic, no LLM, no network.
+tests/test_mf_cas.py -- agents.skill_mf_cas.
 
-Synthetic-only fixtures: every folio/scheme/AMC/ISIN below is invented for
-this test file. No real CAS PDF is ever generated or read here -- per the
-skill's hard architectural split, everything except the password-error test
-exercises the PURE parser/lots functions with synthetic text lines.
+Two independent input shapes are exercised in this one file:
 
-Covers:
+1. The OLD CAS-text shape (parser.py + lots.py, FIFO lot derivation) --
+   kept intact and still fully tested below, even though agent.run() no
+   longer uses it (see AGENT.md's "Kept-but-unused modules"). Synthetic
+   text lines only.
+2. The CURRENT KFintech Capital Gain / Loss Statement (.xlsx) shape
+   (cg_parser.py + cg_writer.py, driven by agent.run()) -- synthetic
+   openpyxl-built workbooks only, shaped like the real statement's four
+   sheets but with entirely invented scheme names/folios/ISINs/amounts.
+
+No real, encrypted, or password-protected xlsx fixture is ever generated or
+committed -- xlsx-boundary tests monkeypatch msoffcrypto.OfficeFile with a
+fake that treats an ordinary (unencrypted) openpyxl-built test workbook as
+"the decrypted result", the same monkeypatch-the-library-entry-point
+pattern the old PDF-boundary tests used for pdfplumber.
+
+Covers (CAS-text/FIFO shape, unchanged):
   * multi-lot FIFO disposal splitting (one row per consumed lot)
   * partial-lot disposal (a lot only partially consumed)
   * a pre-2018-02-01 buy raises the grandfathering flag
@@ -16,15 +26,30 @@ Covers:
   * a disposal reaching into a nonzero Opening Unit Balance is flagged
     "unattributed -- review", never guessed
   * switch-in / switch-out classification
-  * a wrong CAS PDF password surfaces password_error_message() without the
-    password ever appearing in the raised error
+
+Covers (KFintech Capital Gain / Loss Statement xlsx shape, new):
+  * matched-pair row mapping (Section A acquisition + Section B outflow +
+    Section C gain, joined by row) from Trasaction_Details
+  * ISIN extraction from the scheme-name string
+  * Summary sheet parsing by row-label text, not fixed row number
+  * the five s.234C period buckets landing in the correct columns
+  * Equity vs NonEquity separation feeding the three-way reconciliation
+  * three-way reconciliation both agreeing and disagreeing, and the
+    explicit CANNOT_RECONCILE case when a leg is absent
+  * grandfathered cost values carried straight through, without ever
+    raising lots.GRANDFATHER_FLAG (this path does no FIFO re-derivation)
+  * a wrong statement password -> clean message, password never echoed
+  * a workbook missing the expected sheets fails loud (never an empty
+    0-rows report) -- the fix for the skill's original silent-empty defect
 """
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
+from openpyxl import Workbook
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
@@ -32,6 +57,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from agents.skill_mf_cas import agent as mf_agent  # noqa: E402
+from agents.skill_mf_cas import cg_parser  # noqa: E402
 from agents.skill_mf_cas import lots  # noqa: E402
 from agents.skill_mf_cas.parser import classify_row, parse_cas_text  # noqa: E402
 
@@ -406,82 +432,505 @@ def test_switch_out_then_switch_in_different_scheme_each_folio():
 
 
 # ---------------------------------------------------------------------------
-# Password handling (agent.py's PDF boundary) -- the password must never
-# appear in any raised error.
+# cg_parser -- synthetic KFintech Capital Gain / Loss Statement workbooks.
+# Every scheme name / folio / ISIN / amount below is invented for this test
+# file; none of it comes from any real statement.
 # ---------------------------------------------------------------------------
 
-def test_wrong_password_error_never_echoes_password(monkeypatch):
-    import pdfplumber
+_TXN_HEADERS = [
+    "Fund", "Fund Name", "Folio Number", "Scheme Name",
+    "Trxn.Type", "Date", "Current Units", "Source Scheme Units",
+    "Original Purchase Cost", "Original Cost Amount",
+    "Grandfathered NAV as on 31/01/2018", "Grandfathered Cost Value",
+    "IT Applicable NAV", "IT Applicable Cost Value",
+    "Trxn.Type", "Date", "Units", "Amount", "Price", "Tax Perc", "Tax",
+    "Short Term", "Indexed Cost", "Long Term With Index", "Long Term Without Index",
+]
 
-    secret = "hunter2-secret-pan"
 
-    def _raise_open(path, password=""):
-        raise Exception("Incorrect password")
+def _cg_txn_details_sheet(wb, rows, sheet_name=cg_parser.SHEET_TXN_DETAILS):
+    """rows: list of 25-tuples, in _TXN_HEADERS column order."""
+    ws = wb.create_sheet(sheet_name)
+    ws.cell(row=1, column=1, value="Holder Name Placeholder")
+    ws.cell(row=2, column=1, value="PAN Placeholder")
+    ws.cell(row=3, column=5, value="Section A :Subscriptions")
+    ws.cell(row=3, column=15, value="Section B : Outflows")
+    ws.cell(row=3, column=22, value="Section C : Gains/Losses")
+    for i, h in enumerate(_TXN_HEADERS):
+        ws.cell(row=4, column=i + 1, value=h)
+    r = 5
+    for row in rows:
+        for i, v in enumerate(row):
+            ws.cell(row=r, column=i + 1, value=v)
+        r += 1
+    return ws
 
-    monkeypatch.setattr(pdfplumber, "open", _raise_open)
+
+def _cg_summary_sheet(wb, sheet_name, section_rows, header_row=3):
+    """section_rows: {section -> [(label, [5 buckets], total), ...]}. Every
+    section from cg_parser._SUMMARY_SECTIONS is always written as a marker
+    row (even with zero field rows) so callers only need to supply the
+    sections they care about; parse_summary_sheet still requires at least
+    one field row per section, so tests that need a fully valid sheet must
+    supply all three."""
+    ws = wb.create_sheet(sheet_name)
+    ws.cell(row=1, column=1, value="KFintech Capital Gain / Loss Statement")
+    ws.cell(row=header_row, column=1, value="Summary Of Capital Gains")
+    for i, b in enumerate(cg_parser.BUCKET_LABELS):
+        ws.cell(row=header_row, column=2 + i, value=b)
+    ws.cell(row=header_row, column=7, value="Total")
+    r = header_row + 1
+    for section in cg_parser._SUMMARY_SECTIONS:
+        ws.cell(row=r, column=1, value=section)
+        r += 1
+        for label, buckets, total in section_rows.get(section, []):
+            ws.cell(row=r, column=1, value=label)
+            for i, v in enumerate(buckets):
+                ws.cell(row=r, column=2 + i, value=v)
+            ws.cell(row=r, column=7, value=total)
+            r += 1
+    return ws
+
+
+def _cg_scheme_summary_sheet(wb, rows, total=None):
+    """rows: list of (scheme_name_with_isin, count, outflow, net_value,
+    fmv_nav, fmv, short_gain, lt_with, lt_without). total, if given, is the
+    same 8-value tuple without the scheme-name column."""
+    ws = wb.create_sheet(cg_parser.SHEET_SCHEME_SUMMARY)
+    header_row = 3
+    for i, h in enumerate(cg_parser._SCHEME_SUMMARY_HEADERS):
+        # write the real KFintech label text, not the normalised match text
+        ws.cell(row=header_row, column=i + 1, value=h)
+    ws.cell(row=header_row, column=3, value="Outflow\nAmount")  # embedded-newline quirk
+    r = header_row + 1
+    for row in rows:
+        for i, v in enumerate(row):
+            ws.cell(row=r, column=i + 1, value=v)
+        r += 1
+    if total is not None:
+        ws.cell(row=r, column=1, value="Total")
+        for i, v in enumerate(total, start=2):
+            ws.cell(row=r, column=i, value=v)
+    return ws
+
+
+def _build_cg_workbook(*, summary_rows=None, scheme_rows=None, scheme_total=None,
+                        txn_rows=None, txn_sheet_name=cg_parser.SHEET_TXN_DETAILS):
+    wb = Workbook()
+    wb.remove(wb.active)
+    summary_rows = summary_rows or {}
+    _cg_summary_sheet(wb, cg_parser.SHEET_SUMMARY_EQUITY, summary_rows.get("equity", {}))
+    _cg_summary_sheet(wb, cg_parser.SHEET_SUMMARY_NONEQUITY, summary_rows.get("nonequity", {}))
+    _cg_scheme_summary_sheet(wb, scheme_rows or [], scheme_total)
+    _cg_txn_details_sheet(wb, txn_rows or [], sheet_name=txn_sheet_name)
+    return wb
+
+
+def _all_three_sections_minimal():
+    """A section_rows dict with one minimal field row per section, all
+    buckets/total zero -- enough to satisfy parse_summary_sheet's
+    "all three sections present" requirement without contributing to any
+    reconciliation total."""
+    return {
+        s: [(cg_parser._SECTION_GAIN_ROW_LABEL[s], [0.0] * 5, 0.0)]
+        for s in cg_parser._SUMMARY_SECTIONS
+    }
+
+
+def test_extract_isin_from_scheme_name():
+    name, isin = cg_parser.extract_isin(
+        "Test Debt Short Term Fund - Growth Plan (INF999Z00111)"
+    )
+    assert name == "Test Debt Short Term Fund - Growth Plan"
+    assert isin == "INF999Z00111"
+
+
+def test_extract_isin_missing_returns_none():
+    name, isin = cg_parser.extract_isin("Test Fund With No ISIN Suffix")
+    assert name == "Test Fund With No ISIN Suffix"
+    assert isin is None
+
+
+def test_parse_transaction_details_matched_pair_and_isin():
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = _cg_txn_details_sheet(wb, [
+        (
+            "F1", "Test Fund House", "FOLIO/CG/001",
+            "Test Equity Growth Fund - Regular Plan (INF000A00123)",
+            "Purchase", date(2019, 5, 10), 100.0, 100.0, 100.0, 10000.0,
+            105.0, 10500.0, 108.0, 10800.0,
+            "Redemption", date(2021, 6, 15), 100.0, 13000.0, 130.0, 0.0, 0.0,
+            500.0, None, 0.0, 0.0,
+        ),
+    ])
+    rows = cg_parser.parse_transaction_details(ws)
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.folio == "FOLIO/CG/001"
+    assert r.scheme_name == "Test Equity Growth Fund - Regular Plan"
+    assert r.isin == "INF000A00123"
+    assert r.acq_trxn_type == "Purchase"
+    assert r.acq_date == date(2019, 5, 10)
+    assert r.outflow_trxn_type == "Redemption"
+    assert r.outflow_date == date(2021, 6, 15)
+    assert r.units == 100.0
+    assert r.amount == 13000.0
+    assert r.short_term == 500.0
+    assert r.long_term_with_index == 0.0
+    assert r.grandfathered_nav == 105.0
+    assert r.grandfathered_cost_value == 10500.0
+
+
+def test_parse_transaction_details_skips_pii_and_blank_rows():
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = _cg_txn_details_sheet(wb, [
+        (
+            "F1", "Test Fund House", "FOLIO/CG/002",
+            "Test Debt Fund - Direct Plan (INF000A00456)",
+            "Purchase", date(2020, 1, 1), 50.0, 50.0, 20.0, 1000.0,
+            None, None, None, None,
+            "Redemption", date(2022, 1, 1), 50.0, 1200.0, 24.0, 0.0, 0.0,
+            0.0, None, 200.0, 0.0,
+        ),
+        (None,) * 25,  # a trailing blank row must be skipped, not crash
+    ])
+    rows = cg_parser.parse_transaction_details(ws)
+    assert len(rows) == 1
+    # rows 1-2 (holder name / PAN placeholders) must never surface anywhere
+    holder_row_value = ws.cell(row=1, column=1).value
+    assert holder_row_value not in (rows[0].fund_code, rows[0].fund_name, rows[0].folio)
+
+
+def test_summary_sheet_header_located_by_label_not_fixed_row_number():
+    """Same content, header row shifted from 3 to 6 -- proves the header is
+    found by matching label text, not a hardcoded row offset."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    section_rows = _all_three_sections_minimal()
+    section_rows[cg_parser._SECTION_ST] = [
+        (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [100.0, 0, 0, 0, 0], 100.0),
+    ]
+    ws = _cg_summary_sheet(wb, cg_parser.SHEET_SUMMARY_EQUITY, section_rows, header_row=6)
+    data = cg_parser.parse_summary_sheet(ws, "Equity")
+    row = data.gain_loss_row(cg_parser._SECTION_ST)
+    assert row is not None
+    assert row.total == pytest.approx(100.0)
+
+
+def test_summary_sheet_five_234c_buckets_map_correctly():
+    wb = Workbook()
+    wb.remove(wb.active)
+    buckets = [10.0, 20.0, 30.0, 40.0, 50.0]
+    section_rows = _all_three_sections_minimal()
+    section_rows[cg_parser._SECTION_ST] = [
+        (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], buckets, 150.0),
+    ]
+    ws = _cg_summary_sheet(wb, cg_parser.SHEET_SUMMARY_EQUITY, section_rows)
+    data = cg_parser.parse_summary_sheet(ws, "Equity")
+    row = data.gain_loss_row(cg_parser._SECTION_ST)
+    for label, expected in zip(cg_parser.BUCKET_LABELS, buckets):
+        assert row.buckets[label] == pytest.approx(expected)
+
+
+def test_summary_sheet_missing_a_section_fails_loud():
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet("Bad")
+    ws.cell(row=3, column=1, value="Summary Of Capital Gains")
+    for i, b in enumerate(cg_parser.BUCKET_LABELS):
+        ws.cell(row=3, column=2 + i, value=b)
+    ws.cell(row=3, column=7, value="Total")
+    ws.cell(row=4, column=1, value=cg_parser._SECTION_ST)
+    ws.cell(row=5, column=1, value="Short Term Capital Gain/Loss")
+    for i in range(5):
+        ws.cell(row=5, column=2 + i, value=0.0)
+    ws.cell(row=5, column=7, value=0.0)
+    # Long Term sections deliberately omitted.
+    with pytest.raises(cg_parser.CGParseError):
+        cg_parser.parse_summary_sheet(ws, "Equity")
+
+
+def _matched_row(short_term=0.0, lt_with=0.0, lt_without=0.0):
+    return (
+        "F1", "Test Fund House", "FOLIO/CG/900",
+        "Test Hybrid Fund - Growth (INF000A00999)",
+        "Purchase", date(2017, 3, 1), 10.0, 10.0, 50.0, 500.0,
+        60.0, 600.0, 62.0, 620.0,
+        "Redemption", date(2022, 3, 1), 10.0, 900.0, 90.0, 0.0, 0.0,
+        short_term, None, lt_with, lt_without,
+    )
+
+
+def test_three_way_reconciliation_agrees_when_all_legs_match():
+    wb = _build_cg_workbook(
+        summary_rows={
+            "equity": {
+                cg_parser._SECTION_ST: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [500.0, 0, 0, 0, 0], 500.0),
+                ],
+                cg_parser._SECTION_LT_WITH_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITH_INDEX], [200.0, 0, 0, 0, 0], 200.0),
+                ],
+                cg_parser._SECTION_LT_WITHOUT_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITHOUT_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+            },
+            "nonequity": {
+                cg_parser._SECTION_ST: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [0, 0, 0, 0, 0], 0.0),
+                ],
+                cg_parser._SECTION_LT_WITH_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITH_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+                cg_parser._SECTION_LT_WITHOUT_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITHOUT_INDEX], [100.0, 0, 0, 0, 0], 100.0),
+                ],
+            },
+        },
+        scheme_total=(9.0, 0.0, 0.0, None, None, 500.0, 200.0, 100.0),
+        txn_rows=[_matched_row(short_term=500.0, lt_with=200.0, lt_without=100.0)],
+    )
+    summary_equity = cg_parser.parse_summary_sheet(cg_parser.find_sheet(wb, cg_parser.SHEET_SUMMARY_EQUITY), "Equity")
+    summary_nonequity = cg_parser.parse_summary_sheet(cg_parser.find_sheet(wb, cg_parser.SHEET_SUMMARY_NONEQUITY), "NonEquity")
+    scheme_rows, scheme_total = cg_parser.parse_scheme_level_summary(cg_parser.find_sheet(wb, cg_parser.SHEET_SCHEME_SUMMARY))
+    txn_rows = cg_parser.parse_transaction_details(cg_parser.find_sheet(wb, cg_parser.SHEET_TXN_DETAILS))
+
+    results = cg_parser.reconcile(summary_equity, summary_nonequity, scheme_rows, scheme_total, txn_rows)
+    by_cat = {r.category: r for r in results}
+    assert by_cat[cg_parser.CATEGORY_ST].agree is True
+    assert by_cat[cg_parser.CATEGORY_LT_WITH_INDEX].agree is True
+    assert by_cat[cg_parser.CATEGORY_LT_WITHOUT_INDEX].agree is True
+
+
+def test_three_way_reconciliation_reports_variance():
+    wb = _build_cg_workbook(
+        summary_rows={
+            "equity": {
+                cg_parser._SECTION_ST: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [500.0, 0, 0, 0, 0], 500.0),
+                ],
+                cg_parser._SECTION_LT_WITH_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITH_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+                cg_parser._SECTION_LT_WITHOUT_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITHOUT_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+            },
+            "nonequity": {
+                cg_parser._SECTION_ST: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [0, 0, 0, 0, 0], 0.0),
+                ],
+                cg_parser._SECTION_LT_WITH_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITH_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+                cg_parser._SECTION_LT_WITHOUT_INDEX: [
+                    (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITHOUT_INDEX], [0, 0, 0, 0, 0], 0.0),
+                ],
+            },
+        },
+        # Scheme_Level_Summary Total deliberately wrong vs. Trasaction_Details/Summary (500.0).
+        scheme_total=(9.0, 0.0, 0.0, None, None, 400.0, 0.0, 0.0),
+        txn_rows=[_matched_row(short_term=500.0)],
+    )
+    summary_equity = cg_parser.parse_summary_sheet(cg_parser.find_sheet(wb, cg_parser.SHEET_SUMMARY_EQUITY), "Equity")
+    summary_nonequity = cg_parser.parse_summary_sheet(cg_parser.find_sheet(wb, cg_parser.SHEET_SUMMARY_NONEQUITY), "NonEquity")
+    scheme_rows, scheme_total = cg_parser.parse_scheme_level_summary(cg_parser.find_sheet(wb, cg_parser.SHEET_SCHEME_SUMMARY))
+    txn_rows = cg_parser.parse_transaction_details(cg_parser.find_sheet(wb, cg_parser.SHEET_TXN_DETAILS))
+
+    results = cg_parser.reconcile(summary_equity, summary_nonequity, scheme_rows, scheme_total, txn_rows)
+    by_cat = {r.category: r for r in results}
+    st = by_cat[cg_parser.CATEGORY_ST]
+    assert st.agree is False
+    assert st.note is not None and "variance" in st.note.lower()
+
+
+def test_three_way_reconciliation_cannot_reconcile_when_scheme_summary_empty():
+    summary_equity = cg_parser.SummarySheetData(sheet_label="Equity", rows=[
+        cg_parser.SummaryFieldRow(
+            section=cg_parser._SECTION_ST,
+            label=cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST],
+            buckets={b: 0.0 for b in cg_parser.BUCKET_LABELS}, total=500.0,
+        ),
+        cg_parser.SummaryFieldRow(
+            section=cg_parser._SECTION_LT_WITH_INDEX,
+            label=cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITH_INDEX],
+            buckets={b: 0.0 for b in cg_parser.BUCKET_LABELS}, total=0.0,
+        ),
+        cg_parser.SummaryFieldRow(
+            section=cg_parser._SECTION_LT_WITHOUT_INDEX,
+            label=cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_LT_WITHOUT_INDEX],
+            buckets={b: 0.0 for b in cg_parser.BUCKET_LABELS}, total=0.0,
+        ),
+    ])
+    summary_nonequity = cg_parser.SummarySheetData(sheet_label="NonEquity", rows=[
+        cg_parser.SummaryFieldRow(
+            section=s, label=cg_parser._SECTION_GAIN_ROW_LABEL[s],
+            buckets={b: 0.0 for b in cg_parser.BUCKET_LABELS}, total=0.0,
+        )
+        for s in cg_parser._SUMMARY_SECTIONS
+    ])
+    results = cg_parser.reconcile(summary_equity, summary_nonequity, [], None, [])
+    by_cat = {r.category: r for r in results}
+    st = by_cat[cg_parser.CATEGORY_ST]
+    assert st.agree is None
+    assert st.note is not None and cg_parser.CANNOT_RECONCILE in st.note
+
+
+def test_workbook_missing_required_sheets_fails_loud():
+    """The fix for the skill's original silent-empty defect: an
+    unrecognised workbook must never produce a 0-schemes/0-transactions
+    report -- it must raise, naming what was expected vs. found."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    wb.create_sheet("Not The Right Sheet At All")
+    with pytest.raises(cg_parser.CGParseError) as excinfo:
+        cg_parser.validate_workbook_shape(wb)
+    message = str(excinfo.value)
+    assert cg_parser.SHEET_SUMMARY_EQUITY in message
+    assert "Not The Right Sheet At All" in message
+
+
+# ---------------------------------------------------------------------------
+# agent.py -- xlsx boundary (password / file-type rejection / loud failure /
+# end-to-end). msoffcrypto.OfficeFile is monkeypatched with a fake that
+# treats an ordinary openpyxl-built workbook as "the decrypted result" --
+# no real encrypted fixture is ever generated or committed.
+# ---------------------------------------------------------------------------
+
+class _FakeOfficeFile:
+    """Stand-in for msoffcrypto.OfficeFile: accepts exactly one password and
+    "decrypts" by handing back the original (already-plaintext) bytes."""
+
+    def __init__(self, f, expected_password="right-password"):
+        self._f = f
+        self._expected_password = expected_password
+
+    def load_key(self, password="", verify_password=True):
+        if password != self._expected_password:
+            import msoffcrypto.exceptions as exc
+            raise exc.InvalidKeyError("Failed to verify password")
+
+    def decrypt(self, buf):
+        self._f.seek(0)
+        buf.write(self._f.read())
+
+
+def test_wrong_password_error_never_echoes_password(monkeypatch, tmp_path):
+    import msoffcrypto
+
+    secret = "hunter2-secret-statement-password"
+    monkeypatch.setattr(
+        msoffcrypto, "OfficeFile",
+        lambda f: _FakeOfficeFile(f, expected_password=secret),
+    )
+
+    xlsx_path = tmp_path / "fake_statement.xlsx"
+    Workbook().save(xlsx_path)  # contents never matter -- load_key raises first
 
     with pytest.raises(ValueError) as excinfo:
-        mf_agent._extract_pdf_text("does-not-matter.pdf", secret)
+        mf_agent._load_workbook(str(xlsx_path), "wrong-password")
 
     message = str(excinfo.value)
     assert secret not in message
     assert "password" in message.lower()
 
 
-def test_no_extractable_text_fails_loud(monkeypatch, tmp_path):
-    import pdfplumber
-
-    class _FakePage:
-        def extract_text(self, x_tolerance=1):
-            return ""
-
-    class _FakePdf:
-        pages = [_FakePage()]
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(pdfplumber, "open", lambda path, password="": _FakePdf())
-
-    with pytest.raises(ValueError) as excinfo:
-        mf_agent._extract_pdf_text("does-not-matter.pdf", None)
-    assert "No text could be extracted" in str(excinfo.value)
-
-
-# ---------------------------------------------------------------------------
-# End-to-end run() smoke test (writes a real workbook to tmp_path).
-# ---------------------------------------------------------------------------
-
-def test_run_end_to_end_writes_workbook_and_csv_siblings(monkeypatch, tmp_path):
-    import pdfplumber
-
-    text = "\n".join(_folio_block(
-        txn_lines=[
-            _txn("01-Apr-2020", "Purchase", "10000.00", "100.0000", "100.00", "100.0000"),
-            _txn("01-Jun-2021", "Redemption", "-12000.00", "-100.0000", "120.00", "0.0000"),
-        ],
-        closing="0.0000",
-    ))
-
-    class _FakePage:
-        def extract_text(self, x_tolerance=1):
-            return text
-
-    class _FakePdf:
-        pages = [_FakePage()]
-
-        def close(self):
-            pass
-
-    monkeypatch.setattr(pdfplumber, "open", lambda path, password="": _FakePdf())
-
-    cas_path = tmp_path / "fake_cas.pdf"
-    cas_path.write_bytes(b"%PDF-1.4 not a real pdf")
+def test_run_rejects_pdf_input(tmp_path):
+    pdf_path = tmp_path / "statement.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 not a real pdf")
     out_path = tmp_path / "out.xlsx"
 
-    summary = mf_agent.run(str(cas_path), str(out_path))
+    summary = mf_agent.run(str(pdf_path), str(out_path), cas_password="whatever")
+
+    assert "ERROR" in summary
+    assert "xlsx" in summary.lower()
+    assert not out_path.exists()
+
+
+def test_run_fails_loud_on_unrecognised_workbook(monkeypatch, tmp_path):
+    import msoffcrypto
+
+    monkeypatch.setattr(
+        msoffcrypto, "OfficeFile",
+        lambda f: _FakeOfficeFile(f, expected_password="pw"),
+    )
+
+    bad_wb = Workbook()
+    bad_wb.active.title = "Nothing Recognisable"
+    xlsx_path = tmp_path / "bad.xlsx"
+    bad_wb.save(xlsx_path)
+    out_path = tmp_path / "out.xlsx"
+
+    summary = mf_agent.run(str(xlsx_path), str(out_path), cas_password="pw")
+
+    assert "ERROR" in summary
+    assert cg_parser.SHEET_SUMMARY_EQUITY in summary
+    assert not out_path.exists()
+
+
+def test_run_end_to_end_writes_workbook_reconciliation_and_csv_sidecar(monkeypatch, tmp_path):
+    import msoffcrypto
+
+    monkeypatch.setattr(
+        msoffcrypto, "OfficeFile",
+        lambda f: _FakeOfficeFile(f, expected_password="pw"),
+    )
+
+    # A pre-2018-02-01 acquisition with RTA-supplied grandfathering values --
+    # this path must carry them through as-is and never touch lots.py, so
+    # lots.GRANDFATHER_FLAG must never appear anywhere in the output.
+    minimal_sections = _all_three_sections_minimal()
+    minimal_sections[cg_parser._SECTION_ST] = [
+        (cg_parser._SECTION_GAIN_ROW_LABEL[cg_parser._SECTION_ST], [500.0, 0, 0, 0, 0], 500.0),
+    ]
+    src_wb = _build_cg_workbook(
+        summary_rows={"equity": minimal_sections, "nonequity": _all_three_sections_minimal()},
+        scheme_total=(9.0, 0.0, 0.0, None, None, 500.0, 0.0, 0.0),
+        txn_rows=[
+            (
+                "F1", "Test Fund House", "FOLIO/CG/777",
+                "Test Grandfathered Fund - Growth (INF000A00777)",
+                "Purchase", date(2016, 6, 1), 10.0, 10.0, 50.0, 500.0,
+                62.5, 625.0, 65.0, 650.0,
+                "Redemption", date(2022, 3, 1), 10.0, 1000.0, 100.0, 0.0, 0.0,
+                500.0, None, 0.0, 0.0,
+            ),
+        ],
+    )
+    src_path = tmp_path / "source.xlsx"
+    src_wb.save(src_path)
+
+    out_path = tmp_path / "report.xlsx"
+    summary = mf_agent.run(str(src_path), str(out_path), cas_password="pw")
 
     assert "ERROR" not in summary
     assert out_path.is_file()
-    assert (tmp_path / "out_transactions.csv").is_file()
-    assert (tmp_path / "out_realised_gains.csv").is_file()
+    csv_path = tmp_path / "report_matched_lots.csv"
+    assert csv_path.is_file()
+
+    import openpyxl
+    report_wb = openpyxl.load_workbook(out_path)
+    assert set(report_wb.sheetnames) == {
+        "MatchedLots", "SchemeSummary", "PeriodSummary", "Reconciliation", "Exceptions",
+    }
+
+    matched_ws = report_wb["MatchedLots"]
+    # Grandfathered NAV/Cost Value columns (12, 13 -- see cg_writer._MATCHED_LOT_HEADERS)
+    # carry the RTA-supplied values through unchanged.
+    header_row = [c.value for c in matched_ws[1]]
+    gf_nav_col = header_row.index("Grandfathered NAV") + 1
+    gf_cost_col = header_row.index("Grandfathered Cost Value") + 1
+    assert matched_ws.cell(row=2, column=gf_nav_col).value == pytest.approx(62.5)
+    assert matched_ws.cell(row=2, column=gf_cost_col).value == pytest.approx(625.0)
+
+    recon_ws = report_wb["Reconciliation"]
+    statuses = [recon_ws.cell(row=r, column=5).value for r in range(2, recon_ws.max_row + 1)]
+    assert "AGREE" in statuses
+
+    # This path must never invoke lots.py's FIFO/grandfathering-flag logic.
+    for ws in report_wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                assert cell.value != lots.GRANDFATHER_FLAG

@@ -113,8 +113,9 @@ def test_registry_discovers_all_skills():
     # Coverage Gap Detector: infers suspected missing-statement months from
     # transaction dates already posted, no import ledger required
     assert "gnucash_coverage" in names
-    # MF CAS: CAMS/KFintech Consolidated Account Statement parser + FIFO
-    # realised capital-gains derivation (standalone artifacts only)
+    # MF CAS: KFintech Capital Gain / Loss Statement (.xlsx) parser +
+    # three-way reconciliation (standalone artifacts only; directory/skill
+    # name kept as mf_cas for stability -- see AGENT.md)
     assert "mf_cas" in names
     assert len(skills) == 25
 
