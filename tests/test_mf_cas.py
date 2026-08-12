@@ -280,6 +280,102 @@ def test_no_rta_gain_line_leaves_reported_as_none():
     assert recon.rta_gain_variance is None
 
 
+# ---------------------------------------------------------------------------
+# Review-finding regression tests (PR #176 follow-up: matched_vs_disposed_ok
+# was decorative, rta_gain_derived treated unknown gain as zero, and a
+# DISPOSAL row could silently vanish if its sign guarantee ever broke).
+# ---------------------------------------------------------------------------
+
+def test_shortfall_disposal_makes_matched_vs_disposed_ok_false():
+    # Only 50 units ever exist (one 50-unit lot), but the statement's own
+    # redemption row claims 80 units sold -- a 30-unit phantom shortfall
+    # that exceeds every available lot, including the (absent) opening
+    # balance. Under the OLD code, the phantom top-up used to cover this
+    # shortfall was folded straight into total_matched_units, which forced
+    # matched_vs_disposed_ok to True for every possible input -- the
+    # invariant could never fail. It must now be able to report False.
+    lines = _folio_block(
+        txn_lines=[
+            _txn("01-Apr-2020", "Purchase", "5000.00", "50.0000", "100.00", "50.0000"),
+            _txn("01-Jun-2020", "Redemption", "-9600.00", "-80.0000", "120.00", "-30.0000"),
+        ],
+        closing="-30.0000",
+    )
+    blocks = parse_cas_text(lines)
+    recon = lots.derive_scheme(blocks[0])
+
+    assert recon.unattributed_shortfall_units == pytest.approx(30.0)
+    assert recon.matched_vs_disposed_ok is False
+
+
+def test_all_unattributed_disposals_cannot_cross_check_rta_gain():
+    # Every disposed unit here draws on the unknown-cost OPENING lot, so
+    # nothing about this scheme's realised gain is actually derivable.
+    # Under the OLD code, rta_gain_derived silently became 0.0 (treating
+    # "unknown" as "zero gain"), and rta_gain_variance then read as a real
+    # discrepancy against the RTA's stated figure -- a false signal about
+    # genuinely undecidable input.
+    lines = _folio_block(
+        opening="40.0000",
+        txn_lines=[
+            _txn("01-Jun-2020", "Redemption", "-4800.00", "-40.0000", "120.00", "0.0000"),
+        ],
+        closing="0.0000",
+        rta_gain="900.00",
+    )
+    blocks = parse_cas_text(lines)
+    recon = lots.derive_scheme(blocks[0])
+
+    assert lots.UNATTRIBUTED in recon.disposal_lots[0].flags
+    assert recon.rta_gain_derived is None
+    assert recon.rta_gain_variance is None
+    assert recon.rta_gain_note == lots.CANNOT_CROSS_CHECK
+
+    # And this must reach the rendered workbook -- a blank/absent Exceptions
+    # row on undecidable input would misread as "no variance found".
+    from openpyxl import Workbook
+
+    from agents.skill_mf_cas import excel_writer
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    excel_writer._write_exceptions_sheet(wb, [recon])
+    ws = wb["Exceptions"]
+    details = [ws.cell(row=r, column=4).value for r in range(2, ws.max_row + 1)]
+    assert any(lots.CANNOT_CROSS_CHECK in (d or "") for d in details)
+
+
+def test_disposal_with_nonnegative_units_is_flagged_not_dropped():
+    # qty_needed = -txn.units (and the whole matching loop) relies on
+    # classify_row only ever returning DISPOSAL for negative units. This
+    # test builds a TxnRow directly (bypassing the parser, which today
+    # cannot produce this shape) to prove that IF that guarantee ever broke
+    # upstream, derive_scheme would not let the row vanish with no lot and
+    # no flag -- under the OLD code, a non-negative qty_needed would break
+    # the matching loop immediately (remaining_to_consume <= 0) AND fail
+    # the shortfall check (remaining_to_consume > 0 also false), so the
+    # transaction would disappear silently.
+    from datetime import date as _date
+
+    from agents.skill_mf_cas.parser import DISPOSAL, SchemeBlock, TxnRow
+
+    txn = TxnRow(
+        date=_date(2020, 6, 1), description="Malformed disposal row",
+        amount=-1000.0, units=25.0,  # non-negative units on a DISPOSAL row
+        nav=100.0, balance=0.0, kind=DISPOSAL,
+    )
+    block = SchemeBlock(
+        folio="TEST/999", amc="Test AMC", rta="Test RTA",
+        scheme_name="Test Fund", isin="INF000A00999", scheme_type="EQUITY",
+        opening_units=25.0, closing_units=0.0, transactions=[txn],
+    )
+    recon = lots.derive_scheme(block)
+
+    flagged = [dl for dl in recon.disposal_lots if lots.INVALID_DISPOSAL_SIGN in dl.flags]
+    assert len(flagged) == 1
+    assert flagged[0].units == 25.0
+
+
 def test_switch_out_then_switch_in_different_scheme_each_folio():
     lines = [
         *_folio_block(

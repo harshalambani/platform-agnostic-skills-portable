@@ -33,6 +33,8 @@ from .parser import ACQUISITION, DISPOSAL, SchemeBlock
 UNATTRIBUTED = "unattributed -- review"
 GRANDFATHER_FLAG = "REVIEW - FMV 31-01-2018 needed"
 RECONCILIATION_BREACH = "reconciliation breach -- review"
+INVALID_DISPOSAL_SIGN = "invalid disposal sign -- non-negative units on a DISPOSAL row"
+CANNOT_CROSS_CHECK = "cannot cross-check -- unattributed lots present"
 
 _GRANDFATHER_CUTOFF = date(2018, 1, 31)  # s.112A grandfathering cutoff
 
@@ -86,9 +88,11 @@ class SchemeReconciliation:
     units_diff: float | None
     matched_vs_disposed_ok: bool
     disposal_lots: list[DisposalLot] = field(default_factory=list)
+    unattributed_shortfall_units: float = 0.0
     rta_gain_reported: float | None = None
     rta_gain_derived: float | None = None
     rta_gain_variance: float | None = None
+    rta_gain_note: str | None = None
 
 
 def _term_days(buy_date: date | None, sell_date: date) -> int | None:
@@ -111,11 +115,29 @@ def derive_scheme(scheme: SchemeBlock) -> SchemeReconciliation:
     disposal_lots: list[DisposalLot] = []
     total_disposed_units = 0.0
     total_matched_units = 0.0
+    total_shortfall_units = 0.0
 
     for txn in scheme.transactions:
         if txn.kind == ACQUISITION:
             lots.append(_AcqLot(date=txn.date, units=txn.units, cost=txn.amount, nav=txn.nav))
         elif txn.kind == DISPOSAL:
+            if txn.units >= 0:
+                # Defensive guard: classify_row is only ever supposed to
+                # return DISPOSAL for a negative-units row (qty_needed below
+                # relies on that). If that ever stopped holding upstream,
+                # do NOT normalise the sign (that would paper over a real
+                # upstream bug) and do NOT let the row silently vanish --
+                # surface it as a flagged, zero-consumption exception row
+                # instead of feeding it through the FIFO matching loop.
+                disposal_lots.append(DisposalLot(
+                    folio=scheme.folio, scheme=scheme.scheme_name, isin=scheme.isin,
+                    scheme_type=scheme.scheme_type, units=txn.units,
+                    buy_date=None, buy_nav=None, buy_cost=None,
+                    sell_date=txn.date, sell_nav=txn.nav,
+                    sale_proceeds=abs(txn.amount), holding_days=None, gain=None,
+                    flags=[INVALID_DISPOSAL_SIGN],
+                ))
+                continue
             qty_needed = -txn.units  # units is negative on a disposal row
             total_disposed_units += qty_needed
             remaining_to_consume = qty_needed
@@ -157,6 +179,13 @@ def derive_scheme(scheme: SchemeBlock) -> SchemeReconciliation:
             if remaining_to_consume > UNITS_RECONCILIATION_TOLERANCE:
                 # Disposal exceeds every available lot (including the
                 # OPENING lot) -- never guess a phantom lot to cover it.
+                # This phantom-shortfall row is still emitted so the user
+                # sees it (flagged UNATTRIBUTED), but its units are tracked
+                # separately from total_matched_units -- folding them into
+                # total_matched_units would make matched_vs_disposed_ok
+                # true by construction for every input (it would always
+                # equal total_disposed_units), which defeats the point of
+                # the invariant.
                 disposal_lots.append(DisposalLot(
                     folio=scheme.folio, scheme=scheme.scheme_name, isin=scheme.isin,
                     scheme_type=scheme.scheme_type, units=remaining_to_consume,
@@ -165,7 +194,7 @@ def derive_scheme(scheme: SchemeBlock) -> SchemeReconciliation:
                     sale_proceeds=abs(txn.amount) * (remaining_to_consume / qty_needed) if qty_needed else 0.0,
                     holding_days=None, gain=None, flags=[UNATTRIBUTED],
                 ))
-                total_matched_units += remaining_to_consume
+                total_shortfall_units += remaining_to_consume
         # NEITHER rows never touch unit lots.
 
     expected_closing = None
@@ -179,20 +208,38 @@ def derive_scheme(scheme: SchemeBlock) -> SchemeReconciliation:
             units_diff = expected_closing - scheme.closing_units
             units_ok = abs(units_diff) <= UNITS_RECONCILIATION_TOLERANCE
 
+    # Real lot matches only -- the phantom shortfall top-up is intentionally
+    # excluded (see comment above) so this can actually be False.
     matched_vs_disposed_ok = abs(total_matched_units - total_disposed_units) <= UNITS_RECONCILIATION_TOLERANCE
 
-    rta_gain_derived = sum(dl.gain for dl in disposal_lots if dl.gain is not None) or 0.0
-    rta_gain_variance = None
-    if scheme.rta_realised_gain is not None:
-        rta_gain_variance = rta_gain_derived - scheme.rta_realised_gain
+    # If ANY disposal lot contributing to this scheme's realised gain is
+    # UNATTRIBUTED, the FIFO-derived total is not a trustworthy cross-check
+    # against the RTA's stated figure -- treating the unknown contribution
+    # as zero gain would make a genuinely undecidable comparison look like
+    # either a clean match or a real discrepancy, both wrong. Leave the
+    # derived figure and variance as None and surface an explicit reason
+    # instead, so the output never reads as blank/clean on undecidable
+    # input.
+    has_unattributed = any(UNATTRIBUTED in dl.flags for dl in disposal_lots)
+    rta_gain_derived: float | None = None
+    rta_gain_variance: float | None = None
+    rta_gain_note: str | None = None
+    if disposal_lots:
+        if has_unattributed:
+            rta_gain_note = CANNOT_CROSS_CHECK
+        else:
+            rta_gain_derived = sum(dl.gain for dl in disposal_lots if dl.gain is not None)
+            if scheme.rta_realised_gain is not None:
+                rta_gain_variance = rta_gain_derived - scheme.rta_realised_gain
 
     return SchemeReconciliation(
         folio=scheme.folio, scheme=scheme.scheme_name, isin=scheme.isin,
         units_ok=units_ok, units_expected_closing=expected_closing,
         units_actual_closing=scheme.closing_units, units_diff=units_diff,
         matched_vs_disposed_ok=matched_vs_disposed_ok, disposal_lots=disposal_lots,
-        rta_gain_reported=scheme.rta_realised_gain, rta_gain_derived=rta_gain_derived if disposal_lots else None,
-        rta_gain_variance=rta_gain_variance,
+        unattributed_shortfall_units=total_shortfall_units,
+        rta_gain_reported=scheme.rta_realised_gain, rta_gain_derived=rta_gain_derived,
+        rta_gain_variance=rta_gain_variance, rta_gain_note=rta_gain_note,
     )
 
 

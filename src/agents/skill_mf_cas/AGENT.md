@@ -68,7 +68,13 @@ clean, reviewable feed a person (or a future skill) can consume manually.
    capital-gains figure for a scheme, the FIFO-derived gain is compared
    against it and any variance is reported. If the statement doesn't carry
    one, the report says so -- it never fabricates a value to compare
-   against.
+   against. If **any** disposal lot contributing to the scheme's gain is
+   `UNATTRIBUTED`, the derived total is not trustworthy either way (treating
+   the unknown contribution as zero gain would misreport either a false
+   match or a false discrepancy) -- the derived figure and variance are left
+   `None` and the Exceptions sheet states `CANNOT_CROSS_CHECK`
+   ("cannot cross-check -- unattributed lots present") explicitly, rather
+   than leaving a blank cell that could be misread as "no variance found".
 6. **Excel/CSV writer** (`excel_writer.write_report_workbook`) -- writes the
    four-sheet workbook (Transactions / Holdings / RealisedGains /
    Exceptions) plus CSV siblings for Transactions and RealisedGains,
