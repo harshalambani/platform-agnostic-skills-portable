@@ -115,8 +115,8 @@ def _num0(v) -> float:
 
 
 def extract_isin(raw_name: str) -> tuple[str, str | None]:
-    """Split 'Some Fund - Regular Plan ( INF247L01EG4)' into
-    ('Some Fund - Regular Plan', 'INF247L01EG4'). Returns the raw string
+    """Split 'Some Fund - Regular Plan ( INF000A00042)' into
+    ('Some Fund - Regular Plan', 'INF000A00042'). Returns the raw string
     unchanged (and isin=None) if no trailing parenthesised ISIN is found."""
     if not raw_name:
         return raw_name, None
