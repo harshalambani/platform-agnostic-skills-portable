@@ -120,16 +120,24 @@ def _sanitize_name(raw: str, *, what: str = "name") -> str:
     return name
 
 
-def _safe_path_in(base_dir: Path, filename: str) -> Path:
-    """Join filename onto base_dir and verify the resolved result is still
-    contained inside base_dir -- same is_relative_to() containment check
-    ui/tabs/_generic.py uses for staged downloads. base_dir need not exist
-    yet (estimates/archive dirs are created at runtime)."""
-    base = base_dir.resolve()
-    candidate = (base_dir / filename).resolve()
-    if not candidate.is_relative_to(base):
-        raise ValueError(f"Resolved path {candidate} escapes {base}.")
-    return candidate
+def _find_by_name(base_dir: Path, filename: str) -> Path | None:
+    """Look up an existing file in base_dir by exact filename match via a
+    directory LISTING, never by joining the untrusted name onto a path and
+    opening it directly. The returned Path always comes from base_dir's own
+    iterdir() -- i.e. it is derived purely from the filesystem, never from
+    string-concatenation of user-controlled input -- which is what actually
+    closes the py/path-injection dataflow (a resolve()+is_relative_to()
+    containment check on a joined path, tried first, was NOT enough: static
+    analysis still treats the joined Path object as tainted even after a
+    containment check, because the check doesn't change what the Path was
+    built from). Returns None if base_dir doesn't exist or has no such file
+    (both expected -- e.g. before any estimate has ever been saved)."""
+    if not base_dir.is_dir():
+        return None
+    for entry in base_dir.iterdir():
+        if entry.is_file() and entry.name == filename:
+            return entry
+    return None
 
 
 def _estimate_choices() -> list[tuple[str, str]]:
@@ -358,18 +366,18 @@ def _handle_delete(name: str):
         return "Pick a saved estimate to delete first.", gr.update(choices=_estimate_choices())
     try:
         name = _sanitize_name(name, what="Estimate name")
-        src = _safe_path_in(_estimates_dir(), f"{name}.json")
     except ValueError as e:
         return f"Error: {e}", gr.update(choices=_estimate_choices())
-    if not src.is_file():
+    src = _find_by_name(_estimates_dir(), f"{name}.json")
+    if src is None:
         return f"No saved estimate named {name!r}.", gr.update(choices=_estimate_choices())
     archive_dir = _archive_dir()
     archive_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    try:
-        dest = _safe_path_in(archive_dir, f"{name}.json.deleted-{stamp}")
-    except ValueError as e:
-        return f"Error: {e}", gr.update(choices=_estimate_choices())
+    # dest is built from src.name (filesystem-derived, via the iterdir()
+    # lookup above) and a server-generated timestamp -- never from the raw
+    # user-supplied name -- so the join here carries no tainted input.
+    dest = archive_dir / f"{src.name}.deleted-{stamp}"
     shutil.move(str(src), str(dest))
     return f"Archived to `{dest}` (not permanently deleted).", gr.update(choices=_estimate_choices())
 
@@ -487,8 +495,9 @@ def _handle_prefill_from_book(bs_html, book_file, fy: str, regime: str, status: 
             book_path = book_file.name if hasattr(book_file, "name") else book_file
             book = pg.parse_book(book_path)
 
-        # entity_name is free-text from the UI; sanitize + containment-check
-        # before it becomes part of a filesystem path (py/path-injection fix).
+        # entity_name is free-text from the UI; sanitize, then look the
+        # mapping file up by directory LISTING rather than joining the name
+        # onto a path (py/path-injection fix -- see _find_by_name doc).
         # An entity name that fails validation just means no mapping lookup
         # is attempted -- this whole prefill step is optional, so we fall
         # back to no-mapping rather than raise.
@@ -497,11 +506,11 @@ def _handle_prefill_from_book(bs_html, book_file, fy: str, regime: str, status: 
         except ValueError:
             entity_key = ""
         mapping_path = (
-            _safe_path_in(_config_mod.data_root_dir() / "itr" / "mappings", f"{entity_key}.mapping.yaml")
+            _find_by_name(_config_mod.data_root_dir() / "itr" / "mappings", f"{entity_key}.mapping.yaml")
             if entity_key else None
         )
         known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
-        if mapping_path is not None and mapping_path.is_file():
+        if mapping_path is not None:
             loaded = configs.load_mapping(mapping_path, known_paths=known_paths)
         else:
             loaded = configs.MappingLoadResult(entries={}, warnings=[])
