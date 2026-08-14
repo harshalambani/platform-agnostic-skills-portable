@@ -33,6 +33,7 @@ as the intended caller of that override).
 from __future__ import annotations
 
 import datetime
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -90,6 +91,36 @@ def _estimates_dir() -> Path:
 
 def _archive_dir() -> Path:
     return _estimates_dir() / "_archive"
+
+
+# Any free-text name coming from the UI (saved-estimate name, entity name
+# used to look up a mapping file) MUST pass through _sanitize_name() before
+# it is used in ANY filesystem path construction below -- closes the
+# py/path-injection dataflow CodeQL flagged from these values into
+# save/load/delete and the book-prefill mapping lookup.
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,119}$")
+
+
+def _sanitize_name(raw: str, *, what: str = "name") -> str:
+    name = (raw or "").strip()
+    if not name or ".." in name or "/" in name or "\\" in name or not _SAFE_NAME_RE.match(name):
+        raise ValueError(
+            f"{what} {raw!r} is not valid -- use only letters, digits, spaces, "
+            "'.', '_', '-' (no path separators, no '..')."
+        )
+    return name
+
+
+def _safe_path_in(base_dir: Path, filename: str) -> Path:
+    """Join filename onto base_dir and verify the resolved result is still
+    contained inside base_dir -- same is_relative_to() containment check
+    ui/tabs/_generic.py uses for staged downloads. base_dir need not exist
+    yet (estimates/archive dirs are created at runtime)."""
+    base = base_dir.resolve()
+    candidate = (base_dir / filename).resolve()
+    if not candidate.is_relative_to(base):
+        raise ValueError(f"Resolved path {candidate} escapes {base}.")
+    return candidate
 
 
 def _estimate_choices() -> list[tuple[str, str]]:
@@ -283,6 +314,10 @@ def _form_to_input(*values) -> tuple:
 def _handle_load(name: str):
     if not name:
         return (*_blank_form(), "Pick a saved estimate, or leave as (new estimate) to start blank.")
+    try:
+        name = _sanitize_name(name, what="Estimate name")
+    except ValueError as e:
+        return (*_blank_form(), f"Error: {e}")
     adv = _adv_mod()
     try:
         input_data = adv.load_estimate(name, data_root=str(_config_mod.data_root_dir()))
@@ -292,9 +327,10 @@ def _handle_load(name: str):
 
 
 def _handle_save(name: str, *values):
-    name = (name or "").strip()
-    if not name:
-        return "Error: enter a name before saving."
+    try:
+        name = _sanitize_name(name, what="Estimate name")
+    except ValueError as e:
+        return f"Error: {e}"
     input_data, errors = _form_to_input(*values)
     if errors:
         return "Error(s):\n" + "\n".join(f"- {e}" for e in errors)
@@ -309,16 +345,22 @@ def _handle_save(name: str, *values):
 def _handle_delete(name: str):
     """Archive (never delete) a saved estimate -- same discipline as
     itr_entities.py's mapping/filed-return removal."""
-    name = (name or "").strip()
     if not name:
         return "Pick a saved estimate to delete first.", gr.update(choices=_estimate_choices())
-    src = _estimates_dir() / f"{name}.json"
+    try:
+        name = _sanitize_name(name, what="Estimate name")
+        src = _safe_path_in(_estimates_dir(), f"{name}.json")
+    except ValueError as e:
+        return f"Error: {e}", gr.update(choices=_estimate_choices())
     if not src.is_file():
         return f"No saved estimate named {name!r}.", gr.update(choices=_estimate_choices())
     archive_dir = _archive_dir()
     archive_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    dest = archive_dir / f"{name}.json.deleted-{stamp}"
+    try:
+        dest = _safe_path_in(archive_dir, f"{name}.json.deleted-{stamp}")
+    except ValueError as e:
+        return f"Error: {e}", gr.update(choices=_estimate_choices())
     shutil.move(str(src), str(dest))
     return f"Archived to `{dest}` (not permanently deleted).", gr.update(choices=_estimate_choices())
 
@@ -355,10 +397,11 @@ def _handle_compute(*values):
     except Exception as e:
         return f"Error computing estimate: {e}", gr.update(interactive=False, value=None), gr.update(value="")
 
-    # Same output_dir() convention every other skill/tab uses (_generic.py's
-    # _make_run_handler), so outputs land alongside all other generated
-    # workbooks rather than a bespoke location.
-    out_dir = _config_mod.output_dir()
+    # Persisted to Data/advance_tax/ (created at runtime if absent) -- NOT
+    # the generic Data/outputs/ folder, so the output workbook lives
+    # alongside the saved-estimate JSON for this feature, per the brief.
+    out_dir = _estimates_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in input_data.entity_name) or "estimate"
     out_path = out_dir / f"{stamp}-{safe_name}-advance-tax.xlsx"
@@ -435,10 +478,21 @@ def _handle_prefill_from_book(bs_html, book_file, fy: str, regime: str, status: 
             book_path = book_file.name if hasattr(book_file, "name") else book_file
             book = pg.parse_book(book_path)
 
-        entity_key = (entity_name or "").strip()
-        mapping_path = _config_mod.data_root_dir() / "itr" / "mappings" / f"{entity_key}.mapping.yaml"
+        # entity_name is free-text from the UI; sanitize + containment-check
+        # before it becomes part of a filesystem path (py/path-injection fix).
+        # An entity name that fails validation just means no mapping lookup
+        # is attempted -- this whole prefill step is optional, so we fall
+        # back to no-mapping rather than raise.
+        try:
+            entity_key = _sanitize_name(entity_name, what="Entity name") if (entity_name or "").strip() else ""
+        except ValueError:
+            entity_key = ""
+        mapping_path = (
+            _safe_path_in(_config_mod.data_root_dir() / "itr" / "mappings", f"{entity_key}.mapping.yaml")
+            if entity_key else None
+        )
         known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
-        if entity_key and mapping_path.is_file():
+        if mapping_path is not None and mapping_path.is_file():
             loaded = configs.load_mapping(mapping_path, known_paths=known_paths)
         else:
             loaded = configs.MappingLoadResult(entries={}, warnings=[])
