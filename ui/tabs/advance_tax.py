@@ -510,9 +510,46 @@ def _handle_compute(*values):
     )
 
 
+def _find_output_workbook(raw_path: str) -> Path | None:
+    """Resolve a just-written .xlsx workbook's path via a directory WALK of
+    `_estimates_dir()` (Data/advance_tax), matched by filename equality,
+    never by wrapping the raw string directly in a `Path(...)` call. Same
+    technique as `_find_by_name()`/`_find_in_upload_folder()` above, applied
+    here because CodeQL's py/path-injection query treats ANY parameter of a
+    function wired as a Gradio event handler as a remote-flow source --
+    regardless of whether the wired component is a `gr.State` or a
+    `gr.Textbox` -- so converting `out_path_state` to `gr.State` alone did
+    not close this dataflow into `_config_mod.open_in_file_manager()`. This
+    walks `_estimates_dir()` itself and returns a Path derived purely from
+    iterating the filesystem (comparison only, never concatenation),
+    picking the most-recently-written match on a name collision. Returns
+    None if nothing matches (dir absent, or the file was moved/deleted
+    since compute)."""
+    if not raw_path:
+        return None
+    base_dir = _estimates_dir()
+    if not base_dir.is_dir():
+        return None
+    target_name = os.path.basename(raw_path)
+    if not target_name:
+        return None
+    best: Path | None = None
+    best_mtime = -1.0
+    for entry in base_dir.rglob("*"):
+        if entry.is_file() and entry.name == target_name:
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = entry, mtime
+    return best
+
+
 def _open_output_folder(target_path: str):
-    if target_path:
-        _config_mod.open_in_file_manager(Path(target_path))
+    resolved = _find_output_workbook(target_path)
+    if resolved is not None:
+        _config_mod.open_in_file_manager(resolved)
     return None
 
 
