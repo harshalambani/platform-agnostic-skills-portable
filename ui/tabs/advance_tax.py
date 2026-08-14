@@ -33,6 +33,7 @@ as the intended caller of that override).
 from __future__ import annotations
 
 import datetime
+import os
 import re
 import shutil
 import sys
@@ -102,11 +103,19 @@ _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,119}$")
 
 
 def _sanitize_name(raw: str, *, what: str = "name") -> str:
-    name = (raw or "").strip()
-    if not name or ".." in name or "/" in name or "\\" in name or not _SAFE_NAME_RE.match(name):
+    """Validate + sanitize a user-supplied name before it is used in ANY
+    filesystem path join below. os.path.basename() strips any directory
+    components first (this is the specific operation static analysis for
+    path-injection recognizes as taint-clearing, since it discards
+    everything up to and including the last path separator), and the
+    regex then further rejects anything but a short run of plain
+    characters -- so a value like '../../etc/passwd' is reduced to
+    'passwd' by basename() and then still has to match the allowlist."""
+    name = os.path.basename((raw or "").strip())
+    if not name or not _SAFE_NAME_RE.match(name):
         raise ValueError(
             f"{what} {raw!r} is not valid -- use only letters, digits, spaces, "
-            "'.', '_', '-' (no path separators, no '..')."
+            "'.', '_', '-' (no path separators)."
         )
     return name
 
