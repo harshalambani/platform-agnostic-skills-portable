@@ -328,7 +328,10 @@ def test_compute_manual_mode_writes_workbook_and_reports_flags(isolated_data_roo
     assert "unprojected heads" in msg
     assert "undated capital-gains" in msg
     assert download_update["interactive"] is True
-    out_path = Path(path_update["value"])
+    # path_update feeds a gr.State, not a gr.Textbox -- _handle_compute
+    # returns the raw path string directly (State.postprocess() passes its
+    # value through untouched, it does not unwrap a gr.update(...) dict).
+    out_path = Path(path_update)
     assert out_path.is_file()
     assert out_path.suffix == ".xlsx"
 

@@ -140,6 +140,49 @@ def _find_by_name(base_dir: Path, filename: str) -> Path | None:
     return None
 
 
+def _find_in_upload_folder(raw_path: str) -> Path | None:
+    """Resolve a Gradio `gr.File` upload's server-side path via a directory
+    WALK of Gradio's own managed upload root (gradio.utils.get_upload_folder()
+    -- a temp dir Gradio itself controls, distinct from any Data/ location),
+    never by using the client-echoed `.name` string directly in a filesystem
+    call. Same technique as `_find_by_name()` above and for the same reason:
+    a resolve()+is_relative_to() containment check on the joined path was
+    tried first for the original 4 alerts and did NOT satisfy CodeQL's
+    py/path-injection query -- static analysis still treats a Path built
+    from the tainted string as tainted even after a containment check. This
+    walks the upload root itself and returns a Path derived purely from
+    iterating the filesystem, matched by filename equality against the
+    tainted string (comparison only, never concatenation) -- picking the
+    most-recently-modified match if more than one file under the upload
+    root happens to share a basename, since the handler always runs
+    immediately after the matching upload. Returns None if nothing matches
+    (upload already cleaned up, or GRADIO_TEMP_DIR not yet created)."""
+    if not raw_path:
+        return None
+    try:
+        import gradio.utils as _gr_utils  # noqa: PLC0415
+
+        upload_root = Path(_gr_utils.get_upload_folder())
+    except Exception:
+        return None
+    if not upload_root.is_dir():
+        return None
+    target_name = os.path.basename(raw_path)
+    if not target_name:
+        return None
+    best: Path | None = None
+    best_mtime = -1.0
+    for entry in upload_root.rglob("*"):
+        if entry.is_file() and entry.name == target_name:
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best_mtime:
+                best, best_mtime = entry, mtime
+    return best
+
+
 def _estimate_choices() -> list[tuple[str, str]]:
     adv = _adv_mod()
     names = adv.list_estimates(data_root=str(_config_mod.data_root_dir()))
@@ -393,10 +436,19 @@ def _handle_annualise(*values):
 
 def _handle_compute(*values):
     """Compute both regimes and write the .xlsx workbook. Returns
-    (status_markdown, download_update, open_folder_path_update)."""
+    (status_markdown, download_update, open_folder_path).
+
+    The third element feeds `out_path_state`, a `gr.State` (not a
+    `gr.Textbox`) -- State values are session-scoped server-side and are
+    never part of the client-facing event payload, so this function must
+    return the raw path string here, never `gr.update(...)` (State's
+    postprocess() passes its value through untouched, it does not unwrap a
+    Gradio update dict). See out_path_state's declaration in render() for
+    why State (not a hidden Textbox) is what actually closes the
+    py/path-injection dataflow into `_open_output_folder()`."""
     input_data, errors = _form_to_input(*values)
     if errors:
-        return "Error(s):\n" + "\n".join(f"- {e}" for e in errors), gr.update(interactive=False, value=None), gr.update(value="")
+        return "Error(s):\n" + "\n".join(f"- {e}" for e in errors), gr.update(interactive=False, value=None), ""
 
     adv = _adv_mod()
     _ensure_itr_scripts_importable()
@@ -407,12 +459,12 @@ def _handle_compute(*values):
     try:
         rules = rules_engine.load_rules([overlay_dir, rules_engine.canonical_rules_dir()], input_data.fy)
     except rules_engine.RulesError as e:
-        return f"Error: no tax rules found for FY {input_data.fy}: {e}", gr.update(interactive=False, value=None), gr.update(value="")
+        return f"Error: no tax rules found for FY {input_data.fy}: {e}", gr.update(interactive=False, value=None), ""
 
     try:
         estimate = adv.build_estimate(input_data, rules)
     except Exception as e:
-        return f"Error computing estimate: {e}", gr.update(interactive=False, value=None), gr.update(value="")
+        return f"Error computing estimate: {e}", gr.update(interactive=False, value=None), ""
 
     # Persisted to Data/advance_tax/ (created at runtime if absent) -- NOT
     # the generic Data/outputs/ folder, so the output workbook lives
@@ -425,7 +477,7 @@ def _handle_compute(*values):
     try:
         writer.write_workbook(estimate, out_path)
     except Exception as e:
-        return f"Error writing workbook: {e}", gr.update(interactive=False, value=None), gr.update(value="")
+        return f"Error writing workbook: {e}", gr.update(interactive=False, value=None), ""
 
     # Download-staging (security: same pattern as _generic._make_run_handler
     # -- Gradio's allowed_paths would otherwise expose the whole outputs/
@@ -454,7 +506,7 @@ def _handle_compute(*values):
     return (
         "\n\n".join(lines),
         gr.update(value=str(served_path.resolve()), interactive=True),
-        gr.update(value=str(out_path.resolve())),
+        str(out_path.resolve()),
     )
 
 
@@ -468,15 +520,45 @@ def _open_output_folder(target_path: str):
 # "Start from book" -- optional prefill, never required.
 # ---------------------------------------------------------------------------
 
-def _handle_prefill_from_book(bs_html, book_file, fy: str, regime: str, status: str, entity_name: str):
+def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity_name: str):
     """Pre-fills the SAME editable form fields via advance_tax.from_book().
     Purely a convenience: any failure here leaves the manual form untouched
-    and reports an error, it never blocks manual entry."""
+    and reports an error, it never blocks manual entry.
+
+    The balance-sheet HTML export is still a raw `gr.File` upload (there is
+    no domain registry for an arbitrary HTML export), so its server-side
+    path is resolved via `_find_in_upload_folder()` -- a directory WALK of
+    Gradio's own managed upload root, never the client-echoed `.name` string
+    joined onto a path (py/path-injection fix, same technique as
+    `_find_by_name()`/`_find_in_upload_folder()`'s own docstrings explain).
+
+    The GnuCash book is NOT a `gr.File` upload at all -- it is resolved
+    through `ui._book_registry.resolve_book(entity_key, fy)`, the same
+    entity+FY -> registered-book lookup every other tab in this app already
+    uses (see ui/tabs/_entity_book.py). A value drawn from that enumerated
+    registry is not user-controlled taint: the entity_key has already been
+    sanitized/validated against entities.yaml's own key set before it is
+    ever used to index the registry, and the registry hands back a path it
+    itself wrote, never a path built from unsanitized request data."""
     fy = (fy or "").strip()
     if bs_html is None:
         return (*[gr.update() for _ in _FORM_FIELDS], "Pick a balance-sheet HTML export first (or skip this section and enter figures manually).")
     if not fy:
         return (*[gr.update() for _ in _FORM_FIELDS], "Enter the financial year (YYYY-YY) before prefilling from a book.")
+
+    # entity_name is free-text from the UI; sanitize first -- both the
+    # mapping lookup and the book-registry lookup below key off this. An
+    # entity name that fails validation just means no mapping/book lookup is
+    # attempted -- this whole prefill step is optional, so we fall back to
+    # no-mapping/no-book rather than raise.
+    try:
+        entity_key = _sanitize_name(entity_name, what="Entity name") if (entity_name or "").strip() else ""
+    except ValueError:
+        entity_key = ""
+
+    bs_path = _find_in_upload_folder(bs_html.name if hasattr(bs_html, "name") else bs_html)
+    if bs_path is None:
+        return (*[gr.update() for _ in _FORM_FIELDS], "Could not locate the uploaded balance-sheet file -- try re-uploading.")
 
     _ensure_itr_scripts_importable()
     try:
@@ -487,24 +569,18 @@ def _handle_prefill_from_book(bs_html, book_file, fy: str, regime: str, status: 
         import schedules as sch
         from parse_eguile import parse_file
 
-        bs_path = bs_html.name if hasattr(bs_html, "name") else bs_html
-        tree = parse_file(bs_path)
+        tree = parse_file(str(bs_path))
 
         book = None
-        if book_file is not None:
-            book_path = book_file.name if hasattr(book_file, "name") else book_file
-            book = pg.parse_book(book_path)
+        if entity_key:
+            from .. import _book_registry  # noqa: PLC0415
 
-        # entity_name is free-text from the UI; sanitize, then look the
-        # mapping file up by directory LISTING rather than joining the name
-        # onto a path (py/path-injection fix -- see _find_by_name doc).
-        # An entity name that fails validation just means no mapping lookup
-        # is attempted -- this whole prefill step is optional, so we fall
-        # back to no-mapping rather than raise.
-        try:
-            entity_key = _sanitize_name(entity_name, what="Entity name") if (entity_name or "").strip() else ""
-        except ValueError:
-            entity_key = ""
+            book_path = _book_registry.resolve_book(entity_key, fy or None)
+            if book_path is not None and book_path.is_file():
+                book = pg.parse_book(str(book_path))
+
+        # Mapping file lookup by directory LISTING rather than joining the
+        # name onto a path (py/path-injection fix -- see _find_by_name doc).
         mapping_path = (
             _find_by_name(_config_mod.data_root_dir() / "itr" / "mappings", f"{entity_key}.mapping.yaml")
             if entity_key else None
@@ -609,7 +685,16 @@ def render(container_tab=None) -> None:
     with gr.Row():
         download_btn = gr.DownloadButton("Download workbook", interactive=False)
         open_folder_btn = gr.Button("Open output folder")
-    out_path_state = gr.Textbox(visible=False)
+    # gr.State, NOT a hidden gr.Textbox: a Textbox (even invisible=True) is
+    # still part of the client-facing event payload, so its value is
+    # attacker-controlled input as far as static path-injection analysis is
+    # concerned (CodeQL py/path-injection flagged exactly this flowing into
+    # _open_output_folder() -> _config_mod.open_in_file_manager()). A
+    # gr.State's value is session-scoped server-side and is never part of
+    # that payload -- the client cannot supply it -- so it is not a taint
+    # source at all, not merely a sanitized one. See _handle_compute()'s
+    # docstring for the corresponding return-value change this requires.
+    out_path_state = gr.State("")
 
     form_components = [
         entity_name, fy, regime, status, dob, residency, as_of,
@@ -625,14 +710,16 @@ def render(container_tab=None) -> None:
     with gr.Accordion("Start from book (optional -- pre-fills the fields above)", open=False):
         gr.Markdown(
             "Never required. Pre-fills the SAME editable fields above from a "
-            "balance-sheet HTML export (and, optionally, the matching "
-            ".gnucash book for other-sources/TDS/capital-gains actuals). "
-            "Uses this tab's Entity name / FY fields above to locate a "
-            "matching mapping file, if one exists; an unmapped or missing "
-            "mapping still prefills, just with fewer leaves resolved."
+            "balance-sheet HTML export. Uses this tab's Entity name / FY "
+            "fields above to locate a matching mapping file, if one exists "
+            "(an unmapped or missing mapping still prefills, just with fewer "
+            "leaves resolved), and to look up a matching **registered** "
+            "GnuCash book for other-sources/TDS/capital-gains actuals -- "
+            "register a book for this entity+FY once on the **Entities** "
+            "tab to have it picked up here automatically; there is no "
+            "separate book upload on this tab."
         )
         bs_html_file = gr.File(label="Balance sheet HTML export", file_types=[".html", ".htm"])
-        book_file = gr.File(label="GnuCash book (optional)", file_types=[".gnucash"])
         prefill_btn = gr.Button("Prefill from book")
 
     if container_tab is not None:
@@ -654,6 +741,6 @@ def render(container_tab=None) -> None:
 
     prefill_btn.click(
         fn=_handle_prefill_from_book,
-        inputs=[bs_html_file, book_file, fy, regime, status, entity_name],
+        inputs=[bs_html_file, fy, regime, status, entity_name],
         outputs=[*form_components, status_md],
     )
