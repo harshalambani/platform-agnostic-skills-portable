@@ -46,7 +46,7 @@ Start with the Reconciliation sheet -- it shows, per gain category (Short Term, 
 
 | If… | Then… |
 |------|-------|
-| 'xlsx is password-protected' error. | Enter the statement's own open password, as supplied by KFintech. |
+| 'xlsx is password-protected — supply the statement password (the statement's own open password, as supplied by KFintech).' error. | Enter the statement's own open password, as supplied by KFintech. |
 | This skill no longer accepts a PDF. | KFintech issues the Capital Gain / Loss Statement as an encrypted .xlsx workbook, not a PDF. Depository *_TXN.pdf files and PDF parsing of the CG statement are out of scope for this skill. |
 | 'This workbook does not look like a KFintech Capital Gain / Loss Statement.' | Confirm the file is KFintech's own Capital Gain / Loss Statement export (sheets: Summary - Equity, Summary - NonEquity, Scheme_Level_Summary, Trasaction_Details), not a CAMS statement or a different KFintech report. |
 | A reconciliation category shows VARIANCE. | The three figures for that gain category did not agree within tolerance. Check the Reconciliation sheet's Note column for the exact numbers, and re-check the source statement for a corporate action this skill does not model. |

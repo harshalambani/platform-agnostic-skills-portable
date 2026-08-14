@@ -9,13 +9,29 @@ password itself is NEVER part of either function's input or output.
 from __future__ import annotations
 
 
+# msoffcrypto (used only by skill_mf_cas's encrypted-xlsx path) never puts
+# "password" or "encrypt" in either its exception type names or messages.
+# Verified against real msoffcrypto-tool==6.0.0 behaviour (not guessed):
+#   wrong password -> msoffcrypto.exceptions.InvalidKeyError: "Key verification failed"
+#   empty password -> msoffcrypto.exceptions.DecryptionError: "No key specified"
+# Matched here by module name + message substring (duck-typed, not by
+# importing msoffcrypto — bank_common stays dependency-light and this PDF
+# path never needs to import an xlsx-only library).
+_MSOFFCRYPTO_MODULE_PREFIX = "msoffcrypto."
+_MSOFFCRYPTO_MESSAGE_SUBSTRINGS = ("key verification failed", "no key specified")
+
+
 def is_password_error(e: Exception) -> bool:
-    """Best-effort detection of a "this PDF needs a password" failure.
+    """Best-effort detection of a "this document needs a password" failure.
 
     pdfminer's ``PDFPasswordIncorrect`` (missing/wrong password) has no
     message of its own; pdfplumber wraps it in a ``PdfminerException`` whose
     ``str()`` is also empty — so the check looks at the exception chain
     (cause / wrapped args), not just ``str(e)``.
+
+    Also recognises msoffcrypto's wrong/empty-password exceptions
+    (``InvalidKeyError`` / ``DecryptionError``), which name neither
+    "password" nor "encrypt" anywhere — see the module-level comment above.
     """
     candidates = [e, getattr(e, "__cause__", None), *e.args]
     return any(
@@ -23,6 +39,8 @@ def is_password_error(e: Exception) -> bool:
             "password" in type(c).__name__.lower()
             or "password" in str(c).lower()
             or "encrypt" in str(c).lower()
+            or type(c).__module__.startswith(_MSOFFCRYPTO_MODULE_PREFIX)
+            or any(sub in str(c).lower() for sub in _MSOFFCRYPTO_MESSAGE_SUBSTRINGS)
         )
         for c in candidates
     )
