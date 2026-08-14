@@ -837,6 +837,66 @@ def test_wrong_password_error_never_echoes_password(monkeypatch, tmp_path):
     assert "password" in message.lower()
 
 
+def test_wrong_password_error_via_real_msoffcrypto_never_echoes_password(tmp_path):
+    """Regression for the defect diagnosed against real msoffcrypto-tool
+    behaviour: wrong password there raises
+    msoffcrypto.exceptions.InvalidKeyError("Key verification failed"),
+    which contains neither "password" nor "encrypt" -- the fake in
+    _FakeOfficeFile above raises the same exception TYPE but was never
+    proof that agent.py's real xlsx-decryption path (which goes through
+    genuine msoffcrypto encryption) actually reaches the friendly message.
+    msoffcrypto-tool==6.0.0 (requirements-lock.txt) can itself encrypt an
+    xlsx via OOXMLFile.encrypt(), so this test builds a real encrypted
+    workbook with real msoffcrypto -- no monkeypatch anywhere in this test.
+    """
+    import msoffcrypto
+
+    secret = "hunter2-secret-statement-password"
+    plain_wb = Workbook()
+    plain_wb.active["A1"] = "placeholder"
+    plain_path = tmp_path / "plain.xlsx"
+    plain_wb.save(plain_path)
+
+    xlsx_path = tmp_path / "real_encrypted.xlsx"
+    with open(plain_path, "rb") as f_in, open(xlsx_path, "wb") as f_out:
+        office_file = msoffcrypto.OfficeFile(f_in)
+        office_file.encrypt(secret, f_out)
+
+    with pytest.raises(ValueError) as excinfo:
+        mf_agent._load_workbook(str(xlsx_path), "wrong-password")
+
+    message = str(excinfo.value)
+    assert secret not in message
+    assert "wrong-password" not in message
+    assert "password-protected" in message.lower()
+    assert "Key verification failed" not in message
+
+
+def test_empty_password_error_via_real_msoffcrypto(tmp_path):
+    """Real msoffcrypto's empty-password failure is a DIFFERENT exception
+    type/message (DecryptionError: "No key specified") from the
+    wrong-password case (InvalidKeyError: "Key verification failed") --
+    both must be recognised by is_password_error."""
+    import msoffcrypto
+
+    plain_wb = Workbook()
+    plain_wb.active["A1"] = "placeholder"
+    plain_path = tmp_path / "plain2.xlsx"
+    plain_wb.save(plain_path)
+
+    xlsx_path = tmp_path / "real_encrypted2.xlsx"
+    with open(plain_path, "rb") as f_in, open(xlsx_path, "wb") as f_out:
+        office_file = msoffcrypto.OfficeFile(f_in)
+        office_file.encrypt("some-real-password", f_out)
+
+    with pytest.raises(ValueError) as excinfo:
+        mf_agent._load_workbook(str(xlsx_path), None)
+
+    message = str(excinfo.value)
+    assert "password-protected" in message.lower()
+    assert "No key specified" not in message
+
+
 def test_run_rejects_pdf_input(tmp_path):
     pdf_path = tmp_path / "statement.pdf"
     pdf_path.write_bytes(b"%PDF-1.4 not a real pdf")
