@@ -242,10 +242,26 @@ def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) 
         f"Form16: opted out of 115BAC(1A)? {data.opted_out_115bac}",
     ]
     if data.extra_certificates:
-        lines.append(
-            f"Form16: {len(data.extra_certificates)} extra certificate(s) in this PDF (not parsed): "
-            + ", ".join(f"{cert or '?'}/{tan}" for cert, tan in data.extra_certificates)
-        )
+        lines.append(f"Form16: {len(data.extra_certificates)} extra certificate(s) in this PDF:")
+        for c in data.extra_certificates:
+            if c.parsed:
+                lines.append(
+                    f"  {c.certificate_no or '?'}/{c.tan}: gross salary 1(d)={c.gross_salary_1d:.2f}, "
+                    f"net tax payable (21)={c.tds_net_tax_payable_21:.2f}"
+                )
+            else:
+                lines.append(f"  UNPARSED {c.certificate_no or '?'}/{c.tan}: {c.unparsed_reason}")
+        if data.aggregate_gross_salary is not None:
+            lines.append(
+                f"Form16: aggregate gross salary (all parsed certificates) = "
+                f"{data.aggregate_gross_salary:.2f}, aggregate salary TDS = {data.aggregate_salary_tds:.2f}"
+            )
+        if data.unparsed_certificates:
+            lines.append(
+                f"Form16: WARNING -- {len(data.unparsed_certificates)} certificate(s) could not be parsed "
+                "and are EXCLUDED from the aggregate totals above; the true multi-employer total may be "
+                "understated."
+            )
 
     if data.identity_ok:
         lines.append(f"Form16: internal consistency OK ({len(data.identity_checks)} check(s)).")
@@ -463,6 +479,17 @@ def _build_and_write_workbook(
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
+    # GAP B -- Form16<->26AS s.192 salary TDS cross-check: independent of the
+    # Book<->Form16 check above (a mismatch here means Form16 and 26AS
+    # disagree with EACH OTHER, regardless of what the books say). Attached
+    # onto model.taxes_paid (not threaded as its own write_workbook param)
+    # since that schedule already carries the sibling as26 tie-out and is
+    # what presentation.py's Statement-of-Income banner and
+    # write_reconciliation_sheet both read from.
+    model.taxes_paid.form16_26as_salary_results = (
+        book_verify.cross_check_form16_26as_salary(form16_data, as26_data, rules.common.get("tds_sections", {}))
+        if form16_data else []
+    )
     user_rules = rules_engine.load_user_rules(rules_search_dirs)
 
     write_workbook.write_workbook(
@@ -549,6 +576,25 @@ def _build_and_write_workbook(
             f"{presentation.SALARY_RECONCILIATION_ERROR_MARKER} "
             f"(diff {model.salary.reconciliation_diff:,.2f}) -- workbook still written "
             "(see ERROR banner on Salary / Statement of Income sheets) -- DO NOT FILE without review."
+        )
+    form16_26as_mismatches = [r for r in model.taxes_paid.form16_26as_salary_results if not r.ok]
+    if form16_26as_mismatches:
+        # "Banner, no abort" (GAP B), same contract as the CG/Salary
+        # reconciliation checks above: the workbook has ALREADY been written
+        # in full, with a matching top-of-sheet ERROR banner on the
+        # Statement of Income sheet (see
+        # presentation._write_form16_26as_salary_error_banner) and a
+        # per-TAN OK/MISMATCH breakdown on the Reconciliation sheet. This
+        # line's job is only to carry
+        # presentation.FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER into the
+        # run() summary so that main()'s process-level exit code below (and
+        # any other caller grepping the summary) can detect the mismatch.
+        tans = ", ".join(r.tan for r in form16_26as_mismatches)
+        lines.append(
+            f"{presentation.FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER} "
+            f"(TAN(s) {tans}) -- workbook still written "
+            "(see ERROR banner on Statement of Income sheet / Reconciliation sheet) -- "
+            "DO NOT FILE without review."
         )
     return lines
 
@@ -739,6 +785,18 @@ def main(argv: list[str] | None = None) -> int:
             f"{presentation.SALARY_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
             "MUST be reviewed before filing (see ERROR banner on Salary / Statement of Income "
             "sheets).",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    if presentation.FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER in summary:
+        # GAP B -- same "banner, no abort" contract as CG/Salary above: a
+        # Form16-vs-26AS s.192 salary TDS mismatch is a real filing/
+        # processing risk (a TDS credit claim 26AS does not back up), so it
+        # gets the same ERROR-tier exit-code flip.
+        print(
+            f"{presentation.FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER} -- workbook was written but "
+            "MUST be reviewed before filing (see ERROR banner on Statement of Income sheet / "
+            "Reconciliation sheet).",
             file=sys.stderr,
         )
         exit_code = 1

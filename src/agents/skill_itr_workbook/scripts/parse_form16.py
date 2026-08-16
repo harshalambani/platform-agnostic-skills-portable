@@ -15,8 +15,16 @@ observed and handled here:
     assuming the number sits on the same visual line as its label.
   - one real PDF contains pages from a SECOND certificate/TAN: pages are
     grouped by TAN, the group containing "PART B" + "Annexure - I" is treated
-    as the certificate to parse, and any other TAN groups are recorded in
-    `extra_certificates` (count + TANs) -- never silently dropped.
+    as the PRIMARY certificate to parse, and every other TAN group is also
+    attempted (its own Part B / Annexure-I, gross salary 1(d), net tax
+    payable 21) and recorded in `extra_certificates` as an `ExtraCertificate`
+    -- never silently dropped, and never silently merged: a group whose
+    Part B could not be found or parsed is recorded with `parsed=False` and
+    an `unparsed_reason`, not dropped and not treated as zero. Multi-employer
+    totals are exposed separately as `aggregate_gross_salary` /
+    `aggregate_salary_tds` (primary certificate + every successfully parsed
+    extra), so a caller can see both the per-employer breakdown and the
+    combined figure without either being hidden.
 """
 from __future__ import annotations
 
@@ -63,6 +71,23 @@ def _find_text(text: str, label_pattern: str, choices: tuple[str, ...], window: 
     if not m:
         return None
     return m.group(1)
+
+
+@dataclass
+class ExtraCertificate:
+    """A TAN group in the same PDF other than the one selected as the
+    primary certificate. Every such group is attempted independently -- a
+    group without a Part B / Annexure-I salary computation, or one where the
+    two figures below could not be extracted, is recorded with
+    `parsed=False` and a human-readable `unparsed_reason` rather than being
+    dropped or silently treated as zero."""
+
+    tan: str | None
+    certificate_no: str | None
+    parsed: bool
+    unparsed_reason: str | None = None
+    gross_salary_1d: float | None = None          # this certificate's own 1(d) total
+    tds_net_tax_payable_21: float | None = None    # this certificate's own net tax payable (21)
 
 
 @dataclass
@@ -131,11 +156,26 @@ class Form16Data:
     net_tax_payable_21: float | None = None
 
     identity_checks: list = field(default_factory=list)          # list[IdentityCheckResult]
-    extra_certificates: list = field(default_factory=list)        # list[(cert_no|None, tan)]
+    extra_certificates: list = field(default_factory=list)        # list[ExtraCertificate]
+
+    # Multi-employer aggregate: primary certificate + every successfully
+    # parsed extra certificate. None only when even the primary certificate's
+    # own figure could not be extracted (nothing to aggregate onto). The
+    # per-employer breakdown remains fully visible via `extra_certificates`
+    # -- this is a *sum for convenience*, never a replacement for it.
+    aggregate_gross_salary: float | None = None
+    aggregate_salary_tds: float | None = None
 
     @property
     def identity_ok(self) -> bool:
         return all(c.ok for c in self.identity_checks)
+
+    @property
+    def unparsed_certificates(self) -> list:
+        """Extra certificates present in the PDF whose Part B could not be
+        found/parsed -- these are NOT included in the aggregate totals above
+        and must be surfaced loudly by callers, never treated as absent."""
+        return [c for c in self.extra_certificates if not c.parsed]
 
 
 def _page_tan(text: str) -> str | None:
@@ -302,7 +342,58 @@ def _parse_part_b(text: str, extra_certificates: list) -> Form16Data:
                   (data.tax_payable_17 or 0.0) - (data.relief_89_18 or 0.0), data.net_tax_payable_21),
     ]
     data.identity_checks = [c for c in checks if c is not None]
+
+    # Multi-employer aggregation (GAP A): sum the primary certificate's own
+    # figures with every successfully-parsed extra certificate's figures.
+    # Certificates that could not be parsed are excluded from the sum (never
+    # treated as zero) and remain visible via `unparsed_certificates`.
+    parsed_extras = [c for c in extra_certificates if c.parsed]
+    if data.total_1d is not None:
+        data.aggregate_gross_salary = data.total_1d + sum(
+            c.gross_salary_1d or 0.0 for c in parsed_extras
+        )
+    if data.net_tax_payable_21 is not None:
+        data.aggregate_salary_tds = data.net_tax_payable_21 + sum(
+            c.tds_net_tax_payable_21 or 0.0 for c in parsed_extras
+        )
     return data
+
+
+def _extract_extra_certificate(tan: str, indices: list[int], pages_text: list[str]) -> ExtraCertificate:
+    """Attempt to parse a non-primary TAN group's own Part B / Annexure-I
+    salary computation. Returns `parsed=False` with a loud reason instead of
+    raising, so one unparsed certificate never stops the primary certificate
+    (or the other extras) from being reported."""
+    text = "\n".join(pages_text[i] for i in indices)
+    cert_no = _extract_certificate_no(text)
+    if not (_PART_B_RE.search(text) and _ANNEXURE_I_RE.search(text)):
+        return ExtraCertificate(
+            tan=tan,
+            certificate_no=cert_no,
+            parsed=False,
+            unparsed_reason="no PART B / Annexure-I salary computation found for this certificate",
+        )
+    gross = _find_number(text, r"\(d\)\s*Total")
+    tds = _find_number(text, r"Net tax payable")
+    if gross is None or tds is None:
+        missing = []
+        if gross is None:
+            missing.append("gross salary 1(d)")
+        if tds is None:
+            missing.append("net tax payable (21)")
+        return ExtraCertificate(
+            tan=tan,
+            certificate_no=cert_no,
+            parsed=False,
+            unparsed_reason="PART B / Annexure-I present but could not extract: " + ", ".join(missing),
+        )
+    return ExtraCertificate(
+        tan=tan,
+        certificate_no=cert_no,
+        parsed=True,
+        gross_salary_1d=gross,
+        tds_net_tax_payable_21=tds,
+    )
 
 
 def parse_form16(pdf_path: str | Path, pan: str | None = None) -> Form16Data:
@@ -322,7 +413,7 @@ def parse_form16(pdf_path: str | Path, pan: str | None = None) -> Form16Data:
     groups = _group_pages_by_certificate(pages_text)
     selected_tan, selected_indices = _select_part_b_group(groups, pages_text)
 
-    extras = [(_extract_certificate_no("\n".join(pages_text[i] for i in idxs)), tan)
+    extras = [_extract_extra_certificate(tan, idxs, pages_text)
               for tan, idxs in groups.items() if tan != selected_tan]
 
     combined = "\n".join(pages_text[i] for i in selected_indices)

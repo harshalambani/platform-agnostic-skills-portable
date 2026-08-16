@@ -460,6 +460,47 @@ def _write_taxes_paid_unclassified_banner(ws, row: int, tp_schedule, ncols: int)
     return row + 2
 
 
+#: Fail-loud (GAP B, Form16<->26AS s.192 salary TDS cross-check) -- "the
+#: single highest-value check in this area": Form16 is what the employer
+#: SAYS it deducted, 26AS is what the government's own records show was
+#: actually deposited. A mismatch here is a real filing/processing risk
+#: (a TDS credit claim that does not match 26AS is a classic ITR rejection
+#: reason), not a cosmetic difference, so this gets the same red ERROR-tier
+#: banner + exit-code-flip treatment as CG_RECONCILIATION_ERROR_MARKER /
+#: SALARY_RECONCILIATION_ERROR_MARKER above, not the lighter plain-text
+#: MISMATCH-row treatment used by verify.cross_check_form16's Reconciliation
+#: sheet section (which is ALSO still written -- this banner is in addition
+#: to it, not instead of it).
+FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER = "ERROR: Form 16 salary TDS does not reconcile to 26AS section 192"
+
+
+def form16_26as_salary_mismatch_banner_text(mismatches: list) -> str:
+    tans = ", ".join(r.tan for r in mismatches)
+    return (
+        f"*** {FORM16_26AS_SALARY_MISMATCH_ERROR_MARKER} "
+        f"(TAN(s) {tans}) -- DO NOT FILE ***"
+    )
+
+
+def _write_form16_26as_salary_error_banner(ws, row: int, tp_schedule, ncols: int) -> int:
+    """Top-of-sheet ERROR banner, modeled directly on `_write_cg_error_banner`
+    above -- present only when verify.cross_check_form16_26as_salary found at
+    least one TAN whose Form16 salary TDS does not agree with 26AS section
+    192/192A (within _SALARY_TIE_OUT_TOLERANCE), OR a TAN with 26AS salary
+    TDS but no successfully parsed Form16 certificate at all. 'Banner, no
+    abort': the workbook is ALWAYS still produced; omitted entirely (returns
+    `row` unchanged) when there is nothing to compare or everything agrees."""
+    mismatches = [r for r in tp_schedule.form16_26as_salary_results if not r.ok]
+    if not mismatches:
+        return row
+    c = ws.cell(row=row, column=1, value=form16_26as_salary_mismatch_banner_text(mismatches))
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
+
 _PARKED_NOTE = "(to be filled)"
 
 #: Human labels for rules.resolve_age_class()'s return values. 'general'
@@ -966,6 +1007,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     row = _write_salary_error_banner(ws, row, model.salary, OUTER)
     row = _write_taxes_paid_unclassified_banner(ws, row, model.taxes_paid, OUTER)
+    row = _write_form16_26as_salary_error_banner(ws, row, model.taxes_paid, OUTER)
     title = ws.cell(row=row, column=1, value="STATEMENT OF INCOME")
     title.font = _font(14, bold=True)
     ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=OUTER)

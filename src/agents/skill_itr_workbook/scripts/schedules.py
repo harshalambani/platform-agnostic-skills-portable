@@ -582,6 +582,17 @@ class TaxesPaidSchedule:
     #: computed as if nothing was paid until year end -- the workbook says so
     #: rather than presenting an overstated charge as determined.
     advance_tax_dates_available: bool = False
+    #: Form16<->26AS cross-check (GAP B, verify.cross_check_form16_26as_salary):
+    #: populated by agent.py AFTER build_all_schedules returns -- it needs
+    #: form16_data + as26_data + rules.common["tds_sections"], all already in
+    #: scope there, and verify.py deliberately does not import schedules.py.
+    #: See unclassified_sections' docstring above, which noted salary
+    #: "reconciles separately through Form16 / the Salary schedule"; this
+    #: field is that reconciliation. Empty when there is nothing to compare
+    #: (no Form16, or no 26AS data). A TAN present in 26AS section 192/192A
+    #: with no successfully parsed Form16 certificate is still one of these
+    #: results (form16_tds=None, .ok False) -- never silently dropped.
+    form16_26as_salary_results: list = field(default_factory=list)   # list[verify.Form16As26SalaryResult]
 
 
 _TIE_OUT_TOLERANCE = 1.0   # rupee-rounding tolerance between book and 26AS TDS totals
