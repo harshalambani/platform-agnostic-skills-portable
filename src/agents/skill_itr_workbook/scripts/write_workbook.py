@@ -24,6 +24,7 @@ hardcoded ROUND(...,-1) in the workbook).
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
@@ -115,6 +116,31 @@ class _SheetWriter:
 
     def blank(self):
         self.row += 1
+
+
+_NOT_FOUND = "(not found)"
+
+
+def _str_cell(sw: "_SheetWriter", col: int, value: str | None) -> None:
+    """Render an optional string field -- never a blank cell for a field the
+    parser looked for and didn't find; distinguishes that from a genuinely
+    empty sheet region."""
+    sw.cell(col, value if value is not None else _NOT_FOUND)
+
+
+def _num_cell(sw: "_SheetWriter", col: int, obj, field_name: str) -> None:
+    """Render an optional numeric field parsed by parse_foreign.py. When the
+    source cell was a placeholder glyph or free-text prose rather than a real
+    number, parse_foreign leaves the field None and records why in
+    obj.flags[field_name] -- render that flag string verbatim instead of a
+    blank or a coerced 0, so a reader can see the source said "*" or
+    "Lower of (c) or (d)" instead of losing that information."""
+    flag = getattr(obj, "flags", {}).get(field_name)
+    if flag:
+        sw.cell(col, flag)
+    else:
+        value = getattr(obj, field_name)
+        sw.cell(col, value, number_format=INR_FORMAT)
 
 
 # ---------------------------------------------------------------------------
@@ -526,16 +552,195 @@ def write_schedule_al_sheet(wb: Workbook, al: sch.ScheduleALSchedule) -> dict:
     return layout
 
 
-def write_schedule_fa_sheet(wb: Workbook, fa: sch.ScheduleFASchedule) -> None:
-    ws = wb.create_sheet("ScheduleFA")
-    sw = _SheetWriter(ws)
-    sw.header("Schedule FA -- pre-seeded from AL_FOREIGN-flagged holdings; detail cells manual")
+def _write_al_foreign_crosscheck_block(sw: "_SheetWriter", fa: sch.ScheduleFASchedule) -> None:
     for col, h in enumerate(["Account", "Amount", "Country", "Peak balance", "Details"], start=1):
         sw.cell(col, h)
     sw.row += 1
     for r in fa.rows:
         sw.cell(1, r.path)
         sw.cell(2, r.amount, number_format=INR_FORMAT)
+        sw.row += 1
+
+
+def write_schedule_fa_sheet(wb: Workbook, fa: sch.ScheduleFASchedule) -> None:
+    ws = wb.create_sheet("ScheduleFA")
+    sw = _SheetWriter(ws)
+    rep = fa.foreign_report
+
+    if rep is None:
+        # No foreign broker report was supplied for this run -- unchanged
+        # from before parse_foreign.py existed.
+        sw.header("Schedule FA -- pre-seeded from AL_FOREIGN-flagged holdings; detail cells manual")
+        _write_al_foreign_crosscheck_block(sw, fa)
+        return
+
+    fa_data = rep.schedule_fa
+    sw.header("Schedule FA -- parsed from foreign broker consolidated tax report (calendar year)")
+    sw.label_value("Source file", Path(rep.source_path).name, number_format=None)
+    sw.label_value("Report as on", fa_data.report_as_on or _NOT_FOUND, number_format=None)
+
+    if not fa_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {fa_data.unparsed_reason}", number_format=None)
+    else:
+        sw.blank()
+        sw.header("A2 -- Foreign Depository/Custodial Accounts")
+        for col, h in enumerate(
+            ["Country", "Institution", "Account number", "Status", "Opening date",
+             "Peak balance", "Closing balance", "Nature", "Gross amount"], start=1,
+        ):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+        for acct in fa_data.custodial_accounts:
+            _str_cell(sw, 1, acct.country)
+            _str_cell(sw, 2, acct.institution)
+            _str_cell(sw, 3, acct.account_number)
+            _str_cell(sw, 4, acct.status)
+            _str_cell(sw, 5, acct.opening_date)
+            _num_cell(sw, 6, acct, "peak_balance")
+            _num_cell(sw, 7, acct, "closing_balance")
+            _str_cell(sw, 8, acct.gross_amount_nature)
+            _num_cell(sw, 9, acct, "gross_amount")
+            sw.row += 1
+
+        sw.blank()
+        sw.header("A3 -- Foreign Equity/Debt Interest -- one row per acquisition lot (never deduped by entity)")
+        for col, h in enumerate(
+            ["Country", "Entity", "Nature of entity", "Date acquired", "Initial value",
+             "Peak value", "Closing value", "Gross amount credited", "Gross proceeds", "Broker"], start=1,
+        ):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+        for lot in fa_data.equity_lots:
+            _str_cell(sw, 1, lot.country)
+            _str_cell(sw, 2, lot.entity)
+            _str_cell(sw, 3, lot.nature_of_entity)
+            _str_cell(sw, 4, lot.date_acquired)
+            _num_cell(sw, 5, lot, "initial_value")
+            _num_cell(sw, 6, lot, "peak_value")
+            _num_cell(sw, 7, lot, "closing_value")
+            _num_cell(sw, 8, lot, "gross_amount_credited")
+            _num_cell(sw, 9, lot, "gross_proceeds")
+            _str_cell(sw, 10, lot.broker)
+            sw.row += 1
+
+    sw.blank()
+    sw.header("Vendor limitations disclosed by source report")
+    for vl in rep.vendor_limits:
+        sw.label_value(
+            vl.description,
+            "present" if vl.present else "EXPECTED BUT NOT FOUND IN SOURCE -- verify manually",
+            number_format=None,
+        )
+
+    if rep.warnings:
+        sw.blank()
+        sw.header("Parser warnings")
+        for w in rep.warnings:
+            sw.cell(1, w)
+            sw.row += 1
+
+    sw.blank()
+    sw.header("AL_FOREIGN book roll-up -- independent cross-check, NOT merged into the parsed figures above")
+    _write_al_foreign_crosscheck_block(sw, fa)
+
+
+def write_schedule_fsi_sheet(
+    wb: Workbook, fsi_data, dividend_data, interest_data,
+) -> None:
+    ws = wb.create_sheet("ScheduleFSI")
+    sw = _SheetWriter(ws)
+    sw.header(f"Schedule FSI -- foreign source income (FY {fsi_data.financial_year or '?'})")
+    if not fsi_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {fsi_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Head of income", "Country", "TIN", "Income", "Tax paid outside",
+         "Tax payable India", "Tax relief", "DTAA article"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in fsi_data.rows:
+        _str_cell(sw, 1, row.head_of_income)
+        _str_cell(sw, 2, row.country)
+        _str_cell(sw, 3, row.tin)
+        _num_cell(sw, 4, row, "income")
+        _num_cell(sw, 5, row, "tax_paid_outside")
+        _num_cell(sw, 6, row, "tax_payable_india")
+        _num_cell(sw, 7, row, "tax_relief")
+        _str_cell(sw, 8, row.dtaa_article)
+        sw.row += 1
+
+    sw.blank()
+    sw.header("Tie-out check -- Schedule FSI 'Other Sources' income vs Dividend + Interest sheet totals (FY, should tie)")
+    other = fsi_data.other_sources_income
+    div_total = dividend_data.total
+    int_total = interest_data.total
+    combined = div_total + int_total if div_total is not None and int_total is not None else None
+    sw.label_value("Schedule FSI -- Other Sources income", other)
+    sw.label_value("Dividend sheet total", div_total)
+    sw.label_value("Interest sheet total", int_total)
+    sw.label_value("Dividend + Interest combined", combined)
+    if other is not None and combined is not None:
+        sw.label_value("Difference (Other Sources - combined)", other - combined)
+
+
+def write_form67_sheet(wb: Workbook, form67_data) -> None:
+    ws = wb.create_sheet("Form67")
+    sw = _SheetWriter(ws)
+    sw.header(f"Form 67 -- foreign tax credit claim (FY {form67_data.financial_year or '?'})")
+    if not form67_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {form67_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Sr no", "Country", "Source of income", "Income", "Tax paid amount",
+         "Tax paid rate", "DTAA article", "DTAA rate"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in form67_data.rows:
+        _num_cell(sw, 1, row, "sr_no")
+        _str_cell(sw, 2, row.country)
+        _str_cell(sw, 3, row.source_of_income)
+        _num_cell(sw, 4, row, "income")
+        _num_cell(sw, 5, row, "tax_paid_amount")
+        _str_cell(sw, 6, row.tax_paid_rate)
+        _str_cell(sw, 7, row.dtaa_article)
+        _str_cell(sw, 8, row.dtaa_rate)
+        sw.row += 1
+        if row.other_cells:
+            sw.cell(1, "  additional columns (verbatim from source -- header/sub-header labels disagree here)")
+            sw.row += 1
+            for label, val in row.other_cells.items():
+                sw.cell(2, label)
+                sw.cell(3, val)
+                sw.row += 1
+
+
+def write_schedule_tr_sheet(wb: Workbook, tr_data) -> None:
+    ws = wb.create_sheet("ScheduleTR")
+    sw = _SheetWriter(ws)
+    sw.header(f"Schedule TR -- tax relief summary (FY {tr_data.financial_year or '?'})")
+    if not tr_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {tr_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Country", "TIN", "Total taxes paid outside", "Total relief available",
+         "Relief claimed u/s", "DTAA relief", "Non-DTAA relief", "Refunded/credited"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in tr_data.rows:
+        _str_cell(sw, 1, row.country)
+        _str_cell(sw, 2, row.tin)
+        _num_cell(sw, 3, row, "total_taxes_paid_outside")
+        _str_cell(sw, 4, row.total_relief_available)  # usually prose, e.g. "From 'Schedule FSI' sheet: ..."
+        _num_cell(sw, 5, row, "relief_claimed_under_section")
+        _str_cell(sw, 6, row.dtaa_relief)  # usually prose
+        _num_cell(sw, 7, row, "non_dtaa_relief")
+        _str_cell(sw, 8, row.refunded_or_credited)
         sw.row += 1
 
 
@@ -1144,6 +1349,11 @@ def write_workbook(
     business_layout = write_business_sheet(wb, model.business)
     hp_layout = write_house_property_sheet(wb, model.house_property)
     write_schedule_fa_sheet(wb, model.schedule_fa)
+    if model.schedule_fa.foreign_report is not None:
+        _rep = model.schedule_fa.foreign_report
+        write_schedule_fsi_sheet(wb, _rep.schedule_fsi, _rep.dividend, _rep.interest)
+        write_form67_sheet(wb, _rep.form_67)
+        write_schedule_tr_sheet(wb, _rep.schedule_tr)
     os_layout = write_other_sources_sheet(wb, model.other_sources)
     cg_layout = write_capital_gains_sheet(wb, model.capital_gains, rules_layout)
     ei_layout = write_exempt_income_sheet(wb, model.exempt_income)
