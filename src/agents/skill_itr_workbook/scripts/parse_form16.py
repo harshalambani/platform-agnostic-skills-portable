@@ -112,6 +112,16 @@ class Form16Data:
     employer_name: str | None = None
     opted_out_115bac: str | None = None   # "Yes" / "No" as printed on the form
 
+    # Regime derived from opted_out_115bac ("Yes" -> opted OUT of the new
+    # regime -> "old"; "No" -> stayed in the new regime -> "new"). Left
+    # UNSET (None) whenever the election could not be read from the form --
+    # NEVER silently defaulted to either regime, since old vs new produce
+    # materially different tax and a silent default is a filing error.
+    # regime_unparsed_reason is set (human-readable) exactly when regime is
+    # None, mirroring ExtraCertificate.unparsed_reason.
+    regime: str | None = None
+    regime_unparsed_reason: str | None = None
+
     # 1: Gross salary
     s17_1: float | None = None
     s17_2: float | None = None
@@ -273,6 +283,16 @@ def _parse_part_b(text: str, extra_certificates: list) -> Form16Data:
     data.opted_out_115bac = _find_text(
         text, r"Whether opting out of taxation u/s 115BAC\(1A\)\?", ("Yes", "No"),
     )
+    if data.opted_out_115bac == "Yes":
+        data.regime = "old"
+    elif data.opted_out_115bac == "No":
+        data.regime = "new"
+    else:
+        data.regime_unparsed_reason = (
+            "Form 16 does not state a 'Whether opting out of taxation u/s "
+            "115BAC(1A)' Yes/No election (or it could not be extracted) -- "
+            "tax regime cannot be determined from this document"
+        )
 
     data.s17_1 = _find_number(text, r"section 17\(1\)")
     data.s17_2 = _find_number(text, r"section 17\(2\)")

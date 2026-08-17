@@ -501,6 +501,37 @@ def _write_form16_26as_salary_error_banner(ws, row: int, tp_schedule, ncols: int
     return row + 2
 
 
+#: Regime resolution (Form16 tax-regime extraction, PR 2) -- two WARNING-tier
+#: markers, both surfaced only via agent.py's run summary / stderr (no
+#: Excel banner writer of their own -- there is no per-schedule "regime"
+#: object for a banner to hang off, unlike TaxesPaidSchedule above; the
+#: existing "Form16: ..." / "Regime: ..." summary lines are where a filer
+#: actually reads this). Neither flips agent.py's exit code -- like
+#: TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER, these are "worth a
+#: human's attention", not "this workbook may be wrong" (the workbook is
+#: always still fully written using the resolved regime).
+#:
+#: Fires when an explicit --regime-override was supplied AND Form 16 itself
+#: states a determinable regime (via its 115BAC(1A) election) that
+#: DISAGREES with the override. The override always wins -- see
+#: agent.py's _resolve_regime() -- but the disagreement must never be
+#: swallowed silently, since it usually means either the override is wrong
+#: or the wrong Form 16 was supplied.
+REGIME_OVERRIDE_MISMATCH_WARNING_MARKER = "WARNING: regime override does not match Form 16 115BAC(1A) election"
+
+#: Fires when a Form 16 WAS supplied and successfully parsed, but it does
+#: not state a determinable 115BAC(1A) election (missing or unparseable),
+#: AND no explicit --regime-override was given -- so the workbook falls
+#: back to the entity's configured regime_by_ay/default_regime with no
+#: corroboration from the document itself. (When no Form 16 is supplied at
+#: all, relying on the entity config is the normal, expected path and does
+#: NOT fire this -- there is nothing Form16-side to have failed to
+#: determine.) Old vs new regime produce materially different tax, so an
+#: uncorroborated fallback here is a filing error waiting to happen; this
+#: marker is how it gets flagged loudly instead.
+REGIME_UNDETERMINED_WARNING_MARKER = "WARNING: tax regime could not be confirmed from Form 16 or an explicit override"
+
+
 _PARKED_NOTE = "(to be filled)"
 
 #: Human labels for rules.resolve_age_class()'s return values. 'general'
