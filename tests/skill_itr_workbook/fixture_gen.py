@@ -697,8 +697,18 @@ SYN_IND_FORM16_SECOND_GROSS_1D = 200000.00
 SYN_IND_FORM16_SECOND_NET_TAX_21 = 5000.00
 
 
-def _syn_ind_form16_part_b_pages(*, broken_identity: bool = False) -> list[list[str]]:
+def _syn_ind_form16_part_b_pages(
+    *, broken_identity: bool = False, regime_election: str | None = "Yes",
+) -> list[list[str]]:
+    """`regime_election` controls the printed "Whether opting out of taxation
+    u/s 115BAC(1A)?" answer: "Yes" -> old regime, "No" -> new regime, None ->
+    the whole question/answer pair is omitted (simulates a Form 16 that does
+    not state the election at all, so the regime is not determinable)."""
     total_1d = "480000.00" if broken_identity else "500000.00"   # (a)+(b)+(c) != (d) when broken
+    regime_lines = (
+        ["A Whether opting out of taxation u/s 115BAC(1A)?", regime_election]
+        if regime_election is not None else []
+    )
     page1 = [
         "FORM NO. 16",
         "PART B",
@@ -718,8 +728,7 @@ def _syn_ind_form16_part_b_pages(*, broken_identity: bool = False) -> list[list[
         "01-Apr-2024 31-Mar-2025",
         "Annexure - I",
         "Details of Salary Paid and any other income and tax deducted",
-        "A Whether opting out of taxation u/s 115BAC(1A)?",
-        "Yes",
+        *regime_lines,
         "1. Gross Salary Rs.",
         "(a) Salary as per provisions contained in section 17(1)",
         "500000.00",
@@ -867,7 +876,7 @@ def _render_text_pdf(pages: list[list[str]], password: str | None = None) -> byt
 
 def build_syn_ind_form16_pdf(
     *, encrypted: bool = False, two_certificates: bool = False, broken_identity: bool = False,
-    multi_employer_certificates: bool = False,
+    multi_employer_certificates: bool = False, regime_election: str | None = "Yes",
 ) -> bytes:
     """Synthetic SYN-IND Form 16 (TRACES Part B/Annexure-I). 17(1) and net
     tax payable reconcile with the SYN-IND book/HTML's Salary/TDS-on-Salary
@@ -877,7 +886,10 @@ def build_syn_ind_form16_pdf(
     the "flagged not dropped" case); broken_identity=True makes 1(d)'s
     printed total disagree with 17(1)+17(2)+17(3); multi_employer_certificates
     =True prepends a SECOND employer's certificate that has its own full
-    Part B/Annexure-I (for genuine multi-employer aggregation)."""
+    Part B/Annexure-I (for genuine multi-employer aggregation); regime_election
+    controls the printed 115BAC(1A) opt-out answer -- "Yes" (default, old
+    regime), "No" (new regime), or None (question/answer omitted entirely,
+    for the "regime not determinable" case)."""
     pages = []
     if two_certificates:
         pages.extend(_syn_ind_form16_extra_certificate_pages())
@@ -886,7 +898,9 @@ def build_syn_ind_form16_pdf(
     # group (in page order) that matches both markers, so ordering the
     # second full-Part-B employer after the primary keeps the primary
     # selected, with the second employer correctly recorded as "extra".
-    pages.extend(_syn_ind_form16_part_b_pages(broken_identity=broken_identity))
+    pages.extend(_syn_ind_form16_part_b_pages(
+        broken_identity=broken_identity, regime_election=regime_election,
+    ))
     if multi_employer_certificates:
         pages.extend(_syn_ind_form16_second_employer_part_b_pages())
     password = SYN_IND_FORM16_PAN if encrypted else None

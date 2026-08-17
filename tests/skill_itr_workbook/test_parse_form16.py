@@ -59,12 +59,16 @@ def test_plain_fixture_extracts_every_field_and_all_identity_checks_pass(tmp_pat
     assert data.period_from == "01-Apr-2024"
     assert data.period_to == "31-Mar-2025"
     assert data.opted_out_115bac == "Yes"
+    assert data.regime == "old"
     assert data.extra_certificates == []
 
-    # Every numeric field extracted (none left as None).
+    # Every numeric field extracted (none left as None). regime_unparsed_reason
+    # is deliberately excluded: it is populated ONLY when regime could not be
+    # determined (mutually exclusive with regime itself being set -- see the
+    # regime-extraction tests below), so it is expected to stay None here.
     import dataclasses
     for f in dataclasses.fields(data):
-        if f.name in ("identity_checks", "extra_certificates"):
+        if f.name in ("identity_checks", "extra_certificates", "regime_unparsed_reason"):
             continue
         assert getattr(data, f.name) is not None, f"{f.name} was not extracted"
 
@@ -169,6 +173,101 @@ def test_internal_identity_failure_is_flagged_not_corrected(tmp_path):
     # Downstream checks that don't depend on 1(d) still pass.
     passed = {c.label for c in data.identity_checks if c.ok}
     assert "9 = 6+8" in passed
+
+
+# ---------------------------------------------------------------------------
+# parse_form16.py -- tax-regime extraction (PR 2)
+# ---------------------------------------------------------------------------
+
+def test_regime_explicitly_old_when_opted_out_yes(tmp_path):
+    """"Yes" to opting out of 115BAC(1A) means the employee stayed with the
+    OLD regime for TDS purposes -- data.regime must read "old", with no
+    unparsed_reason."""
+    pdf_path = tmp_path / "form16_old.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(regime_election="Yes"))
+    data = pf.parse_form16(str(pdf_path))
+
+    assert data.opted_out_115bac == "Yes"
+    assert data.regime == "old"
+    assert data.regime_unparsed_reason is None
+
+
+def test_regime_explicitly_new_when_opted_out_no(tmp_path):
+    """"No" to opting out of 115BAC(1A) means the employee stayed in the NEW
+    regime -- data.regime must read "new", with no unparsed_reason."""
+    pdf_path = tmp_path / "form16_new.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(regime_election="No"))
+    data = pf.parse_form16(str(pdf_path))
+
+    assert data.opted_out_115bac == "No"
+    assert data.regime == "new"
+    assert data.regime_unparsed_reason is None
+
+
+def test_regime_not_determinable_stays_unset_and_flags(tmp_path):
+    """When the 115BAC(1A) election is missing from the PDF entirely (never
+    printed, or not extractable), regime MUST stay None -- never silently
+    defaulted to either old or new -- and regime_unparsed_reason must be
+    populated so the gap is impossible to miss."""
+    pdf_path = tmp_path / "form16_no_election.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(regime_election=None))
+    data = pf.parse_form16(str(pdf_path))
+
+    assert data.opted_out_115bac is None
+    assert data.regime is None
+    assert data.regime_unparsed_reason
+    assert "115BAC" in data.regime_unparsed_reason
+
+
+# ---------------------------------------------------------------------------
+# agent.py -- regime resolution / consumption (PR 2)
+# ---------------------------------------------------------------------------
+
+def test_agent_run_regime_undetermined_flags_when_no_override(tmp_path):
+    """No --regime-override AND Form 16 does not state a determinable
+    115BAC(1A) election -- the run must fall back to the entity's configured
+    regime (default "new" for a generic/unconfigured entity) but flag the
+    gap loudly via REGIME_UNDETERMINED_WARNING_MARKER, never silently."""
+    import presentation
+
+    html_path = tmp_path / "syn_ind.html"
+    html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
+    form16_path = tmp_path / "form16_no_election.pdf"
+    form16_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(regime_election=None))
+    out_path = tmp_path / "out.xlsx"
+
+    summary = agent.run(
+        str(html_path), str(out_path),
+        mapping_file=str(SYN_IND_MAPPING), form16_pdf=str(form16_path),
+    )
+    assert "Form16: regime NOT determinable" in summary
+    assert presentation.REGIME_UNDETERMINED_WARNING_MARKER in summary
+    assert "(regime=new)" in summary   # generic entity's default_regime, used as fallback
+
+
+def test_agent_run_regime_override_wins_and_disagreement_surfaced(tmp_path):
+    """An explicit --regime-override that disagrees with what Form 16 states
+    must still WIN (it is a deliberate human choice), but the disagreement
+    must be surfaced in the run summary, never swallowed."""
+    import presentation
+
+    html_path = tmp_path / "syn_ind.html"
+    html_path.write_text(fixture_gen.build_syn_ind_html(), encoding="utf-8")
+    form16_path = tmp_path / "form16_old.pdf"
+    # Form 16 states "Yes" (opted out -> old regime); override to "new".
+    form16_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(regime_election="Yes"))
+    out_path = tmp_path / "out.xlsx"
+
+    summary = agent.run(
+        str(html_path), str(out_path),
+        mapping_file=str(SYN_IND_MAPPING), form16_pdf=str(form16_path),
+        regime_override="new",
+    )
+    assert "Form16: regime per 115BAC(1A) election = old." in summary
+    assert "(regime=new)" in summary   # the override wins, not the Form16-parsed "old"
+    assert presentation.REGIME_OVERRIDE_MISMATCH_WARNING_MARKER in summary
+    assert "override='new'" in summary
+    assert "'old'" in summary   # Form16's implied regime named in the warning line
 
 
 # ---------------------------------------------------------------------------

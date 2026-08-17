@@ -241,6 +241,10 @@ def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) 
         f"Form16: employer TAN {data.tan}, certificate {data.certificate_no}, AY {data.assessment_year}.",
         f"Form16: opted out of 115BAC(1A)? {data.opted_out_115bac}",
     ]
+    if data.regime is not None:
+        lines.append(f"Form16: regime per 115BAC(1A) election = {data.regime}.")
+    else:
+        lines.append(f"Form16: regime NOT determinable ({data.regime_unparsed_reason}).")
     if data.extra_certificates:
         lines.append(f"Form16: {len(data.extra_certificates)} extra certificate(s) in this PDF:")
         for c in data.extra_certificates:
@@ -416,6 +420,55 @@ def _resolve_entity(mapping_file: str | None, entities_path: str, entity_key: st
     return configs.EntityProfile(key=key or "UNKNOWN", name=key or "Unknown", pan="", status="Individual")
 
 
+def _resolve_regime(
+    regime_override: str | None, form16_data, entity: "configs.EntityProfile", ay: str,
+) -> tuple[str, list[str]]:
+    """Resolve the regime actually used to build the workbook (PR 2: Form 16
+    tax-regime extraction). Priority, highest first:
+
+      1. An explicit regime_override -- a deliberate human choice, always
+         wins, even when it disagrees with what Form 16 says.
+      2. Form16Data.regime -- derived from the actual signed 115BAC(1A)
+         election on the document itself (see parse_form16.py), more
+         authoritative than a config default because it is the real
+         election for this filing, not a config default.
+      3. The entity's configured regime_by_ay/default_regime (unchanged
+         fallback from before this PR).
+
+    Never silently guesses: when (1) and (2) disagree, or when neither (1)
+    nor a determinable (2) is available and (3) is used as an uncorroborated
+    fallback, a WARNING-tier line (presentation.py's
+    REGIME_OVERRIDE_MISMATCH_WARNING_MARKER /
+    REGIME_UNDETERMINED_WARNING_MARKER) is returned alongside the resolved
+    regime so the disagreement/uncertainty is surfaced in the run summary,
+    never swallowed. Neither warning blocks the build or flips the exit
+    code (see agent.py's main())."""
+    lines: list[str] = []
+    form16_regime = getattr(form16_data, "regime", None) if form16_data is not None else None
+
+    if regime_override:
+        if form16_regime is not None and form16_regime != regime_override:
+            lines.append(
+                f"{presentation.REGIME_OVERRIDE_MISMATCH_WARNING_MARKER} "
+                f"(override={regime_override!r}, Form 16's 115BAC(1A) election implies "
+                f"{form16_regime!r}) -- the explicit override is used; workbook still written -- "
+                "review before filing."
+            )
+        return regime_override, lines
+
+    if form16_regime is not None:
+        return form16_regime, lines
+
+    fallback = entity.regime_by_ay.get(ay, entity.default_regime)
+    if form16_data is not None and getattr(form16_data, "regime_unparsed_reason", None):
+        lines.append(
+            f"{presentation.REGIME_UNDETERMINED_WARNING_MARKER} "
+            f"({form16_data.regime_unparsed_reason}) -- falling back to the entity's configured "
+            f"regime ({fallback!r}), NOT corroborated by Form 16 -- review before filing."
+        )
+    return fallback, lines
+
+
 def _build_and_write_workbook(
     tree, book, result, form16_data, year_key: str | None, failures: list, book_cross_check: list,
     output_path: str, mapping_file: str | None, entity: "configs.EntityProfile",
@@ -451,8 +504,9 @@ def _build_and_write_workbook(
     except rules_engine.RulesError as e:
         return [f"Workbook: rules config unavailable ({e}) -- stub workbook only."]
 
-    regime = regime_override or entity.regime_by_ay.get(_fy_to_ay(year_key), entity.default_regime)
-    audit_case = entity.audit_case_by_ay.get(_fy_to_ay(year_key), entity.audit_case)
+    ay = _fy_to_ay(year_key)
+    regime, regime_lines = _resolve_regime(regime_override, form16_data, entity, ay)
+    audit_case = entity.audit_case_by_ay.get(ay, entity.audit_case)
 
     scrips = {}
     if Path(scrips_path).is_file():
@@ -504,6 +558,7 @@ def _build_and_write_workbook(
         f"Workbook: full schedule model built for {rules.year_label} (regime={regime}), "
         f"written to {Path(output_path).name}.",
     ]
+    lines.extend(regime_lines)
     if result.unmapped:
         n = len(result.unmapped)
         total = sum(leaf.total or 0.0 for leaf in result.unmapped)
@@ -664,6 +719,25 @@ def run(
     default_regime/regime_by_ay for this run only; leave unset/blank to use
     the entity's configured regime.
 
+    PR 2 (Form16 tax-regime extraction): when form16_pdf is supplied and Part
+    B states a "Whether opting out of taxation u/s 115BAC(1A)?" Yes/No
+    election, that election is parsed into a regime too (Yes -> "old", No ->
+    "new") and now feeds this same resolution, in this priority order:
+    regime_override (always wins, even over Form 16) > Form16's own parsed
+    regime (more authoritative than a config default -- it is the actual
+    signed election for this filing) > the entity's configured
+    regime_by_ay/default_regime (unchanged fallback). Regime is NEVER
+    silently defaulted when it cannot be determined: an explicit override
+    that disagrees with what Form 16 states is surfaced as a WARNING line
+    (presentation.REGIME_OVERRIDE_MISMATCH_WARNING_MARKER) in the run
+    summary, and falling back to the entity's config with no corroboration
+    from a parsed Form 16 (its 115BAC(1A) election missing/unparseable) is
+    surfaced as another WARNING line
+    (presentation.REGIME_UNDETERMINED_WARNING_MARKER). Neither warning
+    blocks the build or flips main()'s exit code -- the workbook is always
+    written using the resolved regime; both are "review before filing"
+    signals.
+
     as26_workbook (CF5), when supplied, is the 26AS skill's own output
     workbook (scripts/as26.py reads its Part I sheet). Its transaction
     dates become the authoritative source for the dividend/interest 234C
@@ -812,6 +886,27 @@ def main(argv: list[str] | None = None) -> int:
             f"{presentation.TAXES_PAID_UNCLASSIFIED_SECTION_WARNING_MARKER} -- workbook was "
             "written; review before filing (see WARNING banner on Statement of Income / "
             "TaxesPaid sheets).",
+            file=sys.stderr,
+        )
+    if presentation.REGIME_OVERRIDE_MISMATCH_WARNING_MARKER in summary:
+        # PR 2 -- non-fatal by design (see presentation.py's marker
+        # docstring): the explicit --regime-override always wins and the
+        # workbook is written using it, but the disagreement with Form 16's
+        # own 115BAC(1A) election must still be impossible to miss.
+        print(
+            f"{presentation.REGIME_OVERRIDE_MISMATCH_WARNING_MARKER} -- workbook was written "
+            "using the explicit override; review before filing (see run summary for detail).",
+            file=sys.stderr,
+        )
+    if presentation.REGIME_UNDETERMINED_WARNING_MARKER in summary:
+        # PR 2 -- non-fatal by design: the entity's configured regime is
+        # used, but with no corroboration from Form 16 (its 115BAC(1A)
+        # election missing/unparseable) -- old vs new regime are materially
+        # different filings, so this must be surfaced, never silent.
+        print(
+            f"{presentation.REGIME_UNDETERMINED_WARNING_MARKER} -- workbook was written using "
+            "the entity's configured regime, uncorroborated by Form 16; review before filing "
+            "(see run summary for detail).",
             file=sys.stderr,
         )
     return exit_code
