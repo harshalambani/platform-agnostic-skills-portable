@@ -113,6 +113,11 @@ inputs:
     label: "26AS workbook (optional, feeds TDS tie-out + 234C quarters)"
     file_types: [".xlsx"]
     required: false
+  - name: "foreign_report_xlsx"
+    type: "file"
+    label: "Foreign broker consolidated tax report (optional, fills Schedule FA/FSI/Form 67/Schedule TR)"
+    file_types: [".xlsx"]
+    required: false
 
 run_args:
   bs_html: "{inputs.bs_html}"
@@ -123,6 +128,7 @@ run_args:
   mapping_file: "{inputs.mapping_file}"
   form16_pdf: "{inputs.form16_pdf}"
   as26_workbook: "{inputs.as26_workbook}"
+  foreign_report_xlsx: "{inputs.foreign_report_xlsx}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
@@ -170,7 +176,14 @@ help:
     available, additionally cross-checks 17(1) gross salary against
     SALARY_GROSS and net tax payable against TAXPAID_TDS_SALARY. If a 26AS
     workbook is also supplied, ties out reported TDS by quarter and feeds
-    the 234C dividend-quarter buckets. The Regime dropdown overrides the
+    the 234C dividend-quarter buckets. If a foreign broker consolidated tax
+    report is also supplied, parses Schedule FA (foreign assets, one row
+    per acquisition lot), Schedule FSI (foreign-sourced income), Form 67
+    (foreign tax credit claim), and Schedule TR (tax relief summary), and
+    writes them as their own labelled sheets; the book-derived AL_FOREIGN
+    roll-up keeps running unchanged as an independent, separately labelled
+    cross-check beneath, never merged into the parsed figures. Absent this
+    input, Schedule FA output is unchanged from before. The Regime dropdown overrides the
     entity's configured regime for this run only (leave blank to use the
     entity's default for the selected AY). Marginal relief, surcharge caps,
     age-linked slabs/deductions, and every rate/cap/section referenced in
@@ -210,7 +223,7 @@ help:
   steps:
     - "Pick the Balance Sheet (eguile) HTML export."
     - "Select the Entity and Assessment Year from the dropdowns."
-    - "Optionally supply the GnuCash book, entity mapping, Form 16 PDF, and/or 26AS workbook."
+    - "Optionally supply the GnuCash book, entity mapping, Form 16 PDF, 26AS workbook, and/or a foreign broker consolidated tax report."
     - "Click Run to build the workbook and print the verification summary."
   outputs:
     folder: "Data/outputs/"
@@ -224,9 +237,13 @@ help:
     the salary parse + internal consistency checks, plus the Book<->Form16
     cross-checks when mapping_file is also supplied; the decryption
     password is auto-derived from the selected entity's PAN. as26_workbook
-    ties out TDS by quarter and feeds 234C dividend-quarter bucketing. If
-    the Entity/Assessment Year dropdowns look stale after editing
-    entities.yaml or the rules config, use the refresh button beside them.
+    ties out TDS by quarter and feeds 234C dividend-quarter bucketing.
+    foreign_report_xlsx fills Schedule FA/FSI/Form 67/Schedule TR from the
+    broker's own report; any cell the source left as a placeholder or
+    instructional prose is rendered as an explicit flagged string, never
+    left blank or coerced to zero. If the Entity/Assessment Year dropdowns
+    look stale after editing entities.yaml or the rules config, use the
+    refresh button beside them.
   troubleshooting:
     - problem: "\"file truncated -- re-export\" error."
       fix: "The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash."
