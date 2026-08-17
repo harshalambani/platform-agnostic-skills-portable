@@ -688,6 +688,14 @@ SYN_IND_FORM16_CERT = "SYNCERT1"
 SYN_IND_FORM16_EXTRA_TAN = "OLDE00002E"
 SYN_IND_FORM16_EXTRA_CERT = "OLDCERT2"
 
+# A second employer whose certificate DOES carry a full Part B/Annexure-I
+# salary computation (genuine multi-employer case, distinct from the
+# Part-A-only "unparseable extra" fixture above).
+SYN_IND_FORM16_SECOND_TAN = "SYNE00003E"
+SYN_IND_FORM16_SECOND_CERT = "SYNCERT3"
+SYN_IND_FORM16_SECOND_GROSS_1D = 200000.00
+SYN_IND_FORM16_SECOND_NET_TAX_21 = 5000.00
+
 
 def _syn_ind_form16_part_b_pages(*, broken_identity: bool = False) -> list[list[str]]:
     total_1d = "480000.00" if broken_identity else "500000.00"   # (a)+(b)+(c) != (d) when broken
@@ -796,6 +804,41 @@ def _syn_ind_form16_extra_certificate_pages() -> list[list[str]]:
     return [page1, page2]
 
 
+def _syn_ind_form16_second_employer_part_b_pages() -> list[list[str]]:
+    """A second employer's certificate that DOES carry its own full Part B /
+    Annexure-I salary computation -- exercises genuine multi-employer
+    aggregation in parse_form16.py (GAP A), distinct from the Part-A-only
+    "unparseable extra" fixture above."""
+    gross = f"{SYN_IND_FORM16_SECOND_GROSS_1D:.2f}"
+    net_tax = f"{SYN_IND_FORM16_SECOND_NET_TAX_21:.2f}"
+    page1 = [
+        "FORM NO. 16",
+        "PART B",
+        "Certificate under section 203 of the Income-tax Act, 1961",
+        f"Certificate No. {SYN_IND_FORM16_SECOND_CERT}",
+        f"TAN of Employer:{SYN_IND_FORM16_SECOND_TAN} PAN of Employee:{SYN_IND_FORM16_PAN} "
+        f"Assessment Year:2025-26",
+        "Name and address of the Employer/Specified Bank",
+        "SECOND SYNTHETIC EMPLOYER PRIVATE LIMITED",
+        "Annexure - I",
+        "Details of Salary Paid and any other income and tax deducted",
+        "1. Gross Salary Rs.",
+        "(a) Salary as per provisions contained in section 17(1)",
+        gross,
+        "(b) 0.00",
+        "(c) 0.00",
+        f"(d) Total {gross}",
+        "(e) Reported total amount of salary received from other employer(s) 0.00",
+        "17. Tax payable (13+15+16-14)",
+        net_tax,
+        f"21. Net tax payable (17-18-19-20) {net_tax}",
+        "Verification",
+        "I, SECOND SYNTHETIC AUTHORISED SIGNATORY, do hereby certify that the information",
+        "given above is true, complete and correct.",
+    ]
+    return [page1]
+
+
 def _render_text_pdf(pages: list[list[str]], password: str | None = None) -> bytes:
     """Render `pages` (list of pages, each a list of text lines) to PDF bytes
     with reportlab -- a real text layer (not a raster image), so pdfplumber
@@ -824,17 +867,28 @@ def _render_text_pdf(pages: list[list[str]], password: str | None = None) -> byt
 
 def build_syn_ind_form16_pdf(
     *, encrypted: bool = False, two_certificates: bool = False, broken_identity: bool = False,
+    multi_employer_certificates: bool = False,
 ) -> bytes:
     """Synthetic SYN-IND Form 16 (TRACES Part B/Annexure-I). 17(1) and net
     tax payable reconcile with the SYN-IND book/HTML's Salary/TDS-on-Salary
     leaves. encrypted=True password-protects it with SYN_IND_FORM16_PAN
     (matching Data/itr/entities.example.yaml); two_certificates=True prepends
-    an unrelated second certificate's pages; broken_identity=True makes
-    1(d)'s printed total disagree with 17(1)+17(2)+17(3)."""
+    an unrelated second certificate's pages (Part A only -- unparseable, for
+    the "flagged not dropped" case); broken_identity=True makes 1(d)'s
+    printed total disagree with 17(1)+17(2)+17(3); multi_employer_certificates
+    =True prepends a SECOND employer's certificate that has its own full
+    Part B/Annexure-I (for genuine multi-employer aggregation)."""
     pages = []
     if two_certificates:
         pages.extend(_syn_ind_form16_extra_certificate_pages())
+    # The primary certificate's pages must come first when both certificates
+    # have their own Part B/Annexure-I -- selection picks the first TAN
+    # group (in page order) that matches both markers, so ordering the
+    # second full-Part-B employer after the primary keeps the primary
+    # selected, with the second employer correctly recorded as "extra".
     pages.extend(_syn_ind_form16_part_b_pages(broken_identity=broken_identity))
+    if multi_employer_certificates:
+        pages.extend(_syn_ind_form16_second_employer_part_b_pages())
     password = SYN_IND_FORM16_PAN if encrypted else None
     return _render_text_pdf(pages, password=password)
 
@@ -874,4 +928,7 @@ if __name__ == "__main__":
     (out_dir / "syn_ind_form16_encrypted.pdf").write_bytes(build_syn_ind_form16_pdf(encrypted=True))
     (out_dir / "syn_ind_form16_two_certs.pdf").write_bytes(build_syn_ind_form16_pdf(two_certificates=True))
     (out_dir / "syn_ind_form16_broken_identity.pdf").write_bytes(build_syn_ind_form16_pdf(broken_identity=True))
+    (out_dir / "syn_ind_form16_multi_employer.pdf").write_bytes(
+        build_syn_ind_form16_pdf(multi_employer_certificates=True)
+    )
     print("Wrote fixtures to", out_dir)

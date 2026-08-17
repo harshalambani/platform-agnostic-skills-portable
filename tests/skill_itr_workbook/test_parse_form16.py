@@ -11,6 +11,7 @@ presence and check pass/fail (the real corpus is for local eyes only).
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -26,6 +27,7 @@ for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
+import as26 as as26_engine  # noqa: E402
 import parse_eguile as pe  # noqa: E402
 import parse_form16 as pf  # noqa: E402
 import verify as book_verify  # noqa: E402
@@ -33,6 +35,10 @@ import mapping  # noqa: E402
 import configs  # noqa: E402
 import fixture_gen  # noqa: E402
 import agent  # noqa: E402
+
+# Minimal tds_sections map, same shape rules.common["tds_sections"] provides
+# (see test_schedules.py's _TDS_SECTIONS) -- only "salary" matters here.
+_TDS_SECTIONS = {"salary": ["192", "192A"]}
 
 SYN_IND_MAPPING = FIXTURES / "syn_ind.mapping.yaml"
 
@@ -85,7 +91,10 @@ def test_correct_password_decrypts_and_parses(tmp_path):
     assert data.s17_1 == 500000.00
 
 
-def test_two_certificate_pdf_selects_part_b_and_flags_the_extra(tmp_path):
+def test_two_certificate_pdf_flags_unparseable_extra_not_dropped(tmp_path):
+    """The extra certificate here is Part-A-only (no Part B/Annexure-I) --
+    it must be surfaced as `parsed=False` with a reason, never dropped and
+    never folded into the aggregate totals as if it were zero."""
     pdf_path = tmp_path / "form16_two.pdf"
     pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(two_certificates=True))
     data = pf.parse_form16(str(pdf_path))
@@ -93,9 +102,53 @@ def test_two_certificate_pdf_selects_part_b_and_flags_the_extra(tmp_path):
     assert data.tan == fixture_gen.SYN_IND_FORM16_TAN
     assert data.identity_ok
     assert len(data.extra_certificates) == 1
-    cert_no, tan = data.extra_certificates[0]
-    assert tan == fixture_gen.SYN_IND_FORM16_EXTRA_TAN
-    assert cert_no == fixture_gen.SYN_IND_FORM16_EXTRA_CERT
+
+    extra = data.extra_certificates[0]
+    assert extra.tan == fixture_gen.SYN_IND_FORM16_EXTRA_TAN
+    assert extra.certificate_no == fixture_gen.SYN_IND_FORM16_EXTRA_CERT
+    assert extra.parsed is False
+    assert extra.unparsed_reason
+    assert extra.gross_salary_1d is None
+    assert extra.tds_net_tax_payable_21 is None
+
+    assert data.unparsed_certificates == [extra]
+
+    # The unparsed certificate is EXCLUDED from the aggregate, not treated
+    # as zero -- the aggregate is exactly the primary certificate's own
+    # figures, same as the single-employer case.
+    assert data.aggregate_gross_salary == data.total_1d
+    assert data.aggregate_salary_tds == data.net_tax_payable_21
+
+
+def test_multi_employer_pdf_aggregates_summed_salary_and_tds(tmp_path):
+    """A genuine second employer certificate (its own full Part B /
+    Annexure-I) must be parsed independently and its figures summed into the
+    aggregate totals, with the per-employer breakdown still visible."""
+    pdf_path = tmp_path / "form16_multi.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf(multi_employer_certificates=True))
+    data = pf.parse_form16(str(pdf_path))
+
+    assert data.tan == fixture_gen.SYN_IND_FORM16_TAN
+    assert data.identity_ok
+    assert len(data.extra_certificates) == 1
+
+    extra = data.extra_certificates[0]
+    assert extra.tan == fixture_gen.SYN_IND_FORM16_SECOND_TAN
+    assert extra.certificate_no == fixture_gen.SYN_IND_FORM16_SECOND_CERT
+    assert extra.parsed is True
+    assert extra.unparsed_reason is None
+    assert extra.gross_salary_1d == fixture_gen.SYN_IND_FORM16_SECOND_GROSS_1D
+    assert extra.tds_net_tax_payable_21 == fixture_gen.SYN_IND_FORM16_SECOND_NET_TAX_21
+    assert data.unparsed_certificates == []
+
+    # Per-employer breakdown remains visible (primary certificate's own
+    # fields are untouched by the aggregation).
+    assert data.total_1d == 500000.00
+    assert data.net_tax_payable_21 == 25000.00
+
+    # Aggregate is the sum across both employers.
+    assert data.aggregate_gross_salary == 500000.00 + fixture_gen.SYN_IND_FORM16_SECOND_GROSS_1D
+    assert data.aggregate_salary_tds == 25000.00 + fixture_gen.SYN_IND_FORM16_SECOND_NET_TAX_21
 
 
 def test_internal_identity_failure_is_flagged_not_corrected(tmp_path):
@@ -164,6 +217,94 @@ def test_cross_check_form16_reports_both_values_on_mismatch(tmp_path, syn_ind_re
 def test_cross_check_form16_empty_when_no_form16():
     tree = pe.parse_html(fixture_gen.build_syn_ind_html())
     assert book_verify.cross_check_form16(tree, {}, None) == []
+
+
+# ---------------------------------------------------------------------------
+# verify.py -- Form16<->26AS s.192 salary TDS cross-check (GAP B)
+# ---------------------------------------------------------------------------
+
+def test_cross_check_form16_26as_salary_agrees_when_matching(tmp_path):
+    pdf_path = tmp_path / "form16.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf())
+    data = pf.parse_form16(str(pdf_path))
+    assert data.tan == fixture_gen.SYN_IND_FORM16_TAN
+    assert data.net_tax_payable_21 == 25000.00
+
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction(
+            fixture_gen.SYN_IND_FORM16_TAN, "Synthetic Employer Pvt Ltd", "192",
+            date(2024, 6, 1), 500000.0, 25000.0, 25000.0,
+        ),
+    ])
+
+    results = book_verify.cross_check_form16_26as_salary(data, as26_data, _TDS_SECTIONS)
+    assert len(results) == 1
+    assert results[0].tan == fixture_gen.SYN_IND_FORM16_TAN
+    assert results[0].ok
+
+    summary = book_verify.summarize_form16_26as_salary(results)
+    assert "0 mismatch" in summary
+
+
+def test_cross_check_form16_26as_salary_fails_loud_on_mismatch(tmp_path):
+    pdf_path = tmp_path / "form16.pdf"
+    pdf_path.write_bytes(fixture_gen.build_syn_ind_form16_pdf())
+    data = pf.parse_form16(str(pdf_path))
+    assert data.net_tax_payable_21 == 25000.00
+
+    # 26AS shows less TDS deposited under s.192 than Form16 claims was
+    # deducted for the same TAN -- a real filing risk, must never be
+    # silently accepted.
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction(
+            fixture_gen.SYN_IND_FORM16_TAN, "Synthetic Employer Pvt Ltd", "192",
+            date(2024, 6, 1), 500000.0, 20000.0, 20000.0,
+        ),
+    ])
+
+    results = book_verify.cross_check_form16_26as_salary(data, as26_data, _TDS_SECTIONS)
+    assert len(results) == 1
+    r = results[0]
+    assert not r.ok
+    assert r.form16_tds == 25000.00
+    assert r.as26_tds == 20000.00
+
+    summary = book_verify.summarize_form16_26as_salary(results)
+    assert "MISMATCH" in summary
+    assert f"{r.form16_tds:.2f}" in summary
+    assert f"{r.as26_tds:.2f}" in summary
+
+
+def test_cross_check_form16_26as_salary_flags_tan_with_no_parsed_form16():
+    # A TAN present in 26AS section 192 with no successfully parsed Form16
+    # certificate for it must still surface as a result (form16_tds=None,
+    # .ok forced False) -- never silently dropped from the comparison.
+    as26_data = as26_engine.As26Data(transactions=[
+        as26_engine.As26Transaction(
+            "UNKNOWNTAN1", "Unmatched Employer Pvt Ltd", "192",
+            date(2024, 6, 1), 300000.0, 15000.0, 15000.0,
+        ),
+    ])
+    data = pf.Form16Data()  # no tan, no net_tax_payable_21 -- nothing parsed
+
+    results = book_verify.cross_check_form16_26as_salary(data, as26_data, _TDS_SECTIONS)
+    assert len(results) == 1
+    r = results[0]
+    assert r.tan == "UNKNOWNTAN1"
+    assert r.form16_tds is None
+    assert r.as26_tds == 15000.00
+    assert not r.ok
+
+    summary = book_verify.summarize_form16_26as_salary(results)
+    assert "MISMATCH" in summary
+    assert "no parsed Form16 certificate" in summary
+
+
+def test_cross_check_form16_26as_salary_empty_when_nothing_to_compare():
+    assert book_verify.cross_check_form16_26as_salary(None, None, _TDS_SECTIONS) == []
+    data = pf.Form16Data(tan=fixture_gen.SYN_IND_FORM16_TAN, net_tax_payable_21=25000.00)
+    assert book_verify.cross_check_form16_26as_salary(data, None, _TDS_SECTIONS) == []
+    assert book_verify.cross_check_form16_26as_salary(None, as26_engine.As26Data(), _TDS_SECTIONS) == []
 
 
 # ---------------------------------------------------------------------------

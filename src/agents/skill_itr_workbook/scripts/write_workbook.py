@@ -884,6 +884,7 @@ def write_reconciliation_sheet(
     as26_available: bool = False, as26_tie_out_ok: bool = True, as26_conflicts: list | None = None,
     resolved: dict | None = None, mapping_entries: dict | None = None,
     salary_reconciliation_ok: bool = True,
+    form16_26as_salary: list | None = None,
 ) -> None:
     ws = wb.create_sheet("Reconciliation")
     sw = _SheetWriter(ws)
@@ -956,6 +957,16 @@ def write_reconciliation_sheet(
     sw.header("Book<->Form16 cross-check")
     for r in form16_cross_check:
         sw.label_value(r.label, "OK" if r.ok else f"MISMATCH mapped={r.mapped_total:.2f} form16={r.form16_total:.2f}", number_format=None)
+    sw.blank()
+
+    sw.header("Form16<->26AS cross-check (s.192 salary TDS)")
+    for r in form16_26as_salary or []:
+        form16_str = f"{r.form16_tds:.2f}" if r.form16_tds is not None else "no parsed Form16 certificate"
+        sw.label_value(
+            f"TAN {r.tan}",
+            "OK" if r.ok else f"MISMATCH form16={form16_str} 26AS={r.as26_tds:.2f}",
+            number_format=None,
+        )
     sw.blank()
 
     sw.header(f"Unmapped accounts ({len(unmapped)})")
@@ -1169,6 +1180,7 @@ def write_workbook(
         model.taxes_paid.as26_available, model.taxes_paid.tie_out_ok, model.taxes_paid.tie_out_conflicts,
         resolved, mapping_entries,
         salary_reconciliation_ok=model.salary.reconciliation_ok,
+        form16_26as_salary=model.taxes_paid.form16_26as_salary_results,
     )
 
     write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)
