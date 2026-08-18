@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -216,11 +217,164 @@ class OtherSourcesSchedule:
     interest_quarters_source: str = "book"   # "book" | "26AS" (CF5)
     slbs: float = 0.0
     taxable_total: float = 0.0
+    # Foreign broker report dividends (parse_foreign.py) -- kept OFF
+    # dividend_gross/taxable_total deliberately (see build_other_sources'
+    # docstring below): the GnuCash book may already tag the same receipts
+    # under OS_DIVIDEND, so silently summing would double-count income on a
+    # tax return. Every field here defaults to the "absent" state so a run
+    # with no foreign_report supplied is byte-identical to before this field
+    # set existed.
+    foreign_dividend_gross: float | None = None
+    foreign_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
+    foreign_dividend_quarter_flags: list = field(default_factory=lambda: [None] * 5)
+    foreign_deemed_dividend_gross: float | None = None
+    foreign_deemed_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
+    foreign_dividend_source: str | None = None   # "broker report" when populated, else None
+
+
+#: The two dividend series parse_foreign.py's Dividend sheet quarterly block
+#: can carry -- see QuarterlyBucket.series' own docstring. Ordinary foreign
+#: dividend (s.56 Other Sources) vs. deemed dividend under s.2(22)(f), which
+#: is taxed differently and must never be summed into the ordinary series.
+_FOREIGN_DIVIDEND_SERIES_ORDINARY = "Dividend Income"
+_FOREIGN_DIVIDEND_SERIES_DEEMED = "Dividend u/s 2(22)(f)"
+
+_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _foreign_report_fy_start_year(foreign_report) -> int | None:
+    """The report's financial year (e.g. '2025-26') as its starting
+    calendar year (2025), the same convention parse_gnucash.fy_window uses
+    for `year_key`. Prefers the Dividend sheet's own financial_year (it is
+    what the quarterly labels below actually describe); falls back to the
+    report-level financial_year. Returns None -- never a guess -- when
+    neither is present or the string doesn't start with a 4-digit year."""
+    fy = (foreign_report.dividend.financial_year if foreign_report.dividend else None) \
+        or foreign_report.financial_year
+    if not fy or len(fy) < 4 or not fy[:4].isdigit():
+        return None
+    return int(fy[:4])
+
+
+def _parse_foreign_period_end_date(label: str | None, fy_start_year: int) -> date | None:
+    """Parses a period label like '16-Jun to 15-Sep' into the calendar date
+    of its END ('15-Sep'), which is what determines its 234C window.
+    Jan/Feb/Mar end-dates belong to fy_start_year + 1 (mirrors quarters.py's
+    own threshold convention: the FY's final 234C window straddles the
+    calendar-year boundary). Returns None -- never a guess -- when the label
+    doesn't match the expected 'D-Mon to D-Mon' shape or the month/day is
+    not a real calendar date."""
+    if not label:
+        return None
+    m = re.search(r"to\s*(\d{1,2})-([A-Za-z]{3})", label)
+    if not m:
+        return None
+    month = _MONTH_ABBR.get(m.group(2).lower())
+    if month is None:
+        return None
+    try:
+        day = int(m.group(1))
+        year = fy_start_year + 1 if month in (1, 2, 3) else fy_start_year
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _series_gross(quarterly: list, series_name: str) -> float | None:
+    """Sum of `.amount` over every bucket in `quarterly` whose `.series`
+    matches `series_name`, skipping None (flagged/placeholder) buckets.
+    None (never 0.0) when every matching bucket was flagged, or there were
+    none at all -- a 0 on a tax return is an assertion of fact (parse_
+    foreign.parse_numeric_cell's own rule) and this module never invents
+    one either."""
+    vals = [b.amount for b in quarterly if b.series == series_name and b.amount is not None]
+    return sum(vals) if vals else None
+
+
+def _map_foreign_dividend_quarters(quarterly: list, fy_start_year: int | None, warnings: list):
+    """Maps parse_foreign's flat list of QuarterlyBucket (2 series x up to 5
+    periods, order/completeness not guaranteed by the vendor -- D2) onto the
+    five 234C windows, by parsing each label's END date and resolving it
+    through quarters._bucket_index -- never by position, so there is exactly
+    one definition of the 234C windows in the codebase. A bucket whose
+    amount is None (flag set) stays None in the mapped list; a label that
+    can't be parsed into a date, or an unrecognised series name, is never
+    guessed -- it is skipped and a warning is appended to `warnings` (which
+    callers pass as the live `ForeignIncomeReport.warnings` list, so it
+    surfaces on the ScheduleFA sheet's Parser warnings block same as every
+    other parse_foreign warning). Returns (quarters, flags, deemed_quarters,
+    deemed_flags), each a list[float | None] / list[str | None] of length 5.
+
+    Collision handling: if two buckets of the SAME series ever resolve to the
+    SAME 234C window (e.g. a vendor re-issuing overlapping periods), a plain
+    `target_q[idx] = bucket.amount` would let the second silently clobber the
+    first -- exactly the "silent zero" failure class this feature already
+    had one real defect from. Instead the amounts are SUMMED (both periods'
+    income is real and neither should vanish) and a warning is appended
+    naming both period labels and the window, so the collision is visible
+    even though no income is lost. If either side is None (flagged/
+    placeholder), the numeric side wins and the flag is preserved via
+    `_flag or` fallback rather than being dropped."""
+    quarters: list = [None] * 5
+    flags: list = [None] * 5
+    quarter_labels: list = [None] * 5
+    deemed_quarters: list = [None] * 5
+    deemed_flags: list = [None] * 5
+    deemed_labels: list = [None] * 5
+    for bucket in quarterly:
+        if bucket.series == _FOREIGN_DIVIDEND_SERIES_ORDINARY:
+            target_q, target_f, target_labels = quarters, flags, quarter_labels
+        elif bucket.series == _FOREIGN_DIVIDEND_SERIES_DEEMED:
+            target_q, target_f, target_labels = deemed_quarters, deemed_flags, deemed_labels
+        else:
+            warnings.append(
+                f"Foreign dividends: unrecognised quarterly series {bucket.series!r} "
+                f"(period {bucket.label!r}) -- not summed into either series."
+            )
+            continue
+        if fy_start_year is None:
+            continue   # FY unresolvable -- caller already warned once, not per-bucket
+        end_date = _parse_foreign_period_end_date(bucket.label, fy_start_year)
+        if end_date is None:
+            warnings.append(
+                f"Foreign dividends: could not parse period label {bucket.label!r} into a date -- "
+                "234C window left unfilled rather than guessed."
+            )
+            continue
+        idx = quarters_engine._bucket_index(end_date, fy_start_year)
+        if target_labels[idx] is None:
+            target_q[idx] = bucket.amount
+            target_f[idx] = bucket.flag
+            target_labels[idx] = bucket.label
+        else:
+            # Collision: a prior bucket of this same series already mapped to
+            # this window. Sum rather than overwrite -- see docstring.
+            prior_amount = target_q[idx]
+            if prior_amount is None and bucket.amount is None:
+                combined = None
+            elif prior_amount is None:
+                combined = bucket.amount
+            elif bucket.amount is None:
+                combined = prior_amount
+            else:
+                combined = prior_amount + bucket.amount
+            warnings.append(
+                f"Foreign dividends: periods {target_labels[idx]!r} and {bucket.label!r} "
+                f"both resolved to 234C window Q{idx + 1} for series {bucket.series!r} -- "
+                "amounts summed rather than the second silently overwriting the first."
+            )
+            target_q[idx] = combined
+            target_f[idx] = target_f[idx] or bucket.flag
+            target_labels[idx] = f"{target_labels[idx]} + {bucket.label}"
+    return quarters, flags, deemed_quarters, deemed_flags
 
 
 def build_other_sources(
     resolved: dict, node_by_guid: dict, book: Book | None, year_key: str | None,
-    rules: rules_engine.RulesConfig | None = None, as26_data=None,
+    rules: rules_engine.RulesConfig | None = None, as26_data=None, foreign_report=None,
 ) -> OtherSourcesSchedule:
     sb = _sum_tag(resolved, node_by_guid, "OS_INTEREST_SB")
     bank = _sum_tag(resolved, node_by_guid, "OS_INTEREST_BANK")
@@ -266,6 +420,37 @@ def build_other_sources(
             int_quarters, int_gross_up_flags = buckets.buckets, buckets.gross_up_flags
 
     taxable_total = sb + bank + nbfc + epf + refund_interest + dividend + slbs
+
+    # Foreign broker report dividends (D1-D4) -- deliberately NOT folded into
+    # `dividend`/`taxable_total` above; see OtherSourcesSchedule's docstring.
+    foreign_dividend_gross = None
+    foreign_dividend_quarters: list = [None] * 5
+    foreign_dividend_quarter_flags: list = [None] * 5
+    foreign_deemed_dividend_gross = None
+    foreign_deemed_dividend_quarters: list = [None] * 5
+    foreign_dividend_source = None
+
+    if foreign_report is not None and foreign_report.dividend is not None:
+        div_data = foreign_report.dividend
+        if div_data.quarterly:
+            foreign_dividend_source = "broker report"
+            foreign_dividend_gross = _series_gross(div_data.quarterly, _FOREIGN_DIVIDEND_SERIES_ORDINARY)
+            foreign_deemed_dividend_gross = _series_gross(div_data.quarterly, _FOREIGN_DIVIDEND_SERIES_DEEMED)
+            fy_start_year = _foreign_report_fy_start_year(foreign_report)
+            if fy_start_year is None:
+                foreign_report.warnings.append(
+                    "Foreign dividends: could not determine the report's financial year -- "
+                    "234C quarter-bucket mapping skipped (gross totals above are still computed)."
+                )
+            (foreign_dividend_quarters, foreign_dividend_quarter_flags,
+             foreign_deemed_dividend_quarters, _deemed_flags) = _map_foreign_dividend_quarters(
+                div_data.quarterly, fy_start_year, foreign_report.warnings,
+            )
+        else:
+            foreign_report.warnings.append(
+                "Foreign dividends: report parsed but yielded zero quarterly dividend buckets."
+            )
+
     return OtherSourcesSchedule(
         interest_sb=sb, interest_bank=bank, interest_nbfc=nbfc, interest_epf_taxable=epf,
         refund_interest=refund_interest, refund_principal_excluded=refund_principal,
@@ -274,6 +459,12 @@ def build_other_sources(
         interest_quarters=int_quarters, interest_gross_up_flags=int_gross_up_flags,
         interest_quarters_source=int_source,
         slbs=slbs, taxable_total=taxable_total,
+        foreign_dividend_gross=foreign_dividend_gross,
+        foreign_dividend_quarters=foreign_dividend_quarters,
+        foreign_dividend_quarter_flags=foreign_dividend_quarter_flags,
+        foreign_deemed_dividend_gross=foreign_deemed_dividend_gross,
+        foreign_deemed_dividend_quarters=foreign_deemed_dividend_quarters,
+        foreign_dividend_source=foreign_dividend_source,
     )
 
 
@@ -1244,7 +1435,9 @@ def build_all_schedules(
     salary = build_salary(resolved, node_by_guid, form16, rules, regime)
     business = build_business(resolved, node_by_guid)
     house_property = build_house_property(resolved, node_by_guid, rules)
-    other_sources = build_other_sources(resolved, node_by_guid, book, year_key, rules, as26_data)
+    other_sources = build_other_sources(
+        resolved, node_by_guid, book, year_key, rules, as26_data, foreign_report=foreign_report,
+    )
     capital_gains = build_capital_gains(resolved, node_by_guid, book, year_key, rules, scrips, fmv_tables)
     exempt_income = build_exempt_income(resolved, node_by_guid)
     taxes_paid = build_taxes_paid(resolved, node_by_guid, rules, as26_data, book, year_key)

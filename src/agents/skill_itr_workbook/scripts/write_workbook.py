@@ -378,6 +378,47 @@ def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> di
         for i, q in enumerate(os_.interest_quarters, start=1)
     ]
     layout["slbs"] = sw.label_value("SLBS income", os_.slbs)
+
+    # Foreign broker report dividends (parse_foreign.py) -- D1: deliberately
+    # NOT summed into "Dividend income (gross)"/"Taxable Other Sources total"
+    # above, since the GnuCash book may already tag the same receipts under
+    # OS_DIVIDEND; silently summing would double-count income on a tax
+    # return. Labelled loudly as excluded so a reader can't mistake this
+    # block for part of the total just above it.
+    sw.blank()
+    sw.header("Foreign dividends (broker report) -- NOT included in the Other Sources total above")
+    if os_.foreign_dividend_source is None:
+        sw.label_value("Source", "(no foreign broker report supplied, or none parsed)", number_format=None)
+    else:
+        sw.label_value("Source", os_.foreign_dividend_source, number_format=None)
+        layout["foreign_dividend"] = sw.label_value(
+            "  Ordinary foreign dividend (gross, s.56)",
+            os_.foreign_dividend_gross if os_.foreign_dividend_gross is not None else "(no numeric total -- see quarter flags below)",
+            number_format=INR_FORMAT if os_.foreign_dividend_gross is not None else None,
+        ).coordinate
+        fq_cells = []
+        for i in range(5):
+            flag = os_.foreign_dividend_quarter_flags[i]
+            value = flag if flag else os_.foreign_dividend_quarters[i]
+            fq_cells.append(sw.label_value(
+                f"  Foreign dividend Q{i + 1} (234C bucket)", value,
+                number_format=None if flag else INR_FORMAT,
+            ).coordinate)
+        layout["foreign_dividend_q"] = fq_cells
+        layout["foreign_deemed_dividend"] = sw.label_value(
+            "  Deemed dividend (s.2(22)(f), gross -- kept separate, taxed differently)",
+            os_.foreign_deemed_dividend_gross if os_.foreign_deemed_dividend_gross is not None else "(no numeric total)",
+            number_format=INR_FORMAT if os_.foreign_deemed_dividend_gross is not None else None,
+        ).coordinate
+        fdq_cells = []
+        for i in range(5):
+            value = os_.foreign_deemed_dividend_quarters[i]
+            fdq_cells.append(sw.label_value(
+                f"  Deemed dividend Q{i + 1} (234C bucket)",
+                value if value is not None else "(none/flagged)",
+                number_format=INR_FORMAT if value is not None else None,
+            ).coordinate)
+        layout["foreign_deemed_dividend_q"] = fdq_cells
     sw.cell(1, "Taxable Other Sources total")
     sw.cell(2, os_.taxable_total, number_format=INR_FORMAT)
     layout["taxable_total"] = f"B{sw.row}"
