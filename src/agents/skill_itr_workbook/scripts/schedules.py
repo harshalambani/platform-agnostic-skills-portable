@@ -1021,16 +1021,26 @@ class ScheduleFARow:
 @dataclass
 class ScheduleFASchedule:
     rows: list = field(default_factory=list)
+    # Optional parse_foreign.ForeignIncomeReport, set only when a foreign
+    # broker consolidated tax report was supplied for this run. `rows`
+    # above (the AL_FOREIGN book roll-up) keeps running unchanged either
+    # way, as an independent, separately-labelled cross-check -- it is
+    # never merged into the parsed report's own figures. Left untyped here
+    # (rather than importing parse_foreign) to keep this module's existing
+    # bare-name import list free of a new dependency it doesn't otherwise
+    # need; write_workbook.py imports parse_foreign directly where the
+    # object's fields are actually read.
+    foreign_report: object | None = None
 
 
-def build_schedule_fa(resolved: dict, node_by_guid: dict) -> ScheduleFASchedule:
+def build_schedule_fa(resolved: dict, node_by_guid: dict, foreign_report=None) -> ScheduleFASchedule:
     rows = [
         ScheduleFARow(path=leaf.path, amount=node.total or 0.0)
         for leaf in resolved.values()
         for node in [node_by_guid.get(leaf.guid)]
         if node is not None and "AL_FOREIGN" in leaf.flags
     ]
-    return ScheduleFASchedule(rows=rows)
+    return ScheduleFASchedule(rows=rows, foreign_report=foreign_report)
 
 
 # ---------------------------------------------------------------------------
@@ -1225,6 +1235,7 @@ def build_all_schedules(
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
     residency: str | None = None, filing_date: date | None = None,
     audit_case: bool = False, audit_case_basis: str = "",
+    foreign_report=None,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -1251,7 +1262,7 @@ def build_all_schedules(
         rules, regime, status, dob, fy_end, unclassified, residency=residency,
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
-    schedule_fa = build_schedule_fa(resolved, node_by_guid)
+    schedule_fa = build_schedule_fa(resolved, node_by_guid, foreign_report=foreign_report)
     interest = build_interest_234(
         computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
         rules=rules, audit_case=audit_case, audit_case_basis=audit_case_basis,

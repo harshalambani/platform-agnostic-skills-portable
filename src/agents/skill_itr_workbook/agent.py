@@ -93,6 +93,7 @@ import schedules as sch  # noqa: E402
 import write_workbook  # noqa: E402
 import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
+import parse_foreign as foreign_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
 _AS_OF_RE = re.compile(r"Balance Sheet \(eguile\)[^0-9]*(\d{2})-(\d{2})-(\d{4})")
@@ -474,6 +475,7 @@ def _build_and_write_workbook(
     output_path: str, mapping_file: str | None, entity: "configs.EntityProfile",
     rules_dir: str, scrips_path: str, as26_workbook: str | None = None,
     regime_override: str | None = None, mapping_entries: dict | None = None,
+    foreign_report_xlsx: str | None = None,
 ) -> list[str]:
     """Builds the full schedule model + formula-driven workbook (plan
     sections 2.2/3) whenever mapping resolution ran at all. Returns extra
@@ -525,11 +527,32 @@ def _build_and_write_workbook(
         except (OSError, KeyError, InvalidFileException) as e:
             as26_lines.append(f"26AS: workbook unreadable ({e}) -- book-date buckets only, tie-out skipped.")
 
+    foreign_report = None
+    foreign_lines: list[str] = []
+    if foreign_report_xlsx:
+        try:
+            foreign_report = foreign_engine.load_foreign_income_report(foreign_report_xlsx)
+            foreign_lines.append(
+                f"Foreign report: parsed {Path(foreign_report_xlsx).name} -- "
+                f"{len(foreign_report.schedule_fa.equity_lots)} Schedule FA lot(s), "
+                f"{len(foreign_report.schedule_fsi.rows)} Schedule FSI row(s), "
+                f"{len(foreign_report.form_67.rows)} Form 67 row(s). See ScheduleFA/ScheduleFSI/"
+                "Form67/ScheduleTR sheets; the AL_FOREIGN book roll-up on ScheduleFA remains a "
+                "separate, independent cross-check."
+            )
+            for w in foreign_report.warnings:
+                foreign_lines.append(f"Foreign report: {w}")
+        except foreign_engine.ForeignReportError as e:
+            foreign_lines.append(
+                f"Foreign report: {Path(foreign_report_xlsx).name} unreadable ({e}) -- "
+                "Schedule FA falls back to the AL_FOREIGN book roll-up only."
+            )
+
     model = sch.build_all_schedules(
         tree, result.resolved, book, form16_data, year_key, rules, regime,
         entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
         residency=entity.residency, audit_case=audit_case,
-        audit_case_basis=entity.audit_case_basis,
+        audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
@@ -568,6 +591,7 @@ def _build_and_write_workbook(
             "(NOT filing-ready). See Unclassified / Mapping Review sheets."
         )
     lines.extend(as26_lines)
+    lines.extend(foreign_lines)
     if model.taxes_paid.as26_available and not model.taxes_paid.tie_out_ok:
         for c in model.taxes_paid.tie_out_conflicts:
             lines.append(
@@ -662,6 +686,7 @@ def run(
     form16_pdf: str | None = None,
     form16_pan: str | None = None,
     as26_workbook: str | None = None,
+    foreign_report_xlsx: str | None = None,
     config_path: str = "config.yaml",
     model_override: str | None = None,
     entities_path: str = "Data/itr/entities.yaml",
@@ -747,6 +772,21 @@ def run(
     interest or dividend is flagged as a CONFLICT on both the TaxesPaid and
     Reconciliation sheets, never silently reconciled. Falls back to
     book-date buckets and a skipped tie-out when omitted or unreadable.
+
+    foreign_report_xlsx, when supplied, is a foreign broker's own
+    "consolidated tax report" workbook (scripts/parse_foreign.py). It fills
+    Schedule FA (A2 custodial accounts + A3 equity/debt interest, one row
+    per acquisition lot -- never deduped by entity name), Schedule FSI,
+    Form 67, and Schedule TR as their own sheets. The existing
+    AL_FOREIGN-flagged book roll-up on ScheduleFA keeps running exactly as
+    before, unconditionally, as an independent and separately-labelled
+    cross-check beneath the parsed report's own figures -- it is never
+    merged into them. Any cell the source report left as a placeholder
+    ("-", "#", "*") or instructional prose is rendered as an explicit
+    flagged string, never blank and never coerced to 0. Falls back to the
+    AL_FOREIGN roll-up only when omitted or unreadable; a run with no
+    foreign_report_xlsx supplied is byte-identical to a run before this
+    parameter existed.
     """
     try:
         entity = _resolve_entity(mapping_file, entities_path, entity_key)
@@ -795,6 +835,7 @@ def run(
     extra_lines = _build_and_write_workbook(
         tree, book, result, form16_data, year_key, failures, book_cross_check, output_path,
         mapping_file, entity, rules_dir, scrips_path, as26_workbook, regime_override, mapping_entries,
+        foreign_report_xlsx=foreign_report_xlsx,
     )
     if extra_lines:
         summary = summary + "\n\n" + "\n".join(extra_lines)
@@ -827,6 +868,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--form16-pdf", dest="form16_pdf", default=None)
     parser.add_argument("--form16-pan", dest="form16_pan", default=None)
     parser.add_argument("--as26-workbook", dest="as26_workbook", default=None)
+    parser.add_argument("--foreign-report-xlsx", dest="foreign_report_xlsx", default=None)
     parser.add_argument("--config-path", dest="config_path", default="config.yaml")
     parser.add_argument("--model-override", dest="model_override", default=None)
     parser.add_argument("--entities-path", dest="entities_path", default="Data/itr/entities.yaml")
@@ -840,6 +882,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = run(
         args.bs_html, args.output_path, book_file=args.book_file, mapping_file=args.mapping_file,
         form16_pdf=args.form16_pdf, form16_pan=args.form16_pan, as26_workbook=args.as26_workbook,
+        foreign_report_xlsx=args.foreign_report_xlsx,
         config_path=args.config_path, model_override=args.model_override,
         entities_path=args.entities_path, entity_key=args.entity_key, rules_dir=args.rules_dir,
         scrips_path=args.scrips_path, ay=args.ay, regime_override=args.regime_override,
