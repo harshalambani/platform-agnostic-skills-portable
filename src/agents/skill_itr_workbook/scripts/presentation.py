@@ -2258,6 +2258,26 @@ def write_dividend_schedule(wb, os_, os_layout: dict, print_title: str) -> dict:
         VAL,
     )
 
+    # Foreign broker report dividends -- D1: a separate, clearly-labelled
+    # block, never added into the "Total dividend income" figure above (that
+    # figure ties ONLY to OtherSources' book-sourced "dividend" leaf). Only
+    # rendered when a foreign report actually populated the OtherSources
+    # foreign_dividend_q/foreign_deemed_dividend_q layout keys.
+    if os_layout.get("foreign_dividend_q") or os_layout.get("foreign_deemed_dividend_q"):
+        note_row = row
+        ws.cell(row=note_row, column=1,
+                value="Foreign dividends (broker report) -- NOT included in the total above; "
+                      "see 'OtherSources' sheet for source detail.").font = _font(10, bold=True)
+        row += 1
+        row = _write_quarter_split_block(
+            ws, row, "Ordinary foreign dividend -- 234C instalment-bucket split (s.56)",
+            "OtherSources", os_layout.get("foreign_dividend_q", []), os_.foreign_dividend_source or "n/a",
+        )
+        row = _write_quarter_split_block(
+            ws, row, "Deemed dividend (s.2(22)(f)) -- 234C instalment-bucket split, kept separate",
+            "OtherSources", os_layout.get("foreign_deemed_dividend_q", []), os_.foreign_dividend_source or "n/a",
+        )
+
     apply_sheet_chrome(
         ws, {"A": fit_label_width(ws, LBL, 50), "B": 16, "C": 3},
         last_row=row, last_col=VAL, print_title=print_title,
