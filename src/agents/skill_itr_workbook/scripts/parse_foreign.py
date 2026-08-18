@@ -373,6 +373,7 @@ class QuarterlyBucket:
     label: str
     amount: float | None
     flag: str | None = None
+    series: str | None = None   # e.g. "Dividend Income", "Dividend u/s 2(22)(f)"
 
 
 @dataclass
@@ -831,22 +832,57 @@ def _parse_dividend(grid: list, warnings: list) -> DividendData:
                 break
 
     quarterly: list[QuarterlyBucket] = []
-    qb_header = _find_header_row(grid, ["Quaterly Break", "Up"])
-    if qb_header is None:
+    qb_title = _find_header_row(grid, ["Quaterly Break", "Up"])
+    if qb_title is None:
         # Real-world reports may fix the "Quaterly" typo; tolerate either spelling.
-        qb_header = _find_header_row(grid, ["Quarterly Break", "Up"])
-    if qb_header is not None and qb_header + 2 <= len(grid):
-        col_header_row = grid[qb_header]
-        income_row = grid[qb_header + 1]
-        for c in range(2, len(col_header_row) + 1):
-            label = _clean_str(col_header_row[c - 1])
-            if not label:
-                continue
-            value = income_row[c - 1] if c - 1 < len(income_row) else None
-            v, f = parse_numeric_cell(value)
-            quarterly.append(QuarterlyBucket(label=label, amount=v, flag=f))
+        qb_title = _find_header_row(grid, ["Quarterly Break", "Up"])
+    if qb_title is None:
+        warnings.append("Dividend: could not find the Quarterly Break-Up title row.")
     else:
-        warnings.append("Dividend: could not find the Quarterly Break-Up block.")
+        # The label row ("Particulars" + the five period headers) is NOT
+        # guaranteed to sit immediately under the title row -- the real
+        # report inserts a completely blank spacer row first. Scan forward
+        # for the first row with at least two non-empty cells from column 2
+        # onward, bounded so a missing block can't run into an unrelated
+        # section further down the sheet.
+        label_row_num = None
+        for r in range(qb_title + 1, min(qb_title + 5, len(grid)) + 1):
+            non_empty = sum(1 for v in grid[r - 1][1:] if _clean_str(v))
+            if non_empty >= 2:
+                label_row_num = r
+                break
+        if label_row_num is None:
+            warnings.append(
+                "Dividend: found the Quarterly Break-Up title row but no label row "
+                "(\"Particulars\" + period headers) within 5 rows below it."
+            )
+        else:
+            label_row = grid[label_row_num - 1]
+            periods = {}
+            for c in range(2, len(label_row) + 1):
+                label = _clean_str(label_row[c - 1])
+                if label:
+                    periods[c] = label
+            # Each row after the label row is one SERIES (e.g. "Dividend
+            # Income", "Dividend u/s 2(22)(f)" -- buyback dividend, taxed
+            # differently) -- not just the first. Stop at the first row whose
+            # first cell is empty, bounded so a malformed sheet can't run
+            # away past this block.
+            for r in range(label_row_num + 1, min(label_row_num + 10, len(grid)) + 1):
+                row = grid[r - 1]
+                series_name = _row_first_cell_text(row)
+                if series_name is None:
+                    break
+                for c, label in periods.items():
+                    value = row[c - 1] if c - 1 < len(row) else None
+                    v, f = parse_numeric_cell(value)
+                    quarterly.append(QuarterlyBucket(label=label, amount=v, flag=f,
+                                                       series=series_name))
+            if not quarterly:
+                warnings.append(
+                    "Dividend: found the Quarterly Break-Up label row but no series data "
+                    "rows beneath it."
+                )
 
     us_header_row_idx = _find_header_row(grid, ["Dividends From US Stocks"])
     payments: list[DividendPayment] = []

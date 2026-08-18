@@ -446,9 +446,13 @@ def _build_dividend(ws: Worksheet) -> None:
 
     row += 7
     _write_row(ws, row, ["Quaterly Break - Up"])
+    # The real report has a COMPLETELY BLANK spacer row between the title and
+    # the "Particulars" label row -- row + 1 here is deliberately untouched.
+    # A parser that assumes the label row sits immediately under the title
+    # lands on this blank row instead and silently produces zero buckets.
     _write_row(
         ws,
-        row + 1,
+        row + 2,
         [
             "Particulars",
             "1-Apr to 15-Jun",
@@ -459,10 +463,10 @@ def _build_dividend(ws: Worksheet) -> None:
         ],
     )
     # Quarterly cells use "-" for nil, and the five buckets must sum to the total.
-    _write_row(ws, row + 2, ["Dividend Income", "-", 2200, 700, 650, 650])
-    _write_row(ws, row + 3, ["Dividend u/s 2(22)(f)", "-", "-", "-", "-", "-"])
+    _write_row(ws, row + 3, ["Dividend Income", "-", 2200, 700, 650, 650])
+    _write_row(ws, row + 4, ["Dividend u/s 2(22)(f)", "-", "-", "-", "-", "-"])
 
-    row += 5
+    row += 6
     _write_row(ws, row, ["Indian Stocks Dividend"])
     _write_row(ws, row + 1, ["Name of Stock", "Ex-Date", "Amount (₹)"])
     _write_row(ws, row + 2, ["-", "-", "-"])
