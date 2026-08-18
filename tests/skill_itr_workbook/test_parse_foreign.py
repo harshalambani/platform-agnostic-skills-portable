@@ -264,14 +264,73 @@ def test_dividend_total_and_payments(report):
 
 
 def test_dividend_quarterly_bucket_sums_to_total(report):
+    # The real report has a completely blank spacer row between the
+    # "Quaterly Break - Up" title and the "Particulars" label row -- the
+    # fixture now matches that layout. This is the regression test for the
+    # bug where an adjacent-row assumption landed on the blank spacer and
+    # silently produced zero buckets.
     buckets = report.dividend.quarterly
-    assert len(buckets) == 5
-    total = sum(b.amount for b in buckets if b.amount is not None)
+    income_buckets = [b for b in buckets if b.series == "Dividend Income"]
+    assert len(income_buckets) == 5
+    total = sum(b.amount for b in income_buckets if b.amount is not None)
     assert total == report.dividend.total
     # First quarter is a literal "-" placeholder, not a real zero.
-    first = buckets[0]
+    first = income_buckets[0]
     assert first.amount is None
     assert first.flag == "placeholder:-"
+
+
+def test_dividend_quarterly_both_series_captured(report):
+    # Both data rows under the label row are series, not just the first --
+    # "Dividend u/s 2(22)(f)" is buyback dividend, taxed differently.
+    buckets = report.dividend.quarterly
+    series_names = {b.series for b in buckets}
+    assert series_names == {"Dividend Income", "Dividend u/s 2(22)(f)"}
+    buyback_buckets = [b for b in buckets if b.series == "Dividend u/s 2(22)(f)"]
+    assert len(buyback_buckets) == 5
+    # Every buyback-dividend cell in the fixture is a "-" placeholder.
+    for b in buyback_buckets:
+        assert b.amount is None
+        assert b.flag == "placeholder:-"
+
+
+def test_dividend_quarterly_title_found_but_no_label_row_warns(tmp_path):
+    # Degenerate case built in-memory: a Quarterly Break-Up title row with no
+    # label row beneath it at all (e.g. the title sits right above an
+    # unrelated section). The parser must not silently return an empty list
+    # -- it must warn loudly that the block was found but yielded nothing.
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    for name in pf.REQUIRED_SHEETS:
+        if name not in wb.sheetnames:
+            wb.create_sheet(name)
+    if "Sheet" in wb.sheetnames:
+        del wb["Sheet"]
+
+    ws = wb["Dividend"]
+    ws.append(["Financial Year:", "FY2025-26"])
+    ws.append(["Particulars", "Amount (₹)", "ITR Section"])
+    ws.append(["US Stocks", 100, "Schedule OS U/s Dividend"])
+    ws.append(["Total", 100])
+    ws.append([])
+    ws.append(["Quaterly Break - Up"])
+    for _ in range(6):
+        ws.append([])   # nothing resembling a label row anywhere below
+    ws.append(["Disclaimer: synthetic test data only."])
+
+    for name in pf.REQUIRED_SHEETS:
+        if name != "Dividend":
+            wb[name].append(["placeholder"])
+
+    xlsx_path = tmp_path / "degenerate_quarterly.xlsx"
+    wb.save(xlsx_path)
+
+    result = pf.load_foreign_income_report(xlsx_path)
+    assert result.dividend.quarterly == []
+    assert any(
+        "Quarterly Break-Up" in w and "label row" in w for w in result.warnings
+    ), result.warnings
 
 
 # ---------------------------------------------------------------------------
