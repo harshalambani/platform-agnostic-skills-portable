@@ -43,7 +43,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   series throughout. Each vendor quarterly period is assigned to one of the
   five statutory 234C windows by parsing the period label's END date (e.g.
   "16-Jun to 15-Sep" -> 15-Sep) and resolving it through the shared
-  `quarters._bucket_index` function, rather than by the period's position in
+  bucket-index helper in `quarters.py`, rather than by the period's position in
   the list, so there remains exactly one definition of the 234C windows in
   the codebase. A period whose label cannot be parsed leaves its window
   unfilled and warns instead of guessing; two periods that resolve to the
@@ -69,6 +69,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Changed
 - **`pypdfium2` bumped from 5.12.1 to 5.13.0** in the pdf-ocr dependency
   group (#185).
+- **Seven further dependency bumps, all `requirements-lock.txt`-only** (no
+  source changes):
+  - `gradio` 6.22.0 -> 6.24.0, ui group (#186)
+  - langchain-ecosystem group, 5 updates (#184): `langchain` 1.3.14 ->
+    1.3.15, `langchain-core` 1.5.3 -> 1.5.4, `langchain-openai` 1.4.1 ->
+    1.5.0, `langgraph` 1.2.10 -> 1.2.11, `langgraph-checkpoint` 4.1.1 ->
+    4.2.0
+  - `xxhash` 3.8.1 -> 4.0.0 (#190) - a MAJOR version bump
+  - `huggingface-hub` 1.26.1 -> 1.27.0 (#187)
+  - `greenlet` 3.5.4 -> 3.5.5 (#188)
+  - `charset-normalizer` 3.4.9 -> 3.5.0 (#191)
+  - `filelock` 3.32.2 -> 3.32.3 (#192)
 
 ## [3.6.0] — 2026-08-08
 
