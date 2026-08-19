@@ -184,6 +184,7 @@ def from_book(
     rules: rules_engine.RulesConfig, entity_name: str, regime: str, status: str,
     dob: str | None, scrips: dict | None = None, fmv_tables=None,
     residency: str | None = None, as_of: date | None = None,
+    foreign_report=None, foreign_dividends_in_book: bool = False,
 ) -> EstimateInput:
     """Pre-fill an EstimateInput from a registered book's FY-to-date actuals,
     reusing the existing schedule builders -- fully editable afterwards, and
@@ -194,11 +195,23 @@ def from_book(
     deduction - s.24b interest), not gross rent -- schedules.py's own
     HousePropertySchedule models the head that way, and re-deriving gross
     rent here would duplicate that computation rather than reuse it.
+
+    `foreign_report`/`foreign_dividends_in_book` (2026-08-19): optional,
+    minimal extension so the advance-tax "interest" projection line also
+    picks up an included foreign dividend, same resolution the ITR workbook
+    itself uses (entity.foreign_dividends_in_book_by_ay.get(ay, entity.
+    foreign_dividends_in_book)) -- no caller in this codebase passes them yet
+    since no advance-tax UI currently loads a foreign broker report, but the
+    seam is real (build_other_sources is reused as-is) and worth exposing now
+    rather than only testing build_other_sources() in isolation.
     """
     salary = sch.build_salary(resolved, node_by_guid, None, rules, regime)
     business = sch.build_business(resolved, node_by_guid)
     house_property = sch.build_house_property(resolved, node_by_guid, rules)
-    other_sources = sch.build_other_sources(resolved, node_by_guid, book, fy, rules)
+    other_sources = sch.build_other_sources(
+        resolved, node_by_guid, book, fy, rules, foreign_report=foreign_report,
+        foreign_dividends_in_book=foreign_dividends_in_book,
+    )
     taxes_paid = sch.build_taxes_paid(resolved, node_by_guid, rules, None, book, fy)
 
     capital_gains: list[CapitalGainItem] = []

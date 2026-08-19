@@ -217,19 +217,33 @@ class OtherSourcesSchedule:
     interest_quarters_source: str = "book"   # "book" | "26AS" (CF5)
     slbs: float = 0.0
     taxable_total: float = 0.0
-    # Foreign broker report dividends (parse_foreign.py) -- kept OFF
-    # dividend_gross/taxable_total deliberately (see build_other_sources'
-    # docstring below): the GnuCash book may already tag the same receipts
-    # under OS_DIVIDEND, so silently summing would double-count income on a
-    # tax return. Every field here defaults to the "absent" state so a run
-    # with no foreign_report supplied is byte-identical to before this field
-    # set existed.
+    # Foreign broker report dividends (parse_foreign.py). Whether the ORDINARY
+    # foreign dividend series (never the deemed s.2(22)(f) series -- see
+    # below) is folded into dividend_gross/taxable_total/dividend_quarters
+    # above is controlled by the `foreign_dividends_in_book` flag passed into
+    # build_other_sources (2026-08-19, see EntityProfile.foreign_dividends_in_
+    # book in configs.py): false (the book does NOT yet contain this broker's
+    # activity, today's reality) means it IS added in; true (the book already
+    # tags the same receipts, e.g. under OS_DIVIDEND) means it stays excluded
+    # to avoid double-counting. Either way, these detail fields below stay
+    # populated for the audit trail -- inclusion changes the totals above,
+    # never this detail. Every field here defaults to the "absent" state so a
+    # run with no foreign_report supplied is byte-identical to before this
+    # field set existed.
     foreign_dividend_gross: float | None = None
     foreign_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
     foreign_dividend_quarter_flags: list = field(default_factory=lambda: [None] * 5)
+    # Deemed dividend under s.2(22)(f) -- taxed differently, and NEVER added
+    # into dividend_gross/taxable_total/dividend_quarters under either value
+    # of foreign_dividends_in_book. Strictly a detail-only figure.
     foreign_deemed_dividend_gross: float | None = None
     foreign_deemed_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
     foreign_dividend_source: str | None = None   # "broker report" when populated, else None
+    # The resolved foreign_dividends_in_book flag this schedule was built
+    # with -- carried through purely so presentation/write_workbook can print
+    # it in plain words next to the dividend figures (a wrong setting must be
+    # visible on the sheet, not buried in config).
+    foreign_dividends_in_book: bool = False
 
 
 #: The two dividend series parse_foreign.py's Dividend sheet quarterly block
@@ -298,7 +312,7 @@ def _map_foreign_dividend_quarters(quarterly: list, fy_start_year: int | None, w
     """Maps parse_foreign's flat list of QuarterlyBucket (2 series x up to 5
     periods, order/completeness not guaranteed by the vendor -- D2) onto the
     five 234C windows, by parsing each label's END date and resolving it
-    through quarters._bucket_index -- never by position, so there is exactly
+    through quarters.bucket_index -- never by position, so there is exactly
     one definition of the 234C windows in the codebase. A bucket whose
     amount is None (flag set) stays None in the mapped list; a label that
     can't be parsed into a date, or an unrecognised series name, is never
@@ -344,7 +358,7 @@ def _map_foreign_dividend_quarters(quarterly: list, fy_start_year: int | None, w
                 "234C window left unfilled rather than guessed."
             )
             continue
-        idx = quarters_engine._bucket_index(end_date, fy_start_year)
+        idx = quarters_engine.bucket_index(end_date, fy_start_year)
         if target_labels[idx] is None:
             target_q[idx] = bucket.amount
             target_f[idx] = bucket.flag
@@ -375,7 +389,20 @@ def _map_foreign_dividend_quarters(quarterly: list, fy_start_year: int | None, w
 def build_other_sources(
     resolved: dict, node_by_guid: dict, book: Book | None, year_key: str | None,
     rules: rules_engine.RulesConfig | None = None, as26_data=None, foreign_report=None,
+    foreign_dividends_in_book: bool = False,
 ) -> OtherSourcesSchedule:
+    """`foreign_dividends_in_book` (2026-08-19, EntityProfile.foreign_
+    dividends_in_book -- see configs.py): false (default) means the GnuCash
+    book does NOT yet contain the foreign broker's dividend activity, so the
+    ORDINARY foreign dividend series (never the deemed s.2(22)(f) series) is
+    ADDED into dividend_gross/taxable_total and its five mapped 234C amounts
+    into dividend_quarters element-wise -- omitting it would simply drop that
+    income from the return. true means the book already tags the same
+    receipts (e.g. under OS_DIVIDEND), so the foreign figures stay excluded
+    from the total (still surfaced on their own detail fields) to avoid
+    double-counting. Either way, a None/placeholder foreign quarter or a None
+    foreign_dividend_gross never turns a real book figure into 0.0/None --
+    only present, numeric foreign amounts are ever added in."""
     sb = _sum_tag(resolved, node_by_guid, "OS_INTEREST_SB")
     bank = _sum_tag(resolved, node_by_guid, "OS_INTEREST_BANK")
     nbfc = _sum_tag(resolved, node_by_guid, "OS_INTEREST_NBFC")
@@ -419,10 +446,10 @@ def build_other_sources(
             buckets = quarters_engine.bucket_receipts(book, interest_guids, year_key)
             int_quarters, int_gross_up_flags = buckets.buckets, buckets.gross_up_flags
 
-    taxable_total = sb + bank + nbfc + epf + refund_interest + dividend + slbs
-
-    # Foreign broker report dividends (D1-D4) -- deliberately NOT folded into
-    # `dividend`/`taxable_total` above; see OtherSourcesSchedule's docstring.
+    # Foreign broker report dividends (D1-D4). These detail fields are always
+    # computed and populated when a report is supplied -- inclusion in the
+    # totals/buckets below is controlled separately by
+    # `foreign_dividends_in_book`, never by whether the detail exists.
     foreign_dividend_gross = None
     foreign_dividend_quarters: list = [None] * 5
     foreign_dividend_quarter_flags: list = [None] * 5
@@ -451,6 +478,22 @@ def build_other_sources(
                 "Foreign dividends: report parsed but yielded zero quarterly dividend buckets."
             )
 
+    # Inclusion (T2/T3): the deemed s.2(22)(f) series is NEVER added into the
+    # total/buckets, under either value of foreign_dividends_in_book -- it is
+    # strictly a detail-only figure, taxed differently. The ordinary series is
+    # added in only when the book does NOT already contain it, and only where
+    # a real (non-None) foreign figure exists -- a None foreign quarter/gross
+    # must never coerce a book figure to a different value or invent a 0.0.
+    if not foreign_dividends_in_book:
+        if foreign_dividend_gross is not None:
+            dividend = dividend + foreign_dividend_gross
+        div_quarters = [
+            (book_amt + fq) if fq is not None else book_amt
+            for book_amt, fq in zip(div_quarters, foreign_dividend_quarters)
+        ]
+
+    taxable_total = sb + bank + nbfc + epf + refund_interest + dividend + slbs
+
     return OtherSourcesSchedule(
         interest_sb=sb, interest_bank=bank, interest_nbfc=nbfc, interest_epf_taxable=epf,
         refund_interest=refund_interest, refund_principal_excluded=refund_principal,
@@ -465,6 +508,7 @@ def build_other_sources(
         foreign_deemed_dividend_gross=foreign_deemed_dividend_gross,
         foreign_deemed_dividend_quarters=foreign_deemed_dividend_quarters,
         foreign_dividend_source=foreign_dividend_source,
+        foreign_dividends_in_book=foreign_dividends_in_book,
     )
 
 
@@ -1426,7 +1470,7 @@ def build_all_schedules(
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
     residency: str | None = None, filing_date: date | None = None,
     audit_case: bool = False, audit_case_basis: str = "",
-    foreign_report=None,
+    foreign_report=None, foreign_dividends_in_book: bool = False,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
@@ -1437,6 +1481,7 @@ def build_all_schedules(
     house_property = build_house_property(resolved, node_by_guid, rules)
     other_sources = build_other_sources(
         resolved, node_by_guid, book, year_key, rules, as26_data, foreign_report=foreign_report,
+        foreign_dividends_in_book=foreign_dividends_in_book,
     )
     capital_gains = build_capital_gains(resolved, node_by_guid, book, year_key, rules, scrips, fmv_tables)
     exempt_income = build_exempt_income(resolved, node_by_guid)

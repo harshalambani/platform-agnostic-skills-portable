@@ -509,6 +509,7 @@ def _build_and_write_workbook(
     ay = _fy_to_ay(year_key)
     regime, regime_lines = _resolve_regime(regime_override, form16_data, entity, ay)
     audit_case = entity.audit_case_by_ay.get(ay, entity.audit_case)
+    foreign_dividends_in_book = entity.foreign_dividends_in_book_by_ay.get(ay, entity.foreign_dividends_in_book)
 
     scrips = {}
     if Path(scrips_path).is_file():
@@ -553,6 +554,7 @@ def _build_and_write_workbook(
         entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
         residency=entity.residency, audit_case=audit_case,
         audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
+        foreign_dividends_in_book=foreign_dividends_in_book,
     )
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []

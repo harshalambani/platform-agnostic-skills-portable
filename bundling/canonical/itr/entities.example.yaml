@@ -92,6 +92,18 @@ SYN-IND-BIZ:
   #                                liable to audit; he gets 31 Oct without being
   #                                an audit case himself
   audit_case_basis: "self_44ab"
+  # foreign_dividends_in_book: false (default, and the correct value when the
+  # GnuCash book does NOT yet contain a foreign broker's dividend activity) --
+  # a supplied broker report's ordinary foreign dividend series is then ADDED
+  # into Other Sources' dividend total and 234C buckets, since it would
+  # otherwise simply be missing from the return. Set true once the book
+  # starts recording that income too (e.g. under OS_DIVIDEND), so the broker
+  # figures stay excluded from the total instead of double-counting it. Use
+  # foreign_dividends_in_book_by_ay for a per-year override, e.g. importing
+  # starts partway through:
+  foreign_dividends_in_book: false
+  foreign_dividends_in_book_by_ay:
+    "2026-27": true
   extra_items:
     bf_losses: []
     clubbing_notes: []

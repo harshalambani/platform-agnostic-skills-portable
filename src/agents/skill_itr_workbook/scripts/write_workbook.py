@@ -363,6 +363,18 @@ def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> di
     layout["refund_principal"] = sw.label_value("IT refund principal (excluded, not income -- RULE-1)", os_.refund_principal_excluded)
     layout["dividend"] = sw.label_value("Dividend income (gross)", os_.dividend_gross)
     sw.label_value("  Dividend quarter-bucket source", os_.dividend_quarters_source, number_format=None)
+    # 2026-08-19: a wrong foreign_dividends_in_book setting must be visible
+    # right next to the figure it changes, not buried in config -- plain
+    # words, no jargon, so a reader who has never heard of the flag by name
+    # can still tell whether foreign dividends are folded into the number
+    # just above or not.
+    sw.label_value(
+        "  Foreign broker dividends folded into this total?",
+        "Yes -- book does not yet record them (see 'Foreign dividends' block below)"
+        if not os_.foreign_dividends_in_book
+        else "No -- book already records them, so they are excluded here to avoid double-counting",
+        number_format=None,
+    )
     # 2026-07-26 Build B (Interest/Dividend/TDS detail schedules) -- these
     # quarter cells were always written but never captured into `layout`
     # before; the new `Dividend Schedule` / `Interest Schedule` presentation
@@ -379,14 +391,18 @@ def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> di
     ]
     layout["slbs"] = sw.label_value("SLBS income", os_.slbs)
 
-    # Foreign broker report dividends (parse_foreign.py) -- D1: deliberately
-    # NOT summed into "Dividend income (gross)"/"Taxable Other Sources total"
-    # above, since the GnuCash book may already tag the same receipts under
-    # OS_DIVIDEND; silently summing would double-count income on a tax
-    # return. Labelled loudly as excluded so a reader can't mistake this
-    # block for part of the total just above it.
+    # Foreign broker report dividends (parse_foreign.py). Whether the ordinary
+    # series above is folded into "Dividend income (gross)"/"Taxable Other
+    # Sources total" is controlled by foreign_dividends_in_book (2026-08-19)
+    # -- see the label just above. The deemed s.2(22)(f) series is NEVER
+    # folded in either way; it is taxed differently and stays detail-only.
     sw.blank()
-    sw.header("Foreign dividends (broker report) -- NOT included in the Other Sources total above")
+    sw.header(
+        "Foreign dividends (broker report) -- NOT included in the Other Sources total above"
+        if os_.foreign_dividends_in_book else
+        "Foreign dividends (broker report) -- ordinary series IS included in the Other Sources "
+        "total above; deemed dividend below is never included"
+    )
     if os_.foreign_dividend_source is None:
         sw.label_value("Source", "(no foreign broker report supplied, or none parsed)", number_format=None)
     else:
