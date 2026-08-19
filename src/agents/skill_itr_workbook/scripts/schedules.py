@@ -491,6 +491,17 @@ def build_other_sources(
             (book_amt + fq) if fq is not None else book_amt
             for book_amt, fq in zip(div_quarters, foreign_dividend_quarters)
         ]
+        # 2026-08-19 (coordinator review, defect 2): `div_source` ("book" or
+        # "26AS") describes where dividend_quarters came from BEFORE this
+        # fold. Once a real foreign quarter has actually been added in above,
+        # the label has to say so too -- otherwise a reconciler chasing the
+        # 234C split sees "book" and has no way to know the number no longer
+        # matches the book alone. Only append when a fold actually happened
+        # (report supplied AND at least one non-None foreign quarter got
+        # added) -- flag-true and no-report must leave div_source untouched,
+        # exactly "book"/"26AS", so existing behaviour/tests are unaffected.
+        if foreign_dividend_source is not None and any(fq is not None for fq in foreign_dividend_quarters):
+            div_source = f"{div_source} + broker report"
 
     taxable_total = sb + bank + nbfc + epf + refund_interest + dividend + slbs
 

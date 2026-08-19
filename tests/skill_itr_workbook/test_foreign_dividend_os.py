@@ -228,6 +228,64 @@ def test_detail_lines_identical_under_both_flag_values():
 
 
 # ---------------------------------------------------------------------------
+# Coordinator review of #198, defect 2: dividend_quarters_source must say so
+# when a fold actually happened, and stay exactly "book"/"26AS" otherwise.
+# ---------------------------------------------------------------------------
+
+def test_dividend_quarters_source_gains_broker_suffix_when_folded():
+    quarterly = [
+        pf.QuarterlyBucket("1-Apr to 15-Jun", 100.0, series=ORDINARY),
+        pf.QuarterlyBucket("16-Jun to 15-Sep", 200.0, series=ORDINARY),
+    ]
+    dividend = pf.DividendData(total=300.0, quarterly=quarterly, financial_year="2025-26")
+    report = _empty_report(dividend)
+
+    os_ = _build_os(report, foreign_dividends_in_book=False)
+
+    assert os_.dividend_quarters_source == "book + broker report"
+
+
+def test_dividend_quarters_source_stays_book_when_flag_true_excludes_fold():
+    """Same report, but flag=True means nothing is actually merged into
+    div_quarters -- the source label must not claim a fold that didn't
+    happen."""
+    quarterly = [
+        pf.QuarterlyBucket("1-Apr to 15-Jun", 100.0, series=ORDINARY),
+        pf.QuarterlyBucket("16-Jun to 15-Sep", 200.0, series=ORDINARY),
+    ]
+    dividend = pf.DividendData(total=300.0, quarterly=quarterly, financial_year="2025-26")
+    report = _empty_report(dividend)
+
+    os_ = _build_os(report, foreign_dividends_in_book=True)
+
+    assert os_.dividend_quarters_source == "book"
+
+
+def test_dividend_quarters_source_stays_book_when_no_foreign_report():
+    os_ = _build_os(None, foreign_dividends_in_book=False)
+    assert os_.dividend_quarters_source == "book"
+
+
+def test_dividend_quarters_source_stays_book_when_all_foreign_quarters_none():
+    """flag=False and a report IS supplied, but every foreign quarter is a
+    None/placeholder -- nothing numeric actually got folded into
+    div_quarters, so the source label must not claim otherwise."""
+    quarterly = [
+        pf.QuarterlyBucket("1-Apr to 15-Jun", None, flag="placeholder:-", series=ORDINARY),
+        pf.QuarterlyBucket("16-Jun to 15-Sep", None, flag="placeholder:-", series=ORDINARY),
+        pf.QuarterlyBucket("16-Sep to 15-Dec", None, flag="placeholder:-", series=ORDINARY),
+        pf.QuarterlyBucket("16-Dec to 15-Mar", None, flag="placeholder:-", series=ORDINARY),
+        pf.QuarterlyBucket("16-Mar to 31-Mar", None, flag="placeholder:-", series=ORDINARY),
+    ]
+    dividend = pf.DividendData(total=None, quarterly=quarterly, financial_year="2025-26")
+    report = _empty_report(dividend)
+
+    os_ = _build_os(report, foreign_dividends_in_book=False)
+
+    assert os_.dividend_quarters_source == "book"
+
+
+# ---------------------------------------------------------------------------
 # T1: per-AY override resolution (mirrors audit_case_by_ay's resolution
 # style exactly -- see EntityProfile.foreign_dividends_in_book_by_ay).
 # ---------------------------------------------------------------------------

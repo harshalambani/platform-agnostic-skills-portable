@@ -368,13 +368,21 @@ def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> di
     # words, no jargon, so a reader who has never heard of the flag by name
     # can still tell whether foreign dividends are folded into the number
     # just above or not.
-    sw.label_value(
-        "  Foreign broker dividends folded into this total?",
-        "Yes -- book does not yet record them (see 'Foreign dividends' block below)"
-        if not os_.foreign_dividends_in_book
-        else "No -- book already records them, so they are excluded here to avoid double-counting",
-        number_format=None,
-    )
+    # 2026-08-19 (coordinator review, defect 1): this question only makes
+    # sense when a foreign broker report was actually supplied. With no
+    # report, foreign_dividends_in_book still defaults to False, and the old
+    # unconditional line asserted "Yes -- book does not yet record them" on
+    # every entity/year that has no foreign broker activity at all -- a false
+    # statement pointing at a block that itself says "no report supplied".
+    # If there's no report, the question does not arise: omit the row.
+    if os_.foreign_dividend_source is not None:
+        sw.label_value(
+            "  Foreign broker dividends folded into this total?",
+            "Yes -- book does not yet record them (see 'Foreign dividends' block below)"
+            if not os_.foreign_dividends_in_book
+            else "No -- book already records them, so they are excluded here to avoid double-counting",
+            number_format=None,
+        )
     # 2026-07-26 Build B (Interest/Dividend/TDS detail schedules) -- these
     # quarter cells were always written but never captured into `layout`
     # before; the new `Dividend Schedule` / `Interest Schedule` presentation
