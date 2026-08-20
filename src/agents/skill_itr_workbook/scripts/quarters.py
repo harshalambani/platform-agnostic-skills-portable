@@ -23,7 +23,7 @@ class QuarterBuckets:
     gross_up_flags: list[dict] = field(default_factory=list)
 
 
-def _bucket_index(d: date, fy_start_year: int) -> int:
+def bucket_index(d: date, fy_start_year: int) -> int:
     thresholds = [
         date(fy_start_year, 6, 15),
         date(fy_start_year, 9, 15),
@@ -56,7 +56,7 @@ def bucket_receipts(book: Book, account_guids: set[str], year_key: str) -> Quart
                 continue
             acct = book.accounts[sp.account_guid]
             amount = normalize_value(sp.value, acct.type)
-            idx = _bucket_index(txn.date_posted, fy_start_year)
+            idx = bucket_index(txn.date_posted, fy_start_year)
             buckets[idx] += amount
             if txn.date_posted == fy_end_date:
                 flags.append({
@@ -90,7 +90,7 @@ def bucket_as26_transactions(transactions: list, year_key: str, category: str, t
             continue
         if classify_section(txn.section, tds_sections) != category:
             continue
-        idx = _bucket_index(txn.txn_date, fy_start_year)
+        idx = bucket_index(txn.txn_date, fy_start_year)
         buckets[idx] += txn.amount
         if txn.txn_date == fy_end_date:
             flags.append({

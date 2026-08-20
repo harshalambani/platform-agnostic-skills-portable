@@ -2258,16 +2258,24 @@ def write_dividend_schedule(wb, os_, os_layout: dict, print_title: str) -> dict:
         VAL,
     )
 
-    # Foreign broker report dividends -- D1: a separate, clearly-labelled
-    # block, never added into the "Total dividend income" figure above (that
-    # figure ties ONLY to OtherSources' book-sourced "dividend" leaf). Only
-    # rendered when a foreign report actually populated the OtherSources
-    # foreign_dividend_q/foreign_deemed_dividend_q layout keys.
+    # Foreign broker report dividends -- a separate, clearly-labelled block.
+    # Whether the ordinary series is folded into the "Total dividend income"
+    # figure above is controlled by foreign_dividends_in_book (2026-08-19,
+    # see OtherSources sheet); the deemed s.2(22)(f) series is NEVER folded
+    # in either way. Only rendered when a foreign report actually populated
+    # the OtherSources foreign_dividend_q/foreign_deemed_dividend_q layout
+    # keys.
     if os_layout.get("foreign_dividend_q") or os_layout.get("foreign_deemed_dividend_q"):
         note_row = row
-        ws.cell(row=note_row, column=1,
-                value="Foreign dividends (broker report) -- NOT included in the total above; "
-                      "see 'OtherSources' sheet for source detail.").font = _font(10, bold=True)
+        note_text = (
+            "Foreign dividends (broker report) -- NOT included in the total above; "
+            "see 'OtherSources' sheet for source detail."
+            if os_.foreign_dividends_in_book else
+            "Foreign dividends (broker report) -- ordinary series IS included in the total above "
+            "(book does not yet record it); deemed dividend below is never included. "
+            "See 'OtherSources' sheet for source detail."
+        )
+        ws.cell(row=note_row, column=1, value=note_text).font = _font(10, bold=True)
         row += 1
         row = _write_quarter_split_block(
             ws, row, "Ordinary foreign dividend -- 234C instalment-bucket split (s.56)",

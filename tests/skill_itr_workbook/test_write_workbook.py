@@ -39,7 +39,7 @@ import fixture_gen  # noqa: E402
 YEAR_KEY = "2024-25"
 
 
-def _build(tmp_path_factory, out_name, foreign_report=None):
+def _build(tmp_path_factory, out_name, foreign_report=None, foreign_dividends_in_book=False):
     tree = pe.parse_html(fixture_gen.build_syn_ind_html())
     book = pg.parse_book(FIXTURES / "syn_ind.gnucash")
     loaded = configs.load_mapping(FIXTURES / "syn_ind.mapping.yaml")
@@ -55,7 +55,7 @@ def _build(tmp_path_factory, out_name, foreign_report=None):
     model = sch.build_all_schedules(
         tree, result.resolved, book, form16, YEAR_KEY, rules, "new",
         entity.status, entity.dob, scrips, fmv_tables,
-        foreign_report=foreign_report,
+        foreign_report=foreign_report, foreign_dividends_in_book=foreign_dividends_in_book,
     )
     out_path = tmp_path_factory.mktemp("wb") / out_name
     ww.write_workbook(
@@ -73,8 +73,21 @@ def built_workbook(tmp_path_factory):
 
 @pytest.fixture(scope="module")
 def built_workbook_with_foreign(tmp_path_factory):
+    """foreign_dividends_in_book defaults to False (the production default)
+    -- the broker's ordinary series is folded into the OtherSources total."""
     rep = pf.load_foreign_income_report(FIXTURES / "syn_indmoney_tax_report.xlsx")
     return _build(tmp_path_factory, "syn_ind_foreign.xlsx", foreign_report=rep), rep
+
+
+@pytest.fixture(scope="module")
+def built_workbook_with_foreign_excluded(tmp_path_factory):
+    """Same report, but foreign_dividends_in_book=True -- the book already
+    records the broker's activity, so nothing is folded in."""
+    rep = pf.load_foreign_income_report(FIXTURES / "syn_indmoney_tax_report.xlsx")
+    return _build(
+        tmp_path_factory, "syn_ind_foreign_excluded.xlsx",
+        foreign_report=rep, foreign_dividends_in_book=True,
+    ), rep
 
 
 def _col_b_formulas(ws):
@@ -169,6 +182,68 @@ def test_other_sources_sheet_shows_refund_principal_and_interest_separately(buil
     interest_key = next(k for k in rows if "IT refund" in str(k) and "interest" in str(k).lower())
     assert rows[principal_key] == 1000.0
     assert rows[interest_key] == 300.0
+
+
+# ---------------------------------------------------------------------------
+# Coordinator review of #198: two labelling defects on the OtherSources
+# sheet, both fixed against the real syn_indmoney_tax_report.xlsx fixture.
+# ---------------------------------------------------------------------------
+
+def test_folded_row_absent_when_no_foreign_report(built_workbook):
+    """Defect 1: with no foreign report, foreign_dividend_source is None and
+    the question 'folded into this total?' does not arise -- the row must
+    not be rendered at all (not hedged, not present with a misleading Yes)."""
+    wb, _ = built_workbook
+    ws = wb["OtherSources"]
+    labels = [row[0] for row in ws.iter_rows(min_col=1, max_col=1, values_only=True) if row[0]]
+    assert not any("folded into this total" in str(label) for label in labels)
+
+
+def test_folded_row_present_and_yes_when_report_supplied_flag_false(built_workbook_with_foreign):
+    (wb, _model), _rep = built_workbook_with_foreign
+    ws = wb["OtherSources"]
+    rows = {row[0]: row[1] for row in ws.iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    key = next(k for k in rows if "folded into this total" in str(k))
+    assert str(rows[key]).startswith("Yes")
+
+
+def test_folded_row_present_and_no_when_report_supplied_flag_true(built_workbook_with_foreign_excluded):
+    (wb, _model), _rep = built_workbook_with_foreign_excluded
+    ws = wb["OtherSources"]
+    rows = {row[0]: row[1] for row in ws.iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    key = next(k for k in rows if "folded into this total" in str(k))
+    assert str(rows[key]).startswith("No")
+
+
+def test_dividend_quarter_source_says_plain_book_when_no_foreign_report(built_workbook):
+    """Defect 2 (control case): with no foreign report, the source label is
+    untouched."""
+    wb, _ = built_workbook
+    ws = wb["OtherSources"]
+    rows = {row[0]: row[1] for row in ws.iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    key = next(k for k in rows if "Dividend quarter-bucket source" in str(k))
+    assert rows[key] == "book"
+
+
+def test_dividend_quarter_source_appends_broker_report_when_folded(built_workbook_with_foreign):
+    """Defect 2: the real fixture's ordinary series has real numeric
+    quarters (Q2-Q5; Q1 is a '-' placeholder) that get folded into
+    dividend_quarters when flag=False -- the source label must say so."""
+    (wb, _model), _rep = built_workbook_with_foreign
+    ws = wb["OtherSources"]
+    rows = {row[0]: row[1] for row in ws.iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    key = next(k for k in rows if "Dividend quarter-bucket source" in str(k))
+    assert rows[key] == "book + broker report"
+
+
+def test_dividend_quarter_source_stays_plain_book_when_flag_true(built_workbook_with_foreign_excluded):
+    """Same report as above, but flag=True means nothing is actually folded
+    in -- the source label must not claim a fold that didn't happen."""
+    (wb, _model), _rep = built_workbook_with_foreign_excluded
+    ws = wb["OtherSources"]
+    rows = {row[0]: row[1] for row in ws.iter_rows(min_col=1, max_col=2, values_only=True) if row[0]}
+    key = next(k for k in rows if "Dividend quarter-bucket source" in str(k))
+    assert rows[key] == "book"
 
 
 def test_capital_gains_sheet_has_lot_detail_rows(built_workbook):

@@ -122,6 +122,22 @@ class EntityProfile:
                                          # itself (resolve_due_date() reads audit_case alone).
                                          # Empty == unstated; presented as the s.44AB default,
                                          # which is what audit_case has always meant.
+    foreign_dividends_in_book: bool = False   # false (default) means the GnuCash book does NOT
+                                         # yet contain the foreign broker's dividend activity,
+                                         # so schedules.build_other_sources must ADD the broker
+                                         # report's ordinary foreign dividend series into
+                                         # dividend_gross/taxable_total and its 234C buckets into
+                                         # dividend_quarters -- otherwise that income is simply
+                                         # missing from the return. true means the book already
+                                         # tags the same receipts (e.g. under OS_DIVIDEND), so the
+                                         # foreign figures stay excluded from the total (surfaced
+                                         # on their own lines only) to avoid double-counting.
+    foreign_dividends_in_book_by_ay: dict = field(default_factory=dict)  # per-AY override,
+                                         # {"2026-27": true} -- a user may start importing the
+                                         # broker's activity into the book in a later year while
+                                         # earlier years must stay exactly as filed, so this is a
+                                         # per-AY switch, never a one-way/permanent change. Same
+                                         # shape and resolution style as audit_case_by_ay.
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
 
 
@@ -159,6 +175,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             audit_case=bool(fields_.get("audit_case", False)),
             audit_case_by_ay=fields_.get("audit_case_by_ay") or {},
             audit_case_basis=(fields_.get("audit_case_basis") or "").strip(),
+            foreign_dividends_in_book=bool(fields_.get("foreign_dividends_in_book", False)),
+            foreign_dividends_in_book_by_ay=fields_.get("foreign_dividends_in_book_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},
         )
     return entities
@@ -230,6 +248,10 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["audit_case_by_ay"] = dict(e.audit_case_by_ay)
     if e.audit_case_basis:
         d["audit_case_basis"] = e.audit_case_basis
+    if e.foreign_dividends_in_book:
+        d["foreign_dividends_in_book"] = True
+    if e.foreign_dividends_in_book_by_ay:
+        d["foreign_dividends_in_book_by_ay"] = dict(e.foreign_dividends_in_book_by_ay)
     if e.extra_items:
         d["extra_items"] = dict(e.extra_items)
     return d
@@ -395,6 +417,7 @@ def validate_entity_fields(
     regime_by_ay: dict | None = None,
     audit_case_by_ay: dict | None = None,
     audit_case_basis: str = "",
+    foreign_dividends_in_book_by_ay: dict | None = None,
 ) -> list[str]:
     """Validate the fields of one entity before a write. Returns a list of
     human-readable error strings (empty list == valid). Pure/side-effect-free
@@ -439,6 +462,10 @@ def validate_entity_fields(
     for ay, flag in (audit_case_by_ay or {}).items():
         if not isinstance(flag, bool):
             errors.append(f"audit_case_by_ay[{ay!r}] = {flag!r} must be true/false.")
+
+    for ay, flag in (foreign_dividends_in_book_by_ay or {}).items():
+        if not isinstance(flag, bool):
+            errors.append(f"foreign_dividends_in_book_by_ay[{ay!r}] = {flag!r} must be true/false.")
 
     # Blank is legal (unstated basis -- reads as the s.44AB default). A typo'd
     # token is not: it would silently print the wrong statutory reason on the
