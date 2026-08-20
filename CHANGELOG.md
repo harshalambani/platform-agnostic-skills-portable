@@ -9,6 +9,105 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [Unreleased]
+
+### Added
+- **New ITR Foreign Income Pack skill parses a foreign broker's consolidated
+  tax report and populates Schedule FA, Schedule FSI, Form 67, and Schedule
+  TR** (#195, `src/agents/skill_itr_workbook/scripts/parse_foreign.py`). The
+  input is optional (`foreign_report_xlsx`) so a run with no foreign report
+  supplied is unaffected. The report mixes two different reporting years on
+  the same workbook - Schedule FA reports foreign holdings as of the
+  CALENDAR year, while the Dividend and Interest sheets report the FINANCIAL
+  year - and the parser deliberately leaves that mismatch alone rather than
+  reconciling the two, since reconciling them would misrepresent what each
+  schedule is actually reporting. Every numeric cell is read through one
+  shared parser that never turns a non-numeric cell (blank, "-", or
+  instructional prose) into `0.0`; instead it returns the value alongside a
+  flag naming why it could not be parsed, because a zero on a tax return is
+  an assertion of fact, not a safe default. A required sheet missing
+  entirely raises and stops the run, but a header that cannot be found
+  within a present sheet only marks that one schedule unparsed and warns,
+  so a layout change in one sheet does not take down every other sheet in
+  the same report.
+- **Foreign broker dividends are now wired into Schedule OS and the 234C
+  advance-tax instalment buckets** (#196,
+  `src/agents/skill_itr_workbook/scripts/schedules.py`,
+  `src/agents/skill_itr_workbook/scripts/write_workbook.py`). PR #195 parsed
+  the broker's Dividend sheet but nothing downstream consumed it; this PR
+  surfaces those figures on their own new Other Sources rows, clearly
+  labelled and, at this point, kept strictly separate from the book-derived
+  Other Sources total, because the GnuCash book may already tag the same
+  receipts under `OS_DIVIDEND` and summing both would double-count (#198
+  below turns that separation into a per-AY choice rather than a fixed
+  behaviour). Ordinary dividend income and deemed dividend under s.2(22)(f)
+  are tracked as separate series throughout. Each vendor quarterly period is
+  assigned to one of the five statutory 234C windows by parsing the period
+  label's END date (e.g. "16-Jun to 15-Sep" -> 15-Sep) and resolving it
+  through the shared bucket-index helper in `quarters.py`, rather than by
+  the period's position in the list, so there remains exactly one
+  definition of the 234C windows in the codebase. A period whose label
+  cannot be parsed leaves its window unfilled and warns instead of
+  guessing; two periods that resolve to the same window are summed with a
+  warning instead of one silently overwriting the other.
+- **Whether those foreign broker dividends fold into the book totals is now
+  a per-AY switch on the entity, `foreign_dividends_in_book` /
+  `foreign_dividends_in_book_by_ay`** (#198,
+  `src/agents/skill_itr_workbook/scripts/configs.py`,
+  `src/agents/skill_itr_workbook/scripts/schedules.py`,
+  `src/agents/skill_itr_workbook/scripts/write_workbook.py`), mirroring the
+  existing `audit_case`/`audit_case_by_ay` pattern, because a user may start
+  importing the broker's activity into the book in a later year while
+  earlier years must stay exactly as filed. The default is `false`, meaning
+  the book does NOT yet contain the broker's dividend activity, so
+  `build_other_sources` now folds the ordinary foreign series into both
+  `dividend_gross`/`taxable_total` and, element-wise, into the five 234C
+  instalment buckets - and from there into the advance-tax projection;
+  leaving that fold out would simply drop the income from the return.
+  Setting the flag `true` for a given AY restores the PR #196 behaviour of
+  keeping the foreign figures excluded from the total, for when the book
+  already tags the same receipts and summing both would double-count. The
+  deemed dividend series under s.2(22)(f) is never folded into the total
+  under either setting - it stays a detail-only figure taxed separately. A
+  `None`/placeholder foreign quarter never coerces a book figure to a
+  different value or invents a `0.0`. The detail lines stay populated under
+  both settings; only the totals move, and the resolved setting is printed
+  in plain words on the OtherSources sheet, right next to the figure it
+  changes, so a wrong setting is visible on the workbook itself rather than
+  buried in config.
+- **Form 16 parsing now extracts the taxpayer's old/new tax-regime election
+  and resolves which regime a workbook build actually uses** (#194,
+  `src/agents/skill_itr_workbook/scripts/parse_form16.py`,
+  `src/agents/skill_itr_workbook/agent.py`). `Form16Data` gains `regime`,
+  read from the Part B s.115BAC(1A) opt-out field ("opted out?" Yes means
+  the old regime, No means the new regime); when that field cannot be read,
+  `regime` is left unset and `regime_unparsed_reason` records why, rather
+  than guessing, since old and new regime produce materially different tax.
+  The workbook build resolves the regime to use through a priority chain in
+  the new `_resolve_regime()`: an explicit `regime_override` always wins if
+  one is given, then the regime parsed from Form 16, then the entity's
+  configured default. When an explicit override disagrees with what Form 16
+  says, or when neither an override nor a parsed Form 16 regime is
+  available and the entity's configured default is used unconfirmed, a
+  warning is added to the run summary - the build still completes and the
+  workbook is still written either way.
+
+### Changed
+- **`pypdfium2` bumped from 5.12.1 to 5.13.0** in the pdf-ocr dependency
+  group (#185).
+- **Seven further dependency bumps, all `requirements-lock.txt`-only** (no
+  source changes):
+  - `gradio` 6.22.0 -> 6.24.0, ui group (#186)
+  - langchain-ecosystem group, 5 updates (#184): `langchain` 1.3.14 ->
+    1.3.15, `langchain-core` 1.5.3 -> 1.5.4, `langchain-openai` 1.4.1 ->
+    1.5.0, `langgraph` 1.2.10 -> 1.2.11, `langgraph-checkpoint` 4.1.1 ->
+    4.2.0
+  - `xxhash` 3.8.1 -> 4.0.0 (#190) - a MAJOR version bump
+  - `huggingface-hub` 1.26.1 -> 1.27.0 (#187)
+  - `greenlet` 3.5.4 -> 3.5.5 (#188)
+  - `charset-normalizer` 3.4.9 -> 3.5.0 (#191)
+  - `filelock` 3.32.2 -> 3.32.3 (#192)
+
 ## [3.6.0] — 2026-08-08
 
 This release makes the launcher splash disappear when the app window is
