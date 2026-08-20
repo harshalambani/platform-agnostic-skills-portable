@@ -36,19 +36,45 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `src/agents/skill_itr_workbook/scripts/write_workbook.py`). PR #195 parsed
   the broker's Dividend sheet but nothing downstream consumed it; this PR
   surfaces those figures on their own new Other Sources rows, clearly
-  labelled and kept strictly separate from the book-derived Other Sources
-  total, because the GnuCash book may already tag the same receipts under
-  `OS_DIVIDEND` and summing both would double-count. Ordinary dividend
-  income and deemed dividend under s.2(22)(f) are tracked as separate
-  series throughout. Each vendor quarterly period is assigned to one of the
-  five statutory 234C windows by parsing the period label's END date (e.g.
-  "16-Jun to 15-Sep" -> 15-Sep) and resolving it through the shared
-  bucket-index helper in `quarters.py`, rather than by the period's position in
-  the list, so there remains exactly one definition of the 234C windows in
-  the codebase. A period whose label cannot be parsed leaves its window
-  unfilled and warns instead of guessing; two periods that resolve to the
-  same window are summed with a warning instead of one silently overwriting
-  the other.
+  labelled and, at this point, kept strictly separate from the book-derived
+  Other Sources total, because the GnuCash book may already tag the same
+  receipts under `OS_DIVIDEND` and summing both would double-count (#198
+  below turns that separation into a per-AY choice rather than a fixed
+  behaviour). Ordinary dividend income and deemed dividend under s.2(22)(f)
+  are tracked as separate series throughout. Each vendor quarterly period is
+  assigned to one of the five statutory 234C windows by parsing the period
+  label's END date (e.g. "16-Jun to 15-Sep" -> 15-Sep) and resolving it
+  through the shared bucket-index helper in `quarters.py`, rather than by
+  the period's position in the list, so there remains exactly one
+  definition of the 234C windows in the codebase. A period whose label
+  cannot be parsed leaves its window unfilled and warns instead of
+  guessing; two periods that resolve to the same window are summed with a
+  warning instead of one silently overwriting the other.
+- **Whether those foreign broker dividends fold into the book totals is now
+  a per-AY switch on the entity, `foreign_dividends_in_book` /
+  `foreign_dividends_in_book_by_ay`** (#198,
+  `src/agents/skill_itr_workbook/scripts/configs.py`,
+  `src/agents/skill_itr_workbook/scripts/schedules.py`,
+  `src/agents/skill_itr_workbook/scripts/write_workbook.py`), mirroring the
+  existing `audit_case`/`audit_case_by_ay` pattern, because a user may start
+  importing the broker's activity into the book in a later year while
+  earlier years must stay exactly as filed. The default is `false`, meaning
+  the book does NOT yet contain the broker's dividend activity, so
+  `build_other_sources` now folds the ordinary foreign series into both
+  `dividend_gross`/`taxable_total` and, element-wise, into the five 234C
+  instalment buckets - and from there into the advance-tax projection;
+  leaving that fold out would simply drop the income from the return.
+  Setting the flag `true` for a given AY restores the PR #196 behaviour of
+  keeping the foreign figures excluded from the total, for when the book
+  already tags the same receipts and summing both would double-count. The
+  deemed dividend series under s.2(22)(f) is never folded into the total
+  under either setting - it stays a detail-only figure taxed separately. A
+  `None`/placeholder foreign quarter never coerces a book figure to a
+  different value or invents a `0.0`. The detail lines stay populated under
+  both settings; only the totals move, and the resolved setting is printed
+  in plain words on the OtherSources sheet, right next to the figure it
+  changes, so a wrong setting is visible on the workbook itself rather than
+  buried in config.
 - **Form 16 parsing now extracts the taxpayer's old/new tax-regime election
   and resolves which regime a workbook build actually uses** (#194,
   `src/agents/skill_itr_workbook/scripts/parse_form16.py`,
