@@ -557,7 +557,9 @@ def _open_output_folder(target_path: str):
 # "Start from book" -- optional prefill, never required.
 # ---------------------------------------------------------------------------
 
-def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity_name: str):
+def _handle_prefill_from_book(
+    bs_html, fy: str, regime: str, status: str, entity_name: str, foreign_report=None,
+):
     """Pre-fills the SAME editable form fields via advance_tax.from_book().
     Purely a convenience: any failure here leaves the manual form untouched
     and reports an error, it never blocks manual entry.
@@ -568,6 +570,9 @@ def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity
     Gradio's own managed upload root, never the client-echoed `.name` string
     joined onto a path (py/path-injection fix, same technique as
     `_find_by_name()`/`_find_in_upload_folder()`'s own docstrings explain).
+    The optional foreign broker report (2026-08-28) is the SAME kind of raw
+    `gr.File` upload and is resolved the SAME way, for the SAME reason --
+    never by joining its client-echoed `.name` onto a path.
 
     The GnuCash book is NOT a `gr.File` upload at all -- it is resolved
     through `ui._book_registry.resolve_book(entity_key, fy)`, the same
@@ -576,7 +581,20 @@ def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity
     registry is not user-controlled taint: the entity_key has already been
     sanitized/validated against entities.yaml's own key set before it is
     ever used to index the registry, and the registry hands back a path it
-    itself wrote, never a path built from unsanitized request data."""
+    itself wrote, never a path built from unsanitized request data.
+
+    `foreign_report`/`foreign_dividends_in_book` (2026-08-28): closes the
+    seam advance_tax.py's own from_book() docstring left open -- this
+    handler is now the first caller to pass them. Parsing follows agent.py's
+    own convention (_build_and_write_workbook, foreign_report_xlsx branch):
+    a bad/unreadable foreign report is reported in the status text and the
+    prefill continues with foreign_report=None, it never raises and never
+    blocks the book-figure prefill. foreign_dividends_in_book resolves
+    per-AY exactly as the ITR workbook build does: AY from FY via
+    agent._fy_to_ay, then entity.foreign_dividends_in_book_by_ay.get(ay,
+    entity.foreign_dividends_in_book) -- falling back to the dataclass
+    default (False) whenever no entity resolves at all (blank/invalid
+    entity_key, or the key isn't in entities.yaml)."""
     fy = (fy or "").strip()
     if bs_html is None:
         return (*[gr.update() for _ in _FORM_FIELDS], "Pick a balance-sheet HTML export first (or skip this section and enter figures manually).")
@@ -598,13 +616,19 @@ def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity
         return (*[gr.update() for _ in _FORM_FIELDS], "Could not locate the uploaded balance-sheet file -- try re-uploading.")
 
     _ensure_itr_scripts_importable()
+    foreign_lines: list[str] = []
+    foreign_report_obj = None
+    foreign_dividends_in_book = False
     try:
         import configs
         import mapping as mapping_engine
+        import parse_foreign as foreign_engine
         import parse_gnucash as pg
         import rules as rules_engine
         import schedules as sch
         from parse_eguile import parse_file
+
+        from agents.skill_itr_workbook import agent as itr_agent  # noqa: PLC0415
 
         tree = parse_file(str(bs_path))
 
@@ -639,10 +663,58 @@ def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity
             scrips = configs.load_scrips(scrips_path)
         fmv_tables = sch.load_fmv_tables()
 
+        # Foreign broker report -- optional, same failure convention as
+        # agent.py's own foreign_report_xlsx branch (_build_and_write_
+        # workbook): resolve the upload's server-side path via
+        # _find_in_upload_folder() (never the client-echoed .name joined
+        # onto a path), parse it, and on ANY failure fall back to
+        # foreign_report=None with the problem reported in the status text
+        # -- this whole prefill step stays optional and must never raise.
+        if foreign_report is not None:
+            foreign_path = _find_in_upload_folder(
+                foreign_report.name if hasattr(foreign_report, "name") else foreign_report
+            )
+            if foreign_path is None:
+                foreign_lines.append(
+                    "Foreign report: could not locate the uploaded file -- try re-uploading; "
+                    "foreign dividends not applied."
+                )
+            else:
+                try:
+                    foreign_report_obj = foreign_engine.load_foreign_income_report(str(foreign_path))
+                    for w in foreign_report_obj.warnings:
+                        foreign_lines.append(f"Foreign report: {w}")
+                except foreign_engine.ForeignReportError as e:
+                    foreign_lines.append(
+                        f"Foreign report: {foreign_path.name} unreadable ({e}) -- "
+                        "foreign dividends not applied."
+                    )
+
+        # foreign_dividends_in_book resolves per-AY exactly as the ITR
+        # workbook build does (agent.py _build_and_write_workbook): AY from
+        # FY via _fy_to_ay, then the resolved entity's per-AY override,
+        # falling back to its entity-level default. No entity resolves
+        # (blank/invalid entity_key, or the key isn't in entities.yaml) ->
+        # same default the dataclass itself uses (False) -- never a guessed
+        # value.
+        if foreign_report_obj is not None and entity_key:
+            entities_path = _config_mod.data_root_dir() / "itr" / "entities.yaml"
+            try:
+                entities = configs.load_entities(entities_path)
+            except Exception:
+                entities = {}
+            entity = entities.get(entity_key)
+            if entity is not None:
+                ay = itr_agent._fy_to_ay(fy)
+                foreign_dividends_in_book = entity.foreign_dividends_in_book_by_ay.get(
+                    ay, entity.foreign_dividends_in_book
+                )
+
         input_data = _adv_mod().from_book(
             resolved=result.resolved, node_by_guid=node_by_guid, book=book, fy=fy,
             rules=rules, entity_name=entity_name or "Unnamed", regime=regime, status=status,
             dob=None, scrips=scrips, fmv_tables=fmv_tables,
+            foreign_report=foreign_report_obj, foreign_dividends_in_book=foreign_dividends_in_book,
         )
     except Exception as e:
         return (*[gr.update() for _ in _FORM_FIELDS], f"Error prefilling from book: {e}")
@@ -650,6 +722,24 @@ def _handle_prefill_from_book(bs_html, fy: str, regime: str, status: str, entity
     msg = f"Prefilled from book for FY {fy}. Every field below is still editable."
     if result.unmapped:
         msg += f" ({len(result.unmapped)} unmapped leaf(ves) in the HTML were skipped -- see Review Mapping.)"
+    # Foreign-dividend wording only appears when a foreign report was
+    # actually parsed -- an unconditional line here would assert a flag
+    # value for a run that had no foreign figures at all, the exact defect
+    # #198 fixed on the OtherSources sheet (write_workbook.py).
+    if foreign_report_obj is not None:
+        if foreign_dividends_in_book:
+            msg += (
+                " Foreign broker dividends were **excluded** from the prefilled dividend figure "
+                "above -- book already records them, so they are excluded here to avoid "
+                "double-counting."
+            )
+        else:
+            msg += (
+                " Foreign broker dividends were **folded into** the prefilled dividend figure "
+                "above -- book does not yet record them."
+            )
+    if foreign_lines:
+        msg += "\n\n" + "\n".join(foreign_lines)
     return (*_input_to_form(input_data), msg)
 
 
@@ -757,6 +847,11 @@ def render(container_tab=None) -> None:
             "separate book upload on this tab."
         )
         bs_html_file = gr.File(label="Balance sheet HTML export", file_types=[".html", ".htm"])
+        foreign_report_file = gr.File(
+            label="Foreign broker consolidated report (optional -- only if this entity "
+            "holds foreign broker investments)",
+            file_types=[".xlsx"],
+        )
         prefill_btn = gr.Button("Prefill from book")
 
     if container_tab is not None:
@@ -778,6 +873,6 @@ def render(container_tab=None) -> None:
 
     prefill_btn.click(
         fn=_handle_prefill_from_book,
-        inputs=[bs_html_file, fy, regime, status, entity_name],
+        inputs=[bs_html_file, fy, regime, status, entity_name, foreign_report_file],
         outputs=[*form_components, status_md],
     )

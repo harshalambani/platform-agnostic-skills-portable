@@ -26,17 +26,22 @@ Fully offline; synthetic fixtures only. No access to any Data/ path, any
 """
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 SRC = ROOT / "src"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
+BS_HTML_FIXTURE = FIXTURES / "syn_ind.html"                        # AY-of "31-03-2025" -> FY 2024-25
+FOREIGN_XLSX_FIXTURE = FIXTURES / "syn_indmoney_tax_report.xlsx"   # synthetic, see test_parse_foreign.py
 
 for p in (str(SCRIPTS), str(AGENT_DIR), str(SRC)):
     if p not in sys.path:
@@ -45,6 +50,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ui.tabs import advance_tax as ui_mod  # noqa: E402
+
+import advance_tax as adv_script  # noqa: E402  -- same module object ui_mod._adv_mod() returns
 
 YEAR_KEY = "2024-25"
 
@@ -358,3 +365,201 @@ def test_compute_unknown_fy_reports_error_not_crash(isolated_data_root, monkeypa
     msg, download_update, _path_update = ui_mod._handle_compute(*_blank_values(fy="1999-00"))
     assert "Error" in msg
     assert download_update["interactive"] is False
+
+
+# ---------------------------------------------------------------------------
+# Prefill from book -- optional foreign broker report wiring (2026-08-28).
+#
+# advance_tax.py::from_book() has accepted foreign_report/
+# foreign_dividends_in_book since PR #198, but no caller ever passed them --
+# _handle_prefill_from_book() silently omitted included foreign broker
+# dividends while the workbook build (agent.py) folded them in. These tests
+# cover the closed seam: file upload -> _find_in_upload_folder() resolution
+# -> parse-never-raise -> per-AY flag resolution (agent._fy_to_ay) -> the
+# kwargs from_book() actually receives -> the status wording shown.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def upload_folder(tmp_path, monkeypatch):
+    """A fake Gradio managed-upload root. _find_in_upload_folder() walks
+    whatever gradio.utils.get_upload_folder() reports, which reads
+    GRADIO_TEMP_DIR at call time -- so pointing that env var at an empty
+    tmp_path dir gives each test an isolated, trusted upload directory."""
+    folder = tmp_path / "gradio_uploads"
+    folder.mkdir()
+    monkeypatch.setenv("GRADIO_TEMP_DIR", str(folder))
+    return folder
+
+
+def _stage_upload(upload_folder: Path, src: Path) -> str:
+    """Copy a fixture into the fake upload folder and return the raw path
+    string the handler receives. _find_in_upload_folder() only ever reads
+    the basename off this and then walks the trusted folder itself -- it
+    never joins the client-echoed path directly (that's the py/path-
+    injection fix this PR's upload wiring deliberately follows)."""
+    dest = upload_folder / src.name
+    shutil.copy(src, dest)
+    return str(dest)
+
+
+def _write_entities_yaml(data_root: Path, entity_key: str, **fields) -> None:
+    entities_dir = data_root / "itr"
+    entities_dir.mkdir(parents=True, exist_ok=True)
+    body = {"name": entity_key, "pan": "ABCDE1234F", "status": "Individual", **fields}
+    (entities_dir / "entities.yaml").write_text(
+        yaml.safe_dump({entity_key: body}), encoding="utf-8"
+    )
+
+
+class _FromBookSpy:
+    """Wraps advance_tax.from_book to record the kwargs it was actually
+    called with, while still delegating to the real implementation so the
+    handler's return value (and status message) reflect real behaviour."""
+
+    def __init__(self, real):
+        self.real = real
+        self.kwargs: dict | None = None
+
+    def __call__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        return self.real(*args, **kwargs)
+
+
+@pytest.fixture()
+def from_book_spy(monkeypatch):
+    # advance_tax (imported directly, top of file) and ui_mod._adv_mod()
+    # resolve to the same cached sys.modules entry, so patching the
+    # attribute here is visible through both import paths.
+    spy = _FromBookSpy(adv_script.from_book)
+    monkeypatch.setattr(adv_script, "from_book", spy)
+    return spy
+
+
+def _prefill_data_root(tmp_path) -> Path:
+    data_root = tmp_path / "Data"
+    data_root.mkdir(parents=True, exist_ok=True)
+    return data_root
+
+
+def test_prefill_no_foreign_report_passes_none_and_no_foreign_wording(
+    tmp_path, upload_folder, from_book_spy,
+):
+    data_root = _prefill_data_root(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+        )
+    *_form, msg = result
+    assert from_book_spy.kwargs["foreign_report"] is None
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is False
+    assert "Prefilled from book" in msg
+    assert "foreign" not in msg.lower()
+
+
+def test_prefill_foreign_report_flag_false_folds_in(tmp_path, upload_folder, from_book_spy):
+    data_root = _prefill_data_root(tmp_path)
+    _write_entities_yaml(data_root, "Synthetic Individual", foreign_dividends_in_book=False)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        foreign_raw = _stage_upload(upload_folder, FOREIGN_XLSX_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+            foreign_report=foreign_raw,
+        )
+    *_form, msg = result
+    assert from_book_spy.kwargs["foreign_report"] is not None
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is False
+    assert "folded into" in msg
+    assert "excluded" not in msg
+
+
+def test_prefill_foreign_report_flag_true_excludes(tmp_path, upload_folder, from_book_spy):
+    data_root = _prefill_data_root(tmp_path)
+    _write_entities_yaml(data_root, "Synthetic Individual", foreign_dividends_in_book=True)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        foreign_raw = _stage_upload(upload_folder, FOREIGN_XLSX_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+            foreign_report=foreign_raw,
+        )
+    *_form, msg = result
+    assert from_book_spy.kwargs["foreign_report"] is not None
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is True
+    assert "excluded" in msg
+    assert "folded into" not in msg
+
+
+def test_prefill_per_ay_override_beats_entity_default_true_over_false(
+    tmp_path, upload_folder, from_book_spy,
+):
+    # Entity-level default is False (fold in) but the 2025-26 AY (FY
+    # 2024-25's AY via agent._fy_to_ay) override is True (exclude) -- the
+    # per-AY entry must win over the entity-level default.
+    data_root = _prefill_data_root(tmp_path)
+    _write_entities_yaml(
+        data_root, "Synthetic Individual",
+        foreign_dividends_in_book=False,
+        foreign_dividends_in_book_by_ay={"2025-26": True},
+    )
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        foreign_raw = _stage_upload(upload_folder, FOREIGN_XLSX_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+            foreign_report=foreign_raw,
+        )
+    *_form, msg = result
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is True
+    assert "excluded" in msg
+
+
+def test_prefill_per_ay_override_beats_entity_default_false_over_true(
+    tmp_path, upload_folder, from_book_spy,
+):
+    # Mirror of the above in the other direction: entity-level default True
+    # (exclude) but the matching AY override is False (fold in).
+    data_root = _prefill_data_root(tmp_path)
+    _write_entities_yaml(
+        data_root, "Synthetic Individual",
+        foreign_dividends_in_book=True,
+        foreign_dividends_in_book_by_ay={"2025-26": False},
+    )
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        foreign_raw = _stage_upload(upload_folder, FOREIGN_XLSX_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+            foreign_report=foreign_raw,
+        )
+    *_form, msg = result
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is False
+    assert "folded into" in msg
+
+
+def test_prefill_garbage_foreign_file_still_succeeds_error_reported(
+    tmp_path, upload_folder, from_book_spy,
+):
+    data_root = _prefill_data_root(tmp_path)
+    garbage = upload_folder / "syn_garbage_foreign.xlsx"
+    garbage.write_text("not a real workbook", encoding="utf-8")
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        bs_raw = _stage_upload(upload_folder, BS_HTML_FIXTURE)
+        result = ui_mod._handle_prefill_from_book(
+            bs_raw, YEAR_KEY, "new", "Individual", "Synthetic Individual",
+            foreign_report=str(garbage),
+        )
+    *_form, msg = result
+    # The book-figure prefill still succeeds -- nothing raised, the
+    # `except Exception` escape hatch was never hit.
+    assert "Prefilled from book" in msg
+    assert "Error prefilling" not in msg
+    assert from_book_spy.kwargs["foreign_report"] is None
+    assert from_book_spy.kwargs["foreign_dividends_in_book"] is False
+    assert "unreadable" in msg
+    assert "foreign dividends not applied" in msg
+    # No report was actually parsed, so neither resolution wording appears.
+    assert "folded into" not in msg
+    assert "excluded" not in msg
