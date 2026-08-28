@@ -221,6 +221,91 @@ class TestNativeWindowShutdown:
 
 
 # ---------------------------------------------------------------------------
+# 1d. In-page zoom. pywebview's WebView2 backend disables ALL browser
+#     accelerator keys (including Ctrl+plus/minus/0) in a production build, and
+#     create_window() is called without zoomable=True. The fix is implemented
+#     entirely in an injected page script (_ZOOM_HEAD) rather than by flipping
+#     those pywebview/WebView2 settings, so it behaves identically in browser
+#     mode and native-window mode.
+# ---------------------------------------------------------------------------
+
+class TestInPageZoom:
+
+    def _source(self) -> str:
+        return WEBUI_PATH.read_text(encoding="utf-8")
+
+    def _zoom_head(self) -> str:
+        source = self._source()
+        assert "_ZOOM_HEAD" in source, "webui.py must define a _ZOOM_HEAD constant"
+        start = source.index("_ZOOM_HEAD = ")
+        # The constant is a triple-quoted string; slice out just that literal.
+        marker = '"""'
+        first = source.index(marker, start)
+        second = source.index(marker, first + len(marker))
+        return source[first + len(marker):second]
+
+    def test_zoom_head_constant_is_nonempty(self):
+        head = self._zoom_head()
+        assert isinstance(head, str)
+        assert len(head.strip()) > 0, "_ZOOM_HEAD must not be empty"
+
+    def test_zoom_head_wired_into_main_blocks(self):
+        """head=_ZOOM_HEAD must be passed to the main app's gr.Blocks(...) call,
+        not just defined and left unused."""
+        source = self._source()
+        idx = source.index("with gr.Blocks(")
+        line_end = source.index(")", idx)
+        blocks_call = source[idx:line_end + 1]
+        assert "head=_ZOOM_HEAD" in blocks_call, (
+            "the main gr.Blocks(...) call must pass head=_ZOOM_HEAD, or the zoom "
+            "script is never injected into the served page"
+        )
+        assert 'title=APP_TITLE' in blocks_call, (
+            "sanity check: expected this to be the main app Blocks() call"
+        )
+
+    def test_zoom_head_has_wheel_handler_guarded_by_ctrl_key(self):
+        head = self._zoom_head()
+        assert "wheel" in head, "_ZOOM_HEAD must register a wheel event handler"
+        assert "ctrlKey" in head, (
+            "_ZOOM_HEAD must gate the wheel handler on ctrlKey — a touchpad pinch "
+            "reaches the page as a wheel event with ctrlKey === true, the same "
+            "signal as Ctrl+scroll"
+        )
+        assert "preventDefault" in head
+
+    def test_zoom_head_has_keydown_handler(self):
+        head = self._zoom_head()
+        assert "keydown" in head, "_ZOOM_HEAD must register a keydown handler"
+
+    def test_zoom_head_has_reset_to_one_path(self):
+        head = self._zoom_head()
+        assert "1.0" in head, (
+            "_ZOOM_HEAD must reset the zoom level to 1.0 (Ctrl+0)"
+        )
+
+    def test_zoom_head_uses_namespaced_localstorage_key(self):
+        head = self._zoom_head()
+        assert "paskills.zoom" in head, (
+            "_ZOOM_HEAD must persist the zoom level under a namespaced "
+            "localStorage key (paskills.zoom)"
+        )
+        assert "localStorage" in head
+
+    def test_zoom_head_does_not_touch_launch_call(self):
+        """The fix must not flip pywebview's zoomable flag or debug-derived
+        accelerator-key setting — it's implemented purely via the injected
+        script, independent of those host settings."""
+        source = self._source()
+        launch_idx = source.index("def _run_native_window")
+        launch_body = source[launch_idx:launch_idx + 4000]
+        assert "zoomable" not in launch_body, (
+            "do not wire pywebview's zoomable flag - the approved fix is the "
+            "injected page script only"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. Functional checks on _config.download_staging_dir()
 # ---------------------------------------------------------------------------
 

@@ -9,6 +9,18 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
+## [Unreleased]
+
+### Added
+- **Zoom now works inside the native app window** (`ui/webui.py`). pywebview's
+  WebView2 backend disables all browser accelerator keys in a production
+  build, and the window is created without `zoomable`, so pinch, Ctrl+scroll,
+  and Ctrl+plus/minus/0 previously did nothing. Fixed with a small page
+  script injected via `head=` on the main `gr.Blocks(...)` call, independent
+  of those pywebview/WebView2 settings, so zoom behaves identically in
+  browser mode and native-window mode and the level persists across restarts
+  via `localStorage`.
+
 ## [3.7.0] — 2026-08-28
 
 ### Added

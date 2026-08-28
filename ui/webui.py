@@ -204,6 +204,109 @@ APP_CSS = APP_CSS + _help_mod.HELP_CSS
 
 
 # ---------------------------------------------------------------------------
+# In-page zoom.
+#
+# The app runs Gradio served into a pywebview/WebView2 native window. pywebview's
+# WebView2 backend sets AreBrowserAcceleratorKeysEnabled = debug, so a production
+# build (debug=False) disables ALL browser accelerator keys, including Ctrl+plus /
+# Ctrl+minus / Ctrl+0, and create_window() is called without zoomable (default
+# False) — so pinch/Ctrl+scroll/Ctrl+plus-minus zoom does not work.
+#
+# Fixed here instead, entirely in our own injected page script, so it is
+# independent of WebView2 host settings and behaves identically in browser mode
+# and native-window mode. A touchpad pinch reaches the page as a wheel event
+# with ctrlKey === true — the same signal as Ctrl+scroll — so one handler
+# covers both.
+# ---------------------------------------------------------------------------
+
+_ZOOM_HEAD = """
+<script>
+(function () {
+    "use strict";
+    var STORAGE_KEY = "paskills.zoom";
+    var MIN_ZOOM = 0.5;
+    var MAX_ZOOM = 2.5;
+    var STEP = 0.1;
+    var zoom = 1.0;
+
+    function loadZoom() {
+        try {
+            var raw = window.localStorage.getItem(STORAGE_KEY);
+            var val = raw !== null ? parseFloat(raw) : NaN;
+            if (!isNaN(val) && val >= MIN_ZOOM && val <= MAX_ZOOM) {
+                return val;
+            }
+        } catch (e) { /* localStorage can throw (private mode, disabled, etc.) */ }
+        return 1.0;
+    }
+
+    function saveZoom(val) {
+        try {
+            window.localStorage.setItem(STORAGE_KEY, String(val));
+        } catch (e) { /* ignore — persistence is best-effort */ }
+    }
+
+    function clamp(val) {
+        return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, val));
+    }
+
+    function applyZoom() {
+        try {
+            if (document.documentElement) {
+                document.documentElement.style.zoom = String(zoom);
+            }
+        } catch (e) { /* defensive: never let zoom apply crash the page */ }
+    }
+
+    function setZoom(val) {
+        zoom = clamp(Math.round(val * 100) / 100);
+        applyZoom();
+        saveZoom(zoom);
+    }
+
+    function onWheel(evt) {
+        if (!evt.ctrlKey) return;
+        // Also covers a touchpad pinch, which the browser reports as a wheel
+        // event with ctrlKey === true.
+        evt.preventDefault();
+        var direction = evt.deltaY > 0 ? -1 : 1;
+        setZoom(zoom + direction * STEP);
+    }
+
+    function onKeydown(evt) {
+        if (!(evt.ctrlKey || evt.metaKey)) return;
+        if (evt.key === "=" || evt.key === "+") {
+            evt.preventDefault();
+            setZoom(zoom + STEP);
+        } else if (evt.key === "-" || evt.key === "_") {
+            evt.preventDefault();
+            setZoom(zoom - STEP);
+        } else if (evt.key === "0") {
+            evt.preventDefault();
+            setZoom(1.0);
+        }
+    }
+
+    function init() {
+        zoom = loadZoom();
+        applyZoom();
+        document.addEventListener("wheel", onWheel, { capture: true, passive: false });
+        document.addEventListener("keydown", onKeydown, { capture: true });
+    }
+
+    try {
+        if (document.readyState === "loading") {
+            document.addEventListener("DOMContentLoaded", init);
+        } else {
+            init();
+        }
+    } catch (e) { /* never let setup throw and break the page */ }
+})();
+</script>
+"""
+
+
+# ---------------------------------------------------------------------------
 # Clean shutdown coordinator.
 #
 # The frozen build is a windowless Gradio server (console=False), so there is
@@ -431,7 +534,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
     mode = _resolve_launch_mode() if launch else "browser"
     window_mode = mode == "window"
 
-    with gr.Blocks(title=APP_TITLE, analytics_enabled=False) as app:
+    with gr.Blocks(title=APP_TITLE, analytics_enabled=False, head=_ZOOM_HEAD) as app:
         # Header. In browser/headless mode we add an always-visible Exit button
         # (the deterministic way to stop the windowless server — see shutdown
         # coordinator above) plus the tab-close shutdown wiring. In native-window
