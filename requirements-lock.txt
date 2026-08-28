@@ -1185,9 +1185,9 @@ langgraph-sdk==0.4.2 \
     --hash=sha256:75fa5096c1177ce39c847096a8fe3745ffd480ddb412995f836e9f5f884c43dd \
     --hash=sha256:b88f0f5f6328ac0680d6790614a905b2bcfa257f2276dba4e38f0e86db0aa738
     # via langgraph
-langsmith==0.10.16 \
-    --hash=sha256:7dc5ff6477d50101b4944a985773bf9a3e2a9374e5d71ed2549ada929ca500b2 \
-    --hash=sha256:f0b3882e0d2d69bda596c7b452a7857943aefb2c531c047677470b0a394cc490
+langsmith==0.11.1 \
+    --hash=sha256:47998977366acb3ba3093881fd465cbf11a5f8c2f4e87e40a17dda203f6dedf4 \
+    --hash=sha256:cfc3437a9cf27440cd0095c24df945edbceb6df10b579bc8b3980b4ad367835f
     # via
     #   langchain-classic
     #   langchain-community
