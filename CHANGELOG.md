@@ -9,7 +9,7 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > The commits all remain on `main`, so the history behind older entries is
 > intact, but the version links no longer resolve to a tag.
 
-## [Unreleased]
+## [3.7.0] — 2026-08-28
 
 ### Added
 - **New ITR Foreign Income Pack skill parses a foreign broker's consolidated
@@ -91,6 +91,20 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   available and the entity's configured default is used unconfirmed, a
   warning is added to the run summary - the build still completes and the
   workbook is still written either way.
+- **The Advance Tax tab can now take that same foreign broker report** (#209,
+  `ui/tabs/advance_tax.py`), closing the seam `advance_tax.from_book()`'s own
+  docstring left open - this handler is the first caller in the codebase to
+  pass `foreign_report`/`foreign_dividends_in_book`. The new upload is
+  optional, and its server-side path is resolved by walking Gradio's managed
+  upload root, never by joining the client-echoed `.name` onto a path.
+  `foreign_dividends_in_book` resolves per-AY exactly as the ITR workbook
+  build does - AY from FY, then the entity's per-AY override over its
+  entity-level default - falling back to the dataclass default when no entity
+  resolves at all. A bad or unreadable report is reported in the status text
+  and the prefill continues with no foreign figures: it never raises and never
+  blocks the book-figure prefill. The status line mentions foreign dividends
+  ONLY when a report was actually parsed, so a run with no foreign report
+  never asserts a flag value for figures it did not have.
 
 ### Changed
 - **`pypdfium2` bumped from 5.12.1 to 5.13.0** in the pdf-ocr dependency
@@ -107,6 +121,17 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - `greenlet` 3.5.4 -> 3.5.5 (#188)
   - `charset-normalizer` 3.4.9 -> 3.5.0 (#191)
   - `filelock` 3.32.2 -> 3.32.3 (#192)
+- **Eight further dependency bumps, all `requirements-lock.txt`-only** (no
+  source changes; none of the eight appears in `requirements.txt` - every one
+  is a transitive dependency):
+  - `charset-normalizer` 3.5.0 -> 3.5.1 (#201)
+  - `sqlalchemy` 2.0.51 -> 2.0.52 (#202)
+  - `orjson` 3.11.9 -> 3.12.0 (#203)
+  - `tiktoken` 0.13.0 -> 0.14.0 (#204)
+  - `starlette` 1.4.1 -> 1.6.0 (#205)
+  - `xxhash` 4.0.0 -> 4.0.1 (#206)
+  - `huggingface-hub` 1.27.0 -> 1.28.0 (#207)
+  - `langsmith` 0.10.16 -> 0.11.1 (#208)
 
 ## [3.6.0] — 2026-08-08
 
