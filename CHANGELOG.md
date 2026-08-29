@@ -21,6 +21,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   browser mode and native-window mode and the level persists across restarts
   via `localStorage`.
 
+### Fixed
+- **Dependabot `ui` group pattern was a literal, not a wildcard** (`.github/dependabot.yml`).
+  `"gradio"` matched only the `gradio` package, so the lock-only transitive
+  `gradio-client` fell outside the group and drifted out of lockstep,
+  producing an uninstallable `requirements-lock.txt` (gradio 6.26.0 requires
+  `gradio-client==2.6.1`, but the lock still pinned `2.6.0`). Changed to
+  `"gradio*"` so both move together in one PR.
+
 ## [3.7.0] — 2026-08-28
 
 ### Added
