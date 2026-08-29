@@ -1,0 +1,158 @@
+# Invented, self-consistent fixture for the Partner Compensation
+# Reconciliation skill (agents.skill_partner_comp_recon). No figure here is
+# copied or derived from any real document -- every number was chosen to
+# exercise this package's arithmetic rules (see AGENT.md / engine.py):
+#
+#   - the misc-adjustment derivation (s.3.1)
+#   - a one-off gross-up that lands exactly on a round lakh (s.3.2, CONFIRMED)
+#   - the incentive-cohort FY straddle, with one instalment paid the
+#     following financial year (s.4)
+#   - the capital rule (s.5.1) landing exactly on the Advisory's stated
+#     closing capital
+#   - a mid-year capital-rate-change inside that same cohort (s.5.2) --
+#     deliberately present *alongside* the s.5.1 agreement above, to
+#     demonstrate that an aggregate match does not mask an
+#     instalment-level anomaly
+#   - every other external figure set to agree exactly with the computed
+#     total, so the only two non-AGREE rows in Reconciliation/Exceptions
+#     are the always-cannot-reconcile incentive-schedule leg (no PDF
+#     parser in this build) and the rate-change suspect on Capital.
+
+financial_year: "2025-26"
+
+drivers:
+  firms_tax_rate: 0.349440
+  capital_rate: 0.40
+  capital_months_total: 48
+  capital_months_achieved: 12
+  target_compensation: 10000000
+  remuneration_tds_section: "194T"
+  remuneration_tds_rate: 0.10
+  remuneration_tds_start_date: "2025-04-01"
+
+monthly:
+  - month: "2025-04"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-05"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-06"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-07"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-08"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-09"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-10"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-11"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-12"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 650560
+    firms_tax: -524160
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 896400
+  - month: "2026-01"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2026-02"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2026-03"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+
+cohorts:
+  - award_fy: "2024-25"
+    gross_award: 3000000
+    instalments:
+      - date: "2025-07-31"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -416667
+        net: 233893
+      - date: "2025-10-31"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -291667
+        net: 358893
+      - date: "2026-06-30"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -291667
+        net: 358893
+
+advisory:
+  stated_closing_capital: 1000000
+
+external:
+  bank_credits_total: 8037266
+  form_26as_total_credit: 360000
+  return_exempt_share_of_profit: 6000000
+  return_closing_capital: 1000000

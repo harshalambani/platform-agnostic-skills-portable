@@ -1,0 +1,136 @@
+# skill.yaml -- Partner Compensation Reconciliation manifest.
+#
+# Stage 1 only (see AGENT.md): the computation engine + workbook writer
+# against a structured YAML/JSON input for one financial year. The PDF
+# parsers under parsers/ are guarded placeholders pending real specimens --
+# this skill does not yet read a payout advice, an Advisory letter, a
+# payment-schedule PDF, or an LLP capital-account statement directly.
+
+name: "partner_comp_recon"
+display_name: "Partner Compensation Reconciliation"
+description: >
+  Reconciles an LLP partner's remuneration, exempt share of profit,
+  performance-incentive cohorts (awarded in one financial year, paid out
+  in instalments across the next one or two), compulsory capital
+  contribution, one-off incentives, and any payroll-stream months for a
+  single financial year, against the Compensation Advisory, the bank, Form
+  26AS, and the filed return. Reports agree / variance / cannot-reconcile
+  per category -- a missing source is never silently treated as a match.
+  No tax computation is performed, no .gnucash book is written, and no
+  ITR workbook is touched. Takes a structured YAML/JSON input for this
+  build; parsing the underlying PDFs directly is a placeholder pending
+  real document specimens (see AGENT.md).
+category: "itr"
+version: "0.1.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "input_path"
+    type: "file"
+    label: "Partner compensation input (.yaml/.yml/.json)"
+    file_types: [".yaml", ".yml", ".json"]
+    required: true
+
+run_args:
+  input_path: "{inputs.input_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "partner-comp-recon"
+  download_label: "Download Partner Compensation Reconciliation"
+
+requires:
+  native_binaries: []
+  python_packages: ["openpyxl", "pyyaml"]
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Takes one financial year's partner-compensation figures -- monthly
+    remuneration and share of profit, incentive-cohort instalments,
+    capital contribution, one-off incentives, and (if applicable) payroll
+    months -- as a structured YAML or JSON file, and cross-checks them
+    against the Compensation Advisory's own stated figures, the bank
+    statement, Form 26AS, and the filed return. Every rate, percentage and
+    period this skill uses (the firm's-tax rate, the capital-contribution
+    rate, the capital accretion period, the remuneration-TDS section/rate/
+    start-date) is read from that year's own input -- none of them are
+    hardcoded, since all of them change by year, and the capital rate has
+    been known to change mid-year. A missing rate or a missing source
+    figure produces an explicit "cannot reconcile" row naming what is
+    missing, never a default or a silently-assumed match. This build does
+    not parse the underlying PDFs (the Advisory letter, the incentive
+    payment-schedule, the monthly payout advices, or the LLP's own
+    capital-account statement) directly -- those parsers are guarded
+    placeholders pending real, de-identified specimens of each document;
+    supply their figures as the structured input instead.
+  when_to_use: >
+    Use this once a financial year's partner-compensation documents are in
+    hand and you want a single reconciliation across remuneration, share
+    of profit, the incentive cohort ledger, capital contribution, one-offs,
+    and (if relevant) a payroll stint -- particularly useful for catching
+    a mid-year capital-rate change (which shows up as unequal
+    capital-deducted amounts within one incentive cohort) or a one-off
+    incentive that was grossed up at the wrong year's tax rate. Not a
+    substitute for tax computation or return preparation -- it only
+    reconciles the streams against each other and the return's own
+    figures; it does not compute tax due.
+  inputs:
+    - name: "input_path"
+      tooltip: >
+        A YAML or JSON file describing one financial year's drivers,
+        monthly payouts, incentive cohorts, the Advisory's own figures,
+        and the external (bank / 26AS / return) figures to check against.
+      accepts: ".yaml, .yml, or .json -- see the sample fixture shipped with this skill's tests for the exact shape."
+      gotchas: >
+        Every driver (firm's-tax rate, capital rate, capital months
+        total/achieved, remuneration TDS section/rate/start-date) must be
+        supplied for the financial year being processed -- a missing one
+        does not fall back to a prior year's value or a default; the
+        affected reconciliation rows come back as "cannot reconcile" and
+        name exactly what is missing.
+  steps:
+    - "Assemble one financial year's figures into a YAML or JSON file matching the input shape (drivers, monthly, cohorts, advisory, external, and optionally payroll)."
+    - "Pick that file as the input."
+    - "Click Run."
+    - "Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-partner-comp-recon.xlsx"
+        tooltip: >
+          Ten sheets: Logic (the seven reconciled legs and the governing
+          identity, in prose), Drivers (every rate/period/date as a
+          labelled input cell -- the only sheet where one appears as a
+          literal), Monthly grid, Payroll stream (only present if the
+          input supplied payroll months), One-offs (the gross-up and its
+          roundness check), Cohorts (the incentive ledger with its
+          reporting/prior/future FY-assignment column), Capital (the rule
+          as a formula off Drivers, the Advisory cross-check, and the
+          mid-year rate-change detector), Reconciliation (agree / variance
+          / cannot-reconcile per category), Exceptions (every
+          non-agreeing or non-reconcilable row collected together), and
+          Open items (anything left unresolved and what would close it).
+  tips: >
+    Start with the Reconciliation sheet, then Exceptions -- a
+    "CANNOT RECONCILE" status names exactly which source figure for that
+    category was not supplied, so a "cannot reconcile" row is something to
+    fix in the input, not a defect in the workbook. On Capital, a "RATE
+    CHANGE SUSPECTED" row means the incentive cohort's instalments show
+    unequal capital-deducted amounts -- re-read that year's Compensation
+    Advisory, since it will have been reissued at a new rate part-way
+    through the cohort.
+  troubleshooting:
+    - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
+      fix: "Add that figure to the relevant block (drivers/advisory/external/monthly) of the input file for that financial year -- this skill never guesses or falls back to a prior year's value."
+    - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."
+      fix: "This build has no independent payment-schedule-PDF parser yet (see AGENT.md's Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers."
+    - problem: "'ERROR: this skill no longer accepts...' / unsupported file type."
+      fix: "Supply the structured input as .yaml, .yml, or .json -- this build does not parse the source PDFs directly."
