@@ -33,7 +33,7 @@ updates:
           - "pytesseract"
       ui:
         patterns:
-          - "gradio"
+          - "gradio*"
     ignore:
       # websockets is a TRANSITIVE dependency -- it is not in requirements.txt;
       # the lock records "# via langgraph-sdk, langsmith". langgraph-sdk 0.4.2
