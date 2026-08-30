@@ -117,7 +117,12 @@ def test_registry_discovers_all_skills():
     # three-way reconciliation (standalone artifacts only; directory/skill
     # name kept as mf_cas for stability -- see AGENT.md)
     assert "mf_cas" in names
-    assert len(skills) == 25
+    # Partner Compensation Reconciliation: LLP partner remuneration / share
+    # of profit / incentive-cohort / capital reconciliation for one FY,
+    # against Advisory, bank, 26AS and the return (structured YAML/JSON
+    # input this build; PDF parsers under parsers/ are Stage 2 placeholders)
+    assert "partner_comp_recon" in names
+    assert len(skills) == 26
 
 
 def test_registry_get_by_name():

@@ -68,6 +68,7 @@ padding-top:14px}
 <a href="#skill_mf_cas">MF Capital Gain Statement</a>
 <a href="#skill_msg_parser">MSG / Email Parser</a>
 <a href="#skill_parser_generator">Parser Generator</a>
+<a href="#skill_partner_comp_recon">Partner Compensation Reconciliation</a>
 <a href="#skill_krc_recon">Reconcile</a>
 <a href="#skill_scaffold">Skill Scaffolder</a>
 <a href="#skill_translate">Text Translator</a>
@@ -666,6 +667,32 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Tie-out still exits non-zero.</td><td>Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_partner_comp_recon" class="skill">
+<h2>Partner Compensation Reconciliation <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Takes one financial year&#x27;s partner-compensation figures -- monthly remuneration and share of profit, incentive-cohort instalments, capital contribution, one-off incentives, and (if applicable) payroll months -- as a structured YAML or JSON file, and cross-checks them against the Compensation Advisory&#x27;s own stated figures, the bank statement, Form 26AS, and the filed return. Every rate, percentage and period this skill uses (the firm&#x27;s-tax rate, the capital-contribution rate, the capital accretion period, the remuneration-TDS section/rate/ start-date) is read from that year&#x27;s own input -- none of them are hardcoded, since all of them change by year, and the capital rate has been known to change mid-year. A missing rate or a missing source figure produces an explicit &quot;cannot reconcile&quot; row naming what is missing, never a default or a silently-assumed match. This build does not parse the underlying PDFs (the Advisory letter, the incentive payment-schedule, the monthly payout advices, or the LLP&#x27;s own capital-account statement) directly -- those parsers are guarded placeholders pending real, de-identified specimens of each document; supply their figures as the structured input instead.</p>
+<p class="whenuse"><b>When to use it.</b> Use this once a financial year&#x27;s partner-compensation documents are in hand and you want a single reconciliation across remuneration, share of profit, the incentive cohort ledger, capital contribution, one-offs, and (if relevant) a payroll stint -- particularly useful for catching a mid-year capital-rate change (which shows up as unequal capital-deducted amounts within one incentive cohort) or a one-off incentive that was grossed up at the wrong year&#x27;s tax rate. Not a substitute for tax computation or return preparation -- it only reconciles the streams against each other and the return&#x27;s own figures; it does not compute tax due.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Partner compensation input (.yaml/.yml/.json)</b> <em>(required)</em> <span class="pa-tip" data-tip="A YAML or JSON file describing one financial year&#x27;s drivers, monthly payouts, incentive cohorts, the Advisory&#x27;s own figures, and the external (bank / 26AS / return) figures to check against. ⚠️ Every driver (firm&#x27;s-tax rate, capital rate, capital months total/achieved, remuneration TDS section/rate/start-date) must be supplied for the financial year being processed -- a missing one does not fall back to a prior year&#x27;s value or a default; the affected reconciliation rows come back as &quot;cannot reconcile&quot; and name exactly what is missing.">ℹ️</span><br><span class="fmt">accepts: .yaml, .yml, or .json -- see the sample fixture shipped with this skill&#x27;s tests for the exact shape.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Assemble one financial year&#x27;s figures into a YAML or JSON file matching the input shape (drivers, monthly, cohorts, advisory, external, and optionally payroll).</li>
+<li>Pick that file as the input.</li>
+<li>Click Run.</li>
+<li>Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-partner-comp-recon.xlsx</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-partner-comp-recon.xlsx</code><span class="pa-tip" data-tip="Ten sheets: Logic (the seven reconciled legs and the governing identity, in prose), Drivers (every rate/period/date as a labelled input cell -- the only sheet where one appears as a literal), Monthly grid, Payroll stream (only present if the input supplied payroll months), One-offs (the gross-up and its roundness check), Cohorts (the incentive ledger with its reporting/prior/future FY-assignment column), Capital (the rule as a formula off Drivers, the Advisory cross-check, and the mid-year rate-change detector), Reconciliation (agree / variance / cannot-reconcile per category), Exceptions (every non-agreeing or non-reconcilable row collected together), and Open items (anything left unresolved and what would close it).">ℹ️</span> — Ten sheets: Logic (the seven reconciled legs and the governing identity, in prose), Drivers (every rate/period/date as a labelled input cell -- the only sheet where one appears as a literal), Monthly grid, Payroll stream (only present if the input supplied payroll months), One-offs (the gross-up and its roundness check), Cohorts (the incentive ledger with its reporting/prior/future FY-assignment column), Capital (the rule as a formula off Drivers, the Advisory cross-check, and the mid-year rate-change detector), Reconciliation (agree / variance / cannot-reconcile per category), Exceptions (every non-agreeing or non-reconcilable row collected together), and Open items (anything left unresolved and what would close it).</li>
+</ul>
+<h3>Tips</h3><p>Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE&quot; status names exactly which source figure for that category was not supplied, so a &quot;cannot reconcile&quot; row is something to fix in the input, not a defect in the workbook. On Capital, a &quot;RATE CHANGE SUSPECTED&quot; row means the incentive cohort&#x27;s instalments show unequal capital-deducted amounts -- re-read that year&#x27;s Compensation Advisory, since it will have been reissued at a new rate part-way through the cohort.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>A category shows &#x27;CANNOT RECONCILE&#x27; with a reason naming a driver or a figure.</td><td>Add that figure to the relevant block (drivers/advisory/external/monthly) of the input file for that financial year -- this skill never guesses or falls back to a prior year&#x27;s value.</td></tr>
+<tr><td>Reconciliation shows VARIANCE on the incentive schedule leg.</td><td>This build has no independent payment-schedule-PDF parser yet (see AGENT.md&#x27;s Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers.</td></tr>
+<tr><td>&#x27;ERROR: this skill no longer accepts...&#x27; / unsupported file type.</td><td>Supply the structured input as .yaml, .yml, or .json -- this build does not parse the source PDFs directly.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_krc_recon" class="skill">
 <h2>Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM memos and trade notes) against the Part I Simplified Ledger and produces a &quot;Bills&quot; workbook. Runs fully offline (deterministic, no LLM).</p>
@@ -751,7 +778,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 25 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 26 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];
