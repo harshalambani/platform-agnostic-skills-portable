@@ -46,11 +46,14 @@ cannot-reconcile row, not a number.
 
 ## Stage 1 (this build) vs Stage 2 (not this build)
 
-**Stage 1**, shipped in this PR: the computation engine (`engine.py`), the
+**Stage 1**, shipped first: the computation engine (`engine.py`), the
 workbook writer (`writer.py`), the manifest (`skill.yaml`), and the tests.
 `run()` takes a path to a structured YAML or JSON file for one financial
 year (see skill.yaml's help text for the exact shape) -- the same shape a
 Stage 2 parser would eventually produce.
+
+**Stage 1b**, shipped after Stage 1: the GnuCash journal CSV emitter
+(`jv_emitter.py`), optional and additive -- see its own section below.
 
 **Stage 2, NOT this build**: the PDF parsers under `parsers/`
 (`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
@@ -78,6 +81,12 @@ example and `skill.yaml`'s `help.inputs` for the user-facing description):
   share_of_profit_gross, additional_share_of_profit (the one-off, net),
   firms_tax, tds, capital_transferred, and total_paid. `misc` is never
   read from here -- it is always derived (see `engine.derive_misc()`).
+  Three further fields are optional, default `0.0`, and only matter to
+  Stage 1b (see below): `interest_on_capital` (positive, PGBP s.28(v)
+  income), `medical_topup` (negative, a recovery from the payout), and
+  `prior_cohort_drawdown` (negative -- the net amount of a prior-year
+  incentive instalment received this year; it is a current-account
+  drawdown, not current-year income).
 - `cohorts` -- the incentive cohort ledger: each cohort has an award FY,
   a gross award, and a list of instalments (`date`, `gross`, `firms_tax`,
   `capital`, `net`). Every instalment is assigned to the FY of its
@@ -94,6 +103,14 @@ example and `skill.yaml`'s `help.inputs` for the user-facing description):
   supplies this list), and there was no other field this could plausibly
   come from -- flagged here as an addition to the input shape rather than
   left undocumented.
+- `firm_name` -- optional; used only in the Stage 1b journal CSV's monthly
+  transaction descriptions (`"<firm name> - monthly payout YYYY-MM"`).
+  Never hardcoded -- if omitted, the description drops the firm-name
+  prefix rather than substituting a placeholder.
+- `accounts` -- optional; required only if `journal_path` is set (Stage
+  1b, see below). Maps the GnuCash account for each journal leg.
+- `opening_reclass` -- optional; required only if a Stage 1b opening
+  reclassification entry is wanted (see below).
 
 ## Process
 
@@ -120,6 +137,94 @@ computes a live Excel formula off Drivers (see `writer.py`'s module
 docstring for the exact style vocabulary and the "=" trap it guards
 against).
 
+## Stage 1b -- GnuCash journal emitter (`jv_emitter.py`)
+
+The reconciled year this skill produces always implies a set of journal
+entries; Stage 1b (`jv_emitter.py`) makes that implication explicit,
+tested and importable, as a GnuCash multi-split journal CSV, when
+`journal_path` is supplied to `run()` (or the corresponding `skill.yaml`
+input in the UI). It never opens or writes a `.gnucash` file itself --
+only a plain CSV for GnuCash's own importer to read.
+
+**The CSV dialect** is the same one `skill_26as_journal`'s
+`build_tds_journals.py` uses, restated in full in `jv_emitter.py`'s module
+docstring: `Date, Transaction ID, Number, Description, Account, Amount,
+Currency`, one row per split with the transaction-level fields repeated on
+every row, a single signed Amount column (Debit positive / Credit
+negative) summing to zero per transaction, Account as a colon path
+without the `Root Account:` prefix, `Currency` always `"INR"`, and
+Transaction ID / Number an FY-prefixed series (e.g. `2526-M01`,
+`2526-RECT`) unique per transaction and across financial years. A naive
+emitter gets this wrong in three specific ways this dialect exists to
+rule out: emitting blank-date continuation rows (GnuCash treats them as
+parse errors, not attached splits), emitting Deposit/Withdrawal column
+pairs instead of one signed Amount column, and reusing Transaction IDs
+across financial years (silently fusing two different years' same-numbered
+transactions in GnuCash's multi-split importer).
+
+**Importing into GnuCash**: File > Import > Import Transactions from CSV.
+Tick the Multi-split box. Skip 1 header line. Map the Date column as ISO
+(YYYY-MM-DD). Map the single Amount column to the importer's "Amount"
+column type (or "Amount (Negated)" if a build reverses the sign
+convention). Do not map Transfer Amount / Transfer Account -- this file
+never uses them (every transaction here has three or more splits).
+
+**The monthly journal** (one transaction per `monthly` entry, dated that
+month's last day):
+
+```
+Dr  bank                     = total_paid
+Dr  tds_expense              = -tds                     (tds is negative -> Dr positive)
+Dr  capital_contribution     = -capital_transferred      (negative -> Dr positive)
+Dr  medical_expense          = -medical_topup             (negative -> Dr positive)
+Cr  remuneration_income      = -remuneration
+Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax + additional_share_of_profit)
+Cr  interest_on_capital      = -interest_on_capital
+Cr  current_account          = -prior_cohort_drawdown
+```
+
+A split whose amount rounds to 0.00 is omitted, not emitted as a zero row.
+
+**Firm's tax is never booked as an expense in this ledger, in any year.**
+The share-of-profit credit above is NET of `firms_tax` (which is negative,
+so adding it nets the credit down) precisely because the firm already
+deducted its own tax before paying out -- that deduction is a permanent
+cost already netted into the income figure this ledger (and the firm's
+own statement of account, and the filed return) all report. Grossing it
+back up and booking the gross as income with firm's tax as a matching
+expense would create a permanent, non-deductible add-back that puts this
+ledger on a different basis from both of those other records. The gross
+amount and the firm's-tax rate belong in the workbook's working paper
+(Monthly grid / One-offs sheets) only -- do not "fix" this by grossing the
+credit back up.
+
+**Interest on capital and remuneration are both PGBP income under s.28(v)**,
+not Income from Other Sources -- `interest_on_capital` and
+`remuneration_income` in the `accounts` block name PGBP-side ledger
+accounts. Do not "correct" this placement.
+
+**`prior_cohort_drawdown`** books as a credit to `current_account` (a
+balance-sheet account, the firm's running balance owed to the partner),
+never as income -- the income, and the firm's tax on it, were already
+recognised in the award year's own monthly/cohort journal. Booking it
+again here as income would double-count it.
+
+**The account map** (`accounts` in the input) is required, per key, only
+if the corresponding split is non-zero somewhere in the year: `bank`,
+`tds_expense`, `interest_on_capital`, `current_account`,
+`capital_contribution`, `medical_expense`, `remuneration_income`,
+`share_of_profit_income`. A key needed by a non-zero month that is missing
+or empty comes back from `run()` as `"ERROR: ..."` naming the key and the
+month -- never a traceback.
+
+**The optional opening reclassification entry** (`opening_reclass` in the
+input: `date`, `description`, `splits: [{account, amount}, ...]`) is
+emitted first, with Transaction ID `<FY-prefix>-RECT`, subject to the same
+zero-sum balance check as every other transaction. This exists because a
+closed, filed year is corrected by a prior-period reclassification booked
+in the *following* year, never by reopening the closed year and never by
+crediting current-year income.
+
 ## Non-goals (explicit, not deferred silently)
 
 - **No tax computation.** No slab, surcharge, cess, or exemption
@@ -127,7 +232,8 @@ against).
   the spec this package was built from explicitly names (misc, gross-up,
   the capital rule) are computed.
 - **No `.gnucash` writes.** This skill never opens or modifies a GnuCash
-  book.
+  book, even in Stage 1b -- the journal emitter writes a plain CSV for
+  GnuCash's own importer, not a `.gnucash` file.
 - **No ITR workbook injection.** Output is a standalone workbook only.
 - **The PDF parsers are placeholders pending real specimens** (see Stage
   1/Stage 2 above) -- they are not a partially-done feature, they are an

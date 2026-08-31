@@ -381,6 +381,14 @@ class MonthlyLine:
     capital_transferred: float
     total_paid: float
     misc: float
+    # Stage 1b (jv_emitter.py) fields. Optional / default 0.0 so every
+    # existing fixture and test keeps working unchanged -- see AGENT.md's
+    # "Stage 1b" section for the accounting behind each one.
+    interest_on_capital: float = 0.0   # POSITIVE, income (PGBP s.28(v))
+    medical_topup: float = 0.0         # NEGATIVE, a recovery from the payout
+    prior_cohort_drawdown: float = 0.0  # NEGATIVE, a current-account drawdown,
+    # NOT current-year income -- the income and its firm's tax were already
+    # recognised in the award year (see jv_emitter.py).
 
 
 @dataclass
@@ -397,6 +405,10 @@ class Report:
     tds_month_exceptions: list[str]
     reconciliation: list[ReconciliationResult]
     payroll: list[dict] = field(default_factory=list)
+    # Stage 1b (jv_emitter.py) fields, both optional / default so every
+    # existing fixture and test keeps working unchanged.
+    firm_name: str = ""
+    opening_reclass: dict | None = None
 
 
 def build_report(data: dict) -> Report:
@@ -432,6 +444,9 @@ def build_report(data: dict) -> Report:
             firms_tax=m.get("firms_tax", 0.0) or 0.0, tds=m.get("tds", 0.0) or 0.0,
             capital_transferred=m.get("capital_transferred", 0.0) or 0.0,
             total_paid=m["total_paid"], misc=misc,
+            interest_on_capital=m.get("interest_on_capital", 0.0) or 0.0,
+            medical_topup=m.get("medical_topup", 0.0) or 0.0,
+            prior_cohort_drawdown=m.get("prior_cohort_drawdown", 0.0) or 0.0,
         ))
         addl = m.get("additional_share_of_profit", 0.0) or 0.0
         if addl:
@@ -545,4 +560,6 @@ def build_report(data: dict) -> Report:
         rate_change_suspects=rate_change_suspects, tds_applicability=tds_app,
         tds_month_exceptions=tds_month_exceptions, reconciliation=reconciliation,
         payroll=payroll,
+        firm_name=data.get("firm_name", "") or "",
+        opening_reclass=data.get("opening_reclass"),
     )

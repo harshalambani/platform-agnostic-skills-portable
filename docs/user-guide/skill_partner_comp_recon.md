@@ -14,6 +14,9 @@ Use this once a financial year's partner-compensation documents are in hand and 
 - **Partner compensation input (.yaml/.yml/.json)** (required) — accepts: .yaml, .yml, or .json -- see the sample fixture shipped with this skill's tests for the exact shape.
   - A YAML or JSON file describing one financial year's drivers, monthly payouts, incentive cohorts, the Advisory's own figures, and the external (bank / 26AS / return) figures to check against.
   - ⚠️ Every driver (firm's-tax rate, capital rate, capital months total/achieved, remuneration TDS section/rate/start-date) must be supplied for the financial year being processed -- a missing one does not fall back to a prior year's value or a default; the affected reconciliation rows come back as "cannot reconcile" and name exactly what is missing.
+- **GnuCash journal CSV output path (optional -- Stage 1b)** (optional) — accepts: A full output file path ending in .csv.
+  - Optional. When set, also writes a GnuCash multi-split journal CSV of the year's implied journal entries (Stage 1b) to this path -- one monthly-payout transaction per month, plus an opening reclassification entry if the input's opening_reclass: block is present. Leave blank to only produce the workbook, unchanged from before this option existed.
+  - ⚠️ Requires an accounts: block in the input naming the GnuCash account for every non-zero split (bank, tds_expense, interest_on_capital, current_account, capital_contribution, medical_expense, remuneration_income, share_of_profit_income) -- a missing account needed by a non-zero month comes back as an "ERROR: ..." naming the key and the month, not a traceback. Import the CSV into GnuCash via File > Import > Import Transactions from CSV, with the Multi-split box ticked, skipping the 1 header line, the Date column mapped as ISO (YYYY-MM-DD), and the single Amount column mapped to the importer's "Amount" column type (or "Amount (Negated)" if a build reverses the sign convention).
 
 ## How to run
 
@@ -33,6 +36,7 @@ Data/outputs/YYYY-MM-DD-HHMMSS-<input>-partner-comp-recon.xlsx
 Files produced:
 
 - **`YYYY-MM-DD-HHMMSS-<input>-partner-comp-recon.xlsx`** — Ten sheets: Logic (the seven reconciled legs and the governing identity, in prose), Drivers (every rate/period/date as a labelled input cell -- the only sheet where one appears as a literal), Monthly grid, Payroll stream (only present if the input supplied payroll months), One-offs (the gross-up and its roundness check), Cohorts (the incentive ledger with its reporting/prior/future FY-assignment column), Capital (the rule as a formula off Drivers, the Advisory cross-check, and the mid-year rate-change detector), Reconciliation (agree / variance / cannot-reconcile per category), Exceptions (every non-agreeing or non-reconcilable row collected together), and Open items (anything left unresolved and what would close it).
+- **`<journal_path> (optional -- Stage 1b, only written if journal_path is set)`** — A GnuCash multi-split journal CSV: one balanced transaction per monthly payout (dated month-end), plus an opening reclassification entry if opening_reclass: was supplied. Import via File > Import > Import Transactions from CSV with Multi-split ticked, skipping the 1 header line, Date mapped as ISO, and the Amount column mapped to the importer's Amount column type.
 
 ## Tips
 

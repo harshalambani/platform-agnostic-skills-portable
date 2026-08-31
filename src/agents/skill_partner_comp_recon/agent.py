@@ -16,7 +16,8 @@ of each document exists. See parsers/__init__.py.
 Architecture mirrors skill_mf_cas: `_load_input` below is the ONLY
 function in this package that touches the filesystem for the input path.
 `engine.build_report()` is pure (no I/O); `writer.write_report_workbook()`
-is the only function that touches openpyxl.
+is the only function that touches openpyxl; `jv_emitter.write_journal_csv()`
+(Stage 1b, optional) is the only function that touches the journal CSV.
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from pathlib import Path
 import yaml
 
 from .engine import build_report
+from .jv_emitter import JournalValidationError, build_journals, write_journal_csv
 from .writer import write_report_workbook
 
 
@@ -49,12 +51,20 @@ def run(
     output_path: str = "",
     config_path: str | None = None,
     model_override: str | None = None,
+    journal_path: str = "",
 ) -> str:
     """Read the structured YAML/JSON input for one financial year, compute
     the reconciliation (engine.build_report), write the 10-sheet workbook
     (writer.write_report_workbook) to output_path, and return a text
     summary. Never raises for a user-facing problem -- returns an
     "ERROR: ..." string instead, mirroring skill_mf_cas's convention.
+
+    journal_path is optional (Stage 1b). When non-empty, also builds and
+    writes the GnuCash multi-split journal CSV implied by the reconciled
+    year (jv_emitter.build_journals / write_journal_csv) to that path, and
+    mentions it (with transaction/row counts) in the returned summary. When
+    empty, behaviour is byte-identical to before Stage 1b existed -- no CSV
+    is written.
     """
     in_path = Path(input_path)
     if not in_path.is_file():
@@ -81,6 +91,20 @@ def run(
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_report_workbook(report, str(out_path))
+
+    journal_line = ""
+    if journal_path:
+        accounts = data.get("accounts") or {}
+        try:
+            journals = build_journals(report, accounts)
+        except JournalValidationError as e:
+            return f"ERROR: {e}"
+        write_journal_csv(journals, journal_path)
+        row_count = sum(len(j.splits) for j in journals)
+        journal_line = (
+            f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
+            f"{row_count} row(s))."
+        )
 
     variances = [r for r in report.reconciliation if r.agree is False]
     undecidable = [r for r in report.reconciliation if r.agree is None]
@@ -115,4 +139,6 @@ def run(
     if not variances and not undecidable and not suspects and not suspect_one_offs:
         lines_out.append("  All reconciliation categories agree; no exceptions raised.")
     lines_out.append(f"  Workbook: {output_path}")
+    if journal_line:
+        lines_out.append(journal_line)
     return "\n".join(lines_out)

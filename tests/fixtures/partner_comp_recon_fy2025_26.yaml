@@ -17,8 +17,39 @@
 #     total, so the only two non-AGREE rows in Reconciliation/Exceptions
 #     are the always-cannot-reconcile incentive-schedule leg (no PDF
 #     parser in this build) and the rate-change suspect on Capital.
+#
+# Stage 1b additions (jv_emitter.py -- see AGENT.md's "Stage 1b" section):
+#   - firm_name, used only in the journal CSV's transaction descriptions
+#   - an accounts: block naming a (fictitious) chart-of-accounts leaf for
+#     every journal leg
+#   - an opening_reclass: block, balancing to zero, invented and unrelated
+#     to any real correction
+#   - the April line carries non-zero interest_on_capital, medical_topup
+#     and prior_cohort_drawdown so the journal emitter's tests exercise
+#     all three optional monthly fields
 
 financial_year: "2025-26"
+
+firm_name: "Northgate Advisors LLP"
+
+accounts:
+  bank: "Assets:Bank:Current Account"
+  tds_expense: "Assets:Tax Credits:TDS 194T"
+  interest_on_capital: "Income:PGBP:Interest on Capital"
+  current_account: "Assets:Firm Current Account"
+  capital_contribution: "Assets:Firm Capital Account"
+  medical_expense: "Expenses:Medical"
+  remuneration_income: "Income:PGBP:Remuneration"
+  share_of_profit_income: "Income:PGBP:Share of Profit"
+
+opening_reclass:
+  date: "2025-04-01"
+  description: "Reclass of FY2024-25 closing incentive accrual"
+  splits:
+    - account: "Assets:Firm Current Account"
+      amount: 218650
+    - account: "Income:PGBP:Share of Profit"
+      amount: -218650
 
 drivers:
   firms_tax_rate: 0.349440
@@ -38,7 +69,13 @@ monthly:
     firms_tax: -174720
     tds: -30000
     capital_transferred: 0
-    total_paid: 595280
+    # Stage 1b fields (jv_emitter.py) -- only this month carries them, to
+    # exercise interest_on_capital / medical_topup / prior_cohort_drawdown
+    # without disturbing the other eleven identical months.
+    interest_on_capital: 12000
+    medical_topup: -8000
+    prior_cohort_drawdown: -60000
+    total_paid: 539280
   - month: "2025-05"
     remuneration: 300000
     share_of_profit_gross: 500000
@@ -152,7 +189,7 @@ advisory:
   stated_closing_capital: 1000000
 
 external:
-  bank_credits_total: 8037266
+  bank_credits_total: 7981266
   form_26as_total_credit: 360000
   return_exempt_share_of_profit: 6000000
   return_closing_capital: 1000000
