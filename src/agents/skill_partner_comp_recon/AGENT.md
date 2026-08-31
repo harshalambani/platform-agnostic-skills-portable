@@ -84,9 +84,10 @@ example and `skill.yaml`'s `help.inputs` for the user-facing description):
   Three further fields are optional, default `0.0`, and only matter to
   Stage 1b (see below): `interest_on_capital` (positive, PGBP s.28(v)
   income), `medical_topup` (negative, a recovery from the payout), and
-  `prior_cohort_drawdown` (negative -- the net amount of a prior-year
-  incentive instalment received this year; it is a current-account
-  drawdown, not current-year income).
+  `prior_cohort_drawdown` (positive -- the net amount of a prior-year
+  incentive instalment received this year; cash in, adds to `total_paid`,
+  and credits down the current-account balance owed by the firm -- it is
+  a current-account drawdown, not current-year income).
 - `cohorts` -- the incentive cohort ledger: each cohort has an award FY,
   a gross award, and a list of instalments (`date`, `gross`, `firms_tax`,
   `capital`, `net`). Every instalment is assigned to the FY of its
@@ -203,11 +204,13 @@ not Income from Other Sources -- `interest_on_capital` and
 `remuneration_income` in the `accounts` block name PGBP-side ledger
 accounts. Do not "correct" this placement.
 
-**`prior_cohort_drawdown`** books as a credit to `current_account` (a
-balance-sheet account, the firm's running balance owed to the partner),
-never as income -- the income, and the firm's tax on it, were already
-recognised in the award year's own monthly/cohort journal. Booking it
-again here as income would double-count it.
+**`prior_cohort_drawdown` is positive** -- a prior-year incentive
+instalment *received* this year: cash in, adds to `total_paid`. It books
+as a credit to `current_account` (a balance-sheet account, the firm's
+running balance owed to the partner), reducing that balance, and never as
+income -- the income, and the firm's tax on it, were already recognised in
+the award year's own monthly/cohort journal. Booking it again here as
+income would double-count it.
 
 **The account map** (`accounts` in the input) is required, per key, only
 if the corresponding split is non-zero somewhere in the year: `bank`,

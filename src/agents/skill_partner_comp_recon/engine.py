@@ -386,8 +386,10 @@ class MonthlyLine:
     # "Stage 1b" section for the accounting behind each one.
     interest_on_capital: float = 0.0   # POSITIVE, income (PGBP s.28(v))
     medical_topup: float = 0.0         # NEGATIVE, a recovery from the payout
-    prior_cohort_drawdown: float = 0.0  # NEGATIVE, a current-account drawdown,
-    # NOT current-year income -- the income and its firm's tax were already
+    prior_cohort_drawdown: float = 0.0  # POSITIVE, a prior-year incentive
+    # instalment RECEIVED this year: cash in, adds to total_paid, and
+    # CREDITS (reduces) the current-account balance owed by the firm. NOT
+    # current-year income -- the income and its firm's tax were already
     # recognised in the award year (see jv_emitter.py).
 
 

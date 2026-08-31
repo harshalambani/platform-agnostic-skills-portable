@@ -512,6 +512,58 @@ def test_journal_csv_share_of_profit_is_net_of_firms_tax(tmp_path):
     assert share_split.debit == 0.0
 
 
+# 3.9b -- prior_cohort_drawdown is POSITIVE (a prior-year incentive
+# instalment RECEIVED this year) and must produce a CREDIT (negative
+# Amount) on the current_account split equal to -prior_cohort_drawdown,
+# with no income account carrying any split attributable to it. A
+# balance-only check is not sufficient to pin this direction -- the
+# transaction still balances even with the wrong sign, which is exactly
+# how the wrong sign shipped once already.
+def test_journal_csv_prior_cohort_drawdown_credits_current_account(tmp_path):
+    data = _load_fixture()
+    report = build_report(data)
+    journals = build_journals(report, data["accounts"])
+
+    by_month = {m.month: m for m in report.monthly}
+    april = by_month["2025-04"]
+    assert april.prior_cohort_drawdown > 0, "fixture must exercise the positive case"
+
+    current_account = data["accounts"]["current_account"]
+    income_accounts = {
+        data["accounts"]["remuneration_income"],
+        data["accounts"]["share_of_profit_income"],
+        data["accounts"]["interest_on_capital"],
+    }
+
+    april_journal = next(j for j in journals if j.txn_id.endswith("-M01"))
+    drawdown_split = next(s for s in april_journal.splits if s.account == current_account)
+
+    # Credit leg: stored as .credit (positive), .debit is 0 -- and the CSV
+    # row's signed Amount must be negative (Cr).
+    assert drawdown_split.debit == 0.0
+    assert drawdown_split.credit == pytest.approx(april.prior_cohort_drawdown, abs=0.01)
+
+    out_path = tmp_path / "journal_drawdown.csv"
+    write_journal_csv(journals, str(out_path))
+    csv_rows = _read_journal_csv(out_path)
+    april_rows = [r for r in csv_rows if r["Transaction ID"].endswith("-M01")]
+    current_account_rows = [r for r in april_rows if r["Account"] == current_account]
+    assert len(current_account_rows) == 1
+    amount = float(current_account_rows[0]["Amount"])
+    assert amount == pytest.approx(-april.prior_cohort_drawdown, abs=0.01)
+    assert amount < 0, "prior_cohort_drawdown must book as a CREDIT (negative Amount)"
+
+    # No income account may carry a split whose value traces to the
+    # drawdown -- i.e. no income-account split in April's transaction
+    # equals the drawdown amount (which would indicate double-counting it
+    # as income).
+    for row in april_rows:
+        if row["Account"] in income_accounts:
+            assert abs(float(row["Amount"])) != pytest.approx(
+                april.prior_cohort_drawdown, abs=0.01
+            ), row
+
+
 # 3.10 -- the opening reclass entry is present, dated as given, carries the
 # "<FY>-RECT" id, and balances.
 def test_journal_csv_opening_reclass_present_and_balanced(tmp_path):

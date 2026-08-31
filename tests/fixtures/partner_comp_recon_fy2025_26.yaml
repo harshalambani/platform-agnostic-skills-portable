@@ -23,10 +23,17 @@
 #   - an accounts: block naming a (fictitious) chart-of-accounts leaf for
 #     every journal leg
 #   - an opening_reclass: block, balancing to zero, invented and unrelated
-#     to any real correction
+#     to any real correction -- both splits are deliberately balance-sheet
+#     accounts (never income or equity), because the whole point of an
+#     opening reclassification is that a closed, filed year is corrected
+#     without ever touching current-year income (see AGENT.md's Stage 1b
+#     section)
 #   - the April line carries non-zero interest_on_capital, medical_topup
 #     and prior_cohort_drawdown so the journal emitter's tests exercise
-#     all three optional monthly fields
+#     all three optional monthly fields. prior_cohort_drawdown is POSITIVE
+#     here: it is a prior-year incentive instalment RECEIVED this year --
+#     cash in, adds to total_paid, and CREDITS (reduces) the current-account
+#     balance the firm owes the partner
 
 financial_year: "2025-26"
 
@@ -44,11 +51,17 @@ accounts:
 
 opening_reclass:
   date: "2025-04-01"
-  description: "Reclass of FY2024-25 closing incentive accrual"
+  description: "Reclass of a misallocated FY2024-25 capital contribution"
+  # Deliberately touches no income or equity account -- an opening
+  # reclassification corrects a closed, filed year, and the doctrine this
+  # entry demonstrates is that such a correction never re-touches
+  # current-year income (see AGENT.md's Stage 1b section). Both legs here
+  # are balance-sheet accounts: an amount posted to the capital account by
+  # mistake, moved to the current account where it belonged.
   splits:
     - account: "Assets:Firm Current Account"
       amount: 218650
-    - account: "Income:PGBP:Share of Profit"
+    - account: "Assets:Firm Capital Account"
       amount: -218650
 
 drivers:
@@ -74,8 +87,8 @@ monthly:
     # without disturbing the other eleven identical months.
     interest_on_capital: 12000
     medical_topup: -8000
-    prior_cohort_drawdown: -60000
-    total_paid: 539280
+    prior_cohort_drawdown: 60000
+    total_paid: 659280
   - month: "2025-05"
     remuneration: 300000
     share_of_profit_gross: 500000
@@ -189,7 +202,7 @@ advisory:
   stated_closing_capital: 1000000
 
 external:
-  bank_credits_total: 7981266
+  bank_credits_total: 8101266
   form_26as_total_credit: 360000
   return_exempt_share_of_profit: 6000000
   return_closing_capital: 1000000
