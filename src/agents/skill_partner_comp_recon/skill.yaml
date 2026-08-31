@@ -32,12 +32,17 @@ inputs:
     label: "Partner compensation input (.yaml/.yml/.json)"
     file_types: [".yaml", ".yml", ".json"]
     required: true
+  - name: "journal_path"
+    type: "text"
+    label: "GnuCash journal CSV output path (optional -- Stage 1b)"
+    required: false
 
 run_args:
   input_path: "{inputs.input_path}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
+  journal_path: "{inputs.journal_path}"
 
 output:
   extension: ".xlsx"
@@ -96,6 +101,27 @@ help:
         does not fall back to a prior year's value or a default; the
         affected reconciliation rows come back as "cannot reconcile" and
         name exactly what is missing.
+    - name: "journal_path"
+      tooltip: >
+        Optional. When set, also writes a GnuCash multi-split journal CSV
+        of the year's implied journal entries (Stage 1b) to this path --
+        one monthly-payout transaction per month, plus an opening
+        reclassification entry if the input's opening_reclass: block is
+        present. Leave blank to only produce the workbook, unchanged from
+        before this option existed.
+      accepts: "A full output file path ending in .csv."
+      gotchas: >
+        Requires an accounts: block in the input naming the GnuCash
+        account for every non-zero split (bank, tds_expense,
+        interest_on_capital, current_account, capital_contribution,
+        medical_expense, remuneration_income, share_of_profit_income) -- a
+        missing account needed by a non-zero month comes back as an
+        "ERROR: ..." naming the key and the month, not a traceback. Import
+        the CSV into GnuCash via File > Import > Import Transactions from
+        CSV, with the Multi-split box ticked, skipping the 1 header line,
+        the Date column mapped as ISO (YYYY-MM-DD), and the single Amount
+        column mapped to the importer's "Amount" column type (or "Amount
+        (Negated)" if a build reverses the sign convention).
   steps:
     - "Assemble one financial year's figures into a YAML or JSON file matching the input shape (drivers, monthly, cohorts, advisory, external, and optionally payroll)."
     - "Pick that file as the input."
@@ -118,6 +144,14 @@ help:
           / cannot-reconcile per category), Exceptions (every
           non-agreeing or non-reconcilable row collected together), and
           Open items (anything left unresolved and what would close it).
+      - name: "<journal_path> (optional -- Stage 1b, only written if journal_path is set)"
+        tooltip: >
+          A GnuCash multi-split journal CSV: one balanced transaction per
+          monthly payout (dated month-end), plus an opening
+          reclassification entry if opening_reclass: was supplied. Import
+          via File > Import > Import Transactions from CSV with Multi-split
+          ticked, skipping the 1 header line, Date mapped as ISO, and the
+          Amount column mapped to the importer's Amount column type.
   tips: >
     Start with the Reconciliation sheet, then Exceptions -- a
     "CANNOT RECONCILE" status names exactly which source figure for that

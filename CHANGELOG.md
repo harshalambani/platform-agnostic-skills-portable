@@ -12,6 +12,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Partner Compensation Reconciliation can now emit a GnuCash multi-split
+  journal CSV of the reconciled year's implied entries** (Stage 1b,
+  `src/agents/skill_partner_comp_recon/jv_emitter.py`), via a new optional
+  `journal_path` input -- unset, behaviour is byte-identical to before.
+  The CSV dialect (one row per split, transaction fields repeated on every
+  row, a single signed Dr+/Cr- Amount column, no Transfer Amount/Account
+  columns, FY-prefixed cross-year-unique Transaction IDs) matches
+  `skill_26as_journal`'s `build_tds_journals.py` exactly, which is the
+  dialect's ground truth -- a naive emitter gets this wrong three ways:
+  blank-date continuation rows (GnuCash's importer treats them as a parse
+  error, not a continuation), Deposit/Withdrawal column pairs instead of one
+  signed Amount, and Transaction ID reuse across financial years silently
+  fusing two different years' transactions together. One transaction per
+  monthly payout, plus an optional prior-period opening reclassification
+  entry. The firm's tax is never booked as its own expense/income leg -- it
+  is already netted into the share-of-profit figure this skill reconciles,
+  matching both the firm's own statement and the filed return; grossing it
+  back up here would put this ledger on a different basis than either. A
+  new `accounts:` input block maps the emitter's eight account keys to the
+  book's own chart of accounts; a key missing for a non-zero split returns
+  an `"ERROR: ..."` string naming it, never a traceback. The four PDF
+  parsers under `parsers/` remain untouched guarded placeholders. No
+  `ui/webui.py` change was needed -- `journal_path` is a `type: "text"`
+  input and this skill's `"itr"` category already renders every input
+  generically via `ui/tabs/_generic.py`.
 - **Zoom now works inside the native app window** (`ui/webui.py`). pywebview's
   WebView2 backend disables all browser accelerator keys in a production
   build, and the window is created without `zoomable`, so pinch, Ctrl+scroll,

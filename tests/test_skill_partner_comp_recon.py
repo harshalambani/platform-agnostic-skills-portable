@@ -34,6 +34,12 @@ from agents.skill_partner_comp_recon.engine import (
     gross_up_one_off,
     required_cumulative_capital,
 )
+from agents.skill_partner_comp_recon.jv_emitter import (
+    JOURNAL_HEADERS,
+    build_journals,
+    fy_prefix,
+    write_journal_csv,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -352,3 +358,273 @@ def test_agent_run_unsupported_extension_returns_error_string(tmp_path):
     bad.write_text("financial_year: '2025-26'", encoding="utf-8")
     result = run(input_path=str(bad), output_path=str(tmp_path / "out.xlsx"))
     assert result.startswith("ERROR")
+
+
+# ---------------------------------------------------------------------------
+# Stage 1b -- jv_emitter.py: the GnuCash multi-split journal CSV.
+# ---------------------------------------------------------------------------
+
+def _read_journal_csv(path: Path) -> list[dict]:
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _build_fixture_journal_rows(tmp_path: Path) -> list[dict]:
+    data = _load_fixture()
+    report = build_report(data)
+    journals = build_journals(report, data["accounts"])
+    out_path = tmp_path / "journal.csv"
+    write_journal_csv(journals, str(out_path))
+    return _read_journal_csv(out_path)
+
+
+# 3.1 -- header is exactly the 7 columns, in order.
+def test_journal_csv_header_exact(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    assert rows  # sanity: fixture must produce at least one row
+    with (tmp_path / "journal.csv").open(encoding="utf-8") as f:
+        header_line = f.readline().strip()
+    assert header_line.split(",") == JOURNAL_HEADERS
+    assert JOURNAL_HEADERS == [
+        "Date", "Transaction ID", "Number", "Description", "Account",
+        "Amount", "Currency",
+    ]
+
+
+# 3.2 -- no cell in Date/Transaction ID/Number/Description is ever blank
+# (regression guard for the blank-continuation-row parse-error trap).
+def test_journal_csv_never_has_blank_transaction_fields(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    for row in rows:
+        assert row["Date"].strip(), row
+        assert row["Transaction ID"].strip(), row
+        assert row["Number"].strip(), row
+        assert row["Description"].strip(), row
+
+
+# 3.3 -- rows sharing a Transaction ID share Date/Number/Description, and
+# their Amounts sum to 0.00 within half a paisa.
+def test_journal_csv_transactions_are_internally_consistent_and_balanced(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    by_txn: dict[str, list[dict]] = {}
+    for row in rows:
+        by_txn.setdefault(row["Transaction ID"], []).append(row)
+
+    for txn_id, txn_rows in by_txn.items():
+        dates = {r["Date"] for r in txn_rows}
+        numbers = {r["Number"] for r in txn_rows}
+        descriptions = {r["Description"] for r in txn_rows}
+        assert len(dates) == 1, f"{txn_id}: mixed Date values {dates}"
+        assert len(numbers) == 1, f"{txn_id}: mixed Number values {numbers}"
+        assert len(descriptions) == 1, f"{txn_id}: mixed Description values {descriptions}"
+        assert numbers == {txn_id}
+
+        total = sum(float(r["Amount"]) for r in txn_rows)
+        assert total == pytest.approx(0.0, abs=0.005), f"{txn_id}: splits sum to {total}"
+
+
+# 3.4 -- Transaction IDs are unique per transaction, all carry the FY
+# prefix, and no ID is a prefix of another (so GnuCash's grouping can never
+# fuse two distinct transactions).
+def test_journal_csv_transaction_ids_unique_fy_prefixed_and_not_colliding(tmp_path):
+    data = _load_fixture()
+    fy_pfx = fy_prefix(data["financial_year"])
+    rows = _build_fixture_journal_rows(tmp_path)
+    txn_ids = sorted({row["Transaction ID"] for row in rows})
+    assert len(txn_ids) >= 2  # at least the opening reclass + one month
+
+    for txn_id in txn_ids:
+        assert txn_id.startswith(fy_pfx + "-"), txn_id
+
+    for a in txn_ids:
+        for b in txn_ids:
+            if a != b:
+                assert not b.startswith(a), f"{a!r} is a prefix of {b!r}"
+
+
+# 3.5 -- Currency is INR on every row; every Date matches YYYY-MM-DD.
+def test_journal_csv_currency_and_date_format(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    date_re = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+    for row in rows:
+        assert row["Currency"] == "INR"
+        assert date_re.match(row["Date"]), row["Date"]
+
+
+# 3.6 -- no Account starts with "Root Account:"; every Account appears in
+# the fixture's own accounts: block (no invented/typo'd account leaks in).
+def test_journal_csv_accounts_have_no_root_prefix_and_are_all_known(tmp_path):
+    data = _load_fixture()
+    known_accounts = set(data["accounts"].values())
+    rows = _build_fixture_journal_rows(tmp_path)
+    for row in rows:
+        assert not row["Account"].startswith("Root Account:"), row["Account"]
+        assert row["Account"] in known_accounts, row["Account"]
+
+
+# 3.7 -- no Amount is ever "0.00" (zero-value splits must be omitted, not
+# emitted as a no-op row).
+def test_journal_csv_never_emits_a_zero_amount_row(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    for row in rows:
+        assert row["Amount"] != "0.00", row
+
+
+# 3.8 -- no Transfer Amount / Transfer Account column is ever emitted.
+def test_journal_csv_has_no_transfer_columns(tmp_path):
+    rows = _build_fixture_journal_rows(tmp_path)
+    assert rows
+    for row in rows:
+        assert "Transfer Amount" not in row
+        assert "Transfer Account" not in row
+
+
+# 3.9 -- the firm's tax never appears as its own leg, and the share-of-
+# profit credit for a month is the NET figure (gross + firms_tax +
+# additional), never the gross figure.
+def test_journal_csv_share_of_profit_is_net_of_firms_tax(tmp_path):
+    data = _load_fixture()
+    report = build_report(data)
+    journals = build_journals(report, data["accounts"])
+
+    firms_tax_account = data["accounts"]["tds_expense"]  # sanity: distinct key
+    share_account = data["accounts"]["share_of_profit_income"]
+
+    # Firm's tax must never be booked to any account under its own name --
+    # there is no accounts.firms_tax key at all, so this is really just
+    # confirming ACCOUNT_KEYS has no such entry and no journal invents one.
+    for j in journals:
+        for s in j.splits:
+            assert s.account != "firms_tax", s
+
+    by_month = {m.month: m for m in report.monthly}
+    april = by_month["2025-04"]
+    expected_net = (
+        april.share_of_profit_gross + april.firms_tax + april.additional_share_of_profit
+    )
+
+    april_journal = next(j for j in journals if j.txn_id.endswith("-M01"))
+    share_split = next(s for s in april_journal.splits if s.account == share_account)
+    # Credit leg -> stored as .credit, positive.
+    assert share_split.credit == pytest.approx(expected_net, abs=0.01)
+    assert share_split.debit == 0.0
+
+
+# 3.9b -- prior_cohort_drawdown is POSITIVE (a prior-year incentive
+# instalment RECEIVED this year) and must produce a CREDIT (negative
+# Amount) on the current_account split equal to -prior_cohort_drawdown,
+# with no income account carrying any split attributable to it. A
+# balance-only check is not sufficient to pin this direction -- the
+# transaction still balances even with the wrong sign, which is exactly
+# how the wrong sign shipped once already.
+def test_journal_csv_prior_cohort_drawdown_credits_current_account(tmp_path):
+    data = _load_fixture()
+    report = build_report(data)
+    journals = build_journals(report, data["accounts"])
+
+    by_month = {m.month: m for m in report.monthly}
+    april = by_month["2025-04"]
+    assert april.prior_cohort_drawdown > 0, "fixture must exercise the positive case"
+
+    current_account = data["accounts"]["current_account"]
+    income_accounts = {
+        data["accounts"]["remuneration_income"],
+        data["accounts"]["share_of_profit_income"],
+        data["accounts"]["interest_on_capital"],
+    }
+
+    april_journal = next(j for j in journals if j.txn_id.endswith("-M01"))
+    drawdown_split = next(s for s in april_journal.splits if s.account == current_account)
+
+    # Credit leg: stored as .credit (positive), .debit is 0 -- and the CSV
+    # row's signed Amount must be negative (Cr).
+    assert drawdown_split.debit == 0.0
+    assert drawdown_split.credit == pytest.approx(april.prior_cohort_drawdown, abs=0.01)
+
+    out_path = tmp_path / "journal_drawdown.csv"
+    write_journal_csv(journals, str(out_path))
+    csv_rows = _read_journal_csv(out_path)
+    april_rows = [r for r in csv_rows if r["Transaction ID"].endswith("-M01")]
+    current_account_rows = [r for r in april_rows if r["Account"] == current_account]
+    assert len(current_account_rows) == 1
+    amount = float(current_account_rows[0]["Amount"])
+    assert amount == pytest.approx(-april.prior_cohort_drawdown, abs=0.01)
+    assert amount < 0, "prior_cohort_drawdown must book as a CREDIT (negative Amount)"
+
+    # No income account may carry a split whose value traces to the
+    # drawdown -- i.e. no income-account split in April's transaction
+    # equals the drawdown amount (which would indicate double-counting it
+    # as income).
+    for row in april_rows:
+        if row["Account"] in income_accounts:
+            assert abs(float(row["Amount"])) != pytest.approx(
+                april.prior_cohort_drawdown, abs=0.01
+            ), row
+
+
+# 3.10 -- the opening reclass entry is present, dated as given, carries the
+# "<FY>-RECT" id, and balances.
+def test_journal_csv_opening_reclass_present_and_balanced(tmp_path):
+    data = _load_fixture()
+    fy_pfx = fy_prefix(data["financial_year"])
+    report = build_report(data)
+    journals = build_journals(report, data["accounts"])
+
+    rect = next(j for j in journals if j.txn_id == f"{fy_pfx}-RECT")
+    assert rect.date == data["opening_reclass"]["date"]
+    assert rect.balanced
+    assert rect.total_debit == pytest.approx(218650, abs=0.01)
+    assert rect.total_credit == pytest.approx(218650, abs=0.01)
+
+
+# 3.11 -- a missing required account key produces an "ERROR: ..." string
+# from run(), never a traceback, and names the key.
+def test_missing_account_key_returns_error_string_not_exception(tmp_path):
+    import yaml
+
+    data = _load_fixture()
+    del data["accounts"]["interest_on_capital"]  # April's line uses this key
+    bad_input = tmp_path / "bad_input.yaml"
+    bad_input.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    out_path = tmp_path / "out.xlsx"
+    journal_path = tmp_path / "journal.csv"
+    result = run(
+        input_path=str(bad_input), output_path=str(out_path),
+        journal_path=str(journal_path),
+    )
+    assert result.startswith("ERROR")
+    assert "interest_on_capital" in result
+    assert not journal_path.exists()
+
+
+# 3.12 -- with journal_path="" the workbook output is byte-identical to a
+# run that never mentions Stage 1b at all (no CSV written, no behaviour
+# change).
+def test_empty_journal_path_leaves_workbook_output_unchanged(tmp_path):
+    out_default = tmp_path / "out_default.xlsx"
+    out_explicit_empty = tmp_path / "out_explicit_empty.xlsx"
+
+    result_default = run(input_path=str(FIXTURE_PATH), output_path=str(out_default))
+    result_explicit = run(
+        input_path=str(FIXTURE_PATH), output_path=str(out_explicit_empty),
+        journal_path="",
+    )
+
+    assert result_default == result_explicit.replace(
+        str(out_explicit_empty), str(out_default)
+    )
+    # Compare workbook content, not raw bytes: openpyxl stamps docProps/core.xml
+    # with a wall-clock created/modified timestamp on every save, so two
+    # separate runs are never byte-identical even with identical inputs --
+    # what "unchanged" actually means here is every sheet's content, which
+    # this compares directly, ignoring only that timestamp-bearing part.
+    with zipfile.ZipFile(out_default) as zf_a, zipfile.ZipFile(out_explicit_empty) as zf_b:
+        names_a = {n for n in zf_a.namelist() if n != "docProps/core.xml"}
+        names_b = {n for n in zf_b.namelist() if n != "docProps/core.xml"}
+        assert names_a == names_b
+        for name in sorted(names_a):
+            assert zf_a.read(name) == zf_b.read(name), f"content differs in {name}"
+    assert list(tmp_path.glob("*.csv")) == []  # journal_path unset -> no CSV written at all

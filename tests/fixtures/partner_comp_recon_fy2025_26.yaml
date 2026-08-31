@@ -17,8 +17,55 @@
 #     total, so the only two non-AGREE rows in Reconciliation/Exceptions
 #     are the always-cannot-reconcile incentive-schedule leg (no PDF
 #     parser in this build) and the rate-change suspect on Capital.
+#
+# Stage 1b additions (jv_emitter.py -- see AGENT.md's "Stage 1b" section):
+#   - firm_name, used only in the journal CSV's transaction descriptions
+#   - an accounts: block naming a (fictitious) chart-of-accounts leaf for
+#     every journal leg
+#   - an opening_reclass: block, balancing to zero, invented and unrelated
+#     to any real correction -- both splits are deliberately balance-sheet
+#     accounts (never income or equity), because the whole point of an
+#     opening reclassification is that a closed, filed year is corrected
+#     without ever touching current-year income (see AGENT.md's Stage 1b
+#     section)
+#   - the April line carries non-zero interest_on_capital, medical_topup
+#     and prior_cohort_drawdown so the journal emitter's tests exercise
+#     all three optional monthly fields. prior_cohort_drawdown is POSITIVE
+#     here: it is a prior-year incentive instalment RECEIVED this year --
+#     cash in, adds to total_paid, and CREDITS (reduces) the current-account
+#     balance the firm owes the partner
 
 financial_year: "2025-26"
+
+firm_name: "Northgate Advisors LLP"
+
+accounts:
+  bank: "Assets:Bank:Current Account"
+  # TDS deducted at source is booked as an EXPENSE, consistently with every
+  # other deducted-tax account in this ledger -- deliberately NOT an
+  # asset/tax-credit account. Do not "correct" this to an Assets path.
+  tds_expense: "Expenses:Tax:TDS 194T"
+  interest_on_capital: "Income:PGBP:Interest on Capital"
+  current_account: "Assets:Firm Current Account"
+  capital_contribution: "Assets:Firm Capital Account"
+  medical_expense: "Expenses:Medical"
+  remuneration_income: "Income:PGBP:Remuneration"
+  share_of_profit_income: "Income:PGBP:Share of Profit"
+
+opening_reclass:
+  date: "2025-04-01"
+  description: "Reclass of a misallocated FY2024-25 capital contribution"
+  # Deliberately touches no income or equity account -- an opening
+  # reclassification corrects a closed, filed year, and the doctrine this
+  # entry demonstrates is that such a correction never re-touches
+  # current-year income (see AGENT.md's Stage 1b section). Both legs here
+  # are balance-sheet accounts: an amount posted to the capital account by
+  # mistake, moved to the current account where it belonged.
+  splits:
+    - account: "Assets:Firm Current Account"
+      amount: 218650
+    - account: "Assets:Firm Capital Account"
+      amount: -218650
 
 drivers:
   firms_tax_rate: 0.349440
@@ -38,7 +85,13 @@ monthly:
     firms_tax: -174720
     tds: -30000
     capital_transferred: 0
-    total_paid: 595280
+    # Stage 1b fields (jv_emitter.py) -- only this month carries them, to
+    # exercise interest_on_capital / medical_topup / prior_cohort_drawdown
+    # without disturbing the other eleven identical months.
+    interest_on_capital: 12000
+    medical_topup: -8000
+    prior_cohort_drawdown: 60000
+    total_paid: 659280
   - month: "2025-05"
     remuneration: 300000
     share_of_profit_gross: 500000
@@ -152,7 +205,7 @@ advisory:
   stated_closing_capital: 1000000
 
 external:
-  bank_credits_total: 8037266
+  bank_credits_total: 8101266
   form_26as_total_credit: 360000
   return_exempt_share_of_profit: 6000000
   return_closing_capital: 1000000
