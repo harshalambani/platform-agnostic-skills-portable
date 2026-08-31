@@ -41,7 +41,10 @@ firm_name: "Northgate Advisors LLP"
 
 accounts:
   bank: "Assets:Bank:Current Account"
-  tds_expense: "Assets:Tax Credits:TDS 194T"
+  # TDS deducted at source is booked as an EXPENSE, consistently with every
+  # other deducted-tax account in this ledger -- deliberately NOT an
+  # asset/tax-credit account. Do not "correct" this to an Assets path.
+  tds_expense: "Expenses:Tax:TDS 194T"
   interest_on_capital: "Income:PGBP:Interest on Capital"
   current_account: "Assets:Firm Current Account"
   capital_contribution: "Assets:Firm Capital Account"

@@ -74,6 +74,12 @@ _ZERO_TOLERANCE = 0.005
 # Interest on capital and remuneration are both PGBP income under
 # s.28(v), NOT Income from Other Sources -- do not "correct" the account
 # placement implied by these keys' names to an Other Sources bucket.
+#
+# tds_expense is an EXPENSE account (a debit of s.194T tax deducted at
+# source), NOT an asset/tax-credit account -- this ledger's convention
+# books every deducted-tax leg as an expense, consistently. Do not
+# "correct" the account placement implied by this key's name to an Assets
+# tax-credit bucket.
 ACCOUNT_KEYS = (
     "bank", "tds_expense", "interest_on_capital", "current_account",
     "capital_contribution", "medical_expense", "remuneration_income",
@@ -212,6 +218,14 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     the firm, NOT current-year income -- the income (and the firm's tax on
     it) was already recognised in the award year's own journal. Booking it
     as income again here would double-count it.
+
+    tds_expense is a debit to an EXPENSE account -- s.194T TDS deducted at
+    source on remuneration and interest on capital is booked as an expense
+    here, not as an asset/tax-credit, consistently with every other
+    deducted-tax leg in this ledger. This is distinct from firms_tax above
+    (the firm's own tax on its profit share, which is never booked as an
+    expense at all): tds_expense is the partner's own TDS credit, and this
+    ledger's convention is to expense it.
     """
     ctx = f"month {line.month}"
     date = _month_end(line.month)

@@ -204,6 +204,12 @@ not Income from Other Sources -- `interest_on_capital` and
 `remuneration_income` in the `accounts` block name PGBP-side ledger
 accounts. Do not "correct" this placement.
 
+**s.194T TDS on partner remuneration and interest on capital is booked as
+an EXPENSE leg** -- `tds_expense` in the `accounts` block names an expense
+account, not an asset/tax-credit account, consistent with every other
+deducted-tax account in this ledger. Do not "correct" this placement to an
+Assets tax-credit bucket.
+
 **`prior_cohort_drawdown` is positive** -- a prior-year incentive
 instalment *received* this year: cash in, adds to `total_paid`. It books
 as a credit to `current_account` (a balance-sheet account, the firm's
