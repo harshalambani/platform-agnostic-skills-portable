@@ -6,10 +6,19 @@ them).
 
 Free-form PDF, no published layout, no public schema. Writing a layout
 parser against an invented fixture would produce code that is confidently
-wrong on the real document. Stage 1 (this PR) accepts the same instalment
-data as structured YAML/JSON input instead (see skill.yaml and
-engine.build_report()'s `cohorts` block). This function is a guarded
-placeholder pending a real, de-identified specimen.
+wrong on the real document. This function is a guarded placeholder
+pending a real, de-identified specimen; the (test-only) structured
+YAML/JSON input path accepts the same instalment data in the interim (see
+engine.build_report()'s `cohorts` block). Unlike advisory.py/
+payout_advice.py/llp_statement.py, this parser has NO corresponding input
+in skill.yaml's reshaped, document-driven manifest -- the incentive
+payment-schedule leg is left CANNOT RECONCILE regardless, unchanged from
+before that reshape (see AGENT.md).
+
+See parsers/__init__.py's module docstring for the design notes that MUST
+survive into the real implementation, should this leg ever gain its own
+input (map by label not position, parenthesised negatives, no hardcoded
+rates, etc).
 """
 from __future__ import annotations
 

@@ -1,10 +1,19 @@
 # skill.yaml -- Partner Compensation Reconciliation manifest.
 #
-# Stage 1 only (see AGENT.md): the computation engine + workbook writer
-# against a structured YAML/JSON input for one financial year. The PDF
-# parsers under parsers/ are guarded placeholders pending real specimens --
-# this skill does not yet read a payout advice, an Advisory letter, a
-# payment-schedule PDF, or an LLP capital-account statement directly.
+# This skill now takes the raw source documents directly, matching every
+# other skill in the catalogue (26AS takes a PDF, MF CAS takes an .xlsx,
+# AIS Reconcile takes AIS .json) -- it was the only one still requiring a
+# human to hand-key a structured YAML/JSON input first. The manifest below
+# is that reshape. The PDF parsers under parsers/ are STILL guarded
+# NotImplementedError placeholders pending real, de-identified document
+# specimens (see AGENT.md's "Stage 2" section) -- this PR wires the new
+# inputs through to those parsers' call sites and makes every optional leg
+# degrade to an explicit "not available" note rather than failing the run
+# or fabricating a figure; it does not implement the parsing itself. The
+# structured YAML/JSON input (`input_path`) this skill used to expose is
+# retained ONLY as a test-only run() parameter -- it is deliberately absent
+# from `inputs:` below so it no longer renders in the UI (see
+# tests/test_skill_partner_comp_recon.py's manifest-shape guard test).
 
 name: "partner_comp_recon"
 display_name: "Partner Compensation Reconciliation"
@@ -17,28 +26,75 @@ description: >
   26AS, and the filed return. Reports agree / variance / cannot-reconcile
   per category -- a missing source is never silently treated as a match.
   No tax computation is performed, no .gnucash book is written, and no
-  ITR workbook is touched. Takes a structured YAML/JSON input for this
-  build; parsing the underlying PDFs directly is a placeholder pending
-  real document specimens (see AGENT.md).
+  ITR workbook is touched. Takes the monthly payout advices and the
+  Compensation Advisory letter as PDFs, plus optional documents for the
+  LLP capital tie-out, the books tie-out, and the TDS-credit tie-out;
+  parsing those PDFs is a Stage 2 placeholder pending real document
+  specimens (see AGENT.md) -- every leg that needs one degrades to an
+  explicit "not available" note rather than failing this build.
 category: "itr"
-version: "0.1.0"
+version: "0.2.0"
 
 mode: "direct"
 entry_point: "agent:run"
 
 inputs:
-  - name: "input_path"
-    type: "file"
-    label: "Partner compensation input (.yaml/.yml/.json)"
-    file_types: [".yaml", ".yml", ".json"]
+  # advices_dir leads the form (and so supplies the output filename, via
+  # run_args below) -- mirroring ITR Workbook's bs_html/entity ordering.
+  # entity is declared right after it: it is genuinely required and
+  # consumed via run_args (unlike AIS Reconcile's UI-only "entity"), but
+  # an itr_entities select must never be the FIRST consumed input, or it
+  # would silently name the output file after the taxpayer instead of the
+  # statement (see tests/test_entity_book_wiring.py). Picking someone
+  # here also fills in the GnuCash book input below (book_from).
+  - name: "advices_dir"
+    type: "files"
+    label: "Monthly partner payout certificates / payslips"
+    file_types: [".pdf"]
     required: true
+  - name: "entity"
+    type: "select"
+    label: "Entity"
+    options_from: "itr_entities"
+    required: true
+  - name: "doc_password"
+    type: "password"
+    label: "Document password (optional -- if the advices/advisory PDFs are protected)"
+    required: false
+  - name: "advisory_path"
+    type: "file"
+    label: "Compensation advisory / target compensation advice"
+    file_types: [".pdf"]
+    required: true
+  - name: "llp_statement"
+    type: "file"
+    label: "LLP statement of account (enables leg 1, the capital sign-off)"
+    file_types: [".pdf"]
+    required: false
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (READ ONLY -- enables the books tie-out)"
+    file_types: [".gnucash"]
+    required: false
+    book_from: "entity"
+  - name: "xlsx_26as"
+    type: "output_file"
+    label: "26AS workbook (enables the TDS-credit tie-out)"
+    match: "*-26AS.xlsx"
+    required: false
   - name: "journal_path"
     type: "text"
     label: "GnuCash journal CSV output path (optional -- Stage 1b)"
     required: false
 
 run_args:
-  input_path: "{inputs.input_path}"
+  entity: "{inputs.entity}"
+  advices_dir: "{inputs.advices_dir}"
+  doc_password: "{inputs.doc_password}"
+  advisory_path: "{inputs.advisory_path}"
+  llp_statement: "{inputs.llp_statement}"
+  gnucash_path: "{inputs.gnucash_path}"
+  xlsx_26as: "{inputs.xlsx_26as}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
@@ -58,24 +114,25 @@ requires:
 
 help:
   overview: >
-    Takes one financial year's partner-compensation figures -- monthly
-    remuneration and share of profit, incentive-cohort instalments,
-    capital contribution, one-off incentives, and (if applicable) payroll
-    months -- as a structured YAML or JSON file, and cross-checks them
-    against the Compensation Advisory's own stated figures, the bank
-    statement, Form 26AS, and the filed return. Every rate, percentage and
-    period this skill uses (the firm's-tax rate, the capital-contribution
-    rate, the capital accretion period, the remuneration-TDS section/rate/
-    start-date) is read from that year's own input -- none of them are
-    hardcoded, since all of them change by year, and the capital rate has
-    been known to change mid-year. A missing rate or a missing source
-    figure produces an explicit "cannot reconcile" row naming what is
-    missing, never a default or a silently-assumed match. This build does
-    not parse the underlying PDFs (the Advisory letter, the incentive
-    payment-schedule, the monthly payout advices, or the LLP's own
-    capital-account statement) directly -- those parsers are guarded
-    placeholders pending real, de-identified specimens of each document;
-    supply their figures as the structured input instead.
+    Takes one financial year's partner-compensation documents -- the
+    monthly payout advices, the Compensation Advisory letter, and
+    optionally the LLP's own capital-account statement, a GnuCash book
+    (read only), and a 26AS workbook -- and cross-checks the figures they
+    carry against each other. Every rate, percentage and period this skill
+    uses (the firm's-tax rate, the capital-contribution rate, the capital
+    accretion period, the remuneration-TDS section/rate/start-date) comes
+    from that year's own entity/tax-rules config, never hardcoded, since
+    all of them change by year and the capital rate has been known to
+    change mid-year. A missing rate or a missing source figure produces an
+    explicit "cannot reconcile" row naming what is missing, never a
+    default or a silently-assumed match. Parsing the source PDFs directly
+    is a Stage 2 placeholder pending real, de-identified specimens of each
+    document (see AGENT.md) -- every optional document's leg (the LLP
+    statement, the GnuCash books tie-out, the 26AS TDS-credit tie-out)
+    degrades to an explicit "not available" note when its input is absent
+    or cannot yet be parsed, and the two required documents (the monthly
+    advices and the Advisory) currently make the whole run fail loud with
+    the same reason, since this build has no working parser for either yet.
   when_to_use: >
     Use this once a financial year's partner-compensation documents are in
     hand and you want a single reconciliation across remuneration, share
@@ -88,19 +145,42 @@ help:
     reconciles the streams against each other and the return's own
     figures; it does not compute tax due.
   inputs:
-    - name: "input_path"
-      tooltip: >
-        A YAML or JSON file describing one financial year's drivers,
-        monthly payouts, incentive cohorts, the Advisory's own figures,
-        and the external (bank / 26AS / return) figures to check against.
-      accepts: ".yaml, .yml, or .json -- see the sample fixture shipped with this skill's tests for the exact shape."
+    - name: "entity"
+      tooltip: "The partner/entity this reconciliation is for."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "Required -- also selects the GnuCash book below when one is registered for this entity."
+    - name: "advices_dir"
+      tooltip: "All of this financial year's monthly payout certificates / payslips, as PDFs."
+      accepts: "One or more PDF files."
       gotchas: >
-        Every driver (firm's-tax rate, capital rate, capital months
-        total/achieved, remuneration TDS section/rate/start-date) must be
-        supplied for the financial year being processed -- a missing one
-        does not fall back to a prior year's value or a default; the
-        affected reconciliation rows come back as "cannot reconcile" and
-        name exactly what is missing.
+        Required. This build's PDF parser is a Stage 2 placeholder (see
+        AGENT.md) -- supplying this input validates the directory has PDFs
+        in it, but the run still fails loud naming that the parser itself
+        is not yet implemented, pending a real specimen.
+    - name: "doc_password"
+      tooltip: "Password for the payout advices / advisory PDFs, if they are protected."
+      accepts: "The PDFs' own open password, if any."
+      gotchas: "Optional -- leave blank if the PDFs are not password-protected. Never logged, never included in any output file."
+    - name: "advisory_path"
+      tooltip: "The firm's Compensation Advisory / target compensation advice letter for this financial year."
+      accepts: "A single PDF file."
+      gotchas: >
+        Required. Shares a directory with the monthly payout advices at
+        some firms -- this skill (once Stage 2 lands) will dispatch on
+        document CONTENT, never filename, since filenames are not a
+        reliable way to tell the two document families apart.
+    - name: "llp_statement"
+      tooltip: "The LLP's own statement of account for this partner, this financial year."
+      accepts: "A single PDF file."
+      gotchas: "Optional -- enables the capital sign-off leg (leg 1). Absent, this leg is reported as an explicit 'not available' note, never a zero or a default."
+    - name: "gnucash_path"
+      tooltip: "This entity's GnuCash book, opened READ ONLY for the books tie-out."
+      accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."
+      gotchas: "Optional. Never opened for writing by this skill. Absent (or the books-reader not yet implemented), the books tie-out leg is reported 'not available', never defaulted."
+    - name: "xlsx_26as"
+      tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
+      accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
+      gotchas: "Optional. Absent (or the 26AS reader not yet implemented), the TDS-credit tie-out leg is reported 'not available', never defaulted."
     - name: "journal_path"
       tooltip: >
         Optional. When set, also writes a GnuCash multi-split journal CSV
@@ -108,23 +188,22 @@ help:
         one monthly-payout transaction per month, plus an opening
         reclassification entry if the input's opening_reclass: block is
         present. Leave blank to only produce the workbook, unchanged from
-        before this option existed.
+        before this option existed. Unreachable in this build until the
+        document parsers exist (see gotchas above), since journal emission
+        needs the parsed monthly dict this build cannot yet produce.
       accepts: "A full output file path ending in .csv."
       gotchas: >
-        Requires an accounts: block in the input naming the GnuCash
-        account for every non-zero split (bank, tds_expense,
-        interest_on_capital, current_account, capital_contribution,
-        medical_expense, remuneration_income, share_of_profit_income) -- a
-        missing account needed by a non-zero month comes back as an
-        "ERROR: ..." naming the key and the month, not a traceback. Import
-        the CSV into GnuCash via File > Import > Import Transactions from
-        CSV, with the Multi-split box ticked, skipping the 1 header line,
-        the Date column mapped as ISO (YYYY-MM-DD), and the single Amount
-        column mapped to the importer's "Amount" column type (or "Amount
-        (Negated)" if a build reverses the sign convention).
+        Requires an accounts: block in the (currently test-only,
+        structured) input naming the GnuCash account for every non-zero
+        split (bank, tds_expense, interest_on_capital, current_account,
+        capital_contribution, medical_expense, remuneration_income,
+        share_of_profit_income) -- a missing account needed by a non-zero
+        month comes back as an "ERROR: ..." naming the key and the month,
+        not a traceback.
   steps:
-    - "Assemble one financial year's figures into a YAML or JSON file matching the input shape (drivers, monthly, cohorts, advisory, external, and optionally payroll)."
-    - "Pick that file as the input."
+    - "Pick the entity."
+    - "Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter."
+    - "Optionally supply the LLP statement, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs."
     - "Click Run."
     - "Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning."
   outputs:
@@ -163,8 +242,8 @@ help:
     through the cohort.
   troubleshooting:
     - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
-      fix: "Add that figure to the relevant block (drivers/advisory/external/monthly) of the input file for that financial year -- this skill never guesses or falls back to a prior year's value."
+      fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."
       fix: "This build has no independent payment-schedule-PDF parser yet (see AGENT.md's Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers."
-    - problem: "'ERROR: this skill no longer accepts...' / unsupported file type."
-      fix: "Supply the structured input as .yaml, .yml, or .json -- this build does not parse the source PDFs directly."
+    - problem: "'ERROR: ... Stage 2 placeholder ...' naming a parser."
+      fix: "This build's PDF parsers (advisory letter, monthly payout advices, LLP statement) are guarded placeholders pending a real, de-identified specimen of each document (see AGENT.md) -- none of them can be worked around by renaming or reformatting a file."

@@ -7,10 +7,19 @@ projects a closing capital balance).
 This is a free-form PDF with no published layout, no public schema, and no
 two firms format it alike -- writing a layout parser against an invented
 fixture would produce code that is confidently wrong on the real letter.
-Stage 1 (this PR) accepts the same figures as structured YAML/JSON input
-instead (see skill.yaml's `input_path` and engine.build_report()'s
-`advisory` block). This function is a guarded placeholder pending a real,
-de-identified specimen.
+This function is a guarded placeholder pending a real, de-identified
+specimen; the (test-only) structured YAML/JSON input path accepts the
+same figures in the interim (see engine.build_report()'s `advisory` block).
+
+See parsers/__init__.py's module docstring for the design notes that MUST
+survive into the real implementation (map by label not position, dispatch
+on content not filename, no hardcoded rates, etc). One specific to this
+document: the Advisory shares a directory with the monthly payout advices
+at some firms, and states the RATES (capital-contribution rate, target
+compensation) for the year rather than a running total -- those rates
+still belong in the entity/tax-rules config, not hardcoded from what this
+parser reads, since a re-issued Advisory mid-year signals a rate change
+the config must also be updated to reflect.
 """
 from __future__ import annotations
 

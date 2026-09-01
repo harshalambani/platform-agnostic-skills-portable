@@ -9,10 +9,19 @@ rather than ever reading it off the advice).
 Free-form PDF, no published layout, no public schema, and the exact
 column set varies month to month at some firms. Writing a layout parser
 against an invented fixture would produce code that is confidently wrong
-on the real document. Stage 1 (this PR) accepts the same monthly figures
-as structured YAML/JSON input instead (see skill.yaml and
-engine.build_report()'s `monthly` block). This function is a guarded
-placeholder pending a real, de-identified specimen.
+on the real document. This function is a guarded placeholder pending a
+real, de-identified specimen; the (test-only) structured YAML/JSON input
+path accepts the same monthly figures in the interim (see
+engine.build_report()'s `monthly` block).
+
+See parsers/__init__.py's module docstring for the design notes that MUST
+survive into the real implementation. Three specific to this document:
+(1) it shares a directory with the Advisory letter at some firms, so
+dispatch which parser a given PDF needs on CONTENT, never filename;
+(2) the row set changes between years -- e.g. a "TDS on Remuneration" row
+exists only from FY2025-26 onward (s.194T); (3) interest on capital has
+no separate label here -- it is delivered INSIDE the "Add. Share of
+Profit" row's figure, never a standalone line.
 """
 from __future__ import annotations
 
