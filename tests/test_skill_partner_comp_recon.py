@@ -45,6 +45,10 @@ from agents.skill_partner_comp_recon.parsers.payout_advice import (
     NotAnL1DocumentError,
     parse_l1_text,
 )
+from agents.skill_partner_comp_recon.parsers.advisory import (
+    NotAnL3DocumentError,
+    parse_l3_text,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -264,7 +268,6 @@ def test_build_report_end_to_end_against_fixture():
 @pytest.mark.parametrize(
     "modname, needle",
     [
-        ("advisory", "specimen"),
         ("payment_schedule", "specimen"),
         ("llp_statement", "specimen"),
     ],
@@ -442,10 +445,13 @@ def test_l1_misc_adjustments_is_printed_only_never_an_input_field():
     assert "misc_adjustments" not in record
 
 
-# The advisory letter's parser is still a placeholder, so agent.run()'s
-# document-driven path must keep hard-failing end-to-end even though the
-# L1 parser itself now works -- this is expected, not a regression.
-def test_agent_run_document_driven_still_fails_loud_pending_advisory_parser(tmp_path):
+# A run with an unparseable/malformed required document (garbage-byte
+# "PDF") still fails loud end-to-end, naming the document -- now for a
+# pdfplumber-level "can't open this" reason rather than the old
+# NotImplementedError-placeholder reason, since advisory.py is
+# implemented. Optional legs still degrade to "not available" rather than
+# fail, even though a required leg failed.
+def test_agent_run_document_driven_still_fails_loud_on_unparseable_advisory(tmp_path):
     advices_dir = _advices_dir_with_one_pdf(tmp_path)
     advisory_path = tmp_path / "advisory.pdf"
     advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
@@ -457,6 +463,226 @@ def test_agent_run_document_driven_still_fails_loud_pending_advisory_parser(tmp_
         output_path=str(tmp_path / "out.xlsx"),
     )
     assert result.startswith("ERROR")
+    assert "advisory" in result.lower()
+    # Optional-leg status is still surfaced beneath the fail-loud header,
+    # never silently dropped just because a required leg failed.
+    assert "not available" in result.lower() or "optional" in result.lower()
+
+
+# ---------------------------------------------------------------------------
+# L3 (annual Compensation Advisory letter) parser -- advisory.py.
+# parse_l3_text() is the PURE core; every fixture below is a synthetic,
+# self-invented text block shaped like real specimens' extracted text (see
+# advisory.py's module docstring), never a real document.
+# ---------------------------------------------------------------------------
+
+def _l3_text(
+    *,
+    report_year="2026",
+    salary="12,00,000",
+    remuneration="24,00,000",
+    share_of_profit="18,00,000",
+    arrears=None,
+    incentive_gross="3,00,000",
+    target_compensation="57,00,000",
+    prior_year_target_compensation="52,00,000",
+    interest_on_capital=None,
+    drawings="40,00,000",
+    interest_paid="1,00,000",
+    balance="18,00,000",
+    less_firms_tax="(6,00,000)",
+    less_capital_contribution="(2,00,000)",
+    net_payable="10,00,000",
+    opening_balance="20,00,000",
+    closing_balance="24,00,000",
+    instalments=(
+        {"no": 1, "gross": "2,50,000", "firms_tax": "(1,00,000)", "capital_contribution": "(50,000)", "net": "1,00,000"},
+        {"no": 2, "gross": "2,50,000", "firms_tax": "(1,00,000)", "capital_contribution": "(50,000)", "net": "1,00,000"},
+    ),
+    extra_part1_lines=None,
+    extra_part2_lines=None,
+    extra_part3_lines=None,
+    include_payments_header=True,
+    include_schedule_header=True,
+    fy_phrase=None,
+):
+    """Build a synthetic L3 Advisory body text block. Row order/spacing is
+    not load-bearing -- parse_l3_text() maps by label, not position."""
+    lines = ["Compensation Advisory"]
+    lines.append(
+        fy_phrase
+        if fy_phrase is not None
+        else f"For the year ended 31 March {report_year}"
+    )
+    lines.append("")
+    if salary is not None:
+        lines.append(f"Salary                              {salary}")
+    if remuneration is not None:
+        lines.append(f"Remuneration                        {remuneration}")
+    if share_of_profit is not None:
+        lines.append(f"Share of Profit                     {share_of_profit}")
+    if arrears is not None:
+        lines.append(f"Arrears                             {arrears}")
+    if incentive_gross is not None:
+        lines.append(f"Incentive                           {incentive_gross}")
+    if target_compensation is not None:
+        lines.append(f"Target Compensation                 {target_compensation}")
+    if prior_year_target_compensation is not None:
+        lines.append(f"Prior Year Target Compensation      {prior_year_target_compensation}")
+    if interest_on_capital is not None:
+        lines.append(f"Interest on Capital                 {interest_on_capital}")
+    if extra_part1_lines:
+        lines.extend(extra_part1_lines)
+
+    if include_payments_header:
+        lines.append("PAYMENTS")
+    if drawings is not None:
+        lines.append(f"Drawings                            {drawings}")
+    if interest_paid is not None:
+        lines.append(f"Interest Paid                       {interest_paid}")
+    if balance is not None:
+        lines.append(f"Balance                             {balance}")
+    if less_firms_tax is not None:
+        lines.append(f"Less: Firm's Tax / TDS              {less_firms_tax}")
+    if less_capital_contribution is not None:
+        lines.append(f"Less: Capital Contribution          {less_capital_contribution}")
+    if net_payable is not None:
+        lines.append(f"Net Payable                         {net_payable}")
+    if extra_part2_lines:
+        lines.extend(extra_part2_lines)
+
+    if include_schedule_header:
+        lines.append("SCHEDULE")
+    if opening_balance is not None:
+        lines.append(f"Opening Balance                     {opening_balance}")
+    for inst in instalments:
+        lines.append(
+            f"Instalment No. {inst['no']}   {inst['gross']}   {inst['firms_tax']}   "
+            f"{inst['capital_contribution']}   {inst['net']}"
+        )
+    if closing_balance is not None:
+        lines.append(f"Projected Closing Balance            {closing_balance}")
+    if extra_part3_lines:
+        lines.extend(extra_part3_lines)
+
+    return "\n".join(lines)
+
+
+# 1 -- the reported FY comes from the document text, never the filename.
+def test_l3_reported_fy_from_document_text_not_filename():
+    text = _l3_text(report_year="2026")
+    record = parse_l3_text(text, source_name="advisory_fy2099-00_wrong_name.pdf")
+    assert record["financial_year"] == "2025-26"
+
+
+# 2 -- "interest on capital" absent parses as None, not 0 (earlier years).
+def test_l3_interest_on_capital_absent_is_none_not_zero():
+    text = _l3_text(interest_on_capital=None)
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["interest_on_capital"] is None
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+    text2 = _l3_text(interest_on_capital="45,000")
+    record2 = parse_l3_text(text2, source_name="advisory.pdf")
+    assert record2["interest_on_capital"] == 45000.0
+
+
+# 3 -- a parenthesised amount parses negative, never abs()-ed.
+def test_l3_parenthesised_amount_parses_negative():
+    text = _l3_text(less_firms_tax="(6,00,000)")
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["less_firms_tax"] == -600000.0
+
+
+# 4 -- both the schedule's opening and projected closing balance are
+# exposed, so a caller can later chain them across consecutive Advisories.
+def test_l3_schedule_opening_and_closing_balance_both_exposed():
+    text = _l3_text(opening_balance="20,00,000", closing_balance="24,00,000")
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["schedule_opening_balance"] == 2000000.0
+    assert record["schedule_projected_closing_balance"] == 2400000.0
+
+
+# 5 -- a non-reconciling PAYMENTS block produces a fail-loud diagnostic,
+# never a silent plug.
+def test_l3_non_reconciling_payments_block_is_fail_loud():
+    text = _l3_text(
+        balance="18,00,000",
+        less_firms_tax="(6,00,000)",
+        less_capital_contribution="(2,00,000)",
+        net_payable="99,99,999",  # deliberately wrong
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert any("ERROR" in d and "PAYMENTS" in d for d in record["diagnostics"])
+
+
+# 6 -- a non-reconciling SCHEDULE instalment row produces a fail-loud
+# diagnostic, never a silent plug.
+def test_l3_non_reconciling_schedule_instalment_is_fail_loud():
+    text = _l3_text(
+        instalments=(
+            {"no": 1, "gross": "2,50,000", "firms_tax": "(1,00,000)", "capital_contribution": "(50,000)", "net": "9,99,999"},
+        ),
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert any("ERROR" in d and "instalment 1" in d for d in record["diagnostics"])
+
+
+# 7 -- an unrecognised label line is reported on unknown_labels, never
+# silently dropped.
+def test_l3_unrecognised_label_line_is_reported_not_dropped():
+    text = _l3_text(extra_part1_lines=["Signing Bonus                       1,50,000"])
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert any("Signing Bonus" in u for u in record["unknown_labels"])
+
+
+# 8 -- a non-L3 document (an L2 salary statement) is skipped cleanly, not
+# misparsed as an L3 Advisory.
+def test_l3_non_l3_salary_statement_is_skipped_not_misparsed():
+    text = "SALARY STATEMENT FOR the month of March 2026\nNet Pay   2,00,000"
+    with pytest.raises(NotAnL3DocumentError) as excinfo:
+        parse_l3_text(text, source_name="salary_march26.pdf")
+    assert "salary statement" in str(excinfo.value).lower()
+
+
+# an L1 payout certificate is also skipped cleanly, not misparsed.
+def test_l3_non_l3_l1_certificate_is_skipped_not_misparsed():
+    text = "To Whomsoever It may concern\nRemuneration   1,20,000"
+    with pytest.raises(NotAnL3DocumentError):
+        parse_l3_text(text, source_name="jan26.pdf")
+
+
+# 9 -- no rate is ever hardcoded: the parsed firm's-tax amount tracks the
+# synthetic document's own printed figure, not a computed-from-a-rate
+# constant.
+def test_l3_no_hardcoded_rate_firms_tax_tracks_the_printed_figure():
+    text_a = _l3_text(
+        balance="18,00,000", less_firms_tax="(6,00,000)",
+        less_capital_contribution="(2,00,000)", net_payable="10,00,000",
+    )
+    record_a = parse_l3_text(text_a, source_name="advisory.pdf")
+
+    text_b = _l3_text(
+        balance="18,00,000", less_firms_tax="(9,00,000)",
+        less_capital_contribution="(2,00,000)", net_payable="7,00,000",
+    )
+    record_b = parse_l3_text(text_b, source_name="advisory.pdf")
+
+    assert record_a["less_firms_tax"] == -600000.0
+    assert record_b["less_firms_tax"] == -900000.0
+    assert record_a["less_firms_tax"] != record_b["less_firms_tax"]
+    assert not any("ERROR" in d for d in record_a["diagnostics"])
+    assert not any("ERROR" in d for d in record_b["diagnostics"])
+
+
+# A document missing the FY phrase and/or PAYMENTS/SCHEDULE headers, with
+# no recognisable L1/L2 marker either, is still skipped cleanly via the
+# generic reason -- never crashes, never guesses an L3 parse.
+def test_l3_document_missing_markers_skipped_with_generic_reason():
+    text = "Some unrelated memo with no recognisable structure at all."
+    with pytest.raises(NotAnL3DocumentError) as excinfo:
+        parse_l3_text(text, source_name="memo.pdf")
+    assert "not an l3" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -633,10 +859,11 @@ def test_optional_inputs_absent_degrade_to_not_available_never_zero_or_default(t
         xlsx_26as="",
         output_path=str(tmp_path / "out.xlsx"),
     )
-    # The required legs still hard-fail in this build (Stage 2 parsers are
-    # placeholders), but the optional-leg status notes must appear
-    # regardless, and every one of them must say "not available" -- never
-    # a zero, a blank, or a fabricated figure.
+    # The required legs still hard-fail here (the garbage-byte advisory.pdf
+    # is unparseable, not a real Advisory -- advisory.py itself is no
+    # longer a Stage 2 placeholder), but the optional-leg status notes must
+    # appear regardless, and every one of them must say "not available" --
+    # never a zero, a blank, or a fabricated figure.
     lowered = result.lower()
     assert "llp statement of account: not available" in lowered
     assert "gnucash books tie-out: not available" in lowered

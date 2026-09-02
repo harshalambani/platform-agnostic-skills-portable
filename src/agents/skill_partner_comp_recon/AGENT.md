@@ -55,7 +55,7 @@ Stage 2 parser would eventually produce.
 **Stage 1b**, shipped after Stage 1: the GnuCash journal CSV emitter
 (`jv_emitter.py`), optional and additive -- see its own section below.
 
-**Stage 2, NOT this build (mostly)**: the PDF parsers under `parsers/`
+**Stage 2, mostly NOT this build**: the PDF parsers under `parsers/`
 (`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
 `llp_statement.py`). Every source document for this skill is a free-form,
 unpublished layout and a personal financial record -- none are in this
@@ -64,24 +64,31 @@ seen. Writing layout/regex parsing logic from a prose description of a
 document instead of a real specimen produces code that passes its own
 tests and fails on the real document -- that exact failure mode has
 already shipped once in this codebase (see the MF CAS skill's history).
-So every `parse()` function in `parsers/` is a guarded placeholder that
-raises `NotImplementedError` naming the missing specimen; each has a guard
-test asserting it raises. **Do not implement these against an invented
-fixture. This is deliberate and must not be "finished" opportunistically.**
+So `payment_schedule.py` and `llp_statement.py` remain guarded
+placeholders that raise `NotImplementedError` naming the missing
+specimen; each has a guard test asserting it raises. **Do not implement
+these two against an invented fixture. This is deliberate and must not be
+"finished" opportunistically.**
 
-`payout_advice.py` is the one exception: its document (the "L1" monthly
-partner payout certificate) was read first-hand from real specimens, and
-that layout -- a one-page, password-protected PDF headed "To Whomsoever It
-may concern" with a two-column Particulars/AMOUNTS table -- is documented
-authoritatively enough (see the module's own docstring) that it has been
-implemented against synthetic, self-consistent fixtures, split into a
-pure `parse_l1_text(text)` core and a thin pdfplumber-opening shell
+`payout_advice.py` and `advisory.py` are the two exceptions. Their
+documents -- the "L1" monthly partner payout certificate (a one-page,
+password-protected PDF headed "To Whomsoever It may concern" with a
+two-column Particulars/AMOUNTS table) and the "L3" annual Compensation
+Advisory letter (a component build-up, a PAYMENTS block, and a forward
+SCHEDULE of instalments) -- were both read first-hand from real specimens
+and are documented authoritatively enough (see each module's own
+docstring) that they have been implemented against synthetic,
+self-consistent fixtures, each split into a pure `parse_l1_text(text)` /
+`parse_l3_text(text)` core and a thin pdfplumber-opening shell
 (`parse(path, password)`), mirroring `skill_mf_cas/parser.py`'s split.
-This does not make the skill runnable end-to-end: `advisory_path` is a
-REQUIRED input and `advisory.py` is still an unimplemented placeholder, so
-`agent.py`'s document-driven path still fails loud on every run until that
-parser (and `llp_statement.py`, `payment_schedule.py`) land against their
-own real specimens.
+This does not yet make the skill runnable end-to-end: `agent.py`'s
+document-driven path now parses both REQUIRED documents (the advices and
+the advisory) for real, and still fails loud (naming the document and the
+reason) if either is missing, unreadable, or doesn't match its expected
+layout -- but successfully parsing both does not yet assemble a workbook,
+since that assembly step, and the `llp_statement.py` /
+`payment_schedule.py` parsers it would also need, remain out of this
+build's scope.
 
 ## Inputs
 

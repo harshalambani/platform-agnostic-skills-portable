@@ -1,22 +1,27 @@
 """
-agents.skill_partner_comp_recon.parsers -- Stage 2 placeholders.
+agents.skill_partner_comp_recon.parsers -- Stage 2, mostly placeholders.
 
 Every module in this package exposes a single function:
 
     parse(path: str, password: str | None = None) -> dict
 
-Every one of them raises NotImplementedError naming the real specimen this
-skill needs before that parser can be written -- see each module's
-docstring and AGENT.md's "Stage 2" section. This is deliberate: writing
-regex/layout logic against an invented, non-PII fixture would produce code
-that is confidently wrong against the real document, since these are
-free-form PDFs with no public schema. Until a real specimen exists,
-agent.py's document-driven entry path (_run_from_documents) accepts these
-same documents but degrades every leg it cannot parse to an explicit "not
-available" note; its TEST-ONLY structured-input path
-(_run_from_structured_input / input_path) accepts the same data as a
-structured YAML/JSON input instead -- see skill.yaml and
-engine.build_report().
+`payout_advice.py` (L1, the monthly partner payout certificate) and
+`advisory.py` (L3, the annual Compensation Advisory letter) are
+implemented, each split into a PURE `parse_l1_text()`/`parse_l3_text()`
+core plus a thin pdfplumber-opening `parse()` shell -- see their own
+module docstrings. `payment_schedule.py` and `llp_statement.py` remain
+guarded placeholders: each raises NotImplementedError naming the real
+specimen this skill needs before that parser can be written -- see each
+module's docstring and AGENT.md's "Stage 2" section. This is deliberate:
+writing regex/layout logic against an invented, non-PII fixture would
+produce code that is confidently wrong against the real document, since
+these are free-form PDFs with no public schema. Until a real specimen
+exists for those two, agent.py's document-driven entry path
+(_run_from_documents) accepts their documents but degrades the legs they
+would back to an explicit "not available" note; its TEST-ONLY
+structured-input path (_run_from_structured_input / input_path) accepts
+the same data as a structured YAML/JSON input instead -- see skill.yaml
+and engine.build_report().
 
 Design notes that MUST survive into whichever real parser eventually gets
 written here (get these wrong and the numbers are silently corrupted, not

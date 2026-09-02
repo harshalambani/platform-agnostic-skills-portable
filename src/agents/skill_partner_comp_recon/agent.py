@@ -3,9 +3,10 @@ agent.py -- Partner Compensation Reconciliation. DIRECT mode, no LLM, no
 network.
 
 Stage 1 of this skill (see AGENT.md): the computation engine, the workbook
-writer, and the tests. Stage 2 is the PDF parsers under parsers/ -- they
+writer, and the tests. Stage 2 is the PDF parsers under parsers/ -- most
 are guarded placeholders that raise NotImplementedError until a real
-specimen of each document exists. See parsers/__init__.py.
+specimen of each document exists; `payout_advice.py` (L1) and
+`advisory.py` (L3) are now implemented. See parsers/__init__.py.
 
 run() has two entry paths:
 
@@ -17,10 +18,14 @@ run() has two entry paths:
     parser that is still a Stage 2 placeholder -- degrades its own
     reconciliation leg to an explicit "not available" note; it never
     fails the run, and never substitutes a zero or a default figure. The
-    two REQUIRED documents (advices_dir, advisory_path) currently make the
-    whole run fail loud for the same "Stage 2 not implemented" reason,
-    since this build has no working parser for either yet -- see
-    _run_from_documents()'s docstring.
+    two REQUIRED documents (advices_dir, advisory_path) now parse for
+    real; a document that fails to open/parse (an unreadable/malformed
+    PDF, a wrong password, or content that doesn't match the expected L1/
+    L3 layout) still fails the whole run loud, naming the document and the
+    reason -- see _run_from_documents()'s docstring. Parsing both required
+    documents successfully does not yet assemble a workbook (that
+    remaining wiring is out of this build's scope, see the same
+    docstring).
   - Structured-input (input_path): TEST-ONLY. Retained so the existing
     engine/writer/jv_emitter test suite keeps exercising build_report()
     directly without needing real PDF specimens. Deliberately absent from
@@ -150,29 +155,37 @@ def _run_from_documents(
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
-    This PR's scope is the manifest reshape and the input plumbing, NOT
-    the PDF parsing logic -- parsers/advisory.py, parsers/payout_advice.py
-    and parsers/llp_statement.py are still guarded NotImplementedError
-    placeholders pending real, de-identified specimens of each document
-    (see AGENT.md's "Stage 2" section). `entity`, `gnucash_path` and
-    `xlsx_26as` do not have a parser under parsers/ at all in this build
-    (gnucash_path/xlsx_26as read an existing format rather than parse a
-    free-form PDF, and are wired here as always-degraded legs rather than
-    invented reader logic); `parsers/payment_schedule.py` has no
-    corresponding input in this reshaped manifest at all -- the incentive
-    payment-schedule leg remains CANNOT RECONCILE, unchanged from before.
+    `parsers/advisory.py` (L3) and `parsers/payout_advice.py` (L1) are now
+    implemented (see their own module docstrings); `parsers/llp_statement.py`
+    is still a guarded NotImplementedError placeholder pending a real,
+    de-identified specimen of that document (see AGENT.md's "Stage 2"
+    section). `entity`, `gnucash_path` and `xlsx_26as` do not have a parser
+    under parsers/ at all in this build (gnucash_path/xlsx_26as read an
+    existing format rather than parse a free-form PDF, and are wired here
+    as always-degraded legs rather than invented reader logic);
+    `parsers/payment_schedule.py` has no corresponding input in this
+    reshaped manifest at all -- the incentive payment-schedule leg remains
+    CANNOT RECONCILE, unchanged from before.
 
     Required inputs (entity, advices_dir, advisory_path) missing fail loud
     by name, before any parsing is attempted. Optional inputs
     (llp_statement, gnucash_path, xlsx_26as) resolve to a per-leg status
     note FIRST, independent of whether the required documents can be
     parsed yet, so their "not available" degrade behaviour is observable
-    even while the required legs still hard-fail. The two required
-    documents then attempt to parse; since their parsers are still
-    NotImplementedError placeholders, this currently always returns an
-    ERROR naming that -- the whole document-driven path cannot reach
-    engine.build_report() until Stage 2 lands. Never opens a write handle
-    on gnucash_path -- read-only tie-out only, and only once implemented.
+    even while a required leg fails. The two required documents then
+    attempt to parse; ANY exception from that attempt (a Stage 2
+    NotImplementedError placeholder, a document that fails its
+    content-dispatch check, or pdfplumber choking on an unreadable/
+    malformed/wrong-password PDF) is caught and turned into an "ERROR: ..."
+    string naming the document and the underlying reason -- this function
+    never raises for a user-facing problem. Once both required documents
+    parse successfully, this function reports that fact (and the optional
+    legs' status) but does NOT yet assemble their figures into
+    engine.build_report()'s input shape or write a workbook -- wiring the
+    parsed L1/L3 records (plus the still-placeholder L2/LLP-statement/
+    payment-schedule legs) into that dict shape is a further stage, out of
+    this PR's scope. Never opens a write handle on gnucash_path --
+    read-only tie-out only, and only once implemented.
     """
     for value, name, label in (
         (entity, "entity", "Entity"),
@@ -213,19 +226,35 @@ def _run_from_documents(
     optional_notes = [llp_note, gnucash_note, xlsx_note]
 
     # Required legs: the Advisory letter, then every monthly payout advice.
+    # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
+    # or a pdfplumber-level failure to open/read the PDF) is a user-facing
+    # problem, never a crash -- turned into an "ERROR: ..." string naming
+    # the document and the reason.
     try:
         _advisory_parser.parse(advisory_path, doc_password)
-        for pdf in advice_pdfs:
-            _payout_advice_parser.parse(str(pdf), doc_password)
-    except NotImplementedError as e:
-        lines = [f"ERROR: {e}", "  Optional-leg status (unaffected by the error above):"]
+    except Exception as e:
+        lines = [
+            f"ERROR: could not parse the Compensation advisory ({advisory_path}): {e}",
+            "  Optional-leg status (unaffected by the error above):",
+        ]
         lines.extend(f"  - {note}" for note in optional_notes)
         return "\n".join(lines)
 
-    # Unreachable in this build until Stage 2 parsers land, but kept so
-    # this function has a defined "success" shape once they do -- at that
-    # point it would assemble the same dict shape _load_input() produces
-    # today and call build_report()/write_report_workbook() on it.
+    for pdf in advice_pdfs:
+        try:
+            _payout_advice_parser.parse(str(pdf), doc_password)
+        except Exception as e:
+            lines = [
+                f"ERROR: could not parse payout advice ({pdf}): {e}",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+
+    # Both required documents parsed successfully. Assembling their
+    # figures into engine.build_report()'s input shape (and writing a
+    # workbook) is a further stage, out of this PR's scope -- see this
+    # function's docstring.
     lines = ["Partner Compensation Reconciliation: documents parsed successfully."]
     lines.extend(f"  - {note}" for note in optional_notes)
     return "\n".join(lines)
