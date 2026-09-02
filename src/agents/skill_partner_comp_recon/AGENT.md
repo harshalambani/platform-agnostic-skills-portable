@@ -55,7 +55,7 @@ Stage 2 parser would eventually produce.
 **Stage 1b**, shipped after Stage 1: the GnuCash journal CSV emitter
 (`jv_emitter.py`), optional and additive -- see its own section below.
 
-**Stage 2, NOT this build**: the PDF parsers under `parsers/`
+**Stage 2, NOT this build (mostly)**: the PDF parsers under `parsers/`
 (`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
 `llp_statement.py`). Every source document for this skill is a free-form,
 unpublished layout and a personal financial record -- none are in this
@@ -68,6 +68,20 @@ So every `parse()` function in `parsers/` is a guarded placeholder that
 raises `NotImplementedError` naming the missing specimen; each has a guard
 test asserting it raises. **Do not implement these against an invented
 fixture. This is deliberate and must not be "finished" opportunistically.**
+
+`payout_advice.py` is the one exception: its document (the "L1" monthly
+partner payout certificate) was read first-hand from real specimens, and
+that layout -- a one-page, password-protected PDF headed "To Whomsoever It
+may concern" with a two-column Particulars/AMOUNTS table -- is documented
+authoritatively enough (see the module's own docstring) that it has been
+implemented against synthetic, self-consistent fixtures, split into a
+pure `parse_l1_text(text)` core and a thin pdfplumber-opening shell
+(`parse(path, password)`), mirroring `skill_mf_cas/parser.py`'s split.
+This does not make the skill runnable end-to-end: `advisory_path` is a
+REQUIRED input and `advisory.py` is still an unimplemented placeholder, so
+`agent.py`'s document-driven path still fails loud on every run until that
+parser (and `llp_statement.py`, `payment_schedule.py`) land against their
+own real specimens.
 
 ## Inputs
 

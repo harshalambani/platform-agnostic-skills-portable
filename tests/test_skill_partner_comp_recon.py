@@ -41,6 +41,10 @@ from agents.skill_partner_comp_recon.jv_emitter import (
     fy_prefix,
     write_journal_csv,
 )
+from agents.skill_partner_comp_recon.parsers.payout_advice import (
+    NotAnL1DocumentError,
+    parse_l1_text,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -262,7 +266,6 @@ def test_build_report_end_to_end_against_fixture():
     [
         ("advisory", "specimen"),
         ("payment_schedule", "specimen"),
-        ("payout_advice", "specimen"),
         ("llp_statement", "specimen"),
     ],
 )
@@ -273,6 +276,187 @@ def test_parser_is_a_guarded_placeholder(modname, needle):
     with pytest.raises(NotImplementedError) as excinfo:
         module.parse("does-not-matter.pdf")
     assert needle in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# L1 (monthly partner payout certificate) parser -- payout_advice.py.
+# parse_l1_text() is the PURE core; every fixture below is a synthetic,
+# self-invented text block shaped like real specimens' extracted text
+# (see payout_advice.py's module docstring), never a real document.
+# ---------------------------------------------------------------------------
+
+def _l1_text(
+    *,
+    month_phrase="Jan-26",
+    remuneration="1,20,000",
+    share_of_profit="80,000",
+    additional_share_of_profit=None,
+    tds=None,
+    misc="5,000",
+    total="2,05,000",
+    words=None,
+    issue_date="05-Feb-26",
+    include_month_phrase=True,
+    extra_lines=None,
+):
+    """Build a synthetic L1 body text block. Row order/spacing is not
+    load-bearing -- parse_l1_text() maps by label, not position."""
+    lines = ["To Whomsoever It may concern"]
+    if include_month_phrase:
+        lines.append(
+            f"This is to certify that the amount payable for the month of "
+            f"{month_phrase} is as under."
+        )
+    lines.append(f"Issued on {issue_date}")
+    lines.append("Particulars                AMOUNTS")
+    lines.append(f"Remuneration                {remuneration}")
+    lines.append(f"Share of Profit             {share_of_profit}")
+    if additional_share_of_profit is not None:
+        lines.append(f"Add. Share of Profit         {additional_share_of_profit}")
+    if tds is not None:
+        lines.append(f"TDS on Remuneration          {tds}")
+    lines.append(f"Misc Adjustments             {misc}")
+    lines.append(f"Total                        {total}")
+    if words is not None:
+        lines.append(f"Amount in Words: {words}")
+    if extra_lines:
+        lines.extend(extra_lines)
+    if not include_month_phrase:
+        lines.append(month_phrase)
+    return "\n".join(lines)
+
+
+# 1 -- a TDS row absent vs present; absent must come through as None, not 0.
+def test_l1_tds_row_absent_is_none_not_zero():
+    without_tds = _l1_text(tds=None, misc="5,000", total="2,05,000")
+    record = parse_l1_text(without_tds, source_name="jan26_without_tds.pdf")
+    assert record["tds"] is None
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+    with_tds = _l1_text(tds="(5,000)", misc="5,000", total="2,00,000")
+    record2 = parse_l1_text(with_tds, source_name="jan26_with_tds.pdf")
+    assert record2["tds"] == -5000.0
+    assert not any("ERROR" in d for d in record2["diagnostics"])
+
+
+# 2 -- a parenthesised amount parses negative and is never abs()-ed.
+def test_l1_parenthesised_amount_parses_negative():
+    text = _l1_text(share_of_profit="(30,000)", misc="5,000", total="95,000")
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["share_of_profit_gross"] == -30000.0
+
+
+# 3 -- a "#N/A" token in the amount column never parses as a value.
+def test_l1_na_token_in_amount_column_is_not_a_value():
+    text = _l1_text(misc="#N/A", total="2,00,000")
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["misc_printed"] is None
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+
+# 4 -- two L1 blocks with the same body month but different filenames
+# resolve to one month.
+def test_l1_same_body_month_different_filenames_resolve_to_one_month():
+    text_a = _l1_text(month_phrase="Jan-26")
+    text_b = _l1_text(month_phrase="Jan-26")
+    record_a = parse_l1_text(text_a, source_name="advice_batch1_xyz123.pdf")
+    record_b = parse_l1_text(text_b, source_name="completely_different_name.pdf")
+    assert record_a["month"] == record_b["month"] == "2026-01"
+
+
+# 5 -- rows that do not sum to Total produce the fail-loud diagnostic,
+# never a silent pass and never an exception.
+def test_l1_row_sum_mismatch_is_a_fail_loud_diagnostic_not_silent():
+    text = _l1_text(total="9,99,999")  # deliberately wrong
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["total_paid"] == 999999.0
+    assert any("ERROR" in d and "sum" in d.lower() for d in record["diagnostics"])
+
+
+# 6 -- a non-L1 document (a payroll salary statement) is skipped cleanly,
+# never misparsed as a payout certificate.
+def test_l1_non_l1_document_is_skipped_not_misparsed():
+    salary_text = (
+        "SALARY STATEMENT FOR THE MONTH OF JANUARY 2026\n"
+        "Basic Pay              1,00,000\n"
+        "Net Pay                1,00,000\n"
+    )
+    with pytest.raises(NotAnL1DocumentError):
+        parse_l1_text(salary_text, source_name="jan26_salary.pdf")
+
+
+# 7 -- month is taken from the body even when the filename says a
+# different month.
+def test_l1_month_from_body_ignores_filename():
+    text = _l1_text(month_phrase="Jan-26")
+    record = parse_l1_text(text, source_name="payout_advice_MARCH.pdf")
+    assert record["month"] == "2026-01"
+
+
+# Extra coverage: the body-month fallback (no "for the month of" phrase)
+# must not be fooled by the issue date's "DD-Mon-YY" shape.
+def test_l1_bare_month_line_not_confused_with_issue_date():
+    text = _l1_text(include_month_phrase=False, month_phrase="Jan-26", issue_date="05-Feb-26")
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["month"] == "2026-01"
+    assert record["issue_date"] == "05-Feb-26"
+
+
+# Extra coverage: an earlier-year template's literal "#N/A" standing in
+# for the amount-in-words line is skipped, not parsed as a value.
+def test_l1_na_placeholder_for_words_line_is_skipped():
+    text = _l1_text(words="#N/A")
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["amount_in_words_value"] is None
+    assert not any("words" in d.lower() for d in record["diagnostics"])
+
+
+# Extra coverage: the amount-in-words line carries paise, Total is
+# rounded -- cross-checked to +/- 1.00, never exact equality.
+def test_l1_amount_in_words_paise_cross_check_within_tolerance():
+    text = _l1_text(
+        total="2,05,000",
+        words="Rupees Two Lakh Five Thousand and Forty Paise Only 2,05,000.40",
+    )
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["amount_in_words_value"] == 205000.40
+    assert not any("words" in d.lower() for d in record["diagnostics"])
+
+
+def test_l1_amount_in_words_mismatch_beyond_tolerance_is_fail_loud():
+    text = _l1_text(
+        total="2,05,000",
+        words="Rupees Two Lakh Seven Thousand Only 2,07,000.00",
+    )
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert any("words" in d.lower() and "ERROR" in d for d in record["diagnostics"])
+
+
+# Misc Adjustments is parsed and carried as a printed CHECK figure, but
+# never fed into the model's input side under a different name.
+def test_l1_misc_adjustments_is_printed_only_never_an_input_field():
+    text = _l1_text(misc="5,000", total="2,05,000")
+    record = parse_l1_text(text, source_name="jan26.pdf")
+    assert record["misc_printed"] == 5000.0
+    assert "misc" not in record or record.get("misc") is None
+    assert "misc_adjustments" not in record
+
+
+# The advisory letter's parser is still a placeholder, so agent.run()'s
+# document-driven path must keep hard-failing end-to-end even though the
+# L1 parser itself now works -- this is expected, not a regression.
+def test_agent_run_document_driven_still_fails_loud_pending_advisory_parser(tmp_path):
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    result = run(
+        entity="Harshal",
+        advices_dir=str(advices_dir),
+        advisory_path=str(advisory_path),
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert result.startswith("ERROR")
 
 
 # ---------------------------------------------------------------------------
