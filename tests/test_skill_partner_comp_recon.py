@@ -14,6 +14,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
@@ -358,6 +359,107 @@ def test_agent_run_unsupported_extension_returns_error_string(tmp_path):
     bad.write_text("financial_year: '2025-26'", encoding="utf-8")
     result = run(input_path=str(bad), output_path=str(tmp_path / "out.xlsx"))
     assert result.startswith("ERROR")
+
+
+# ---------------------------------------------------------------------------
+# H3.5 -- manifest reshape: skill.yaml now takes the raw documents
+# directly. `input_path` is demoted to a test-only run() parameter (used
+# throughout this file above) and must never render in the UI; every
+# optional document-backed leg must degrade to an explicit "not
+# available" note rather than a zero/default; a missing REQUIRED input
+# must fail loud, naming it, before any parsing is attempted.
+# ---------------------------------------------------------------------------
+
+def _skill_yaml_inputs() -> list[dict]:
+    skill_yaml_path = (
+        Path(__file__).resolve().parent.parent
+        / "src" / "agents" / "skill_partner_comp_recon" / "skill.yaml"
+    )
+    manifest = yaml.safe_load(skill_yaml_path.read_text(encoding="utf-8"))
+    return manifest["inputs"]
+
+
+def test_input_path_absent_from_manifest_but_run_still_accepts_it():
+    names = {inp["name"] for inp in _skill_yaml_inputs()}
+    assert "input_path" not in names, (
+        "input_path must be demoted to a test-only run() parameter -- it "
+        "must never appear in skill.yaml's inputs: (else it renders in the UI)"
+    )
+    # run() must still accept it -- every e2e test above this section calls
+    # run(input_path=...) and depends on that continuing to work.
+    import inspect
+
+    assert "input_path" in inspect.signature(run).parameters
+
+
+def _advices_dir_with_one_pdf(tmp_path: Path) -> Path:
+    advices_dir = tmp_path / "advices"
+    advices_dir.mkdir()
+    (advices_dir / "jan.pdf").write_bytes(b"%PDF-1.4 not a real pdf")
+    return advices_dir
+
+
+def test_missing_required_input_fails_loud_and_names_it(tmp_path):
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    # entity missing
+    result = run(
+        entity="",
+        advices_dir=str(advices_dir),
+        advisory_path=str(advisory_path),
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert result.startswith("ERROR")
+    assert "entity" in result
+
+    # advices_dir missing
+    result = run(
+        entity="Harshal",
+        advices_dir="",
+        advisory_path=str(advisory_path),
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert result.startswith("ERROR")
+    assert "advices_dir" in result
+
+    # advisory_path missing
+    result = run(
+        entity="Harshal",
+        advices_dir=str(advices_dir),
+        advisory_path="",
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert result.startswith("ERROR")
+    assert "advisory_path" in result
+
+
+def test_optional_inputs_absent_degrade_to_not_available_never_zero_or_default(tmp_path):
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    result = run(
+        entity="Harshal",
+        advices_dir=str(advices_dir),
+        advisory_path=str(advisory_path),
+        llp_statement="",
+        gnucash_path="",
+        xlsx_26as="",
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    # The required legs still hard-fail in this build (Stage 2 parsers are
+    # placeholders), but the optional-leg status notes must appear
+    # regardless, and every one of them must say "not available" -- never
+    # a zero, a blank, or a fabricated figure.
+    lowered = result.lower()
+    assert "llp statement of account: not available" in lowered
+    assert "gnucash books tie-out: not available" in lowered
+    assert "26as tds-credit tie-out: not available" in lowered
+    assert "not available (no document supplied)" in lowered  # llp_statement
+    assert "not available (no book supplied)" in lowered  # gnucash_path
+    assert "not available (no workbook supplied)" in lowered  # xlsx_26as
 
 
 # ---------------------------------------------------------------------------

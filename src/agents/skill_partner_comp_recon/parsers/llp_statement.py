@@ -6,11 +6,18 @@ Compensation Advisory's projection).
 
 Free-form export, no published layout, no public schema. Writing a layout
 parser against an invented fixture would produce code that is confidently
-wrong on the real document. Stage 1 (this PR) accepts the same closing
-capital figures as structured YAML/JSON input instead (see skill.yaml and
-engine.build_report()'s `external.return_closing_capital` /
-`advisory.stated_closing_capital` fields). This function is a guarded
-placeholder pending a real, de-identified specimen.
+wrong on the real document. This function is a guarded placeholder
+pending a real, de-identified specimen; the (test-only) structured
+YAML/JSON input path accepts the same closing capital figures in the
+interim (see engine.build_report()'s `external.return_closing_capital` /
+`advisory.stated_closing_capital` fields). skill.yaml's optional
+`llp_statement` input feeds this parser and enables the capital sign-off
+leg -- absent, that leg degrades to an explicit "not available" note.
+
+See parsers/__init__.py's module docstring for the design notes that MUST
+survive into the real implementation (map by label not position,
+parenthesised negatives, thousands-separator commas, skip "#N/A" cells,
+no hardcoded rates, etc).
 """
 from __future__ import annotations
 
