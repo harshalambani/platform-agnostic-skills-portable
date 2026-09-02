@@ -64,31 +64,43 @@ seen. Writing layout/regex parsing logic from a prose description of a
 document instead of a real specimen produces code that passes its own
 tests and fails on the real document -- that exact failure mode has
 already shipped once in this codebase (see the MF CAS skill's history).
-So `payment_schedule.py` and `llp_statement.py` remain guarded
-placeholders that raise `NotImplementedError` naming the missing
-specimen; each has a guard test asserting it raises. **Do not implement
-these two against an invented fixture. This is deliberate and must not be
-"finished" opportunistically.**
+So `payment_schedule.py` remains a guarded placeholder that raises
+`NotImplementedError` naming the missing specimen; it has a guard test
+asserting it raises. **Do not implement this one against an invented
+fixture. This is deliberate and must not be "finished" opportunistically.**
 
-`payout_advice.py` and `advisory.py` are the two exceptions. Their
-documents -- the "L1" monthly partner payout certificate (a one-page,
-password-protected PDF headed "To Whomsoever It may concern" with a
-two-column Particulars/AMOUNTS table) and the "L3" annual Compensation
-Advisory letter (a component build-up, a PAYMENTS block, and a forward
-SCHEDULE of instalments) -- were both read first-hand from real specimens
-and are documented authoritatively enough (see each module's own
-docstring) that they have been implemented against synthetic,
-self-consistent fixtures, each split into a pure `parse_l1_text(text)` /
-`parse_l3_text(text)` core and a thin pdfplumber-opening shell
-(`parse(path, password)`), mirroring `skill_mf_cas/parser.py`'s split.
+`payout_advice.py`, `advisory.py`, and `llp_statement.py` are the three
+exceptions. `payout_advice.py`'s document -- the "L1" monthly partner
+payout certificate (a one-page, password-protected PDF headed "To
+Whomsoever It may concern" with a two-column Particulars/AMOUNTS table) --
+and `advisory.py`'s document -- the "L3" annual Compensation Advisory
+letter (a component build-up, a PAYMENTS block, and a forward SCHEDULE of
+instalments) -- were both read first-hand from real specimens and are
+documented authoritatively enough (see each module's own docstring) that
+they have been implemented against synthetic, self-consistent fixtures.
+`llp_statement.py`'s document -- the "L5" LLP statement of account (a
+CAPITAL account block and a CURRENT account block, as at 31 March of a
+financial year) -- is different: it was implemented from the H3.5 task's
+PROSE DESCRIPTION only, with **no real specimen read**, because none is
+available to this codebase (see CLAUDE.md's privacy constraint) -- its
+block-header wording, row labels, and FY-phrase wording are documented as
+ASSUMPTIONS in its own module docstring, naming exactly which constants a
+future fix would edit if a real, de-identified specimen later shows
+different wording. All three parsers are split into a pure
+`parse_l1_text(text)` / `parse_l3_text(text)` / `parse_l5_text(text)` core
+and a thin pdfplumber-opening shell (`parse(path, password)`), mirroring
+`skill_mf_cas/parser.py`'s split.
+
 This does not yet make the skill runnable end-to-end: `agent.py`'s
 document-driven path now parses both REQUIRED documents (the advices and
 the advisory) for real, and still fails loud (naming the document and the
 reason) if either is missing, unreadable, or doesn't match its expected
-layout -- but successfully parsing both does not yet assemble a workbook,
-since that assembly step, and the `llp_statement.py` /
-`payment_schedule.py` parsers it would also need, remain out of this
-build's scope.
+layout; the OPTIONAL `llp_statement` leg now also parses for real when
+supplied, degrading to "not available" (naming the reason) if it is
+absent, unreadable, or doesn't match its expected layout -- but
+successfully parsing all three does not yet assemble a workbook, since
+that assembly step, and the `payment_schedule.py` parser it would also
+need, remain out of this build's scope.
 
 ## Inputs
 
@@ -265,9 +277,11 @@ crediting current-year income.
   book, even in Stage 1b -- the journal emitter writes a plain CSV for
   GnuCash's own importer, not a `.gnucash` file.
 - **No ITR workbook injection.** Output is a standalone workbook only.
-- **The PDF parsers are placeholders pending real specimens** (see Stage
-  1/Stage 2 above) -- they are not a partially-done feature, they are an
-  intentional stopping point.
+- **`payment_schedule.py` is a placeholder pending a real specimen** (see
+  Stage 1/Stage 2 above) -- this is not a partially-done feature, it is an
+  intentional stopping point. `payout_advice.py`, `advisory.py`, and
+  `llp_statement.py` are now implemented, but parsing them successfully
+  does not by itself assemble a workbook end-to-end (see Stage 2 above).
 - **Every rate, percentage and period is an input** (see N1) -- there is
   no scenario in which a later change should reintroduce a constant or a
   fallback default for one of these values.

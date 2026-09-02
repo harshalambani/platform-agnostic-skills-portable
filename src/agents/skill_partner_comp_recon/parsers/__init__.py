@@ -5,23 +5,29 @@ Every module in this package exposes a single function:
 
     parse(path: str, password: str | None = None) -> dict
 
-`payout_advice.py` (L1, the monthly partner payout certificate) and
-`advisory.py` (L3, the annual Compensation Advisory letter) are
-implemented, each split into a PURE `parse_l1_text()`/`parse_l3_text()`
-core plus a thin pdfplumber-opening `parse()` shell -- see their own
-module docstrings. `payment_schedule.py` and `llp_statement.py` remain
-guarded placeholders: each raises NotImplementedError naming the real
-specimen this skill needs before that parser can be written -- see each
-module's docstring and AGENT.md's "Stage 2" section. This is deliberate:
-writing regex/layout logic against an invented, non-PII fixture would
-produce code that is confidently wrong against the real document, since
-these are free-form PDFs with no public schema. Until a real specimen
-exists for those two, agent.py's document-driven entry path
-(_run_from_documents) accepts their documents but degrades the legs they
-would back to an explicit "not available" note; its TEST-ONLY
+`payout_advice.py` (L1, the monthly partner payout certificate),
+`advisory.py` (L3, the annual Compensation Advisory letter), and
+`llp_statement.py` (L5, the LLP's own annual statement of account -- the
+anchor document for this skill) are implemented, each split into a PURE
+`parse_l1_text()`/`parse_l3_text()`/`parse_l5_text()` core plus a thin
+pdfplumber-opening `parse()` shell -- see their own module docstrings.
+Unlike L1/L3, no real L5 specimen has been read either -- its module
+docstring's ASSUMPTIONS paragraph names exactly which constants a future
+fix would need to edit if a real specimen later shows different wording.
+`payment_schedule.py` remains a guarded placeholder: it raises
+NotImplementedError naming the real specimen this skill needs before that
+parser can be written -- see its docstring and AGENT.md's "Stage 2"
+section. This is deliberate: writing regex/layout logic against an
+invented, non-PII fixture would produce code that is confidently wrong
+against the real document, since these are free-form PDFs with no public
+schema. Until a real specimen exists for it, agent.py's document-driven
+entry path (_run_from_documents) accepts its document but degrades the leg
+it would back to an explicit "not available" note; its TEST-ONLY
 structured-input path (_run_from_structured_input / input_path) accepts
 the same data as a structured YAML/JSON input instead -- see skill.yaml
-and engine.build_report().
+and engine.build_report(). Note that parsing L1/L3/L5 successfully does
+not, by itself, assemble a workbook end-to-end -- see agent.py's and
+AGENT.md's own caveats on that point.
 
 Design notes that MUST survive into whichever real parser eventually gets
 written here (get these wrong and the numbers are silently corrupted, not

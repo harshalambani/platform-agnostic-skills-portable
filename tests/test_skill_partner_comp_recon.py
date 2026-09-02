@@ -49,6 +49,10 @@ from agents.skill_partner_comp_recon.parsers.advisory import (
     NotAnL3DocumentError,
     parse_l3_text,
 )
+from agents.skill_partner_comp_recon.parsers.llp_statement import (
+    NotAnL5DocumentError,
+    parse_l5_text,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -269,7 +273,6 @@ def test_build_report_end_to_end_against_fixture():
     "modname, needle",
     [
         ("payment_schedule", "specimen"),
-        ("llp_statement", "specimen"),
     ],
 )
 def test_parser_is_a_guarded_placeholder(modname, needle):
@@ -683,6 +686,232 @@ def test_l3_document_missing_markers_skipped_with_generic_reason():
     with pytest.raises(NotAnL3DocumentError) as excinfo:
         parse_l3_text(text, source_name="memo.pdf")
     assert "not an l3" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# L5 (LLP's own annual statement of account) parser -- llp_statement.py.
+# parse_l5_text() is the PURE core; every fixture below is a synthetic,
+# self-invented text block shaped like the H3.5 task's PROSE description
+# only (see llp_statement.py's own ASSUMPTIONS paragraph) -- no real
+# specimen of this document exists or was sought (see AGENT.md and
+# CLAUDE.md's privacy constraint).
+# ---------------------------------------------------------------------------
+
+def _l5_text(
+    *,
+    report_year="2026",
+    fy_phrase=None,
+    capital_opening_balance="20,00,000",
+    capital_introduced="2,00,000",
+    capital_closing_balance="22,00,000",
+    current_remuneration="24,00,000",
+    current_interest_on_capital=None,
+    current_profit_share="18,00,000",
+    current_total_additions="42,00,000",
+    current_drawings="(40,00,000)",
+    current_transfer_to_capital="(2,00,000)",
+    current_closing_balance="0",
+    extra_capital_lines=None,
+    extra_current_lines=None,
+    include_capital_header=True,
+    include_current_header=True,
+    capital_before_current=True,
+):
+    """Build a synthetic L5 LLP-statement body text block. Row order/
+    spacing is not load-bearing -- parse_l5_text() maps by label, not
+    position. Defaults reconcile cleanly: 20,00,000 + 2,00,000 =
+    22,00,000 (capital); 24,00,000 + 18,00,000 = 42,00,000 (current
+    additions, interest on capital absent); 42,00,000 - 40,00,000 -
+    2,00,000 = 0 (current closing)."""
+    capital_lines = []
+    if include_capital_header:
+        capital_lines.append("CAPITAL ACCOUNT")
+    if capital_opening_balance is not None:
+        capital_lines.append(f"Opening Balance                     {capital_opening_balance}")
+    if capital_introduced is not None:
+        capital_lines.append(f"Add. Capital Introduced              {capital_introduced}")
+    if capital_closing_balance is not None:
+        capital_lines.append(f"Closing Balance                     {capital_closing_balance}")
+    if extra_capital_lines:
+        capital_lines.extend(extra_capital_lines)
+
+    current_lines = []
+    if include_current_header:
+        current_lines.append("CURRENT ACCOUNT")
+    if current_remuneration is not None:
+        current_lines.append(f"Remuneration                         {current_remuneration}")
+    if current_interest_on_capital is not None:
+        current_lines.append(f"Interest on Capital                   {current_interest_on_capital}")
+    if current_profit_share is not None:
+        current_lines.append(f"Share of Profit                      {current_profit_share}")
+    if current_total_additions is not None:
+        current_lines.append(f"Total Additions                      {current_total_additions}")
+    if current_drawings is not None:
+        current_lines.append(f"Less: Drawings                       {current_drawings}")
+    if current_transfer_to_capital is not None:
+        current_lines.append(f"Transfer to Capital                  {current_transfer_to_capital}")
+    if current_closing_balance is not None:
+        current_lines.append(f"Closing Balance                     {current_closing_balance}")
+    if extra_current_lines:
+        current_lines.extend(extra_current_lines)
+
+    lines = ["Statement of Account"]
+    lines.append(
+        fy_phrase
+        if fy_phrase is not None
+        else f"As at 31 March {report_year}"
+    )
+    lines.append("")
+    if capital_before_current:
+        lines.extend(capital_lines)
+        lines.extend(current_lines)
+    else:
+        lines.extend(current_lines)
+        lines.extend(capital_lines)
+    return "\n".join(lines)
+
+
+# 1 -- the reported FY comes from the document text, never the filename.
+def test_l5_reported_fy_from_document_text_not_filename():
+    text = _l5_text(report_year="2026")
+    record = parse_l5_text(text, source_name="llp_stmt_fy2099-00_wrong_name.pdf")
+    assert record["financial_year"] == "2025-26"
+
+
+# 2 -- CAPITAL closing and CURRENT closing are both exposed and distinct,
+# so neither can overwrite the other despite sharing the same label.
+def test_l5_capital_and_current_closing_balance_both_exposed_and_distinct():
+    text = _l5_text(
+        capital_closing_balance="22,00,000",
+        current_closing_balance="0",
+    )
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert record["capital_closing_balance"] == 2200000.0
+    assert record["current_closing_balance"] == 0.0
+    assert record["capital_closing_balance"] != record["current_closing_balance"]
+
+
+# 3 -- "interest on capital" absent parses as None, not 0, and produces no
+# spurious ERROR diagnostic (only a NOTE that the check was skipped).
+def test_l5_interest_on_capital_absent_is_none_not_zero():
+    text = _l5_text(current_interest_on_capital=None)
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert record["current_interest_on_capital"] is None
+    assert not any("ERROR" in d for d in record["diagnostics"])
+    assert any("NOTE" in d and "additions" in d for d in record["diagnostics"])
+
+    text2 = _l5_text(
+        current_interest_on_capital="1,00,000",
+        current_total_additions="43,00,000",
+        current_closing_balance="1,00,000",
+    )
+    record2 = parse_l5_text(text2, source_name="llp_stmt.pdf")
+    assert record2["current_interest_on_capital"] == 100000.0
+    assert not any("ERROR" in d for d in record2["diagnostics"])
+
+
+# 4 -- a parenthesised amount parses negative, never abs()-ed.
+def test_l5_parenthesised_amount_parses_negative():
+    text = _l5_text(current_drawings="(40,00,000)")
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert record["current_drawings"] == -4000000.0
+
+
+# 5 -- a non-reconciling CAPITAL block produces a fail-loud ERROR
+# diagnostic naming the actual figures, never a silent plug.
+def test_l5_non_reconciling_capital_block_is_fail_loud():
+    text = _l5_text(
+        capital_opening_balance="20,00,000",
+        capital_introduced="2,00,000",
+        capital_closing_balance="99,99,999",  # deliberately wrong
+    )
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert any("ERROR" in d and "CAPITAL" in d for d in record["diagnostics"])
+
+
+# 6 -- a non-reconciling CURRENT block produces a fail-loud ERROR
+# diagnostic naming the actual figures, never a silent plug.
+def test_l5_non_reconciling_current_block_is_fail_loud():
+    text = _l5_text(
+        current_total_additions="42,00,000",
+        current_drawings="(40,00,000)",
+        current_transfer_to_capital="(2,00,000)",
+        current_closing_balance="99,99,999",  # deliberately wrong
+    )
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert any("ERROR" in d and "CURRENT" in d for d in record["diagnostics"])
+
+
+# 7 -- an unrecognised label line is reported on unknown_labels, never
+# silently dropped.
+def test_l5_unrecognised_label_line_is_reported_not_dropped():
+    text = _l5_text(extra_current_lines=["Signing Bonus                       1,50,000"])
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert any("Signing Bonus" in u for u in record["unknown_labels"])
+
+
+# 8 -- an L1 payout certificate is skipped cleanly, never misparsed as an
+# L5 LLP statement.
+def test_l5_non_l5_l1_certificate_is_skipped_not_misparsed():
+    text = "To Whomsoever It may concern\nRemuneration   1,20,000"
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_text(text, source_name="jan26.pdf")
+    assert "l1" in str(excinfo.value).lower()
+
+
+# 9 -- an L3 Compensation Advisory (PAYMENTS/SCHEDULE headers) is skipped
+# cleanly, never misparsed as an L5 LLP statement.
+def test_l5_non_l5_l3_advisory_is_skipped_not_misparsed():
+    text = _l3_text(report_year="2026")
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_text(text, source_name="advisory.pdf")
+    assert "l3" in str(excinfo.value).lower()
+
+
+# 10 -- an L2 payroll salary statement is skipped cleanly, never misparsed
+# as an L5 LLP statement.
+def test_l5_non_l5_l2_salary_statement_is_skipped_not_misparsed():
+    text = "SALARY STATEMENT FOR the month of March 2026\nNet Pay   2,00,000"
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_text(text, source_name="salary_march26.pdf")
+    assert "l2" in str(excinfo.value).lower() or "salary" in str(excinfo.value).lower()
+
+
+# 11 -- a document with no recognisable markers at all is skipped cleanly
+# via the generic reason -- never crashes, never guesses an L5 parse.
+def test_l5_document_missing_markers_skipped_with_generic_reason():
+    text = "Some unrelated memo with no recognisable structure at all."
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_text(text, source_name="memo.pdf")
+    assert "not an l5" in str(excinfo.value).lower()
+
+
+# Extra coverage: the CAPITAL/CURRENT block ordering may appear either way
+# round in a real template -- both orderings must split cleanly.
+def test_l5_current_before_capital_block_ordering_still_splits_cleanly():
+    text = _l5_text(capital_before_current=False)
+    record = parse_l5_text(text, source_name="llp_stmt.pdf")
+    assert record["capital_closing_balance"] == 2200000.0
+    assert record["current_closing_balance"] == 0.0
+
+
+# Extra coverage: the OPTIONAL llp_statement leg degrades to "not
+# available" (naming the reason) when the supplied document doesn't match
+# the expected L5 layout -- it never crashes the whole run, since this leg
+# is optional.
+def test_agent_resolve_optional_leg_degrades_on_real_parser_dispatch_mismatch():
+    from agents.skill_partner_comp_recon.agent import _resolve_optional_leg
+
+    status = _resolve_optional_leg(
+        "LLP statement",
+        "not-an-l5-document.pdf",
+        lambda path, password: parse_l5_text(
+            "Some unrelated memo with no recognisable structure at all.",
+            source_name=path,
+        ),
+    )
+    assert "not available" in status.lower()
+    assert "llp statement" in status.lower()
 
 
 # ---------------------------------------------------------------------------

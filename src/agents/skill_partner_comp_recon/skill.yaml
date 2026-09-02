@@ -4,10 +4,14 @@
 # other skill in the catalogue (26AS takes a PDF, MF CAS takes an .xlsx,
 # AIS Reconcile takes AIS .json) -- it was the only one still requiring a
 # human to hand-key a structured YAML/JSON input first. The manifest below
-# is that reshape. `payout_advice.py` (L1) and `advisory.py` (L3) are now
-# implemented parsers; `payment_schedule.py` and `llp_statement.py` under
-# parsers/ remain guarded NotImplementedError placeholders pending real,
-# de-identified document specimens (see AGENT.md's "Stage 2" section).
+# is that reshape. `payout_advice.py` (L1), `advisory.py` (L3), and
+# `llp_statement.py` (L5, the LLP's own annual statement of account) are
+# now implemented parsers; only `payment_schedule.py` under parsers/
+# remains a guarded NotImplementedError placeholder pending a real,
+# de-identified document specimen (see AGENT.md's "Stage 2" section).
+# Unlike L1/L3, the L5 parser was written from the task's prose
+# description only, with no real specimen read -- its own module
+# docstring names its unverified assumptions explicitly.
 # Every optional leg still degrades to an explicit "not available" note
 # rather than failing the run or fabricating a figure. The
 # structured YAML/JSON input (`input_path`) this skill used to expose is
@@ -28,10 +32,11 @@ description: >
   No tax computation is performed, no .gnucash book is written, and no
   ITR workbook is touched. Takes the monthly payout advices and the
   Compensation Advisory letter as PDFs, plus optional documents for the
-  LLP capital tie-out, the books tie-out, and the TDS-credit tie-out;
-  parsing those PDFs is a Stage 2 placeholder pending real document
-  specimens (see AGENT.md) -- every leg that needs one degrades to an
-  explicit "not available" note rather than failing this build.
+  LLP capital tie-out, the books tie-out, and the TDS-credit tie-out. The
+  LLP statement parser now parses for real (see AGENT.md); the books and
+  TDS-credit tie-outs remain Stage 2 placeholders pending real document
+  specimens -- every leg that needs one still degrades to an explicit
+  "not available" note rather than failing this build.
 category: "itr"
 version: "0.2.0"
 
@@ -132,11 +137,15 @@ help:
     run loud, naming the document and the reason. Every optional
     document's leg (the LLP statement, the GnuCash books tie-out, the 26AS
     TDS-credit tie-out) degrades to an explicit "not available" note when
-    its input is absent or cannot yet be parsed -- the LLP statement
-    parser is still a Stage 2 placeholder pending a real, de-identified
-    specimen (see AGENT.md). Parsing both required documents successfully
-    does not yet assemble a workbook; that remaining wiring is a further
-    stage, out of this build's scope.
+    its input is absent or cannot yet be parsed. The LLP statement now
+    also parses for real -- its own module docstring names its
+    content-dispatch markers as unverified assumptions, since no real
+    specimen of that document was available (see AGENT.md); the GnuCash
+    books and 26AS tie-outs remain Stage 2 placeholders pending real
+    specimens of those. Parsing the required documents (and the LLP
+    statement, when supplied) successfully does not yet assemble a
+    workbook; that remaining wiring is a further stage, out of this
+    build's scope.
   when_to_use: >
     Use this once a financial year's partner-compensation documents are in
     hand and you want a single reconciliation across remuneration, share
@@ -178,7 +187,14 @@ help:
     - name: "llp_statement"
       tooltip: "The LLP's own statement of account for this partner, this financial year."
       accepts: "A single PDF file."
-      gotchas: "Optional -- enables the capital sign-off leg (leg 1). Absent, this leg is reported as an explicit 'not available' note, never a zero or a default."
+      gotchas: >
+        Optional -- enables the capital sign-off leg (leg 1), and is
+        dispatched on its CONTENT, never its filename. Absent, or if it
+        fails to open/parse (unreadable/malformed PDF, wrong password, or
+        content that doesn't match the LLP statement's expected CAPITAL
+        account / CURRENT account layout -- e.g. an L1/L2/L3 document
+        misfiled here), this leg is reported as an explicit 'not
+        available' note naming the reason, never a zero or a default.
     - name: "gnucash_path"
       tooltip: "This entity's GnuCash book, opened READ ONLY for the books tie-out."
       accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."
@@ -253,5 +269,5 @@ help:
       fix: "This build has no independent payment-schedule-PDF parser yet (see AGENT.md's Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers."
     - problem: "'ERROR: could not parse ...' naming the advisory letter or a payout advice."
       fix: "The PDF is unreadable/malformed, password-protected without the right password, or its content doesn't match the expected layout (e.g. an L1 payout certificate misfiled as the Advisory) -- fix the underlying document/password, not the filename."
-    - problem: "'ERROR: ... Stage 2 placeholder ...' naming the LLP statement parser."
-      fix: "The LLP statement of account parser is a guarded placeholder pending a real, de-identified specimen of that document (see AGENT.md) -- it cannot be worked around by renaming or reformatting a file; leave llp_statement blank and that leg reports 'not available' instead."
+    - problem: "The capital sign-off leg (leg 1) shows 'not available' even though llp_statement was supplied."
+      fix: "The LLP statement parser dispatches on CONTENT, never filename: 'not available' here means the PDF was unreadable/malformed, password-protected without the right password, or its content didn't match the expected CAPITAL account / CURRENT account layout (e.g. a payout advice or the Advisory letter misfiled as the LLP statement). It never means the leg silently defaulted to zero. This leg is OPTIONAL, so this never fails the whole run -- fix the underlying document/password and re-run. Note the parser's block-header and financial-year wording were written from the task's prose only, with no real specimen read (see llp_statement.py's own ASSUMPTIONS paragraph and AGENT.md); if a real statement uses different wording than assumed, that is the first place to check."

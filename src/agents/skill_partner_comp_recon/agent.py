@@ -3,10 +3,12 @@ agent.py -- Partner Compensation Reconciliation. DIRECT mode, no LLM, no
 network.
 
 Stage 1 of this skill (see AGENT.md): the computation engine, the workbook
-writer, and the tests. Stage 2 is the PDF parsers under parsers/ -- most
-are guarded placeholders that raise NotImplementedError until a real
-specimen of each document exists; `payout_advice.py` (L1) and
-`advisory.py` (L3) are now implemented. See parsers/__init__.py.
+writer, and the tests. Stage 2 is the PDF parsers under parsers/ --
+`payment_schedule.py` remains a guarded placeholder that raises
+NotImplementedError until a real specimen of that document exists;
+`payout_advice.py` (L1), `advisory.py` (L3), and `llp_statement.py` (L5,
+the LLP's own annual statement of account -- the anchor document) are now
+implemented. See parsers/__init__.py.
 
 run() has two entry paths:
 
@@ -15,15 +17,17 @@ run() has two entry paths:
     llp_statement/gnucash_path/xlsx_26as. Required inputs missing fail
     loud, naming the input. Every OPTIONAL input (llp_statement,
     gnucash_path, xlsx_26as) that is absent -- or present but backed by a
-    parser that is still a Stage 2 placeholder -- degrades its own
-    reconciliation leg to an explicit "not available" note; it never
-    fails the run, and never substitutes a zero or a default figure. The
-    two REQUIRED documents (advices_dir, advisory_path) now parse for
-    real; a document that fails to open/parse (an unreadable/malformed
-    PDF, a wrong password, or content that doesn't match the expected L1/
-    L3 layout) still fails the whole run loud, naming the document and the
-    reason -- see _run_from_documents()'s docstring. Parsing both required
-    documents successfully does not yet assemble a workbook (that
+    parser that is still a Stage 2 placeholder, or that fails to parse
+    (content-dispatch mismatch, unreadable/malformed PDF, wrong password)
+    -- degrades its own reconciliation leg to an explicit "not available"
+    note; it never fails the run, and never substitutes a zero or a
+    default figure. The two REQUIRED documents (advices_dir, advisory_path)
+    now parse for real; a document that fails to open/parse (an unreadable/
+    malformed PDF, a wrong password, or content that doesn't match the
+    expected L1/L3 layout) still fails the whole run loud, naming the
+    document and the reason -- see _run_from_documents()'s docstring.
+    `llp_statement` now also parses for real when supplied, but parsing it
+    successfully (like L1/L3) does not yet assemble a workbook (that
     remaining wiring is out of this build's scope, see the same
     docstring).
   - Structured-input (input_path): TEST-ONLY. Retained so the existing
@@ -86,13 +90,18 @@ def _resolve_optional_leg(label: str, path: str, parse_fn, password: str | None 
     _require() instead. An absent path degrades the leg to "not
     available", never a zero or a default. A path that IS supplied but
     whose parser is still a Stage 2 NotImplementedError placeholder
-    degrades identically, naming that reason instead of crashing."""
+    degrades identically, naming that reason instead of crashing -- and so
+    does a path whose parser IS implemented (e.g. llp_statement.py) but
+    fails for any other reason (content-dispatch mismatch such as
+    NotAnL5DocumentError, an unreadable/malformed PDF, a wrong password):
+    this leg is OPTIONAL, so any failure here degrades to "not available"
+    naming the reason, it never fails the whole run."""
     if not path:
         return f"{label}: not available (no document supplied)."
     try:
         parse_fn(path, password)
         return f"{label}: parsed from {path}."
-    except NotImplementedError as e:
+    except Exception as e:
         return f"{label}: not available ({e})"
 
 
@@ -155,14 +164,15 @@ def _run_from_documents(
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
-    `parsers/advisory.py` (L3) and `parsers/payout_advice.py` (L1) are now
-    implemented (see their own module docstrings); `parsers/llp_statement.py`
-    is still a guarded NotImplementedError placeholder pending a real,
-    de-identified specimen of that document (see AGENT.md's "Stage 2"
-    section). `entity`, `gnucash_path` and `xlsx_26as` do not have a parser
-    under parsers/ at all in this build (gnucash_path/xlsx_26as read an
-    existing format rather than parse a free-form PDF, and are wired here
-    as always-degraded legs rather than invented reader logic);
+    `parsers/advisory.py` (L3), `parsers/payout_advice.py` (L1), and
+    `parsers/llp_statement.py` (L5, the anchor document) are now
+    implemented (see their own module docstrings) -- L5, unlike L1/L3, was
+    written entirely from the task's prose description with no real
+    specimen read; see llp_statement.py's own ASSUMPTIONS paragraph.
+    `entity`, `gnucash_path` and `xlsx_26as` do not have a parser under
+    parsers/ at all in this build (gnucash_path/xlsx_26as read an existing
+    format rather than parse a free-form PDF, and are wired here as
+    always-degraded legs rather than invented reader logic);
     `parsers/payment_schedule.py` has no corresponding input in this
     reshaped manifest at all -- the incentive payment-schedule leg remains
     CANNOT RECONCILE, unchanged from before.
@@ -180,12 +190,12 @@ def _run_from_documents(
     string naming the document and the underlying reason -- this function
     never raises for a user-facing problem. Once both required documents
     parse successfully, this function reports that fact (and the optional
-    legs' status) but does NOT yet assemble their figures into
-    engine.build_report()'s input shape or write a workbook -- wiring the
-    parsed L1/L3 records (plus the still-placeholder L2/LLP-statement/
-    payment-schedule legs) into that dict shape is a further stage, out of
-    this PR's scope. Never opens a write handle on gnucash_path --
-    read-only tie-out only, and only once implemented.
+    legs' status, including llp_statement's now-real parse outcome) but
+    does NOT yet assemble their figures into engine.build_report()'s input
+    shape or write a workbook -- wiring the parsed L1/L3/L5 records (plus
+    the still-placeholder L2/payment-schedule legs) into that dict shape is
+    a further stage, out of this PR's scope. Never opens a write handle on
+    gnucash_path -- read-only tie-out only, and only once implemented.
     """
     for value, name, label in (
         (entity, "entity", "Entity"),
