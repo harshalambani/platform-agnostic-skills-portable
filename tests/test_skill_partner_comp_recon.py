@@ -49,6 +49,10 @@ from agents.skill_partner_comp_recon.parsers.advisory import (
     NotAnL3DocumentError,
     parse_l3_text,
 )
+from agents.skill_partner_comp_recon.parsers.llp_statement import (
+    NotAnL5DocumentError,
+    parse_l5_words,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -269,7 +273,6 @@ def test_build_report_end_to_end_against_fixture():
     "modname, needle",
     [
         ("payment_schedule", "specimen"),
-        ("llp_statement", "specimen"),
     ],
 )
 def test_parser_is_a_guarded_placeholder(modname, needle):
@@ -683,6 +686,353 @@ def test_l3_document_missing_markers_skipped_with_generic_reason():
     with pytest.raises(NotAnL3DocumentError) as excinfo:
         parse_l3_text(text, source_name="memo.pdf")
     assert "not an l3" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# L5 (LLP Statement of Account) parser -- llp_statement.py.
+# parse_l5_words() is PURE and coordinate-based (not text-based): every
+# fixture below is a synthetic, self-invented list of word dicts shaped
+# like pdfplumber's page.extract_words() output ({"text","x0","x1","top",
+# "bottom"}), laid out to mimic the real document's two-column
+# (CAPITAL ACCOUNT / CURRENT ACCOUNT) layout and its confirmed traps --
+# see llp_statement.py's module docstring. Never a real document; every
+# figure here is invented.
+# ---------------------------------------------------------------------------
+
+def _l5_word(text, x0, x1, top, bottom=None):
+    return {
+        "text": text,
+        "x0": x0,
+        "x1": x1,
+        "top": top,
+        "bottom": bottom if bottom is not None else top + 10.0,
+    }
+
+
+def _l5_word_line(text, x0, top):
+    """Lay a text string out left-to-right as whitespace-separated word
+    tokens, starting at (x0, top). Used for metadata/footer lines and for
+    dispatch-rejection fixtures, where exact geometry is not load-bearing."""
+    words = []
+    x = x0
+    for tok in text.split(" "):
+        w = 6.5 * len(tok)
+        words.append(_l5_word(tok, x, x + w, top))
+        x += w + 4.0
+    return words
+
+
+def _words_from_lines(lines, start_top=20.0, x0=40.0, step=20.0):
+    words = []
+    top = start_top
+    for line in lines:
+        words.extend(_l5_word_line(line, x0, top))
+        top += step
+    return words
+
+
+_L5_LABEL_X0 = 40.0
+_L5_CAPITAL_X0 = 300.0
+_L5_CURRENT_X0 = 420.0
+
+
+def _l5_header_words(top=100.0):
+    return [
+        _l5_word("CAPITAL", 300.0, 345.0, top),
+        _l5_word("ACCOUNT", 348.0, 395.0, top),
+        _l5_word("CURRENT", 420.0, 463.0, top),
+        _l5_word("ACCOUNT", 466.0, 513.0, top),
+    ]
+# The header above puts the derived boundary at (395.0 + 420.0) / 2 = 407.5
+# and the label/value region start at 300.0 -- every row builder below
+# stays clear of both, and tests that probe the boundary do so explicitly.
+
+
+def _l5_row_words(top, label, capital_text=None, current_text=None):
+    words = _l5_word_line(label, _L5_LABEL_X0, top)
+    if capital_text is not None:
+        w = 6.5 * len(capital_text)
+        words.append(_l5_word(capital_text, _L5_CAPITAL_X0, _L5_CAPITAL_X0 + w, top))
+    if current_text is not None:
+        w = 6.5 * len(current_text)
+        words.append(_l5_word(current_text, _L5_CURRENT_X0, _L5_CURRENT_X0 + w, top))
+    return words
+
+
+# A fully self-consistent, invented statement: every roll-forward and
+# section sum below reconciles exactly, and current_transfer_to_capital
+# (4,00,000) deliberately differs from capital_introduced_transferred
+# (5,00,000) so the NOTE (never ERROR) about that comparison is exercised.
+_DEFAULT_L5_ROWS = [
+    ("Opening Balance as on 1 April, 2025", "10,00,000", "2,00,000"),
+    ("ADDITIONS:-", None, None),
+    ("Introduced/Transferred", "5,00,000", None),
+    ("Interest on Capital", "1,00,000", None),
+    ("Profit Share for the year", None, "18,00,000"),
+    ("Remuneration", None, "24,00,000"),
+    ("Total additions", "6,00,000", "42,00,000"),
+    ("WITHDRAWALS:-", None, None),
+    ("Drawings", "(2,00,000)", "(30,00,000)"),
+    ("Transfer to Capital Account", None, "(4,00,000)"),
+    ("Total withdrawals", "(2,00,000)", "(34,00,000)"),
+    ("Closing Balance as on 31 March, 2026", "14,00,000", "10,00,000"),
+]
+
+
+def _l5_words(
+    *,
+    as_on="31 MARCH, 2026",
+    assessment_year="2026-27",
+    previous_year="31 MARCH, 2025",
+    statement_date="05-Sep-2026",
+    rows=None,
+    extra_rows=None,
+    include_metadata=True,
+):
+    """Build a synthetic L5 word list. `rows` (defaulting to
+    _DEFAULT_L5_ROWS) is a list of (label, capital_text, current_text)
+    tuples placed one per row below the header; `extra_rows` are appended
+    after them (before the footer) without disturbing the defaults."""
+    words: list[dict] = []
+    top = 20.0
+    if include_metadata:
+        words += _l5_word_line("STATEMENT OF ACCOUNT OF A PARTNER", 40.0, top)
+        top += 20.0
+        words += _l5_word_line(f"AS ON {as_on}", 40.0, top)
+        top += 20.0
+        words += _l5_word_line(f"ASSESSMENT YEAR : {assessment_year}", 40.0, top)
+        top += 20.0
+        words += _l5_word_line(f"PREVIOUS YEAR : {previous_year}", 40.0, top)
+        top += 20.0
+        words += _l5_word_line(statement_date, 40.0, top)
+        top += 30.0
+    words += _l5_header_words(top=top)
+    top += 20.0
+
+    row_specs = _DEFAULT_L5_ROWS if rows is None else rows
+    for label, capital_text, current_text in row_specs:
+        words += _l5_row_words(top, label, capital_text, current_text)
+        top += 20.0
+    if extra_rows:
+        for row in extra_rows:
+            words += row(top) if callable(row) else _l5_row_words(top, *row)
+            top += 20.0
+
+    top += 20.0
+    words += _l5_word_line("KPMG India Services LLP", 40.0, top)
+    return words
+
+
+# 1 -- the financial year is derived from "AS ON <d> MARCH, <yyyy>", and
+# the printed ASSESSMENT YEAR is cross-checked against FY+1 -- agreement
+# produces no ERROR.
+def test_l5_fy_and_assessment_year_agree_no_error():
+    words = _l5_words(as_on="31 MARCH, 2026", assessment_year="2026-27")
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["financial_year"] == "2025-26"
+    assert record["assessment_year"] == "2026-27"
+    assert not any("ERROR" in d and "ASSESSMENT YEAR" in d for d in record["diagnostics"])
+
+
+# 2 -- a disagreeing ASSESSMENT YEAR is a fail-loud ERROR diagnostic,
+# never silently trusted or silently ignored.
+def test_l5_fy_and_assessment_year_disagreement_is_fail_loud():
+    words = _l5_words(as_on="31 MARCH, 2026", assessment_year="2099-00")
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["financial_year"] == "2025-26"
+    assert any(
+        "ERROR" in d and "ASSESSMENT YEAR" in d for d in record["diagnostics"]
+    )
+
+
+# 3 -- capital and current closing balances are distinct fields, both
+# exposed, never conflated into a single "closing balance".
+def test_l5_distinct_capital_and_current_closing_balances_exposed():
+    words = _l5_words()
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["capital_closing_balance"] == 1400000.0
+    assert record["current_closing_balance"] == 1000000.0
+    assert record["capital_closing_balance"] != record["current_closing_balance"]
+
+
+# 4 -- Interest on Capital is a separate labelled row here (unlike L1) and
+# is pinned to the CAPITAL column only -- never the CURRENT column.
+def test_l5_interest_on_capital_pinned_to_capital_column():
+    words = _l5_words()
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["capital_interest_on_capital"] == 100000.0
+    assert "current_interest_on_capital" not in record
+
+
+# 5 -- trap (a): a printed negative amount split across x-adjacent word
+# tokens, including a split-off leading "(", still parses correctly --
+# and this pins the SIGN of a withdrawal (never abs()-ed).
+def test_l5_split_token_negative_amount_parses_and_keeps_sign():
+    rows = list(_DEFAULT_L5_ROWS)
+    # Replace the "Drawings" row with one whose capital figure arrives as
+    # two adjacent word tokens: "(" then "2,00,000)" with a 0.5pt gap.
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Drawings")
+    rows[idx] = ("Drawings", None, "(30,00,000)")
+    words = _l5_words(rows=rows)
+    # Manually splice in the split-token capital figure for Drawings at
+    # the same top as the row emitted above (12 rows in, 20pt apart,
+    # header + metadata offsets mirrored from _l5_words()).
+    drawings_top = 20.0 * 5 + 30.0 + 20.0 + 20.0 * idx
+    words = [w for w in words if not (w["top"] == drawings_top and w["x0"] >= _L5_CAPITAL_X0 and w["x0"] < _L5_CURRENT_X0)]
+    words.append(_l5_word("(", 300.0, 303.0, drawings_top))
+    words.append(_l5_word("2,00,000)", 303.5, 340.0, drawings_top))
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["capital_drawings"] == -200000.0
+    assert record["current_drawings"] == -3000000.0
+
+
+# 6 -- trap (b): a row's label and amount tops can disagree by ~1pt; a
+# +/-2pt tolerance still groups them into one row rather than losing the
+# amount or splitting a spurious extra row.
+def test_l5_top_tolerance_groups_label_and_amount_despite_1pt_offset():
+    words = _l5_words()
+    header_top = 20.0 * 5 + 30.0
+    row_top = header_top + 20.0 + 20.0 * len(_DEFAULT_L5_ROWS)
+    label_words = _l5_word_line("Signing Fee Reimbursement", _L5_LABEL_X0, row_top)
+    amount_word = _l5_word("50,000", _L5_CURRENT_X0, _L5_CURRENT_X0 + 40.0, row_top + 1.3)
+    words = words + label_words + [amount_word]
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert any("Signing Fee Reimbursement" in u for u in record["unknown_labels"])
+
+
+# 7 -- trap (c): a printed "-" means the figure is 0.0 (a nil that WAS
+# printed) -- distinct from a label that never appears at all (None).
+def test_l5_printed_dash_is_nil_absent_label_is_none():
+    rows = list(_DEFAULT_L5_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Introduced/Transferred")
+    rows[idx] = ("Introduced/Transferred", "-", None)
+    words = _l5_words(rows=rows)
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["capital_introduced_transferred"] == 0.0
+    # "Interest on Capital" never carries a current-column figure anywhere
+    # in this fixture -- that stays genuinely absent (None), never 0.0.
+    assert record.get("current_interest_on_capital") is None
+
+
+# 8 -- the CAPITAL/CURRENT column boundary is derived at runtime from the
+# header row's own coordinates, never hardcoded: a value token placed
+# just left of the derived midpoint (407.5) lands in CAPITAL, and one
+# placed just right of it lands in CURRENT.
+def test_l5_column_boundary_is_derived_from_header_not_hardcoded():
+    words = _l5_header_words(top=100.0)
+    words += _l5_word_line("Drawings", _L5_LABEL_X0, 120.0)
+    words.append(_l5_word("(1,00,000)", 380.0, 406.0, 120.0))  # mid 393 < 407.5
+    words.append(_l5_word("(2,00,000)", 409.0, 440.0, 120.0))  # mid 424.5 > 407.5
+    words += _l5_word_line("STATEMENT OF ACCOUNT OF A PARTNER AS ON 31 MARCH, 2026", 40.0, 20.0)
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record["capital_drawings"] == -100000.0
+    assert record["current_drawings"] == -200000.0
+
+
+# 9 -- a non-reconciling ADDITIONS section (row sum vs printed
+# "Total additions") is a fail-loud ERROR, never a silent plug.
+def test_l5_non_reconciling_additions_section_is_fail_loud():
+    rows = list(_DEFAULT_L5_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total additions")
+    rows[idx] = ("Total additions", "99,99,999", "42,00,000")  # deliberately wrong
+    words = _l5_words(rows=rows)
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert any(
+        "ERROR" in d and "capital" in d and "additions" in d
+        for d in record["diagnostics"]
+    )
+
+
+# 10 -- a non-reconciling WITHDRAWALS section is likewise fail-loud.
+def test_l5_non_reconciling_withdrawals_section_is_fail_loud():
+    rows = list(_DEFAULT_L5_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total withdrawals")
+    rows[idx] = ("Total withdrawals", "(2,00,000)", "(99,99,999)")  # wrong
+    words = _l5_words(rows=rows)
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert any(
+        "ERROR" in d and "current" in d and "withdrawals" in d
+        for d in record["diagnostics"]
+    )
+
+
+# 11 -- an unrecognised row inside a section still contributes to that
+# section's sum AND is separately reported in unknown_labels -- never
+# silently dropped, never silently excluded from reconciliation.
+def test_l5_unknown_row_in_section_still_sums_and_is_reported():
+    rows = list(_DEFAULT_L5_ROWS)
+    add_idx = next(i for i, r in enumerate(rows) if r[0] == "Total additions")
+    rows.insert(add_idx, ("Bonus Contribution", "50,000", None))
+    total_idx = next(i for i, r in enumerate(rows) if r[0] == "Total additions")
+    rows[total_idx] = ("Total additions", "6,50,000", "42,00,000")
+    # The capital column's roll-forward must still reconcile: opening
+    # 10,00,000 + additions 6,50,000 - withdrawals 2,00,000 = 14,50,000.
+    close_idx = next(
+        i for i, r in enumerate(rows) if r[0] == "Closing Balance as on 31 March, 2026"
+    )
+    rows[close_idx] = ("Closing Balance as on 31 March, 2026", "14,50,000", "10,00,000")
+    words = _l5_words(rows=rows)
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert any("Bonus Contribution" in u for u in record["unknown_labels"])
+    assert not any(
+        "ERROR" in d and "capital" in d and "additions" in d
+        for d in record["diagnostics"]
+    )
+
+
+# 12 -- both roll-forwards (opening + additions + withdrawals == closing)
+# reconcile for a fully self-consistent statement -- no ERROR at all.
+def test_l5_fully_reconciling_statement_has_no_error_diagnostics():
+    words = _l5_words()
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert not any(d.startswith("ERROR") for d in record["diagnostics"])
+    assert any("NOTE" in d for d in record["diagnostics"])  # the transfer-vs-introduced NOTE
+
+
+# 13 -- an L1 monthly payout certificate is skipped cleanly, never
+# misparsed as an L5 statement.
+def test_l5_non_l5_l1_certificate_is_skipped_not_misparsed():
+    words = _words_from_lines(
+        ["To Whomsoever It may concern", "Remuneration 1,20,000"]
+    )
+    with pytest.raises(NotAnL5DocumentError):
+        parse_l5_words(words, source_name="jan26.pdf")
+
+
+# 14 -- an L2 salary statement is skipped cleanly.
+def test_l5_non_l5_salary_statement_is_skipped_not_misparsed():
+    words = _words_from_lines(
+        ["SALARY STATEMENT FOR the month of March 2026", "Net Pay 2,00,000"]
+    )
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_words(words, source_name="salary_march26.pdf")
+    assert "salary statement" in str(excinfo.value).lower()
+
+
+# 15 -- an L3 Compensation Advisory letter is skipped cleanly.
+def test_l5_non_l5_l3_advisory_is_skipped_not_misparsed():
+    words = _words_from_lines(
+        [
+            "Compensation Advisory",
+            "For the year ended 31 March 2026",
+            "PAYMENTS",
+            "Net Payable 10,00,000",
+            "SCHEDULE",
+            "Opening Balance 20,00,000",
+        ]
+    )
+    with pytest.raises(NotAnL5DocumentError):
+        parse_l5_words(words, source_name="advisory.pdf")
+
+
+# 16 -- a document missing both the header row and the statement-phrase
+# is skipped with a generic, but still specific, reason -- never crashes,
+# never guesses an L5 parse.
+def test_l5_document_missing_markers_skipped_with_generic_reason():
+    words = _words_from_lines(["Some unrelated memo with no recognisable structure at all."])
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_words(words, source_name="memo.pdf")
+    assert "not an l5" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
