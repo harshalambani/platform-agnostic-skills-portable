@@ -53,6 +53,10 @@ from agents.skill_partner_comp_recon.parsers.llp_statement import (
     NotAnL5DocumentError,
     parse_l5_words,
 )
+from agents.skill_partner_comp_recon.parsers.payment_schedule import (
+    NotAPaymentScheduleError,
+    parse_payment_schedule_pages,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -265,23 +269,12 @@ def test_build_report_end_to_end_against_fixture():
 
 
 # ---------------------------------------------------------------------------
-# Parser guard tests -- s.7. These are deliberately NOT implemented. Do not
-# "finish" them opportunistically -- see AGENT.md's Stage 1/Stage 2 split.
+# Parser guard tests -- s.7. All four parsers are now implemented (see
+# parsers/__init__.py); there is no remaining guarded placeholder to test
+# here. Do not "finish" a parser opportunistically -- see AGENT.md's
+# Stage 1/Stage 2 split -- but payment_schedule.py's implementation was an
+# explicit, briefed task, not an opportunistic one.
 # ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "modname, needle",
-    [
-        ("payment_schedule", "specimen"),
-    ],
-)
-def test_parser_is_a_guarded_placeholder(modname, needle):
-    module = __import__(
-        f"agents.skill_partner_comp_recon.parsers.{modname}", fromlist=["parse"]
-    )
-    with pytest.raises(NotImplementedError) as excinfo:
-        module.parse("does-not-matter.pdf")
-    assert needle in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
@@ -1033,6 +1026,394 @@ def test_l5_document_missing_markers_skipped_with_generic_reason():
     with pytest.raises(NotAnL5DocumentError) as excinfo:
         parse_l5_words(words, source_name="memo.pdf")
     assert "not an l5" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# L4 (payment schedule) parser -- payment_schedule.py.
+# parse_payment_schedule_pages() is PURE and coordinate-based: every
+# fixture below is a synthetic, self-invented list of per-page word lists
+# shaped like pdfplumber's page.extract_words() output ({"text","x0","x1",
+# "top","bottom"}), laid out to mimic the real document's month-by-month
+# grid (page 1) and its "CTC Structuring" reconciliation block (a later
+# page) -- see payment_schedule.py's module docstring for the confirmed
+# traps each fixture below pins down. Never a real document; every figure
+# here is invented.
+# ---------------------------------------------------------------------------
+
+_PS_MONTHS = [
+    "April", "May", "June", "July", "August", "September",
+    "October", "November", "December", "January", "February", "March",
+]
+
+
+def _ps_column_x0s(months=None, start=300.0, step=80.0):
+    months = _PS_MONTHS if months is None else months
+    xs = {}
+    x = start
+    for m in months:
+        xs[m] = x
+        x += step
+    xs["Total"] = x
+    return xs
+
+
+def _ps_header_words(top=100.0, months=None):
+    months = _PS_MONTHS if months is None else months
+    xs = _ps_column_x0s(months)
+    words = [_l5_word("Particulars", 40.0, 110.0, top)]
+    for m in months:
+        x0 = xs[m]
+        words.append(_l5_word(m, x0, x0 + 6.5 * len(m), top))
+    x0 = xs["Total"]
+    words.append(_l5_word("Total", x0, x0 + 6.5 * len("Total"), top))
+    return words
+
+
+def _ps_row_words(top, label, values, months=None):
+    """`values` maps a month name (or "Total") to its printed text, or
+    None to leave that cell unprinted entirely (a genuinely absent cell,
+    never a zero)."""
+    months = _PS_MONTHS if months is None else months
+    xs = _ps_column_x0s(months)
+    words = _l5_word_line(label, _L5_LABEL_X0, top)
+    for key, text in values.items():
+        if text is None:
+            continue
+        x0 = xs[key]
+        words.append(_l5_word(text, x0, x0 + 6.5 * len(text), top))
+    return words
+
+
+def _ps_flag_row_words(top, status_by_month, months=None):
+    months = _PS_MONTHS if months is None else months
+    xs = _ps_column_x0s(months)
+    words = []
+    for m in months:
+        if m not in status_by_month:
+            continue
+        text = status_by_month[m]
+        x0 = xs[m]
+        words.append(_l5_word(text, x0, x0 + 6.5 * len(text), top))
+    return words
+
+
+def _ps_uniform_values(monthly_text, total_text, months=None):
+    months = _PS_MONTHS if months is None else months
+    d = {m: monthly_text for m in months}
+    d["Total"] = total_text
+    return d
+
+
+# A fully self-consistent, invented page-1 grid: Remuneration + Gross
+# Share of Profit + Previous Year PLMIs sum to Total Gross Payment every
+# month and for the year; Firm Tax on SOP + Firm Tax (Others) sum to
+# Total Recovery; Total Gross Payment + Total Recovery == Total Payout,
+# both per month and for the year.
+_DEFAULT_PS_ROWS = [
+    ("Remuneration", _ps_uniform_values("50,000", "6,00,000")),
+    ("Gross Share of Profit", _ps_uniform_values("1,00,000", "12,00,000")),
+    ("Previous Year PLMIs", _ps_uniform_values("20,000", "2,40,000")),
+    ("Total Gross Payment", _ps_uniform_values("1,70,000", "20,40,000")),
+    ("Firm Tax on SOP", _ps_uniform_values("(10,000)", "(1,20,000)")),
+    ("Firm Tax (Others)", _ps_uniform_values("(5,000)", "(60,000)")),
+    ("Total Recovery", _ps_uniform_values("(15,000)", "(1,80,000)")),
+    ("Total Payout", _ps_uniform_values("1,55,000", "18,60,000")),
+]
+
+# A self-consistent, invented CTC Structuring block: its four components
+# sum to the printed "CTC Structuring" total row every month and for the
+# year. This block sits entirely outside the page-1 payout arithmetic.
+_DEFAULT_CTC_ROWS = [
+    ("Car Lease Rentals", _ps_uniform_values("15,000", "1,80,000")),
+    ("Car Insurance", _ps_uniform_values("2,000", "24,000")),
+    ("Telephone/Mobile Reimbursement", _ps_uniform_values("1,000", "12,000")),
+    ("Meal Card", _ps_uniform_values("2,000", "24,000")),
+    ("CTC Structuring", _ps_uniform_values("20,000", "2,40,000")),
+]
+
+
+def _ps_page1_words(
+    *, entity="Meridian Consulting Services LLP", fy="2025-26", rows=None,
+    flag_status=None, months=None, include_metadata=True,
+):
+    months = _PS_MONTHS if months is None else months
+    words: list[dict] = []
+    top = 20.0
+    if include_metadata:
+        words += _l5_word_line(f"Entity: {entity}", 40.0, top)
+        top += 20.0
+        words += _l5_word_line(f"Financial Year: {fy}", 40.0, top)
+        top += 30.0
+    words += _ps_header_words(top=top, months=months)
+    top += 20.0
+    if flag_status is not None:
+        words += _ps_flag_row_words(top, flag_status, months=months)
+        top += 20.0
+    row_specs = _DEFAULT_PS_ROWS if rows is None else rows
+    for label, values in row_specs:
+        words += _ps_row_words(top, label, values, months=months)
+        top += 20.0
+    return words
+
+
+def _ps_page2_ctc_words(*, fy="2025-26", ctc_rows=None, months=None, heading=True, top=20.0):
+    months = _PS_MONTHS if months is None else months
+    words: list[dict] = []
+    if heading:
+        words += _l5_word_line(f"CTC Structuring for FY{fy}", 40.0, top)
+        top += 20.0
+    words += _ps_header_words(top=top, months=months)
+    top += 20.0
+    row_specs = _DEFAULT_CTC_ROWS if ctc_rows is None else ctc_rows
+    for label, values in row_specs:
+        words += _ps_row_words(top, label, values, months=months)
+        top += 20.0
+    return words
+
+
+def _ps_pages(**kwargs):
+    # _ps_page2_ctc_words()'s own params are "ctc_rows" and "heading" --
+    # only "ctc_heading" needs renaming on the way through.
+    ctc_kwargs = {}
+    page1_kwargs = {}
+    for k, v in kwargs.items():
+        if k == "ctc_rows":
+            ctc_kwargs["ctc_rows"] = v
+        elif k == "ctc_heading":
+            ctc_kwargs["heading"] = v
+        else:
+            page1_kwargs[k] = v
+    page1 = _ps_page1_words(**page1_kwargs)
+    page2 = _ps_page2_ctc_words(fy=page1_kwargs.get("fy", "2025-26"), **ctc_kwargs)
+    return [page1, page2]
+
+
+# 1 -- a full financial year's grid (all 12 months) parses cleanly: every
+# named row lands under the right field, the Total column is captured
+# alongside every month, and the fully self-consistent fixture produces
+# no ERROR diagnostics at all (page 1 or CTC).
+def test_ps_full_year_grid_parses_with_no_error_diagnostics():
+    pages = _ps_pages()
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["months"] == _PS_MONTHS
+    assert record["rows"]["remuneration"]["total"] == 600000.0
+    assert record["rows"]["remuneration"]["months"]["April"] == 50000.0
+    assert record["rows"]["total_payout"]["total"] == 1860000.0
+    assert not any(d.startswith("ERROR") for d in record["diagnostics"])
+    assert not any(d.startswith("ERROR") for d in record["ctc_structuring"]["diagnostics"])
+
+
+# 2 -- a schedule issued mid-year carries "Actual" for elapsed months and
+# "Forecast" for the rest -- captured per month in month_status, never
+# defaulted to "Actual".
+def test_ps_mid_year_actual_forecast_split_captured_per_month():
+    flag_status = {}
+    elapsed = _PS_MONTHS[:5]
+    forecast = _PS_MONTHS[5:]
+    for m in elapsed:
+        flag_status[m] = "Actual"
+    for m in forecast:
+        flag_status[m] = "Forecast"
+    pages = _ps_pages(flag_status=flag_status)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    for m in elapsed:
+        assert record["month_status"][m] == "Actual"
+    for m in forecast:
+        assert record["month_status"][m] == "Forecast"
+
+
+# 2b -- when the flag row is absent altogether, every month's status
+# stays None -- never silently defaulted to "Actual".
+def test_ps_absent_flag_row_leaves_every_month_status_none():
+    pages = _ps_pages(flag_status=None)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert all(v is None for v in record["month_status"].values())
+
+
+# 3 -- a row that never appears on the page at all is None everywhere --
+# never coerced to 0.0. "Interest on Capital" is a confirmed example of a
+# row that exists some years and not others.
+def test_ps_absent_row_is_none_not_zero():
+    pages = _ps_pages()
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"].get("interest_on_capital") is None
+
+
+# 4 -- "Firm Tax on SOP" and "Firm Tax (Others)" are two distinct fields
+# that must never be merged, even though both are recovery-side tax
+# rows charged at the same rate.
+def test_ps_firm_tax_on_sop_and_others_are_distinct_fields():
+    pages = _ps_pages()
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    sop = record["rows"]["firm_tax_on_sop"]
+    others = record["rows"]["firm_tax_others"]
+    assert sop["total"] == -120000.0
+    assert others["total"] == -60000.0
+    assert sop["total"] != others["total"]
+
+
+# 5 -- a subtotal that does not match the recomputed sum of its component
+# rows is a fail-loud ERROR diagnostic -- never raised as an exception,
+# and the printed (disagreeing) figure is never silently corrected.
+def test_ps_subtotal_mismatch_is_fail_loud_not_corrected():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Previous Year PLMIs")
+    # Bump the component row without touching "Total Gross Payment" --
+    # the printed subtotal now disagrees with the recomputed component sum.
+    rows[idx] = ("Previous Year PLMIs", _ps_uniform_values("30,000", "3,60,000"))
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert any(
+        "ERROR" in d and "Total Gross Payment" in d for d in record["diagnostics"]
+    )
+    # The printed figure is returned unchanged, not "fixed" to agree.
+    assert record["rows"]["total_gross_payment"]["total"] == 2040000.0
+
+
+# 6 -- both negative-number formats -- parenthesised ("(5,000)") and
+# minus-prefixed ("-5,000") -- parse to the same signed value, and the
+# sign is never abs()-ed away.
+def test_ps_both_negative_formats_parse_to_same_signed_value():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Firm Tax (Others)")
+    rows[idx] = ("Firm Tax (Others)", _ps_uniform_values("-5,000", "-60,000"))
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["firm_tax_others"]["total"] == -60000.0
+    assert record["rows"]["firm_tax_others"]["months"]["April"] == -5000.0
+
+
+# 7 -- "#N/A" is a template artefact and is skipped outright: the cell
+# stays absent (None), never read as zero.
+def test_ps_na_cell_is_skipped_not_zero():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Remuneration")
+    values = dict(_ps_uniform_values("50,000", "6,00,000"))
+    values["August"] = "#N/A"
+    rows[idx] = ("Remuneration", values)
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["remuneration"]["months"]["August"] is None
+    assert record["rows"]["remuneration"]["months"]["April"] == 50000.0
+
+
+# 7b -- a printed "-" cell is a nil that WAS printed and parses to 0.0,
+# which must stay distinguishable from a cell with no token at all (None)
+# and from a "#N/A" template artefact (also None) -- llp_statement.py's
+# trap (c), reused here.
+def test_ps_printed_dash_is_zero_not_none():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Remuneration")
+    values = dict(_ps_uniform_values("50,000", "6,00,000"))
+    values["August"] = "-"
+    values["September"] = "#N/A"
+    rows[idx] = ("Remuneration", values)
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    months = record["rows"]["remuneration"]["months"]
+    assert months["August"] == 0.0
+    assert months["September"] is None
+    assert months["April"] == 50000.0
+
+
+# 8 -- a printed negative amount split across x-adjacent word tokens,
+# including a split-off leading "(", still parses correctly (mirrors
+# llp_statement.py's trap (a), reused here via _merge_row_tokens()).
+def test_ps_x_adjacent_split_token_negative_parses_correctly():
+    months = _PS_MONTHS
+    pages = _ps_pages(months=months)
+    page1 = pages[0]
+    # Locate the "Firm Tax on SOP" row's April cell and replace it with
+    # two x-adjacent tokens: "(" then "10,000)" with a 0.5pt gap.
+    xs = _ps_column_x0s(months)
+    row_idx = next(i for i, r in enumerate(_DEFAULT_PS_ROWS) if r[0] == "Firm Tax on SOP")
+    header_top = 20.0 + 20.0 + 30.0
+    row_top = header_top + 20.0 * (row_idx + 1)
+    april_x0 = xs["April"]
+    page1 = [
+        w for w in page1
+        if not (w["top"] == row_top and abs(w["x0"] - april_x0) < 20.0)
+    ]
+    page1.append(_l5_word("(", april_x0, april_x0 + 3.0, row_top))
+    page1.append(_l5_word("10,000)", april_x0 + 3.5, april_x0 + 40.0, row_top))
+    pages = [page1, pages[1]]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["firm_tax_on_sop"]["months"]["April"] == -10000.0
+
+
+# 9 -- an unrecognised row is never dropped silently: it is captured in
+# unknown_labels with its parsed figures, and (once its containing
+# subtotal is bumped to match) does not disturb the reconciliation.
+def test_ps_unknown_label_captured_and_reconciles():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total Gross Payment")
+    rows.insert(idx, ("Signing Bonus", _ps_uniform_values("10,000", "1,20,000")))
+    total_idx = next(i for i, r in enumerate(rows) if r[0] == "Total Gross Payment")
+    rows[total_idx] = ("Total Gross Payment", _ps_uniform_values("1,80,000", "21,60,000"))
+    # The Signing Bonus also feeds through to Total Payout (gross + recovery);
+    # bump it too so the payout identity stays self-consistent and only the
+    # Signing Bonus row itself is "new" from the parser's point of view.
+    payout_idx = next(i for i, r in enumerate(rows) if r[0] == "Total Payout")
+    rows[payout_idx] = ("Total Payout", _ps_uniform_values("1,65,000", "19,80,000"))
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert any(u["label"] == "Signing Bonus" for u in record["unknown_labels"])
+    unknown = next(u for u in record["unknown_labels"] if u["label"] == "Signing Bonus")
+    assert unknown["total"] == 120000.0
+    assert not any(
+        "ERROR" in d and "Total Gross Payment" in d for d in record["diagnostics"]
+    )
+
+
+# 10 -- the CTC Structuring block is a reconciliation-to-CTC item only,
+# entirely outside the page-1 payout arithmetic: its own mismatch lands
+# in its own nested diagnostics list and never disturbs (or is disturbed
+# by) the page-1 subtotal checks.
+def test_ps_ctc_block_isolated_diagnostics_from_page1():
+    ctc_rows = list(_DEFAULT_CTC_ROWS)
+    idx = next(i for i, r in enumerate(ctc_rows) if r[0] == "Car Lease Rentals")
+    # Bump a CTC component without touching the CTC total -- a CTC-side
+    # mismatch that must never leak into the page-1 diagnostics list.
+    ctc_rows[idx] = ("Car Lease Rentals", _ps_uniform_values("25,000", "3,00,000"))
+    pages = _ps_pages(ctc_rows=ctc_rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert any("ERROR" in d and "CTC Structuring" in d for d in record["ctc_structuring"]["diagnostics"])
+    assert not any("ERROR" in d for d in record["diagnostics"])
+    assert not any("CTC" in d for d in record["diagnostics"])
+    # CTC rows never leak into the page-1 `rows` dict.
+    assert "car_lease_rentals" not in record["rows"]
+
+
+# 11 -- a document with neither a Particulars/month header nor any of the
+# anchor subtotal labels is not a payment schedule -- guarded by
+# NotAPaymentScheduleError so a directory-walking caller can skip it
+# cleanly, never crash, never misparse it.
+def test_ps_document_missing_markers_skipped_with_generic_reason():
+    words = _words_from_lines(["Some unrelated memo with no recognisable structure at all."])
+    with pytest.raises(NotAPaymentScheduleError) as excinfo:
+        parse_payment_schedule_pages([words], source_name="memo.pdf")
+    assert "not a payment schedule" in str(excinfo.value).lower()
+
+
+# 11b -- an L1 monthly payout certificate is skipped cleanly with a
+# specific look-alike reason, never misparsed as a payment schedule.
+def test_ps_non_l4_l1_certificate_is_skipped_not_misparsed():
+    words = _words_from_lines(
+        ["To Whomsoever It may concern", "Remuneration 1,20,000"]
+    )
+    with pytest.raises(NotAPaymentScheduleError) as excinfo:
+        parse_payment_schedule_pages([words], source_name="jan26.pdf")
+    assert "l1" in str(excinfo.value).lower()
+
+
+# 11c -- an L5 LLP Statement of Account is skipped cleanly with a
+# specific look-alike reason.
+def test_ps_non_l4_l5_statement_is_skipped_not_misparsed():
+    words = _l5_header_words(top=100.0)
+    words += _words_from_lines(["Some other capital account current account text"], start_top=20.0)
+    with pytest.raises(NotAPaymentScheduleError) as excinfo:
+        parse_payment_schedule_pages([words], source_name="stmt.pdf")
+    assert "l5" in str(excinfo.value).lower()
 
 
 # ---------------------------------------------------------------------------
