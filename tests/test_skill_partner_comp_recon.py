@@ -1655,6 +1655,350 @@ def test_ps_ctc_block_on_page3_reconciles_to_its_own_total():
 
 
 # ---------------------------------------------------------------------------
+# L4 round 2 -- three defects found only by running the merged (#233)
+# parser against a REAL three-page schedule, invisible to the synthetic
+# fixtures above. Coordinates below (header/flag/data-row x-positions,
+# CTC block row y-positions) are taken verbatim from the real document per
+# the l4-round2 brief; amounts and the entity name are synthetic.
+# `Meridian Consulting Services LLP` throughout.
+# ---------------------------------------------------------------------------
+
+_L4R2_HEADER_XS = {
+    "Total": 137.0, "April": 191.0, "May": 246.0, "June": 299.0, "July": 355.0,
+    "August": 402.0, "September": 448.0, "October": 508.0, "November": 557.0,
+    "December": 612.0, "January": 670.0, "February": 722.0, "March": 782.0,
+}
+
+# The real Actual/Forecast flag row (Gap 2): tokens sit ~30pt LEFT of the
+# numeric data columns above, aligned instead to the month-HEADER row.
+_L4R2_FLAG_XS = {
+    "April": 190.0, "May": 244.0, "June": 298.0, "July": 352.0, "August": 406.0,
+    "September": 460.0, "October": 514.0, "November": 568.0, "December": 622.0,
+    "January": 676.0, "February": 730.0, "March": 784.0,
+}
+
+# The real per-month data columns (page 2 detail rows: April@201, each
+# subsequent month 54pt further right, matching the brief's literal
+# April@201/May@255/June@309 values).
+_L4R2_DETAIL_DATA_XS = {"Total": 142.0}
+_L4R2_DETAIL_DATA_XS.update({m: 201.0 + 54.0 * i for i, m in enumerate(_PS_MONTHS)})
+
+# The real per-month data columns on the page-3 CTC block (April@205,
+# same 54pt pitch, matching the brief's literal CTC total row figures).
+_L4R2_CTC_DATA_XS = {"Total": 147.0}
+_L4R2_CTC_DATA_XS.update({m: 205.0 + 54.0 * i for i, m in enumerate(_PS_MONTHS)})
+
+
+def _l4r2_header_words(top=93.0):
+    """Header word geometry using a narrower (4.5pt/char) width for the
+    month names than the module's usual 6.5pt/char convention -- at this
+    header's real 54-56pt column pitch, long month names ("September",
+    "November") at the default width would abut/overlap their neighbour
+    and get wrongly fused by `_merge_row_tokens`'s 1.5pt-gap rule."""
+    words = [_l5_word("Particulars", 7.0, 78.5, top)]
+    x0 = _L4R2_HEADER_XS["Total"]
+    words.append(_l5_word("Total", x0, x0 + 4.5 * len("Total"), top))
+    for m in _PS_MONTHS:
+        x0 = _L4R2_HEADER_XS[m]
+        words.append(_l5_word(m, x0, x0 + 4.5 * len(m), top))
+    return words
+
+
+def _l4r2_flag_row_words(top=70.0, status_by_month=None):
+    status_by_month = (
+        {m: "Actual" for m in _PS_MONTHS} if status_by_month is None else status_by_month
+    )
+    words = []
+    for m, text in status_by_month.items():
+        x0 = _L4R2_FLAG_XS[m]
+        words.append(_l5_word(text, x0, x0 + 6.5 * len(text), top))
+    return words
+
+
+def _l4r2_values(monthly_text, total_text, overrides=None):
+    d = {m: monthly_text for m in _PS_MONTHS}
+    d["Total"] = total_text
+    if overrides:
+        d.update(overrides)
+    return d
+
+
+def _l4r2_row_words(top, label, values, data_xs=None):
+    """A page-2/page-3-shaped data row: the label laid out left-to-right
+    with whitespace-separated tokens (so a lone "-"/"/" trap token stays a
+    distinct token, exactly as on the real document), values on the real
+    per-month data columns."""
+    data_xs = _L4R2_DETAIL_DATA_XS if data_xs is None else data_xs
+    words = _l5_word_line(label, 7.0, top)
+    for key, text in values.items():
+        if text is None:
+            continue
+        x0 = data_xs[key]
+        words.append(_l5_word(text, x0, x0 + 6.5 * len(text), top))
+    return words
+
+
+def _l4r2_arrears_row_words(top, values, data_xs=None):
+    """The "Arrears - Share of Profit" label using the brief's own real
+    per-token x0 positions (Arrears@7, -@40, Share@46, of@72, Profit@84)
+    rather than the generic whitespace-split helper: at these real,
+    tightly-packed positions the trailing "Profit" token's centroid sits
+    comfortably inside the label zone, which the module's usual uniform
+    6.5pt/char label width (as `_l5_word_line` would produce here) pushes
+    past -- an artifact of the synthetic width formula, not a real
+    document trait, since the shorter "Gross Share of Profit" row above
+    it has no such issue."""
+    data_xs = _L4R2_DETAIL_DATA_XS if data_xs is None else data_xs
+    label_tokens = [
+        ("Arrears", 7.0, 36.0), ("-", 40.0, 42.0), ("Share", 46.0, 68.0),
+        ("of", 72.0, 80.0), ("Profit", 84.0, 114.0),
+    ]
+    words = [_l5_word(text, x0, x1, top) for text, x0, x1 in label_tokens]
+    for key, text in values.items():
+        if text is None:
+            continue
+        x0 = data_xs[key]
+        words.append(_l5_word(text, x0, x0 + 6.5 * len(text), top))
+    return words
+
+
+def _l4r2_detail_page_words(*, entity="Meridian Consulting Services LLP", fy="2025-26",
+                             flag_status=None):
+    """A page-2-shaped DETAIL page using the real geometry from the
+    l4-round2 brief: header@93, an optional Actual/Forecast flag row@70
+    (offset ~30pt left of the data columns, sitting ABOVE the header --
+    Gap 2), the control row Gross Share of Profit@138, the hyphenated
+    Arrears - Share of Profit row@160 (Gap 1), an invented lone-slash
+    label trap, and a Total Gross Payment anchor row."""
+    words: list[dict] = []
+    words += _l5_word_line(f"Entity: {entity}", 40.0, 20.0)
+    words += _l5_word_line(f"Financial Year: {fy}", 40.0, 40.0)
+    if flag_status is not None:
+        words += _l4r2_flag_row_words(70.0, flag_status)
+    words += _l4r2_header_words(93.0)
+    words += _l4r2_row_words(115.0, "Remuneration", _l4r2_values("3,00,000", "36,00,000"))
+    words += _l4r2_row_words(138.0, "Gross Share of Profit", _l4r2_values("5,20,118", "67,57,376"))
+    words += _l4r2_arrears_row_words(
+        160.0, _l4r2_values("0", "41,666", overrides={"April": "41,666"}),
+    )
+    words += _l4r2_row_words(180.0, "Bonus / Overtime", _l4r2_values("5,000", "60,000"))
+    words += _l4r2_row_words(200.0, "Total Gross Payment", _l4r2_values("8,25,118", "99,01,416"))
+    return words
+
+
+def _l4r2_wrapped_ctc_row_words(*, value_text="1,000", total_text="12,000"):
+    """The real three-text-line wrapped row from the brief: a label
+    fragment ("Home Landline / Mobile") at y=178, the figures alone at
+    y=183 (5pt away -- well under the page's ~22pt modal row pitch, the
+    "cluster by pitch" trap), and the rest of the label ("Bill") at y=187.
+    The Home/Landline token pair intentionally overlaps by 2pt (matching
+    the module's existing _ps_wrapped_ctc_row_words fixture) so they merge
+    into one "HomeLandline" token -- same "homelandline_mobile_bill" slug
+    as the M7 fixture above."""
+    words: list[dict] = []
+    words.append(_l5_word("Home", 7.0, 37.0, 178.0))
+    words.append(_l5_word("Landline", 35.0, 85.0, 178.0))
+    words.append(_l5_word("/", 73.0, 78.0, 178.0))
+    words.append(_l5_word("Mobile", 80.0, 120.0, 178.0))
+    for m in _PS_MONTHS:
+        x0 = _L4R2_CTC_DATA_XS[m]
+        words.append(_l5_word(value_text, x0, x0 + 6.5 * len(value_text), 183.0))
+    x0 = _L4R2_CTC_DATA_XS["Total"]
+    words.append(_l5_word(total_text, x0, x0 + 6.5 * len(total_text), 183.0))
+    words.append(_l5_word("Bill", 7.0, 27.0, 187.0))
+    return words
+
+
+def _l4r2_ctc_page_words():
+    """A page-3-shaped CTC STRUCTURING page using the real geometry from
+    the brief: a title line, a heading ("CTC Structuring", no figures) at
+    y=60 that must NOT become a row, the shared header@93, a TOTAL row at
+    y=115 whose label is identical to the heading text but DOES carry
+    figures and appears BEFORE its own components (Gap 3), two plain
+    component rows, the three-text-line wrapped row spanning y=178/183/187
+    (Gap 1's slash trap plus Gap 3's wrapped-row trap combined), and two
+    more plain component rows -- all reconciling to the printed total."""
+    words: list[dict] = []
+    words += _l5_word_line("Payment Schedule FY 2025-2026", 12.0, 12.0)
+    words += _l5_word_line("CTC Structuring", 6.0, 60.0)  # heading -- no figures
+    words += _l4r2_header_words(93.0)
+    words += _l4r2_row_words(  # TOTAL row -- same text as the heading, BEFORE its components
+        115.0, "CTC Structuring", _l4r2_values("20,000", "2,40,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    words += _l4r2_row_words(
+        138.0, "Car Lease Rentals", _l4r2_values("15,000", "1,80,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    words += _l4r2_row_words(
+        160.0, "Car Insurance", _l4r2_values("2,000", "24,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    words += _l4r2_wrapped_ctc_row_words()
+    words += _l4r2_row_words(
+        205.0, "Pluxee", _l4r2_values("1,000", "12,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    words += _l4r2_row_words(
+        228.0, "Smartphone", _l4r2_values("500", "6,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    words += _l4r2_row_words(
+        250.0, "Computer", _l4r2_values("500", "6,000"), data_xs=_L4R2_CTC_DATA_XS,
+    )
+    return words
+
+
+# L4R2-1 -- Gap 1: "Arrears - Share of Profit" (a hyphenated label, real
+# geometry) maps to arrears_share_of_profit and is absent from
+# unknown_labels -- label assembly must not stop at the lone "-" token.
+def test_l4r2_hyphenated_arrears_label_maps_to_its_field():
+    pages = [_l4r2_detail_page_words()]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["arrears_share_of_profit"]["total"] == 41666.0
+    assert record["rows"]["arrears_share_of_profit"]["months"]["April"] == 41666.0
+    assert not any(u["label"] == "Arrears" for u in record["unknown_labels"])
+
+
+# L4R2-2 -- Gap 1 generalised: a label containing a lone slash token
+# ("Bonus / Overtime") survives intact too, not just the hyphen case
+# _ROW_FIELD_MAP happens to carry a regex for.
+def test_l4r2_lone_slash_label_survives_intact():
+    pages = [_l4r2_detail_page_words()]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert any(u["label"] == "Bonus / Overtime" for u in record["unknown_labels"])
+
+
+# L4R2-3 -- Gap 2: month_status is populated for all twelve months from a
+# flag row whose tokens sit ~30pt LEFT of the numeric data columns,
+# aligned instead to the month-header row above (not the data row below).
+def test_l4r2_flag_row_offset_from_header_populates_all_months():
+    flag_status = {m: "Actual" for m in _PS_MONTHS}
+    pages = [_l4r2_detail_page_words(flag_status=flag_status)]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    for m in _PS_MONTHS:
+        assert record["month_status"][m] == "Actual"
+
+
+# L4R2-4 -- the same offset flag row, mixing Actual and Forecast, still
+# maps correctly per month.
+def test_l4r2_flag_row_offset_mixed_status_per_month():
+    flag_status = {m: ("Actual" if i % 2 == 0 else "Forecast") for i, m in enumerate(_PS_MONTHS)}
+    pages = [_l4r2_detail_page_words(flag_status=flag_status)]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    for i, m in enumerate(_PS_MONTHS):
+        expected = "Actual" if i % 2 == 0 else "Forecast"
+        assert record["month_status"][m] == expected
+
+
+# L4R2-5 -- Gap 3: the page-3 CTC heading line ("CTC Structuring", no
+# figures) does not itself become a row; the TOTAL row of the same text
+# (which DOES carry figures and appears BEFORE its own components) does.
+def test_l4r2_ctc_heading_is_not_a_row_but_total_row_is():
+    pages = [_l4r2_detail_page_words(), _l4r2_ctc_page_words()]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    ctc = record["ctc_structuring"]
+    assert ctc["total"] == 240000.0
+    assert ctc["months"]["April"] == 20000.0
+
+
+# L4R2-6 -- ctc_structuring is non-empty and its components reconcile to
+# the printed CTC total, even though the total row appears BEFORE its
+# components on the real page.
+def test_l4r2_ctc_components_reconcile_to_printed_total():
+    pages = [_l4r2_detail_page_words(), _l4r2_ctc_page_words()]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    ctc = record["ctc_structuring"]
+    assert ctc["rows"]["car_lease_rentals"]["total"] == 180000.0
+    assert not any("ERROR" in d for d in ctc["diagnostics"])
+
+
+# L4R2-7 -- the three-text-line wrapped row (label fragment / figures /
+# rest of label at y=178/183/187, well under the page's ~22pt modal row
+# pitch) parses to exactly one row carrying the full label.
+def test_l4r2_three_line_wrapped_row_parses_to_one_row():
+    pages = [_l4r2_detail_page_words(), _l4r2_ctc_page_words()]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    ctc_rows = record["ctc_structuring"]["rows"]
+    assert "homelandline_mobile_bill" in ctc_rows
+    assert ctc_rows["homelandline_mobile_bill"]["total"] == 12000.0
+    assert ctc_rows["homelandline_mobile_bill"]["months"]["April"] == 1000.0
+
+
+def _l4r2_tgp_values(april_text, total_text):
+    """Total Gross Payment values with every non-April month at the
+    self-consistent baseline (1,70,000) and April/annual set explicitly --
+    used by the Gap 4 tests below, where only April carries the extra
+    Arrears - Share of Profit instalment."""
+    values = _ps_uniform_values("1,70,000", total_text)
+    values["April"] = april_text
+    return values
+
+
+def _l4r2_gap4_detail_rows(total_gross_payment_values):
+    """A copy of _DEFAULT_PS_ROWS with an "Arrears - Share of Profit"
+    component row inserted before "Total Gross Payment" (April=41,666,
+    every other month=0, annual total=41,666), and "Total Gross Payment"
+    itself replaced with `total_gross_payment_values` -- the fixture used
+    by the Gap 4 (component-consistency precedence) tests below. The
+    correct component sum is therefore 2,11,666 for April (the 1,70,000
+    baseline plus the 41,666 arrears instalment) and 20,81,666 for the
+    year."""
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total Gross Payment")
+    arrears = _ps_uniform_values("0", "41,666")
+    arrears["April"] = "41,666"
+    rows.insert(idx, ("Arrears - Share of Profit", arrears))
+    total_idx = next(i for i, r in enumerate(rows) if r[0] == "Total Gross Payment")
+    rows[total_idx] = ("Total Gross Payment", total_gross_payment_values)
+    return rows
+
+
+# L4R2-8 -- Gap 4: component-consistency precedence. The summary page's
+# figure is returned when it matches the sum of the period's own
+# component rows and the detail page's own figure does not, with a
+# diagnostic naming both values.
+def test_l4r2_summary_wins_when_it_matches_component_sum():
+    detail_rows = _l4r2_gap4_detail_rows(_l4r2_tgp_values("2,53,332", "20,81,666"))
+    summary_rows = _ps_subtotal_rows_from(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(summary_rows) if r[0] == "Total Gross Payment")
+    summary_rows[idx] = ("Total Gross Payment", _l4r2_tgp_values("2,11,666", "20,81,666"))
+    pages = _ps_three_pages(summary_subtotal_rows=summary_rows, detail_kwargs={"rows": detail_rows})
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["total_gross_payment"]["months"]["April"] == 211666.0
+    assert record["rows"]["total_gross_payment"]["total"] == 2081666.0
+    assert any("which does match, is used instead" in d for d in record["diagnostics"])
+
+
+# L4R2-9 -- the reverse case: the detail page matches its own components,
+# the summary page does not, the detail page wins, and a diagnostic is
+# still recorded naming both values and the reason.
+def test_l4r2_detail_wins_when_it_matches_component_sum():
+    detail_rows = _l4r2_gap4_detail_rows(_l4r2_tgp_values("2,11,666", "20,81,666"))
+    pages = _ps_three_pages(detail_kwargs={"rows": detail_rows})
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["total_gross_payment"]["months"]["April"] == 211666.0
+    assert record["rows"]["total_gross_payment"]["total"] == 2081666.0
+    assert any(
+        "matches the sum of its own component rows" in d and "so the detail page's figure is kept" in d
+        for d in record["diagnostics"]
+    )
+
+
+# L4R2-10 -- neither page's figure matches the sum of the component rows:
+# the detail page's figure is kept as a fallback, and a diagnostic says so.
+def test_l4r2_neither_page_matches_component_sum_falls_back_to_detail():
+    detail_rows = _l4r2_gap4_detail_rows(_l4r2_tgp_values("2,20,000", "21,00,000"))
+    summary_rows = _ps_subtotal_rows_from(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(summary_rows) if r[0] == "Total Gross Payment")
+    summary_rows[idx] = ("Total Gross Payment", _l4r2_tgp_values("2,00,000", "20,90,000"))
+    pages = _ps_three_pages(summary_subtotal_rows=summary_rows, detail_kwargs={"rows": detail_rows})
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["total_gross_payment"]["months"]["April"] == 220000.0
+    assert record["rows"]["total_gross_payment"]["total"] == 2100000.0
+    assert any(
+        "neither figure matches the sum of the component rows" in d
+        and "falling back to the detail page's figure" in d
+        for d in record["diagnostics"]
+    )
+
+
+# ---------------------------------------------------------------------------
 # s.6.2 -- the "=" trap. A label that happens to start with "=" must never
 # be silently stored as an Excel formula.
 # ---------------------------------------------------------------------------

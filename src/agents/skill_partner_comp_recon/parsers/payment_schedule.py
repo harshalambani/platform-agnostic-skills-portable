@@ -257,6 +257,28 @@ def _nearest_column(columns: list[dict], x0: float, x1: float) -> str:
     return best["name"]
 
 
+def _label_zone_right_edge(columns: list[dict]) -> float:
+    """The x-centroid below which a token is unambiguously part of the row
+    label, never a value cell -- derived from the columns' own centroids
+    (never hardcoded), so a lone hyphen/en-dash/slash/ampersand token
+    inside a hyphenated label (e.g. "Arrears - Share of Profit") is never
+    mistaken for a nil-value "-" cell just because it happens to match the
+    amount-candidate pattern (see `_AMOUNT_CANDIDATE_RE`'s `^-$`
+    alternative). Trap fixed here: a genuinely nil "-" cell always sits at
+    a real column's position (at or past the leftmost column, "Total");
+    a hyphen used as a word separator inside a label never does -- it
+    sits well to the left, among the other label words."""
+    if not columns:
+        return float("inf")
+    centroids = sorted(c["centroid"] for c in columns)
+    if len(centroids) >= 2:
+        gaps = [b - a for a, b in zip(centroids, centroids[1:]) if b > a]
+        pitch = min(gaps) if gaps else 60.0
+    else:
+        pitch = 60.0
+    return centroids[0] - pitch / 2.0
+
+
 def _parse_grid_row(row_words: list[dict], columns: list[dict]) -> tuple[str, dict]:
     """Splits one data row into (label, values). `values` maps a column
     name ("Total" or a month name) to a parsed float -- only for columns
@@ -264,21 +286,28 @@ def _parse_grid_row(row_words: list[dict], columns: list[dict]) -> tuple[str, di
     "#N/A" cell contributes nothing (the column stays absent from
     `values`, i.e. None downstream) -- never zero. A "-" cell parses to
     0.0 (a nil that WAS printed), distinct from a column with no token at
-    all. The label is the leading run of non-numeric, non-"#N/A" tokens."""
+    all. The label is the leading run of tokens sitting to the left of
+    `_label_zone_right_edge()` -- any token still in that label zone
+    (including one that happens to match the amount-candidate pattern,
+    such as a lone "-" used as a hyphenated-label separator) is always
+    kept in the label, never misread as a value cell. Only once a token
+    past that boundary is seen does value-zone parsing begin."""
     tokens = _merge_row_tokens(row_words)
     label_parts: list[str] = []
     values: dict[str, float] = {}
     in_value_zone = False
+    label_zone_right_edge = _label_zone_right_edge(columns)
     for tok in tokens:
         text = tok["text"].strip()
         if not text:
             continue
-        is_na = bool(_NA_TOKEN_RE.search(text))
-        is_amount = bool(_AMOUNT_CANDIDATE_RE.match(text))
-        if not in_value_zone and not is_na and not is_amount:
+        tok_centroid = (tok["x0"] + tok["x1"]) / 2.0
+        if not in_value_zone and tok_centroid < label_zone_right_edge:
             label_parts.append(tok["text"])
             continue
         in_value_zone = True
+        is_na = bool(_NA_TOKEN_RE.search(text))
+        is_amount = bool(_AMOUNT_CANDIDATE_RE.match(text))
         if is_na:
             continue
         if not is_amount:
@@ -481,6 +510,63 @@ def _cross_check_payout_identity(
             )
 
 
+def _resolve_cross_page_subtotal(
+    diagnostics: list[str],
+    subtotal_label: str,
+    period_desc: str,
+    detail_val: float,
+    other_val: float,
+    component_sum: float | None,
+) -> float:
+    """Gap-4 component-consistency precedence: on a cross-page disagreement
+    for the same subtotal/period, the page whose printed figure equals the
+    sum of that period's own component rows wins. If neither figure
+    matches, or no component sum is available for that period, fall back
+    to the detail page's figure as before. Always appends a diagnostic
+    naming the chosen value, the rejected value, the component sum (when
+    available) and the reason -- never raises, never silently rewrites a
+    printed figure. Returns the value to use."""
+    if component_sum is None:
+        diagnostics.append(
+            f"ERROR: '{subtotal_label}' printed {period_desc} on the detail page "
+            f"({detail_val:,.2f}) does not match the figure on another page "
+            f"({other_val:,.2f}); no component rows are available to arbitrate "
+            f"for this period, falling back to the detail page's figure."
+        )
+        return detail_val
+
+    matches_detail = abs(detail_val - component_sum) <= 0.01
+    matches_other = abs(other_val - component_sum) <= 0.01
+
+    if matches_other and not matches_detail:
+        diagnostics.append(
+            f"ERROR: '{subtotal_label}' printed {period_desc} on the detail page "
+            f"({detail_val:,.2f}) does not match the figure on another page "
+            f"({other_val:,.2f}); the detail page's figure does not match the sum "
+            f"of its own component rows ({component_sum:,.2f}), so the other "
+            f"page's figure ({other_val:,.2f}), which does match, is used instead."
+        )
+        return other_val
+
+    if matches_detail:
+        diagnostics.append(
+            f"ERROR: '{subtotal_label}' printed {period_desc} on the detail page "
+            f"({detail_val:,.2f}) does not match the figure on another page "
+            f"({other_val:,.2f}); the detail page's figure matches the sum of its "
+            f"own component rows ({component_sum:,.2f}), so the detail page's "
+            f"figure is kept."
+        )
+        return detail_val
+
+    diagnostics.append(
+        f"ERROR: '{subtotal_label}' printed {period_desc} on the detail page "
+        f"({detail_val:,.2f}) does not match the figure on another page "
+        f"({other_val:,.2f}); neither figure matches the sum of the component "
+        f"rows ({component_sum:,.2f}), falling back to the detail page's figure."
+    )
+    return detail_val
+
+
 # ---------------------------------------------------------------------------
 # Grid consumption -- the main payout grid (may appear on more than one
 # page -- a summary page and a detail page, see the module docstring's
@@ -502,13 +588,17 @@ def _consume_main_grid(
     columns: list[dict],
     months_order: list[str],
     diagnostics: list[str],
-) -> tuple[dict, list[dict], bool]:
-    """Returns (rows_dict, unknown_labels, has_components) -- `has_components`
-    is False when the section between the header and each subtotal row
-    carried NO component rows at all (a summary-only page), in which case
-    a single STRUCTURAL diagnostic replaces what would otherwise be a
-    per-month cross-check against an empty component set (see s.7 of the
-    module docstring's multi-page section)."""
+) -> tuple[dict, list[dict], bool, dict]:
+    """Returns (rows_dict, unknown_labels, has_components, bucket_sum_by_field).
+    `has_components` is False when the section between the header and each
+    subtotal row carried NO component rows at all (a summary-only page), in
+    which case a single STRUCTURAL diagnostic replaces what would otherwise
+    be a per-month cross-check against an empty component set (see s.7 of
+    the module docstring's multi-page section). `bucket_sum_by_field` maps
+    each subtotal field (e.g. "total_gross_payment") to that PAGE's own
+    component-row sums (`{"months": {...}, "total": ..., "has_rows": bool}`)
+    -- captured right before the bucket resets -- used for the Gap-4
+    component-consistency cross-page precedence rule."""
     rows_dict: dict = {}
     unknown_labels: list[dict] = []
     bucket_sum = {m: 0.0 for m in months_order}
@@ -516,6 +606,7 @@ def _consume_main_grid(
     section_row_count = 0
     any_components = False
     subtotal_values: dict = {}
+    bucket_sum_by_field: dict[str, dict] = {}
 
     data_rows = _merge_wrapped_label_rows(data_rows)
 
@@ -564,6 +655,12 @@ def _consume_main_grid(
             else:
                 _cross_check_bucket(diagnostics, subtotal_label, bucket_sum, bucket_sum_total, entry, months_order)
 
+        bucket_sum_by_field[matched_field] = {
+            "months": dict(bucket_sum),
+            "total": bucket_sum_total,
+            "has_rows": section_row_count > 0,
+        }
+
         if matched_field == "total_gross_payment":
             subtotal_values["gross"] = entry
         elif matched_field == "total_recovery":
@@ -578,7 +675,7 @@ def _consume_main_grid(
         bucket_sum_total = 0.0
         section_row_count = 0
 
-    return rows_dict, unknown_labels, any_components
+    return rows_dict, unknown_labels, any_components, bucket_sum_by_field
 
 
 def _consume_ctc_grid(
@@ -609,8 +706,16 @@ def _consume_ctc_grid(
         _cross_check_row_total(ctc_diagnostics, label, entry, prefix=prefix)
 
         if _CTC_TOTAL_ROW_RE.match(label):
-            total_entry = entry
-            break
+            # On the real document the CTC total row appears BEFORE its
+            # component rows (immediately after the header), not after --
+            # do not stop consuming the block here, or every component row
+            # that follows is silently dropped and `ctc_structuring` comes
+            # back empty. The heading line above the header carries the
+            # same text but has no figures, so it was already filtered out
+            # by the `not values` guard above and never reaches here twice.
+            if total_entry is None:
+                total_entry = entry
+            continue
 
         rows_dict[_slugify(label)] = entry
         for m in months_order:
@@ -777,6 +882,19 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
                 has_flag_row = True
                 next_idx += 1
 
+        if not has_flag_row and r_idx > 0:
+            # The flag row can also sit ABOVE the header rather than below it
+            # (see the module docstring's flag-row trap) -- on the real
+            # document its tokens are left-aligned to the header row's own
+            # month-name x-positions (not the right-aligned numeric data
+            # columns), so `page_month_columns` -- derived from the header
+            # row itself -- is exactly the right reference for both
+            # directions; only the search direction differs.
+            flag = _extract_flag_row(rows[r_idx - 1], page_month_columns)
+            if flag is not None:
+                page_flag.update(flag)
+                has_flag_row = True
+
         end_idx = len(rows)
         for other_p, other_r in header_locations:
             if other_p == p_idx and other_r > r_idx:
@@ -784,7 +902,7 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
 
         page_data_rows = rows[next_idx:end_idx]
         page_diagnostics: list[str] = []
-        page_rows_dict, page_unknown_labels, has_components = _consume_main_grid(
+        page_rows_dict, page_unknown_labels, has_components, page_bucket_sum_by_field = _consume_main_grid(
             page_data_rows, page_columns, page_months_order, page_diagnostics
         )
         page_results.append({
@@ -792,6 +910,7 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
             "rows_dict": page_rows_dict,
             "unknown_labels": page_unknown_labels,
             "has_components": has_components,
+            "bucket_sum_by_field": page_bucket_sum_by_field,
             "month_status": page_flag,
             "has_flag_row": has_flag_row,
             "diagnostics": page_diagnostics,
@@ -828,35 +947,57 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
                 for m, v in pr["month_status"].items():
                     if month_status.get(m) is None and v is not None:
                         month_status[m] = v
-            # Requirement 3: cross-check the same subtotal appearing on more
-            # than one page. The detail page's printed figure always wins --
-            # any disagreement is recorded as a diagnostic, never applied.
+            # Requirement 3 / Gap 4: cross-check the same subtotal appearing
+            # on more than one page. Precedence is no longer a fixed
+            # "detail page always wins" -- it is a component-consistency
+            # test: whichever page's printed figure equals the sum of that
+            # period's own component rows wins; if neither matches, or no
+            # components exist for that period, fall back to the detail
+            # page as before. Every disagreement -- whichever way it
+            # resolves -- is recorded as a diagnostic naming both values,
+            # the component sum, and the reason; nothing is ever applied
+            # silently.
             subtotal_label_by_field = {
                 "total_gross_payment": "Total Gross Payment",
                 "total_recovery": "Total Recovery",
                 "total_payout": "Total Payout",
             }
+            detail_bucket_by_field = detail.get("bucket_sum_by_field", {})
+            other_bucket_by_field = pr.get("bucket_sum_by_field", {})
             for field, subtotal_label in subtotal_label_by_field.items():
                 detail_entry = rows_dict.get(field)
                 other_entry = pr["rows_dict"].get(field)
                 if detail_entry is None or other_entry is None:
                     continue
+                detail_bucket = detail_bucket_by_field.get(field)
+                other_bucket = other_bucket_by_field.get(field)
+
                 for m in months_order:
                     dv = detail_entry["months"].get(m)
                     ov = other_entry["months"].get(m)
-                    if dv is not None and ov is not None and abs(dv - ov) > 0.005:
-                        diagnostics.append(
-                            f"ERROR: '{subtotal_label}' printed {m} figure on the "
-                            f"detail page ({dv:,.2f}) does not match the figure on "
-                            f"another page ({ov:,.2f}). Using the detail page's figure."
-                        )
+                    if dv is None or ov is None or abs(dv - ov) <= 0.005:
+                        continue
+                    component_sum_m = None
+                    if detail_bucket and detail_bucket.get("has_rows"):
+                        component_sum_m = detail_bucket["months"].get(m)
+                    elif other_bucket and other_bucket.get("has_rows"):
+                        component_sum_m = other_bucket["months"].get(m)
+                    chosen = _resolve_cross_page_subtotal(
+                        diagnostics, subtotal_label, f"{m} figure", dv, ov, component_sum_m,
+                    )
+                    rows_dict[field]["months"][m] = chosen
+
                 dt, ot = detail_entry.get("total"), other_entry.get("total")
                 if dt is not None and ot is not None and abs(dt - ot) > 0.005:
-                    diagnostics.append(
-                        f"ERROR: '{subtotal_label}' printed annual total on the "
-                        f"detail page ({dt:,.2f}) does not match the annual total "
-                        f"on another page ({ot:,.2f}). Using the detail page's figure."
+                    component_sum_t = None
+                    if detail_bucket and detail_bucket.get("has_rows"):
+                        component_sum_t = detail_bucket.get("total")
+                    elif other_bucket and other_bucket.get("has_rows"):
+                        component_sum_t = other_bucket.get("total")
+                    chosen_total = _resolve_cross_page_subtotal(
+                        diagnostics, subtotal_label, "annual total", dt, ot, component_sum_t,
                     )
+                    rows_dict[field]["total"] = chosen_total
 
         subtotal_values = {
             "gross": rows_dict.get("total_gross_payment"),
