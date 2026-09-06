@@ -1914,7 +1914,7 @@ def test_excel_writer_omits_feedback_sheet_when_not_provided(tmp_path):
 import yaml  # noqa: E402
 from agents.skill_ais_reconcile import agent as AG  # noqa: E402
 
-ENTITY_KEY = "harshal"
+ENTITY_KEY = "syn-partner"
 # PAN[3:9] = "DE1234" -> masked "XXX" + "DE1234" + "X"
 AIS_FILENAME = "XXXDE1234X_2025-26_AIS.json"
 

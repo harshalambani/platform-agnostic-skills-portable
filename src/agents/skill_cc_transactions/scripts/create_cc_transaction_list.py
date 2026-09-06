@@ -404,7 +404,7 @@ def parse_axis_transactions(text, bank_name, card_type):
         AMOUNT (Rs.)
         CASHBACK EARNED
         Name
-        HARSHAL ...       ← account name — skip
+        CARDHOLDER ...       ← account name — skip
         MISC STORE        ← merchant category — skip
         8.00 Dr           ← amounts
         249.00 Cr
