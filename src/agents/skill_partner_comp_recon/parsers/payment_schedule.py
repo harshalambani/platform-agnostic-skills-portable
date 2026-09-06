@@ -200,7 +200,7 @@ _ROW_FIELD_MAP: list[tuple[str, "re.Pattern[str]"]] = [
     ("previous_year_plmis", re.compile(r"^\s*previous\s+year\s+plmis?\b", re.IGNORECASE)),
     ("firm_tax_on_sop", re.compile(r"^\s*firm\s+tax\s+on\s+sop\b", re.IGNORECASE)),
     ("firm_tax_others", re.compile(r"^\s*firm\s+tax\s*\(?\s*others?\)?\b", re.IGNORECASE)),
-    ("tds_on_rem_ioc", re.compile(r"^\s*tds\s+on\s+rem\s*/\s*ioc\b", re.IGNORECASE)),
+    ("tds_on_rem_ioc", re.compile(r"^\s*tds\s+on\s+(rem\s*/\s*ioc|remuneration)\b", re.IGNORECASE)),
     ("transferred_to_capital", re.compile(r"^\s*transferred\s+to\s+capital\b", re.IGNORECASE)),
     ("medical_topup", re.compile(r"^\s*medical\s+top[\s-]?up\b", re.IGNORECASE)),
 ]
@@ -315,6 +315,88 @@ def _slugify(label: str) -> str:
     return slug.strip("_")
 
 
+class _WrappedRow:
+    """A synthetic row reassembled from a wrapped label -- see the
+    "wrapped row labels" trap in the module docstring: a label fragment,
+    then a numeric-only line, then the rest of the label. `value_words`
+    is the original values-only physical row (fed to `_parse_grid_row()`
+    for its numbers); `label` is the already-joined label text."""
+
+    __slots__ = ("label", "value_words")
+
+    def __init__(self, label: str, value_words: list[dict]):
+        self.label = label
+        self.value_words = value_words
+
+
+def _line_has_amount_text(tokens: list[dict]) -> bool:
+    texts = [t["text"].strip() for t in tokens if t["text"].strip()]
+    return any(
+        _NA_TOKEN_RE.search(t) or _AMOUNT_CANDIDATE_RE.match(t) for t in texts
+    )
+
+
+def _line_has_label_text(tokens: list[dict]) -> bool:
+    texts = [t["text"].strip() for t in tokens if t["text"].strip()]
+    return any(
+        not (_NA_TOKEN_RE.search(t) or _AMOUNT_CANDIDATE_RE.match(t)) for t in texts
+    )
+
+
+def _merge_wrapped_label_rows(data_rows: list[list[dict]]) -> list:
+    """Reassembles a label that wraps across physical lines with the
+    numbers sitting on an intervening line -- trap (see module docstring):
+    a row whose text line contains ONLY amounts and no label must be
+    joined to the nearest label fragment rather than discarded or treated
+    as a new row. A normal row (label AND values on the same physical
+    line) passes through completely unchanged."""
+    result: list = []
+    pending_label_lines: list[str] = []
+    open_wrapped: _WrappedRow | None = None
+
+    for row in data_rows:
+        tokens = _merge_row_tokens(row)
+        if not any(t["text"].strip() for t in tokens):
+            continue
+        line_text = " ".join(t["text"] for t in tokens).strip()
+        has_values = _line_has_amount_text(tokens)
+        has_label = _line_has_label_text(tokens)
+
+        if has_values and has_label:
+            # A normal, complete row -- close out anything left open first.
+            if open_wrapped is not None:
+                result.append(open_wrapped)
+                open_wrapped = None
+            if pending_label_lines:
+                merged_label = " ".join(pending_label_lines + [line_text]).strip()
+                pending_label_lines = []
+                result.append(_WrappedRow(merged_label, row))
+            else:
+                result.append(row)
+            continue
+
+        if has_values and not has_label:
+            # A numbers-only line -- open (or continue) a wrapped row.
+            if open_wrapped is not None:
+                result.append(open_wrapped)
+                open_wrapped = None
+            label_text = " ".join(pending_label_lines).strip()
+            pending_label_lines = []
+            open_wrapped = _WrappedRow(label_text, row)
+            continue
+
+        if has_label and not has_values:
+            if open_wrapped is not None:
+                open_wrapped.label = (open_wrapped.label + " " + line_text).strip()
+            else:
+                pending_label_lines.append(line_text)
+            continue
+
+    if open_wrapped is not None:
+        result.append(open_wrapped)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Reconciliation helpers. Nothing here ever raises on a mismatch -- every
 # check appends an "ERROR: ..." diagnostic and the record still comes
@@ -400,21 +482,45 @@ def _cross_check_payout_identity(
 
 
 # ---------------------------------------------------------------------------
-# Grid consumption -- page 1 (the payout arithmetic) and the CTC block.
+# Grid consumption -- the main payout grid (may appear on more than one
+# page -- a summary page and a detail page, see the module docstring's
+# multi-page section) and the CTC block.
 # ---------------------------------------------------------------------------
 
+def _parse_row_generic(row, columns: list[dict]) -> tuple[str, dict]:
+    """Like `_parse_grid_row()`, but also accepts a `_WrappedRow` -- a
+    label reassembled from a wrapped line (see `_merge_wrapped_label_rows()`)
+    paired with the original values-only physical row for its numbers."""
+    if isinstance(row, _WrappedRow):
+        _, values = _parse_grid_row(row.value_words, columns)
+        return row.label, values
+    return _parse_grid_row(row, columns)
+
+
 def _consume_main_grid(
-    data_rows: list[list[dict]], columns: list[dict], months_order: list[str],
+    data_rows: list,
+    columns: list[dict],
+    months_order: list[str],
     diagnostics: list[str],
-) -> tuple[dict, list[dict]]:
+) -> tuple[dict, list[dict], bool]:
+    """Returns (rows_dict, unknown_labels, has_components) -- `has_components`
+    is False when the section between the header and each subtotal row
+    carried NO component rows at all (a summary-only page), in which case
+    a single STRUCTURAL diagnostic replaces what would otherwise be a
+    per-month cross-check against an empty component set (see s.7 of the
+    module docstring's multi-page section)."""
     rows_dict: dict = {}
     unknown_labels: list[dict] = []
     bucket_sum = {m: 0.0 for m in months_order}
     bucket_sum_total = 0.0
+    section_row_count = 0
+    any_components = False
     subtotal_values: dict = {}
 
+    data_rows = _merge_wrapped_label_rows(data_rows)
+
     for row in data_rows:
-        label, values = _parse_grid_row(row, columns)
+        label, values = _parse_row_generic(row, columns)
         if not label or not values:
             continue
         entry = {
@@ -435,6 +541,8 @@ def _consume_main_grid(
             rows_dict[matched_field] = entry
 
         if matched_field not in _SUBTOTAL_FIELDS:
+            section_row_count += 1
+            any_components = True
             for m in months_order:
                 v = entry["months"].get(m)
                 if v is not None:
@@ -443,22 +551,34 @@ def _consume_main_grid(
                 bucket_sum_total += entry["total"]
             continue
 
+        subtotal_label = {
+            "total_gross_payment": "Total Gross Payment",
+            "total_recovery": "Total Recovery",
+        }.get(matched_field)
+        if subtotal_label is not None:
+            if section_row_count == 0:
+                diagnostics.append(
+                    f"STRUCTURAL: no component rows found for '{subtotal_label}' -- "
+                    "cross-check against its components skipped."
+                )
+            else:
+                _cross_check_bucket(diagnostics, subtotal_label, bucket_sum, bucket_sum_total, entry, months_order)
+
         if matched_field == "total_gross_payment":
-            _cross_check_bucket(diagnostics, "Total Gross Payment", bucket_sum, bucket_sum_total, entry, months_order)
             subtotal_values["gross"] = entry
         elif matched_field == "total_recovery":
-            _cross_check_bucket(diagnostics, "Total Recovery", bucket_sum, bucket_sum_total, entry, months_order)
             subtotal_values["recovery"] = entry
         elif matched_field == "total_payout":
             subtotal_values["payout"] = entry
             bucket_sum = {m: 0.0 for m in months_order}
             bucket_sum_total = 0.0
-            _cross_check_payout_identity(diagnostics, subtotal_values, months_order)
+            section_row_count = 0
             break
         bucket_sum = {m: 0.0 for m in months_order}
         bucket_sum_total = 0.0
+        section_row_count = 0
 
-    return rows_dict, unknown_labels
+    return rows_dict, unknown_labels, any_components
 
 
 def _consume_ctc_grid(
@@ -475,8 +595,10 @@ def _consume_ctc_grid(
     component_sum_total = 0.0
     total_entry: dict | None = None
 
+    data_rows = _merge_wrapped_label_rows(data_rows)
+
     for row in data_rows:
-        label, values = _parse_grid_row(row, columns)
+        label, values = _parse_row_generic(row, columns)
         if not label or not values:
             continue
         entry = {
@@ -609,7 +731,7 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
             " -- not a payment schedule, skipped."
         )
 
-    main_loc = None
+    main_locs: list[tuple[int, int]] = []
     ctc_loc = None
     for p_idx, r_idx in header_locations:
         rows = pages_rows[p_idx]
@@ -617,10 +739,11 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
             _CTC_HEADING_RE.search(" ".join(w["text"] for w in row))
             for row in rows[:r_idx]
         )
-        if preceded_by_ctc_heading and ctc_loc is None:
-            ctc_loc = (p_idx, r_idx)
-        elif not preceded_by_ctc_heading and main_loc is None:
-            main_loc = (p_idx, r_idx)
+        if preceded_by_ctc_heading:
+            if ctc_loc is None:
+                ctc_loc = (p_idx, r_idx)
+        else:
+            main_locs.append((p_idx, r_idx))
 
     entity_name = _extract_entity_name(full_text)
     financial_year = _extract_financial_year(full_text)
@@ -632,19 +755,26 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
     month_status: dict = {}
     ctc_structuring = None
 
-    if main_loc is not None:
-        p_idx, r_idx = main_loc
+    # Every non-CTC header location (i.e. every page carrying a "Particulars"
+    # grid outside the CTC Structuring block -- see the multi-page section of
+    # the module docstring) is processed independently: its own columns, its
+    # own flag row, its own component-row consumption. Reusing one page's
+    # columns/month order for another page is exactly the original defect.
+    page_results: list[dict] = []
+    for p_idx, r_idx in main_locs:
         rows = pages_rows[p_idx]
         header_row = rows[r_idx]
-        months_order, columns = _build_columns(header_row)
-        month_columns = [c for c in columns if c["name"] != "Total"]
-        month_status = {m: None for m in months_order}
+        page_months_order, page_columns = _build_columns(header_row)
+        page_month_columns = [c for c in page_columns if c["name"] != "Total"]
+        page_flag = {m: None for m in page_months_order}
+        has_flag_row = False
 
         next_idx = r_idx + 1
         if next_idx < len(rows):
-            flag = _extract_flag_row(rows[next_idx], month_columns)
+            flag = _extract_flag_row(rows[next_idx], page_month_columns)
             if flag is not None:
-                month_status.update(flag)
+                page_flag.update(flag)
+                has_flag_row = True
                 next_idx += 1
 
         end_idx = len(rows)
@@ -652,8 +782,88 @@ def parse_payment_schedule_pages(pages: list[list[dict]], source_name: str = "")
             if other_p == p_idx and other_r > r_idx:
                 end_idx = min(end_idx, other_r)
 
-        data_rows = rows[next_idx:end_idx]
-        rows_dict, unknown_labels = _consume_main_grid(data_rows, columns, months_order, diagnostics)
+        page_data_rows = rows[next_idx:end_idx]
+        page_diagnostics: list[str] = []
+        page_rows_dict, page_unknown_labels, has_components = _consume_main_grid(
+            page_data_rows, page_columns, page_months_order, page_diagnostics
+        )
+        page_results.append({
+            "months_order": page_months_order,
+            "rows_dict": page_rows_dict,
+            "unknown_labels": page_unknown_labels,
+            "has_components": has_components,
+            "month_status": page_flag,
+            "has_flag_row": has_flag_row,
+            "diagnostics": page_diagnostics,
+        })
+
+    if page_results:
+        # The "detail" page is the one whose components are actually being
+        # reconciled -- per the precedence policy, IT wins on any subtotal
+        # disagreement. Prefer the last page with real component rows (a
+        # summary page has none); if none has components, fall back to the
+        # last main page so a summary-only document still returns a result
+        # (with a STRUCTURAL diagnostic, not a crash -- requirement 7/test 2).
+        detail = None
+        for pr in page_results:
+            if pr["has_components"]:
+                detail = pr
+        if detail is None:
+            detail = page_results[-1]
+
+        months_order = detail["months_order"]
+        rows_dict = dict(detail["rows_dict"])
+        unknown_labels = list(detail["unknown_labels"])
+        month_status = dict(detail["month_status"])
+        diagnostics = list(detail["diagnostics"])
+
+        for pr in page_results:
+            if pr is detail:
+                continue
+            unknown_labels.extend(pr["unknown_labels"])
+            # Backfill month_status only where the detail page itself carried
+            # no flag row / no value for that month -- the detail page's own
+            # flag row always wins when both are present.
+            if not detail["has_flag_row"]:
+                for m, v in pr["month_status"].items():
+                    if month_status.get(m) is None and v is not None:
+                        month_status[m] = v
+            # Requirement 3: cross-check the same subtotal appearing on more
+            # than one page. The detail page's printed figure always wins --
+            # any disagreement is recorded as a diagnostic, never applied.
+            subtotal_label_by_field = {
+                "total_gross_payment": "Total Gross Payment",
+                "total_recovery": "Total Recovery",
+                "total_payout": "Total Payout",
+            }
+            for field, subtotal_label in subtotal_label_by_field.items():
+                detail_entry = rows_dict.get(field)
+                other_entry = pr["rows_dict"].get(field)
+                if detail_entry is None or other_entry is None:
+                    continue
+                for m in months_order:
+                    dv = detail_entry["months"].get(m)
+                    ov = other_entry["months"].get(m)
+                    if dv is not None and ov is not None and abs(dv - ov) > 0.005:
+                        diagnostics.append(
+                            f"ERROR: '{subtotal_label}' printed {m} figure on the "
+                            f"detail page ({dv:,.2f}) does not match the figure on "
+                            f"another page ({ov:,.2f}). Using the detail page's figure."
+                        )
+                dt, ot = detail_entry.get("total"), other_entry.get("total")
+                if dt is not None and ot is not None and abs(dt - ot) > 0.005:
+                    diagnostics.append(
+                        f"ERROR: '{subtotal_label}' printed annual total on the "
+                        f"detail page ({dt:,.2f}) does not match the annual total "
+                        f"on another page ({ot:,.2f}). Using the detail page's figure."
+                    )
+
+        subtotal_values = {
+            "gross": rows_dict.get("total_gross_payment"),
+            "recovery": rows_dict.get("total_recovery"),
+            "payout": rows_dict.get("total_payout"),
+        }
+        _cross_check_payout_identity(diagnostics, subtotal_values, months_order)
 
     if ctc_loc is not None:
         p_idx, r_idx = ctc_loc

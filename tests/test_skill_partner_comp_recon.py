@@ -1057,9 +1057,9 @@ def _ps_column_x0s(months=None, start=300.0, step=80.0):
     return xs
 
 
-def _ps_header_words(top=100.0, months=None):
+def _ps_header_words(top=100.0, months=None, xs=None):
     months = _PS_MONTHS if months is None else months
-    xs = _ps_column_x0s(months)
+    xs = _ps_column_x0s(months) if xs is None else xs
     words = [_l5_word("Particulars", 40.0, 110.0, top)]
     for m in months:
         x0 = xs[m]
@@ -1069,12 +1069,12 @@ def _ps_header_words(top=100.0, months=None):
     return words
 
 
-def _ps_row_words(top, label, values, months=None):
+def _ps_row_words(top, label, values, months=None, xs=None):
     """`values` maps a month name (or "Total") to its printed text, or
     None to leave that cell unprinted entirely (a genuinely absent cell,
     never a zero)."""
     months = _PS_MONTHS if months is None else months
-    xs = _ps_column_x0s(months)
+    xs = _ps_column_x0s(months) if xs is None else xs
     words = _l5_word_line(label, _L5_LABEL_X0, top)
     for key, text in values.items():
         if text is None:
@@ -1186,6 +1186,86 @@ def _ps_pages(**kwargs):
     page1 = _ps_page1_words(**page1_kwargs)
     page2 = _ps_page2_ctc_words(fy=page1_kwargs.get("fy", "2025-26"), **ctc_kwargs)
     return [page1, page2]
+
+
+# ---------------------------------------------------------------------------
+# Multi-page fixtures -- a real payment schedule is three pages: page 1
+# SUMMARY (title + header + the three subtotal rows only, no components),
+# page 2 DETAIL (title, Entity line, Actual/Forecast flag row, header, all
+# component rows interleaved with the same three subtotals), page 3 CTC
+# STRUCTURING. See the module docstring's multi-page section.
+# ---------------------------------------------------------------------------
+
+def _ps_subtotal_rows_from(rows_source):
+    labels = {"Total Gross Payment", "Total Recovery", "Total Payout"}
+    return [r for r in rows_source if r[0] in labels]
+
+
+def _ps_summary_page_words(
+    *, months=None, subtotal_rows=None, top=20.0, xs=None,
+    title="Payment Schedule Summary",
+):
+    """A page-1-shaped SUMMARY page: title, header, and (by default) just
+    the three subtotal rows -- no component rows at all."""
+    months = _PS_MONTHS if months is None else months
+    words: list[dict] = []
+    words += _l5_word_line(title, 40.0, top)
+    top += 30.0
+    words += _ps_header_words(top=top, months=months, xs=xs)
+    top += 20.0
+    rows = _ps_subtotal_rows_from(_DEFAULT_PS_ROWS) if subtotal_rows is None else subtotal_rows
+    for label, values in rows:
+        words += _ps_row_words(top, label, values, months=months, xs=xs)
+        top += 20.0
+    return words
+
+
+def _ps_wrapped_ctc_row_words(*, y_label=45.0, y_values=49.0, y_cont=53.0, months=None,
+                               value_text="1,000", total_text="12,000"):
+    """Reproduces the brief's wrapped-label trap: a row label spanning two
+    physical lines ("Home Landline / Mobile" then, after the numbers,
+    "Bill") with the amounts sitting entirely on the INTERVENING numbers
+    -only line -- must be joined into one row, never dropped or treated as
+    a new row."""
+    months = _PS_MONTHS if months is None else months
+    xs = _ps_column_x0s(months)
+    words: list[dict] = []
+    words.append(_l5_word("Home", 7.0, 37.0, y_label))
+    words.append(_l5_word("Landline", 35.0, 85.0, y_label))
+    words.append(_l5_word("/", 73.0, 78.0, y_label))
+    words.append(_l5_word("Mobile", 80.0, 120.0, y_label))
+    for m in months:
+        x0 = xs[m]
+        words.append(_l5_word(value_text, x0, x0 + 6.5 * len(value_text), y_values))
+    x0 = xs["Total"]
+    words.append(_l5_word(total_text, x0, x0 + 6.5 * len(total_text), y_values))
+    words.append(_l5_word("Bill", 7.0, 27.0, y_cont))
+    return words
+
+
+def _ps_three_pages(
+    *, months=None, summary_subtotal_rows=None, summary_xs=None,
+    detail_kwargs=None, ctc_kwargs=None, fy="2025-26",
+    entity="Meridian Consulting Services LLP",
+):
+    """A full three-page document: page 1 SUMMARY, page 2 DETAIL, page 3
+    CTC STRUCTURING -- the shape the real defect silently truncated down
+    to just page 1."""
+    months = _PS_MONTHS if months is None else months
+    detail_kwargs = dict(detail_kwargs or {})
+    ctc_kwargs = dict(ctc_kwargs or {})
+    detail_kwargs.setdefault("entity", entity)
+    detail_kwargs.setdefault("fy", fy)
+    detail_kwargs.setdefault("months", months)
+    ctc_kwargs.setdefault("fy", fy)
+    ctc_kwargs.setdefault("months", months)
+
+    page1 = _ps_summary_page_words(
+        months=months, subtotal_rows=summary_subtotal_rows, xs=summary_xs,
+    )
+    page2 = _ps_page1_words(**detail_kwargs)
+    page3 = _ps_page2_ctc_words(**ctc_kwargs)
+    return [page1, page2, page3]
 
 
 # 1 -- a full financial year's grid (all 12 months) parses cleanly: every
@@ -1414,6 +1494,164 @@ def test_ps_non_l4_l5_statement_is_skipped_not_misparsed():
     with pytest.raises(NotAPaymentScheduleError) as excinfo:
         parse_payment_schedule_pages([words], source_name="stmt.pdf")
     assert "l5" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# Multi-page defect fix -- a real payment schedule is three pages (SUMMARY,
+# DETAIL, CTC STRUCTURING); the original bug consumed only the first page
+# carrying a "Particulars" anchor and silently dropped the rest.
+# ---------------------------------------------------------------------------
+
+# M1 -- a full three-page document: every page-2 (DETAIL) component row is
+# present in the result, not just the page-1 (SUMMARY) subtotals.
+def test_ps_three_page_document_all_detail_components_present():
+    pages = _ps_three_pages()
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["remuneration"]["total"] == 600000.0
+    assert record["rows"]["gross_share_of_profit"]["total"] == 1200000.0
+    assert record["rows"]["previous_year_plmis"]["total"] == 240000.0
+    assert record["rows"]["total_payout"]["total"] == 1860000.0
+    assert record["ctc_structuring"]["total"] == 240000.0
+
+
+# M2 -- a page-1-only document (summary, no detail page at all) yields a
+# single STRUCTURAL diagnostic per empty subtotal, never twelve per-month
+# mismatch ERRORs against an empty component set, and still returns a
+# complete result rather than raising.
+def test_ps_summary_only_document_yields_structural_diagnostic():
+    page1 = _ps_summary_page_words()
+    record = parse_payment_schedule_pages([page1], source_name="summary_only.pdf")
+    assert record["rows"]["total_gross_payment"]["total"] == 2040000.0
+    assert any(
+        d.startswith("STRUCTURAL") and "Total Gross Payment" in d
+        for d in record["diagnostics"]
+    )
+    assert any(
+        d.startswith("STRUCTURAL") and "Total Recovery" in d
+        for d in record["diagnostics"]
+    )
+    # Never the old per-month-mismatch flood against an empty bucket.
+    assert not any(
+        "ERROR" in d and "does not match the sum of its component rows" in d
+        for d in record["diagnostics"]
+    )
+
+
+# M3 -- month_status is populated from the page-2 (DETAIL) Actual/Forecast
+# flag row, which today is missed entirely because only page 1 is consumed.
+def test_ps_month_status_populated_from_page2_flag_row():
+    flag_status = {m: "Actual" for m in _PS_MONTHS[:6]}
+    flag_status.update({m: "Forecast" for m in _PS_MONTHS[6:]})
+    pages = _ps_three_pages(detail_kwargs={"flag_status": flag_status})
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    for m in _PS_MONTHS[:6]:
+        assert record["month_status"][m] == "Actual"
+    for m in _PS_MONTHS[6:]:
+        assert record["month_status"][m] == "Forecast"
+
+
+# M4 -- a mixed Actual/Forecast flag row on the detail page is captured
+# per-month even when interleaved (not just a single split point).
+def test_ps_mixed_flag_row_across_pages_captured_per_month():
+    flag_status = {}
+    for i, m in enumerate(_PS_MONTHS):
+        flag_status[m] = "Actual" if i % 2 == 0 else "Forecast"
+    pages = _ps_three_pages(detail_kwargs={"flag_status": flag_status})
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    for i, m in enumerate(_PS_MONTHS):
+        expected = "Actual" if i % 2 == 0 else "Forecast"
+        assert record["month_status"][m] == expected
+
+
+# M5 -- column geometry differs between page 1 (summary) and page 2
+# (detail); both parse correctly. This is the regression guard against
+# reusing page 1's column x-positions on page 2 (the root cause of the bug).
+def test_ps_differing_column_geometry_across_pages_both_parse():
+    summary_xs = _ps_column_x0s(start=120.0, step=55.0)
+    pages = _ps_three_pages(summary_xs=summary_xs)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["total_gross_payment"]["total"] == 2040000.0
+    assert record["rows"]["remuneration"]["months"]["April"] == 50000.0
+    assert record["rows"]["remuneration"]["total"] == 600000.0
+
+
+# M6 -- when the same subtotal disagrees between page 1 (summary) and
+# page 2 (detail), the detail page's printed figure wins, a diagnostic is
+# recorded, and no exception is raised.
+def test_ps_page1_vs_page2_subtotal_disagreement_detail_wins():
+    summary_rows = _ps_subtotal_rows_from(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(summary_rows) if r[0] == "Total Gross Payment")
+    # The summary page prints a different April figure/total than the
+    # detail page's own components reconcile to.
+    summary_rows[idx] = ("Total Gross Payment", _ps_uniform_values("1,60,000", "19,40,000"))
+    pages = _ps_three_pages(summary_subtotal_rows=summary_rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    # Detail page's figure (self-consistent with its own components) wins.
+    assert record["rows"]["total_gross_payment"]["total"] == 2040000.0
+    assert record["rows"]["total_gross_payment"]["months"]["April"] == 170000.0
+    assert any(
+        "Total Gross Payment" in d and ("does not match" in d)
+        for d in record["diagnostics"]
+    )
+
+
+# M7 -- a wrapped row label (a label fragment, then a numbers-only line,
+# then the rest of the label) parses to exactly one row, never dropped and
+# never split into two rows.
+def test_ps_wrapped_label_with_intervening_values_line_parses_to_one_row():
+    ctc_page = _ps_page2_ctc_words()
+    ctc_page = ctc_page + _ps_wrapped_ctc_row_words()
+    pages = _ps_pages()
+    pages = [pages[0], ctc_page]
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    ctc_rows = record["ctc_structuring"]["rows"]
+    assert "homelandline_mobile_bill" in ctc_rows
+    assert ctc_rows["homelandline_mobile_bill"]["total"] == 12000.0
+    assert ctc_rows["homelandline_mobile_bill"]["months"]["April"] == 1000.0
+
+
+# M8 -- "TDS on Remuneration" is an alternate wording for the same field
+# as "TDS on Rem/IOC" (a sibling document's phrasing).
+def test_ps_tds_on_remuneration_wording_maps_to_same_field():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total Recovery")
+    rows.insert(idx, ("TDS on Remuneration", _ps_uniform_values("(5,000)", "(60,000)")))
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["tds_on_rem_ioc"]["total"] == -60000.0
+
+
+# M9 -- an off-by-one-currency-unit rounding discrepancy in the payout
+# identity (Gross + Recovery vs. printed Payout) is recorded as a
+# diagnostic, never raised, and the printed figure is returned unchanged.
+def test_ps_off_by_one_rounding_in_payout_identity_is_diagnostic_not_failure():
+    rows = list(_DEFAULT_PS_ROWS)
+    idx = next(i for i, r in enumerate(rows) if r[0] == "Total Payout")
+    values = dict(_ps_uniform_values("1,55,000", "18,60,000"))
+    values["April"] = "1,55,001"
+    values["Total"] = "18,60,001"
+    rows[idx] = ("Total Payout", values)
+    pages = _ps_pages(rows=rows)
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert record["rows"]["total_payout"]["total"] == 1860001.0
+    assert any(
+        "does not match the printed Total Payout" in d for d in record["diagnostics"]
+    )
+    assert any(
+        "for April" in d and "does not match the printed Total Payout" in d
+        for d in record["diagnostics"]
+    )
+
+
+# M10 -- the CTC Structuring block on page 3 reconciles to its own printed
+# total independent of the page-1/page-2 payout arithmetic, even in a full
+# three-page document.
+def test_ps_ctc_block_on_page3_reconciles_to_its_own_total():
+    pages = _ps_three_pages()
+    record = parse_payment_schedule_pages(pages, source_name="schedule.pdf")
+    assert not any("ERROR" in d for d in record["ctc_structuring"]["diagnostics"])
+    assert record["ctc_structuring"]["total"] == 240000.0
+    assert record["ctc_structuring"]["months"]["April"] == 20000.0
 
 
 # ---------------------------------------------------------------------------
