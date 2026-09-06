@@ -453,7 +453,7 @@ def test_agent_run_document_driven_still_fails_loud_on_unparseable_advisory(tmp_
     advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
 
     result = run(
-        entity="Harshal",
+        entity="SYN-PARTNER",
         advices_dir=str(advices_dir),
         advisory_path=str(advisory_path),
         output_path=str(tmp_path / "out.xlsx"),
@@ -812,7 +812,7 @@ def _l5_words(
             top += 20.0
 
     top += 20.0
-    words += _l5_word_line("KPMG India Services LLP", 40.0, top)
+    words += _l5_word_line("Meridian Consulting Services LLP", 40.0, top)
     return words
 
 
@@ -1557,7 +1557,7 @@ def test_missing_required_input_fails_loud_and_names_it(tmp_path):
 
     # advices_dir missing
     result = run(
-        entity="Harshal",
+        entity="SYN-PARTNER",
         advices_dir="",
         advisory_path=str(advisory_path),
         output_path=str(tmp_path / "out.xlsx"),
@@ -1567,7 +1567,7 @@ def test_missing_required_input_fails_loud_and_names_it(tmp_path):
 
     # advisory_path missing
     result = run(
-        entity="Harshal",
+        entity="SYN-PARTNER",
         advices_dir=str(advices_dir),
         advisory_path="",
         output_path=str(tmp_path / "out.xlsx"),
@@ -1582,7 +1582,7 @@ def test_optional_inputs_absent_degrade_to_not_available_never_zero_or_default(t
     advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
 
     result = run(
-        entity="Harshal",
+        entity="SYN-PARTNER",
         advices_dir=str(advices_dir),
         advisory_path=str(advisory_path),
         llp_statement="",

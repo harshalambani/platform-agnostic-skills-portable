@@ -114,7 +114,7 @@ _STATEMENT_DATE_RE = re.compile(r"\b(\d{1,2})-([A-Za-z]{3})-(\d{4})\b")
 _CURRENT_WORD_RE = re.compile(r"^current$", re.IGNORECASE)
 
 _FOOTER_RE = re.compile(
-    r"kpmg\s+india\s+services\s+llp|computer\s+generated\s+advice", re.IGNORECASE
+    r"\bllp\b|computer\s+generated\s+advice", re.IGNORECASE
 )
 
 _AMOUNT_CANDIDATE_RE = re.compile(r"^\(?[0-9][0-9,]*\.?[0-9]*\)?$|^-$")
