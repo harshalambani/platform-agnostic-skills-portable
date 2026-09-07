@@ -16,8 +16,8 @@ thing you do on your Windows box is:
 cd 'C:\Users\inabm\Documents\Cowork Playground\platform-agnostic-skills-portable'
 Remove-Item .git -Recurse -Force
 git init -b main
-git config user.email "harshal.subscribe@hotmail.com"
-git config user.name  "Harshal"
+git config user.email "you@example.com"
+git config user.name  "Your Name"
 git add .
 git commit -m "Phase 1 scaffold (v0.2 spec)"
 git tag v0.1.0
