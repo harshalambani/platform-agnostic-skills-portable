@@ -443,6 +443,305 @@ def test_l1_misc_adjustments_is_printed_only_never_an_input_field():
     assert "misc_adjustments" not in record
 
 
+# ---------------------------------------------------------------------------
+# L1 Class B ("PAYOUT STATEMENT FOR <MONTH> <YYYY>") -- the post-1-April-2025
+# replacement form, added alongside Class A above. Every fixture below is
+# transcribed-shape-only from the real documents with the partner name,
+# email, employee id, bank details and every amount replaced by the
+# synthetic values named in the brief -- never a real document, no real
+# figure.
+# ---------------------------------------------------------------------------
+
+def _class_b_text(
+    *,
+    month="APRIL",
+    year="2025",
+    remuneration="300,000",
+    share_of_profit="338,368",
+    additional_share_of_profit=None,
+    tds="-30,000",
+    tds_label="TDS on Rem/IOC",
+    misc_adjustments=None,
+    total="608,368",
+    words="Rupees Six Lakh Eight Thousand Three Hundred Sixty Eight Only.",
+    body_month="April",
+    body_year_yy="25",
+    include_crosscheck=True,
+    sub_medical_topup=None,
+    sub_transferred_to_capital=None,
+    sub_net_pay=None,
+    employee_id="40199",
+    partner_name="A. N. Other",
+    email="another@example.com",
+    designation="PARTNER",
+    location="Mumbai",
+    function="Advisory- Consulting",
+    entity_name="Meridian Consulting Services LLP",
+    date_of_joining="28-09-2020",
+    doj_as_partner="01-04-2022",
+    bank_name="HSBC",
+    bank_account_number="000000000000",
+):
+    """Build a synthetic Class B body text block, shaped exactly like the
+    real form: header label-line/value-line pairs, a main table, and an
+    optional sub-table. Row order is not load-bearing -- parse_l1_text()
+    maps by label, not position."""
+    lines = [f"PAYOUT STATEMENT FOR {month} {year}"]
+    lines.append("Employee ID Name Email")
+    lines.append(f"{employee_id} {partner_name} {email}")
+    lines.append("Designation Location Function")
+    lines.append(f"{designation} {location} {function}")
+    lines.append("Entity Date of Joining DoJ As Partner")
+    lines.append(f"{entity_name} {date_of_joining} {doj_as_partner}")
+    lines.append("Bank Account Number")
+    lines.append(f"{bank_name} {bank_account_number}")
+    if include_crosscheck:
+        lines.append(
+            f"Please find below payout details for the month of {body_month} '{body_year_yy}"
+        )
+    lines.append("Particulars Amount in INR")
+    lines.append(f"Remuneration {remuneration}")
+    lines.append(f"Share of profit {share_of_profit}")
+    if additional_share_of_profit is not None:
+        lines.append(f"Additional Share of profit {additional_share_of_profit}")
+    if tds is not None:
+        lines.append(f"{tds_label} {tds}")
+    if misc_adjustments is not None:
+        lines.append(f"Miscellaneous Adjustments {misc_adjustments}")
+    lines.append(f"Total {total}")
+    if words is not None:
+        lines.append(words)
+    if sub_medical_topup is not None or sub_transferred_to_capital is not None or sub_net_pay is not None:
+        lines.append("Miscellaneous Adjustments Amount in INR")
+        if sub_medical_topup is not None:
+            lines.append(f"Medical Topup {sub_medical_topup}")
+        if sub_transferred_to_capital is not None:
+            lines.append(f"Transferred to Capital {sub_transferred_to_capital}")
+        if sub_net_pay is not None:
+            lines.append(f"Net Pay {sub_net_pay}")
+    return "\n".join(lines)
+
+
+# 1 -- Class A specimen (real-shaped, from the firm's own template as
+# transcribed in the brief) parses exactly as it does today -- pins the
+# existing behaviour so Class B's addition can never regress it.
+def test_l1_class_a_real_shaped_specimen_pins_existing_behaviour():
+    text = (
+        "To Whomsoever It may concern\n"
+        "This is to certify that A. N. Other is working with us and is currently designated as a Partner.\n"
+        "Please find below his payout details for the month of Sep-24.\n"
+        "Particulars AMOUNTS\n"
+        "Remuneration 300,000\n"
+        "Share of Profit 324,810\n"
+        "Add. Share of Profit 0\n"
+        "Misc Adjustments 0\n"
+        "Total 624,810\n"
+        "Rupees Six lakhs twenty four thousand eight hundred ten only\n"
+        "Sep-24"
+    )
+    record = parse_l1_text(text, source_name="classA_sep24.pdf")
+    assert record["month"] == "2024-09"
+    assert record["remuneration"] == 300000.0
+    assert record["share_of_profit_gross"] == 324810.0
+    assert record["additional_share_of_profit"] == 0.0
+    assert record["misc_printed"] == 0.0
+    assert record["total_paid"] == 624810.0
+    assert not any("ERROR" in d for d in record["diagnostics"])
+    # Class A's record shape is unchanged by adding Class B alongside it.
+    assert "unknown_labels" not in record
+    assert "doc_class" not in record
+
+
+# 2 -- Class B minimal (three rows, no sub-table) parses; unknown_labels
+# empty -- the acceptance bar from the brief.
+def test_l1_class_b_minimal_parses_with_empty_unknown_labels():
+    text = _class_b_text(month="APRIL", year="2025", body_month="April", body_year_yy="25")
+    record = parse_l1_text(text, source_name="classB_apr25.pdf")
+    assert record["doc_class"] == "B"
+    assert record["month"] == "April"
+    assert record["year"] == 2025
+    assert record["remuneration"] == 300000.0
+    assert record["share_of_profit"] == 338368.0
+    assert record["tds"] == -30000.0
+    assert record["tds_label"] == "TDS on Rem/IOC"
+    assert record["total"] == 608368.0
+    assert record["misc_breakdown"] is None
+    assert record["unknown_labels"] == []
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+
+# 3 -- Class B full (five main-table rows plus the sub-table) parses;
+# sub-table fields populated; unknown_labels empty.
+def test_l1_class_b_full_with_subtable_parses_with_empty_unknown_labels():
+    text = _class_b_text(
+        month="JULY", year="2025", body_month="July", body_year_yy="25",
+        share_of_profit="338,368", additional_share_of_profit="1,745,669",
+        tds="-30,000", misc_adjustments="-750,368", total="1,603,669",
+        words="Rupees Sixteen Lakh Three Thousand Six Hundred Sixty Nine Only.",
+        sub_medical_topup="-21,535", sub_transferred_to_capital="-728,833",
+        sub_net_pay="-750,368",
+    )
+    record = parse_l1_text(text, source_name="classB_jul25.pdf")
+    assert record["additional_share_of_profit"] == 1745669.0
+    assert record["misc_adjustments"] == -750368.0
+    assert record["misc_breakdown"] == {
+        "medical_topup": -21535.0,
+        "transferred_to_capital": -728833.0,
+        "net_pay": -750368.0,
+    }
+    assert record["unknown_labels"] == []
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+
+# 4 -- "Additional Share of profit" maps to its own field and is never
+# captured by the (less specific) "Share of profit" pattern.
+def test_l1_class_b_additional_share_of_profit_not_captured_by_share_of_profit_pattern():
+    text = _class_b_text(
+        share_of_profit="338,368",
+        additional_share_of_profit="1,745,669",
+        tds="-30,000",
+        total="2,354,037",  # 300,000 + 338,368 + 1,745,669 - 30,000
+    )
+    record = parse_l1_text(text, source_name="classB_isolation.pdf")
+    assert record["share_of_profit"] == 338368.0
+    assert record["additional_share_of_profit"] == 1745669.0
+    assert not any("ERROR" in d and "sum" in d.lower() for d in record["diagnostics"])
+
+
+# 5 -- "TDS on Rem/IOC" and "TDS on Remuneration" both map to the same
+# `tds` field, and `tds_label` retains the verbatim spelling seen in each.
+def test_l1_class_b_tds_label_retains_verbatim_spelling_for_both_forms():
+    text_remioc = _class_b_text(tds="-30,000", tds_label="TDS on Rem/IOC", total="608,368")
+    record_remioc = parse_l1_text(text_remioc, source_name="classB_remioc.pdf")
+    assert record_remioc["tds"] == -30000.0
+    assert record_remioc["tds_label"] == "TDS on Rem/IOC"
+
+    text_remuneration = _class_b_text(
+        month="MARCH", year="2026", body_month="March", body_year_yy="26",
+        share_of_profit="336,116", additional_share_of_profit="50,648",
+        tds="-30,000", tds_label="TDS on Remuneration", total="656,764",
+        words=None,
+    )
+    record_rem = parse_l1_text(text_remuneration, source_name="classB_remuneration.pdf")
+    assert record_rem["tds"] == -30000.0
+    assert record_rem["tds_label"] == "TDS on Remuneration"
+
+
+# 6 -- the "Miscellaneous Adjustments Amount in INR" sub-table HEADER line
+# must never become a second main-table row.
+def test_l1_class_b_subtable_header_line_is_not_a_second_main_table_row():
+    text = _class_b_text(
+        additional_share_of_profit="1,745,669",
+        misc_adjustments="-750,368",
+        total="1,603,669",
+        sub_medical_topup="-21,535",
+        sub_transferred_to_capital="-728,833",
+        sub_net_pay="-750,368",
+        words=None,
+    )
+    record = parse_l1_text(text, source_name="classB_subtable_header.pdf")
+    assert record["misc_adjustments"] == -750368.0
+    assert record["unknown_labels"] == []
+
+
+# 7 -- a main-table footing mismatch produces a diagnostic naming both
+# figures, never a raise.
+def test_l1_class_b_main_table_footing_mismatch_is_diagnostic_not_raise():
+    text = _class_b_text(total="9,99,999")  # deliberately wrong
+    record = parse_l1_text(text, source_name="classB_mismatch.pdf")
+    assert record["total"] == 999999.0
+    assert any("ERROR" in d and "sum" in d.lower() for d in record["diagnostics"])
+
+
+# 8 -- sub-table net_pay != main table's misc_adjustments produces a
+# diagnostic, never a raise.
+def test_l1_class_b_subtable_net_pay_mismatch_is_diagnostic_not_raise():
+    text = _class_b_text(
+        additional_share_of_profit="1,745,669",
+        misc_adjustments="-750,368",
+        total="1,603,669",
+        sub_medical_topup="-21,535",
+        sub_transferred_to_capital="-700,000",
+        sub_net_pay="-721,535",  # deliberately != -750,368
+        words=None,
+    )
+    record = parse_l1_text(text, source_name="classB_netpay_mismatch.pdf")
+    assert any("ERROR" in d and "net pay" in d.lower() for d in record["diagnostics"])
+
+
+# 9 -- negative figures parse negative -- assert the sign explicitly on
+# tds and medical_topup (a test that only checked the rows sum to Total
+# would pass under a uniform sign flip).
+def test_l1_class_b_negative_figures_parse_negative_explicit_sign_check():
+    text = _class_b_text(
+        additional_share_of_profit="1,745,669",
+        misc_adjustments="-750,368",
+        total="1,603,669",
+        sub_medical_topup="-21,535",
+        sub_transferred_to_capital="-728,833",
+        sub_net_pay="-750,368",
+        words=None,
+    )
+    record = parse_l1_text(text, source_name="classB_negatives.pdf")
+    assert record["tds"] == -30000.0
+    assert record["tds"] < 0
+    assert record["misc_breakdown"]["medical_topup"] == -21535.0
+    assert record["misc_breakdown"]["medical_topup"] < 0
+
+
+# 10 -- all header metadata fields are captured, including a multi-word
+# entity name followed by two dates, and a multi-word partner name
+# between an id and an email.
+def test_l1_class_b_header_metadata_all_fields_captured():
+    text = _class_b_text()
+    record = parse_l1_text(text, source_name="classB_header.pdf")
+    assert record["employee_id"] == "40199"
+    assert record["partner_name"] == "A. N. Other"
+    assert record["email"] == "another@example.com"
+    assert record["designation"] == "PARTNER"
+    assert record["location"] == "Mumbai"
+    assert record["function"] == "Advisory- Consulting"
+    assert record["entity_name"] == "Meridian Consulting Services LLP"
+    assert record["date_of_joining"] == "28-09-2020"
+    assert record["doj_as_partner"] == "01-04-2022"
+    assert record["bank_name"] == "HSBC"
+    assert record["bank_account_number"] == "000000000000"
+
+
+# 11 -- the amount-in-words line ("Rupees ... Only.") is ignored, never
+# parsed as a row.
+def test_l1_class_b_amount_in_words_line_is_ignored_not_parsed_as_row():
+    text = _class_b_text(words="Rupees Six Lakh Eight Thousand Three Hundred Sixty Eight Only.")
+    record = parse_l1_text(text, source_name="classB_words.pdf")
+    assert record["unknown_labels"] == []
+    assert record["total"] == 608368.0
+
+
+# 12 -- title-line and body-line month disagreement produces a
+# diagnostic, never a raise.
+def test_l1_class_b_title_body_month_disagreement_is_diagnostic():
+    text = _class_b_text(month="APRIL", year="2025", body_month="May", body_year_yy="25")
+    record = parse_l1_text(text, source_name="classB_month_mismatch.pdf")
+    assert any("ERROR" in d and "disagree" in d.lower() for d in record["diagnostics"])
+
+
+# 13 -- an L2 salary statement and an L3 advisory are both still
+# rejected by the Class-B-aware dispatch (no regression on the existing
+# guards).
+def test_l1_class_b_dispatch_still_rejects_l2_and_l3_documents():
+    salary_text = (
+        "SALARY STATEMENT FOR THE MONTH OF JANUARY 2026\n"
+        "Basic Pay              1,00,000\n"
+        "Net Pay                1,00,000\n"
+    )
+    with pytest.raises(NotAnL1DocumentError):
+        parse_l1_text(salary_text, source_name="l2_salary.pdf")
+
+    advisory_text = _l3_text()
+    with pytest.raises(NotAnL1DocumentError):
+        parse_l1_text(advisory_text, source_name="l3_advisory.pdf")
+
+
 # A run with an unparseable/malformed required document (garbage-byte
 # "PDF") still fails loud end-to-end, naming the document -- now for a
 # pdfplumber-level "can't open this" reason rather than the old
