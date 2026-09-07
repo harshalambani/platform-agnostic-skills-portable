@@ -3,10 +3,11 @@ agent.py -- Partner Compensation Reconciliation. DIRECT mode, no LLM, no
 network.
 
 Stage 1 of this skill (see AGENT.md): the computation engine, the workbook
-writer, and the tests. Stage 2 is the PDF parsers under parsers/ -- most
-are guarded placeholders that raise NotImplementedError until a real
-specimen of each document exists; `payout_advice.py` (L1) and
-`advisory.py` (L3) are now implemented. See parsers/__init__.py.
+writer, and the tests. Stage 2 is the PDF parsers under parsers/ --
+`payout_advice.py` (L1), `advisory.py` (L3) and `llp_statement.py` (L5)
+are all implemented; the remaining Stage 2 placeholders (`gnucash_path`,
+`xlsx_26as` readers) are still guarded NotImplementedError-style degrades.
+See parsers/__init__.py.
 
 run() has two entry paths:
 
@@ -15,17 +16,20 @@ run() has two entry paths:
     llp_statement/gnucash_path/xlsx_26as. Required inputs missing fail
     loud, naming the input. Every OPTIONAL input (llp_statement,
     gnucash_path, xlsx_26as) that is absent -- or present but backed by a
-    parser that is still a Stage 2 placeholder -- degrades its own
-    reconciliation leg to an explicit "not available" note; it never
-    fails the run, and never substitutes a zero or a default figure. The
-    two REQUIRED documents (advices_dir, advisory_path) now parse for
-    real; a document that fails to open/parse (an unreadable/malformed
-    PDF, a wrong password, or content that doesn't match the expected L1/
-    L3 layout) still fails the whole run loud, naming the document and the
-    reason -- see _run_from_documents()'s docstring. Parsing both required
-    documents successfully does not yet assemble a workbook (that
-    remaining wiring is out of this build's scope, see the same
-    docstring).
+    parser/reader that is still a Stage 2 placeholder, or fails its own
+    content-dispatch check -- degrades its own reconciliation leg to an
+    explicit "not available" note; it never fails the run, and never
+    substitutes a zero or a default figure. The two REQUIRED documents
+    (advices_dir, advisory_path) parse for real; a document that fails to
+    open/parse (an unreadable/malformed PDF, a wrong password, or content
+    that doesn't match the expected L1/L3 layout) still fails the whole
+    run loud, naming the document and the reason -- see
+    _run_from_documents()'s docstring. Once both required documents (and
+    the optional L5 leg, if resolvable) parse, this path assembles them
+    (mapper.build_input_data), computes the reconciliation
+    (engine.build_report), writes the workbook, and -- if journal_path is
+    supplied -- resolves/validates the entity's GnuCash account map and
+    emits the journal CSV, exactly like the structured-input path below.
   - Structured-input (input_path): TEST-ONLY. Retained so the existing
     engine/writer/jv_emitter test suite keeps exercising build_report()
     directly without needing real PDF specimens. Deliberately absent from
@@ -34,25 +38,52 @@ run() has two entry paths:
 
 Architecture mirrors skill_mf_cas: `_load_input` is the ONLY function in
 this package that touches the filesystem for the structured input path.
+`mapper.build_input_data()` is pure (no I/O) and converts parsed L1/L3/L5
+document records into `engine.build_report()`'s input shape.
 `engine.build_report()` is pure (no I/O); `writer.write_report_workbook()`
 is the only function that touches openpyxl; `jv_emitter.write_journal_csv()`
 (Stage 1b, optional) is the only function that touches the journal CSV.
 gnucash_path is READ ONLY everywhere in this package -- no function here
-ever opens a write handle on a .gnucash file.
+ever opens a write handle on a .gnucash file; account-path validation
+(`_validate_accounts_against_book`) only ever calls
+gnucash_accounts.read_postable_paths()/read_special_paths()/load_accounts(),
+never anything that could write.
 """
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import yaml
 
+from .. import gnucash_accounts
 from .engine import build_report
-from .jv_emitter import JournalValidationError, build_journals, write_journal_csv
+from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, write_journal_csv
+from .mapper import FinancialYearMismatchError, build_input_data
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
 from .parsers import payout_advice as _payout_advice_parser
 from .writer import write_report_workbook
+
+# skill_itr_workbook/scripts is a separate package (not importable via the
+# agents.* package path) that carries the entities.yaml loader this skill
+# reuses rather than re-implementing its own -- same sys.path pattern
+# skill_ais_reconcile/agent.py uses for the same reason. `config_path` (an
+# existing run() parameter, previously accepted-but-unused on this entry
+# path) is repurposed here as the path to that entities.yaml-shaped file:
+# each entity's `partner_comp_accounts` field supplies its GnuCash account
+# map (see configs.py / bundling/canonical/itr/entities.example.yaml), and
+# its generic `extra_items["partner_comp_drivers"][<financial_year>]`
+# supplies this skill's own rate/period drivers (firm's tax rate, capital
+# rate, TDS section/rate/start-date, etc.) -- there is no dedicated
+# tax-rules loader for these values anywhere else in the codebase, and
+# entities.yaml's own closed-dataclass shape already carries a generic
+# passthrough dict for exactly this kind of skill-specific extension.
+_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
+if str(_ITR_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_ITR_SCRIPTS))
+import configs  # noqa: E402
 
 
 def _load_input(input_path: str) -> dict:
@@ -94,6 +125,175 @@ def _resolve_optional_leg(label: str, path: str, parse_fn, password: str | None 
         return f"{label}: parsed from {path}."
     except NotImplementedError as e:
         return f"{label}: not available ({e})"
+
+
+def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]:
+    """Resolve the OPTIONAL L5 (LLP statement of account) leg to a
+    (status note, parsed record or None) pair. Unlike _resolve_optional_leg
+    (kept as-is for whatever else calls it), this also hands back the
+    parsed record on success, since the mapper needs it for
+    `interest_on_capital`. `llp_statement.py`'s parser is now real, so a
+    genuinely malformed/wrong-content/wrong-password PDF can raise
+    NotAnL5DocumentError (or a pdfplumber-level exception) rather than
+    NotImplementedError -- both degrade this leg to a "not available"
+    note, never an uncaught traceback and never a crash of the whole run."""
+    label = "LLP statement of account"
+    if not path:
+        return f"{label}: not available (no document supplied).", None
+    try:
+        record = _llp_statement_parser.parse(path, password)
+        return f"{label}: parsed from {path}.", record
+    except NotImplementedError as e:
+        return f"{label}: not available ({e})", None
+    except Exception as e:
+        return f"{label}: not available (could not parse {path}: {e})", None
+
+
+def _resolve_entity_config(entity: str, config_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
+    """Look up `entity` in the entities.yaml-shaped file at `config_path`.
+    Returns (profile, None) on success, (None, note) otherwise -- a note
+    describing why no entity config is available (no config_path supplied,
+    file missing, or entity key not found), never an exception. Absence
+    of an entity profile is not itself a run-ending error: it simply means
+    `accounts`/`drivers` stay unset, and every account-key/rate that would
+    have come from it degrades to its own explicit CANNOT-RECONCILE/ERROR
+    downstream (never guessed)."""
+    if not config_path:
+        return None, "entity config: not available (no config_path supplied)."
+    try:
+        entities = configs.load_entities(config_path)
+    except (OSError, configs.ConfigValidationError) as e:
+        return None, f"entity config: could not load {config_path} ({e})."
+    profile = entities.get(entity)
+    if profile is None:
+        return None, f"entity config: {entity!r} not found in {config_path}."
+    return profile, None
+
+
+def _validate_accounts_against_book(accounts: dict, gnucash_path: str) -> list[str]:
+    """Validate every configured account path against the GnuCash book at
+    `gnucash_path` BEFORE anything is written. Returns a list of "ERROR:
+    ..." strings (empty if every configured path is a valid posting
+    target) -- one per account key that is missing, or resolves to a
+    placeholder/hidden (non-postable) account, each naming the account
+    key, the configured path, the reason, and (when a same-leaf-name
+    account exists elsewhere in the book) the closest candidate path as a
+    rename hint. Read-only: only ever calls
+    gnucash_accounts.read_postable_paths()/read_special_paths()/
+    load_accounts() -- never opens a write handle, never touches a
+    .gnucash.LOG/backup file."""
+    postable = gnucash_accounts.read_postable_paths(gnucash_path)
+    special = gnucash_accounts.read_special_paths(gnucash_path)
+    all_accounts = gnucash_accounts.load_accounts(gnucash_path)
+    by_leaf: dict[str, list[str]] = {}
+    for acc in all_accounts:
+        if acc.path:
+            by_leaf.setdefault(acc.leaf, []).append(acc.path)
+
+    errors = []
+    for key, path in accounts.items():
+        if path in postable:
+            continue
+        if path in special:
+            reason = "is a placeholder/hidden account and cannot be a posting target"
+        else:
+            reason = "does not exist in the supplied GnuCash book"
+        leaf = path.rsplit(":", 1)[-1] if ":" in path else path
+        candidates = [p for p in by_leaf.get(leaf, []) if p != path]
+        hint = ""
+        if candidates:
+            hint = f" Closest candidate(s) by leaf name: {', '.join(sorted(candidates))}."
+        errors.append(
+            f"ERROR: partner_comp_accounts['{key}'] = {path!r} {reason}.{hint}"
+        )
+    return errors
+
+
+def _resolve_accounts_for_journal(
+    entity_profile: "configs.EntityProfile | None",
+    entity: str,
+    gnucash_path: str,
+) -> tuple[dict, list[str], str | None]:
+    """Section 4.3's three degradation rules for the journal leg, given
+    that journal_path IS supplied (the caller only calls this when it is).
+    Returns (accounts, book_validation_notes, error_or_None):
+
+      - no partner_comp_accounts configured -> error naming the entity and
+        every required account key (jv_emitter.ACCOUNT_KEYS).
+      - accounts configured, no gnucash_path -> (accounts, [an explicit
+        NOTE that paths could not be verified], None).
+      - accounts configured, gnucash_path supplied -> validated against the
+        book; any bad path returns an error naming it (before any write);
+        all-good returns (accounts, [], None).
+    """
+    accounts = dict(entity_profile.partner_comp_accounts) if entity_profile else {}
+    if not accounts:
+        return (
+            {},
+            [],
+            "ERROR: journal_path was supplied but entity "
+            f"{entity!r} has no partner_comp_accounts configured -- the "
+            f"following account keys are required: {', '.join(ACCOUNT_KEYS)}.",
+        )
+    if not gnucash_path:
+        return (
+            accounts,
+            [
+                "NOTE: journal accounts could not be verified against a GnuCash "
+                "book -- no gnucash_path was supplied. The journal CSV below uses "
+                "the paths configured in entities.yaml as-is."
+            ],
+            None,
+        )
+    validation_errors = _validate_accounts_against_book(accounts, gnucash_path)
+    if validation_errors:
+        return {}, [], "\n".join(validation_errors)
+    return accounts, [], None
+
+
+def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
+    """The shared reporting tail for both entry paths: variance WARNINGs,
+    undecidable NOTEs, rate-change-suspect WARNINGs, one-off-roundness
+    WARNINGs (or the single "all agree" line), the Workbook: line, and the
+    Journal CSV: line if a journal was written. Factored out of the
+    (pre-existing) structured-input path so the document-driven path
+    reuses it verbatim rather than duplicating it."""
+    variances = [r for r in report.reconciliation if r.agree is False]
+    undecidable = [r for r in report.reconciliation if r.agree is None]
+    suspects = len(report.rate_change_suspects)
+    suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
+
+    lines_out = [
+        f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
+        f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
+        "instalment(s).",
+    ]
+    if variances:
+        lines_out.append(
+            f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
+            "-- see Reconciliation/Exceptions sheets."
+        )
+    if undecidable:
+        lines_out.append(
+            f"  NOTE: {len(undecidable)} category(ies) could not be reconciled -- "
+            "see Reconciliation/Exceptions sheets for the explicit reason."
+        )
+    if suspects:
+        lines_out.append(
+            f"  WARNING: mid-year capital rate change suspected in {suspects} "
+            "cohort(s) -- see Capital/Exceptions sheets."
+        )
+    if suspect_one_offs:
+        lines_out.append(
+            f"  WARNING: {len(suspect_one_offs)} one-off gross-up(s) failed the "
+            "roundness check -- see One-offs/Exceptions sheets."
+        )
+    if not variances and not undecidable and not suspects and not suspect_one_offs:
+        lines_out.append("  All reconciliation categories agree; no exceptions raised.")
+    lines_out.append(f"  Workbook: {output_path}")
+    if journal_line:
+        lines_out.append(journal_line)
+    return "\n".join(lines_out)
 
 
 def run(
@@ -155,17 +355,17 @@ def _run_from_documents(
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
-    `parsers/advisory.py` (L3) and `parsers/payout_advice.py` (L1) are now
-    implemented (see their own module docstrings); `parsers/llp_statement.py`
-    is still a guarded NotImplementedError placeholder pending a real,
-    de-identified specimen of that document (see AGENT.md's "Stage 2"
-    section). `entity`, `gnucash_path` and `xlsx_26as` do not have a parser
-    under parsers/ at all in this build (gnucash_path/xlsx_26as read an
-    existing format rather than parse a free-form PDF, and are wired here
-    as always-degraded legs rather than invented reader logic);
-    `parsers/payment_schedule.py` has no corresponding input in this
-    reshaped manifest at all -- the incentive payment-schedule leg remains
-    CANNOT RECONCILE, unchanged from before.
+    `parsers/advisory.py` (L3), `parsers/payout_advice.py` (L1) and
+    `parsers/llp_statement.py` (L5) are all implemented (see their own
+    module docstrings). `entity`, `gnucash_path` and `xlsx_26as` do not
+    have a parser under parsers/ at all in this build (gnucash_path/
+    xlsx_26as read an existing format rather than parse a free-form PDF,
+    and are wired here as always-degraded legs rather than invented reader
+    logic -- gnucash_path is used later, read-only, purely to validate
+    configured account paths before a journal is written, never for a
+    books tie-out); `parsers/payment_schedule.py` has no corresponding
+    input in this reshaped manifest at all -- the incentive payment-
+    schedule leg remains CANNOT RECONCILE, unchanged from before.
 
     Required inputs (entity, advices_dir, advisory_path) missing fail loud
     by name, before any parsing is attempted. Optional inputs
@@ -173,19 +373,32 @@ def _run_from_documents(
     note FIRST, independent of whether the required documents can be
     parsed yet, so their "not available" degrade behaviour is observable
     even while a required leg fails. The two required documents then
-    attempt to parse; ANY exception from that attempt (a Stage 2
-    NotImplementedError placeholder, a document that fails its
-    content-dispatch check, or pdfplumber choking on an unreadable/
-    malformed/wrong-password PDF) is caught and turned into an "ERROR: ..."
-    string naming the document and the underlying reason -- this function
-    never raises for a user-facing problem. Once both required documents
-    parse successfully, this function reports that fact (and the optional
-    legs' status) but does NOT yet assemble their figures into
-    engine.build_report()'s input shape or write a workbook -- wiring the
-    parsed L1/L3 records (plus the still-placeholder L2/LLP-statement/
-    payment-schedule legs) into that dict shape is a further stage, out of
-    this PR's scope. Never opens a write handle on gnucash_path --
-    read-only tie-out only, and only once implemented.
+    attempt to parse; ANY exception from that attempt (a document that
+    fails its content-dispatch check, or pdfplumber choking on an
+    unreadable/malformed/wrong-password PDF) is caught and turned into an
+    "ERROR: ..." string naming the document and the underlying reason --
+    this function never raises for a user-facing problem. The optional L5
+    leg degrades the same way (see _resolve_llp_leg) rather than aborting
+    the run.
+
+    Once both required documents (and the optional L5 leg, if resolvable)
+    parse, their records are assembled by mapper.build_input_data() into
+    engine.build_report()'s input shape (a financial-year disagreement
+    between documents -- mapper.FinancialYearMismatchError, or plain
+    ValueError if no year at all -- becomes an "ERROR: ..." string here,
+    not a traceback), the reconciliation is computed, and the workbook is
+    written (creating output_path's parent directories). If journal_path
+    is supplied, the entity's `partner_comp_accounts` (from the
+    entities.yaml-shaped file at config_path) are resolved and -- if
+    gnucash_path is also supplied -- validated against that book (see
+    _validate_accounts_against_book) BEFORE anything is written; a missing
+    config or an invalid account path is an "ERROR: ..." string, never a
+    partially-written journal. A JournalValidationError from
+    jv_emitter.build_journals() is likewise turned into an "ERROR: ..."
+    string. The final summary reuses _summarize_report() (the same
+    reporting tail the structured-input path uses) plus the optional
+    legs' status notes. Never opens a write handle on gnucash_path --
+    read-only account-path validation only.
     """
     for value, name, label in (
         (entity, "entity", "Entity"),
@@ -205,9 +418,7 @@ def _run_from_documents(
 
     # Optional legs resolve first -- independent of whether the required
     # legs below can be parsed yet in this build.
-    llp_note = _resolve_optional_leg(
-        "LLP statement of account", llp_statement, _llp_statement_parser.parse, doc_password,
-    )
+    llp_note, llp_record = _resolve_llp_leg(llp_statement, doc_password)
     if not gnucash_path:
         gnucash_note = "GnuCash books tie-out: not available (no book supplied)."
     else:
@@ -231,7 +442,7 @@ def _run_from_documents(
     # problem, never a crash -- turned into an "ERROR: ..." string naming
     # the document and the reason.
     try:
-        _advisory_parser.parse(advisory_path, doc_password)
+        advisory_record = _advisory_parser.parse(advisory_path, doc_password)
     except Exception as e:
         lines = [
             f"ERROR: could not parse the Compensation advisory ({advisory_path}): {e}",
@@ -240,9 +451,10 @@ def _run_from_documents(
         lines.extend(f"  - {note}" for note in optional_notes)
         return "\n".join(lines)
 
+    advice_records = []
     for pdf in advice_pdfs:
         try:
-            _payout_advice_parser.parse(str(pdf), doc_password)
+            advice_records.append(_payout_advice_parser.parse(str(pdf), doc_password))
         except Exception as e:
             lines = [
                 f"ERROR: could not parse payout advice ({pdf}): {e}",
@@ -251,12 +463,69 @@ def _run_from_documents(
             lines.extend(f"  - {note}" for note in optional_notes)
             return "\n".join(lines)
 
-    # Both required documents parsed successfully. Assembling their
-    # figures into engine.build_report()'s input shape (and writing a
-    # workbook) is a further stage, out of this PR's scope -- see this
-    # function's docstring.
-    lines = ["Partner Compensation Reconciliation: documents parsed successfully."]
+    # Both required documents (and the optional L5 leg, if it resolved)
+    # parsed successfully. Resolve the entity's config (accounts/drivers),
+    # assemble the parsed records into engine.build_report()'s input
+    # shape, compute the reconciliation, and write the workbook.
+    entity_profile, entity_config_note = _resolve_entity_config(entity, config_path)
+    if entity_config_note:
+        optional_notes.append(entity_config_note)
+
+    if entity_profile is not None:
+        drivers_by_fy = entity_profile.extra_items.get("partner_comp_drivers") or {}
+    else:
+        drivers_by_fy = {}
+
+    try:
+        data = build_input_data(
+            advisory_record=advisory_record,
+            advice_records=advice_records,
+            llp_record=llp_record,
+            firm_name=entity_profile.name if entity_profile else "",
+        )
+    except (FinancialYearMismatchError, ValueError) as e:
+        lines = [f"ERROR: {e}", "  Optional-leg status (unaffected by the error above):"]
+        lines.extend(f"  - {note}" for note in optional_notes)
+        return "\n".join(lines)
+
+    mapper_diagnostics = data.pop("_diagnostics", [])
+    drivers = drivers_by_fy.get(data["financial_year"])
+    if drivers is not None:
+        data["drivers"] = drivers
+
+    try:
+        report = build_report(data)
+    except KeyError as e:
+        return f"ERROR: input is missing required field {e}"
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_report_workbook(report, str(out_path))
+
+    journal_line = ""
+    account_notes: list[str] = []
+    if journal_path:
+        accounts, account_notes, accounts_error = _resolve_accounts_for_journal(
+            entity_profile, entity, gnucash_path,
+        )
+        if accounts_error:
+            return accounts_error
+        try:
+            journals = build_journals(report, accounts)
+        except JournalValidationError as e:
+            return f"ERROR: {e}"
+        write_journal_csv(journals, journal_path)
+        row_count = sum(len(j.splits) for j in journals)
+        journal_line = (
+            f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
+            f"{row_count} row(s))."
+        )
+
+    summary = _summarize_report(report, output_path, journal_line)
+    lines = [summary, "  Optional-leg status:"]
     lines.extend(f"  - {note}" for note in optional_notes)
+    lines.extend(f"  - {note}" for note in account_notes)
+    lines.extend(f"  - {note}" for note in mapper_diagnostics)
     return "\n".join(lines)
 
 
@@ -322,39 +591,4 @@ def _run_from_structured_input(
             f"{row_count} row(s))."
         )
 
-    variances = [r for r in report.reconciliation if r.agree is False]
-    undecidable = [r for r in report.reconciliation if r.agree is None]
-    suspects = len(report.rate_change_suspects)
-    suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
-
-    lines_out = [
-        f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
-        f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
-        "instalment(s).",
-    ]
-    if variances:
-        lines_out.append(
-            f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
-            "-- see Reconciliation/Exceptions sheets."
-        )
-    if undecidable:
-        lines_out.append(
-            f"  NOTE: {len(undecidable)} category(ies) could not be reconciled -- "
-            "see Reconciliation/Exceptions sheets for the explicit reason."
-        )
-    if suspects:
-        lines_out.append(
-            f"  WARNING: mid-year capital rate change suspected in {suspects} "
-            "cohort(s) -- see Capital/Exceptions sheets."
-        )
-    if suspect_one_offs:
-        lines_out.append(
-            f"  WARNING: {len(suspect_one_offs)} one-off gross-up(s) failed the "
-            "roundness check -- see One-offs/Exceptions sheets."
-        )
-    if not variances and not undecidable and not suspects and not suspect_one_offs:
-        lines_out.append("  All reconciliation categories agree; no exceptions raised.")
-    lines_out.append(f"  Workbook: {output_path}")
-    if journal_line:
-        lines_out.append(journal_line)
-    return "\n".join(lines_out)
+    return _summarize_report(report, output_path, journal_line)
