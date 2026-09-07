@@ -48,6 +48,8 @@ from agents.skill_partner_comp_recon.parsers.payout_advice import (
 from agents.skill_partner_comp_recon.parsers.advisory import (
     NotAnL3DocumentError,
     parse_l3_text,
+    merge_advisories,
+    _extract_numbers,
 )
 from agents.skill_partner_comp_recon.parsers.llp_statement import (
     NotAnL5DocumentError,
@@ -679,6 +681,321 @@ def test_l3_document_missing_markers_skipped_with_generic_reason():
     with pytest.raises(NotAnL3DocumentError) as excinfo:
         parse_l3_text(text, source_name="memo.pdf")
     assert "not an l3" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# L3 repair -- 14 mandatory tests added against the real-specimen-driven
+# repair of advisory.py (dispatch-gate fix, tokeniser fix, schedule
+# rework, Computation block, extended Part1 vocabulary, merge_advisories).
+# Every fixture below is synthetic, built only from the SHAPES described
+# in advisory.py's module docstring, using the invented identifiers
+# "Meridian Consulting Services LLP" / "A. N. Other" / employee id
+# "40199" -- never a real document.
+# ---------------------------------------------------------------------------
+
+# L3-1 -- both the old bare "SCHEDULE" heading and the new descriptive
+# "...schedule" sentence heading dispatch into the SCHEDULE section.
+def test_l3_schedule_header_both_old_and_new_shapes_recognised():
+    old_text = _l3_text()
+    record_old = parse_l3_text(old_text, source_name="advisory_old.pdf")
+    assert record_old["sections_present"]["schedule"] is True
+    assert record_old["schedule_instalments"]
+
+    lines = old_text.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln == "SCHEDULE")
+    lines[idx] = "Capital balance and PLMI payment schedule"
+    new_text = "\n".join(lines)
+    record_new = parse_l3_text(new_text, source_name="advisory_new.pdf")
+    assert record_new["sections_present"]["schedule"] is True
+    assert record_new["schedule_instalments"]
+    assert record_new["schedule_opening_balance"] == record_old["schedule_opening_balance"]
+
+
+# L3-2 -- a document carrying only the FY phrase + a SCHEDULE section (no
+# PAYMENTS, no recognisable Part 1 labels -- a revision letter shape)
+# parses with Part 1/Part 2 fields None and a NOTE diagnostic naming the
+# missing PAYMENTS section, never a crash and never a fabricated value.
+def test_l3_fy_plus_schedule_only_document_parses_with_part1_part2_none():
+    text = (
+        "Compensation Advisory (Revision)\n"
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)          20,00,000\n"
+        "PLMI : FY 25 (1st instalment)     2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   21,00,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory_revision.pdf")
+    assert record["sections_present"] == {
+        "part1": False, "part2": False, "schedule": True, "computation": False,
+    }
+    assert record["salary"] is None
+    assert record["net_payable"] is None
+    assert any("NOTE" in d and "PAYMENTS" in d for d in record["diagnostics"])
+    assert not any(d.startswith("ERROR") for d in record["diagnostics"])
+
+
+# L3-3 -- the pdfplumber digit-split repair is pinned against the exact
+# examples the brief called out: a stray space inside a number, a stray
+# space after "(", and a trailing footnote marker.
+def test_l3_tokenizer_repairs_pdfplumber_digit_split_pinned_values():
+    assert _extract_numbers("2 ,333,333") == [2333333.0]
+    assert _extract_numbers("1 1,125,000") == [11125000.0]
+    assert _extract_numbers("7 89,140") == [789140.0]
+    assert _extract_numbers("( 815,360)") == [-815360.0]
+    assert _extract_numbers("( 510,083)**") == [-510083.0]
+
+
+# L3-4 -- the repaired tokeniser never drops the negative sign, even with
+# a footnote marker glued onto the closing parenthesis.
+def test_l3_tokenizer_negative_sign_never_dropped_even_with_footnote_marker():
+    values = _extract_numbers("( 510,083)**")
+    assert values == [-510083.0]
+    assert values[0] < 0
+
+
+# L3-5 -- a schedule instalment row's four figures parse identically
+# whether they sit on the row's own line or are split across the
+# following lookahead lines (a layout pdfplumber sometimes produces).
+def test_l3_schedule_row_numbers_same_whether_one_line_or_split_across_lookahead():
+    text_one_line = _l3_text(
+        instalments=(
+            {"no": 1, "gross": "2,50,000", "firms_tax": "(1,00,000)",
+             "capital_contribution": "(50,000)", "net": "1,00,000"},
+        ),
+    )
+    record_one = parse_l3_text(text_one_line, source_name="a.pdf")
+
+    lines = text_one_line.splitlines()
+    idx = next(i for i, ln in enumerate(lines) if ln.startswith("Instalment No. 1"))
+    lines[idx:idx + 1] = [
+        "Instalment No. 1",
+        "2,50,000",
+        "(1,00,000)   (50,000)   1,00,000",
+    ]
+    text_split = "\n".join(lines)
+    record_split = parse_l3_text(text_split, source_name="b.pdf")
+
+    assert record_split["schedule_instalments"][0] == record_one["schedule_instalments"][0]
+
+
+# L3-6 -- the schedule's unlabelled TOTALS row (preceded by a dashed
+# separator) reconciles against the sum of the rows above it when
+# correct, and produces a fail-loud diagnostic -- never a raise -- when
+# it does not.
+def test_l3_schedule_totals_row_reconciles_or_is_a_fail_loud_diagnostic():
+    good_text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "PLMI : FY 25 (2nd instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "- - - -\n"
+        "5,00,000   (2,00,000)   (1,00,000)   2,00,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   22,00,000\n"
+    )
+    good = parse_l3_text(good_text, source_name="good.pdf")
+    assert good["schedule_totals"] == {
+        "instalment_no": None, "label": "TOTAL",
+        "gross": 500000.0, "firms_tax": -200000.0,
+        "capital_contribution": -100000.0, "net": 200000.0,
+    }
+    assert not any("totals row" in d for d in good["diagnostics"])
+
+    bad_text = good_text.replace(
+        "5,00,000   (2,00,000)   (1,00,000)   2,00,000",
+        "9,99,999   (2,00,000)   (1,00,000)   2,00,000",
+    )
+    bad = parse_l3_text(bad_text, source_name="bad.pdf")
+    assert any("ERROR" in d and "totals row" in d and "gross" in d for d in bad["diagnostics"])
+
+
+# L3-7 -- an "Additions pertaining to prior year" row (only gross+net
+# printed, no firm's-tax/capital-contribution columns) parses its own two
+# figures without corrupting the neighbouring instalment row's four.
+def test_l3_additions_pertaining_to_prior_year_row_parses_two_figures_only():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "Additions pertaining to prior year   50,000   50,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   21,50,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    rows = record["schedule_instalments"]
+    addition = next(r for r in rows if r["label"] == "Additions pertaining to prior year")
+    assert addition["gross"] == 50000.0
+    assert addition["net"] == 50000.0
+    assert addition["firms_tax"] is None
+    assert addition["capital_contribution"] is None
+    instalment = next(r for r in rows if r["instalment_no"] == 1)
+    assert instalment["gross"] == 250000.0
+    assert instalment["firms_tax"] == -100000.0
+    assert instalment["capital_contribution"] == -50000.0
+    assert instalment["net"] == 100000.0
+    assert not any("ERROR" in d for d in record["diagnostics"])
+
+
+# L3-8 -- a lone "-" line is skipped (not reported as unknown), and a
+# printed nil balance (0.0, is_nil True) stays distinct from a balance
+# that is never printed at all (None, is_nil False).
+def test_l3_lone_dash_line_skipped_nil_vs_absent_distinguishable():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)\n"
+        "-\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["schedule_opening_balance"] == 0.0
+    assert record["schedule_opening_balance_is_nil"] is True
+    assert not any("-" in u for u in record["unknown_labels"])
+    # The closing balance is never printed anywhere in this fixture --
+    # that stays genuinely absent, never coerced to a nil.
+    assert record["schedule_projected_closing_balance"] is None
+    assert record["schedule_closing_balance_is_nil"] is False
+
+
+# L3-9 -- both the schedule's opening and projected closing "as on" dates
+# are captured, so a caller can later chain consecutive Advisories.
+def test_l3_schedule_opening_and_closing_balance_dates_captured():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   21,00,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["schedule_opening_balance_date"] == "01 April 2025"
+    assert record["schedule_closing_balance_date"] == "31 March 2026"
+
+
+# L3-10 -- the optional Computation block's 8 fields all map correctly,
+# "40.00%" parses as 40.0 (not a string), and its identity
+# (percent_required/100 * tc_for_fy * months_achieved/months_expected ==
+# contribution_required) holds for a self-consistent block.
+def test_l3_computation_block_all_eight_fields_and_identity_check():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   21,00,000\n"
+        "Computation\n"
+        "TC for FY 25-26                         1,00,00,000\n"
+        "Capital contribution till date          35,00,000\n"
+        "Contribution required                   10,00,000\n"
+        "Contribution required/to be refunded    5,00,000\n"
+        "Total months over which capital contribution expected   48\n"
+        "Total months of capital contribution achived            12\n"
+        "% of capital contribution required      40.00%\n"
+        "% of capital contribution achieved      40.00%\n"
+    )
+    record = parse_l3_text(text, source_name="advisory_computation.pdf")
+    comp = record["computation"]
+    assert comp == {
+        "tc_for_fy": 10000000.0,
+        "capital_contribution_till_date": 3500000.0,
+        "contribution_required": 1000000.0,
+        "contribution_required_or_refunded": 500000.0,
+        "months_expected": 48,
+        "months_achieved": 12,
+        "percent_required": 40.0,
+        "percent_achieved": 40.0,
+    }
+    assert record["sections_present"]["computation"] is True
+    assert not any("ERROR" in d and "Computation" in d for d in record["diagnostics"])
+
+
+# L3-11 -- the extended Part 1 vocabulary (Gap 6) maps each label to a
+# distinct field, and "Total compensation for the year ended 31 Mar NN"
+# is disambiguated by comparing its own printed year against the
+# document's reported year -- never by pattern order or line position.
+def test_l3_extended_part1_labels_distinct_fields_with_year_disambiguation():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Compensation paid as Salary                24,00,000\n"
+        "Compensation paid in FY 25-26 (Base pay + Incentive)   5,00,000\n"
+        "PLMI as Share of Profit (gross)            8,00,000\n"
+        "PLMI (gross)                                3,00,000\n"
+        "Share of Profit (gross)                     18,00,000\n"
+        "Total compensation for the year ended 31 Mar 26   57,00,000\n"
+        "Total compensation for the year ended 31 Mar 25   52,00,000\n"
+        "PAYMENTS\n"
+        "Net Payable   10,00,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    assert record["salary"] == 2400000.0
+    assert record["compensation_paid_base_and_incentive"] == 500000.0
+    assert record["plmi_share_of_profit_gross"] == 800000.0
+    assert record["plmi_gross"] == 300000.0
+    assert record["share_of_profit"] == 1800000.0
+    assert record["target_compensation"] == 5700000.0
+    assert record["prior_year_target_compensation"] == 5200000.0
+    assert record["unknown_labels"] == []
+
+
+# L3-12 -- merge_advisories: a schedule-only reissue (newer) retains the
+# original's Part 1/Part 2, replaces only the schedule, and records
+# per-section provenance -- never "pick the most recent file" wholesale.
+def test_l3_merge_schedule_only_reissue_over_full_original_with_provenance():
+    original = parse_l3_text(_l3_text(), source_name="advisory_original.pdf")
+    reissue_text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "PLMI : FY 25 (1st instalment)   3,00,000   (1,20,000)   (60,000)   1,20,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   23,20,000\n"
+    )
+    reissue = parse_l3_text(reissue_text, source_name="advisory_reissue.pdf")
+    assert reissue["sections_present"]["part1"] is False
+    assert reissue["sections_present"]["part2"] is False
+    assert reissue["sections_present"]["schedule"] is True
+
+    merged = merge_advisories([original, reissue])
+    assert merged["salary"] == original["salary"]
+    assert merged["net_payable"] == original["net_payable"]
+    assert merged["schedule_instalments"][0]["gross"] == 300000.0
+    assert merged["section_sources"]["part1"] == "advisory_original.pdf"
+    assert merged["section_sources"]["part2"] == "advisory_original.pdf"
+    assert merged["section_sources"]["schedule"] == "advisory_reissue.pdf"
+
+
+# L3-13 -- merge_advisories reports a NOTE, never silently drops, when two
+# documents both carry a field with disagreeing values -- the newer
+# document's value is kept.
+def test_l3_merge_disagreement_between_documents_produces_note_not_silent():
+    record_a = parse_l3_text(_l3_text(salary="12,00,000"), source_name="a.pdf")
+    record_b = parse_l3_text(_l3_text(salary="15,00,000"), source_name="b.pdf")
+    merged = merge_advisories([record_a, record_b])
+    assert merged["salary"] == 1500000.0
+    assert any(
+        "NOTE" in d and "salary" in d and "disagrees" in d for d in merged["diagnostics"]
+    )
+
+
+# L3-14 -- an "Arrears for FY NN-NN" row (four figures, like a numbered
+# instalment but with no instalment number) parses and reconciles like
+# any other four-figure schedule row.
+def test_l3_arrears_row_parses_as_a_four_figure_schedule_row():
+    text = (
+        "For the year ended 31 March 2026\n"
+        "Capital balance and PLMI payment schedule\n"
+        "Opening Balance (as on 01 April 2025)     20,00,000\n"
+        "Arrears for FY 24-25   1,50,000   (60,000)   (30,000)   60,000\n"
+        "PLMI : FY 25 (1st instalment)   2,50,000   (1,00,000)   (50,000)   1,00,000\n"
+        "Projected Closing Balance (as on 31 March 2026)   23,10,000\n"
+    )
+    record = parse_l3_text(text, source_name="advisory.pdf")
+    rows = record["schedule_instalments"]
+    arrears = next(r for r in rows if r["instalment_no"] is None and "Arrears" in (r["label"] or ""))
+    assert arrears["gross"] == 150000.0
+    assert arrears["firms_tax"] == -60000.0
+    assert arrears["capital_contribution"] == -30000.0
+    assert arrears["net"] == 60000.0
+    assert not any("ERROR" in d and "Arrears" in d for d in record["diagnostics"])
 
 
 # ---------------------------------------------------------------------------
