@@ -59,6 +59,10 @@ from agents.skill_partner_comp_recon.parsers.payment_schedule import (
     NotAPaymentScheduleError,
     parse_payment_schedule_pages,
 )
+from agents.skill_partner_comp_recon.mapper import (
+    FinancialYearMismatchError,
+    build_input_data,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -2923,9 +2927,11 @@ def test_journal_csv_has_no_transfer_columns(tmp_path):
         assert "Transfer Account" not in row
 
 
-# 3.9 -- the firm's tax never appears as its own leg, and the share-of-
-# profit credit for a month is the NET figure (gross + firms_tax +
-# additional), never the gross figure.
+# 3.9 -- the firm's tax never appears as its own leg, and the CURRENT
+# YEAR's share-of-profit credit for a month is netted by firms_tax_sop
+# ONLY -- never by firms_tax_other (that figure belongs to a prior-year
+# PLMI drawdown, booked as its own separate leg -- see the December case
+# below and jv_emitter.py's module docstring).
 def test_journal_csv_share_of_profit_is_net_of_firms_tax(tmp_path):
     data = _load_fixture()
     report = build_report(data)
@@ -2942,16 +2948,58 @@ def test_journal_csv_share_of_profit_is_net_of_firms_tax(tmp_path):
             assert s.account != "firms_tax", s
 
     by_month = {m.month: m for m in report.monthly}
+
+    # April carries no PLMI drawdown (additional_share_of_profit == 0,
+    # firms_tax_other == 0), so its journal must carry exactly ONE
+    # share_of_profit_income split, netted by firms_tax_sop alone.
     april = by_month["2025-04"]
-    expected_net = (
-        april.share_of_profit_gross + april.firms_tax + april.additional_share_of_profit
-    )
+    assert april.additional_share_of_profit == 0.0
+    assert april.firms_tax_other == 0.0
+    expected_april_net = april.share_of_profit_gross + april.firms_tax_sop
 
     april_journal = next(j for j in journals if j.txn_id.endswith("-M01"))
-    share_split = next(s for s in april_journal.splits if s.account == share_account)
+    april_share_splits = [s for s in april_journal.splits if s.account == share_account]
+    assert len(april_share_splits) == 1, april_share_splits
+    share_split = april_share_splits[0]
     # Credit leg -> stored as .credit, positive.
-    assert share_split.credit == pytest.approx(expected_net, abs=0.01)
+    assert share_split.credit == pytest.approx(expected_april_net, abs=0.01)
     assert share_split.debit == 0.0
+
+    # December DOES carry a prior-year PLMI drawdown (additional_share_of_
+    # profit != 0, firms_tax_other != 0). Its journal must carry TWO
+    # share_of_profit_income splits: the current-year SoP leg netted by
+    # firms_tax_sop only, and the PLMI leg booked at additional_share_of_
+    # profit AS-IS (already net of firms_tax_other upstream -- see the
+    # fixture's comment -- so jv_emitter must NOT subtract firms_tax_other
+    # a second time).
+    december = by_month["2025-12"]
+    assert december.firms_tax_other != 0.0
+    assert december.additional_share_of_profit != 0.0
+    expected_sop_leg = december.share_of_profit_gross + december.firms_tax_sop
+    expected_plmi_leg = december.additional_share_of_profit
+
+    december_journal = next(j for j in journals if j.txn_id.endswith("-M09"))
+    december_share_splits = [
+        s for s in december_journal.splits if s.account == share_account
+    ]
+    assert len(december_share_splits) == 2, december_share_splits
+    december_credits = sorted(s.credit for s in december_share_splits)
+    assert december_credits == [
+        pytest.approx(min(expected_sop_leg, expected_plmi_leg), abs=0.01),
+        pytest.approx(max(expected_sop_leg, expected_plmi_leg), abs=0.01),
+    ]
+    for s in december_share_splits:
+        assert s.debit == 0.0
+    # Neither leg equals gross + BOTH tax figures combined -- that would be
+    # the old (wrong) double-counted formula.
+    wrong_combined = (
+        december.share_of_profit_gross
+        + december.firms_tax_sop
+        + december.firms_tax_other
+        + december.additional_share_of_profit
+    )
+    for s in december_share_splits:
+        assert s.credit != pytest.approx(wrong_combined, abs=0.01)
 
 
 # 3.9b -- prior_cohort_drawdown is POSITIVE (a prior-year incentive
@@ -3070,3 +3118,464 @@ def test_empty_journal_path_leaves_workbook_output_unchanged(tmp_path):
         for name in sorted(names_a):
             assert zf_a.read(name) == zf_b.read(name), f"content differs in {name}"
     assert list(tmp_path.glob("*.csv")) == []  # journal_path unset -> no CSV written at all
+
+
+# ---------------------------------------------------------------------------
+# mapper.build_input_data() -- first tests for this module (assembly-brief
+# section 5). All fixtures below are synthetic and invented for this test
+# file only: no real name, PAN, employee number, bank account, or amount
+# traceable to any person or document. Helper builders below produce the
+# minimal shapes parsers/payout_advice.py and parsers/payment_schedule.py
+# are confirmed (by direct source reading of their to_dict()/return-value
+# code) to actually emit -- see mapper.py's own module docstring for the
+# two L1 document classes' exact field names.
+# ---------------------------------------------------------------------------
+
+
+def _class_a_advice(month: str, **overrides) -> dict:
+    """A synthetic Class A (pre-s.194T) advice record -- no "doc_class" key
+    at all, month already "YYYY-MM", share_of_profit_gross already gross."""
+    rec = {
+        "month": month,
+        "source_name": f"synthetic_l1_classA_{month}.pdf",
+        # total_paid = remuneration 200000 + share_of_profit_gross 300000
+        # + tds -20000 = 480000 (balances a journal with no other legs).
+        "total_paid": 480000.0,
+        "remuneration": 200000.0,
+        "share_of_profit_gross": 300000.0,
+        "additional_share_of_profit": 0.0,
+        "tds": -20000.0,
+    }
+    rec.update(overrides)
+    return rec
+
+
+def _class_b_advice(month_name: str, year: int, **overrides) -> dict:
+    """A synthetic Class B (current, s.194T) advice record -- always
+    carries "doc_class": "B"; month is a name + separate year;
+    share_of_profit is NET; total_paid's source field is "total", not
+    "total_paid" (see parsers/payout_advice.py's L1ClassBRecord.to_dict())."""
+    rec = {
+        "doc_class": "B",
+        "month": month_name,
+        "year": year,
+        "source_name": f"synthetic_l1_classB_{month_name}_{year}.pdf",
+        # Consistent with a schedule supplying gross_share_of_profit=300000
+        # and firm_tax_on_sop=-104832 (34.944% rate, same as this skill's
+        # other synthetic fixture): net = 195168; total_paid = remuneration
+        # 200000 + net 195168 + tds -20000 = 375168.
+        "total": 375168.0,
+        "remuneration": 200000.0,
+        "share_of_profit": 195168.0,  # NET of firm's tax on SoP
+        "additional_share_of_profit": 0.0,
+        "tds": -20000.0,
+        "tds_label": "TDS u/s 194T on remuneration and interest on capital",
+    }
+    rec.update(overrides)
+    return rec
+
+
+def _schedule_record(fy: str, months: list, rows: dict, ctc_structuring=None) -> dict:
+    """A synthetic L4 payment-schedule record matching
+    parsers/payment_schedule.py's confirmed return shape: `rows` is keyed
+    by the same field names as _ROW_FIELD_MAP, each value
+    {"total": ..., "months": {month_name: value}}."""
+    return {
+        "source_name": "synthetic_l4_schedule.pdf",
+        "document_type": "payment_schedule",
+        "entity_name": "Synthetic Test LLP",
+        "financial_year": fy,
+        "months": months,
+        "rows": rows,
+        "ctc_structuring": ctc_structuring,
+        "unknown_labels": [],
+        "diagnostics": [],
+    }
+
+
+# 5.1 -- first real test of build_input_data(): a minimal, fully synthetic
+# single-month Class A input assembles into the expected `data` shape, with
+# no schedule/LLP/advisory supplied at all (those legs are simply absent,
+# never defaulted).
+def test_build_input_data_minimal_class_a_smoke():
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        firm_name="Synthetic Test LLP",
+    )
+    assert data["financial_year"] == "2025-26"
+    assert data["firm_name"] == "Synthetic Test LLP"
+    assert len(data["monthly"]) == 1
+    line = data["monthly"][0]
+    assert line["month"] == "2025-04"
+    assert line["total_paid"] == 480000.0
+    assert line["remuneration"] == 200000.0
+    assert line["share_of_profit_gross"] == 300000.0
+    # Legs never supplied here must be absent, never defaulted to 0/None keys.
+    assert "advisory" not in data
+    assert "ctc_structuring" not in data
+    assert "_diagnostics" not in data  # nothing here should have produced a NOTE
+
+
+# 5.2 -- a full 12-month Class B record set must survive assembly with
+# ZERO records dropped. This pins the "vanishing year" defect: every one of
+# the 12 months must appear in `monthly`, none silently lost.
+def test_build_input_data_class_b_full_year_survives_zero_dropped():
+    month_names = [
+        "April", "May", "June", "July", "August", "September",
+        "October", "November", "December", "January", "February", "March",
+    ]
+    advice_records = []
+    for name in month_names:
+        year = 2025 if name in month_names[:9] else 2026
+        advice_records.append(_class_b_advice(name, year))
+
+    # Class B's own share_of_profit is NET -- the schedule is the only
+    # source of the GROSS figure (mapper.py's own docstring), so every
+    # month needs a schedule entry or it would be dropped for missing
+    # share_of_profit_gross. Same 300000 / 104832 figures every month,
+    # consistent with _class_b_advice()'s own default net (195168).
+    #
+    # NOTE on sign: mapper.py's own Class B net-vs-gross identity check
+    # (_build_monthly()) computes `implied_tax = gross - net` (positive
+    # under normal net < gross conditions) and compares it DIRECTLY
+    # (not via abs()) against the schedule's raw `firm_tax_on_sop` value.
+    # The already-existing, pre-this-work parser-level tests in this file
+    # (see the payment_schedule parser assertions around
+    # `firm_tax_on_sop`/`firm_tax_others`) confirm the REAL parser emits
+    # this figure as NEGATIVE. Feeding that real-world negative sign
+    # through this identity check would make it fire on every
+    # economically normal month (implied_tax positive vs a negative
+    # comparand), which cannot be what was intended. Since mapper.py
+    # must not be modified, this fixture supplies firm_tax_on_sop as
+    # POSITIVE so it satisfies the check's literal, as-written arithmetic
+    # and this test can assert the true "no diagnostic" happy path. This
+    # apparent sign-convention mismatch between the identity check and
+    # the real parser's output is called out in this work's final report
+    # as an observed possible mapper.py defect, not fixed here.
+    schedule = _schedule_record(
+        "2025-26",
+        month_names,
+        {
+            "gross_share_of_profit": {
+                "total": 3600000.0, "months": {name: 300000.0 for name in month_names},
+            },
+            "firm_tax_on_sop": {
+                "total": 1257984.0, "months": {name: 104832.0 for name in month_names},
+            },
+        },
+    )
+
+    data = build_input_data(
+        financial_year="2025-26", advice_records=advice_records, schedule_record=schedule,
+    )
+
+    assert len(data["monthly"]) == 12, (
+        f"expected all 12 months to survive, got {len(data['monthly'])}: "
+        f"{[m['month'] for m in data['monthly']]}"
+    )
+    expected_months = [
+        "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09",
+        "2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03",
+    ]
+    assert [m["month"] for m in data["monthly"]] == expected_months
+    assert "_diagnostics" not in data
+
+
+# 5.3 -- a Class A record set (no "doc_class" key at all) still assembles
+# correctly -- no regression introduced by the Class B / schedule-precedence
+# work.
+def test_build_input_data_class_a_set_still_assembles():
+    advice_records = [
+        _class_a_advice("2025-04"),
+        _class_a_advice("2025-05"),
+        _class_a_advice("2025-06"),
+    ]
+    data = build_input_data(financial_year="2025-26", advice_records=advice_records)
+    assert len(data["monthly"]) == 3
+    assert [m["month"] for m in data["monthly"]] == ["2025-04", "2025-05", "2025-06"]
+    for line in data["monthly"]:
+        assert line["share_of_profit_gross"] == 300000.0
+        assert "share_of_profit_net_reported" not in line  # Class A never carries this
+
+
+# 5.4 -- a mixed Class A + Class B record set assembles into CHRONOLOGICAL
+# order (by calendar month), never alphabetical by month name or by input
+# order. This pins the historic alphabetical-sort defect: "April" would
+# sort before "January" alphabetically by coincidence, but "August" would
+# NOT sort before "July" chronologically the way it would alphabetically --
+# so the fixture below deliberately supplies records OUT of both
+# chronological and alphabetical order and includes an April/August pair
+# whose alphabetical and chronological orderings agree, plus a
+# December/January FY-boundary pair whose orderings disagree, to catch a
+# sort keyed on month name rather than the canonical "YYYY-MM" string.
+def test_build_input_data_mixed_classes_chronological_order():
+    advice_records = [
+        _class_b_advice("January", 2026),          # 2026-01, given first
+        _class_a_advice("2025-08"),                 # 2025-08
+        _class_b_advice("December", 2025),          # 2025-12
+        _class_a_advice("2025-04"),                 # 2025-04
+    ]
+    # The two Class B months need a schedule entry for their gross figure
+    # (see test_build_input_data_class_b_full_year_survives_zero_dropped's
+    # comment) or they would be dropped for missing share_of_profit_gross.
+    schedule = _schedule_record(
+        "2025-26",
+        ["December", "January"],
+        {
+            "gross_share_of_profit": {
+                "total": 600000.0, "months": {"December": 300000.0, "January": 300000.0},
+            },
+            "firm_tax_on_sop": {
+                "total": -209664.0, "months": {"December": -104832.0, "January": -104832.0},
+            },
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26", advice_records=advice_records, schedule_record=schedule,
+    )
+    months = [m["month"] for m in data["monthly"]]
+    assert months == ["2025-04", "2025-08", "2025-12", "2026-01"], months
+
+
+# 5.5 -- Class B's NET share of profit is never presented as gross: the
+# assembled monthly line's `share_of_profit_gross` comes from the schedule
+# (precedence source), and the net figure is preserved separately, under
+# its own distinct key, never overwriting or aliasing the gross one. Where
+# the schedule supplies gross and firm_tax_on_sop, the identity
+# gross - net == firm_tax_on_sop must hold; a violation produces a loud
+# diagnostic, not silence, and does NOT block the run.
+def test_build_input_data_class_b_net_never_presented_as_gross():
+    # See the sign-convention note in
+    # test_build_input_data_class_b_full_year_survives_zero_dropped: this
+    # identity-agrees case must feed mapper.py's literal, as-written
+    # `implied_tax == firm_tax_on_sop` comparison, which is direct (not
+    # abs()-wrapped) -- so firm_tax_on_sop is supplied POSITIVE here, even
+    # though the real parser's confirmed convention is negative.
+    schedule = _schedule_record(
+        "2025-26",
+        ["April"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
+            "firm_tax_on_sop": {"total": 104832.0, "months": {"April": 104832.0}},
+        },
+    )
+    net_reported = 195168.0  # 300000 - 104832, agrees exactly
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_b_advice("April", 2025, share_of_profit=net_reported)],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["share_of_profit_gross"] == 300000.0
+    assert line["share_of_profit_net_reported"] == net_reported
+    assert line["share_of_profit_gross"] != line["share_of_profit_net_reported"]
+    assert "_diagnostics" not in data  # identity holds exactly -- no diagnostic expected
+
+
+def test_build_input_data_class_b_net_gross_mismatch_is_loud_not_blocking():
+    schedule = _schedule_record(
+        "2025-26",
+        ["April"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
+            "firm_tax_on_sop": {"total": -104832.0, "months": {"April": -104832.0}},
+        },
+    )
+    # Net reported disagrees with gross - firm_tax_on_sop by well over
+    # _AMOUNT_TOLERANCE (1.0) -- must be reported, never silently corrected,
+    # and must NOT raise / block assembly.
+    wrong_net = 150000.0
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_b_advice("April", 2025, share_of_profit=wrong_net)],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["share_of_profit_gross"] == 300000.0
+    assert line["share_of_profit_net_reported"] == wrong_net
+    diagnostics = data["_diagnostics"]
+    assert any(
+        "does not reconcile" in d and "2025-04" in d for d in diagnostics
+    ), diagnostics
+
+
+# 5.6 -- when the L4 schedule and a payout advice disagree on
+# gross_share_of_profit, the schedule (precedence source) wins, the
+# disagreement is reported via a diagnostic, and the run is never blocked
+# (no exception).
+def test_build_input_data_schedule_precedence_over_disagreeing_advice():
+    schedule = _schedule_record(
+        "2025-26",
+        ["April"],
+        {"gross_share_of_profit": {"total": 350000.0, "months": {"April": 350000.0}}},
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        # Class A advice's own figure (300000) disagrees with the
+        # schedule's (350000).
+        advice_records=[_class_a_advice("2025-04", share_of_profit_gross=300000.0)],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["share_of_profit_gross"] == 350000.0, "schedule figure must win"
+    diagnostics = data["_diagnostics"]
+    assert any(
+        "disagrees" in d and "2025-04" in d and "350,000.00" in d and "300,000.00" in d
+        for d in diagnostics
+    ), diagnostics
+
+
+# 5.7 -- sign-pinned, full-stack (mapper -> engine -> jv_emitter) journal
+# test built from build_input_data() output rather than the hand-written
+# fixture: pins the DEBIT/CREDIT side of the bank leg and the remuneration
+# leg for a single assembled month. A zero-sum balance assertion alone does
+# not prove the sign is right (a swapped debit/credit still balances) --
+# this asserts the specific side of each split.
+def test_build_input_data_to_journal_signs_are_pinned():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "current_account": "Assets:Firm Current Account",
+        "capital_contribution": "Assets:Firm Capital Account",
+        "medical_expense": "Expenses:Medical",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        accounts=accounts,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    journals = build_journals(report, accounts)
+    journal = next(j for j in journals if j.txn_id.endswith("-M01"))
+
+    bank_split = next(s for s in journal.splits if s.account == accounts["bank"])
+    assert bank_split.debit == pytest.approx(480000.0, abs=0.01)
+    assert bank_split.credit == 0.0  # bank receipt is a DEBIT, never a credit
+
+    remuneration_split = next(
+        s for s in journal.splits if s.account == accounts["remuneration_income"]
+    )
+    assert remuneration_split.credit == pytest.approx(200000.0, abs=0.01)
+    assert remuneration_split.debit == 0.0  # income is a CREDIT, never a debit
+
+    tds_split = next(s for s in journal.splits if s.account == accounts["tds_expense"])
+    assert tds_split.debit == pytest.approx(20000.0, abs=0.01)
+    assert tds_split.credit == 0.0  # TDS is booked as an EXPENSE debit, never a credit
+
+    assert journal.balanced
+
+
+# 5.8 -- firms_tax_other attaches to the PLMI leg (additional_share_of_
+# profit), NOT the current-year share-of-profit leg, at the mapper/
+# build_input_data() integration level (distinct from the jv_emitter-level
+# test already covering the split arithmetic). Confirms mapper carries
+# additional_share_of_profit through completely UNCHANGED by
+# firms_tax_other -- it never subtracts firms_tax_other from it a second
+# time, since the advice's own figure already arrives net upstream.
+def test_build_input_data_firms_tax_other_attaches_to_plmi_leg_only():
+    schedule = _schedule_record(
+        "2025-26",
+        ["December"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"December": 300000.0}},
+            "firm_tax_on_sop": {"total": -104832.0, "months": {"December": -104832.0}},
+            "firm_tax_others": {"total": -349440.0, "months": {"December": -349440.0}},
+        },
+    )
+    plmi_net = 650560.0  # already net of firms_tax_other, per upstream contract
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[
+            _class_b_advice(
+                "December", 2025,
+                share_of_profit=195168.0,  # 300000 - 104832, agrees with schedule
+                additional_share_of_profit=plmi_net,
+            )
+        ],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    # additional_share_of_profit (the PLMI leg) is carried through EXACTLY
+    # as supplied -- firms_tax_other never touches it here.
+    assert line["additional_share_of_profit"] == plmi_net
+    assert line["firms_tax_other"] == -349440.0
+    assert line["firms_tax_sop"] == -104832.0
+    # And firms_tax_sop, not firms_tax_other, is what nets the CURRENT
+    # year's gross share of profit -- that identity is asserted separately
+    # in test_build_input_data_class_b_net_never_presented_as_gross.
+    assert line["share_of_profit_gross"] == 300000.0
+
+
+# 5.9 -- the ctc_structuring block is carried through to `data` for
+# reconciliation purposes, but yields NO journal row: a change to
+# ctc_structuring's content must produce byte-for-byte identical journals.
+# Merely checking that the block is present/carried through is NOT
+# sufficient (mapper.py already had passing tests for that) -- this proves
+# it never leaks into build_journals()'s output.
+def test_ctc_structuring_yields_no_journal_row():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "current_account": "Assets:Firm Current Account",
+        "capital_contribution": "Assets:Firm Capital Account",
+        "medical_expense": "Expenses:Medical",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    schedule_no_ctc = _schedule_record(
+        "2025-26", ["April"],
+        {"gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}}},
+        ctc_structuring=None,
+    )
+    schedule_with_ctc = _schedule_record(
+        "2025-26", ["April"],
+        {"gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}}},
+        ctc_structuring={
+            "total": 180000.0,
+            "months": {"April": 15000.0},
+            "rows": {"leased_car": {"total": 180000.0, "months": {"April": 15000.0}}},
+            "unknown_labels": [],
+            "diagnostics": [],
+        },
+    )
+
+    data_without_ctc = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        schedule_record=schedule_no_ctc,
+        accounts=accounts,
+    )
+    data_with_ctc = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        schedule_record=schedule_with_ctc,
+        accounts=accounts,
+    )
+    assert "ctc_structuring" not in data_without_ctc
+    assert data_with_ctc["ctc_structuring"]["total"] == 180000.0
+
+    journals_without_ctc = build_journals(build_report(data_without_ctc), accounts)
+    journals_with_ctc = build_journals(build_report(data_with_ctc), accounts)
+
+    def _splits_signature(journals):
+        return [
+            (j.txn_id, sorted((s.account, s.debit, s.credit) for s in j.splits))
+            for j in journals
+        ]
+
+    assert _splits_signature(journals_without_ctc) == _splits_signature(journals_with_ctc), (
+        "ctc_structuring's presence/content must never change any journal split"
+    )
+    # And no split anywhere carries an amount equal to the CTC total or any
+    # of its per-month figures -- confirming no row was emitted FROM it.
+    ctc_amounts = {180000.0, 15000.0}
+    for j in journals_with_ctc:
+        for s in j.splits:
+            assert s.debit not in ctc_amounts
+            assert s.credit not in ctc_amounts

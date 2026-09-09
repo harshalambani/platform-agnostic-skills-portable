@@ -376,7 +376,9 @@ class MonthlyLine:
     remuneration: float
     share_of_profit_gross: float
     additional_share_of_profit: float
-    firms_tax: float
+    firms_tax_sop: float    # firm's tax on the CURRENT year's share of profit
+    firms_tax_other: float  # firm's tax on a PRIOR-year PLMI instalment drawn
+    # down this month (never on the current year's SoP) -- see jv_emitter.py.
     tds: float
     capital_transferred: float
     total_paid: float
@@ -443,7 +445,9 @@ def build_report(data: dict) -> Report:
             month=m["month"], remuneration=m["remuneration"],
             share_of_profit_gross=m["share_of_profit_gross"],
             additional_share_of_profit=m.get("additional_share_of_profit", 0.0) or 0.0,
-            firms_tax=m.get("firms_tax", 0.0) or 0.0, tds=m.get("tds", 0.0) or 0.0,
+            firms_tax_sop=m.get("firms_tax_sop", 0.0) or 0.0,
+            firms_tax_other=m.get("firms_tax_other", 0.0) or 0.0,
+            tds=m.get("tds", 0.0) or 0.0,
             capital_transferred=m.get("capital_transferred", 0.0) or 0.0,
             total_paid=m["total_paid"], misc=misc,
             interest_on_capital=m.get("interest_on_capital", 0.0) or 0.0,
@@ -525,9 +529,9 @@ def build_report(data: dict) -> Report:
         {"Computed (monthly TDS)": total_tds_credit, "Form 26AS": form_26as},
     ))
 
-    total_firms_tax = (sum(m.firms_tax for m in monthly) if monthly else 0.0) + sum(
-        (i.firms_tax or 0.0) for i in reporting_instalments
-    )
+    total_firms_tax = (
+        sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else 0.0
+    ) + sum((i.firms_tax or 0.0) for i in reporting_instalments)
     conflation_note = firms_tax_conflated_with_26as(total_firms_tax, form_26as, total_tds_credit)
     reconciliation.append(ReconciliationResult(
         category="Firm's tax on share of profit is absent from Form 26AS",

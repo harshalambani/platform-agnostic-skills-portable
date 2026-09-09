@@ -4,11 +4,9 @@
 # other skill in the catalogue (26AS takes a PDF, MF CAS takes an .xlsx,
 # AIS Reconcile takes AIS .json) -- it was the only one still requiring a
 # human to hand-key a structured YAML/JSON input first. The manifest below
-# is that reshape. `payout_advice.py` (L1), `advisory.py` (L3), and
-# `llp_statement.py` (L5) are now implemented parsers; `payment_schedule.py`
-# under parsers/ remains a guarded NotImplementedError placeholder pending a
-# real, de-identified document specimen (see AGENT.md's "Stage 2" section).
-# Every optional leg still degrades to an explicit "not available" note
+# is that reshape. `payout_advice.py` (L1), `advisory.py` (L3),
+# `llp_statement.py` (L5) and `payment_schedule.py` (L4) are now implemented
+# parsers. Every optional leg still degrades to an explicit "not available" note
 # rather than failing the run or fabricating a figure. The
 # structured YAML/JSON input (`input_path`) this skill used to expose is
 # retained ONLY as a test-only run() parameter -- it is deliberately absent
@@ -72,6 +70,11 @@ inputs:
     label: "LLP statement of account (enables leg 1, the capital sign-off)"
     file_types: [".pdf"]
     required: false
+  - name: "payment_schedule"
+    type: "file"
+    label: "Incentive payment schedule (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)"
+    file_types: [".pdf"]
+    required: false
   - name: "gnucash_path"
     type: "file"
     label: "GnuCash book (READ ONLY -- enables the books tie-out)"
@@ -94,6 +97,7 @@ run_args:
   doc_password: "{inputs.doc_password}"
   advisory_path: "{inputs.advisory_path}"
   llp_statement: "{inputs.llp_statement}"
+  payment_schedule: "{inputs.payment_schedule}"
   gnucash_path: "{inputs.gnucash_path}"
   xlsx_26as: "{inputs.xlsx_26as}"
   output_path: "{output_path}"
@@ -189,6 +193,18 @@ help:
         the whole run and never falls back to a zero or a default. The
         statement is often issued months after the financial year ends, so
         it is common for it to be genuinely unavailable at filing time.
+    - name: "payment_schedule"
+      tooltip: "The firm's own incentive payment schedule for this financial year (the L4 document)."
+      accepts: "A single PDF file."
+      gotchas: >
+        Optional -- enables the schedule leg, and takes PRECEDENCE over the
+        payout advices for gross share of profit and both firm's-tax
+        figures (firm_tax_on_sop, firm_tax_others) when supplied. Absent,
+        or supplied but unreadable/malformed/not actually a payment
+        schedule, this leg degrades to an explicit "not available" note
+        naming the reason; it never fails the whole run. A disagreement
+        between the schedule and a payout advice is reported as a
+        diagnostic note, not a run failure.
     - name: "gnucash_path"
       tooltip: "This entity's GnuCash book, opened READ ONLY for the books tie-out."
       accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."
@@ -219,7 +235,7 @@ help:
   steps:
     - "Pick the entity."
     - "Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter."
-    - "Optionally supply the LLP statement, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs."
+    - "Optionally supply the LLP statement, the incentive payment schedule, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs."
     - "Click Run."
     - "Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning."
   outputs:
@@ -260,10 +276,10 @@ help:
     - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
       fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."
-      fix: "This build has no independent payment-schedule-PDF parser yet (see AGENT.md's Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers."
+      fix: "A VARIANCE means the supplied payment schedule and a payout advice genuinely disagree on gross share of profit or a firm's-tax figure for that month -- check the Note column for the exact numbers. The schedule's own figure is what is used; the disagreement is reported, not silently resolved."
     - problem: "'ERROR: could not parse ...' naming the advisory letter or a payout advice."
       fix: "The PDF is unreadable/malformed, password-protected without the right password, or its content doesn't match the expected layout (e.g. an L1 payout certificate misfiled as the Advisory) -- fix the underlying document/password, not the filename."
-    - problem: "'ERROR: ... Stage 2 placeholder ...' naming the payment-schedule parser."
-      fix: "The payment-schedule PDF parser is a guarded placeholder pending a real, de-identified specimen of that document (see AGENT.md) -- it cannot be worked around by renaming or reformatting a file; that leg reports CANNOT RECONCILE instead."
+    - problem: "Incentive payment schedule leg shows 'not available' even though payment_schedule was supplied."
+      fix: "The document failed to open/parse, or its content didn't match the payment schedule's expected layout -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document."
     - problem: "LLP capital sign-off leg (leg 1) shows 'not available' even though llp_statement was supplied."
       fix: "The document failed to open/parse, or its content didn't match the LLP Statement of Account layout (e.g. it doesn't carry a combined CAPITAL ACCOUNT / CURRENT ACCOUNT header and a 'STATEMENT OF ACCOUNT OF ... AS ON <date> MARCH, <year>' phrase) -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document."

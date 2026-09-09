@@ -63,6 +63,7 @@ from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, wr
 from .mapper import FinancialYearMismatchError, build_input_data
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
+from .parsers import payment_schedule as _payment_schedule_parser
 from .parsers import payout_advice as _payout_advice_parser
 from .writer import write_report_workbook
 
@@ -142,6 +143,28 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         return f"{label}: not available (no document supplied).", None
     try:
         record = _llp_statement_parser.parse(path, password)
+        return f"{label}: parsed from {path}.", record
+    except NotImplementedError as e:
+        return f"{label}: not available ({e})", None
+    except Exception as e:
+        return f"{label}: not available (could not parse {path}: {e})", None
+
+
+def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | None]:
+    """Resolve the OPTIONAL L4 (incentive payment schedule) leg to a
+    (status note, parsed record or None) pair -- same degradation contract
+    as _resolve_llp_leg. `payment_schedule.py`'s parser is now real (see
+    its own module docstring); a genuinely malformed/wrong-content/
+    wrong-password PDF raises NotAPaymentScheduleError (or a
+    pdfplumber-level exception), both of which degrade this leg to a "not
+    available" note, never an uncaught traceback and never a crash of the
+    whole run. Absent path degrades identically -- never a fabricated
+    figure, never a block on the rest of the run."""
+    label = "Incentive payment schedule"
+    if not path:
+        return f"{label}: not available (no document supplied).", None
+    try:
+        record = _payment_schedule_parser.parse(path, password)
         return f"{label}: parsed from {path}.", record
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
@@ -302,6 +325,7 @@ def run(
     doc_password: str | None = None,
     advisory_path: str = "",
     llp_statement: str = "",
+    payment_schedule: str = "",
     gnucash_path: str = "",
     xlsx_26as: str = "",
     output_path: str = "",
@@ -330,6 +354,7 @@ def run(
         doc_password=doc_password,
         advisory_path=advisory_path,
         llp_statement=llp_statement,
+        payment_schedule=payment_schedule,
         gnucash_path=gnucash_path,
         xlsx_26as=xlsx_26as,
         output_path=output_path,
@@ -346,6 +371,7 @@ def _run_from_documents(
     doc_password: str | None,
     advisory_path: str,
     llp_statement: str,
+    payment_schedule: str,
     gnucash_path: str,
     xlsx_26as: str,
     output_path: str,
@@ -355,31 +381,34 @@ def _run_from_documents(
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
-    `parsers/advisory.py` (L3), `parsers/payout_advice.py` (L1) and
-    `parsers/llp_statement.py` (L5) are all implemented (see their own
-    module docstrings). `entity`, `gnucash_path` and `xlsx_26as` do not
-    have a parser under parsers/ at all in this build (gnucash_path/
-    xlsx_26as read an existing format rather than parse a free-form PDF,
-    and are wired here as always-degraded legs rather than invented reader
-    logic -- gnucash_path is used later, read-only, purely to validate
-    configured account paths before a journal is written, never for a
-    books tie-out); `parsers/payment_schedule.py` has no corresponding
-    input in this reshaped manifest at all -- the incentive payment-
-    schedule leg remains CANNOT RECONCILE, unchanged from before.
+    `parsers/advisory.py` (L3), `parsers/payout_advice.py` (L1),
+    `parsers/llp_statement.py` (L5) and `parsers/payment_schedule.py` (L4)
+    are all implemented (see their own module docstrings). `entity`,
+    `gnucash_path` and `xlsx_26as` do not have a parser under parsers/ at
+    all in this build (gnucash_path/xlsx_26as read an existing format
+    rather than parse a free-form PDF, and are wired here as
+    always-degraded legs rather than invented reader logic -- gnucash_path
+    is used later, read-only, purely to validate configured account paths
+    before a journal is written, never for a books tie-out).
 
     Required inputs (entity, advices_dir, advisory_path) missing fail loud
     by name, before any parsing is attempted. Optional inputs
-    (llp_statement, gnucash_path, xlsx_26as) resolve to a per-leg status
-    note FIRST, independent of whether the required documents can be
-    parsed yet, so their "not available" degrade behaviour is observable
-    even while a required leg fails. The two required documents then
-    attempt to parse; ANY exception from that attempt (a document that
-    fails its content-dispatch check, or pdfplumber choking on an
-    unreadable/malformed/wrong-password PDF) is caught and turned into an
-    "ERROR: ..." string naming the document and the underlying reason --
-    this function never raises for a user-facing problem. The optional L5
-    leg degrades the same way (see _resolve_llp_leg) rather than aborting
-    the run.
+    (llp_statement, payment_schedule, gnucash_path, xlsx_26as) resolve to
+    a per-leg status note FIRST, independent of whether the required
+    documents can be parsed yet, so their "not available" degrade
+    behaviour is observable even while a required leg fails. The two
+    required documents then attempt to parse; ANY exception from that
+    attempt (a document that fails its content-dispatch check, or
+    pdfplumber choking on an unreadable/malformed/wrong-password PDF) is
+    caught and turned into an "ERROR: ..." string naming the document and
+    the underlying reason -- this function never raises for a user-facing
+    problem. The optional L5 and L4 legs degrade the same way (see
+    _resolve_llp_leg / _resolve_schedule_leg) rather than aborting the
+    run. When the L4 schedule parses, its record takes precedence over
+    the payout advices for `gross_share_of_profit` / `firm_tax_on_sop` /
+    `firm_tax_others` inside mapper.build_input_data() -- any disagreement
+    with the payout advices is reported as a mapper diagnostic, never
+    blocking the run.
 
     Once both required documents (and the optional L5 leg, if resolvable)
     parse, their records are assembled by mapper.build_input_data() into
@@ -419,6 +448,7 @@ def _run_from_documents(
     # Optional legs resolve first -- independent of whether the required
     # legs below can be parsed yet in this build.
     llp_note, llp_record = _resolve_llp_leg(llp_statement, doc_password)
+    schedule_note, schedule_record = _resolve_schedule_leg(payment_schedule, doc_password)
     if not gnucash_path:
         gnucash_note = "GnuCash books tie-out: not available (no book supplied)."
     else:
@@ -434,7 +464,7 @@ def _run_from_documents(
             "26AS TDS-credit tie-out: not available (reader not yet implemented in this "
             f"build; {xlsx_26as} was supplied but not read)."
         )
-    optional_notes = [llp_note, gnucash_note, xlsx_note]
+    optional_notes = [llp_note, schedule_note, gnucash_note, xlsx_note]
 
     # Required legs: the Advisory letter, then every monthly payout advice.
     # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
@@ -481,6 +511,7 @@ def _run_from_documents(
             advisory_record=advisory_record,
             advice_records=advice_records,
             llp_record=llp_record,
+            schedule_record=schedule_record,
             firm_name=entity_profile.name if entity_profile else "",
         )
     except (FinancialYearMismatchError, ValueError) as e:

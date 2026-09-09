@@ -82,7 +82,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     # Stage 1b fields (jv_emitter.py) -- only this month carries them, to
@@ -96,7 +96,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -104,7 +104,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -112,7 +112,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -120,7 +120,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -128,7 +128,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -136,7 +136,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -144,23 +144,37 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
   - month: "2025-12"
     remuneration: 300000
     share_of_profit_gross: 500000
+    # additional_share_of_profit here is a prior-year PLMI drawdown,
+    # already NET of the firm's tax on that drawdown (see AGENT.md / this
+    # skill's principle -- "gross PLMI, less firm's tax paid by firm, less
+    # capital contribution = net PLMI"): gross 1,000,000 less firms_tax_other
+    # 349440 (both at firms_tax_rate) = 650560. jv_emitter.py books this
+    # NET figure as-is, with no further subtraction of firms_tax_other --
+    # that leg is what already netted it.
     additional_share_of_profit: 650560
-    firms_tax: -524160
+    firms_tax_sop: -174720
+    firms_tax_other: -349440
     tds: -30000
     capital_transferred: 0
-    total_paid: 896400
+    # total_paid = remuneration 300000 + net current-year SoP leg 325280
+    # (500000 - 174720) + the PLMI leg 650560 (already net, booked as-is)
+    # - tds 30000 = 1245840. (Recomputed for the firms_tax_sop/
+    # firms_tax_other split -- the old combined-field arithmetic gave
+    # 896400, which no longer balances the journal now that the PLMI leg
+    # is booked at its full net value instead of being re-netted.)
+    total_paid: 1245840
   - month: "2026-01"
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -168,7 +182,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -176,7 +190,7 @@ monthly:
     remuneration: 300000
     share_of_profit_gross: 500000
     additional_share_of_profit: 0
-    firms_tax: -174720
+    firms_tax_sop: -174720
     tds: -30000
     capital_transferred: 0
     total_paid: 595280
@@ -205,7 +219,10 @@ advisory:
   stated_closing_capital: 1000000
 
 external:
-  bank_credits_total: 8101266
+  # Recomputed alongside December's total_paid (see the monthly block's
+  # comment above) so this still agrees with computed cash received:
+  # 8101266 + 349440 = 8450706.
+  bank_credits_total: 8450706
   form_26as_total_credit: 360000
   return_exempt_share_of_profit: 6000000
   return_closing_capital: 1000000

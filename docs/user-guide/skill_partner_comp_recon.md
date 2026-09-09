@@ -26,6 +26,9 @@ Use this once a financial year's partner-compensation documents are in hand and 
 - **LLP statement of account (enables leg 1, the capital sign-off)** (optional) — accepts: A single PDF file.
   - The LLP's own statement of account for this partner, this financial year.
   - ⚠️ Optional -- enables the capital sign-off leg (leg 1). Absent, or supplied but unreadable/malformed/not actually an LLP statement of account (wrong document filed here), this leg degrades to an explicit "not available" note naming the reason; it never fails the whole run and never falls back to a zero or a default. The statement is often issued months after the financial year ends, so it is common for it to be genuinely unavailable at filing time.
+- **Incentive payment schedule (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)** (optional) — accepts: A single PDF file.
+  - The firm's own incentive payment schedule for this financial year (the L4 document).
+  - ⚠️ Optional -- enables the schedule leg, and takes PRECEDENCE over the payout advices for gross share of profit and both firm's-tax figures (firm_tax_on_sop, firm_tax_others) when supplied. Absent, or supplied but unreadable/malformed/not actually a payment schedule, this leg degrades to an explicit "not available" note naming the reason; it never fails the whole run. A disagreement between the schedule and a payout advice is reported as a diagnostic note, not a run failure.
 - **GnuCash book (READ ONLY -- enables the books tie-out)** (optional) — accepts: GnuCash XML book (.gnucash), optionally gzip-compressed.
   - This entity's GnuCash book, opened READ ONLY for the books tie-out.
   - ⚠️ Optional. Never opened for writing by this skill. Absent (or the books-reader not yet implemented), the books tie-out leg is reported 'not available', never defaulted.
@@ -40,7 +43,7 @@ Use this once a financial year's partner-compensation documents are in hand and 
 
 1. Pick the entity.
 2. Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter.
-3. Optionally supply the LLP statement, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs.
+3. Optionally supply the LLP statement, the incentive payment schedule, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs.
 4. Click Run.
 5. Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning.
 
@@ -66,7 +69,7 @@ Start with the Reconciliation sheet, then Exceptions -- a "CANNOT RECONCILE" sta
 | If… | Then… |
 |------|-------|
 | A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure. | That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value. |
-| Reconciliation shows VARIANCE on the incentive schedule leg. | This build has no independent payment-schedule-PDF parser yet (see AGENT.md's Stage 2 note) -- that leg is reported CANNOT RECONCILE rather than VARIANCE for this reason; a VARIANCE elsewhere means two supplied figures genuinely disagree, check the Note column for the exact numbers. |
+| Reconciliation shows VARIANCE on the incentive schedule leg. | A VARIANCE means the supplied payment schedule and a payout advice genuinely disagree on gross share of profit or a firm's-tax figure for that month -- check the Note column for the exact numbers. The schedule's own figure is what is used; the disagreement is reported, not silently resolved. |
 | 'ERROR: could not parse ...' naming the advisory letter or a payout advice. | The PDF is unreadable/malformed, password-protected without the right password, or its content doesn't match the expected layout (e.g. an L1 payout certificate misfiled as the Advisory) -- fix the underlying document/password, not the filename. |
-| 'ERROR: ... Stage 2 placeholder ...' naming the payment-schedule parser. | The payment-schedule PDF parser is a guarded placeholder pending a real, de-identified specimen of that document (see AGENT.md) -- it cannot be worked around by renaming or reformatting a file; that leg reports CANNOT RECONCILE instead. |
+| Incentive payment schedule leg shows 'not available' even though payment_schedule was supplied. | The document failed to open/parse, or its content didn't match the payment schedule's expected layout -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document. |
 | LLP capital sign-off leg (leg 1) shows 'not available' even though llp_statement was supplied. | The document failed to open/parse, or its content didn't match the LLP Statement of Account layout (e.g. it doesn't carry a combined CAPITAL ACCOUNT / CURRENT ACCOUNT header and a 'STATEMENT OF ACCOUNT OF ... AS ON <date> MARCH, <year>' phrase) -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document. |
