@@ -139,6 +139,18 @@ class EntityProfile:
                                          # per-AY switch, never a one-way/permanent change. Same
                                          # shape and resolution style as audit_case_by_ay.
     extra_items: dict = field(default_factory=dict)     # b/f losses, clubbing notes
+    partner_comp_accounts: dict[str, str] = field(default_factory=dict)  # Partner
+                                         # Compensation Reconciliation skill's GnuCash account
+                                         # map: {account_key: "Full:Colon:Path"} for the eight
+                                         # keys in skill_partner_comp_recon.jv_emitter.ACCOUNT_KEYS
+                                         # ("bank", "tds_expense", "interest_on_capital",
+                                         # "current_account", "capital_contribution",
+                                         # "medical_expense", "remuneration_income",
+                                         # "share_of_profit_income"). Paths are full colon paths
+                                         # WITHOUT the "Root Account:" prefix. Empty (default)
+                                         # means the skill cannot emit a journal for this entity
+                                         # at all -- it fails loud naming the entity and listing
+                                         # the required keys rather than guessing account paths.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -178,6 +190,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             foreign_dividends_in_book=bool(fields_.get("foreign_dividends_in_book", False)),
             foreign_dividends_in_book_by_ay=fields_.get("foreign_dividends_in_book_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},
+            partner_comp_accounts=fields_.get("partner_comp_accounts") or {},
         )
     return entities
 
@@ -254,6 +267,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["foreign_dividends_in_book_by_ay"] = dict(e.foreign_dividends_in_book_by_ay)
     if e.extra_items:
         d["extra_items"] = dict(e.extra_items)
+    if e.partner_comp_accounts:
+        d["partner_comp_accounts"] = dict(e.partner_comp_accounts)
     return d
 
 

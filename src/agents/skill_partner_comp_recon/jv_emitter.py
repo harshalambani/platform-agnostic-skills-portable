@@ -197,22 +197,38 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
         Dr  capital_contribution     = -capital_transferred     (negative)
         Dr  medical_expense          = -medical_topup           (negative)
         Cr  remuneration_income      = -remuneration
-        Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax
-                                          + additional_share_of_profit)
+        Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax_sop)
+        Cr  share_of_profit_income   = -additional_share_of_profit
         Cr  interest_on_capital      = -interest_on_capital
         Cr  current_account          = -prior_cohort_drawdown
 
-    The share-of-profit credit is NET of the firm's tax (firms_tax is
-    negative, so adding it nets the credit down). Firm's tax is NEVER
-    booked as an expense in this ledger, in any year: it is a permanent
-    cost the firm already deducted before paying out, already netted into
-    the income figure recognised here. Grossing it up and booking it as an
-    expense would create a permanent, non-deductible add-back that puts
-    this ledger on a different basis than both the firm's own statement of
-    account and the filed return -- which both report the same net figure.
-    The gross amount and the firm's-tax rate stay in the workbook's working
-    paper (the One-offs / Monthly sheets) only; do not "fix" this by
-    grossing the credit back up.
+    The current-year share-of-profit credit is NET of firms_tax_sop only
+    (firms_tax_sop is negative, so adding it nets the credit down). Firm's
+    tax is NEVER booked as an expense in this ledger, in any year: it is a
+    permanent cost the firm already deducted before paying out, already
+    netted into the income figure recognised here. Grossing it up and
+    booking it as an expense would create a permanent, non-deductible
+    add-back that puts this ledger on a different basis than both the
+    firm's own statement of account and the filed return -- which both
+    report the same net figure. The gross amount and the firm's-tax rate
+    stay in the workbook's working paper (the One-offs / Monthly sheets)
+    only; do not "fix" this by grossing the credit back up.
+
+    additional_share_of_profit is booked as its own leg, separate from the
+    current year's share of profit, and is NEVER netted by firms_tax_sop --
+    that figure belongs exclusively to the current year's own share of
+    profit. Nor is it netted by firms_tax_other again here: mapper.py
+    (parsers/payout_advice.py's Class B contract) already hands this figure
+    through NET -- it is either a prior-year PLMI instalment already net of
+    firms_tax_other, or (in the FY's final month) interest on capital net of
+    its own TDS. firms_tax_other is the firm's tax on that PLMI drawdown,
+    not on the current year's share of profit -- subtracting it again here
+    would double-count a tax the payslip has already netted out. Booking
+    this leg at exactly additional_share_of_profit is what "the PLMI leg is
+    netted by firms_tax_other" means in practice: the netting already
+    happened upstream, and this leg must not undo or repeat it by folding
+    firms_tax_other into the current-year share-of-profit leg (the historic
+    defect this split fixes).
 
     prior_cohort_drawdown is a drawdown of the current-account balance with
     the firm, NOT current-year income -- the income (and the firm's tax on
@@ -242,7 +258,11 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     _add_leg(splits, accounts, "remuneration_income", ctx, -line.remuneration)
     _add_leg(
         splits, accounts, "share_of_profit_income", ctx,
-        -(line.share_of_profit_gross + line.firms_tax + line.additional_share_of_profit),
+        -(line.share_of_profit_gross + line.firms_tax_sop),
+    )
+    _add_leg(
+        splits, accounts, "share_of_profit_income", ctx,
+        -line.additional_share_of_profit,
     )
     _add_leg(splits, accounts, "interest_on_capital", ctx, -line.interest_on_capital)
     _add_leg(splits, accounts, "current_account", ctx, -line.prior_cohort_drawdown)

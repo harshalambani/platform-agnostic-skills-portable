@@ -82,6 +82,43 @@ def test_dump_then_load_round_trips_all_fields(tmp_path):
         assert got.audit_case_basis == orig.audit_case_basis
 
 
+def test_dump_then_load_round_trips_partner_comp_accounts(tmp_path):
+    """partner_comp_accounts (skill_partner_comp_recon's GnuCash account map)
+    is a later addition to EntityProfile -- pin that it survives a
+    dump_entities() -> load_entities() cycle exactly like every other field,
+    and that an entity which never sets it round-trips to the empty-dict
+    default (not None, not a stray key in the dump)."""
+    accounts = {
+        "bank": "Assets:Bank:Firm Current Account",
+        "tds_expense": "Expenses:TDS on Remuneration",
+        "interest_on_capital": "Income:Interest on Capital",
+        "current_account": "Equity:Partner Current Account",
+        "capital_contribution": "Equity:Partner Capital Account",
+        "medical_expense": "Expenses:Medical Topup",
+        "remuneration_income": "Income:Partner Remuneration",
+        "share_of_profit_income": "Income:Share of Profit",
+    }
+    entities = _make_entities()
+    entities["SYN-IND"].partner_comp_accounts = dict(accounts)
+
+    text = configs.dump_entities(entities)
+    out = tmp_path / "entities.yaml"
+    out.write_text(text, encoding="utf-8")
+
+    loaded = configs.load_entities(out)
+    assert loaded["SYN-IND"].partner_comp_accounts == accounts
+    # An entity that never set it round-trips to {}, never None, and never
+    # emits a stray key in the dump.
+    assert loaded["SYN-HUF"].partner_comp_accounts == {}
+    lines = text.splitlines()
+    start = next(i for i, ln in enumerate(lines) if ln == "SYN-HUF:")
+    end = start + 1
+    while end < len(lines) and (lines[end].startswith("  ") or not lines[end].strip()):
+        end += 1
+    huf_block = "\n".join(lines[start:end])
+    assert "partner_comp_accounts" not in huf_block
+
+
 def test_dump_includes_stable_header():
     text = configs.dump_entities(_make_entities())
     assert text.startswith(configs.ENTITIES_YAML_HEADER)
