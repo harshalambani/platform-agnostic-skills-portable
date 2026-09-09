@@ -352,12 +352,78 @@ def _build_monthly(
             "remuneration": rec["remuneration"],
             "share_of_profit_gross": gross,
         }
-        if rec.get("additional_share_of_profit") is not None:
-            line["additional_share_of_profit"] = rec["additional_share_of_profit"]
-        if rec.get("tds") is not None:
-            line["tds"] = rec["tds"]
+
+        # 2.1 -- three schedule rows carried straight through, sign as
+        # parsed (never negated/abs()'d), absent when the schedule has no
+        # figure for the month (never padded with 0.0). Note the name
+        # change: the schedule's "transferred_to_capital" row becomes the
+        # line's "capital_transferred" key -- see engine.MonthlyLine.
+        if sched.get("medical_topup") is not None:
+            line["medical_topup"] = sched["medical_topup"]
+        if sched.get("transferred_to_capital") is not None:
+            line["capital_transferred"] = sched["transferred_to_capital"]
+        if sched.get("interest_on_capital") is not None:
+            line["interest_on_capital"] = sched["interest_on_capital"]
+
+        # 2.2 -- prior_cohort_drawdown is the prior-year PLMI instalment
+        # NET of the firm's tax on it (firm_tax_others is negative as
+        # parsed, so this is an addition and the result is positive). Left
+        # absent when previous_year_plmis is itself absent or zero for the
+        # month -- never computed off a synthesised 0.0.
+        prev_plmis = sched.get("previous_year_plmis")
+        if prev_plmis:
+            line["prior_cohort_drawdown"] = prev_plmis + (firm_tax_others or 0.0)
+
+        # 2.3 -- tds is sourced from the schedule's tds_on_rem_ioc
+        # (precedence source; the payslip under-states some months). Falls
+        # back to the payslip's own figure only when the schedule has none
+        # for this month. A disagreement between the two is a loud,
+        # non-blocking diagnostic naming both figures -- the month is
+        # never dropped and nothing raises.
+        sched_tds = sched.get("tds_on_rem_ioc")
+        payslip_tds = rec.get("tds")
+        if sched_tds is not None and payslip_tds is not None and abs(sched_tds - payslip_tds) > _AMOUNT_TOLERANCE:
+            diagnostics.append(
+                f"NOTE: {month} -- payslip's TDS figure ({payslip_tds:,.2f}) "
+                f"disagrees with the payment schedule's tds_on_rem_ioc "
+                f"({sched_tds:,.2f}) -- the schedule figure is used "
+                "(precedence source); not blocking."
+            )
+        tds = sched_tds if sched_tds is not None else payslip_tds
+        if tds is not None:
+            line["tds"] = tds
         if rec.get("tds_label") is not None:
             line["tds_label"] = rec["tds_label"]
+
+        # 2.4 -- additional_share_of_profit is booked from the schedule's
+        # arrears_share_of_profit ONLY. The payslip's own
+        # additional_share_of_profit field is polymorphic across the year
+        # (a prior-year PLMI drawdown in some months, net interest on
+        # capital in others, genuine arrears in others) and cannot be a
+        # booking source; it is used here purely as a reconciliation
+        # check. A disagreement is reported as a loud, non-blocking
+        # diagnostic -- never a dropped month, never a changed booked
+        # amount.
+        sched_arrears = sched.get("arrears_share_of_profit")
+        if sched_arrears is not None:
+            line["additional_share_of_profit"] = sched_arrears
+        payslip_arrears = rec.get("additional_share_of_profit")
+        if payslip_arrears is not None:
+            effective_sched_arrears = sched_arrears if sched_arrears is not None else 0.0
+            if abs(payslip_arrears - effective_sched_arrears) > _AMOUNT_TOLERANCE:
+                diagnostics.append(
+                    f"NOTE: {month} -- payslip's additional_share_of_profit "
+                    f"figure ({payslip_arrears:,.2f}) disagrees with the payment "
+                    f"schedule's arrears_share_of_profit "
+                    f"({effective_sched_arrears:,.2f}); this payslip field is "
+                    "polymorphic across the year (a prior-year PLMI drawdown, "
+                    "net interest on capital, or genuine share-of-profit "
+                    "arrears, depending on the month) and is used here only as "
+                    "a reconciliation check, not a booking source -- the "
+                    "schedule's arrears_share_of_profit is what is booked; "
+                    "not blocking."
+                )
+
         if rec["is_class_b"] and rec.get("share_of_profit_net") is not None:
             # Distinctly named -- NEVER share_of_profit_gross. Carried for
             # traceability/diagnostics; engine.build_report() does not read
