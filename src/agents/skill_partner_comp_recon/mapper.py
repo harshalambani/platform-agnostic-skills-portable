@@ -314,7 +314,7 @@ def _build_monthly(
         firm_tax_on_sop = sched.get("firm_tax_on_sop")
         firm_tax_others = sched.get("firm_tax_others")
 
-        # Class B net-vs-gross identity check: gross - net == firm_tax_on_sop.
+        # Class B net-vs-gross identity check: gross - net == -firm_tax_on_sop.
         if (
             rec["is_class_b"]
             and gross is not None
@@ -322,7 +322,7 @@ def _build_monthly(
             and firm_tax_on_sop is not None
         ):
             implied_tax = gross - rec["share_of_profit_net"]
-            if abs(implied_tax - firm_tax_on_sop) > _AMOUNT_TOLERANCE:
+            if abs(implied_tax + firm_tax_on_sop) > _AMOUNT_TOLERANCE:
                 diagnostics.append(
                     f"NOTE: {month} -- Class B net share of profit "
                     f"({rec['share_of_profit_net']:,.2f}) does not reconcile "

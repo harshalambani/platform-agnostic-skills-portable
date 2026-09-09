@@ -3236,23 +3236,8 @@ def test_build_input_data_class_b_full_year_survives_zero_dropped():
     # share_of_profit_gross. Same 300000 / 104832 figures every month,
     # consistent with _class_b_advice()'s own default net (195168).
     #
-    # NOTE on sign: mapper.py's own Class B net-vs-gross identity check
-    # (_build_monthly()) computes `implied_tax = gross - net` (positive
-    # under normal net < gross conditions) and compares it DIRECTLY
-    # (not via abs()) against the schedule's raw `firm_tax_on_sop` value.
-    # The already-existing, pre-this-work parser-level tests in this file
-    # (see the payment_schedule parser assertions around
-    # `firm_tax_on_sop`/`firm_tax_others`) confirm the REAL parser emits
-    # this figure as NEGATIVE. Feeding that real-world negative sign
-    # through this identity check would make it fire on every
-    # economically normal month (implied_tax positive vs a negative
-    # comparand), which cannot be what was intended. Since mapper.py
-    # must not be modified, this fixture supplies firm_tax_on_sop as
-    # POSITIVE so it satisfies the check's literal, as-written arithmetic
-    # and this test can assert the true "no diagnostic" happy path. This
-    # apparent sign-convention mismatch between the identity check and
-    # the real parser's output is called out in this work's final report
-    # as an observed possible mapper.py defect, not fixed here.
+    # firm_tax_on_sop is negative -- that is the sign the real L4 parser
+    # emits (confirmed against a real payment-schedule PDF).
     schedule = _schedule_record(
         "2025-26",
         month_names,
@@ -3261,7 +3246,7 @@ def test_build_input_data_class_b_full_year_survives_zero_dropped():
                 "total": 3600000.0, "months": {name: 300000.0 for name in month_names},
             },
             "firm_tax_on_sop": {
-                "total": 1257984.0, "months": {name: 104832.0 for name in month_names},
+                "total": -1257984.0, "months": {name: -104832.0 for name in month_names},
             },
         },
     )
@@ -3343,21 +3328,17 @@ def test_build_input_data_mixed_classes_chronological_order():
 # (precedence source), and the net figure is preserved separately, under
 # its own distinct key, never overwriting or aliasing the gross one. Where
 # the schedule supplies gross and firm_tax_on_sop, the identity
-# gross - net == firm_tax_on_sop must hold; a violation produces a loud
+# gross - net == -firm_tax_on_sop must hold; a violation produces a loud
 # diagnostic, not silence, and does NOT block the run.
 def test_build_input_data_class_b_net_never_presented_as_gross():
-    # See the sign-convention note in
-    # test_build_input_data_class_b_full_year_survives_zero_dropped: this
-    # identity-agrees case must feed mapper.py's literal, as-written
-    # `implied_tax == firm_tax_on_sop` comparison, which is direct (not
-    # abs()-wrapped) -- so firm_tax_on_sop is supplied POSITIVE here, even
-    # though the real parser's confirmed convention is negative.
+    # firm_tax_on_sop is negative -- that is the sign the real L4 parser
+    # emits.
     schedule = _schedule_record(
         "2025-26",
         ["April"],
         {
             "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
-            "firm_tax_on_sop": {"total": 104832.0, "months": {"April": 104832.0}},
+            "firm_tax_on_sop": {"total": -104832.0, "months": {"April": -104832.0}},
         },
     )
     net_reported = 195168.0  # 300000 - 104832, agrees exactly
@@ -3382,9 +3363,10 @@ def test_build_input_data_class_b_net_gross_mismatch_is_loud_not_blocking():
             "firm_tax_on_sop": {"total": -104832.0, "months": {"April": -104832.0}},
         },
     )
-    # Net reported disagrees with gross - firm_tax_on_sop by well over
-    # _AMOUNT_TOLERANCE (1.0) -- must be reported, never silently corrected,
-    # and must NOT raise / block assembly.
+    # Correct net would be gross + firm_tax_on_sop = 300000 + (-104832)
+    # = 195168.0; this fixture reports a net that disagrees with that by
+    # well over _AMOUNT_TOLERANCE (1.0) -- must be reported, never
+    # silently corrected, and must NOT raise / block assembly.
     wrong_net = 150000.0
     data = build_input_data(
         financial_year="2025-26",
