@@ -89,7 +89,9 @@ never synthesised from the advices.
 """
 from __future__ import annotations
 
-from .engine import fy_of_date
+import calendar
+
+from .engine import fy_of_date, fy_start_year
 
 # Hard-required keys on every assembled monthly line -- engine.build_report()
 # reads these via `m["..."]` (KeyError, not `.get()`), so a record missing
@@ -466,6 +468,89 @@ def _place_interest_on_capital(monthly: list[dict], llp_record: dict | None) -> 
     return diagnostics
 
 
+def _cohort_month_end(year: int, month: int) -> str:
+    """(year, month) -> ISO date of that month's last day. Mirrors
+    jv_emitter._month_end's convention exactly (duplicated here rather
+    than imported, to avoid a new mapper -> jv_emitter dependency)."""
+    last_day = calendar.monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-{last_day:02d}"
+
+
+def _prior_fy(fy: str) -> str:
+    """"2025-26" -> "2024-25", via engine.fy_start_year (never a
+    hardcoded year)."""
+    start = fy_start_year(fy) - 1
+    return f"{start}-{str(start + 1)[-2:]}"
+
+
+def _build_cohorts(schedule_record: dict | None, fy: str) -> list[dict]:
+    """Assembles the `cohorts` list engine.classify_cohort_instalments()
+    consumes from the L4 payment schedule's "Previous Year PLMIs" row --
+    the only source in this build that carries payment *dates* for these
+    instalments (see build brief DX4 s.1). One instalment is emitted for
+    every month where previous_year_plmis is present and non-zero; all of
+    them are grouped into a single cohort whose award_fy is the FY
+    immediately preceding the reporting FY (the row is literally labelled
+    "Previous Year PLMIs", so the award year is definitionally the prior
+    FY). Returns [] -- never an empty list nested under a "cohorts" key --
+    when no such month is found.
+    """
+    if not schedule_record:
+        return []
+    fy_field = schedule_record.get("financial_year")
+    months = schedule_record.get("months") or []
+    rows = schedule_record.get("rows") or {}
+    try:
+        start_year = int(str(fy_field).split("-")[0])
+    except (ValueError, IndexError, TypeError):
+        return []
+
+    plmi_row = rows.get("previous_year_plmis")
+    if not isinstance(plmi_row, dict):
+        return []
+    plmi_months = plmi_row.get("months") or {}
+
+    tax_row = rows.get("firm_tax_others")
+    tax_months = (tax_row.get("months") or {}) if isinstance(tax_row, dict) else {}
+    capital_row = rows.get("transferred_to_capital")
+    capital_months = (capital_row.get("months") or {}) if isinstance(capital_row, dict) else {}
+
+    instalments: list[dict] = []
+    for name in months:
+        num = _MONTH_NAME_TO_NUM.get(str(name).lower())
+        if num is None:
+            continue
+        gross_raw = plmi_months.get(name)
+        if not gross_raw:
+            # Absent or exactly zero for this month -- no instalment.
+            continue
+        year = start_year if num >= 4 else start_year + 1
+        date = _cohort_month_end(year, num)
+        gross = abs(float(gross_raw))
+
+        firms_tax = tax_months.get(name)
+        firms_tax = firms_tax if firms_tax else None
+        capital = capital_months.get(name)
+        capital = capital if capital else None
+
+        if firms_tax is None and capital is None:
+            net = None
+        else:
+            net = gross + (firms_tax or 0.0) + (capital or 0.0)
+
+        instalments.append({
+            "date": date,
+            "gross": gross,
+            "firms_tax": firms_tax,
+            "capital": capital,
+            "net": net,
+        })
+
+    if not instalments:
+        return []
+    return [{"award_fy": _prior_fy(fy), "instalments": instalments}]
+
+
 def build_input_data(
     *,
     financial_year: str | None = None,
@@ -489,6 +574,11 @@ def build_input_data(
         and a document-derived year raises FinancialYearMismatchError.
     advisory_record:
         The dict returned by parsers.advisory.parse_l3_text()/parse().
+        Its `financial_year` and the gross total of its
+        `schedule_instalments` (when present) are carried through into
+        `data["advisory"]` as `financial_year` /
+        `schedule_instalments_gross_total`, for engine.build_report()'s
+        award-year-advisory-vs-payment-schedule reconciliation category.
     advice_records:
         A list of dicts, each returned by
         parsers.payout_advice.parse_l1_text()/parse() -- one per monthly
@@ -525,8 +615,12 @@ def build_input_data(
     Returns
     -------
     dict with keys: financial_year, firm_name, and (only when the source
-    data supports them) drivers, advisory, monthly, accounts,
-    ctc_structuring. `external` and `payroll` are never populated in this
+    data supports them) drivers, advisory, monthly, cohorts, accounts,
+    ctc_structuring. `cohorts` is assembled from the L4 payment schedule's
+    "Previous Year PLMIs" row (the only source that carries payment dates
+    for these instalments -- see _build_cohorts()) and is only ever
+    emitted as a non-empty list with one cohort; it is never emitted as
+    an empty list. `external` and `payroll` are never populated in this
     build -- no parser in this package produces them -- so the
     corresponding reconciliation categories in engine.build_report()
     legitimately report CANNOT RECONCILE. A `"_diagnostics"` key
@@ -551,12 +645,27 @@ def build_input_data(
     }
     if drivers is not None:
         data["drivers"] = drivers
-    if advisory_record is not None and advisory_record.get("schedule_projected_closing_balance") is not None:
-        data["advisory"] = {
-            "stated_closing_capital": advisory_record["schedule_projected_closing_balance"],
-        }
+    if advisory_record is not None:
+        adv: dict = {}
+        if advisory_record.get("schedule_projected_closing_balance") is not None:
+            adv["stated_closing_capital"] = advisory_record["schedule_projected_closing_balance"]
+        if advisory_record.get("financial_year"):
+            adv["financial_year"] = advisory_record["financial_year"]
+        adv_instalments = advisory_record.get("schedule_instalments") or []
+        adv_grosses = [
+            inst.get("gross")
+            for inst in adv_instalments
+            if isinstance(inst, dict) and inst.get("gross") is not None
+        ]
+        if adv_grosses:
+            adv["schedule_instalments_gross_total"] = sum(adv_grosses)
+        if adv:
+            data["advisory"] = adv
     if monthly:
         data["monthly"] = monthly
+    cohorts = _build_cohorts(schedule_record, fy)
+    if cohorts:
+        data["cohorts"] = cohorts
     if accounts:
         data["accounts"] = accounts
     if schedule_record is not None and schedule_record.get("ctc_structuring") is not None:

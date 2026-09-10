@@ -506,13 +506,31 @@ def _run_from_documents(
     else:
         drivers_by_fy = {}
 
+    # firm_name is the FIRM's name (the LLP/partnership that pays out the
+    # compensation), never the taxpayer's own name -- entity_profile.name
+    # identifies the partner whose return/books this run is for, which is
+    # a different entity entirely and must never be used here. The payment
+    # schedule (L4) prints the firm's own name on its letterhead, so it is
+    # the preferred source; a payout advice (L1) also prints it, so the
+    # first advice record with a non-empty entity_name is the fallback.
+    # Absent both, firm_name is "" -- never silently defaulted to the
+    # taxpayer's name.
+    firm_name = ""
+    if schedule_record and schedule_record.get("entity_name"):
+        firm_name = schedule_record["entity_name"]
+    else:
+        for rec in advice_records:
+            if rec.get("entity_name"):
+                firm_name = rec["entity_name"]
+                break
+
     try:
         data = build_input_data(
             advisory_record=advisory_record,
             advice_records=advice_records,
             llp_record=llp_record,
             schedule_record=schedule_record,
-            firm_name=entity_profile.name if entity_profile else "",
+            firm_name=firm_name,
         )
     except (FinancialYearMismatchError, ValueError) as e:
         lines = [f"ERROR: {e}", "  Optional-leg status (unaffected by the error above):"]

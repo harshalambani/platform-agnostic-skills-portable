@@ -222,9 +222,12 @@ def test_required_cumulative_capital():
 # ---------------------------------------------------------------------------
 
 def test_mid_year_rate_change_detected():
+    # Grosses all equal -- the asymmetry in capitals is a real rate change,
+    # not an artefact of unequal instalment sizes.
     suspect = detect_mid_year_rate_change(
         [416667, 291667, 291667], target_compensation=10_000_000,
         months_achieved=12, months_total=48,
+        instalment_grosses=[1_000_000, 1_000_000, 1_000_000],
     )
     assert suspect is not None
     assert suspect.implied_old_rate == pytest.approx(0.500, abs=0.001)
@@ -236,8 +239,32 @@ def test_no_rate_change_when_all_instalment_capitals_equal():
     suspect = detect_mid_year_rate_change(
         [291667, 291667, 291667], target_compensation=10_000_000,
         months_achieved=12, months_total=48,
+        instalment_grosses=[1_000_000, 1_000_000, 1_000_000],
     )
     assert suspect is None
+
+
+def test_no_rate_change_flagged_when_grosses_also_differ():
+    # Unequal capitals here are the expected arithmetic consequence of
+    # unequal instalment grosses (a bigger instalment carries a bigger
+    # capital deduction even at an unchanged rate) -- must NOT be flagged
+    # as a rate change.
+    suspect = detect_mid_year_rate_change(
+        [416667, 291667], target_compensation=10_000_000,
+        months_achieved=12, months_total=48,
+        instalment_grosses=[1_500_000, 1_000_000],
+    )
+    assert suspect is None
+
+
+def test_rate_change_still_detected_with_no_gross_info_supplied():
+    # Backward-compatible default: when instalment_grosses is not supplied
+    # at all, the detector keeps its original equal-capitals-only gate.
+    suspect = detect_mid_year_rate_change(
+        [416667, 291667, 291667], target_compensation=10_000_000,
+        months_achieved=12, months_total=48,
+    )
+    assert suspect is not None
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +284,12 @@ def test_build_report_end_to_end_against_fixture():
 
     by_category = {r.category: r for r in report.reconciliation}
     for cat, r in by_category.items():
-        if cat.startswith("Incentive schedule"):
-            assert r.agree is None, "Leg 2 has no independent PDF source in this build"
+        if cat.startswith("Incentive instalments"):
+            assert r.agree is True, (
+                f"expected AGREE for {cat!r} (fixture's advisory financial_year "
+                f"matches the cohort's award_fy and the gross totals match), "
+                f"got {r.agree!r} ({r.note})"
+            )
         else:
             assert r.agree is True, f"expected AGREE for {cat!r}, got {r.agree!r} ({r.note})"
 
@@ -2807,6 +2838,121 @@ def test_optional_inputs_absent_degrade_to_not_available_never_zero_or_default(t
 
 
 # ---------------------------------------------------------------------------
+# Defect C -- agent.py's firm_name must come from the FIRM's own name (the
+# L4 payment schedule's entity_name, falling back to the first L1 payout
+# advice's entity_name), NEVER from entity_profile.name (which identifies
+# the taxpayer/partner the run is for -- a different entity entirely). All
+# three synthetic names below are invented for this test only.
+# ---------------------------------------------------------------------------
+
+class _FakeEntityProfile:
+    """A minimal stand-in for configs.EntityProfile whose .name is a
+    deliberately different, deliberately distinctive synthetic string --
+    if it ever leaks into firm_name, that is exactly the bug this test
+    exists to catch."""
+    name = "Synthetic Taxpayer Person"
+    extra_items: dict = {}
+
+
+def _patch_required_legs_for_firm_name_test(monkeypatch, tmp_path, schedule_entity_name, advice_entity_name):
+    from agents.skill_partner_comp_recon import agent as agent_module
+    from agents.skill_partner_comp_recon.mapper import build_input_data as real_build_input_data
+
+    captured_firm_names: list[str] = []
+
+    def spy_build_input_data(**kwargs):
+        captured_firm_names.append(kwargs.get("firm_name"))
+        return real_build_input_data(**kwargs)
+
+    monkeypatch.setattr(agent_module, "build_input_data", spy_build_input_data)
+    monkeypatch.setattr(
+        agent_module, "_resolve_entity_config",
+        lambda entity, config_path: (_FakeEntityProfile(), None),
+    )
+    monkeypatch.setattr(agent_module._advisory_parser, "parse", lambda path, password: {})
+    monkeypatch.setattr(
+        agent_module._payout_advice_parser, "parse",
+        lambda path, password: _class_a_advice("2025-04", entity_name=advice_entity_name),
+    )
+    if schedule_entity_name is None:
+        # No payment_schedule input at all -- _resolve_schedule_leg() must
+        # never be invoked, schedule_record stays None.
+        pass
+    else:
+        monkeypatch.setattr(
+            agent_module._payment_schedule_parser, "parse",
+            lambda path, password: {
+                "source_name": "synthetic_l4_schedule.pdf",
+                "document_type": "payment_schedule",
+                "entity_name": schedule_entity_name,
+                "financial_year": "2025-26",
+                "months": [],
+                "rows": {},
+                "ctc_structuring": None,
+                "unknown_labels": [],
+                "diagnostics": [],
+            },
+        )
+    return captured_firm_names
+
+
+def test_agent_run_firm_name_prefers_schedule_over_advice_and_entity_profile(tmp_path, monkeypatch):
+    captured = _patch_required_legs_for_firm_name_test(
+        monkeypatch, tmp_path,
+        schedule_entity_name="Schedule Synthetic LLP",
+        advice_entity_name="Advice Synthetic LLP",
+    )
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+    schedule_path = tmp_path / "schedule.pdf"
+    schedule_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    result = run(
+        entity="SYN-PARTNER", advices_dir=str(advices_dir), advisory_path=str(advisory_path),
+        payment_schedule=str(schedule_path), output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert "ERROR" not in result
+    assert captured == ["Schedule Synthetic LLP"]
+
+
+def test_agent_run_firm_name_falls_back_to_advice_when_no_schedule(tmp_path, monkeypatch):
+    captured = _patch_required_legs_for_firm_name_test(
+        monkeypatch, tmp_path, schedule_entity_name=None, advice_entity_name="Advice Synthetic LLP",
+    )
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    result = run(
+        entity="SYN-PARTNER", advices_dir=str(advices_dir), advisory_path=str(advisory_path),
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert "ERROR" not in result
+    assert captured == ["Advice Synthetic LLP"]
+
+
+def test_agent_run_firm_name_empty_string_when_neither_source_has_one_never_entity_profile(tmp_path, monkeypatch):
+    captured = _patch_required_legs_for_firm_name_test(
+        monkeypatch, tmp_path, schedule_entity_name="", advice_entity_name="",
+    )
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+    schedule_path = tmp_path / "schedule.pdf"
+    schedule_path.write_bytes(b"%PDF-1.4 not a real pdf")
+
+    result = run(
+        entity="SYN-PARTNER", advices_dir=str(advices_dir), advisory_path=str(advisory_path),
+        payment_schedule=str(schedule_path), output_path=str(tmp_path / "out.xlsx"),
+    )
+    assert "ERROR" not in result
+    assert captured == [""]
+    # entity_profile.name must NEVER have been used as a firm_name fallback.
+    assert "Synthetic Taxpayer Person" not in captured
+
+
+# ---------------------------------------------------------------------------
 # Stage 1b -- jv_emitter.py: the GnuCash multi-split journal CSV.
 # ---------------------------------------------------------------------------
 
@@ -3570,6 +3716,232 @@ def test_build_input_data_prior_cohort_drawdown_is_net_and_positive():
         schedule_record=schedule_no_plmi,
     )
     assert "prior_cohort_drawdown" not in data2["monthly"][0]
+
+
+# ---------------------------------------------------------------------------
+# Defect A -- mapper._build_cohorts() / build_input_data()'s "cohorts" key.
+# Every figure below is invented, self-consistent and round.
+# ---------------------------------------------------------------------------
+
+# 5.9a -- no "Previous Year PLMIs" row (or an all-zero/absent one) at all
+# means NO "cohorts" key is emitted -- never an empty list.
+def test_build_input_data_no_plmi_row_means_no_cohorts_key_at_all():
+    schedule = _schedule_record(
+        "2025-26", ["April"],
+        {"gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}}},
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        schedule_record=schedule,
+    )
+    assert "cohorts" not in data
+
+
+# 5.9b -- two non-zero PLMI months assemble into ONE cohort with exactly
+# two instalments, each carrying the exact sign-pinned figures from the
+# schedule -- gross positive, firms_tax and capital negative as parsed
+# (never abs()'d, never a zero-sum check standing in for the real values).
+def test_build_input_data_two_instalment_cohort_assembled_with_pinned_signs():
+    schedule = _schedule_record(
+        "2025-26", ["July", "October"],
+        {
+            "gross_share_of_profit": {
+                "total": 600000.0, "months": {"July": 300000.0, "October": 300000.0},
+            },
+            "previous_year_plmis": {
+                "total": 2000000.0, "months": {"July": 1000000.0, "October": 1000000.0},
+            },
+            "firm_tax_others": {
+                "total": -698880.0, "months": {"July": -349440.0, "October": -349440.0},
+            },
+            "transferred_to_capital": {
+                "total": -708334.0, "months": {"July": -416667.0, "October": -291667.0},
+            },
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-07"), _class_a_advice("2025-10")],
+        schedule_record=schedule,
+    )
+    assert len(data["cohorts"]) == 1
+    cohort = data["cohorts"][0]
+    # award_fy is the FY immediately preceding the reporting FY -- derived,
+    # never hardcoded.
+    assert cohort["award_fy"] == "2024-25"
+    instalments = cohort["instalments"]
+    assert len(instalments) == 2
+
+    july = next(i for i in instalments if i["date"] == "2025-07-31")
+    assert july["gross"] == 1000000.0
+    assert july["firms_tax"] == -349440.0
+    assert july["capital"] == -416667.0
+    assert july["net"] == 233893.0  # 1,000,000 - 349,440 - 416,667
+
+    october = next(i for i in instalments if i["date"] == "2025-10-31")
+    assert october["gross"] == 1000000.0
+    assert october["firms_tax"] == -349440.0
+    assert october["capital"] == -291667.0
+    assert october["net"] == 358893.0  # 1,000,000 - 349,440 - 291,667
+
+
+# 5.9c -- award_fy is derived from fy_start_year, proven on a FY other than
+# "2025-26" so a hardcoded "2024-25" could never pass this test by accident.
+def test_build_input_data_cohort_award_fy_derived_not_hardcoded_on_other_fy():
+    schedule = _schedule_record(
+        "2027-28", ["June"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"June": 300000.0}},
+            "previous_year_plmis": {"total": 500000.0, "months": {"June": 500000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2027-28",
+        advice_records=[_class_a_advice("2027-06")],
+        schedule_record=schedule,
+    )
+    assert data["cohorts"][0]["award_fy"] == "2026-27"
+
+
+# 5.9d -- ISO month-end dates: the instalment date is the calendar
+# month's actual last day, including a February that must resolve to the
+# 28th (2026 is not a leap year) and a 31-day month.
+def test_build_input_data_cohort_instalment_dates_are_iso_month_ends():
+    schedule = _schedule_record(
+        "2025-26", ["February", "May"],
+        {
+            "gross_share_of_profit": {
+                "total": 600000.0, "months": {"February": 300000.0, "May": 300000.0},
+            },
+            "previous_year_plmis": {
+                "total": 800000.0, "months": {"February": 400000.0, "May": 400000.0},
+            },
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-05")],
+        schedule_record=schedule,
+    )
+    dates = {i["date"] for i in data["cohorts"][0]["instalments"]}
+    assert "2026-02-28" in dates  # Feb 2026 is not a leap year -- 28, not 29
+    assert "2025-05-31" in dates  # May is a 31-day month
+
+
+# 5.9e -- firms_tax/capital absent for a month must be None, never 0.0; net
+# is None only when BOTH are absent, otherwise the sum treats a lone None
+# as 0 (not as a reason to drop the whole figure).
+def test_build_input_data_cohort_none_semantics_not_zero():
+    schedule = _schedule_record(
+        "2025-26", ["June", "September", "December"],
+        {
+            "gross_share_of_profit": {
+                "total": 900000.0,
+                "months": {"June": 300000.0, "September": 300000.0, "December": 300000.0},
+            },
+            "previous_year_plmis": {
+                "total": 1500000.0,
+                "months": {"June": 500000.0, "September": 500000.0, "December": 500000.0},
+            },
+            # Only September carries a firm_tax_others figure; only December
+            # carries a transferred_to_capital figure; June carries neither.
+            "firm_tax_others": {"total": -174720.0, "months": {"September": -174720.0}},
+            "transferred_to_capital": {"total": -200000.0, "months": {"December": -200000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[
+            _class_a_advice("2025-06"), _class_a_advice("2025-09"), _class_a_advice("2025-12"),
+        ],
+        schedule_record=schedule,
+    )
+    instalments = {i["date"]: i for i in data["cohorts"][0]["instalments"]}
+
+    june = instalments["2025-06-30"]
+    assert june["firms_tax"] is None
+    assert june["capital"] is None
+    assert june["net"] is None  # both absent -> net itself is None
+
+    september = instalments["2025-09-30"]
+    assert september["firms_tax"] == -174720.0
+    assert september["capital"] is None  # absent -> None, never 0.0
+    assert september["net"] == 500000.0 - 174720.0  # lone None treated as 0 in the sum
+
+    december = instalments["2025-12-31"]
+    assert december["firms_tax"] is None  # absent -> None, never 0.0
+    assert december["capital"] == -200000.0
+    assert december["net"] == 500000.0 - 200000.0
+
+
+# 5.9f -- rejects a zero-sum/abs()-based check standing in for the real
+# sign: the fixture-level assertion that gross_award and net-of-net figures
+# aren't secretly re-derived by summing to zero. (Doubles as a second
+# sign-pin check independent of 5.9b's schedule shape.)
+def test_build_input_data_cohort_gross_never_negative_even_if_schedule_row_is():
+    schedule = _schedule_record(
+        "2025-26", ["March"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"March": 300000.0}},
+            # Some real schedules print this row already negative-signed;
+            # the mapper must still emit a POSITIVE gross.
+            "previous_year_plmis": {"total": -700000.0, "months": {"March": -700000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2026-03")],
+        schedule_record=schedule,
+    )
+    inst = data["cohorts"][0]["instalments"][0]
+    assert inst["gross"] == 700000.0
+    assert inst["gross"] > 0
+
+
+# 5.9c -- the AWARD-year Advisory vs payment-schedule cohort ledger
+# reconciliation (Defect B). Both branches: FY match -> numeric compare via
+# reconcile_category(); FY mismatch -> CANNOT RECONCILE naming the specific
+# missing award-year Advisory FY (derived from the cohort, never hardcoded).
+def test_reconciliation_incentive_instalments_agrees_when_advisory_fy_matches_award_fy():
+    data = _load_fixture()
+    report = build_report(data)
+    row = next(
+        r for r in report.reconciliation
+        if r.category == "Incentive instalments: award-year Advisory vs payment schedule"
+    )
+    assert row.agree is True
+
+
+def test_reconciliation_incentive_instalments_cannot_reconcile_names_missing_advisory_fy():
+    data = _load_fixture()
+    # The fixture's advisory.financial_year ("2024-25") matches the
+    # cohort's award_fy -- deliberately mismatch it here to exercise the
+    # other branch, naming the FY whose Advisory is actually missing.
+    data = dict(data)
+    data["advisory"] = dict(data["advisory"])
+    data["advisory"]["financial_year"] = "2023-24"
+    report = build_report(data)
+    row = next(
+        r for r in report.reconciliation
+        if r.category == "Incentive instalments: award-year Advisory vs payment schedule"
+    )
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert "2024-25" in row.note  # the specific missing award-year Advisory FY
+
+
+def test_reconciliation_incentive_instalments_cannot_reconcile_when_no_cohorts_at_all():
+    data = _load_fixture()
+    data = dict(data)
+    del data["cohorts"]
+    report = build_report(data)
+    row = next(
+        r for r in report.reconciliation
+        if r.category == "Incentive instalments: award-year Advisory vs payment schedule"
+    )
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
 
 
 # 5.8c -- (dv61 mapper fix) tds is sourced from the schedule's
