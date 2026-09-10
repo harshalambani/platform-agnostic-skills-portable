@@ -21,7 +21,7 @@ SRC = PROJECT_ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from agents.skill_partner_comp_recon import engine, writer
+from agents.skill_partner_comp_recon import engine, jv_emitter, writer
 from agents.skill_partner_comp_recon.agent import run
 from agents.skill_partner_comp_recon.engine import (
     CANNOT_RECONCILE,
@@ -265,6 +265,201 @@ def test_rate_change_still_detected_with_no_gross_info_supplied():
         months_achieved=12, months_total=48,
     )
     assert suspect is not None
+
+
+# ---------------------------------------------------------------------------
+# Regression: build_report() must not double-count cash or firm's tax that
+# is already inside the monthly totals, when a cohort also carries a
+# "reporting"-FY instalment sourced from the same underlying schedule row.
+# Synthetic, round-number, self-consistent data -- not derived from any
+# real document.
+# ---------------------------------------------------------------------------
+
+def _double_count_regression_data() -> dict:
+    return {
+        "financial_year": "2030-31",
+        "drivers": {"firms_tax_rate": 0.35},
+        "monthly": [
+            {
+                "month": "2030-04", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000, "capital_transferred": 0,
+                "total_paid": 240000,
+            },
+            {
+                "month": "2030-05", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000, "capital_transferred": 0,
+                "total_paid": 240000,
+            },
+        ],
+        # A single cohort instalment paid inside the reporting FY (payment
+        # date 2030-06-15 falls in FY2030-31), sourced -- exactly as in the
+        # real payment schedule -- from the same underlying row that already
+        # fed one of the monthly lines above. Its gross/firms_tax/net are
+        # deliberately non-zero and non-trivial so a re-introduced
+        # double-count would change the pinned totals below.
+        "cohorts": [
+            {
+                "award_fy": "2030-31",
+                "gross_award": 100000,
+                "instalments": [
+                    {
+                        "date": "2030-06-15", "gross": 100000,
+                        "firms_tax": -35000, "capital": -20000, "net": 45000,
+                    },
+                ],
+            },
+        ],
+        "external": {
+            # The monthly total_paid sum ALONE (240000 + 240000 = 480000).
+            # If the cohort instalment's net (45000) were wrongly added on
+            # top again, the computed figure would be 525000 and this
+            # would VARIANCE instead of AGREE.
+            "bank_credits_total": 480000,
+        },
+    }
+
+
+def test_build_report_does_not_double_count_cash_from_cohort_instalments():
+    report = build_report(_double_count_regression_data())
+
+    reporting = [i for i in report.cohort_instalments if i.membership == "reporting"]
+    assert len(reporting) == 1
+    assert reporting[0].net == 45000
+
+    cash = next(
+        r for r in report.reconciliation
+        if r.category == "Total cash received (monthly payouts) vs Bank"
+    )
+    # Pinned: the monthly sum ALONE, never monthly + cohort net. A future
+    # regression that re-adds the cohort instalment net (45000) on top
+    # would compute 525000 here instead, and fail this assertion.
+    assert cash.sources["Computed (monthly payouts)"] == 480000
+    assert cash.agree is True
+
+
+def test_build_report_does_not_double_count_firms_tax_from_cohort_instalments():
+    report = build_report(_double_count_regression_data())
+
+    firms_tax_row = next(
+        r for r in report.reconciliation
+        if r.category == "Firm's tax on share of profit is absent from Form 26AS"
+    )
+    # Pinned: the monthly firms_tax_sop sum ALONE (-50000 * 2 = -100000).
+    # The cohort instalment above carries its own non-zero firms_tax
+    # (-35000) sourced from the same schedule row that already fed a
+    # monthly line -- if it were wrongly added again the total would be
+    # -135000 instead, and this assertion would fail.
+    assert firms_tax_row.sources["Firm's tax total"] == -100000
+
+
+# ---------------------------------------------------------------------------
+# Regression: the no-rate-change-suspects message in the written workbook
+# must not claim the capital-deducted instalments are all equal -- a
+# cohort's grosses can also differ, in which case unequal capital-deducted
+# figures are the expected arithmetic result, not evidence the instalments
+# are "equal".
+# ---------------------------------------------------------------------------
+
+_FALSE_EQUAL_CAPITAL_PHRASE = "shows unequal capital-deducted instalments"
+
+
+def test_no_rate_change_message_does_not_claim_capitals_are_equal(tmp_path):
+    import openpyxl
+
+    data = _double_count_regression_data()
+    data["cohorts"] = []  # no cohort at all -> no rate-change suspects
+    report = build_report(data)
+    assert report.rate_change_suspects == []
+
+    out_path = tmp_path / "no_rate_change.xlsx"
+    writer.write_report_workbook(report, str(out_path))
+
+    wb = openpyxl.load_workbook(str(out_path))
+    all_text = []
+    for ws in wb.worksheets:
+        for row in ws.iter_rows():
+            for cell in row:
+                if isinstance(cell.value, str):
+                    all_text.append(cell.value)
+    joined = "\n".join(all_text)
+
+    assert _FALSE_EQUAL_CAPITAL_PHRASE not in joined
+    assert (
+        "either every cohort's capital-deducted instalments are equal, or "
+        "where they differ, the instalment grosses differ too, which "
+        "explains the difference without a rate change"
+    ) in joined
+
+
+# ---------------------------------------------------------------------------
+# Transaction IDs: a firm token derived from report.firm_name prefixes
+# every journal id, including the opening reclassification; an empty
+# firm_name falls back to the bare FY-prefixed id with no leading hyphen.
+# ---------------------------------------------------------------------------
+
+def test_firm_token_derivation():
+    assert jv_emitter._firm_token("Testcorp Alpha LLP") == "TESTCORP"
+    assert jv_emitter._firm_token("KPMG India Services LLP") == "KPMG"
+    assert jv_emitter._firm_token("") == ""
+    assert jv_emitter._firm_token(None) == ""
+
+
+def test_txn_id_prefixes_with_firm_token_or_falls_back_bare():
+    assert jv_emitter._txn_id("3031", "Testcorp Alpha LLP", "M01") == "TESTCORP-3031-M01"
+    assert jv_emitter._txn_id("3031", "", "M01") == "3031-M01"
+    assert not jv_emitter._txn_id("3031", "", "M01").startswith("-")
+
+
+def _journal_ids_fixture_data(firm_name: str) -> dict:
+    data = _double_count_regression_data()
+    data["cohorts"] = []
+    data["firm_name"] = firm_name
+    data["opening_reclass"] = {
+        "date": "2030-04-01",
+        "description": "Test opening reclassification",
+        "splits": [
+            {"account": "Assets:Test:A", "amount": 1000},
+            {"account": "Assets:Test:B", "amount": -1000},
+        ],
+    }
+    return data
+
+
+_JOURNAL_ACCOUNTS = {
+    "bank": "Assets:Bank:Current Account",
+    "tds_expense": "Expenses:Tax:TDS",
+    "remuneration_income": "Income:PGBP:Remuneration",
+    "share_of_profit_income": "Income:PGBP:Share of Profit",
+}
+
+
+def test_journal_transaction_ids_carry_firm_prefix_when_firm_name_present():
+    report = build_report(_journal_ids_fixture_data("Testcorp Alpha LLP"))
+    journals = build_journals(report, _JOURNAL_ACCOUNTS)
+    fy_pfx = fy_prefix(report.financial_year)
+
+    ids = {j.txn_id for j in journals}
+    assert f"TESTCORP-{fy_pfx}-M01" in ids
+    assert f"TESTCORP-{fy_pfx}-M02" in ids
+    assert f"TESTCORP-{fy_pfx}-RECT" in ids
+    for txn_id in ids:
+        assert txn_id.startswith("TESTCORP-")
+
+
+def test_journal_transaction_ids_fall_back_bare_when_firm_name_empty():
+    report = build_report(_journal_ids_fixture_data(""))
+    journals = build_journals(report, _JOURNAL_ACCOUNTS)
+    fy_pfx = fy_prefix(report.financial_year)
+
+    ids = {j.txn_id for j in journals}
+    assert f"{fy_pfx}-M01" in ids
+    assert f"{fy_pfx}-M02" in ids
+    assert f"{fy_pfx}-RECT" in ids
+    for txn_id in ids:
+        assert not txn_id.startswith("-")
+        assert "TESTCORP" not in txn_id
 
 
 # ---------------------------------------------------------------------------
@@ -3027,8 +3222,10 @@ def test_journal_csv_transaction_ids_unique_fy_prefixed_and_not_colliding(tmp_pa
     txn_ids = sorted({row["Transaction ID"] for row in rows})
     assert len(txn_ids) >= 2  # at least the opening reclass + one month
 
+    # The fixture's firm_name ("Northgate Advisors LLP") yields a firm token
+    # ("NORTHGATE") ahead of the FY prefix -- ids are "NORTHGATE-<fy_pfx>-...".
     for txn_id in txn_ids:
-        assert txn_id.startswith(fy_pfx + "-"), txn_id
+        assert txn_id.startswith("NORTHGATE-" + fy_pfx + "-"), txn_id
 
     for a in txn_ids:
         for b in txn_ids:
@@ -3201,14 +3398,16 @@ def test_journal_csv_prior_cohort_drawdown_credits_current_account(tmp_path):
 
 
 # 3.10 -- the opening reclass entry is present, dated as given, carries the
-# "<FY>-RECT" id, and balances.
+# "<firm_token>-<FY>-RECT" id, and balances.
 def test_journal_csv_opening_reclass_present_and_balanced(tmp_path):
     data = _load_fixture()
     fy_pfx = fy_prefix(data["financial_year"])
     report = build_report(data)
     journals = build_journals(report, data["accounts"])
 
-    rect = next(j for j in journals if j.txn_id == f"{fy_pfx}-RECT")
+    # The fixture's firm_name ("Northgate Advisors LLP") yields firm token
+    # "NORTHGATE" ahead of the FY prefix.
+    rect = next(j for j in journals if j.txn_id == f"NORTHGATE-{fy_pfx}-RECT")
     assert rect.date == data["opening_reclass"]["date"]
     assert rect.balanced
     assert rect.total_debit == pytest.approx(218650, abs=0.01)

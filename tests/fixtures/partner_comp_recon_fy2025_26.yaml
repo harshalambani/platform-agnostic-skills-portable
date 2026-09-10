@@ -232,10 +232,12 @@ advisory:
   schedule_instalments_gross_total: 2000000
 
 external:
-  # Recomputed alongside December's total_paid (see the monthly block's
-  # comment above) so this still agrees with computed cash received:
-  # 8101266 + 349440 = 8450706.
-  bank_credits_total: 8450706
+  # bank_credits_total is the sum of the twelve monthly total_paid figures
+  # ALONE (7,857,920) -- the reconciliation compares monthly payouts to the
+  # bank, never monthly + cohort instalment nets, because total_paid is
+  # already inclusive of any PLMI instalment paid that month (see engine.py
+  # build_report()'s "Total cash received (monthly payouts) vs Bank").
+  bank_credits_total: 7857920
   form_26as_total_credit: 360000
   return_exempt_share_of_profit: 6000000
   return_closing_capital: 1000000
