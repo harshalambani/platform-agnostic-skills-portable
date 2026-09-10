@@ -32,10 +32,16 @@ module's docstring + JOURNAL_HEADERS are the ground truth this restates):
   f. Currency is the constant "INR" on every row.
   g. Date is ISO YYYY-MM-DD.
   h. Transaction ID is unique per transaction AND unique across financial
-     years -- an FY-prefixed series (e.g. "2526-M01" for the first monthly
-     payout of FY 2025-26, "2526-RECT" for that year's opening
-     reclassification). Number duplicates Transaction ID, landing in
-     GnuCash's visible Num field.
+     years -- an FY-prefixed series, itself prefixed with a short firm
+     token derived from report.firm_name (its first whitespace-separated
+     word, stripped to alphanumerics and upper-cased), e.g. "KPMG-2526-M01"
+     for the first monthly payout of FY 2025-26 with firm_name "KPMG India
+     Services LLP", "KPMG-2526-RECT" for that year's opening
+     reclassification. When firm_name is empty or the token would come out
+     empty, the firm prefix is omitted entirely (bare "2526-M01" / no
+     leading hyphen) rather than crashing or emitting a malformed ID.
+     Number duplicates Transaction ID, landing in GnuCash's visible Num
+     field.
   i. No Notes/Memo columns are emitted.
 
 Import settings (see AGENT.md's "Importing into GnuCash" section): tick
@@ -130,6 +136,29 @@ def fy_prefix(fy: str) -> str:
     if m:
         return m.group(1)[2:] + m.group(2)
     return re.sub(r"[^0-9A-Za-z]", "", fy or "FY")
+
+
+def _firm_token(firm_name: str) -> str:
+    """Short firm-scoped Transaction ID prefix derived from firm_name, e.g.
+    "KPMG India Services LLP" -> "KPMG": the first whitespace-separated
+    word, stripped to alphanumerics and upper-cased. Returns "" when
+    firm_name is empty or the token would come out empty, so the caller
+    falls back to today's bare ID shape rather than crashing or emitting a
+    leading hyphen."""
+    words = (firm_name or "").split()
+    if not words:
+        return ""
+    return re.sub(r"[^0-9A-Za-z]", "", words[0]).upper()
+
+
+def _txn_id(fy_pfx: str, firm_name: str, suffix: str) -> str:
+    """Build a Transaction ID as '<firm_token>-<fy_pfx>-<suffix>' when a
+    firm token is available (dialect point h), else the bare
+    '<fy_pfx>-<suffix>' with no leading hyphen."""
+    token = _firm_token(firm_name)
+    if token:
+        return f"{token}-{fy_pfx}-{suffix}"
+    return f"{fy_pfx}-{suffix}"
 
 
 def _strip_root(account: str) -> str:
@@ -264,11 +293,11 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     _add_leg(splits, accounts, "interest_on_capital", ctx, -line.interest_on_capital)
     _add_leg(splits, accounts, "current_account", ctx, -line.prior_cohort_drawdown)
 
-    txn_id = f"{fy_pfx}-M{idx:02d}"
+    txn_id = _txn_id(fy_pfx, firm_name, f"M{idx:02d}")
     return Journal(txn_id=txn_id, date=date, description=desc, splits=splits)
 
 
-def _opening_reclass_journal(block: dict | None, fy_pfx: str) -> "Journal | None":
+def _opening_reclass_journal(block: dict | None, fy_pfx: str, firm_name: str = "") -> "Journal | None":
     """Build the optional opening reclassification entry (spec 2.6). This
     exists because a closed, filed year is corrected by a prior-period
     reclassification booked in the FOLLOWING year, never by reopening the
@@ -305,7 +334,7 @@ def _opening_reclass_journal(block: dict | None, fy_pfx: str) -> "Journal | None
         else:
             splits.append(Split(account=account, credit=-amount))
 
-    txn_id = f"{fy_pfx}-RECT"
+    txn_id = _txn_id(fy_pfx, firm_name, "RECT")
     return Journal(txn_id=txn_id, date=date, description=description, splits=splits)
 
 
@@ -324,13 +353,13 @@ def build_journals(report, accounts: dict) -> list:
     accounts = accounts or {}
     fy_pfx = fy_prefix(report.financial_year)
     journals: list = []
+    firm_name = getattr(report, "firm_name", "") or ""
 
-    opening = _opening_reclass_journal(getattr(report, "opening_reclass", None), fy_pfx)
+    opening = _opening_reclass_journal(getattr(report, "opening_reclass", None), fy_pfx, firm_name)
     if opening is not None and opening.splits:
         _check_balanced(opening)
         journals.append(opening)
 
-    firm_name = getattr(report, "firm_name", "") or ""
     for idx, line in enumerate(report.monthly, start=1):
         journal = _monthly_journal(line, accounts, fy_pfx, firm_name, idx)
         if not journal.splits:

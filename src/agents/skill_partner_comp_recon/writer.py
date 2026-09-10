@@ -349,8 +349,10 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
     _set(ws, row, 1, "Mid-year rate-change detector", bold=True)
     row += 1
     if not report.rate_change_suspects:
-        _set(ws, row, 1, "No cohort in this run shows unequal capital-deducted "
-                         "instalments -- no rate change suspected.")
+        _set(ws, row, 1, "No rate change is suspected in this run: either every "
+                         "cohort's capital-deducted instalments are equal, or "
+                         "where they differ, the instalment grosses differ too, "
+                         "which explains the difference without a rate change.")
         row += 1
     else:
         headers = ["Instalment count", "First instalment capital", "Implied old rate",

@@ -510,15 +510,17 @@ def build_report(data: dict) -> Report:
     reconciliation: list[ReconciliationResult] = []
 
     reporting_instalments = [i for i in cohort_instalments if i.membership == "reporting"]
+    # The cohort instalments' net figures are NOT added here: the payment
+    # schedule's total_payout row (monthly.total_paid) is already inclusive
+    # of any PLMI instalment paid that month -- the cohort ledger is built
+    # from that same schedule row (mapper.py), so adding the cohort net on
+    # top double-counts cash the monthly total already contains. The
+    # monthly payouts alone ARE the cash received.
     total_monthly_paid = sum(m.total_paid for m in monthly) if monthly else None
-    total_instalment_net = (sum(i.net for i in reporting_instalments if i.net is not None)
-                             if reporting_instalments else 0.0)
-    total_received = (None if total_monthly_paid is None
-                       else total_monthly_paid + total_instalment_net)
     bank_total, _ = field_or_reason(external, "bank_credits_total", "bank credits total")
     reconciliation.append(reconcile_category(
-        "Total cash received (monthly payouts + in-FY cohort instalments) vs Bank",
-        {"Computed (monthly + cohort)": total_received, "Bank statement": bank_total},
+        "Total cash received (monthly payouts) vs Bank",
+        {"Computed (monthly payouts)": total_monthly_paid, "Bank statement": bank_total},
     ))
 
     total_sop = sum(m.share_of_profit_gross for m in monthly) if monthly else None
@@ -546,9 +548,13 @@ def build_report(data: dict) -> Report:
         {"Computed (monthly TDS)": total_tds_credit, "Form 26AS": form_26as},
     ))
 
+    # The cohort instalments' firms_tax is NOT added here: mapper.py sources
+    # each cohort instalment's firms_tax from the same payment-schedule row
+    # (firm_tax_others) that already feeds the monthly line's
+    # firms_tax_other -- adding the cohort term would read that row twice.
     total_firms_tax = (
         sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else 0.0
-    ) + sum((i.firms_tax or 0.0) for i in reporting_instalments)
+    )
     conflation_note = firms_tax_conflated_with_26as(total_firms_tax, form_26as, total_tds_credit)
     reconciliation.append(ReconciliationResult(
         category="Firm's tax on share of profit is absent from Form 26AS",
