@@ -13,10 +13,15 @@
 #     deliberately present *alongside* the s.5.1 agreement above, to
 #     demonstrate that an aggregate match does not mask an
 #     instalment-level anomaly
+#   - the advisory block's financial_year matches the cohort's award_fy
+#     ("2024-25"), and its schedule_instalments_gross_total (2,000,000)
+#     matches the two in-FY cohort instalments' gross total exactly, so
+#     the "Incentive instalments: award-year Advisory vs payment schedule"
+#     category resolves to AGREE, not CANNOT RECONCILE
 #   - every other external figure set to agree exactly with the computed
-#     total, so the only two non-AGREE rows in Reconciliation/Exceptions
-#     are the always-cannot-reconcile incentive-schedule leg (no PDF
-#     parser in this build) and the rate-change suspect on Capital.
+#     total, so this fixture's only non-AGREE signal is the rate-change
+#     suspect on Capital (a note on rate_change_suspects, not a
+#     reconciliation row)
 #
 # Stage 1b additions (jv_emitter.py -- see AGENT.md's "Stage 1b" section):
 #   - firm_name, used only in the journal CSV's transaction descriptions
@@ -217,6 +222,14 @@ cohorts:
 
 advisory:
   stated_closing_capital: 1000000
+  # This is the AWARD-year Advisory for the cohort above (award_fy
+  # "2024-25"), so its own schedule_instalments gross total is directly
+  # comparable against the reporting FY's cohort ledger gross total: the
+  # two in-FY instalments (2025-07-31 and 2025-10-31) at 1,000,000 gross
+  # each = 2,000,000 (the third instalment, 2026-06-30, belongs to next
+  # FY and is excluded from the reporting-FY total -- see s.4 above).
+  financial_year: "2024-25"
+  schedule_instalments_gross_total: 2000000
 
 external:
   # Recomputed alongside December's total_paid (see the monthly block's

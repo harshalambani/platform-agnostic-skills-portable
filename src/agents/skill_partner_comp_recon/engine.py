@@ -171,23 +171,35 @@ class RateChangeSuspect:
 
 
 def detect_mid_year_rate_change(instalment_capitals: list[float], target_compensation,
-                                 months_achieved, months_total) -> RateChangeSuspect | None:
+                                 months_achieved, months_total,
+                                 instalment_grosses: list[float] | None = None) -> RateChangeSuspect | None:
     """See spec s.5.2. If a cohort's instalment capital-deducted figures are
-    not all equal (beyond a 1-rupee tolerance), that asymmetry is the
+    not all equal (beyond a 1-rupee tolerance), that asymmetry COULD be the
     fingerprint of the firm changing the capital rate part-way through the
-    cohort -- never a rounding artefact, and never smoothed over.
+    cohort -- but only when the instalments' GROSS figures are all equal
+    too. When the grosses themselves differ, unequal capital-deducted
+    figures are the expected, arithmetic consequence of unequal grosses
+    (a bigger instalment carries a bigger capital deduction even at an
+    unchanged rate) -- not evidence of a rate change, and not flagged.
 
-    Returns None (no exception) when every instalment's capital matches
-    the first within tolerance, or when the inputs needed to compute the
-    implied rates are missing (the asymmetry is still real, but the
-    implied-rate figures cannot be computed -- callers should still surface
-    the raw asymmetry as an open item in that case).
+    `instalment_grosses`, when supplied, must be the same length as
+    `instalment_capitals` (one gross per capital figure, same instalment
+    order). Returns None (no exception) when every instalment's capital
+    matches the first within tolerance, when the grosses are supplied and
+    are not all equal within CAPITAL_TOLERANCE, or when the inputs needed
+    to compute the implied rates are missing (the asymmetry is still real
+    in that last case, but the implied-rate figures cannot be computed --
+    callers should still surface the raw asymmetry as an open item then).
     """
     if not instalment_capitals:
         return None
     first = instalment_capitals[0]
     if all(abs(c - first) <= CAPITAL_TOLERANCE for c in instalment_capitals):
         return None
+    if instalment_grosses:
+        first_gross = instalment_grosses[0]
+        if not all(abs(g - first_gross) <= CAPITAL_TOLERANCE for g in instalment_grosses):
+            return None
     if target_compensation is None or months_achieved is None or months_total is None:
         return None
     base = target_compensation * (months_achieved / months_total)
@@ -480,11 +492,16 @@ def build_report(data: dict) -> Report:
     rate_change_suspects: list[RateChangeSuspect] = []
     for cohort in cohorts_raw:
         cohort_instalments.extend(classify_cohort_instalments(cohort, fy))
-        capitals = [abs(i["capital"]) for i in cohort.get("instalments", [])
-                    if i.get("capital") is not None]
+        capital_instalments = [i for i in cohort.get("instalments", [])
+                                if i.get("capital") is not None]
+        capitals = [abs(i["capital"]) for i in capital_instalments]
+        grosses = [abs(i["gross"]) for i in capital_instalments if i.get("gross") is not None]
+        if len(grosses) != len(capitals):
+            grosses = None
         suspect = detect_mid_year_rate_change(
             capitals, drivers.get("target_compensation"),
             drivers.get("capital_months_achieved"), drivers.get("capital_months_total"),
+            instalment_grosses=grosses,
         )
         if suspect is not None:
             rate_change_suspects.append(suspect)
@@ -543,22 +560,51 @@ def build_report(data: dict) -> Report:
         ),
     ))
 
-    # Leg 2 (the firm's payment-schedule PDF) is never independently
-    # available in this build -- parsers/payment_schedule.py is a Stage 2
-    # placeholder (see AGENT.md). The cohort ledger from the structured
-    # input is the only source of the incentive schedule this run has, so
-    # it cannot be cross-checked against itself.
-    reconciliation.append(ReconciliationResult(
-        category="Incentive schedule (payment-schedule PDF) vs cohort ledger",
-        sources={"Payment-schedule PDF": None,
-                 "Cohort ledger (structured input)": sum(
-                     i.gross for i in reporting_instalments if i.gross is not None
-                 ) if reporting_instalments else 0.0},
-        agree=None,
-        note=f"{CANNOT_RECONCILE} -- payment-schedule PDF parsing is a Stage 2 "
-             "placeholder (see parsers/payment_schedule.py); the cohort ledger "
-             "supplied as structured input is this run's only source.",
-    ))
+    # Leg 2: the award-year Compensation Advisory's own schedule_instalments
+    # gross total (see mapper.py -- advisory["schedule_instalments_gross_total"])
+    # cross-checked against this reporting FY's cohort ledger (the payment
+    # schedule's "Previous Year PLMIs" row, assembled into `cohorts` by
+    # mapper._build_cohorts()). This can only be compared when the Advisory
+    # supplied is the one issued for the cohort's AWARD year -- an Advisory
+    # for any other year describes a different cohort's instalments
+    # entirely, so a mismatch there is a missing-document CANNOT RECONCILE
+    # naming the specific award-year Advisory that is missing, never a
+    # silent comparison against the wrong year's figures.
+    category_name = "Incentive instalments: award-year Advisory vs payment schedule"
+    if not cohorts_raw:
+        reconciliation.append(ReconciliationResult(
+            category=category_name,
+            sources={"Award-year Advisory (schedule_instalments)": None,
+                     "Payment-schedule cohort ledger": None},
+            agree=None,
+            note=f"{CANNOT_RECONCILE} -- no cohort (Previous Year PLMIs) data "
+                 "supplied for this FY.",
+        ))
+    else:
+        award_fy = cohorts_raw[0]["award_fy"]
+        advisory_fy = advisory.get("financial_year")
+        cohort_gross_total = sum(
+            i.gross for i in reporting_instalments if i.gross is not None
+        ) if reporting_instalments else 0.0
+        if advisory_fy != award_fy:
+            reconciliation.append(ReconciliationResult(
+                category=category_name,
+                sources={"Award-year Advisory (schedule_instalments)": None,
+                         "Payment-schedule cohort ledger": cohort_gross_total},
+                agree=None,
+                note=f"{CANNOT_RECONCILE} -- the cohort's award year is FY{award_fy}, "
+                     f"but the Compensation Advisory supplied is for FY"
+                     f"{advisory_fy or '<none supplied>'}; the FY{award_fy} Advisory "
+                     "is missing and its schedule_instalments cannot be substituted "
+                     "from any other year.",
+            ))
+        else:
+            advisory_gross_total = advisory.get("schedule_instalments_gross_total")
+            reconciliation.append(reconcile_category(
+                category_name,
+                {"Award-year Advisory (schedule_instalments)": advisory_gross_total,
+                 "Payment-schedule cohort ledger": cohort_gross_total},
+            ))
 
     return Report(
         financial_year=fy, drivers=drivers, monthly=monthly, cohorts_raw=cohorts_raw,

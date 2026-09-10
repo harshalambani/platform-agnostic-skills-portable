@@ -197,13 +197,15 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
         Dr  capital_contribution     = -capital_transferred     (negative)
         Dr  medical_expense          = -medical_topup           (negative)
         Cr  remuneration_income      = -remuneration
-        Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax_sop)
-        Cr  share_of_profit_income   = -additional_share_of_profit
+        Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax_sop
+                                          + additional_share_of_profit)
         Cr  interest_on_capital      = -interest_on_capital
         Cr  current_account          = -prior_cohort_drawdown
 
-    The current-year share-of-profit credit is NET of firms_tax_sop only
-    (firms_tax_sop is negative, so adding it nets the credit down). Firm's
+    share_of_profit_income is booked as ONE folded leg: the current year's
+    own gross share of profit, netted by firms_tax_sop (the firm's tax on
+    THAT share of profit), PLUS additional_share_of_profit in the same
+    leg -- never as two separate share_of_profit_income postings. Firm's
     tax is NEVER booked as an expense in this ledger, in any year: it is a
     permanent cost the firm already deducted before paying out, already
     netted into the income figure recognised here. Grossing it up and
@@ -214,21 +216,20 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     stay in the workbook's working paper (the One-offs / Monthly sheets)
     only; do not "fix" this by grossing the credit back up.
 
-    additional_share_of_profit is booked as its own leg, separate from the
-    current year's share of profit, and is NEVER netted by firms_tax_sop --
-    that figure belongs exclusively to the current year's own share of
-    profit. Nor is it netted by firms_tax_other again here: mapper.py
-    (parsers/payout_advice.py's Class B contract) already hands this figure
-    through NET -- it is either a prior-year PLMI instalment already net of
-    firms_tax_other, or (in the FY's final month) interest on capital net of
-    its own TDS. firms_tax_other is the firm's tax on that PLMI drawdown,
-    not on the current year's share of profit -- subtracting it again here
-    would double-count a tax the payslip has already netted out. Booking
-    this leg at exactly additional_share_of_profit is what "the PLMI leg is
-    netted by firms_tax_other" means in practice: the netting already
-    happened upstream, and this leg must not undo or repeat it by folding
-    firms_tax_other into the current-year share-of-profit leg (the historic
-    defect this split fixes).
+    additional_share_of_profit is folded into the SAME share_of_profit_income
+    leg as the current year's own share of profit (see above) -- not a
+    separate posting, and not netted by firms_tax_sop or firms_tax_other a
+    second time here: mapper.py (parsers/payout_advice.py's Class B
+    contract) already hands this figure through NET -- it is either a
+    prior-year PLMI instalment already net of firms_tax_other, or (in the
+    FY's final month) interest on capital net of its own TDS. firms_tax_other
+    is the firm's tax on that PLMI drawdown, not on the current year's share
+    of profit -- subtracting it again here would double-count a tax the
+    payslip has already netted out. Folding this figure into the leg at
+    exactly its own (already-net) value is what "the PLMI leg is netted by
+    firms_tax_other" means in practice: the netting already happened
+    upstream, and this leg must not undo or repeat it by subtracting
+    firms_tax_other again (the historic defect this fold fixes).
 
     prior_cohort_drawdown is a drawdown of the current-account balance with
     the firm, NOT current-year income -- the income (and the firm's tax on
