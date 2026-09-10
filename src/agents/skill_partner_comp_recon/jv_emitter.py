@@ -258,11 +258,7 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     _add_leg(splits, accounts, "remuneration_income", ctx, -line.remuneration)
     _add_leg(
         splits, accounts, "share_of_profit_income", ctx,
-        -(line.share_of_profit_gross + line.firms_tax_sop),
-    )
-    _add_leg(
-        splits, accounts, "share_of_profit_income", ctx,
-        -line.additional_share_of_profit,
+        -(line.share_of_profit_gross + line.firms_tax_sop + line.additional_share_of_profit),
     )
     _add_leg(splits, accounts, "interest_on_capital", ctx, -line.interest_on_capital)
     _add_leg(splits, accounts, "current_account", ctx, -line.prior_cohort_drawdown)

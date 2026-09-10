@@ -2966,40 +2966,40 @@ def test_journal_csv_share_of_profit_is_net_of_firms_tax(tmp_path):
     assert share_split.debit == 0.0
 
     # December DOES carry a prior-year PLMI drawdown (additional_share_of_
-    # profit != 0, firms_tax_other != 0). Its journal must carry TWO
-    # share_of_profit_income splits: the current-year SoP leg netted by
-    # firms_tax_sop only, and the PLMI leg booked at additional_share_of_
-    # profit AS-IS (already net of firms_tax_other upstream -- see the
-    # fixture's comment -- so jv_emitter must NOT subtract firms_tax_other
-    # a second time).
+    # profit != 0, firms_tax_other != 0). Its journal must carry exactly
+    # ONE share_of_profit_income split -- the current-year SoP leg
+    # (netted by firms_tax_sop only) and the PLMI leg (booked at
+    # additional_share_of_profit AS-IS, already net of firms_tax_other
+    # upstream -- see the fixture's comment) are folded into a single
+    # _add_leg call, not two separate splits (see jv_emitter.py's
+    # _monthly_journal: one combined share_of_profit_income leg per
+    # month, never two).
     december = by_month["2025-12"]
     assert december.firms_tax_other != 0.0
     assert december.additional_share_of_profit != 0.0
     expected_sop_leg = december.share_of_profit_gross + december.firms_tax_sop
     expected_plmi_leg = december.additional_share_of_profit
+    expected_combined = expected_sop_leg + expected_plmi_leg
 
     december_journal = next(j for j in journals if j.txn_id.endswith("-M09"))
     december_share_splits = [
         s for s in december_journal.splits if s.account == share_account
     ]
-    assert len(december_share_splits) == 2, december_share_splits
-    december_credits = sorted(s.credit for s in december_share_splits)
-    assert december_credits == [
-        pytest.approx(min(expected_sop_leg, expected_plmi_leg), abs=0.01),
-        pytest.approx(max(expected_sop_leg, expected_plmi_leg), abs=0.01),
-    ]
-    for s in december_share_splits:
-        assert s.debit == 0.0
-    # Neither leg equals gross + BOTH tax figures combined -- that would be
-    # the old (wrong) double-counted formula.
+    assert len(december_share_splits) == 1, december_share_splits
+    december_split = december_share_splits[0]
+    assert december_split.credit == pytest.approx(expected_combined, abs=0.01)
+    assert december_split.debit == 0.0
+    # The combined leg must NOT also include firms_tax_other -- that would
+    # be the old (wrong) double-counted formula; firms_tax_other's own
+    # leg is booked separately (see the prior_cohort_drawdown /
+    # firms_tax_other tests).
     wrong_combined = (
         december.share_of_profit_gross
         + december.firms_tax_sop
         + december.firms_tax_other
         + december.additional_share_of_profit
     )
-    for s in december_share_splits:
-        assert s.credit != pytest.approx(wrong_combined, abs=0.01)
+    assert december_split.credit != pytest.approx(wrong_combined, abs=0.01)
 
 
 # 3.9b -- prior_cohort_drawdown is POSITIVE (a prior-year incentive
@@ -3460,6 +3460,14 @@ def test_build_input_data_to_journal_signs_are_pinned():
 # firms_tax_other -- it never subtracts firms_tax_other from it a second
 # time, since the advice's own figure already arrives net upstream.
 def test_build_input_data_firms_tax_other_attaches_to_plmi_leg_only():
+    # Fix 2.4: additional_share_of_profit is now sourced from the
+    # schedule's arrears_share_of_profit row, NOT blindly passed through
+    # from the payslip's additional_share_of_profit -- that payslip field
+    # is polymorphic (PLMI drawdown in some months, IOC-net-of-TDS or
+    # genuine arrears in others) and cannot be trusted on its own. Here
+    # the payslip figure is set to AGREE with the schedule so this test
+    # continues to prove firms_tax_other never touches the PLMI leg.
+    plmi_net = 650560.0  # already net of firms_tax_other, per upstream contract
     schedule = _schedule_record(
         "2025-26",
         ["December"],
@@ -3467,23 +3475,23 @@ def test_build_input_data_firms_tax_other_attaches_to_plmi_leg_only():
             "gross_share_of_profit": {"total": 300000.0, "months": {"December": 300000.0}},
             "firm_tax_on_sop": {"total": -104832.0, "months": {"December": -104832.0}},
             "firm_tax_others": {"total": -349440.0, "months": {"December": -349440.0}},
+            "arrears_share_of_profit": {"total": plmi_net, "months": {"December": plmi_net}},
         },
     )
-    plmi_net = 650560.0  # already net of firms_tax_other, per upstream contract
     data = build_input_data(
         financial_year="2025-26",
         advice_records=[
             _class_b_advice(
                 "December", 2025,
                 share_of_profit=195168.0,  # 300000 - 104832, agrees with schedule
-                additional_share_of_profit=plmi_net,
+                additional_share_of_profit=plmi_net,  # payslip agrees with schedule
             )
         ],
         schedule_record=schedule,
     )
     line = data["monthly"][0]
-    # additional_share_of_profit (the PLMI leg) is carried through EXACTLY
-    # as supplied -- firms_tax_other never touches it here.
+    # additional_share_of_profit (the PLMI leg) comes from the schedule's
+    # arrears_share_of_profit row -- firms_tax_other never touches it here.
     assert line["additional_share_of_profit"] == plmi_net
     assert line["firms_tax_other"] == -349440.0
     assert line["firms_tax_sop"] == -104832.0
@@ -3491,6 +3499,238 @@ def test_build_input_data_firms_tax_other_attaches_to_plmi_leg_only():
     # year's gross share of profit -- that identity is asserted separately
     # in test_build_input_data_class_b_net_never_presented_as_gross.
     assert line["share_of_profit_gross"] == 300000.0
+
+
+# 5.8a -- (dv61 mapper fix) the L4 payment schedule's medical_topup,
+# transferred_to_capital and interest_on_capital rows are carried straight
+# onto the monthly line, sign exactly as parsed -- never negated/abs()'d --
+# and stay absent (not padded with 0.0) for any month the schedule has no
+# row for. All figures below are invented/fictional.
+def test_build_input_data_new_schedule_fields_pass_through_sign_and_absence():
+    schedule = _schedule_record(
+        "2025-26",
+        ["April"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
+            "medical_topup": {"total": -5000.0, "months": {"April": -5000.0}},
+            "transferred_to_capital": {"total": -40000.0, "months": {"April": -40000.0}},
+            "interest_on_capital": {"total": 6000.0, "months": {"April": 6000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04"), _class_a_advice("2025-05")],
+        schedule_record=schedule,
+    )
+    by_month = {m["month"]: m for m in data["monthly"]}
+
+    april = by_month["2025-04"]
+    assert april["medical_topup"] == -5000.0
+    assert april["capital_transferred"] == -40000.0
+    assert april["interest_on_capital"] == 6000.0
+
+    # May has no schedule row at all -- these keys must be absent, never
+    # defaulted to 0.0.
+    may = by_month["2025-05"]
+    assert "medical_topup" not in may
+    assert "capital_transferred" not in may
+    assert "interest_on_capital" not in may
+
+
+# 5.8b -- (dv61 mapper fix) prior_cohort_drawdown = previous_year_plmis +
+# firm_tax_others (a NET computation; firm_tax_others is negative as
+# parsed, so this is an addition and the result is positive). Absent/zero
+# previous_year_plmis leaves the key off the line entirely.
+def test_build_input_data_prior_cohort_drawdown_is_net_and_positive():
+    schedule = _schedule_record(
+        "2025-26",
+        ["July"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"July": 300000.0}},
+            "previous_year_plmis": {"total": 900000.0, "months": {"July": 900000.0}},
+            "firm_tax_others": {"total": -314496.0, "months": {"July": -314496.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-07")],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["prior_cohort_drawdown"] == pytest.approx(900000.0 - 314496.0)
+    assert line["prior_cohort_drawdown"] > 0
+
+    schedule_no_plmi = _schedule_record(
+        "2025-26", ["August"],
+        {"gross_share_of_profit": {"total": 300000.0, "months": {"August": 300000.0}}},
+    )
+    data2 = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-08")],
+        schedule_record=schedule_no_plmi,
+    )
+    assert "prior_cohort_drawdown" not in data2["monthly"][0]
+
+
+# 5.8c -- (dv61 mapper fix) tds is sourced from the schedule's
+# tds_on_rem_ioc (precedence source, since the payslip under-states it in
+# some real months). A disagreement between the schedule and the payslip
+# produces a loud, non-blocking diagnostic naming the month and both
+# figures -- the month is never dropped.
+def test_build_input_data_tds_sourced_from_schedule_with_diagnostic_on_disagreement():
+    schedule = _schedule_record(
+        "2025-26", ["April"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
+            "tds_on_rem_ioc": {"total": -25000.0, "months": {"April": -25000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04", tds=-19372.0)],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["tds"] == -25000.0, "schedule's tds_on_rem_ioc must win"
+    diagnostics = data["_diagnostics"]
+    assert any(
+        "tds" in d.lower() and "2025-04" in d
+        and "25,000.00" in d and "19,372.00" in d
+        for d in diagnostics
+    ), diagnostics
+    assert len(data["monthly"]) == 1  # disagreement never drops the month
+
+
+# 5.8d -- (dv61 mapper fix) additional_share_of_profit is booked from the
+# schedule's arrears_share_of_profit ONLY -- the payslip's own polymorphic
+# additional_share_of_profit figure is used purely as a reconciliation
+# check. A disagreement is a loud, non-blocking diagnostic; the booked
+# amount and the month are both unaffected.
+def test_build_input_data_additional_share_of_profit_sourced_from_schedule_with_diagnostic():
+    schedule = _schedule_record(
+        "2025-26", ["October"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"October": 300000.0}},
+            "arrears_share_of_profit": {"total": 720000.0, "months": {"October": 720000.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-10", additional_share_of_profit=250000.0)],
+        schedule_record=schedule,
+    )
+    line = data["monthly"][0]
+    assert line["additional_share_of_profit"] == 720000.0
+    diagnostics = data["_diagnostics"]
+    assert any(
+        "additional_share_of_profit" in d and "2025-10" in d and "polymorphic" in d
+        for d in diagnostics
+    ), diagnostics
+    assert len(data["monthly"]) == 1  # not dropped, amount not overridden
+
+
+# 5.8e -- (dv61 mapper fix) twelve advice records in, twelve monthly lines
+# out, in chronological order -- fields being added/re-sourced must never
+# cause a month to be silently dropped.
+def test_build_input_data_twelve_months_in_twelve_months_out():
+    months = [
+        ("2025-04", "April"), ("2025-05", "May"), ("2025-06", "June"),
+        ("2025-07", "July"), ("2025-08", "August"), ("2025-09", "September"),
+        ("2025-10", "October"), ("2025-11", "November"), ("2025-12", "December"),
+        ("2026-01", "January"), ("2026-02", "February"), ("2026-03", "March"),
+    ]
+    schedule = _schedule_record(
+        "2025-26",
+        [name for _, name in months],
+        {
+            "gross_share_of_profit": {
+                "total": 3600000.0,
+                "months": {name: 300000.0 for _, name in months},
+            },
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice(ym) for ym, _ in months],
+        schedule_record=schedule,
+    )
+    assert len(data["monthly"]) == 12
+    assert [m["month"] for m in data["monthly"]] == [ym for ym, _ in months]
+
+
+# 5.8f -- (dv61 mapper fix) full-stack (mapper -> engine -> jv_emitter)
+# sign-pinning for every new leg this fix introduces: capital contribution
+# and medical expense are DEBITs, the current-account (prior_cohort_
+# drawdown) and interest-on-capital legs are CREDITs, and TDS expense is a
+# DEBIT. A zero-sum balance check alone would not catch a swapped debit/
+# credit, so each leg's side is asserted explicitly. Also confirms the
+# share_of_profit_income leg is still exactly ONE row for the month.
+def test_build_input_data_to_journal_new_legs_sign_pinned():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "current_account": "Assets:Firm Current Account",
+        "capital_contribution": "Assets:Firm Capital Account",
+        "medical_expense": "Expenses:Medical",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    schedule = _schedule_record(
+        "2025-26", ["April"],
+        {
+            "gross_share_of_profit": {"total": 300000.0, "months": {"April": 300000.0}},
+            "medical_topup": {"total": -5000.0, "months": {"April": -5000.0}},
+            "transferred_to_capital": {"total": -40000.0, "months": {"April": -40000.0}},
+            "interest_on_capital": {"total": 6000.0, "months": {"April": 6000.0}},
+            "previous_year_plmis": {"total": 500000.0, "months": {"April": 500000.0}},
+            "firm_tax_others": {"total": -174720.0, "months": {"April": -174720.0}},
+        },
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        # total_paid chosen so the transaction balances: remuneration
+        # 200000 + share_of_profit 300000 + interest_on_capital 6000 +
+        # prior_cohort_drawdown 325280 (= 500000 - 174720) - tds 20000 -
+        # capital_transferred 40000 - medical_topup 5000 = 766280.
+        advice_records=[_class_a_advice("2025-04", total_paid=766280.0)],
+        schedule_record=schedule,
+        accounts=accounts,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    journals = build_journals(report, accounts)
+    journal = next(j for j in journals if j.txn_id.endswith("-M01"))
+
+    def split_for(account_key):
+        return next(s for s in journal.splits if s.account == accounts[account_key])
+
+    capital_split = split_for("capital_contribution")
+    assert capital_split.debit == pytest.approx(40000.0, abs=0.01)
+    assert capital_split.credit == 0.0  # capital contribution is a DEBIT
+
+    medical_split = split_for("medical_expense")
+    assert medical_split.debit == pytest.approx(5000.0, abs=0.01)
+    assert medical_split.credit == 0.0  # medical expense is a DEBIT
+
+    current_account_split = split_for("current_account")
+    assert current_account_split.credit == pytest.approx(325280.0, abs=0.01)
+    assert current_account_split.debit == 0.0  # current-account leg is a CREDIT
+
+    ioc_split = split_for("interest_on_capital")
+    assert ioc_split.credit == pytest.approx(6000.0, abs=0.01)
+    assert ioc_split.debit == 0.0  # interest-on-capital income is a CREDIT
+
+    tds_split = split_for("tds_expense")
+    assert tds_split.debit == pytest.approx(20000.0, abs=0.01)
+    assert tds_split.credit == 0.0  # TDS expense is a DEBIT
+
+    share_splits = [
+        s for s in journal.splits if s.account == accounts["share_of_profit_income"]
+    ]
+    assert len(share_splits) == 1, share_splits  # never two rows
+
+    assert journal.balanced
 
 
 # 5.9 -- the ctc_structuring block is carried through to `data` for
