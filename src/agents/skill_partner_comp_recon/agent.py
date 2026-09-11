@@ -5,9 +5,12 @@ network.
 Stage 1 of this skill (see AGENT.md): the computation engine, the workbook
 writer, and the tests. Stage 2 is the PDF parsers under parsers/ --
 `payout_advice.py` (L1), `advisory.py` (L3) and `llp_statement.py` (L5)
-are all implemented; the remaining Stage 2 placeholders (`gnucash_path`,
-`xlsx_26as` readers) are still guarded NotImplementedError-style degrades.
-See parsers/__init__.py.
+are all implemented; `xlsx_26as` now has a real reader
+(xlsx_26as_reader.py, Section A of the tie-out work); `gnucash_path` now
+has a real, read-only tie-out (gnucash_tieout.py, Sections B and C): a
+posted-already detector for every journal this run would emit, and a
+balance tie-out for each of jv_emitter.ACCOUNT_KEYS's configured account
+paths against the book's actual FY movement. See parsers/__init__.py.
 
 run() has two entry paths:
 
@@ -47,7 +50,9 @@ gnucash_path is READ ONLY everywhere in this package -- no function here
 ever opens a write handle on a .gnucash file; account-path validation
 (`_validate_accounts_against_book`) only ever calls
 gnucash_accounts.read_postable_paths()/read_special_paths()/load_accounts(),
-never anything that could write.
+and the Section B/C tie-out (`gnucash_tieout.py`) only ever calls
+skill_itr_workbook's parse_gnucash.parse_book() -- never anything that
+could write.
 """
 from __future__ import annotations
 
@@ -59,6 +64,7 @@ import yaml
 
 from .. import gnucash_accounts
 from .engine import build_report
+from .gnucash_tieout import build_balance_tieout, build_posted_check
 from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, write_journal_csv
 from .mapper import FinancialYearMismatchError, build_input_data
 from .parsers import advisory as _advisory_parser
@@ -66,6 +72,7 @@ from .parsers import llp_statement as _llp_statement_parser
 from .parsers import payment_schedule as _payment_schedule_parser
 from .parsers import payout_advice as _payout_advice_parser
 from .writer import write_report_workbook
+from .xlsx_26as_reader import read_form_26as_tds_credit
 
 # skill_itr_workbook/scripts is a separate package (not importable via the
 # agents.* package path) that carries the entities.yaml loader this skill
@@ -385,11 +392,13 @@ def _run_from_documents(
     `parsers/llp_statement.py` (L5) and `parsers/payment_schedule.py` (L4)
     are all implemented (see their own module docstrings). `entity`,
     `gnucash_path` and `xlsx_26as` do not have a parser under parsers/ at
-    all in this build (gnucash_path/xlsx_26as read an existing format
-    rather than parse a free-form PDF, and are wired here as
-    always-degraded legs rather than invented reader logic -- gnucash_path
-    is used later, read-only, purely to validate configured account paths
-    before a journal is written, never for a books tie-out).
+    all in this build -- they read an existing structured format rather
+    than parse a free-form PDF. `xlsx_26as` is read by
+    xlsx_26as_reader.read_form_26as_tds_credit() (Section A), feeding
+    external["form_26as_total_credit"]. `gnucash_path` is still an
+    always-degraded reconciliation leg here; it is separately used later,
+    read-only, purely to validate configured account paths before a
+    journal is written, never for a books tie-out.
 
     Required inputs (entity, advices_dir, advisory_path) missing fail loud
     by name, before any parsing is attempted. Optional inputs
@@ -449,22 +458,21 @@ def _run_from_documents(
     # legs below can be parsed yet in this build.
     llp_note, llp_record = _resolve_llp_leg(llp_statement, doc_password)
     schedule_note, schedule_record = _resolve_schedule_leg(payment_schedule, doc_password)
+    # gnucash_note starts as a placeholder here because the required
+    # documents (advisory/advices) haven't been parsed yet, so `report`
+    # (needed by build_posted_check/build_balance_tieout below) doesn't
+    # exist yet -- this placeholder is only ever seen by an early-exit
+    # ERROR path below. Once `report` is built successfully, this slot is
+    # overwritten in place (via _gnucash_note_idx) with the real posted-
+    # check note; the balance tie-out results are appended straight onto
+    # report.reconciliation instead of surfacing as a single note.
     if not gnucash_path:
         gnucash_note = "GnuCash books tie-out: not available (no book supplied)."
     else:
-        gnucash_note = (
-            "GnuCash books tie-out: not available (reader not yet implemented in this "
-            f"build; {gnucash_path} was supplied but never opened -- this skill only ever "
-            "opens a GnuCash book read-only, and only once this leg is implemented)."
-        )
-    if not xlsx_26as:
-        xlsx_note = "26AS TDS-credit tie-out: not available (no workbook supplied)."
-    else:
-        xlsx_note = (
-            "26AS TDS-credit tie-out: not available (reader not yet implemented in this "
-            f"build; {xlsx_26as} was supplied but not read)."
-        )
+        gnucash_note = f"GnuCash books tie-out: pending ({gnucash_path} not yet checked)."
+    xlsx_note, form_26as_total_credit = read_form_26as_tds_credit(xlsx_26as)
     optional_notes = [llp_note, schedule_note, gnucash_note, xlsx_note]
+    _gnucash_note_idx = 2
 
     # Required legs: the Advisory letter, then every monthly payout advice.
     # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
@@ -541,15 +549,40 @@ def _run_from_documents(
     drivers = drivers_by_fy.get(data["financial_year"])
     if drivers is not None:
         data["drivers"] = drivers
+    # Section A: feed the 26AS reader's result into the existing
+    # external["form_26as_total_credit"] reconciliation leg (engine.py's
+    # field_or_reason() treats a None value the same as the key being
+    # absent, so this is safe to set unconditionally -- a failed/absent
+    # read degrades the leg exactly as before, never a silent 0.0).
+    data.setdefault("external", {})
+    data["external"]["form_26as_total_credit"] = form_26as_total_credit
 
     try:
         report = build_report(data)
     except KeyError as e:
         return f"ERROR: input is missing required field {e}"
 
+    # Section B/C: GnuCash tie-out. Both legs reuse jv_emitter.build_journals
+    # to compute this run's implied journal (purely, no I/O) and compare it
+    # read-only against gnucash_path -- see gnucash_tieout.py. Neither leg
+    # can raise: every unavailable input (no book, no accounts configured,
+    # an unresolvable account path, an unbuildable journal) degrades to an
+    # explicit note/CANNOT-RECONCILE result rather than aborting the run.
+    accounts_for_tieout = (
+        dict(entity_profile.partner_comp_accounts)
+        if (entity_profile and entity_profile.partner_comp_accounts) else {}
+    )
+    posted_check, gnucash_note = build_posted_check(
+        report, accounts_for_tieout, gnucash_path, report.financial_year,
+    )
+    optional_notes[_gnucash_note_idx] = gnucash_note
+    report.reconciliation.extend(
+        build_balance_tieout(report, accounts_for_tieout, gnucash_path, report.financial_year)
+    )
+
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_report_workbook(report, str(out_path))
+    write_report_workbook(report, str(out_path), posted_check=posted_check)
 
     journal_line = ""
     account_notes: list[str] = []

@@ -63,6 +63,15 @@ from agents.skill_partner_comp_recon.mapper import (
     FinancialYearMismatchError,
     build_input_data,
 )
+from agents.skill_partner_comp_recon.xlsx_26as_reader import read_form_26as_tds_credit
+from agents.skill_partner_comp_recon.gnucash_tieout import (
+    ALREADY_POSTED,
+    CANNOT_CHECK,
+    NOT_POSTED,
+    PARTIALLY_POSTED,
+    build_balance_tieout,
+    build_posted_check,
+)
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "partner_comp_recon_fy2025_26.yaml"
 
@@ -3047,6 +3056,7 @@ class _FakeEntityProfile:
     exists to catch."""
     name = "Synthetic Taxpayer Person"
     extra_items: dict = {}
+    partner_comp_accounts: dict = {}
 
 
 def _patch_required_legs_for_firm_name_test(monkeypatch, tmp_path, schedule_entity_name, advice_entity_name):
@@ -4372,3 +4382,639 @@ def test_ctc_structuring_yields_no_journal_row():
         for s in j.splits:
             assert s.debit not in ctc_amounts
             assert s.credit not in ctc_amounts
+
+
+# ---------------------------------------------------------------------------
+# Section A -- xlsx_26as_reader.read_form_26as_tds_credit(). Synthetic
+# openpyxl fixtures only, matching skill_26as/scripts/extract_26as_to_xlsx.py's
+# build_part_i() geometry exactly (see that module's docstring, and
+# xlsx_26as_reader.py's own docstring): "Part I" sheet, header row 3, data
+# from row 4, 15 columns, column 7 = Txn Sr.No. (blank on subtotal/grand
+# total rows), column 14 = Tax Deducted ##.
+# ---------------------------------------------------------------------------
+
+_P1_HEADERS = [
+    "Deductor Sr.No.", "Name of Deductor", "TAN of Deductor",
+    "Total Amount Paid/Credited", "Total Tax Deducted #", "Total TDS Deposited",
+    "Txn Sr.No.", "Section", "Transaction Date", "Status of Booking",
+    "Date of Booking", "Remarks", "Amount Paid/Credited",
+    "Tax Deducted ##", "TDS Deposited",
+]
+
+
+def _write_part_i_workbook(path: Path, *, transactions=None, no_transactions_marker=False,
+                            omit_part_i=False, blank_sheet=False):
+    """Build a synthetic xlsx matching build_part_i()'s geometry.
+    `transactions` is a list of (txn_sr_no, tax_deducted) pairs, each
+    written as a full 15-column data row followed (once all of a
+    deductor's rows are in -- here treated as a single deductor) by a
+    Sub-total row (columns 1/2/13/14/15 only, column 7 blank) and a Grand
+    Total row (columns 2/13/14/15 only, column 7 blank), exactly like the
+    real writer. No real document/PII involved -- every value here is
+    invented for this test."""
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    if omit_part_i:
+        ws.title = "Not Part I"
+    else:
+        ws.title = "Part I"
+        if not blank_sheet:
+            for c, h in enumerate(_P1_HEADERS, 1):
+                ws.cell(row=3, column=c, value=h)
+            r = 4
+            if no_transactions_marker or not transactions:
+                ws.cell(row=r, column=1, value="No Transactions Present")
+            else:
+                for sr, tax in transactions:
+                    vals = [1, "Synthetic Deductor", "SYNT12345D", 100000.0, tax, tax,
+                            sr, "194J", "01-Apr-2025", "F", "07-May-2025", "",
+                            10000.0, tax, tax]
+                    for c, v in enumerate(vals, 1):
+                        ws.cell(row=r, column=c, value=v)
+                    r += 1
+                sub_tax = sum(t for _, t in transactions)
+                ws.cell(row=r, column=1, value="#1")
+                ws.cell(row=r, column=2, value="Sub-total -- Synthetic Deductor")
+                ws.cell(row=r, column=13, value=sum(10000.0 for _ in transactions))
+                ws.cell(row=r, column=14, value=sub_tax)
+                ws.cell(row=r, column=15, value=sub_tax)
+                r += 1
+                ws.cell(row=r, column=2, value="GRAND TOTAL (all deductors)")
+                ws.cell(row=r, column=14, value=sub_tax)
+    wb.save(str(path))
+    return path
+
+
+def test_26as_reader_no_path_is_not_available_none_value():
+    note, value = read_form_26as_tds_credit("")
+    assert value is None
+    assert "not available" in note
+    assert "no workbook supplied" in note
+
+
+def test_26as_reader_missing_file_degrades_loud_not_a_crash():
+    note, value = read_form_26as_tds_credit(
+        "C:/does/not/exist/nonexistent_26as_fixture.xlsx"
+    )
+    assert value is None
+    assert "not available" in note
+    assert "could not open" in note
+
+
+def test_26as_reader_missing_part_i_sheet_degrades_loud(tmp_path):
+    path = _write_part_i_workbook(tmp_path / "no_part_i.xlsx", omit_part_i=True)
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value is None
+    assert "not available" in note
+    assert "Part I" in note
+
+
+def test_26as_reader_empty_sheet_with_marker_is_zero_and_success(tmp_path):
+    path = _write_part_i_workbook(
+        tmp_path / "empty_26as.xlsx", no_transactions_marker=True,
+    )
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value == 0.0
+    assert "not available" not in note
+    assert "no TDS entries" in note
+
+
+def test_26as_reader_blank_part_i_sheet_no_header_at_all_is_also_zero_success(tmp_path):
+    # A sheet with literally nothing on it (no header row, no marker) must
+    # still degrade to a clean "0.0, no entries" success, not a crash --
+    # there is simply no row anywhere with a populated Txn Sr.No. column.
+    path = _write_part_i_workbook(tmp_path / "blank_26as.xlsx", blank_sheet=True)
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value == 0.0
+    assert "no TDS entries" in note
+
+
+def test_26as_reader_sums_only_genuine_transaction_rows(tmp_path):
+    path = _write_part_i_workbook(
+        tmp_path / "with_txns.xlsx",
+        transactions=[(1, 1500.0), (2, 2500.0), (3, 1000.0)],
+    )
+    note, value = read_form_26as_tds_credit(str(path))
+    # The subtotal row and the grand-total row both also carry 5000.0 in
+    # column 14 -- if the reader summed every non-blank column-14 cell
+    # instead of discriminating on column 7, it would report 15000.0
+    # (5000 real + 5000 subtotal + 5000 grand total) instead of 5000.0.
+    assert value == 5000.0
+    assert "3 transaction(s)" in note
+
+
+def test_26as_reader_single_transaction_matches_exactly(tmp_path):
+    path = _write_part_i_workbook(
+        tmp_path / "one_txn.xlsx", transactions=[(1, 4321.0)],
+    )
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value == 4321.0
+
+
+def test_26as_reader_wired_into_external_form_26as_total_credit(monkeypatch, tmp_path):
+    """End-to-end: agent._run_from_documents() must feed the reader's
+    result into external["form_26as_total_credit"], which engine.py's
+    existing reconcile_category() then compares against the computed
+    monthly TDS -- never touching engine.py's consuming logic, only
+    supplying the input."""
+    fixture = _load_fixture()
+    data = dict(fixture)
+    xlsx_path = _write_part_i_workbook(
+        tmp_path / "wired_26as.xlsx", transactions=[(1, 999.0)],
+    )
+    note, value = read_form_26as_tds_credit(str(xlsx_path))
+    assert value == 999.0
+
+    data["external"] = {"form_26as_total_credit": value}
+    report = build_report(data)
+    row = next(
+        r for r in report.reconciliation
+        if r.category.startswith("TDS credit:")
+    )
+    assert row.sources["Form 26AS"] == 999.0
+
+
+# ---------------------------------------------------------------------------
+# Sections B/C -- gnucash_tieout.py (posted-already check + balance tie-out).
+# All fixtures below are hand-built, minimal, plain-text (non-gzipped)
+# GnuCash-v2 XML book fragments -- entirely synthetic, no real book, no
+# real name/account/amount. parse_gnucash.parse_book() only ever OPENS
+# these files for reading (via a plain `open()`/`gzip.open()` context
+# manager that this test never writes through) -- no write handle is ever
+# created on any .gnucash file, real or synthetic, anywhere in this file.
+#
+# The journal these tests compare against is always the one implied by
+# _gc_tieout_report() below: a single Class A monthly payout for 2025-04
+# (firm_name "Synthetic Test LLP") that jv_emitter.build_journals() turns
+# into ONE transaction, txn_id "SYNTHETIC-2526-M01", dated 2025-04-30, with
+# exactly these four splits (Dr+/Cr- convention):
+#   Dr  Assets:Bank:Current Account       480000.00
+#   Dr  Expenses:Tax:TDS                   20000.00
+#   Cr  Income:PGBP:Remuneration          200000.00
+#   Cr  Income:PGBP:Share of Profit       300000.00
+# (verified directly against jv_emitter.build_journals() while designing
+# these tests -- not hand-computed from the spec alone).
+# ---------------------------------------------------------------------------
+
+_GC_NS = (
+    'xmlns:gnc="http://www.gnucash.org/XML/gnc" '
+    'xmlns:act="http://www.gnucash.org/XML/act" '
+    'xmlns:book="http://www.gnucash.org/XML/book" '
+    'xmlns:cmdty="http://www.gnucash.org/XML/cmdty" '
+    'xmlns:trn="http://www.gnucash.org/XML/trn" '
+    'xmlns:split="http://www.gnucash.org/XML/split" '
+    'xmlns:ts="http://www.gnucash.org/XML/ts" '
+    'xmlns:slot="http://www.gnucash.org/XML/slot"'
+)
+
+
+def _gc_guid(seed: str) -> str:
+    import hashlib
+    return hashlib.md5(seed.encode()).hexdigest()
+
+
+def _gc_account_xml(guid: str, name: str, typ: str, parent_guid: str | None) -> str:
+    parent_xml = f'<act:parent type="guid">{parent_guid}</act:parent>' if parent_guid else ""
+    return f"""
+<gnc:account version="2.0.0">
+  <act:name>{name}</act:name>
+  <act:id type="guid">{guid}</act:id>
+  <act:type>{typ}</act:type>
+  <act:commodity>
+    <cmdty:space>CURRENCY</cmdty:space>
+    <cmdty:id>INR</cmdty:id>
+  </act:commodity>
+  {parent_xml}
+</gnc:account>
+"""
+
+
+def _gc_frac(x: float) -> str:
+    return f"{round(x * 100)}/100"
+
+
+def _gc_split_xml(guid: str, value: float, account_guid: str) -> str:
+    return f"""
+    <trn:split>
+      <split:id type="guid">{guid}</split:id>
+      <split:reconciled-state>n</split:reconciled-state>
+      <split:value>{_gc_frac(value)}</split:value>
+      <split:quantity>{_gc_frac(value)}</split:quantity>
+      <split:account type="guid">{account_guid}</split:account>
+    </trn:split>
+"""
+
+
+def _gc_txn_xml(guid: str, iso_date: str, description: str, splits_xml: list, num: str = "") -> str:
+    num_xml = f"<trn:num>{num}</trn:num>" if num else ""
+    return f"""
+<gnc:transaction version="2.0.0">
+  <trn:id type="guid">{guid}</trn:id>
+  {num_xml}
+  <trn:date-posted>
+    <ts:date>{iso_date} 10:59:00 +0000</ts:date>
+  </trn:date-posted>
+  <trn:date-entered>
+    <ts:date>{iso_date} 10:59:00 +0000</ts:date>
+  </trn:date-entered>
+  <trn:description>{description}</trn:description>
+  <trn:splits>
+    {"".join(splits_xml)}
+  </trn:splits>
+</gnc:transaction>
+"""
+
+
+def _gc_document_xml(accounts_xml: list, txns_xml: list) -> str:
+    return f"""<?xml version="1.0" encoding="utf-8" ?>
+<gnc-v2 {_GC_NS}>
+<gnc:count-data cd:type="book" xmlns:cd="http://www.gnucash.org/XML/cd">1</gnc:count-data>
+<gnc:book version="2.0.0">
+<book:id type="guid">{_gc_guid("book-id")}</book:id>
+{"".join(accounts_xml)}
+{"".join(txns_xml)}
+</gnc:book>
+</gnc-v2>
+"""
+
+
+def _write_gnucash_book(path: Path, xml_text: str) -> str:
+    """Writes a plain-text (non-gzipped) .gnucash XML file -- parse_gnucash.
+    parse_book() detects gzip by magic bytes and falls back to plain-text
+    open() otherwise, so a real book need not be gzipped for these tests.
+    This ONLY EVER writes a fresh synthetic fixture file under tmp_path --
+    never opens or modifies any real/existing .gnucash file, and never
+    opens a write handle through parse_gnucash itself (that module never
+    writes at all)."""
+    path.write_text(xml_text, encoding="utf-8")
+    return str(path)
+
+
+_GC_TIEOUT_ACCOUNTS = {
+    "bank": "Assets:Bank:Current Account",
+    "tds_expense": "Expenses:Tax:TDS",
+    "remuneration_income": "Income:PGBP:Remuneration",
+    "share_of_profit_income": "Income:PGBP:Share of Profit",
+}
+
+
+def _gc_tieout_report():
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04")],
+        accounts=_GC_TIEOUT_ACCOUNTS,
+        firm_name="Synthetic Test LLP",
+    )
+    return build_report(data)
+
+
+def _gc_tree() -> tuple[list, dict]:
+    """Builds a minimal account tree matching _GC_TIEOUT_ACCOUNTS's paths
+    exactly (verified directly against _colon_paths() while designing this
+    fixture). Returns (accounts_xml, guids) where guids maps each leaf
+    account's plain name (e.g. "Current Account", "TDS", "Remuneration",
+    "Share of Profit") to its guid, for use when building split XML."""
+    root = _gc_guid("Root")
+    guids = {
+        "Root": root,
+        "Assets": _gc_guid("Assets"),
+        "Bank": _gc_guid("Bank"),
+        "Current Account": _gc_guid("Current Account"),
+        "Expenses": _gc_guid("Expenses"),
+        "Tax": _gc_guid("Tax"),
+        "TDS": _gc_guid("TDS"),
+        "Income": _gc_guid("Income"),
+        "PGBP": _gc_guid("PGBP"),
+        "Remuneration": _gc_guid("Remuneration"),
+        "Share of Profit": _gc_guid("Share of Profit"),
+    }
+    accounts = [
+        _gc_account_xml(guids["Root"], "Root Account", "ROOT", None),
+        _gc_account_xml(guids["Assets"], "Assets", "ASSET", guids["Root"]),
+        _gc_account_xml(guids["Bank"], "Bank", "ASSET", guids["Assets"]),
+        _gc_account_xml(guids["Current Account"], "Current Account", "ASSET", guids["Bank"]),
+        _gc_account_xml(guids["Expenses"], "Expenses", "EXPENSE", guids["Root"]),
+        _gc_account_xml(guids["Tax"], "Tax", "EXPENSE", guids["Expenses"]),
+        _gc_account_xml(guids["TDS"], "TDS", "EXPENSE", guids["Tax"]),
+        _gc_account_xml(guids["Income"], "Income", "INCOME", guids["Root"]),
+        _gc_account_xml(guids["PGBP"], "PGBP", "INCOME", guids["Income"]),
+        _gc_account_xml(guids["Remuneration"], "Remuneration", "INCOME", guids["PGBP"]),
+        _gc_account_xml(guids["Share of Profit"], "Share of Profit", "INCOME", guids["PGBP"]),
+    ]
+    return accounts, guids
+
+
+def _gc_matching_splits(guids: dict) -> list:
+    """The four split XML fragments that exactly match
+    _gc_tieout_report()'s implied journal, for a same-day/full-match book
+    transaction."""
+    return [
+        _gc_split_xml(_gc_guid("s-bank"), 480000.0, guids["Current Account"]),
+        _gc_split_xml(_gc_guid("s-tds"), 20000.0, guids["TDS"]),
+        _gc_split_xml(_gc_guid("s-rem"), -200000.0, guids["Remuneration"]),
+        _gc_split_xml(_gc_guid("s-sop"), -300000.0, guids["Share of Profit"]),
+    ]
+
+
+# --- Section B: build_posted_check() -----------------------------------
+
+def test_build_posted_check_definite_trn_num_match_is_already_posted(tmp_path):
+    accounts, guids = _gc_tree()
+    txn = _gc_txn_xml(
+        _gc_guid("txn-1"), "2025-04-30", "matching posted txn",
+        _gc_matching_splits(guids), num="SYNTHETIC-2526-M01",
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_definite.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+    report = _gc_tieout_report()
+
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26")
+
+    assert len(results) == 1
+    assert results[0].status == ALREADY_POSTED
+    assert "Transaction ID/Num" in results[0].detail
+    assert "1 already posted" in note
+
+
+def test_build_posted_check_fallback_exact_match_no_num_is_already_posted(tmp_path):
+    # Same splits/date as the definite-match test above, but NO trn:num on
+    # the book transaction -- must still resolve to ALREADY POSTED via the
+    # exact date+amount+account fallback, never a false NOT POSTED.
+    accounts, guids = _gc_tree()
+    txn = _gc_txn_xml(
+        _gc_guid("txn-2"), "2025-04-30", "matching posted txn, no num",
+        _gc_matching_splits(guids),
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_fallback.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+    report = _gc_tieout_report()
+
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26")
+
+    assert len(results) == 1
+    assert results[0].status == ALREADY_POSTED
+    assert "no trn:num match" in results[0].detail
+    assert "1 already posted" in note
+
+
+def test_build_posted_check_no_matching_book_transaction_is_not_posted(tmp_path):
+    accounts, guids = _gc_tree()
+    # An unrelated transaction: different date, different amounts -- no
+    # split of it can match any split of this run's implied journal.
+    unrelated = _gc_txn_xml(
+        _gc_guid("txn-unrelated"), "2025-05-15", "unrelated txn",
+        [_gc_split_xml(_gc_guid("s-unrelated"), 1234.56, guids["Current Account"])],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_not_posted.gnucash", _gc_document_xml(accounts, [unrelated]),
+    )
+    report = _gc_tieout_report()
+
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26")
+
+    assert len(results) == 1
+    assert results[0].status == NOT_POSTED
+    assert "1 not posted" in note
+
+
+def test_build_posted_check_partially_posted_ambiguous_when_only_some_splits_match(tmp_path):
+    # A same-day book transaction with only the bank leg matching one
+    # split of this run's journal exactly, plus an unrelated second leg
+    # that matches none of the journal's other three splits -- 1 of 4
+    # splits match, but not as a single full transaction, so this must
+    # come back PARTIALLY POSTED -- AMBIGUOUS, never ALREADY POSTED and
+    # never NOT POSTED.
+    accounts, guids = _gc_tree()
+    txn = _gc_txn_xml(
+        _gc_guid("txn-partial"), "2025-04-30", "partially matching txn",
+        [
+            _gc_split_xml(_gc_guid("s-partial-bank"), 480000.0, guids["Current Account"]),
+            _gc_split_xml(_gc_guid("s-partial-other"), -480000.0, guids["Remuneration"]),
+        ],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_partial.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+    report = _gc_tieout_report()
+
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26")
+
+    assert len(results) == 1
+    assert results[0].status == PARTIALLY_POSTED
+    assert "1 of 4" in results[0].detail
+    assert "ambiguous" in results[0].detail.lower()
+    assert "1 partially posted -- ambiguous" in note.lower()
+
+
+def test_build_posted_check_degrades_cleanly_when_inputs_missing_or_bad(tmp_path):
+    report = _gc_tieout_report()
+    accounts, guids = _gc_tree()
+    good_book_path = _write_gnucash_book(
+        tmp_path / "book_good.gnucash", _gc_document_xml(accounts, []),
+    )
+
+    # No gnucash_path at all.
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, "", "2025-26")
+    assert results == []
+    assert "no GnuCash book supplied" in note
+
+    # No accounts configured for this entity.
+    results, note = build_posted_check(report, {}, good_book_path, "2025-26")
+    assert results == []
+    assert "no partner_comp_accounts configured" in note
+
+    # A book file that fails to parse (garbage, not XML at all).
+    garbage_path = tmp_path / "garbage.gnucash"
+    garbage_path.write_text("this is not a GnuCash book", encoding="utf-8")
+    results, note = build_posted_check(report, _GC_TIEOUT_ACCOUNTS, str(garbage_path), "2025-26")
+    assert results == []
+    assert "could not open/parse" in note
+
+    # An accounts dict missing a key this run's journal actually needs
+    # (share_of_profit_income, required because share_of_profit_gross is
+    # non-zero) -- build_journals() itself raises JournalValidationError.
+    incomplete_accounts = dict(_GC_TIEOUT_ACCOUNTS)
+    del incomplete_accounts["share_of_profit_income"]
+    results, note = build_posted_check(report, incomplete_accounts, good_book_path, "2025-26")
+    assert results == []
+    assert "could not build this run's implied journal" in note
+
+
+# --- Section C: build_balance_tieout() ----------------------------------
+
+def test_build_balance_tieout_agree_variance_sweep_and_missing_shapes(tmp_path):
+    accounts, guids = _gc_tree()
+    txns = [
+        # bank (ASSET, no flip): book FY movement 480000.00 == computed
+        # 480000.00 -- AGREE.
+        _gc_txn_xml(
+            _gc_guid("txn-bank"), "2025-04-30", "bank leg",
+            [_gc_split_xml(_gc_guid("s-c-bank"), 480000.0, guids["Current Account"])],
+        ),
+        # tds_expense (EXPENSE, flips): raw +20000.00 debit normalizes to
+        # -20000.00, matching computed -20000.00 exactly -- AGREE. This
+        # pins the EXPENSE side as NEGATIVE, not merely abs()==20000.
+        _gc_txn_xml(
+            _gc_guid("txn-tds"), "2025-04-30", "tds leg",
+            [_gc_split_xml(_gc_guid("s-c-tds"), 20000.0, guids["TDS"])],
+        ),
+        # remuneration_income (INCOME, flips): raw -190000.00 normalizes
+        # to +190000.00, vs. computed +200000.00 -- a genuine 10,000.00
+        # VARIANCE, not an agreement. This pins the INCOME side as
+        # POSITIVE, not merely abs()==190000/200000.
+        _gc_txn_xml(
+            _gc_guid("txn-rem"), "2025-04-30", "remuneration leg",
+            [_gc_split_xml(_gc_guid("s-c-rem"), -190000.0, guids["Remuneration"])],
+        ),
+        # share_of_profit_income: deliberately NO book transaction at all
+        # -- FY movement is 0.00 against a computed +300000.00, on an
+        # INCOME (FLIP_TYPES) account -- must downgrade to the
+        # closed-book-sweep note, not a hard VARIANCE.
+    ]
+    book_path = _write_gnucash_book(
+        tmp_path / "book_tieout.gnucash", _gc_document_xml(accounts, txns),
+    )
+    report = _gc_tieout_report()
+
+    results = build_balance_tieout(report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26")
+    assert len(results) == 8
+    by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
+
+    bank = by_key["bank"]
+    assert bank.agree is True
+    assert bank.sources["Computed (this run's journal)"] == 480000.0
+    assert bank.sources["GnuCash book (FY movement)"] == 480000.0
+
+    tds = by_key["tds_expense"]
+    assert tds.agree is True
+    assert tds.sources["Computed (this run's journal)"] == -20000.0
+    assert tds.sources["GnuCash book (FY movement)"] == -20000.0
+
+    rem = by_key["remuneration_income"]
+    assert rem.agree is False
+    assert rem.sources["Computed (this run's journal)"] == 200000.0
+    assert rem.sources["GnuCash book (FY movement)"] == 190000.0
+    assert "Variance" in rem.note
+
+    sop = by_key["share_of_profit_income"]
+    assert sop.agree is None
+    assert sop.sources["Computed (this run's journal)"] == 300000.0
+    assert sop.sources["GnuCash book (FY movement)"] == 0.0
+    assert CANNOT_RECONCILE not in sop.note
+    assert "sweep" in sop.note.lower() or "closed-book" in sop.note.lower()
+
+    for key in ("interest_on_capital", "current_account", "capital_contribution", "medical_expense"):
+        r = by_key[key]
+        assert r.agree is None
+        assert CANNOT_RECONCILE in r.note
+        assert r.sources["Computed (this run's journal)"] is None
+
+
+def test_build_balance_tieout_account_path_not_found_in_book(tmp_path):
+    accounts, guids = _gc_tree()
+    book_path = _write_gnucash_book(
+        tmp_path / "book_pathcheck.gnucash", _gc_document_xml(accounts, []),
+    )
+    report = _gc_tieout_report()
+    bad_accounts = dict(_GC_TIEOUT_ACCOUNTS)
+    bad_accounts["bank"] = "Assets:Bank:Does Not Exist"
+
+    results = build_balance_tieout(report, bad_accounts, book_path, "2025-26")
+    by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
+
+    bank = by_key["bank"]
+    assert bank.agree is None
+    assert "not found in the supplied GnuCash book" in bank.note
+
+
+def test_build_balance_tieout_degrades_cleanly_when_inputs_missing_or_bad(tmp_path):
+    report = _gc_tieout_report()
+    accounts, guids = _gc_tree()
+    good_book_path = _write_gnucash_book(
+        tmp_path / "book_c_good.gnucash", _gc_document_xml(accounts, []),
+    )
+
+    results = build_balance_tieout(report, _GC_TIEOUT_ACCOUNTS, "", "2025-26")
+    assert len(results) == 8
+    assert all(r.agree is None and "no GnuCash book supplied" in r.note for r in results)
+
+    results = build_balance_tieout(report, {}, good_book_path, "2025-26")
+    assert len(results) == 8
+    assert all(r.agree is None and "no partner_comp_accounts configured" in r.note for r in results)
+
+    garbage_path = tmp_path / "garbage_c.gnucash"
+    garbage_path.write_text("this is not a GnuCash book", encoding="utf-8")
+    results = build_balance_tieout(report, _GC_TIEOUT_ACCOUNTS, str(garbage_path), "2025-26")
+    assert len(results) == 8
+    assert all(r.agree is None and "could not open/parse" in r.note for r in results)
+
+    incomplete_accounts = dict(_GC_TIEOUT_ACCOUNTS)
+    del incomplete_accounts["share_of_profit_income"]
+    results = build_balance_tieout(report, incomplete_accounts, good_book_path, "2025-26")
+    assert len(results) == 8
+    assert all(
+        r.agree is None and "could not build this run's implied journal" in r.note
+        for r in results
+    )
+
+
+# --- Integration: agent.run() wires Sections B/C end to end -------------
+
+def test_agent_run_wires_gnucash_tieout_note_and_reconciliation_rows(tmp_path, monkeypatch):
+    """End-to-end: run() must feed build_posted_check()'s real note into
+    the returned optional-leg status (replacing the old
+    "GnuCash books tie-out: pending (...)" placeholder), and
+    build_balance_tieout()'s 8 results must land in the written workbook's
+    reconciliation set via report.reconciliation -- never silently
+    dropped."""
+    from agents.skill_partner_comp_recon import agent as agent_module
+    import openpyxl
+
+    class _FakeEntityProfileWithAccounts:
+        name = "Synthetic Taxpayer Person"
+        extra_items: dict = {}
+        partner_comp_accounts = dict(_GC_TIEOUT_ACCOUNTS)
+
+    monkeypatch.setattr(
+        agent_module, "_resolve_entity_config",
+        lambda entity, config_path: (_FakeEntityProfileWithAccounts(), None),
+    )
+    monkeypatch.setattr(agent_module._advisory_parser, "parse", lambda path, password: {})
+    monkeypatch.setattr(
+        agent_module._payout_advice_parser, "parse",
+        lambda path, password: _class_a_advice("2025-04", entity_name="Synthetic Test LLP"),
+    )
+
+    accounts, guids = _gc_tree()
+    txn = _gc_txn_xml(
+        _gc_guid("txn-integration"), "2025-04-30", "matching posted txn",
+        _gc_matching_splits(guids), num="SYNTHETIC-2526-M01",
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_integration.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+
+    advices_dir = _advices_dir_with_one_pdf(tmp_path)
+    advisory_path = tmp_path / "advisory.pdf"
+    advisory_path.write_bytes(b"%PDF-1.4 not a real pdf")
+    out_path = tmp_path / "out.xlsx"
+
+    result = run(
+        entity="SYN-PARTNER",
+        advices_dir=str(advices_dir),
+        advisory_path=str(advisory_path),
+        gnucash_path=book_path,
+        output_path=str(out_path),
+    )
+
+    assert "ERROR" not in result
+    assert "Posted-already check" in result
+    assert "1 already posted" in result
+    assert "GnuCash books tie-out: pending" not in result
+
+    wb = openpyxl.load_workbook(str(out_path))
+    assert "Posted check" in wb.sheetnames

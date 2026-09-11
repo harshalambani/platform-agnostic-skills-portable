@@ -458,10 +458,50 @@ def _write_open_items_sheet(wb, report: Report):
 
 
 # ---------------------------------------------------------------------------
+# 11. Posted check (Section B -- "posted already?" per-journal detector)
+#
+# This does NOT reuse the Reconciliation/Exceptions/Open items sheets: those
+# are all shaped around ReconciliationResult (one category, N named
+# *numeric* sources compared against each other). A posted-check result is
+# a different shape entirely -- one row per journal this run WOULD post,
+# carrying a 4-way status (ALREADY POSTED / NOT POSTED / PARTIALLY POSTED --
+# AMBIGUOUS / CANNOT CHECK) plus a free-text explanation of which book
+# transaction (if any) it matched and how -- there is no "Sources" dict to
+# show, and cramming a per-transaction match narrative into the Exceptions
+# sheet's Category/Status/Detail columns would bury it beside unrelated
+# category-level variances. A dedicated sheet keeps both readable.
+# ---------------------------------------------------------------------------
+
+def _write_posted_check_sheet(wb, posted_check):
+    ws = wb.create_sheet("Posted check")
+    headers = ["Transaction ID", "Date", "Description", "Status", "Detail"]
+    _write_header(ws, 1, headers)
+    row = 2
+    status_fills = {
+        "ALREADY POSTED": OK,
+        "NOT POSTED": SF,
+        "PARTIALLY POSTED -- AMBIGUOUS": TF,
+        "CANNOT CHECK": BAD,
+    }
+    for r in posted_check or []:
+        _set(ws, row, 1, r.txn_id, wrap=True)
+        _set(ws, row, 2, r.date)
+        _set(ws, row, 3, r.description, wrap=True)
+        _set(ws, row, 4, r.status, fill=status_fills.get(r.status), bold=True)
+        _set(ws, row, 5, r.detail, wrap=True)
+        row += 1
+    if row == 2:
+        _set(ws, row, 1, "No journals to check -- either no GnuCash book was supplied, no "
+                         "partner_comp_accounts are configured, or this run implies no "
+                         "journal entries.", wrap=True)
+    _autosize(ws, len(headers))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def write_report_workbook(report: Report, out_path: str) -> None:
+def write_report_workbook(report: Report, out_path: str, posted_check=None) -> None:
     wb = Workbook()
     wb.remove(wb.active)
     _write_logic_sheet(wb, report)
@@ -474,4 +514,6 @@ def write_report_workbook(report: Report, out_path: str) -> None:
     _write_reconciliation_sheet(wb, report)
     _write_exceptions_sheet(wb, report)
     _write_open_items_sheet(wb, report)
+    if posted_check is not None:
+        _write_posted_check_sheet(wb, posted_check)
     wb.save(out_path)
