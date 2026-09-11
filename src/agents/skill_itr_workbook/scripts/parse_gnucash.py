@@ -68,6 +68,12 @@ class Transaction:
     date_posted: date
     description: str
     splits: list[Split] = field(default_factory=list)
+    num: str = ""  # trn:num -- GnuCash's "Num" field. jv_emitter.py writes
+    # Transaction ID into the CSV "Number" column, which lands here on
+    # import, so this is the definite (when present) posted-already match
+    # key for skill_partner_comp_recon's Section B. Default "" for any
+    # transaction lacking a trn:num element, matching GnuCash's own
+    # behaviour of an empty Num field.
 
 
 @dataclass
@@ -140,6 +146,8 @@ def parse_book_text(xml_text: str) -> Book:
         dt = datetime.strptime(date_el.text[:10], "%Y-%m-%d").date()
         desc_el = txn_el.find("trn:description", NS)
         desc = desc_el.text if desc_el is not None else ""
+        num_el = txn_el.find("trn:num", NS)
+        num = num_el.text if num_el is not None and num_el.text else ""
         splits: list[Split] = []
         for sp_el in txn_el.findall("trn:splits/trn:split", NS):
             sguid = sp_el.find("split:id", NS).text
@@ -153,7 +161,7 @@ def parse_book_text(xml_text: str) -> Book:
                 action=action_el.text if action_el is not None else None,
                 reconciled_state=recon_el.text if recon_el is not None else None,
             ))
-        transactions.append(Transaction(guid=guid, date_posted=dt, description=desc, splits=splits))
+        transactions.append(Transaction(guid=guid, date_posted=dt, description=desc, splits=splits, num=num))
 
     transactions.sort(key=lambda t: t.date_posted)
     return Book(accounts=accounts, transactions=transactions)
