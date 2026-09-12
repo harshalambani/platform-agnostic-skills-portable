@@ -395,10 +395,11 @@ def _run_from_documents(
     all in this build -- they read an existing structured format rather
     than parse a free-form PDF. `xlsx_26as` is read by
     xlsx_26as_reader.read_form_26as_tds_credit() (Section A), feeding
-    external["form_26as_total_credit"]. `gnucash_path` is still an
-    always-degraded reconciliation leg here; it is separately used later,
-    read-only, purely to validate configured account paths before a
-    journal is written, never for a books tie-out.
+    external["form_26as_total_credit"]. `gnucash_path` now feeds a real,
+    read-only books tie-out (gnucash_tieout.py, Sections B and C: a
+    posted-already check plus a per-account balance tie-out) once the
+    report is built; it is separately used later, read-only, to validate
+    configured account paths before a journal is written.
 
     Required inputs (entity, advices_dir, advisory_path) missing fail loud
     by name, before any parsing is attempted. Optional inputs
@@ -436,7 +437,8 @@ def _run_from_documents(
     string. The final summary reuses _summarize_report() (the same
     reporting tail the structured-input path uses) plus the optional
     legs' status notes. Never opens a write handle on gnucash_path --
-    read-only account-path validation only.
+    read-only account-path validation and the Section B/C books tie-out
+    only.
     """
     for value, name, label in (
         (entity, "entity", "Entity"),
