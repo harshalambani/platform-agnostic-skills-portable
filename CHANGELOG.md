@@ -11,7 +11,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.8.0] — 2026-09-14
+
 ### Added
+- **New Partner Compensation Reconciliation skill, reshaped to take raw
+  source documents instead of pre-extracted figures** (#223, #225), with a
+  parser for each document class: L1 payout advice/certificate, including
+  Class B "PAYOUT STATEMENT" support (#226, #237); L3 compensation advisory,
+  later repaired to match the real document layout (#227, #236); L4 payment
+  schedule, fixed to consume every page (not just the first) and redesigned
+  for cross-page subtotal precedence against real-document gaps (#231, #233,
+  #235); and L5 LLP statement of account (#230). A Class A/B mapper pipeline
+  assembles the parsed documents into monthly reconciliation lines, with
+  assembly tests added (#238).
+- **Partner Compensation Reconciliation gains a 26AS TDS-credit reader and a
+  GnuCash posted-check/balance tie-out** (Sections A/B/C) (#242).
 - **Partner Compensation Reconciliation can now emit a GnuCash multi-split
   journal CSV of the reconciled year's implied entries** (Stage 1b,
   `src/agents/skill_partner_comp_recon/jv_emitter.py`), via a new optional
@@ -53,6 +67,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   producing an uninstallable `requirements-lock.txt` (gradio 6.26.0 requires
   `gradio-client==2.6.1`, but the lock still pinned `2.6.0`). Changed to
   `"gradio*"` so both move together in one PR.
+- **Partner Compensation Reconciliation: mapper now carries all L4 schedule
+  fields onto monthly lines** (#239).
+- **Partner Compensation Reconciliation: cohort assembly, rate-change gate,
+  reconciliation category, and `firm_name` sourcing fixed** (#240).
+- **Partner Compensation Reconciliation: cash/firm's-tax double-counts and a
+  false rate-change message fixed, and journal Transaction IDs are now
+  firm-prefixed** (#241).
+- **Partner Compensation Reconciliation: stale `gnucash_path` docstring
+  corrected** (#243).
+- **`compat-check.yml` workflow now installs the `reportlab`/`xlwt`
+  test-only fixture dependencies and quotes the `"pyinstaller>=6.10"`
+  version pin**, fixing a workflow failure (#254).
+
+### Changed
+- **Eleven further dependency bumps, all `requirements-lock.txt`-only** (no
+  source changes):
+  - langchain-ecosystem group, 4 updates (#199)
+  - `extract-msg` 0.56.0 -> 0.56.1 (#213)
+  - ui group, `gradio` 6.24.0 -> 6.26.0 and `gradio-client` (#214)
+  - `cryptography` 50.0.0 -> 50.0.1 (#215)
+  - `python-dotenv` 1.2.2 -> 1.2.3 (#216)
+  - `typing-inspection` 0.4.2 -> 0.4.4 (#217)
+  - `idna` 3.18 -> 3.19 (#218)
+  - `pygments` 2.20.0 -> 2.21.0 (#219)
+  - `filelock` 3.32.3 -> 3.32.4 (#221)
+  - `uvicorn` 0.52.1 -> 0.52.4 (#222)
+  - `softprops/action-gh-release` GitHub Action, 3.0.2 -> 3.0.3 (#229)
 
 ## [3.7.0] — 2026-08-28
 
