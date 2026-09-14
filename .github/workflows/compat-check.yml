@@ -53,7 +53,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip wheel setuptools
           python -m pip install -r requirements.txt
-          python -m pip install pyinstaller>=6.10 pytest
+          # Test-only, deliberately not in requirements.txt: the bank-parser
+          # tests synthesise their own fixtures rather than committing real
+          # statements -- reportlab writes the PDFs, xlwt the legacy .xls.
+          python -m pip install "pyinstaller>=6.10" pytest reportlab xlwt
 
       # ----------------------------------------------------------------
       # 4. Run full test suite
