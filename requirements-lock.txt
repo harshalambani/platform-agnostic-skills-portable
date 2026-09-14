@@ -988,9 +988,9 @@ httpx-sse==0.4.3 \
     --hash=sha256:0ac1c9fe3c0afad2e0ebb25a934a59f4c7823b60792691f779fad2c5568830fc \
     --hash=sha256:9b1ed0127459a66014aec3c56bebd93da3c1bc8bb6618c8082039a44889a755d
     # via langchain-community
-huggingface-hub==1.28.0 \
-    --hash=sha256:46a2e950c09234de54093d587d1675382f0d08dbd600d9fb599b5932f5b2c6cb \
-    --hash=sha256:58a8bacb03072edfc38067065e9dc24bbb34805410fcd36a1632de0b329660bb
+huggingface-hub==1.31.0 \
+    --hash=sha256:9dbb6a503cbe2494ea666695207e7262d410659e09134059deb83e5480864667 \
+    --hash=sha256:f8e9e710a210613fa5d0f26bba6da05ef4aef9fba5a0f23f508f5ac4d08b6f90
     # via
     #   gradio
     #   gradio-client
