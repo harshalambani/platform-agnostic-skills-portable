@@ -106,11 +106,15 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                                 splits_data.append((split_acc, split_value, split_memo))
 
             if date_posted and splits_data:
-                # Filter by account if specified
-                if target_acc_ids:
+                # Filter by account if specified. Note: check `account_filter`
+                # (was requested at all), not `target_acc_ids` (matched
+                # something) -- a filter that matches zero accounts must
+                # still exclude every split, not silently fall through to
+                # unfiltered behaviour indistinguishable from no filter.
+                if account_filter:
                     splits_data = [
                         (acc, val, memo) for acc, val, memo in splits_data
-                        if acc in target_acc_ids
+                        if acc in (target_acc_ids or [])
                     ]
 
                 if splits_data:

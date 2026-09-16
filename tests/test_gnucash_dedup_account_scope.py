@@ -44,6 +44,7 @@ for _p in (SRC, SRC / "agents"):
 
 import hdfc_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_gnucash_pipeline.agent import run as pipeline_run  # noqa: E402
+from agents.skill_gnucash_reconciler.agent import parse_gnucash_for_reconcile  # noqa: E402
 
 _NS_DECL = (
     'xmlns:gnc="http://www.gnucash.org/XML/gnc" '
@@ -164,3 +165,105 @@ def test_unrelated_account_same_date_amount_does_not_dedupe_statement_row(tmp_pa
         f"the target account.\nrows={rows}\nlog={result}"
     )
     assert "50000.00" in deposits
+
+
+# ── Negative tests ────────────────────────────────────────────────────────
+# These assert the WRONG behaviour does NOT occur: no silent fallback to an
+# unscoped whole-book scan, and no false "duplicate" verdict.
+
+def _build_book_with_no_hdfc_account_and_a_decoy(tmp_path: Path) -> str:
+    """No account whose name contains 'HDFC' exists anywhere in this book --
+    _get_gnucash_account_balance() must report not-found. An unrelated
+    account still carries a same-date/same-amount decoy posting, so that if
+    the code wrongly fell back to an unscoped whole-book dedup scan on a
+    resolution failure, this decoy would be exactly what falsely matches."""
+    accounts = [
+        _account_xml("Root Account", "root", "ROOT", None),
+        _account_xml("Assets", "asset", "ASSET", "root"),
+        _account_xml("ICICI Bank - SYN9999", "icici", "BANK", "asset"),
+        _account_xml("Expenses", "exp_top", "EXPENSE", "root"),
+        _account_xml("Rent", "exp_rent", "EXPENSE", "exp_top"),
+    ]
+    transactions = [
+        _transaction_xml(
+            "Unrelated rent posting (decoy)",
+            _UNRELATED_TXN_DATE,
+            "exp_rent",
+            _UNRELATED_TXN_AMOUNT,
+        ),
+    ]
+    return _write_book(tmp_path, accounts, transactions)
+
+
+def test_unresolvable_account_skips_dedup_instead_of_falling_back_unscoped(tmp_path):
+    """When the target bank account cannot be found in the book at all,
+    dedup must be SKIPPED -- never silently fall back to scanning the whole
+    book unscoped. If it fell back, the decoy Expense:Rent posting (same
+    date+amount as the statement's first row) would wrongly dedupe it away,
+    exactly like the original defect. The log must say plainly that the
+    check was skipped."""
+    csv_path = tmp_path / "syn_hdfc.csv"
+    csv_path.write_text(fixture_gen.build_csv_text(), encoding="utf-8")
+    gnucash_file = _build_book_with_no_hdfc_account_and_a_decoy(tmp_path)
+    out_path = tmp_path / "out.csv"
+
+    result = pipeline_run(
+        bank="HDFC",
+        statement_files=str(csv_path),
+        gnucash_file=gnucash_file,
+        output_path=str(out_path),
+        config_path=None,
+    )
+
+    assert "Duplicate check skipped" in result, (
+        f"no matching HDFC account exists in this book, so dedup must say it "
+        f"was skipped rather than silently proceeding unscoped.\nlog={result}"
+    )
+    assert "already in GnuCash" not in result, (
+        f"an unresolvable account must never let dedup fall back to an "
+        f"unscoped whole-book scan and dedupe the row away via the decoy "
+        f"Expense:Rent posting.\nlog={result}"
+    )
+    assert out_path.is_file(), f"pipeline did not produce an output CSV:\n{result}"
+    rows = _read_output_rows(out_path)
+    dates = [r.get("Date") for r in rows]
+    assert "2025-04-01" in dates, (
+        f"the salary-credit row must survive when dedup is skipped, not be "
+        f"silently dropped.\nrows={rows}\nlog={result}"
+    )
+
+
+def test_account_filter_matching_nothing_yields_no_transactions_not_a_fallback(tmp_path):
+    """parse_gnucash_for_reconcile()'s account_filter must actually restrict
+    the result set -- a filter that matches no account in the book must
+    yield zero transactions, not silently behave as if no filter had been
+    given at all (which would defeat the whole point of scoping dedup)."""
+    accounts = [
+        _account_xml("Root Account", "root", "ROOT", None),
+        _account_xml("Assets", "asset", "ASSET", "root"),
+        _account_xml("HDFC Bank - SYN0001", "hdfc", "BANK", "asset"),
+        _account_xml("Expenses", "exp_top", "EXPENSE", "root"),
+        _account_xml("Rent", "exp_rent", "EXPENSE", "exp_top"),
+    ]
+    transactions = [
+        _transaction_xml(
+            "Unrelated rent posting",
+            _UNRELATED_TXN_DATE,
+            "exp_rent",
+            _UNRELATED_TXN_AMOUNT,
+        ),
+    ]
+    gnucash_file = _write_book(tmp_path, accounts, transactions)
+
+    unfiltered = parse_gnucash_for_reconcile(gnucash_file)
+    assert len(unfiltered["transactions"]) == 1  # sanity: the decoy is really there
+
+    scoped = parse_gnucash_for_reconcile(
+        gnucash_file, account_filter="Root Account:Assets:Nonexistent Bank - 0000"
+    )
+    assert scoped["transactions"] == [], (
+        "an account_filter matching no account in the book must produce an "
+        "empty transaction list, not silently fall back to every "
+        "transaction in the book (which would be indistinguishable from no "
+        "filter at all)"
+    )

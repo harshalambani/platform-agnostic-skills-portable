@@ -23,6 +23,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -82,6 +84,27 @@ def test_withdrawal_with_zero_point_zero_string_deposit_is_not_labelled_deposit(
     prompts = _run_and_capture_prompts(monkeypatch, rows)
     assert " [withdrawal]" in prompts[0]
     assert " [deposit]" not in prompts[0]
+
+
+# ── Negative tests ────────────────────────────────────────────────────────
+# Explicitly assert the WRONG label is absent, per bank convention -- not
+# just that the right one is present. This is exactly the defect: on
+# unfixed code, " [deposit]" appears even though the row is a withdrawal.
+
+@pytest.mark.parametrize("zero_string", ["0", "0.0", "0.00"])
+def test_withdrawal_never_labelled_deposit_across_zero_string_conventions(monkeypatch, zero_string):
+    """ICICI/BoB write the empty side as '0', HSBC as '0.0'; guard '0.00' too
+    in case a bank ever zero-pads to two decimals. None of these truthy-but-
+    zero strings may produce ' [deposit]' for a withdrawal row."""
+    rows = [
+        {"row": 1, "description": "POS PURCHASE", "deposit": zero_string, "withdrawal": "999.00"},
+    ]
+    prompts = _run_and_capture_prompts(monkeypatch, rows)
+    assert " [deposit]" not in prompts[0], (
+        f"withdrawal row with deposit={zero_string!r} was wrongly labelled "
+        f"[deposit]: {prompts[0]!r}"
+    )
+    assert " [withdrawal]" in prompts[0]
 
 
 def test_hdfc_blank_empty_side_still_classifies_correctly(monkeypatch):
