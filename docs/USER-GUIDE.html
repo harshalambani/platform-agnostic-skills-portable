@@ -447,7 +447,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <p class="overview">Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-importable CSV in canonical columns.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use Banks &gt; Convert to GnuCash and choose ICICI instead.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Use the original .xls export from ICICI net-banking. If you re-saved it as .xlsx, export a fresh .xls — the layout this skill expects is the net-banking .xls.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many.</span></li>
+<li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Re-saving in Excel is fine — a re-saved .xls (where dates/amounts become real Excel cells) parses the same as the original download, and an accidental .xlsx re-save is read automatically too. If it still fails to parse, export a fresh .xls from ICICI net-banking.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Download your statement(s) as .xls from ICICI net-banking.</li>

@@ -15,7 +15,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from agents.bank_common.normalize import clean_amount, normalise_date
+import pytest
+
+from agents.bank_common.normalize import clean_amount, normalise_date, parse_comma_month_date
 from agents.bank_common.password import is_password_error, password_error_message
 from agents.bank_common.tabular import find_header_row, map_columns
 from agents.bank_common.text_quality import text_layer_usable
@@ -70,6 +72,39 @@ def test_normalise_date_already_iso_passes_through():
 
 def test_normalise_date_unrecognized_passes_through():
     assert normalise_date("garbage") == "garbage"
+
+
+# ---------------------------------------------------------------------------
+# normalize.parse_comma_month_date (I-1 fix: 2-digit years, calendar
+# validity -- shared helper, so run every bank's tests when touching it,
+# even though only ICICI's agent.py calls it directly today).
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    ("01,Apr,2024", "2024-04-01"),
+    ("31,Mar,2025", "2025-03-31"),
+    # 2-digit year -> 2000+YY, matching normalise_date()'s existing
+    # 2-digit-year convention elsewhere in this module (pinned decision).
+    ("01,Apr,24", "2024-04-01"),
+    ("31,Mar,25", "2025-03-31"),
+    # Calendar-invalid dates return None, not a garbage ISO-shaped string.
+    ("31,Feb,2024", None),
+    ("31,Apr,2024", None),
+    # Leap-year edge: 2024 is a leap year, 2023 is not.
+    ("29,Feb,2024", "2024-02-29"),
+    ("29,Feb,2023", None),
+    # "Sept" (4-letter) is not a recognized abbreviation -- only the
+    # 3-letter form ("Sep") is in MONTH_ABBR; pinned behaviour.
+    ("01,Sept,2024", None),
+    ("01,Sep,2024", "2024-09-01"),
+    ("01,Foo,2024", None),
+    ("", None),
+    (None, None),
+    ("not,a,date", None),
+    ("01,Apr", None),  # wrong shape -- only 2 parts
+])
+def test_parse_comma_month_date_table(raw, expected):
+    assert parse_comma_month_date(raw) == expected
 
 
 # ---------------------------------------------------------------------------

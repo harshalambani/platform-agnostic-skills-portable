@@ -13,7 +13,7 @@ Use this for the .xls statements ICICI lets you download from net-banking. To al
 
 - **ICICI statement XLS file(s)** (required) — accepts: Excel 97-2003 (.xls) — one or many.
   - One or more ICICI .xls statement downloads.
-  - ⚠️ Use the original .xls export from ICICI net-banking. If you re-saved it as .xlsx, export a fresh .xls — the layout this skill expects is the net-banking .xls.
+  - ⚠️ Re-saving in Excel is fine — a re-saved .xls (where dates/amounts become real Excel cells) parses the same as the original download, and an accidental .xlsx re-save is read automatically too. If it still fails to parse, export a fresh .xls from ICICI net-banking.
 
 ## How to run
 

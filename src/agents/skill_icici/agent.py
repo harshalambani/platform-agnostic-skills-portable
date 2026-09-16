@@ -13,11 +13,12 @@ Output: Canonical 8-column CSV for Phase 3/4/6 consumption:
 """
 
 import csv
+import io
 import json
 import logging
 import re
 import tempfile
-from datetime import datetime
+from datetime import date as _date_type, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,7 +27,11 @@ from agents.balance_utils import format_balance_summary as _fmt_bal
 from agents.bank_common import normalize as _normalize
 from agents.bank_common.consolidate import StatementGroup, consolidate as _consolidate
 from agents.bank_contract import BankResult, BankStatementMeta
-from agents.canonical_io import CANONICAL_FIELDS, run_balance_check
+from agents.canonical_io import (
+    CANONICAL_FIELDS,
+    derive_opening_closing as _derive_opening_closing,
+    run_balance_check,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,16 +92,115 @@ LEGEND_MARKERS = [
 # XLS → CSV conversion
 # ============================================================================
 
+def _format_number_cell(val: float) -> str:
+    """Render a NUMBER cell as plain decimal text — never scientific
+    notation — so an amount that became a real Excel number after a
+    re-save parses to the same value as the original text-cell form.
+    """
+    if val == int(val):
+        return str(int(val))
+    s = repr(val)
+    if 'e' in s or 'E' in s:
+        s = f"{val:.10f}".rstrip('0').rstrip('.')
+    return s
+
+
+def _normalise_xls_cell(cell, wb) -> str:
+    """Normalise one xlrd cell to the text-cell shape the rest of the
+    parser expects, regardless of whether Excel re-saved it as a real
+    DATE/NUMBER cell."""
+    import xlrd  # noqa: PLC0415
+
+    if cell.ctype == xlrd.XL_CELL_DATE:
+        dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
+        # ISO — unambiguous. A slash-separated dd/mm string would be
+        # ambiguous for any date cell we didn't produce ourselves, so we
+        # convert straight to the canonical shape here instead of relying
+        # on parse_icici_date() to guess.
+        return dt.strftime('%Y-%m-%d')
+    if cell.ctype == xlrd.XL_CELL_NUMBER:
+        return _format_number_cell(cell.value)
+    if cell.ctype == xlrd.XL_CELL_EMPTY:
+        return ''
+    return str(cell.value).strip()
+
+
+def _normalise_xlsx_cell(value: Any) -> str:
+    """Normalise one openpyxl cell value to the same text-cell shape as
+    ``_normalise_xls_cell``."""
+    if value is None:
+        return ''
+    if isinstance(value, _date_type):  # covers both date and datetime
+        return value.strftime('%Y-%m-%d')
+    if isinstance(value, (int, float)):
+        return _format_number_cell(float(value))
+    return str(value).strip()
+
+
+def _convert_xlsx_to_csv(path: Path) -> List[List[str]]:
+    """Read a file that's actually a .xlsx container (magic bytes 'PK') —
+    e.g. the user opened the ICICI .xls in Excel and it got re-saved as
+    .xlsx while keeping (or not) the .xls extension — with the same cell
+    normalisation as the native .xls path, so this never silently yields
+    zero rows just because the container format changed.
+
+    Raises ValueError with one clear, user-facing message if the file
+    can't be read cleanly this way; callers should surface it as-is
+    rather than falling through to a silent empty-result parse.
+    """
+    try:
+        import openpyxl  # noqa: PLC0415
+    except Exception as e:  # pragma: no cover — openpyxl ships in requirements.txt
+        raise ValueError(
+            "This file is a .xlsx (Excel re-save) and openpyxl is not "
+            f"available to read it ({e}). Please export a fresh .xls from "
+            "ICICI net banking."
+        ) from e
+
+    try:
+        # Read via an in-memory buffer rather than a path string: openpyxl's
+        # loader validates the *file extension* when given a path (and
+        # rejects ".xls" outright, regardless of actual content), but skips
+        # that check for a file-like object — which is exactly the case
+        # here, since the whole point of this function is a real .xlsx
+        # container that may still be named ".xls".
+        with open(path, 'rb') as fh:
+            buf = io.BytesIO(fh.read())
+        wb = openpyxl.load_workbook(buf, data_only=True, read_only=True)
+        try:
+            ws = wb.worksheets[0]
+            rows: List[List[str]] = []
+            for row in ws.iter_rows():
+                rows.append([_normalise_xlsx_cell(cell.value) for cell in row])
+            return rows
+        finally:
+            wb.close()
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(
+            "This file looks like an Excel .xlsx re-save and could not be "
+            f"read cleanly ({e}). Please export a fresh .xls from ICICI "
+            "net banking instead."
+        ) from e
+
+
 def convert_xls_to_csv(xls_path: str) -> List[List[str]]:
-    """Read ICICI .xls (BIFF) and return rows as List[List[str]].
+    """Read an ICICI .xls (BIFF) — or, defensively, a file that's actually
+    a .xlsx container despite its name — and return rows as List[List[str]].
 
     Requires xlrd (pure Python, no external tools): pip install xlrd
     """
-    import xlrd  # noqa: PLC0415
-
     xls_path = Path(xls_path)
     if not xls_path.exists():
         raise FileNotFoundError(f"File not found: {xls_path}")
+
+    with open(xls_path, 'rb') as f:
+        magic = f.read(4)
+    if magic[:2] == b'PK':
+        return _convert_xlsx_to_csv(xls_path)
+
+    import xlrd  # noqa: PLC0415
 
     wb = xlrd.open_workbook(str(xls_path))
     ws = wb.sheet_by_index(0)
@@ -105,16 +209,7 @@ def convert_xls_to_csv(xls_path: str) -> List[List[str]]:
         row: List[str] = []
         for col_idx in range(ws.ncols):
             cell = ws.cell(row_idx, col_idx)
-            if cell.ctype == xlrd.XL_CELL_DATE:
-                dt = xlrd.xldate_as_datetime(cell.value, wb.datemode)
-                row.append(dt.strftime('%d/%m/%Y'))
-            elif cell.ctype == xlrd.XL_CELL_NUMBER:
-                val = cell.value
-                row.append(str(int(val)) if val == int(val) else str(val))
-            elif cell.ctype == xlrd.XL_CELL_EMPTY:
-                row.append('')
-            else:
-                row.append(str(cell.value).strip())
+            row.append(_normalise_xls_cell(cell, wb))
         rows.append(row)
     return rows
 
@@ -160,12 +255,21 @@ def _extract_meta_fields(
 # DATE PARSING
 # ============================================================================
 
+_ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
 def parse_icici_date(date_str: str) -> Optional[str]:
     """Parse ICICI's DD,Mon,YYYY format → ISO YYYY-MM-DD.
 
     Examples:
         "01,Apr,2024" → "2024-04-01"
         "31,Mar,2025" → "2025-03-31"
+
+    Also accepts an already-ISO ``YYYY-MM-DD`` string — the shape
+    ``convert_xls_to_csv()`` emits for a real DATE cell (e.g. after the
+    user re-saved the statement in Excel). That's unambiguous because we
+    produced it ourselves; this does NOT loosely accept arbitrary
+    slash-separated dates, which would risk a day/month swap.
 
     Delegates to bank_common.normalize.parse_comma_month_date; preserves the
     original unknown-month warning log.
@@ -175,6 +279,13 @@ def parse_icici_date(date_str: str) -> Optional[str]:
     stripped = date_str.strip().strip('"')
     if not stripped:
         return None
+
+    if _ISO_DATE_RE.match(stripped):
+        try:
+            datetime.strptime(stripped, '%Y-%m-%d')
+        except ValueError:
+            return None
+        return stripped
 
     result = _normalize.parse_comma_month_date(stripped)
     if result is None:
@@ -600,6 +711,25 @@ def transform_icici_statement(xls_path: str, output_path: str) -> Dict[str, Any]
 
     logger.info(f"Transformed {len(transformed)} rows")
 
+    if data_rows and not transformed:
+        # Every data row was found but NONE parsed — collapse what would
+        # otherwise be one "failed to parse date" issue per row into a
+        # single clear error instead of silent per-row noise.
+        sample = issues[:5]
+        return {
+            'success': False,
+            'error': (
+                f"Found {len(data_rows)} transaction row(s) but none could "
+                "be parsed (date parsing failed for every row) — check the "
+                "statement's date format, or export a fresh .xls from "
+                "ICICI net banking."
+            ),
+            'raw_row_count': len(raw_rows),
+            'rows_input': len(data_rows),
+            'rows_output': 0,
+            'issues': sample,
+        }
+
     # Step 4: Post-validation
     validation_issues = post_validate(data_rows, transformed)
     issues.extend(validation_issues)
@@ -844,21 +974,25 @@ def run(
             writer.writeheader()
             writer.writerows(consolidated.rows)
 
-    # Write sidecar summary JSON for pipeline's balance verification
-    # ICICI closing_balance is derived from last row (no independent statement summary)
+    # Write sidecar summary JSON for pipeline's balance verification.
+    # Built from the actual consolidated output CSV — opening balance from
+    # the earliest row by DATE and closing from the latest by DATE, not
+    # from whichever file happened to be processed last (filename order).
+    # For a single file this is just that file's own rows; for a batch it's
+    # consolidated.rows, which _consolidate() already date-orders above.
     sidecar_path = Path(output_path).with_suffix(".csv_summary.json")
     try:
-        # Use the last successful result's balances
-        last_ob = result.get('opening_balance', 0) if result else 0
-        last_cb = result.get('closing_balance', 0) if result else 0
-        last_rows = result.get('rows_output', 0) if result else 0
+        final_rows = _read_canonical_csv(output_path)
+        derived = _derive_opening_closing(final_rows)
         sidecar_data = {
             "bank": "ICICI",
             "source": "derived",
-            "opening_balance": last_ob,
-            "closing_balance": last_cb,
-            "row_count": last_rows,
+            "opening_balance": derived["opening_balance"],
+            "closing_balance": derived["closing_balance"],
+            "row_count": derived["row_count"],
         }
+        if consolidation_warnings:
+            sidecar_data["warnings"] = consolidation_warnings
         with open(sidecar_path, "w", encoding="utf-8") as sf:
             json.dump(sidecar_data, sf, indent=2)
         logger.info("Wrote sidecar summary: %s", sidecar_path)
