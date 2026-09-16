@@ -187,11 +187,15 @@ def _get_gnucash_account_balance(
     (from statement metadata), it is normalised to digits and matched
     against digits embedded in each candidate's account name (e.g.
     "BOB - 760001001951") — this disambiguates multiple accounts at the
-    same bank and is preferred over a bare name match. If no account
-    number is given, or none of the candidates' digits match it, falls
-    back to the first name match and reports that in "match_warning" so
-    callers can surface it (a name-only match is a guess when there are
-    multiple accounts for the same bank).
+    same bank and is preferred over a bare name match.
+
+    If no account number is given, or there is at most one same-bank-name
+    candidate, falls back to a name-only match and reports that in
+    "match_warning" so callers can surface it. But if an account number
+    IS given and matches none of *two or more* same-bank-name candidates,
+    a name-only match would be a coin-flip over which account is right —
+    so this refuses to guess: it returns ``found: False`` with
+    "match_warning" explaining why, rather than silently picking one.
 
     Returns:
         {
@@ -260,6 +264,25 @@ def _get_gnucash_account_balance(
                     f"Multiple GnuCash accounts matched account number "
                     f"'{account_number}'; using '{target_name}'."
                 )
+        elif len(candidates) > 1:
+            # An account number was supplied but matched none of several
+            # same-bank-name candidates: with more than one account sharing
+            # this bank name, a plain name match is a coin-flip over which
+            # one is right, so refuse to guess and report why instead of
+            # silently attributing the statement to the wrong ledger.
+            match_warning = (
+                f"Could not match account number '{account_number}' to any "
+                f"of the {len(candidates)} GnuCash accounts named "
+                f"'{bank_name}' ({', '.join(name for _, name in candidates)}); "
+                f"not resolving to any one of them automatically."
+            )
+            return {
+                "found": False, "account_name": "", "balance": 0.0,
+                "last_txn_date": None, "match_warning": match_warning,
+            }
+        # else: zero or exactly one candidate — handled by the name-match
+        # fallback below, which is unambiguous when there's only one account
+        # for this bank name (single-account case, unchanged).
 
     if target_id is None and candidates:
         target_id, target_name = candidates[0]
@@ -358,14 +381,21 @@ def _reconcile_opening_balance(
             "Could not find %s account in GnuCash — skipping opening balance check",
             bank_name,
         )
+        not_found_message = (
+            gc.get("match_warning")
+            or f"GnuCash account for '{bank_name}' not found — skipping balance reconciliation."
+        )
         return {
             "ok": True,
-            "message": f"GnuCash account for '{bank_name}' not found — skipping balance reconciliation.",
+            "message": not_found_message,
             "rows_skipped": 0,
             "filtered_rows": canonical_rows,
             "gnucash_balance": 0.0,
             "statement_opening": 0.0,
             "account_found": False,
+            # Already folded into "message" above (a not-found result isn't
+            # separately logged via the match_warning line at the call site),
+            # so this stays None to avoid printing the same text twice.
             "match_warning": None,
         }
 
@@ -870,6 +900,19 @@ def run(
                 )
                 log.info("%s skill: %d canonical rows (balance_ok=%s)",
                          bank, bank_result.row_count, bank_result.balance_check.ok)
+                # Surface the bank skill's own non-fatal warnings (missing/
+                # overlapping statement gaps, extracted-vs-expected count
+                # mismatches, unparseable rows, running-balance mismatches,
+                # …) instead of discarding them — previously bank_result.warnings
+                # was computed and attached by every bank skill but never read
+                # by this pipeline, so the user never saw it.
+                if bank_result.warnings:
+                    log_lines.append(
+                        f"**Step 1 warnings** — {bank}: {len(bank_result.warnings)} "
+                        f"warning(s) from statement parsing:"
+                    )
+                    for w in bank_result.warnings:
+                        log_lines.append(f"⚠ {w}")
             except Exception as e:
                 log.error("%s extraction failed: %s", bank, e, exc_info=True)
                 return (
@@ -970,7 +1013,18 @@ def run(
 
         # ── Resolve GnuCash bank account (needed to scope dedup below, and
         # for the CSV Account column) ──────────────────────────────────────
-        gc_info = _get_gnucash_account_balance(gnucash_file, bank)
+        # Must pass stmt_account_number here too — the opening-balance
+        # reconciliation above (_reconcile_opening_balance) already resolves
+        # the account by account number when one is available. Without
+        # passing it here as well, this second, independent resolution could
+        # fall back to a bare bank-name match and land on a *different*
+        # account than the one just reconciled whenever several accounts
+        # share the same bank name (e.g. four Bank of Baroda accounts) —
+        # silently scoping dedup / the CSV Account column / contra detection
+        # to the wrong ledger. Any ambiguity here is already surfaced via
+        # recon['match_warning'] above (same bank/account_number/file inputs
+        # → same resolution), so it is not re-logged a second time.
+        gc_info = _get_gnucash_account_balance(gnucash_file, bank, stmt_account_number)
         account_filter_path = gc_info["account_name"] if gc_info["found"] else None
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
