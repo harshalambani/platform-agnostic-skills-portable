@@ -11,6 +11,51 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.9.0] — 2026-09-16
+
+### Fixed
+- **Bank import de-duplication is now scoped to the statement's own GnuCash
+  account** (#256). Previously a statement row was compared against every
+  split in the whole book by date and amount alone, so a same-date,
+  same-amount posting in an unrelated account (an expense, a clearing leg)
+  made a genuine new row read as already imported and it was silently
+  dropped. If the target account cannot be resolved, the duplicate check is
+  now skipped with a log line instead of falling back to an unscoped scan.
+  `parse_gnucash_for_reconcile()` also no longer ignores an `account_filter`
+  that matches no account -- it returns no transactions rather than all of
+  them.
+- **Withdrawals are no longer described to the account mapper as deposits**
+  (#256). ICICI, Bank of Baroda and HSBC write the empty side of a row as
+  `'0'` or `'0.0'`, a truthy string, so every withdrawal from those banks was
+  hinted to the LLM mapper as `[deposit]`. The hint now uses the parsed
+  amount, and is omitted when neither side carries a genuine amount. HDFC was
+  unaffected.
+- **An ICICI statement opened and re-saved in Excel now imports instead of
+  parsing zero rows** (#257). Excel date cells and number cells are read the
+  same as ICICI's original text cells, with no day/month swap; a file saved
+  as `.xlsx` is detected by its contents (even if it keeps the `.xls` name)
+  and read; a file that genuinely cannot be read raises one clear error
+  rather than returning `success: false` with no rows. Calendar-invalid dates
+  such as `31,Feb,2024` are now rejected, and two-digit years (`01,Apr,24`)
+  map to `2024-04-01` instead of the malformed `24-04-01`.
+- **ICICI multi-file runs record the consolidated balances in the summary
+  sidecar** (#257). The opening balance comes from the earliest statement and
+  the closing balance from the latest, by date rather than filename order;
+  gaps and overlaps between statements are recorded as warnings.
+- **Bank-skill warnings now reach the pipeline output** (#258). Missing
+  statement, overlapping statement and row-count mismatch warnings were
+  computed and then discarded; they now appear under "Step 1 warnings".
+- **The closing-balance check resolves the account by account number**
+  (#258). With several accounts under one bank name, an account number that
+  matches none of them is now reported as unmatched instead of silently
+  checking the first candidate's balance.
+
+### Tests
+- Every fix above ships with negative tests that assert the wrong behaviour
+  does not occur -- no unscoped fallback, no `[deposit]` label on a
+  withdrawal, no silent zero-row parse, no balance taken from another
+  same-bank account -- alongside the fixed-path tests.
+
 ## [3.8.0] — 2026-09-14
 
 ### Added
