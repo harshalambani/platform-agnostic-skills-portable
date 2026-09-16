@@ -10,6 +10,7 @@ absent from HDFC's.
 from __future__ import annotations
 
 import re
+from datetime import date as _date
 
 _ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
 _CR_DR_SUFFIX_RE = re.compile(r'(Cr|Dr)$', re.IGNORECASE)
@@ -81,7 +82,13 @@ def parse_space_month_date(d) -> str | None:
 def parse_comma_month_date(d) -> str | None:
     """Parse ICICI's "DD,Mon,YYYY" date shape (e.g. "01,Apr,2024") to ISO
     YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't
-    match -- callers decide how to log/report that."""
+    match -- callers decide how to log/report that.
+
+    A 2-digit year (e.g. "01,Apr,24") is mapped to 2000+YY, matching this
+    module's other date helper (``normalise_date``)'s existing convention
+    for 2-digit years. A calendar-invalid date (e.g. "31,Feb,2024") returns
+    None rather than a garbage ISO-shaped string.
+    """
     if not d or not isinstance(d, str):
         return None
     d = d.strip().strip('"')
@@ -92,6 +99,14 @@ def parse_comma_month_date(d) -> str | None:
         return None
     day, month_abbr, year = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
     month = MONTH_ABBR.get(month_abbr)
-    if not month:
+    if not month or not day.isdigit() or not year.isdigit():
+        return None
+    if len(year) == 2:
+        year = "20" + year
+    elif len(year) != 4:
+        return None
+    try:
+        _date(int(year), int(month), int(day))
+    except ValueError:
         return None
     return f"{year}-{month}-{day.zfill(2)}"
