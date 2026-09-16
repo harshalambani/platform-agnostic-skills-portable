@@ -19,6 +19,8 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
+from agents.balance_utils import _safe_float
+
 
 # ---------------------------------------------------------------------------
 # Account path helpers
@@ -681,10 +683,16 @@ def llm_fallback_mapping(
 
         row_num = row["row"]
         desc = row["description"]
+        # Classify on the parsed numeric value, not string truthiness — the
+        # amount-text convention differs per bank (e.g. ICICI/BoB/HSBC write
+        # the empty side as the string '0', which is truthy in Python and
+        # would otherwise make every withdrawal look like a deposit here).
+        deposit_amt = _safe_float(row.get("deposit"))
+        withdrawal_amt = _safe_float(row.get("withdrawal"))
         amt_info = ""
-        if row.get("deposit"):
+        if deposit_amt > 0 and withdrawal_amt == 0:
             amt_info = " [deposit]"
-        elif row.get("withdrawal"):
+        elif withdrawal_amt > 0 and deposit_amt == 0:
             amt_info = " [withdrawal]"
 
         # Build prompt — use grouped historical patterns if available,
