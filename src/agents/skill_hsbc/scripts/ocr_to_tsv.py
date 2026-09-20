@@ -93,6 +93,23 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
             stderr=subprocess.DEVNULL,
         )
 
+        # tesseract exits 0 even when it can't find the "tsv" config file
+        # under tessdata/configs/ -- it just prints "read_params_file:
+        # Can't open tsv" to stderr (discarded above) and silently falls
+        # back to writing plain <out_stem>.txt instead of <out_stem>.tsv.
+        # Trusting the exit code alone lets that failure run silently
+        # through every remaining page and only surface ~270s later when
+        # parse_tsv.py finds nothing to glob. Fail loudly here, on this
+        # page, instead.
+        if not tsv_path.exists() or tsv_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"[{stem}] tesseract did not produce {tsv_path} for page "
+                f"{page_num} (exit code was 0). This almost always means "
+                "the vendored tessdata/configs/tsv config file is missing "
+                "-- tesseract silently wrote a .txt file instead of a .tsv "
+                "one. Check vendor/tesseract/tessdata/configs/tsv exists."
+            )
+
     return tsv_dir
 
 
