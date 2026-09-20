@@ -260,3 +260,46 @@ def test_every_registered_skill_gets_a_tab():
     missing = [s.display_name for s in registry.discover(refresh=True)
                if s.display_name not in tab_labels]
     assert not missing, f"registered skills with no tab in the UI: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Banks sub-tab order (ledger item: Coverage Gap Detector moved to the end
+# of the row). The gr.Tabs() render order is not reliably introspectable
+# from the constructed Blocks object, so the ordering logic is exercised
+# directly via the extracted pure helper, per the standing rule that a
+# tracker fix ships with a negative test proving the wrong behaviour is
+# gone, not just that the new behaviour works.
+# ---------------------------------------------------------------------------
+
+def test_banks_tab_order_puts_coverage_gap_detector_last():
+    from ui import webui
+    before, after = webui._split_banks_tabs(
+        ["Coverage Gap Detector", "Convert to GnuCash"]
+    )
+    assert before == ["Convert to GnuCash"]
+    assert after == ["Coverage Gap Detector"]
+
+
+def test_banks_tab_order_coverage_gap_detector_not_before_review():
+    """Negative test: the OLD behaviour (Coverage Gap Detector rendered
+    before the hand-written Review tab, since it iterated _cat_skills in
+    discovery order) must not recur. before_review is exactly what renders
+    ahead of the Review tab in webui.py, so asserting it is absent there
+    directly guards against the regression, not just the happy path."""
+    from ui import webui
+    before, _after = webui._split_banks_tabs(
+        ["Convert to GnuCash", "Coverage Gap Detector"]
+    )
+    assert "Coverage Gap Detector" not in before
+
+
+def test_banks_tab_order_unknown_skill_defaults_before_review():
+    """A future gnucash skill with no entry in _BANKS_TAB_ORDER must still
+    land before Review, matching pre-existing behaviour for every skill
+    that isn't explicitly pinned last."""
+    from ui import webui
+    before, after = webui._split_banks_tabs(
+        ["Convert to GnuCash", "Coverage Gap Detector", "Some Future Skill"]
+    )
+    assert "Some Future Skill" in before
+    assert after == ["Coverage Gap Detector"]

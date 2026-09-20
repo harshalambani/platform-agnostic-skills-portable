@@ -199,12 +199,18 @@ def _spec(
             Column("Date", "Date"),
             Column("Description", "Description"),
             Column(TARGET_COL, "Account"),
-            Column("Transfer Account", "Transfer Acct", sortable=False),
             Column(deposit_key, "Deposit", sort="number"),
             Column(withdrawal_key, "Withdrawal", sort="number"),
             Column("Balance", "Balance", sortable=False),
             Column("Confidence", "Conf", sort="order", order=CONF_ORDER),
             Column("MatchReason", "Reason"),
+            # Transfer Acct holds the same bank account on nearly every row
+            # -- displayed last so Description and Reason get the width
+            # instead. This is DISPLAY order only; the re-exported CSV keeps
+            # Transfer Account immediately after Account via
+            # agents.canonical_io.order_import_ready_headers (see the
+            # re-export block below) and must not be changed to match.
+            Column("Transfer Account", "Transfer Acct", sortable=False),
         ],
         target_col=TARGET_COL,
         payload_var=PAYLOAD_VAR,
