@@ -452,6 +452,32 @@ def _setup_warning_log() -> Path | None:
     return log_path
 
 
+# Rank map for the GnuCash "Banks" sub-tab row. Skills with rank < 50 render
+# before the hand-written "Review" tab (the import workflow itself);
+# rank >= 50 renders after it. Coverage Gap Detector is a read-only
+# diagnostic you run before/after an import, not a step in the import
+# workflow, so it is pinned last. Unknown/future skills default to rank 0
+# and keep landing before Review, matching the pre-existing behaviour.
+_BANKS_TAB_ORDER = {"Coverage Gap Detector": 50}
+
+
+def _banks_tab_rank(display_name: str) -> int:
+    return _BANKS_TAB_ORDER.get(display_name, 0)
+
+
+def _split_banks_tabs(display_names: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Split (already display-name-sorted-by-rank) skill names for the Banks
+    sub-tab into (before_review, after_review), per _BANKS_TAB_ORDER.
+    Extracted as a pure function so tab order is unit-testable without a
+    live Gradio render.
+    """
+    ordered = sorted(display_names, key=_banks_tab_rank)
+    before = [n for n in ordered if _banks_tab_rank(n) < 50]
+    after = [n for n in ordered if _banks_tab_rank(n) >= 50]
+    return before, after
+
+
 def build_app(launch: bool = False) -> gr.Blocks:
     """
     Construct the Gradio Blocks object.
@@ -580,11 +606,21 @@ def build_app(launch: bool = False) -> gr.Blocks:
                         with gr.Tabs():
                             with gr.Tab("Banks"):
                                 with gr.Tabs():
-                                    for _skill in _cat_skills:
-                                        with gr.Tab(_skill.display_name) as _t:
-                                            tab_generic.render(_skill, container_tab=_t)
+                                    # See _split_banks_tabs / _BANKS_TAB_ORDER:
+                                    # Coverage Gap Detector is a read-only
+                                    # diagnostic you run before/after an
+                                    # import, not a step in the import
+                                    # workflow itself, so it renders last.
+                                    _by_name = {s.display_name: s for s in _cat_skills}
+                                    _before_names, _after_names = _split_banks_tabs(list(_by_name))
+                                    for _name in _before_names:
+                                        with gr.Tab(_name) as _t:
+                                            tab_generic.render(_by_name[_name], container_tab=_t)
                                     with gr.Tab("Review") as _rt:
                                         tab_gnucash_review.render(container_tab=_rt)
+                                    for _name in _after_names:
+                                        with gr.Tab(_name) as _t:
+                                            tab_generic.render(_by_name[_name], container_tab=_t)
                             with gr.Tab("Inter-entity"):
                                 with gr.Tabs():
                                     # The pairwise Reconcile is the primary tool

@@ -216,3 +216,67 @@ def test_save_changes_no_changes_is_a_noop():
 def test_save_changes_malformed_json_reports_error():
     status, download_update = gr_review._save_changes("{not valid json")
     assert "Error parsing changes" in status
+
+
+# ---------------------------------------------------------------------------
+# _spec() display column order (ledger item: Transfer Acct moved to the end
+# of the Banks > Review grid, since it holds the same bank account on nearly
+# every row and was wasting width Description/Reason need). Per the standing
+# rule, this ships with a negative test proving the old position is gone,
+# plus a regression guard on the CSV re-export path -- the display order and
+# the file order are deliberately decoupled (order_import_ready_headers
+# keeps Transfer Account immediately after Account in the saved file), and
+# that decoupling is the thing this change could plausibly break.
+# ---------------------------------------------------------------------------
+
+def test_spec_display_column_order_ends_with_reason_then_transfer_acct():
+    spec = gr_review._spec(
+        picker_items=[], csv_path="unused.csv", gnucash_path="unused.gnucash",
+        deposit_key="Deposit", withdrawal_key="Withdrawal",
+    )
+    labels = [c.label for c in spec.columns]
+    assert labels[-2:] == ["Reason", "Transfer Acct"]
+
+
+def test_spec_transfer_acct_not_immediately_after_account():
+    """Negative test: the OLD display position (Transfer Acct right after
+    Account) must not recur."""
+    spec = gr_review._spec(
+        picker_items=[], csv_path="unused.csv", gnucash_path="unused.gnucash",
+        deposit_key="Deposit", withdrawal_key="Withdrawal",
+    )
+    keys = [c.key for c in spec.columns]
+    account_idx = keys.index(gr_review.TARGET_COL)
+    assert keys[account_idx + 1] != "Transfer Account"
+
+
+def test_save_changes_export_keeps_transfer_account_immediately_after_account(tmp_path, monkeypatch):
+    """The display-column reorder must not leak into the re-exported CSV:
+    order_import_ready_headers keeps Transfer Account immediately after
+    Account in the saved file regardless of _spec()'s display order. This is
+    the regression this change could plausibly cause, so it gets its own
+    guard rather than relying on the display-order tests above."""
+    csv_p = _write_csv(tmp_path, [
+        "2025-05-01,ACME RENT 123456,Liabilities:Suspense,,5000.00,10000.00,suspense,Suspense — review\n",
+    ])
+    monkeypatch.setattr(gr_review._config_mod, "PORTABLE_CONFIG_PATH", _fake_config_path(tmp_path))
+
+    gnucash_file = str(tmp_path / "book3.gnucash")
+    payload = json.dumps({
+        "context": {"csv_path": str(csv_p), "gnucash_file": gnucash_file},
+        "changes": [_engine_change("Liabilities:Suspense", Account="Expense:Rent")],
+        "all_rows": [{
+            "Date": "2025-05-01", "Description": "ACME RENT 123456", "Account": "Expense:Rent",
+            "Transfer Account": "", "Deposit": "", "Withdrawal": "5000.00",
+            "Balance": "10000.00", "Confidence": "override",
+            "MatchReason": "User override (review)",
+        }],
+    })
+
+    status, download_update = gr_review._save_changes(payload)
+    assert "Saved" in status
+
+    with open(csv_p, encoding="utf-8", newline="") as fh:
+        header = next(csv.reader(fh))
+    account_idx = header.index("Account")
+    assert header[account_idx + 1] == "Transfer Account"
