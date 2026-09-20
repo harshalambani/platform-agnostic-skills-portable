@@ -36,7 +36,12 @@ SRC = ROOT / "src"
 ITR_SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
 COVERAGE_DIR = SRC / "agents" / "skill_gnucash_coverage"
 
-for _p in (str(SRC), str(ITR_SCRIPTS), str(COVERAGE_DIR)):
+# NOTE: COVERAGE_DIR is deliberately NOT added to sys.path here. The frozen
+# PortableApps build never puts a skill's own folder on sys.path, so a test
+# that did so was hand-building a condition the real app never has -- see
+# test_run_works_without_own_dir_on_syspath below, which pins this down as a
+# regression guard (ledger item COV-01).
+for _p in (str(SRC), str(ITR_SCRIPTS)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -364,3 +369,60 @@ def test_fy_boundary_gap_reported_without_adjacent_evidence(fy2425_book, tmp_pat
     months = {row[4].value for row in gaps_ws.iter_rows(min_row=2)
               if row[2].value == "Assets:Bank:TestBank"}
     assert "2025-03" in months
+
+
+# ---------------------------------------------------------------------------
+# Regression guard for ledger item COV-01: the frozen PortableApps build
+# never puts a skill's own folder on sys.path, so agent.py's excel_writer
+# import must resolve as a package import, not a bare-module lookup that
+# only works when COVERAGE_DIR happens to be on sys.path. Proves the
+# ABSENCE of the old failure (ModuleNotFoundError), not just the happy path.
+# ---------------------------------------------------------------------------
+
+def test_run_works_without_own_dir_on_syspath(fy2425_book, tmp_path):
+    """Strip the skill's own directory (and any bare 'excel_writer' module)
+    out of the import machinery, reimport agent.py fresh, and confirm
+    run() still produces a workbook instead of raising ModuleNotFoundError.
+    This is exactly the condition of the shipped, frozen app -- COVERAGE_DIR
+    is never on sys.path there."""
+    import importlib
+
+    coverage_dir_str = str(COVERAGE_DIR)
+    assert coverage_dir_str not in sys.path, (
+        "COVERAGE_DIR must not be on sys.path for this test to be a real "
+        "regression guard -- the module-level sys.path setup above should "
+        "already keep it off."
+    )
+
+    # Defensively evict anything a previous test/run could have cached, so
+    # this test proves the import works cold, exactly as the frozen app's
+    # first launch of the skill would see it.
+    for mod_name in (
+        "excel_writer",
+        "agents.skill_gnucash_coverage.excel_writer",
+        "agents.skill_gnucash_coverage.agent",
+    ):
+        sys.modules.pop(mod_name, None)
+
+    fresh_cov = importlib.import_module("agents.skill_gnucash_coverage.agent")
+
+    out_path = tmp_path / "cold_import_out.xlsx"
+    entities_path = tmp_path / "no-such-entities.yaml"
+    try:
+        summary = fresh_cov.run(
+            books=str(fy2425_book),
+            output_path=str(out_path),
+            entities_path=str(entities_path),
+        )
+    except ModuleNotFoundError as exc:
+        pytest.fail(
+            f"run() raised ModuleNotFoundError with COVERAGE_DIR off "
+            f"sys.path -- the exact frozen-app crash this test guards "
+            f"against: {exc}"
+        )
+
+    assert "ERROR" not in summary
+    assert out_path.exists(), "run() did not actually produce a workbook"
+    wb = load_workbook(out_path)
+    assert "Gaps" in wb.sheetnames
+    assert "Summary" in wb.sheetnames

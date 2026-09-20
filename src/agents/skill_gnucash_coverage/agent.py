@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Optional
 
 from agents.gnucash_accounts import GncAccount, load_accounts, postable_accounts
+from agents.skill_gnucash_coverage import excel_writer as XL
 
 # Reuse the Inter-entity Matrix's own reuse target: reconcile_intercompany's
 # filename-based owner/FY derivation, as the FALLBACK label for a book that
@@ -408,12 +409,6 @@ def run(
     path per line, and run_args substitution makes every kwarg a string on
     the way in -- same convention as the Inter-entity Matrix skill).
     """
-    from excel_writer import write_gaps_workbook  # noqa: PLC0415
-    _this_dir = Path(__file__).resolve().parent
-    if str(_this_dir) not in sys.path:
-        sys.path.insert(0, str(_this_dir))
-        from excel_writer import write_gaps_workbook  # noqa: PLC0415,F811
-
     if isinstance(books, str):
         paths = [ln.strip() for ln in books.splitlines() if ln.strip()]
     else:
@@ -478,7 +473,7 @@ def run(
                 suppressed_boundary_gaps=suppressed,
             ))
 
-    write_gaps_workbook(all_gaps, all_stats, output_path)
+    XL.write_gaps_workbook(all_gaps, all_stats, output_path)
 
     high = sum(1 for g in all_gaps if g.confidence == "HIGH")
     low = sum(1 for g in all_gaps if g.confidence == "LOW")
