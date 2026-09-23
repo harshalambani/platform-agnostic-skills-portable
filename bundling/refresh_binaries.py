@@ -174,13 +174,36 @@ def install_tesseract(meta: dict, tmp: Path) -> None:
     # Copy all .exe and .dll and any tessdata/*.traineddata
     n_exe = _copy_globs(src_root, ["*.exe"], dest)
     n_dll = _copy_globs(src_root, ["*.dll"], dest)
-    # Tessdata: keep only eng.traineddata per spec §6.
+    # Tessdata: keep only eng.traineddata per spec §6 -- language data is the
+    # only thing that scales with number of languages, so we don't vendor the
+    # rest of the tessdata tree.
+    #
+    # tessdata/configs/ is NOT language data, it is required runtime config:
+    # `tesseract <img> <out> tsv` (see ocr_to_tsv.py) passes "tsv" as the name
+    # of a config file under tessdata/configs/, not a CLI flag. Without it,
+    # tesseract prints "read_params_file: Can't open tsv" to stderr, still
+    # exits 0, and silently falls back to writing plain .txt instead of .tsv
+    # -- a config file is always copied in full (it's tiny and fixed-size
+    # regardless of language count).
     eng = next(src_root.rglob("eng.traineddata"), None)
     if eng is None:
         raise RuntimeError("eng.traineddata not found in archive — wrong build?")
     shutil.copy2(eng, dest / "tessdata" / "eng.traineddata")
 
-    _eprint(f"  tesseract: copied {n_exe} exe, {n_dll} dll, 1 traineddata")
+    configs_src = next(
+        (p for p in src_root.rglob("configs") if p.is_dir() and p.parent.name == "tessdata"),
+        None,
+    )
+    if configs_src is None:
+        raise RuntimeError("tessdata/configs/ not found in archive — wrong build?")
+    configs_dest = dest / "tessdata" / "configs"
+    shutil.copytree(configs_src, configs_dest, dirs_exist_ok=True)
+    if not (configs_dest / "tsv").exists():
+        raise RuntimeError("tessdata/configs/tsv missing after copy — wrong build?")
+    n_configs = sum(1 for _ in configs_dest.rglob("*") if _.is_file())
+
+    _eprint(f"  tesseract: copied {n_exe} exe, {n_dll} dll, 1 traineddata, "
+            f"{n_configs} tessdata/configs files")
     _eprint(f"  final tree: {sum(1 for _ in dest.rglob('*') if _.is_file())} files under vendor/tesseract/")
 
 
