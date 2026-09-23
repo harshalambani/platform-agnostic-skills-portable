@@ -44,12 +44,43 @@ def extract_neft_key(description: str) -> Optional[str]:
     return None
 
 def extract_merchant_id(description: str) -> Optional[str]:
-    """Extract merchant ID (6+ digit sequences)."""
-    match = re.search(r'\b(\d{6,})\b', description)
+    """Extract merchant ID (6-9 digit sequences).
+
+    Capped at 9 digits deliberately: bank UTR / reference numbers are
+    typically 10+ digits, while merchant/scheme codes are usually 6-9.
+    Matching a UTR here would produce a pattern that is really a disguised
+    raw-narration match -- it can only ever match the one transaction it
+    was generated from.
+    """
+    match = re.search(r'\b(\d{6,9})\b', description)
     if match:
         merchant_id = match.group(1)
         return f".*{merchant_id}.*"
     return None
+
+
+# Patterns must stay short and generic to be reusable, and must never smuggle
+# in a reference-number-shaped run of digits (the raw-narration failure mode
+# this module exists to avoid). Both bounds are deliberately generous for
+# legitimate UPI/NEFT/merchant-id patterns and tight for anything else.
+MAX_PATTERN_LEN = 80
+_LONG_DIGIT_RUN = re.compile(r'\d{10,}')
+
+
+def _is_safe_pattern(pattern: str) -> bool:
+    """A generated pattern is only usable if it is short, contains no
+    reference-number-shaped digit run, and actually compiles as a regex.
+    Failing any of these must drop the pattern, not defer the failure to
+    match time."""
+    if not pattern or len(pattern) > MAX_PATTERN_LEN:
+        return False
+    if _LONG_DIGIT_RUN.search(pattern):
+        return False
+    try:
+        re.compile(pattern)
+    except re.error:
+        return False
+    return True
 
 def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[str, List[Dict]]:
     """Generate rules from extractor JSON.
@@ -98,25 +129,37 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
             last_date = mapping.get('last_date', '')
             conf = confidence_score(frequency, last_date)
 
-            patterns = []
+            # Generalisation is attempted for every candidate regardless of
+            # confidence -- confidence only decides the rule's WEIGHT
+            # (confidence_level below), never whether we try to generalise.
+            # A transaction seen once, years ago, still deserves a
+            # low-confidence generalised rule rather than no usable rule at
+            # all -- and gating this on `conf > 0.7` was exactly why a
+            # once-seen, >2-year-old UPI transaction (recency_weight 0.2,
+            # frequency 1 -> conf 0.2) never got generalised at all.
+            candidate_patterns = []
 
-            if conf > 0.7:
-                upi_key = extract_upi_key(description)
-                if upi_key:
-                    patterns.append(upi_key)
+            upi_key = extract_upi_key(description)
+            if upi_key:
+                candidate_patterns.append(upi_key)
 
-                neft_key = extract_neft_key(description)
-                if neft_key:
-                    patterns.append(neft_key)
+            neft_key = extract_neft_key(description)
+            if neft_key:
+                candidate_patterns.append(neft_key)
 
-                merchant_id = extract_merchant_id(description)
-                if merchant_id:
-                    patterns.append(merchant_id)
+            merchant_id = extract_merchant_id(description)
+            if merchant_id:
+                candidate_patterns.append(merchant_id)
+
+            patterns = [p for p in candidate_patterns if _is_safe_pattern(p)]
 
             if not patterns:
-                patterns.append(description)
-
-            if not patterns:
+                # No safe generalised pattern could be extracted. Never fall
+                # back to persisting the raw narration as the pattern: bank
+                # narrations carry unique reference numbers, so such a
+                # "pattern" can only ever match the one byte-identical
+                # description it was generated from and the rule would never
+                # fire again. Drop the rule instead of emitting a dead one.
                 continue
 
             if conf > 0.8:
