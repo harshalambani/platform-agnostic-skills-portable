@@ -11,7 +11,7 @@ old code (`if row.get("deposit"): ... elif row.get("withdrawal"): ...`)
 treated every ICICI/BoB/HSBC withdrawal row as a deposit, since its
 'deposit' field held the truthy string '0'.
 
-This drives llm_fallback_mapping() with _ollama_chat and _resolve_ollama_config
+This drives llm_fallback_mapping() with _llm_chat and _resolve_llm_endpoint_config
 monkeypatched (no network, no real Ollama config), and inspects the actual
 prompt text sent for each row to confirm the correct token is used --
 regardless of whether the empty side is blank ('' , HDFC), the string '0'
@@ -33,8 +33,8 @@ if str(SRC) not in sys.path:
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
 
-def _fake_resolve_ollama_config(config_path, model_override=None):
-    return "http://fake-ollama:11434", "fake-model"
+def _fake_resolve_llm_endpoint_config(config_path, model_override=None):
+    return "ollama", "http://fake-ollama:11434", "fake-model", None, 0.0
 
 
 def _run_and_capture_prompts(monkeypatch, rows):
@@ -42,14 +42,14 @@ def _run_and_capture_prompts(monkeypatch, rows):
     return the list of non-warmup user prompts sent, in row order."""
     calls = []
 
-    def fake_ollama_chat(base_url, model, system, user, timeout=None):
+    def fake_llm_chat(provider, base_url, model, system, user, api_key=None, timeout=None):
         calls.append(user)
         if user == "ping":
             return "OK"  # warm-up reply
         return "SKIP"  # main-prompt reply -- classification content is what we test
 
-    monkeypatch.setattr(agent, "_resolve_ollama_config", _fake_resolve_ollama_config)
-    monkeypatch.setattr(agent, "_ollama_chat", fake_ollama_chat)
+    monkeypatch.setattr(agent, "_resolve_llm_endpoint_config", _fake_resolve_llm_endpoint_config)
+    monkeypatch.setattr(agent, "_llm_chat", fake_llm_chat)
     monkeypatch.setattr(agent, "_emit_mapper_progress", lambda msg: None)
 
     agent.llm_fallback_mapping(
