@@ -492,6 +492,67 @@ def _historical_prefix_match(
 
 
 # ---------------------------------------------------------------------------
+# Shared relevance tokeniser + ranking (MAP-02 / MAP-04)
+#
+# Both _retry_with_focused_prompt and _score_account_relevance rank
+# historical-mapping account groups by keyword overlap with the current
+# transaction description, then feed the top few into an LLM prompt. Two
+# defects lived here:
+#
+#   MAP-02: each call site sorted its own list of (score, acct, descs)
+#   tuples with `scored.sort(reverse=True)`. When every group scored 0
+#   (no keyword overlap at all -- a common case), Python's tuple compare
+#   falls through the tied score to compare `acct` strings in REVERSE
+#   order, so the "top" picks were just the reverse-alphabetically last
+#   account names -- not a ranking by any real relevance signal.
+#
+#   MAP-04: _retry_with_focused_prompt tokenised with `[A-Z]{3,}` while
+#   _score_account_relevance used `[A-Z]{2,}`. A short-but-meaningful
+#   token like "PF" (as in "TO PF") only ever matched under the 2+ rule,
+#   so the retry path -- which exists specifically to re-ask the model
+#   with a shorter, focused prompt -- silently found nothing and returned
+#   None without ever calling the model.
+#
+# Fix: one tokeniser (letters, 2+) and one ranking function shared by both
+# call sites. Ranking key is explicit (score desc, then total historical
+# frequency desc, then account name asc) so a full tie always resolves the
+# same way regardless of dict/insertion order, and never falls through to
+# comparing the `descs` lists themselves.
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r'[A-Z]{2,}')
+
+
+def _extract_tokens(text: str) -> set:
+    """Shared tokeniser: uppercase letter-runs, 2+ characters."""
+    return set(_TOKEN_RE.findall(text.upper()))
+
+
+def _rank_account_groups(
+    groups: Dict[str, List[Tuple[str, int]]],
+    desc: str,
+) -> List[Tuple[float, str, List[Tuple[str, int]]]]:
+    """Rank account groups by keyword overlap with `desc`.
+
+    Returns (score, account_path, descriptions), sorted by score desc, then
+    total historical frequency desc, then account name asc -- an explicit
+    key, deterministic regardless of the caller's dict/insertion order or
+    PYTHONHASHSEED.
+    """
+    desc_words = _extract_tokens(desc)
+    scored = []
+    for acct, descs in groups.items():
+        score = 0.0
+        for d, freq in descs:
+            overlap = desc_words & _extract_tokens(d)
+            score += sum(len(w) for w in overlap) * freq
+        total_freq = sum(f for _, f in descs)
+        scored.append((score, total_freq, acct, descs))
+    scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    return [(score, acct, descs) for score, _freq, acct, descs in scored]
+
+
+# ---------------------------------------------------------------------------
 # LLM retry with focused prompt (fewer account groups)
 # ---------------------------------------------------------------------------
 
@@ -507,25 +568,15 @@ def _retry_with_focused_prompt(
     """Retry LLM with a shorter prompt containing only the most relevant groups."""
     from collections import defaultdict
 
-    desc_upper = desc.upper()
-    desc_words = set(re.findall(r'[A-Z]{3,}', desc_upper))
-
     groups: Dict[str, list] = defaultdict(list)
     for m in historical_mappings:
         groups[m['account']].append((m['description'], m.get('frequency', 1)))
 
-    scored = []
-    for acct, descs in groups.items():
-        score = 0
-        for d, freq in descs:
-            d_words = set(re.findall(r'[A-Z]{3,}', d.upper()))
-            overlap = desc_words & d_words
-            score += sum(len(w) for w in overlap) * freq
-        if score > 0:
-            scored.append((score, acct, descs))
-
-    scored.sort(reverse=True)
-    top = scored[:3]
+    # MAP-02/MAP-04: shared, deterministic ranking; only groups that
+    # actually scored above 0 are candidates here (a zero-score group is
+    # never "relevant"), top 3.
+    ranked = _rank_account_groups(groups, desc)
+    top = [t for t in ranked if t[0] > 0][:3]
     if not top:
         return None
 
@@ -585,19 +636,10 @@ def _score_account_relevance(
 ) -> List[Tuple[float, str, List[Tuple[str, int]]]]:
     """Score account groups by keyword overlap with the transaction description.
 
-    Returns a sorted list of (score, account_path, descriptions) — highest first.
+    Returns a sorted list of (score, account_path, descriptions) — highest
+    first, deterministic tie-break (see `_rank_account_groups`).
     """
-    desc_words = set(re.findall(r'[A-Z]{2,}', desc.upper()))
-    scored = []
-    for acct, descs in groups.items():
-        score = 0.0
-        for d, freq in descs:
-            d_words = set(re.findall(r'[A-Z]{2,}', d.upper()))
-            overlap = desc_words & d_words
-            score += sum(len(w) for w in overlap) * freq
-        scored.append((score, acct, descs))
-    scored.sort(reverse=True)
-    return scored
+    return _rank_account_groups(groups, desc)
 
 
 def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_info: str) -> str:
@@ -611,17 +653,22 @@ def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_inf
     for m in historical_mappings:
         groups[m['account']].append((m['description'], m.get('frequency', 1)))
 
-    # Score and rank accounts by relevance to this transaction
+    # Score and rank accounts by relevance to this transaction (MAP-02:
+    # deterministic order, never reverse-alphabetical fallback).
     scored = _score_account_relevance(groups, desc)
 
-    # Take top 12 accounts (mix of relevant + high-frequency fallbacks)
-    top_relevant = scored[:10]
-    # Also include top 2 by frequency that aren't already included
+    # Take top 10 accounts that actually scored above 0 -- a zero-score
+    # group is never a "relevant" pick, even if it happens to land in the
+    # first 10 slots of the ranked list.
+    top_relevant = [t for t in scored if t[0] > 0][:10]
+
+    # Fill remaining slots (up to 12 total) from the frequency ranking,
+    # skipping accounts already included. Explicit name-asc tie-break here
+    # too, so two equally-frequent groups don't fall back to dict order.
     top_names = {acct for _, acct, _ in top_relevant}
     freq_sorted = sorted(
         groups.items(),
-        key=lambda kv: sum(f for _, f in kv[1]),
-        reverse=True,
+        key=lambda kv: (-sum(f for _, f in kv[1]), kv[0]),
     )
     for acct, descs in freq_sorted:
         if acct not in top_names:
@@ -793,35 +840,131 @@ def _segment_match(answer: str, acct: str) -> bool:
     return acct == answer or acct.endswith(":" + answer)
 
 
+# ---------------------------------------------------------------------------
+# Answer normalisation (MAP-03)
+#
+# Small/local models routinely wrap an otherwise-correct account path in
+# markdown or label it, e.g. "`Expenses:Food and Dining`", "**Account:
+# Expenses:Food and Dining**", "Answer: Expenses : Food and Dining.". The old
+# code only stripped three literal prefixes and matched case-sensitively, so
+# these common wrapper forms were rejected outright even though the model
+# picked the right account.
+#
+# This normaliser strips the wrapping (never the content), applied BEFORE
+# validation. It is idempotent -- re-applying it to already-normalised text
+# is a no-op -- so it is safe to call at both the SKIP-check site and
+# defensively inside _validate_llm_answer.
+# ---------------------------------------------------------------------------
+
+_QUOTE_CHARS = '"\'“”‘’'
+_LEADING_LABEL_RE = re.compile(
+    r'^(?:Account|Answer|Root Account)\s*:\s*|^->\s*',
+    re.IGNORECASE,
+)
+_COLON_SPACING_RE = re.compile(r'\s*:\s*')
+
+
+def _normalize_llm_answer(raw: str) -> str:
+    """Strip whitespace, markdown wrapping, quoting and leading labels from
+    a raw LLM reply, without altering the substantive account-path text.
+    Idempotent: normalizing an already-normalized string is a no-op.
+    """
+    if not raw:
+        return raw
+    s = raw.strip()
+    changed = True
+    while changed:
+        changed = False
+        # Triple backtick code fence, e.g. ```Expenses:Food```
+        if s.startswith("```") and s.endswith("```") and len(s) >= 6:
+            s = s[3:-3].strip()
+            changed = True
+            continue
+        # Single backtick pair
+        if s.startswith("`") and s.endswith("`") and len(s) >= 2:
+            s = s[1:-1].strip()
+            changed = True
+            continue
+        # Markdown bold
+        if s.startswith("**") and s.endswith("**") and len(s) >= 4:
+            s = s[2:-2].strip()
+            changed = True
+            continue
+        # Surrounding matching quotes (straight or curly)
+        if len(s) >= 2 and s[0] in _QUOTE_CHARS and s[-1] in _QUOTE_CHARS:
+            s = s[1:-1].strip()
+            changed = True
+            continue
+        # Leading label, e.g. "Account:", "Answer:", "Root Account:", "->"
+        new_s = _LEADING_LABEL_RE.sub("", s, count=1).strip()
+        if new_s != s:
+            s = new_s
+            changed = True
+            continue
+        # Trailing period (single, not part of a path segment) -- peeled
+        # inside the loop too, so a period OUTSIDE another wrapper (e.g.
+        # "**Expenses:Food**.") doesn't block that wrapper from being
+        # stripped on a later pass.
+        if s.endswith(".") and not s.endswith(".."):
+            s = s[:-1].strip()
+            changed = True
+            continue
+    # Collapse spacing around ':' -- "Expenses : Food" -> "Expenses:Food"
+    s = _COLON_SPACING_RE.sub(":", s)
+    return s.strip()
+
+
 def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
     """Validate an LLM answer against known accounts.
 
-    Returns the matched account path (exact or full colon-segment match) or
-    None. A partial match must be a complete ':'-delimited tail of the
-    account path — never a bare substring — and at least
-    _MIN_PARTIAL_MATCH_LEN characters, so a short or poisoned reply can't
-    land on an unintended (if technically valid) account.
+    Returns the matched account path, or None. The answer is normalised
+    first (markdown/quote/label wrapping stripped -- MAP-03), then matched
+    in two tiers:
+
+      1. Case-sensitive: an exact full-path match always wins outright. If
+         not, every account whose full ':'-delimited path or tail equals
+         the answer is collected (MAP-01) -- a bare substring never counts,
+         and the tail must be at least _MIN_PARTIAL_MATCH_LEN characters.
+         Exactly one candidate resolves; more than one is ambiguous and
+         returns None (never a heuristic pick, e.g. shortest path).
+
+      2. Case-insensitive, ONLY when tier 1 found zero candidates: same
+         exact/tail rules, case-insensitively. Exactly one candidate
+         resolves; two accounts differing only by case is ambiguous and
+         returns None.
+
+    Never fuzzy/edit-distance matching.
     """
     if not answer:
         return None
-    # Exact match
+    answer = _normalize_llm_answer(answer)
+    if not answer:
+        return None
+
+    # Tier 0: exact full-path match always wins outright.
     if answer in account_set:
         return answer
-    # Partial match — LLM might omit a leading prefix segment.
+
+    # Tier 1: case-sensitive segment-tail match, collect ALL candidates.
     if len(answer) >= _MIN_PARTIAL_MATCH_LEN:
-        for acct in account_set:
-            if _segment_match(answer, acct):
-                return acct
-    # Strip common hallucination prefixes (e.g. "Account: Expenses:...")
-    for prefix in ("Account:", "->", "account:"):
-        if answer.startswith(prefix):
-            cleaned = answer[len(prefix):].strip()
-            if cleaned in account_set:
-                return cleaned
-            if len(cleaned) >= _MIN_PARTIAL_MATCH_LEN:
-                for acct in account_set:
-                    if _segment_match(cleaned, acct):
-                        return acct
+        candidates = {acct for acct in account_set if _segment_match(answer, acct)}
+        if len(candidates) == 1:
+            return next(iter(candidates))
+        if len(candidates) > 1:
+            return None  # ambiguous -- same policy as MAP-08's tie -> no match
+
+    # Tier 2: case-insensitive fallback, only if tier 1 found nothing.
+    answer_lower = answer.lower()
+    ci_candidates = set()
+    for acct in account_set:
+        acct_lower = acct.lower()
+        if acct_lower == answer_lower:
+            ci_candidates.add(acct)
+        elif len(answer) >= _MIN_PARTIAL_MATCH_LEN and _segment_match(answer_lower, acct_lower):
+            ci_candidates.add(acct)
+    if len(ci_candidates) == 1:
+        return next(iter(ci_candidates))
+
     return None
 
 
@@ -937,7 +1080,7 @@ def llm_fallback_mapping(
             if not reply:
                 continue
 
-        answer = reply.strip().split("\n")[0].strip()  # first line only
+        answer = _normalize_llm_answer(reply.strip().split("\n")[0].strip())  # first line only
         if answer.upper() == "SKIP" or not answer:
             _emit_mapper_progress(f"  -> SKIP ({answer!r})")
             result[row_num] = {"account": "", "reason": "LLM: skip"}
@@ -954,7 +1097,7 @@ def llm_fallback_mapping(
                 provider, base_url, model, api_key=api_key,
             )
             if retry_reply:
-                retry_answer = retry_reply.strip().split("\n")[0].strip()
+                retry_answer = _normalize_llm_answer(retry_reply.strip().split("\n")[0].strip())
                 if retry_answer.upper() != "SKIP" and retry_answer:
                     matched_acct = _validate_llm_answer(retry_answer, account_set)
 
