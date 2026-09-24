@@ -221,10 +221,21 @@ def smart_pattern_match(
                 return {"account": matched_acct, "reason": f"NACH dividend — {company}"}
 
     # 5. TDS on Dividend: "NACH.*TDS", narrations with TDS
+    # MAP-08: the old code picked the first tree-order account containing
+    # the bare substring "TDS", which is order-dependent and can land on
+    # the wrong account when several accounts contain "TDS". Prefer the
+    # specific "TDS on Dividend" leaf; fall back to a bare "TDS" match only
+    # when exactly one such account exists, and pick deterministically
+    # (sorted) either way. If neither condition is met, fall through to
+    # later rules / the LLM instead of guessing.
     if re.search(r'TDS\s*(ON|FOR)?\s*DIV', desc_upper):
-        for acct in account_tree:
-            if "TDS on Dividend" in acct or "TDS" in acct:
-                return {"account": acct, "reason": "TDS on dividend pattern"}
+        dividend_tds = sorted(a for a in account_tree if "TDS on Dividend" in a)
+        if dividend_tds:
+            return {"account": dividend_tds[0], "reason": "TDS on dividend pattern"}
+        bare_tds = sorted(a for a in account_tree if "TDS" in a)
+        if len(bare_tds) == 1:
+            return {"account": bare_tds[0], "reason": "TDS on dividend pattern"}
+        # ambiguous (0 or >1 bare "TDS" accounts) — don't guess
 
     # 6. Self/internal transfer patterns
     if re.search(r'SELF\s*TRANSFER|AC\s*XFR\s*FROM|TRANSFER\s*TO\s*SELF|FD\s*MATURITY', desc_upper):
@@ -279,10 +290,25 @@ def smart_pattern_match(
                 return {"account": acct, "reason": "Insurance premium"}
 
     # 14. Tax payment — match only if account found
+    # MAP-08: the old code picked the first tree-order account containing
+    # any of "Income Tax" / "Tax" / "Advance Tax", order-dependent and prone
+    # to landing on the wrong bucket. Prefer the most specific keyword the
+    # narration actually mentions ("Advance Tax" first, then "Income Tax"),
+    # and only fall back to a bare "Tax" substring when exactly one account
+    # qualifies — deterministically (sorted) in every case. If nothing
+    # qualifies unambiguously, fall through to later rules / the LLM.
     if re.search(r'ADVANCE\s*TAX|SELF\s*ASSESS.*TAX|INCOME\s*TAX|TDS\s*PAYMENT|CHALLAN', desc_upper):
-        for acct in account_tree:
-            if any(k in acct for k in ("Income Tax", "Tax", "Advance Tax")):
-                return {"account": acct, "reason": "Tax payment"}
+        if re.search(r'ADVANCE\s*TAX', desc_upper):
+            advance_tax = sorted(a for a in account_tree if "Advance Tax" in a)
+            if advance_tax:
+                return {"account": advance_tax[0], "reason": "Tax payment"}
+        income_tax = sorted(a for a in account_tree if "Income Tax" in a)
+        if income_tax:
+            return {"account": income_tax[0], "reason": "Tax payment"}
+        bare_tax = sorted(a for a in account_tree if "Tax" in a)
+        if len(bare_tax) == 1:
+            return {"account": bare_tax[0], "reason": "Tax payment"}
+        # ambiguous (0 or >1 bare "Tax" accounts) — don't guess
 
     # 15. Salary / pension — match only if account found
     if re.search(r'SALARY|PENSION|PAY\s*CREDIT', desc_upper):
@@ -366,24 +392,85 @@ def _historical_prefix_match(
     if best_account:
         return {"account": best_account, "reason": f"Prefix match ({norm_desc[:30]})"}
 
-    # Fallback: keyword match — description words vs. account leaf names
+    # Fallback: keyword match — description words vs. account leaf names,
+    # scored across ALL candidates (deduped), not first-hit in list order.
+    #
+    # MAP-08: the old version returned the first account (in the caller's
+    # arbitrary list order) whose leaf shared any >=5-char token with the
+    # narration. A family surname present in many account leaves would then
+    # decide the account by sheer list-order luck, and the result was
+    # stamped confidence='smart' — indistinguishable from the high-precision
+    # rules above, so a bad guess was never reconsidered by the LLM pass.
+    #
+    # Fix: compute each token's document frequency (how many distinct
+    # candidate leaves contain it). A token that appears in more than one
+    # leaf cannot discriminate between candidates and is dropped before
+    # scoring — this is what kills the shared-surname case. Score the
+    # remaining (discriminating) shared tokens by summed length, break ties
+    # by historical frequency, and require a clear winner: if the top two
+    # candidates still tie after the frequency tiebreak, return None rather
+    # than guess. The whole thing is order-independent (sorted by score/
+    # frequency/account name) so it is deterministic regardless of the
+    # caller's list order or PYTHONHASHSEED. A match found this way is
+    # labelled confidence='weak', distinct from the 'smart' prefix-match
+    # result above, so run() can send it back through the LLM pass instead
+    # of trusting it outright.
     _STOP = {'MICR', 'PAID', 'NEFT', 'IMPS', 'INCL', 'FROM', 'WITH',
              'BANK', 'TRAN', 'INWARD', 'TRANSFER', 'CLEARING', 'MUMBAI'}
     desc_words = set(re.findall(r'[A-Z]{4,}', desc.upper())) - _STOP
+    if not desc_words:
+        return None
 
-    seen: set = set()
+    # Dedup candidate accounts; keep the max historical frequency seen for
+    # each (used only as a tiebreak, never as a match criterion).
+    candidate_freq: Dict[str, int] = {}
+    leaf_words_by_account: Dict[str, set] = {}
     for m in historical_mappings:
         acct = m['account']
-        if acct in seen:
-            continue
-        seen.add(acct)
-        leaf = acct.rsplit(':', 1)[-1] if ':' in acct else acct
-        leaf_words = set(re.findall(r'[A-Za-z]{4,}', leaf.upper()))
-        common = desc_words & leaf_words
-        if common and max(len(w) for w in common) >= 5:
-            return {"account": acct, "reason": f"Keyword match ({', '.join(sorted(common))})"}
+        freq = m.get('frequency', 1)
+        if acct not in candidate_freq:
+            leaf = acct.rsplit(':', 1)[-1] if ':' in acct else acct
+            leaf_words_by_account[acct] = set(re.findall(r'[A-Za-z]{4,}', leaf.upper()))
+        candidate_freq[acct] = max(candidate_freq.get(acct, 0), freq)
 
-    return None
+    if not candidate_freq:
+        return None
+
+    # Document frequency: number of distinct candidate leaves each token
+    # appears in. Non-discriminating (doc-freq > 1) tokens never count.
+    token_doc_freq: Dict[str, int] = {}
+    for words in leaf_words_by_account.values():
+        for w in words:
+            token_doc_freq[w] = token_doc_freq.get(w, 0) + 1
+
+    scored = []  # (score, freq, account, discriminating_tokens)
+    for acct, leaf_words in leaf_words_by_account.items():
+        common = desc_words & leaf_words
+        discriminating = {w for w in common if token_doc_freq.get(w, 0) == 1}
+        if not discriminating or max(len(w) for w in discriminating) < 5:
+            continue
+        score = sum(len(w) for w in discriminating)
+        scored.append((score, candidate_freq[acct], acct, discriminating))
+
+    if not scored:
+        return None
+
+    # Deterministic regardless of input order: sort by (score, frequency)
+    # descending, account name as a final ordering key only (NOT a match
+    # criterion — a genuine (score, frequency) tie between the top two is
+    # still detected below and returns None).
+    scored.sort(key=lambda t: (-t[0], -t[1], t[2]))
+    best_score, best_freq, best_account, best_tokens = scored[0]
+    if len(scored) > 1:
+        second_score, second_freq, _, _ = scored[1]
+        if (best_score, best_freq) == (second_score, second_freq):
+            return None  # no clear winner — let the LLM pass decide
+
+    return {
+        "account": best_account,
+        "reason": f"Keyword match ({', '.join(sorted(best_tokens))})",
+        "confidence": "weak",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -877,6 +964,7 @@ _CONFIDENCE_LABELS: List[Tuple[str, str]] = [
     ('high', 'High confidence'),
     ('medium', 'Medium confidence'),
     ('low', 'Low confidence'),
+    ('weak', 'Weak keyword match'),
     ('smart', 'Smart pattern match'),
     ('llm', 'LLM fallback match'),
     ('override', 'User override'),
@@ -885,9 +973,11 @@ _CONFIDENCE_LABELS: List[Tuple[str, str]] = [
 ]
 
 # Categories treated as "needs a human to look at it" for the manual-review
-# section: low-confidence rule matches, genuinely unmatched rows, and
-# suspense-account placeholders (which are explicitly flagged for reassignment).
-_MANUAL_REVIEW_CONFIDENCES = ('low', 'none', 'suspense')
+# section: low-confidence rule matches, genuinely unmatched rows,
+# suspense-account placeholders (which are explicitly flagged for
+# reassignment), and unscored keyword-fallback guesses (which the LLM pass
+# tries to replace but may not be able to).
+_MANUAL_REVIEW_CONFIDENCES = ('low', 'none', 'suspense', 'weak')
 
 
 def _build_confidence_report(
@@ -1289,6 +1379,7 @@ def run(
     # Step 4: Smart pattern pass + LLM fallback for unmatched rows
     unmatched_count = result['confidence_counts'].get('none', 0)
     smart_mapped_count = 0
+    weak_mapped_count = 0
     llm_mapped_count = 0
 
     # Re-read the mapped CSV and build the full account list unconditionally —
@@ -1313,12 +1404,22 @@ def run(
             if match is None and historical_pairs_for_llm:
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
             if match is not None:
+                # MAP-08: _historical_prefix_match's keyword fallback carries
+                # its own confidence='weak' — a scored-but-unscored-against-
+                # the-rules guess that must be distinguishable from a
+                # high-precision 'smart' match and reconsidered by the LLM
+                # pass below. Everything else from this step (prefix match,
+                # smart_pattern_match) stays 'smart' as before.
+                match_confidence = match.get('confidence', 'smart')
                 row['Account'] = _strip_root(match['account']) if match['account'] else ''
-                row['Confidence'] = 'smart'
+                row['Confidence'] = match_confidence
                 row['MatchReason'] = f"Smart: {match['reason']}"
                 if match['account']:
-                    smart_mapped_count += 1
-                    _emit_mapper_progress(f"  row {i+1}: {desc[:35]} -> {match['account'].rsplit(':', 1)[-1]}")
+                    if match_confidence == 'weak':
+                        weak_mapped_count += 1
+                    else:
+                        smart_mapped_count += 1
+                    _emit_mapper_progress(f"  row {i+1}: {desc[:35]} -> {match['account'].rsplit(':', 1)[-1]} ({match_confidence})")
                 else:
                     _emit_mapper_progress(f"  row {i+1}: {desc[:35]} -> {match['reason']}")
 
@@ -1326,21 +1427,31 @@ def run(
             result['confidence_counts']['smart'] = smart_mapped_count
             result['confidence_counts']['none'] -= smart_mapped_count
             _emit_mapper_progress(f"smart pass: {smart_mapped_count} rows mapped")
+        if weak_mapped_count > 0:
+            result['confidence_counts']['weak'] = weak_mapped_count
+            result['confidence_counts']['none'] -= weak_mapped_count
+            _emit_mapper_progress(f"smart pass: {weak_mapped_count} rows weakly matched (keyword fallback)")
 
         # --- Step 4b: LLM fallback for remaining unmatched ---
+        # 'weak' rows are included here — a keyword-fallback guess is never
+        # final; the LLM gets a chance to replace it with a real answer.
+        # 'weak' is deliberately excluded from example_mappings below (an
+        # unscored guess must not train the LLM's prompt).
         still_unmatched = []
+        still_unmatched_orig_conf: Dict[int, str] = {}
         example_mappings = []
         for i, row in enumerate(mapped_rows, 1):
             desc = row.get('Description') or row.get('Narration') or ''
             acct = row.get('Account', '')
             conf = row.get('Confidence', 'none')
-            if (conf == 'none' or not acct) and conf not in ('smart', 'override'):
+            if (conf in ('none', 'weak') or not acct) and conf not in ('smart', 'override'):
                 still_unmatched.append({
                     'row': i,
                     'description': desc,
                     'withdrawal': row.get('Withdrawal', ''),
                     'deposit': row.get('Deposit', ''),
                 })
+                still_unmatched_orig_conf[i] = conf
             elif acct and conf in ('high', 'medium', 'smart', 'override'):
                 example_mappings.append({'description': desc, 'account': acct})
 
@@ -1355,15 +1466,26 @@ def run(
                 historical_mappings=historical_pairs_for_llm,
             )
             if llm_results:
+                llm_from_none = 0
+                llm_from_weak = 0
                 for i, row in enumerate(mapped_rows):
                     row_num = i + 1
                     if row_num in llm_results and llm_results[row_num].get('account'):
+                        orig_conf = still_unmatched_orig_conf.get(row_num, 'none')
                         row['Account'] = _strip_root(llm_results[row_num]['account'])
                         row['Confidence'] = 'llm'
                         row['MatchReason'] = f"LLM: {llm_results[row_num]['reason']}"
                         llm_mapped_count += 1
+                        if orig_conf == 'weak':
+                            llm_from_weak += 1
+                        else:
+                            llm_from_none += 1
                 if llm_mapped_count > 0:
-                    result['confidence_counts']['none'] -= llm_mapped_count
+                    result['confidence_counts']['none'] -= llm_from_none
+                    if llm_from_weak:
+                        result['confidence_counts']['weak'] = (
+                            result['confidence_counts'].get('weak', 0) - llm_from_weak
+                        )
                     result['confidence_counts']['llm'] = llm_mapped_count
         elif still_unmatched and not config_path:
             _emit_mapper_progress("no LLM config — skipping LLM fallback")
@@ -1371,9 +1493,10 @@ def run(
             _emit_mapper_progress("all rows resolved — no LLM needed")
 
         # Rewrite CSV if anything changed
-        if smart_mapped_count > 0 or llm_mapped_count > 0:
+        if smart_mapped_count > 0 or weak_mapped_count > 0 or llm_mapped_count > 0:
             _emit_mapper_progress(
-                f"pattern/LLM pass: +{smart_mapped_count} smart, +{llm_mapped_count} LLM"
+                f"pattern/LLM pass: +{smart_mapped_count} smart, "
+                f"+{weak_mapped_count} weak, +{llm_mapped_count} LLM"
             )
     else:
         _emit_mapper_progress("all rows matched by rules — no fallback needed")
@@ -1452,6 +1575,8 @@ def run(
     extra_notes = []
     if smart_mapped_count:
         extra_notes.append(f"smart patterns mapped {smart_mapped_count}")
+    if weak_mapped_count:
+        extra_notes.append(f"weak keyword matches {weak_mapped_count}")
     if llm_mapped_count:
         extra_notes.append(f"LLM mapped {llm_mapped_count}")
     extra = (" + " + ", ".join(extra_notes)) if extra_notes else ""
@@ -1462,6 +1587,7 @@ def run(
         f"**Confidence breakdown:**\n"
         f"- High: {counts.get('high', 0)} ({pct(counts.get('high', 0))})\n"
         f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
+        f"- Weak: {counts.get('weak', 0)} ({pct(counts.get('weak', 0))})\n"
         f"- Smart: {counts.get('smart', 0)} ({pct(counts.get('smart', 0))})\n"
         f"- LLM: {counts.get('llm', 0)} ({pct(counts.get('llm', 0))})\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
