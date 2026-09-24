@@ -864,10 +864,22 @@ _LEADING_LABEL_RE = re.compile(
 _COLON_SPACING_RE = re.compile(r'\s*:\s*')
 
 
-def _normalize_llm_answer(raw: str) -> str:
+def _normalize_llm_answer(raw: str, strip_trailing_period: bool = True) -> str:
     """Strip whitespace, markdown wrapping, quoting and leading labels from
     a raw LLM reply, without altering the substantive account-path text.
-    Idempotent: normalizing an already-normalized string is a no-op.
+    Idempotent for a given `strip_trailing_period` value: normalizing an
+    already-normalized string is a no-op.
+
+    `strip_trailing_period` controls whether a trailing "." is peeled.
+    GnuCash account names can legitimately end with a period (e.g. a
+    company name such as "Acme Industries Ltd."), so a trailing period is
+    NOT always wrapper noise. `_validate_llm_answer` calls this twice --
+    first with strip_trailing_period=False, preserving a possibly-real
+    period so an exact match against such an account still wins, then,
+    only if that finds nothing, again with strip_trailing_period=True, so
+    an ordinary sentence-final period on an otherwise-correct answer is
+    still peeled. Callers that only care about the SKIP short-circuit (a
+    period-terminated "SKIP." always means SKIP) may rely on the default.
     """
     if not raw:
         return raw
@@ -904,8 +916,10 @@ def _normalize_llm_answer(raw: str) -> str:
         # Trailing period (single, not part of a path segment) -- peeled
         # inside the loop too, so a period OUTSIDE another wrapper (e.g.
         # "**Expenses:Food**.") doesn't block that wrapper from being
-        # stripped on a later pass.
-        if s.endswith(".") and not s.endswith(".."):
+        # stripped on a later pass. Only when the caller opted in --
+        # a trailing period may be a real, significant character in an
+        # account name (see docstring).
+        if strip_trailing_period and s.endswith(".") and not s.endswith(".."):
             s = s[:-1].strip()
             changed = True
             continue
@@ -914,33 +928,18 @@ def _normalize_llm_answer(raw: str) -> str:
     return s.strip()
 
 
-def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
-    """Validate an LLM answer against known accounts.
+_AMBIGUOUS = object()  # sentinel: a tier found >1 candidates -- caller must
+                       # stop, never try a different normalised form.
 
-    Returns the matched account path, or None. The answer is normalised
-    first (markdown/quote/label wrapping stripped -- MAP-03), then matched
-    in two tiers:
 
-      1. Case-sensitive: an exact full-path match always wins outright. If
-         not, every account whose full ':'-delimited path or tail equals
-         the answer is collected (MAP-01) -- a bare substring never counts,
-         and the tail must be at least _MIN_PARTIAL_MATCH_LEN characters.
-         Exactly one candidate resolves; more than one is ambiguous and
-         returns None (never a heuristic pick, e.g. shortest path).
+def _match_answer_tiers(answer: str, account_set: set):
+    """Run the Tier 0/1/2 match rules against one already-normalised answer.
 
-      2. Case-insensitive, ONLY when tier 1 found zero candidates: same
-         exact/tail rules, case-insensitively. Exactly one candidate
-         resolves; two accounts differing only by case is ambiguous and
-         returns None.
-
-    Never fuzzy/edit-distance matching.
+    Returns the matched account path, `_AMBIGUOUS` (more than one candidate
+    matched at some tier -- the caller must treat this as a final None, not
+    retry with a different normalisation), or None (no match at all, safe
+    for the caller to retry with a different normalisation).
     """
-    if not answer:
-        return None
-    answer = _normalize_llm_answer(answer)
-    if not answer:
-        return None
-
     # Tier 0: exact full-path match always wins outright.
     if answer in account_set:
         return answer
@@ -951,7 +950,7 @@ def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
         if len(candidates) == 1:
             return next(iter(candidates))
         if len(candidates) > 1:
-            return None  # ambiguous -- same policy as MAP-08's tie -> no match
+            return _AMBIGUOUS  # same policy as MAP-08's tie -> no match
 
     # Tier 2: case-insensitive fallback, only if tier 1 found nothing.
     answer_lower = answer.lower()
@@ -964,8 +963,72 @@ def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
             ci_candidates.add(acct)
     if len(ci_candidates) == 1:
         return next(iter(ci_candidates))
+    if len(ci_candidates) > 1:
+        return _AMBIGUOUS
 
     return None
+
+
+def _validate_llm_answer(answer: str, account_set: set) -> Optional[str]:
+    """Validate an LLM answer against known accounts.
+
+    Returns the matched account path, or None. The answer is normalised
+    (markdown/quote/label wrapping stripped -- MAP-03) and matched in up to
+    two passes, because a trailing "." may be either wrapper noise (a
+    sentence-final period) or a real, significant character in an account
+    name (e.g. a company name like "Acme Industries Ltd."):
+
+      Pass 1: normalise with the trailing period PRESERVED, then run all
+      three tiers (see `_match_answer_tiers`). If this finds a match,
+      return it -- a genuinely period-terminated account always wins here
+      before any period-stripping is considered.
+
+      Pass 2: only if Pass 1 found nothing at all (not merely "found one
+      candidate", but zero) AND the period-stripped normalised form
+      actually differs from Pass 1's form (i.e. there was a trailing
+      period to strip), normalise again with the period stripped and run
+      all three tiers again.
+
+    Within each pass, the three tiers are:
+
+      0. Exact full-path match, case-sensitive.
+      1. Case-sensitive segment-tail match (MAP-01): every account whose
+         full ':'-delimited path or tail equals the answer is collected --
+         a bare substring never counts, and the tail must be at least
+         _MIN_PARTIAL_MATCH_LEN characters. Exactly one candidate
+         resolves; more than one is ambiguous.
+      2. Case-insensitive fallback, only if tier 1 found zero candidates:
+         same exact/tail rules, case-insensitively. Exactly one candidate
+         resolves; more than one is ambiguous.
+
+    An ambiguous result (more than one candidate at any tier) at Pass 1
+    ends the whole call as None immediately -- Pass 2 is never attempted
+    in that case, so it can never "rescue" an ambiguous Pass 1 into a
+    specific answer (never a heuristic pick, e.g. shortest path; never
+    fuzzy/edit-distance matching).
+    """
+    if not answer:
+        return None
+
+    # Pass 1: preserve a possibly-real trailing period.
+    normalized = _normalize_llm_answer(answer, strip_trailing_period=False)
+    if not normalized:
+        return None
+    result = _match_answer_tiers(normalized, account_set)
+    if result is _AMBIGUOUS:
+        return None
+    if result is not None:
+        return result
+
+    # Pass 2: only if Pass 1 found nothing at all, and there was actually a
+    # trailing period to strip (the two normalised forms differ).
+    normalized_stripped = _normalize_llm_answer(answer, strip_trailing_period=True)
+    if not normalized_stripped or normalized_stripped == normalized:
+        return None
+    result = _match_answer_tiers(normalized_stripped, account_set)
+    if result is _AMBIGUOUS:
+        return None
+    return result
 
 
 def llm_fallback_mapping(
@@ -1080,14 +1143,20 @@ def llm_fallback_mapping(
             if not reply:
                 continue
 
-        answer = _normalize_llm_answer(reply.strip().split("\n")[0].strip())  # first line only
+        first_line = reply.strip().split("\n")[0].strip()
+        # SKIP-check form: a period after "SKIP" is always wrapper noise,
+        # never part of a real answer, so this is safe to fully normalise.
+        answer = _normalize_llm_answer(first_line, strip_trailing_period=True)
         if answer.upper() == "SKIP" or not answer:
             _emit_mapper_progress(f"  -> SKIP ({answer!r})")
             result[row_num] = {"account": "", "reason": "LLM: skip"}
             continue
 
-        # Validate against known accounts
-        matched_acct = _validate_llm_answer(answer, account_set)
+        # Validate against known accounts. Pass the UNSTRIPPED first line --
+        # _validate_llm_answer runs its own two-pass normalisation so a
+        # trailing period that is actually part of an account name (e.g.
+        # "Acme Industries Ltd.") is not lost before Tier 0 ever sees it.
+        matched_acct = _validate_llm_answer(first_line, account_set)
 
         if not matched_acct and historical_mappings:
             # First answer was garbage — retry with focused prompt
@@ -1097,9 +1166,10 @@ def llm_fallback_mapping(
                 provider, base_url, model, api_key=api_key,
             )
             if retry_reply:
-                retry_answer = _normalize_llm_answer(retry_reply.strip().split("\n")[0].strip())
+                retry_first_line = retry_reply.strip().split("\n")[0].strip()
+                retry_answer = _normalize_llm_answer(retry_first_line, strip_trailing_period=True)
                 if retry_answer.upper() != "SKIP" and retry_answer:
-                    matched_acct = _validate_llm_answer(retry_answer, account_set)
+                    matched_acct = _validate_llm_answer(retry_first_line, account_set)
 
         if matched_acct:
             _emit_mapper_progress(f"  -> {matched_acct}")
