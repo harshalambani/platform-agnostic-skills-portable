@@ -45,7 +45,14 @@ def run(
     and return a summary string, or raise with the real stderr on failure.
 
     Args:
-        pdf_dir:        Directory containing HSBC PDF statements.
+        pdf_dir:        A folder of HSBC statement PDFs, or a single PDF.
+                         Despite the name (kept for run_args compatibility
+                         with the skill.yaml `directory` input), a single PDF
+                         file path is also accepted and staged into its own
+                         temp folder — see ``_run_ocr_pipeline``. An already-
+                         enriched ``.xlsx``/``.xlsm`` workbook is rejected
+                         with a pointer to Convert to GnuCash (HSB-03): this
+                         route only OCRs, and that workbook needs no OCR.
         work_dir:       Scratch directory for intermediate files.
         output_path:    Path where the output .xlsx should be saved.
         title:          Workbook title shown in the Summary sheet.
@@ -53,6 +60,44 @@ def run(
                          other bank skills' entry-point signature).
         model_override: Unused (ditto).
     """
+    src = Path(pdf_dir)
+
+    if not src.exists():
+        raise ValueError(f"Path not found: {pdf_dir}")
+
+    if src.is_file():
+        suffix = src.suffix.lower()
+        if suffix == ".pdf":
+            # Stage the single PDF into its own temp directory — the same
+            # staging pattern _run_ocr_pipeline uses — so the subprocess
+            # call below OCRs exactly this one PDF, never its siblings.
+            stage_dir = Path(tempfile.mkdtemp(prefix="hsbc_run_"))
+            (stage_dir / src.name).write_bytes(src.read_bytes())
+            pdf_dir = str(stage_dir)
+        elif suffix in (".xlsx", ".xlsm"):
+            raise ValueError(
+                f"`{src.name}` is an already-enriched HSBC workbook (this "
+                "skill's own output), so there is nothing to OCR. To import "
+                "it, go to Banks > Convert to GnuCash, choose HSBC, and "
+                "upload the workbook."
+            )
+        else:
+            raise ValueError(f"Unsupported file type: {suffix or src.name}")
+    else:
+        entries = sorted(src.iterdir())
+        pdfs = [p for p in entries if p.is_file() and p.suffix.lower() == ".pdf"]
+        if not pdfs:
+            workbooks = [p for p in entries if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm")]
+            if workbooks:
+                raise ValueError(
+                    f"`{src}` contains no PDF statements, only an "
+                    "already-enriched HSBC workbook. To import it, go to "
+                    "Banks > Convert to GnuCash, choose HSBC, and upload "
+                    "the workbook."
+                )
+            raise ValueError(f"No PDF statements found in: {src}")
+        # pdf_dir already points at a directory of PDFs; pass it through.
+
     result = subprocess.run(
         [
             sys.executable, str(_PIPELINE),

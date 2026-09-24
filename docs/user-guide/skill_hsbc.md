@@ -11,14 +11,14 @@ Use this when you have one or more HSBC statement PDFs (savings or Premier) and 
 
 ## Inputs
 
-- **Folder containing HSBC statement PDF(s)** (required) — accepts: A folder of HSBC PDF statements.
-  - A folder containing one or more HSBC statement PDFs.
-  - ⚠️ Select the folder, not a single PDF. Scanned PDFs are OCR'd, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build).
+- **Folder of HSBC statement PDFs, or a single PDF** (required) — accepts: A folder of HSBC PDF statements, or a single HSBC statement PDF.
+  - A folder containing one or more HSBC statement PDFs, or a single PDF.
+  - ⚠️ Scanned PDFs are OCR'd, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build). This tab only OCRs PDFs — if you already have an enriched HSBC .xlsx/.xlsm workbook (this skill's own output), there is nothing to OCR; use Banks > Convert to GnuCash and choose HSBC to import it instead.
 
 ## How to run
 
-1. Put your HSBC PDFs in one folder.
-2. Select that folder.
+1. Put your HSBC PDFs in one folder (or use a single PDF).
+2. Select that folder, or the single PDF.
 3. Click Run — OCR may take a minute on scanned statements.
 4. Download the Excel workbook.
 

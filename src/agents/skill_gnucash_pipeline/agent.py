@@ -88,6 +88,70 @@ def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
     return path_or_dir
 
 
+def _resolve_hsbc_input(path_or_dir: str, hsbc_skill) -> tuple[str | None, str | None]:
+    """Resolve a staged HSBC upload for ``HSBCSkill.parse()``.
+
+    HSBC is the one bank whose ``parse()`` accepts either a directory of PDF
+    statements (OCR path) or a single already-enriched ``.xlsx``/``.xlsm``
+    workbook (fast path — see MAP-08 sibling task HSB-03). A single-file
+    upload must be passed through as-is (never swapped for its parent
+    directory, which would sweep every sibling PDF into OCR); a directory
+    upload must be inspected to tell which shape it holds.
+
+    Returns ``(resolved_path, None)`` on success, or ``(None, error_markdown)``
+    when the upload can't be resolved unambiguously — in the same
+    ``## HSBC → ...`` style as the Bank of Baroda branch just below.
+    """
+    src = Path(path_or_dir)
+
+    if not src.is_dir():
+        # Single file (PDF or already-enriched workbook): pass it through
+        # unchanged. Never substitute its parent directory.
+        return str(src), None
+
+    entries = sorted(src.iterdir())
+    pdfs = [p for p in entries if p.is_file() and p.suffix.lower() == ".pdf"]
+    workbooks = [p for p in entries if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm")]
+
+    if pdfs and workbooks:
+        return None, (
+            "## HSBC → mixed upload\n\n"
+            f"❌ The staged upload directory contains both PDF statement(s) "
+            f"and enriched workbook(s):\n`{path_or_dir}`\n\n"
+            "Upload either PDF statements (for OCR) or a single "
+            "already-enriched .xlsx/.xlsm workbook, not both."
+        )
+    if workbooks:
+        if len(workbooks) > 1:
+            return None, (
+                "## HSBC → multiple workbooks\n\n"
+                f"❌ The staged upload directory contains more than one "
+                f"enriched workbook:\n`{path_or_dir}`\n\n"
+                "Upload just one already-enriched HSBC .xlsx/.xlsm workbook."
+            )
+        wb = workbooks[0]
+        try:
+            confidence = hsbc_skill.detect(wb)
+        except Exception:
+            confidence = 0.0
+        if confidence <= 0:
+            return None, (
+                "## HSBC → unrecognised workbook\n\n"
+                f"❌ `{wb.name}` doesn't look like an already-enriched HSBC "
+                "workbook. Expected first-sheet headers: `Date, Transaction "
+                "Details, Transaction Date, Transaction Number, Extra "
+                "Information, Deposit, Withdrawals, Balance`."
+            )
+        return str(wb), None
+    if pdfs:
+        return str(src), None
+    return None, (
+        "## HSBC → no statements found\n\n"
+        f"❌ The staged upload directory contains no .pdf or .xlsx/.xlsm "
+        f"files:\n`{path_or_dir}`"
+    )
+
+
 def _read_sidecar(canonical_path: str) -> dict | None:
     """Read the _summary.json sidecar if it exists (shared canonical_io tail)."""
     return _ci_read_sidecar(canonical_path)
@@ -871,11 +935,16 @@ def run(
             elif bank == "HDFC":
                 bank_input = _resolve_single_file(bank_input, (".csv", ".xls", ".xlsx", ".pdf"))
             elif bank == "HSBC":
-                # If input is a directory (staged uploads), use it as-is;
-                # if it's a single file, use its parent directory — HSBC's
-                # parse() OCRs every PDF in the directory it's given.
-                hsbc_src = Path(bank_input)
-                bank_input = hsbc_src if hsbc_src.is_dir() else hsbc_src.parent
+                # A directory may hold PDFs (OCR path) or a single already-
+                # enriched workbook (fast path); a single file is passed
+                # through as-is, never swapped for its parent directory. See
+                # _resolve_hsbc_input (HSB-03).
+                hsbc_resolved, hsbc_error = _resolve_hsbc_input(
+                    bank_input, load_bank_skill(bank_info),
+                )
+                if hsbc_error:
+                    return hsbc_error
+                bank_input = hsbc_resolved
             elif bank == "Bank of Baroda":
                 bob_src = Path(bank_input)
                 if bob_src.is_dir() and not sorted(bob_src.glob("*.pdf")):
