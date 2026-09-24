@@ -394,8 +394,10 @@ def _retry_with_focused_prompt(
     desc: str,
     amt_info: str,
     historical_mappings: List[Dict],
+    provider: str,
     base_url: str,
     model: str,
+    api_key: Optional[str] = None,
 ) -> Optional[str]:
     """Retry LLM with a shorter prompt containing only the most relevant groups."""
     from collections import defaultdict
@@ -437,8 +439,8 @@ def _retry_with_focused_prompt(
         f"Account:"
     )
 
-    reply = _ollama_chat(base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
-                         timeout=_LLM_TIMEOUT_SECONDS)
+    reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
+                       api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
     if reply:
         _emit_mapper_progress(f"  -> (retry matched)")
     return reply
@@ -540,18 +542,45 @@ def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_inf
     )
 
 
-def _resolve_ollama_config(config_path: str, model_override: str = None) -> Tuple[str, str]:
-    """Read config.yaml and return (base_url, model_name)."""
+def _resolve_llm_endpoint_config(
+    config_path: str, model_override: str = None
+) -> Tuple[str, str, str, Optional[str], float]:
+    """Read the materialized legacy LLM config and return
+    (provider, base_url, model, api_key, temperature).
+
+    The config is produced by ui/_config.py's ``materialize_legacy_config()``
+    / ``_legacy_from_endpoint()``, which names the endpoint block after
+    ``cfg["provider"]`` -- either "ollama" OR "openai_compatible" -- not
+    always "ollama". Reading ``cfg["ollama"]`` unconditionally (the old
+    behaviour) silently produced a hard-coded localhost:11434 fallback for
+    an openai_compatible endpoint, with no Authorization header.
+
+    There is no such fallback here: a missing/unknown provider, base_url,
+    or model is a hard ValueError. Callers must surface it through
+    ``_emit_mapper_progress`` rather than guess an endpoint.
+    """
     cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    ep = cfg.get("ollama") or {}
-    base_url = ep.get("base_url", "http://localhost:11434").rstrip("/")
-    model = model_override or ep.get("default_model") or "gemma4:12b"
-    return base_url, model
+    provider = cfg.get("provider")
+    if provider not in ("ollama", "openai_compatible"):
+        raise ValueError(
+            f"Unknown or missing LLM provider {provider!r} in {config_path} "
+            "-- refusing to guess an endpoint."
+        )
+    ep = cfg.get(provider) or {}
+    base_url = (ep.get("base_url") or "").rstrip("/")
+    if not base_url:
+        raise ValueError(f"No base_url configured for provider '{provider}' in {config_path}.")
+    model = model_override or ep.get("default_model")
+    if not model:
+        raise ValueError(f"No model configured for provider '{provider}' in {config_path}.")
+    api_key = ep.get("api_key") if provider == "openai_compatible" else None
+    temperature = float(ep.get("temperature", 0.0))
+    return provider, base_url, model, api_key, temperature
 
 
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
-    """Call Ollama /api/chat directly. Returns the assistant reply or None."""
-    from urllib import request as _req, error as _err
+    """Call Ollama's /api/chat directly. Returns the assistant reply or None."""
+    from urllib import request as _req
 
     payload = json.dumps({
         "model": model,
@@ -576,6 +605,77 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
     except Exception as e:  # noqa: BLE001
         _emit_mapper_progress(f"  Ollama error: {e}")
         return None
+
+
+def _openai_compatible_chat(
+    base_url: str,
+    model: str,
+    system: str,
+    user: str,
+    api_key: Optional[str] = None,
+    timeout: float = 60.0,
+) -> Optional[str]:
+    """Call an OpenAI-compatible /chat/completions endpoint directly.
+
+    Same timeout / error-handling semantics as ``_ollama_chat``, but the
+    OpenAI request/response schema and a Bearer Authorization header when
+    an api_key is configured.
+    """
+    from urllib import request as _req
+
+    payload = json.dumps({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 120,
+        "stream": False,
+    }).encode("utf-8")
+
+    headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    req = _req.Request(
+        f"{base_url}/chat/completions",
+        data=payload,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with _req.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode("utf-8", errors="replace"))
+            choices = body.get("choices") or []
+            if not choices:
+                return ""
+            return (choices[0].get("message") or {}).get("content", "")
+    except Exception as e:  # noqa: BLE001
+        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        return None
+
+
+def _llm_chat(
+    provider: str,
+    base_url: str,
+    model: str,
+    system: str,
+    user: str,
+    api_key: Optional[str] = None,
+    timeout: float = 60.0,
+) -> Optional[str]:
+    """Provider-aware chat dispatch.
+
+    Explicit per-provider branch -- deliberately no catch-all/default so an
+    unrecognised provider fails loud instead of silently falling back to
+    the Ollama protocol against whatever base_url happens to be configured.
+    """
+    if provider == "ollama":
+        return _ollama_chat(base_url, model, system, user, timeout=timeout)
+    if provider == "openai_compatible":
+        return _openai_compatible_chat(base_url, model, system, user, api_key=api_key, timeout=timeout)
+    raise ValueError(f"Unknown LLM provider {provider!r} -- no chat dispatch available.")
 
 
 _MIN_PARTIAL_MATCH_LEN = 4
@@ -639,7 +739,9 @@ def llm_fallback_mapping(
         return {}
 
     try:
-        base_url, model = _resolve_ollama_config(config_path, model_override)
+        provider, base_url, model, api_key, _temperature = _resolve_llm_endpoint_config(
+            config_path, model_override
+        )
     except Exception as e:
         _emit_mapper_progress(f"LLM config error: {e}")
         return {}
@@ -647,14 +749,16 @@ def llm_fallback_mapping(
     total = len(unmatched_rows)
     hist_count = len(historical_mappings) if historical_mappings else 0
     _emit_mapper_progress(
-        f"LLM fallback: {total} rows, {hist_count} historical examples, model={model}"
+        f"LLM fallback: {total} rows, {hist_count} historical examples, "
+        f"provider={provider}, model={model}"
     )
 
     # ── Warm up the model (cold start loads weights into VRAM) ───────────
     _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
-    warmup_reply = _ollama_chat(
-        base_url, model,
+    warmup_reply = _llm_chat(
+        provider, base_url, model,
         "Reply OK.", "ping",
+        api_key=api_key,
         timeout=_LLM_WARMUP_TIMEOUT,
     )
     if warmup_reply is None:
@@ -715,14 +819,15 @@ def llm_fallback_mapping(
 
         _emit_mapper_progress(f"LLM row {i}/{total}: {desc[:40]}")
 
-        reply = _ollama_chat(base_url, model, _LLM_SYSTEM_PROMPT, user_prompt, timeout=_LLM_TIMEOUT_SECONDS)
+        reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
+                          api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
 
         if not reply:
             # Retry with focused prompt — top 3 account groups by keyword overlap
             if historical_mappings:
                 reply = _retry_with_focused_prompt(
                     desc, amt_info, historical_mappings,
-                    base_url, model,
+                    provider, base_url, model, api_key=api_key,
                 )
             if not reply:
                 continue
@@ -741,7 +846,7 @@ def llm_fallback_mapping(
             _emit_mapper_progress(f"  -> invalid ({answer[:40]!r}), retrying focused…")
             retry_reply = _retry_with_focused_prompt(
                 desc, amt_info, historical_mappings,
-                base_url, model,
+                provider, base_url, model, api_key=api_key,
             )
             if retry_reply:
                 retry_answer = retry_reply.strip().split("\n")[0].strip()
@@ -757,6 +862,127 @@ def llm_fallback_mapping(
     matched = sum(1 for v in result.values() if v.get("account"))
     _emit_mapper_progress(f"LLM fallback complete: {matched}/{total} rows mapped")
     return result
+
+
+# ---------------------------------------------------------------------------
+# Confidence report — shared builder + post-passes rewrite
+# ---------------------------------------------------------------------------
+
+# Category key -> report label, in display order. Categories beyond the
+# original four (high/medium/low/none) are only ever added to
+# confidence_counts by run()'s further passes (smart pattern match, LLM
+# fallback, user overrides, suspense) — they must still show up in the
+# report when non-zero, instead of being silently invisible.
+_CONFIDENCE_LABELS: List[Tuple[str, str]] = [
+    ('high', 'High confidence'),
+    ('medium', 'Medium confidence'),
+    ('low', 'Low confidence'),
+    ('smart', 'Smart pattern match'),
+    ('llm', 'LLM fallback match'),
+    ('override', 'User override'),
+    ('suspense', 'Suspense (unassigned)'),
+    ('none', 'No match'),
+]
+
+# Categories treated as "needs a human to look at it" for the manual-review
+# section: low-confidence rule matches, genuinely unmatched rows, and
+# suspense-account placeholders (which are explicitly flagged for reassignment).
+_MANUAL_REVIEW_CONFIDENCES = ('low', 'none', 'suspense')
+
+
+def _build_confidence_report(
+    total: int,
+    confidence_counts: Dict[str, int],
+    manual_review: List[Dict],
+) -> str:
+    """Render the confidence-report text from final counts + review rows.
+
+    Shared by map_accounts() (rules-pass-only state) and
+    _rewrite_confidence_report_from_csv() (final, post-all-passes state) so
+    both produce the same report format.
+    """
+    pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
+
+    report_lines = [
+        "=" * 90,
+        "ACCOUNT MAPPING CONFIDENCE REPORT",
+        "=" * 90,
+        "",
+        "CONFIDENCE DISTRIBUTION",
+        "-" * 90,
+        f"Total rows: {total}",
+    ]
+    for key, label in _CONFIDENCE_LABELS:
+        count = confidence_counts.get(key, 0)
+        # The original four categories always show (even at 0, for a stable
+        # shape); the passes-only categories only show when they fired.
+        if key in ('high', 'medium', 'low', 'none') or count:
+            report_lines.append(f"  {label + ':':<22} {count:4d}  ({pct(count)})")
+    report_lines.append("")
+
+    if manual_review:
+        report_lines += [
+            "MANUAL REVIEW REQUIRED",
+            "-" * 90,
+            f"Items requiring review: {len(manual_review)}",
+            "",
+        ]
+        for item in manual_review[:20]:
+            report_lines += [
+                f"Row {item['row']:4d}: {item['description']:60}",
+                f"         Assigned to: {item['assigned_account'] or '(none)':45}",
+                f"         Confidence: {item['confidence']:10} | {item['reason']}",
+                "",
+            ]
+        if len(manual_review) > 20:
+            report_lines.append(f"... and {len(manual_review) - 20} more items\n")
+
+    report_lines += [
+        "=" * 90,
+        "Next: Import mapped CSV into GnuCash using File → Import → Import CSV",
+        "=" * 90,
+    ]
+    return "\n".join(report_lines)
+
+
+def _rewrite_confidence_report_from_csv(mapped_csv_path: str, report_path: str) -> Dict[str, int]:
+    """Rebuild the confidence report FROM the final mapped CSV on disk.
+
+    map_accounts() writes the confidence report after only the rules pass.
+    run() then runs further passes (smart pattern match, LLM fallback, user
+    overrides, suspense) that reassign rows and mutate confidence counts —
+    but never used to rewrite the report file, so it silently went stale
+    (e.g. reporting the rules-pass "No match" count even though the
+    suspense pass had since assigned every one of those rows to a Suspense
+    account).
+
+    This reads the Confidence column back from the CSV that actually ships
+    (the single source of truth) rather than trusting any counter threaded
+    through the pipeline, so the report can never drift from the CSV again.
+    Returns the recomputed confidence_counts.
+    """
+    with open(mapped_csv_path, 'r', encoding='utf-8', errors='replace') as f:
+        rows = list(csv.DictReader(f))
+
+    confidence_counts: Dict[str, int] = {}
+    manual_review: List[Dict] = []
+    for row_num, row in enumerate(rows, 1):
+        conf = row.get('Confidence') or 'none'
+        confidence_counts[conf] = confidence_counts.get(conf, 0) + 1
+        if conf in _MANUAL_REVIEW_CONFIDENCES:
+            manual_review.append({
+                'row': row_num,
+                'description': (row.get('Description') or row.get('Narration') or '')[:60],
+                'assigned_account': row.get('Account', ''),
+                'confidence': conf,
+                'reason': row.get('MatchReason', ''),
+            })
+
+    report_text = _build_confidence_report(len(rows), confidence_counts, manual_review)
+    with open(report_path, 'w', encoding='utf-8') as f:
+        f.write(report_text)
+
+    return confidence_counts
 
 
 # ---------------------------------------------------------------------------
@@ -844,47 +1070,11 @@ def map_accounts(
         writer.writerows(mapped_rows)
     print(f"[mapper] Wrote {len(mapped_rows)} rows")
 
-    # Write confidence report
+    # Write confidence report (rules-pass state — map_accounts() only ever
+    # runs the rules pass; run() below rewrites this file after its further
+    # smart/LLM/override/suspense passes so it stays in sync with the CSV).
     total = len(canonical_rows)
-    pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
-    report_lines = [
-        "=" * 90,
-        "ACCOUNT MAPPING CONFIDENCE REPORT",
-        "=" * 90,
-        "",
-        "CONFIDENCE DISTRIBUTION",
-        "-" * 90,
-        f"Total rows: {total}",
-        f"  High confidence:   {confidence_counts['high']:4d}  ({pct(confidence_counts['high'])})",
-        f"  Medium confidence: {confidence_counts['medium']:4d}  ({pct(confidence_counts['medium'])})",
-        f"  Low confidence:    {confidence_counts['low']:4d}  ({pct(confidence_counts['low'])})",
-        f"  No match:          {confidence_counts['none']:4d}  ({pct(confidence_counts['none'])})",
-        "",
-    ]
-
-    if manual_review:
-        report_lines += [
-            "MANUAL REVIEW REQUIRED",
-            "-" * 90,
-            f"Items requiring review: {len(manual_review)}",
-            "",
-        ]
-        for item in manual_review[:20]:
-            report_lines += [
-                f"Row {item['row']:4d}: {item['description']:60}",
-                f"         Assigned to: {item['assigned_account'] or '(none)':45}",
-                f"         Confidence: {item['confidence']:10} | {item['reason']}",
-                "",
-            ]
-        if len(manual_review) > 20:
-            report_lines.append(f"... and {len(manual_review) - 20} more items\n")
-
-    report_lines += [
-        "=" * 90,
-        "Next: Import mapped CSV into GnuCash using File → Import → Import CSV",
-        "=" * 90,
-    ]
-    report_text = "\n".join(report_lines)
+    report_text = _build_confidence_report(total, confidence_counts, manual_review)
     with open(output_report, 'w', encoding='utf-8') as f:
         f.write(report_text)
 
@@ -1101,14 +1291,14 @@ def run(
     smart_mapped_count = 0
     llm_mapped_count = 0
 
+    # Re-read the mapped CSV and build the full account list unconditionally —
+    # both mapped_rows and account_list are needed below by the Step 5
+    # suspense pass regardless of whether unmatched_count was > 0 here.
+    with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
+        mapped_rows = list(csv.DictReader(f))
+    account_list = sorted(all_account_paths)
+
     if unmatched_count > 0:
-        # Re-read the mapped CSV
-        with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
-            mapped_rows = list(csv.DictReader(f))
-
-        # Build full account list (all banks)
-        account_list = sorted(all_account_paths)
-
         # --- Step 4a: Smart pattern pass (deterministic, no LLM) ---
         _emit_mapper_progress(f"smart pattern pass for {unmatched_count} unmatched rows")
         for i, row in enumerate(mapped_rows):
@@ -1239,6 +1429,20 @@ def run(
         writer.writeheader()
         writer.writerows(mapped_rows)
     _emit_mapper_progress(f"CSV written: {len(mapped_rows)} rows")
+
+    # --- Rewrite the confidence report from the FINAL CSV ---
+    # map_accounts() wrote it after only the rules pass; overrides/smart/LLM/
+    # suspense have all run since and reassigned rows, so the on-disk report
+    # would otherwise still show the stale rules-pass counts (e.g. a "No
+    # match" figure that the suspense pass has since zeroed out on the CSV
+    # sitting right next to it). Recompute straight from the CSV that ships
+    # so the two artefacts can never disagree.
+    final_counts = _rewrite_confidence_report_from_csv(str(out_path), str(report_path))
+    result['confidence_counts'] = final_counts
+    result['manual_review_count'] = sum(
+        final_counts.get(k, 0) for k in _MANUAL_REVIEW_CONFIDENCES
+    )
+    _emit_mapper_progress(f"confidence report rewritten: {report_path.name}")
 
     counts = result['confidence_counts']
     total = result['total_rows']
