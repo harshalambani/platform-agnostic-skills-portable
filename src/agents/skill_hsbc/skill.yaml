@@ -19,7 +19,7 @@ entry_point: "agent:run"
 inputs:
   - name: "pdf_dir"
     type: "directory"
-    label: "Folder containing HSBC statement PDF(s)"
+    label: "Folder of HSBC statement PDFs, or a single PDF"
     required: true
 
 run_args:
@@ -52,14 +52,17 @@ help:
     into GnuCash, use Banks > Convert to GnuCash and choose HSBC instead.
   inputs:
     - name: "pdf_dir"
-      tooltip: "A folder containing one or more HSBC statement PDFs."
-      accepts: "A folder of HSBC PDF statements."
+      tooltip: "A folder containing one or more HSBC statement PDFs, or a single PDF."
+      accepts: "A folder of HSBC PDF statements, or a single HSBC statement PDF."
       gotchas: >
-        Select the folder, not a single PDF. Scanned PDFs are OCR'd, so the run
-        takes longer and needs Tesseract + Poppler (bundled in the frozen build).
+        Scanned PDFs are OCR'd, so the run takes longer and needs Tesseract +
+        Poppler (bundled in the frozen build). This tab only OCRs PDFs — if
+        you already have an enriched HSBC .xlsx/.xlsm workbook (this skill's
+        own output), there is nothing to OCR; use Banks > Convert to GnuCash
+        and choose HSBC to import it instead.
   steps:
-    - "Put your HSBC PDFs in one folder."
-    - "Select that folder."
+    - "Put your HSBC PDFs in one folder (or use a single PDF)."
+    - "Select that folder, or the single PDF."
     - "Click Run — OCR may take a minute on scanned statements."
     - "Download the Excel workbook."
   outputs:
