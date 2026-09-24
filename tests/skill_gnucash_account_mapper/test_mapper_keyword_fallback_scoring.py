@@ -263,6 +263,129 @@ def test_rule14_single_bare_tax_account_matches_deterministically():
     assert result["account"] == "Expenses:Statutory:Tax Payment Only Channel"
 
 
+# --- MAP-08 follow-up: every tier requires EXACTLY ONE candidate, not just
+# the bare-substring fallback tier. A book with several payers/assessment
+# years can have several "TDS on Dividend" or several "Advance Tax"/"Income
+# Tax" leaves; picking the alphabetically first one at a specific tier is
+# the same arbitrary-pick bug MAP-08 removed, just moved up a tier. The
+# LLM (always available, per the user) is the right fallback when a tier
+# is ambiguous -- these rules must never guess, at any tier.
+
+def test_rule5_multiple_tds_on_dividend_accounts_yields_no_match():
+    """Two 'TDS on Dividend' leaves (e.g. one per payer) -- the specific
+    tier itself is ambiguous. Must NOT pick either one (not the
+    alphabetically first), and must NOT drop down to a bare 'TDS' tier."""
+    account_tree = [
+        "Income:Dividend:TDS on Dividend Acme",
+        "Income:Dividend:TDS on Dividend Zenith",
+    ]
+    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
+    assert result is None
+
+
+def test_rule5_multiple_tds_on_dividend_accounts_order_independent():
+    account_tree = [
+        "Income:Dividend:TDS on Dividend Acme",
+        "Income:Dividend:TDS on Dividend Zenith",
+    ]
+    reversed_tree = list(reversed(account_tree))
+    result_a = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
+    result_b = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", reversed_tree)
+    assert result_a == result_b is None
+
+
+def test_rule5_ambiguous_specific_tier_does_not_drop_to_bare_tier():
+    """Two 'TDS on Dividend' leaves PLUS exactly one other bare 'TDS' leaf
+    (which on its own would be an unambiguous match at the fallback tier).
+    The specific tier's ambiguity must still win -- the rule falls through
+    entirely rather than dropping down to the now-unambiguous bare tier."""
+    account_tree = [
+        "Income:Dividend:TDS on Dividend Acme",
+        "Income:Dividend:TDS on Dividend Zenith",
+        "Expenses:Tax:TDS Receivable Only Other Account",
+    ]
+    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
+    assert result is None
+
+
+def test_rule14_multiple_advance_tax_accounts_yields_no_match():
+    """Two 'Advance Tax' leaves (e.g. one per assessment year) with an
+    ADVANCE TAX narration -- must NOT pick either one, and must NOT drop
+    down to 'Income Tax' or a bare 'Tax' tier."""
+    account_tree = [
+        "Expenses:Statutory:Advance Tax AY2025-26",
+        "Expenses:Statutory:Advance Tax AY2026-27",
+        "Expenses:Statutory:Income Tax Paid",
+    ]
+    result = agent.smart_pattern_match("ADVANCE TAX Q2 CHALLAN PAID", account_tree)
+    assert result is None
+
+
+def test_rule14_multiple_advance_tax_accounts_order_independent():
+    account_tree = [
+        "Expenses:Statutory:Advance Tax AY2025-26",
+        "Expenses:Statutory:Advance Tax AY2026-27",
+    ]
+    reversed_tree = list(reversed(account_tree))
+    result_a = agent.smart_pattern_match("ADVANCE TAX Q2 CHALLAN PAID", account_tree)
+    result_b = agent.smart_pattern_match("ADVANCE TAX Q2 CHALLAN PAID", reversed_tree)
+    assert result_a == result_b is None
+
+
+def test_rule14_multiple_income_tax_accounts_yields_no_match():
+    """Two 'Income Tax' leaves, no ADVANCE TAX wording in the narration --
+    the Income Tax tier itself is ambiguous. Must NOT pick either one, and
+    must NOT drop down to a bare 'Tax' tier even though only one bare-Tax
+    decoy account exists."""
+    account_tree = [
+        "Expenses:Statutory:Income Tax Paid AY2025-26",
+        "Expenses:Statutory:Income Tax Paid AY2026-27",
+        "Expenses:Statutory:Tax Payment Channel A",
+    ]
+    result = agent.smart_pattern_match("INCOME TAX CHALLAN PAID", account_tree)
+    assert result is None
+
+
+def test_rule14_multiple_income_tax_accounts_order_independent():
+    account_tree = [
+        "Expenses:Statutory:Income Tax Paid AY2025-26",
+        "Expenses:Statutory:Income Tax Paid AY2026-27",
+    ]
+    reversed_tree = list(reversed(account_tree))
+    result_a = agent.smart_pattern_match("INCOME TAX CHALLAN PAID", account_tree)
+    result_b = agent.smart_pattern_match("INCOME TAX CHALLAN PAID", reversed_tree)
+    assert result_a == result_b is None
+
+
+def test_rule14_ambiguous_advance_tax_tier_does_not_drop_to_income_tax_tier():
+    """Two 'Advance Tax' leaves PLUS exactly one 'Income Tax' leaf (which on
+    its own, or under a non-ADVANCE-TAX narration, would be an unambiguous
+    match). With ADVANCE TAX wording, the ambiguous Advance Tax tier must
+    still win -- the rule falls through entirely rather than dropping down
+    to the now-unambiguous Income Tax tier."""
+    account_tree = [
+        "Expenses:Statutory:Advance Tax AY2025-26",
+        "Expenses:Statutory:Advance Tax AY2026-27",
+        "Expenses:Statutory:Income Tax Paid",
+    ]
+    result = agent.smart_pattern_match("ADVANCE TAX Q2 CHALLAN PAID", account_tree)
+    assert result is None
+
+
+def test_rule14_ambiguous_income_tax_tier_does_not_drop_to_bare_tax_tier():
+    """Two 'Income Tax' leaves PLUS exactly one bare 'Tax' leaf (which on
+    its own would be an unambiguous fallback match). No ADVANCE TAX wording
+    in the narration, so Income Tax is the first applicable tier -- its
+    ambiguity must still win over dropping to the bare tier."""
+    account_tree = [
+        "Expenses:Statutory:Income Tax Paid AY2025-26",
+        "Expenses:Statutory:Income Tax Paid AY2026-27",
+        "Expenses:Statutory:Tax Payment Only Channel",
+    ]
+    result = agent.smart_pattern_match("INCOME TAX CHALLAN PAID", account_tree)
+    assert result is None
+
+
 # ---------------------------------------------------------------------------
 # Part 3: run() end-to-end -- weak rows are reconsidered by the LLM pass,
 # excluded from LLM examples, and correctly reflected in confidence

@@ -223,19 +223,28 @@ def smart_pattern_match(
     # 5. TDS on Dividend: "NACH.*TDS", narrations with TDS
     # MAP-08: the old code picked the first tree-order account containing
     # the bare substring "TDS", which is order-dependent and can land on
-    # the wrong account when several accounts contain "TDS". Prefer the
-    # specific "TDS on Dividend" leaf; fall back to a bare "TDS" match only
-    # when exactly one such account exists, and pick deterministically
-    # (sorted) either way. If neither condition is met, fall through to
-    # later rules / the LLM instead of guessing.
+    # the wrong account when several accounts contain "TDS".
+    #
+    # MAP-08 follow-up: an earlier version of this fix preferred the first
+    # (sorted) "TDS on Dividend" leaf whenever ANY such leaves existed — but
+    # a book can have several "TDS on Dividend" leaves (one per payer), and
+    # picking the alphabetically first one is the exact same arbitrary-pick
+    # bug this fix removes, just moved up a tier. Each tier now requires
+    # EXACTLY ONE candidate to return a match: "TDS on Dividend" leaves
+    # first; if there are none, fall back to a bare "TDS" leaf only when
+    # exactly one exists. If a tier has more than one candidate, the whole
+    # rule falls through (no match here — never drop down to a less
+    # specific tier just because the specific one was ambiguous) and the
+    # LLM pass (always available) decides instead of guessing.
     if re.search(r'TDS\s*(ON|FOR)?\s*DIV', desc_upper):
-        dividend_tds = sorted(a for a in account_tree if "TDS on Dividend" in a)
-        if dividend_tds:
-            return {"account": dividend_tds[0], "reason": "TDS on dividend pattern"}
-        bare_tds = sorted(a for a in account_tree if "TDS" in a)
-        if len(bare_tds) == 1:
-            return {"account": bare_tds[0], "reason": "TDS on dividend pattern"}
-        # ambiguous (0 or >1 bare "TDS" accounts) — don't guess
+        for candidates in (
+            sorted(a for a in account_tree if "TDS on Dividend" in a),
+            sorted(a for a in account_tree if "TDS" in a),
+        ):
+            if len(candidates) == 1:
+                return {"account": candidates[0], "reason": "TDS on dividend pattern"}
+            if len(candidates) > 1:
+                break  # ambiguous at this tier — fall through the whole rule
 
     # 6. Self/internal transfer patterns
     if re.search(r'SELF\s*TRANSFER|AC\s*XFR\s*FROM|TRANSFER\s*TO\s*SELF|FD\s*MATURITY', desc_upper):
@@ -292,23 +301,32 @@ def smart_pattern_match(
     # 14. Tax payment — match only if account found
     # MAP-08: the old code picked the first tree-order account containing
     # any of "Income Tax" / "Tax" / "Advance Tax", order-dependent and prone
-    # to landing on the wrong bucket. Prefer the most specific keyword the
-    # narration actually mentions ("Advance Tax" first, then "Income Tax"),
-    # and only fall back to a bare "Tax" substring when exactly one account
-    # qualifies — deterministically (sorted) in every case. If nothing
-    # qualifies unambiguously, fall through to later rules / the LLM.
+    # to landing on the wrong bucket.
+    #
+    # MAP-08 follow-up: an earlier version of this fix preferred the first
+    # (sorted) account at the most specific applicable tier ("Advance Tax",
+    # then "Income Tax") whenever ANY such accounts existed — but a book can
+    # have several "Advance Tax" or "Income Tax" leaves (one per assessment
+    # year), and picking the alphabetically first one is the exact same
+    # arbitrary-pick bug this fix removes, just moved up a tier. Each tier
+    # now requires EXACTLY ONE candidate to return a match: "Advance Tax"
+    # (only when the narration says ADVANCE TAX) first, then "Income Tax",
+    # then a bare "Tax" leaf only when exactly one exists. If a tier has
+    # more than one candidate, the whole rule falls through (no match here
+    # — never drop down to a less specific tier just because the specific
+    # one was ambiguous) and the LLM pass (always available) decides
+    # instead of guessing.
     if re.search(r'ADVANCE\s*TAX|SELF\s*ASSESS.*TAX|INCOME\s*TAX|TDS\s*PAYMENT|CHALLAN', desc_upper):
+        tiers = []
         if re.search(r'ADVANCE\s*TAX', desc_upper):
-            advance_tax = sorted(a for a in account_tree if "Advance Tax" in a)
-            if advance_tax:
-                return {"account": advance_tax[0], "reason": "Tax payment"}
-        income_tax = sorted(a for a in account_tree if "Income Tax" in a)
-        if income_tax:
-            return {"account": income_tax[0], "reason": "Tax payment"}
-        bare_tax = sorted(a for a in account_tree if "Tax" in a)
-        if len(bare_tax) == 1:
-            return {"account": bare_tax[0], "reason": "Tax payment"}
-        # ambiguous (0 or >1 bare "Tax" accounts) — don't guess
+            tiers.append(sorted(a for a in account_tree if "Advance Tax" in a))
+        tiers.append(sorted(a for a in account_tree if "Income Tax" in a))
+        tiers.append(sorted(a for a in account_tree if "Tax" in a))
+        for candidates in tiers:
+            if len(candidates) == 1:
+                return {"account": candidates[0], "reason": "Tax payment"}
+            if len(candidates) > 1:
+                break  # ambiguous at this tier — fall through the whole rule
 
     # 15. Salary / pension — match only if account found
     if re.search(r'SALARY|PENSION|PAY\s*CREDIT', desc_upper):
