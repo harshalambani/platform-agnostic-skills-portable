@@ -63,9 +63,10 @@ def _accounts():
     return accts
 
 
-def _deductor(sr, name, section, amt, tax):
+def _deductor(sr, name, section, amt, tax, tan=""):
     return m.Deductor(sr=sr, name=name, sections=(section,),
-                      amount_paid=amt, tax_deducted=tax, tds_deposited=tax)
+                      amount_paid=amt, tax_deducted=tax, tds_deposited=tax,
+                      tan=tan)
 
 
 # ---------------------------------------------------------------------------
@@ -220,9 +221,10 @@ def test_build_15g_journals_tied_candidates_flagged_ambiguous_too():
 
 
 def test_write_review_appends_tied_candidates_as_last_column():
-    """The review CSV has the new last column; every existing column keeps
-    its original position."""
-    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0)
+    """The review CSV has "Tied Candidates" then "TAN" as its last two
+    columns (TDS-11 added TAN after Tied Candidates); every earlier column
+    keeps its original position."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0, tan="AAAA00000A")
     journals = m.build_journals([d], _tie_accounts())
     out = Path(tempfile.gettempdir()) / "test_tds06_review.csv"
     m.write_review(journals, out, _tie_accounts())
@@ -231,9 +233,10 @@ def test_write_review_appends_tied_candidates_as_last_column():
     header = rows[0]
     assert header == ["Sr", "Deductor", "Section", "Category", "Credit Account",
                       "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
-                      "Needs Review", "Basis", "Tied Candidates"]
+                      "Needs Review", "Basis", "Tied Candidates", "TAN"]
     data_row = rows[1]
-    assert data_row[-1] == (
+    assert data_row[-1] == "AAAA00000A"
+    assert data_row[-2] == (
         "Income:Interest Income:Interest on Zenith Bank; "
         "Income:Interest Income:Interest on Zenith Global"
     )
@@ -794,9 +797,10 @@ def _tcs_accounts():
     ]
 
 
-def _collector(sr, name, section, amt, tax):
+def _collector(sr, name, section, amt, tax, tan=""):
     return m.Deductor(sr=sr, name=name, sections=(section,),
-                      amount_paid=amt, tax_deducted=tax, tds_deposited=tax)
+                      amount_paid=amt, tax_deducted=tax, tds_deposited=tax,
+                      tan=tan)
 
 
 @pytest.mark.parametrize("section", ["206CQ", "206CR", "206CL", "206C"])
@@ -918,6 +922,139 @@ def test_15g_override_stays_needs_review_fl1_2():
     assert j.credit_confidence == "Override"
     assert j.needs_review is True
     assert j.credit_basis == "Model pick - confirm"
+
+
+# ---------------------------------------------------------------------------
+# TDS-11 -- persisted human confirmations ("learnings") for the 26AS Review
+# tab, mirroring skill_gnucash_account_mapper.persistent_rules in spirit:
+# only a genuinely human Review-tab save may create a learning (see FL1.2 --
+# an accepted LLM override must NOT become a learning); a stored learning is
+# applied automatically on a later run (confidence "Learned", needs_review
+# cleared, since it represents a PRIOR human confirmation, not a fresh
+# guess); an explicit per-run override still wins over a stored learning;
+# learnings are keyed by TAN (falling back to normalised name) and
+# namespaced by domain (DOMAIN_INCOME for Categories A/B/C/G, DOMAIN_TCS for
+# Category T) so the same TAN acting as both a deductor and a collector
+# can't cross-contaminate; and a learning can never bypass the s.194T
+# partner-comp exclusion in Category C, since it feeds the same
+# credit_acc/credit_confidence/credit_basis/needs_review variables the
+# deterministic matcher and override paths already feed, with the exclusion
+# logic running unconditionally afterwards.
+#
+# Proven to fail pre-fix (tip 3b346f6, before TDS-11): build_journals() /
+# build_15g_journals() / build_tcs_journals() had no `learnings` parameter
+# at all, so every test below that passes `learnings=...` fails with
+# `TypeError: build_journals() got an unexpected keyword argument
+# 'learnings'` (or the m.tds_learnings module simply doesn't exist yet,
+# `AttributeError: module 'build_tds_journals' has no attribute
+# 'tds_learnings'`).
+# ---------------------------------------------------------------------------
+
+def test_learning_applied_when_no_override_income_domain():
+    """A stored learning (prior human confirmation) is applied when this run
+    has no explicit override for the same deductor -- confidence "Learned",
+    needs_review cleared."""
+    d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="AAAA00000A")
+    accts = [
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
+        m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
+    ]
+    learn_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "AAAA00000A", "SOME OBSCURE PAYER")
+    j = m.build_journals([d], accts,
+                         learnings={learn_key: "Income:Interest Income"})[0]
+    assert j.credit_account == "Income:Interest Income"
+    assert j.credit_confidence == "Learned"
+    assert j.needs_review is False
+
+
+def test_override_wins_over_learning():
+    """An explicit per-run override beats a matching stored learning -- this
+    run's deliberate choice outranks a prior confirmation."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0, tan="AAAA00000A")
+    accts = _tie_accounts()
+    learn_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "AAAA00000A", "ZENITH LIMITED")
+    j = m.build_journals(
+        [d], accts,
+        overrides={1: "Income:Interest Income:Interest on Zenith Global"},
+        learnings={learn_key: "Income:Interest Income:Interest on Zenith Bank"},
+    )[0]
+    assert j.credit_account == "Income:Interest Income:Interest on Zenith Global"
+    assert j.credit_confidence == "Override"
+    # FL1.2: an override is still a model pick pending human confirmation on
+    # this base -- it does not clear needs_review just for beating a learning.
+    assert j.needs_review is True
+
+
+def test_learning_keyed_by_tan_ignores_name_change():
+    """Same TAN, different name text -- the learning still matches, proving
+    the key is TAN-based, not name-based."""
+    d = _deductor(1, "ZENITH LIMITED (RENAMED)", "194A", 100000.0, 10000.0,
+                  tan="AAAA00000A")
+    accts = _tie_accounts()
+    learn_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "AAAA00000A", "ZENITH LIMITED")
+    j = m.build_journals(
+        [d], accts,
+        learnings={learn_key: "Income:Interest Income:Interest on Zenith Bank"},
+    )[0]
+    assert j.credit_account == "Income:Interest Income:Interest on Zenith Bank"
+    assert j.credit_confidence == "Learned"
+    assert j.needs_review is False
+
+
+def test_learning_falls_back_to_name_when_no_tan():
+    """A blank/invalid TAN falls back to a name-keyed learning."""
+    d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="")
+    accts = [
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
+        m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
+    ]
+    learn_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "", "SOME OBSCURE PAYER")
+    j = m.build_journals([d], accts,
+                         learnings={learn_key: "Income:Interest Income"})[0]
+    assert j.credit_account == "Income:Interest Income"
+    assert j.credit_confidence == "Learned"
+    assert j.needs_review is False
+
+
+def test_category_c_learning_does_not_bypass_partner_comp_exclusion():
+    """Category C with a learning hit AND partner_comp_configured=True still
+    gets excluded_from_journal=True, needs_review False, and the exclusion
+    basis -- the s.194T exclusion must win over the "Learned from..." text,
+    exactly as it already wins over the deterministic matcher and override
+    paths."""
+    d = _deductor(1, "ZENITH LIMITED", "194T", 100000.0, 10000.0, tan="AAAA00000A")
+    accts = _tie_accounts()
+    learn_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "AAAA00000A", "ZENITH LIMITED")
+    j = m.build_journals(
+        [d], accts,
+        learnings={learn_key: "Income:Interest Income:Interest on Zenith Bank"},
+        partner_comp_configured=True,
+    )[0]
+    assert j.excluded_from_journal is True
+    assert j.needs_review is False
+    assert "Learned from" not in j.credit_basis
+
+
+def test_tcs_learning_uses_separate_domain_from_income():
+    """A DOMAIN_INCOME-keyed learning for a given TAN must NOT be picked up
+    by build_tcs_journals() for a collector with the same TAN -- proves
+    domain isolation between the deductor (income) and collector (TCS)
+    roles a single TAN can hold."""
+    c = _collector(1, "X TOURS", "206CQ", 100, 10, tan="AAAA00000A")
+    income_key = m.tds_learnings.deductor_key(
+        m.tds_learnings.DOMAIN_INCOME, "AAAA00000A", "X TOURS")
+    j = m.build_tcs_journals(
+        [c], _tcs_accounts(),
+        learnings={income_key: "Expense:TCS on Foreign Trip"},
+    )[0]
+    assert j.credit_confidence != "Learned"
 
 
 def test_non_206c_section_in_part_vi_goes_suspense():

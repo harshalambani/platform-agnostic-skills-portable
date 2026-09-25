@@ -734,6 +734,139 @@ def test_load_review_data_hostile_content_not_live_markup(tmp_path):
     assert "%%APP%%" not in html
 
 
+# ---------------------------------------------------------------------------
+# TDS-11 -- persisted "learnings" from a genuinely human Save. Mirrors
+# ui/tabs/gnucash_review.py's override-persistence pattern (Suspense-skip
+# guard, try/except-wrapped so a persistence failure never blocks the CSV
+# save). Only rows THIS Save actually applied (Confidence == OVERRIDE_
+# CONFIDENCE post-_apply_changes) may become a learning -- an LLM/model
+# override never reaches OVERRIDE_CONFIDENCE (it stays "Override", capital
+# O, per FL1.2), so it can never be picked up here either.
+#
+# Proven to fail pre-fix (tip 3b346f6, before TDS-11): _import_tds_learnings
+# and _collect_learnings_to_save did not exist at all, so every test below
+# fails with `AttributeError: module 'ui.tabs.tds_journal_review' has no
+# attribute '_collect_learnings_to_save'` (U1/U2) or the saved sidecar file
+# never gets created because _save_changes had no learnings-persistence
+# block at all (U3), or the "No GnuCash book loaded" message did not exist
+# (U4).
+# ---------------------------------------------------------------------------
+
+def test_collect_learnings_to_save_only_includes_applied_rows():
+    """A `changes` entry _apply_changes actually applied (Confidence ==
+    OVERRIDE_CONFIDENCE on the post-apply review row) is included; one that
+    was skipped (still some other Confidence, e.g. never resolved to an
+    override) is not."""
+    review_rows = [
+        {"Sr": "1", "Category": "A", "Deductor": "ACME BANK", "TAN": "",
+         "Credit Account": "Income:Interest:ACME FD", "Confidence": "override"},
+        {"Sr": "2", "Category": "A", "Deductor": "OTHER BANK", "TAN": "",
+         "Credit Account": "Liabilities:Suspense", "Confidence": "Suspense"},
+    ]
+    changes = [
+        {"Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD"},
+        {"Sr": "2", "Category": "A", "Credit Account": "Something:Unresolved"},
+    ]
+    items = tjr._collect_learnings_to_save(changes, review_rows)
+    assert len(items) == 1
+    tds_learnings = tjr._import_tds_learnings()
+    expected_key = tds_learnings.deductor_key(
+        tds_learnings.DOMAIN_INCOME, "", "ACME BANK")
+    assert items[0] == (expected_key, "Income:Interest:ACME FD")
+
+
+def test_collect_learnings_to_save_excludes_suspense():
+    """A row that Save applied but whose Credit Account still contains
+    "Suspense" must never become a learning -- mirrors gnucash_review.py's
+    identical guard; an unresolved pick must not be persisted as if it were
+    a confirmed answer."""
+    review_rows = [
+        {"Sr": "1", "Category": "A", "Deductor": "ACME BANK", "TAN": "",
+         "Credit Account": "Liabilities:Suspense", "Confidence": "override"},
+    ]
+    changes = [
+        {"Sr": "1", "Category": "A", "Credit Account": "Liabilities:Suspense"},
+    ]
+    assert tjr._collect_learnings_to_save(changes, review_rows) == []
+
+
+def test_save_changes_persists_learning_to_disk(tmp_path):
+    """Full integration: a real Save with a gnucash_path in context writes a
+    learning to the sidecar YAML tds_learnings.py resolves for that book."""
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+    gnucash_path = str(tmp_path / "2025-26.gnucash")
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Expense:TDS on Interest", "Amount": "10.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Income:Interest Income:Interest on FD", "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "TDS FY 2025-26 - ACME BANK (Sec 194A)",
+         "Account": "Liabilities:Suspense", "Amount": "-100.00", "Currency": "INR"},
+    ])
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p), "gnucash_path": gnucash_path},
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    status, _, _ = tjr._save_changes(payload)
+
+    assert "Learned 1 deductor/collector account pick(s)" in status
+
+    tds_learnings = tjr._import_tds_learnings()
+    learnings = tds_learnings.load_learnings(gnucash_path)
+    expected_key = tds_learnings.deductor_key(
+        tds_learnings.DOMAIN_INCOME, "", "ACME BANK")
+    assert learnings[expected_key] == "Income:Interest:ACME FD"
+
+
+def test_save_changes_does_not_persist_when_no_gnucash_path(tmp_path):
+    """No GnuCash book loaded -- Save still succeeds (CSV rewrite is never
+    blocked), but confirmed picks are reported as NOT saved as a learning,
+    and no sidecar file is written anywhere."""
+    review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
+    journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
+
+    _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
+    _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Expense:TDS on Interest", "Amount": "10.00",
+         "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Income:Interest Income:Interest on FD",
+         "Amount": "90.00", "Currency": "INR"},
+        {"Date": "2026-03-31", "Transaction ID": "2526-TDSJ01", "Number": "2526-TDSJ01",
+         "Description": "x", "Account": "Liabilities:Suspense", "Amount": "-100.00",
+         "Currency": "INR"},
+    ])
+
+    import json
+    payload = json.dumps({
+        "context": {"review_path": str(review_p)},  # no gnucash_path
+        "changes": [{
+            "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+            "_orig": "Liabilities:Suspense",
+        }],
+        "all_rows": [],
+    })
+
+    status, _, _ = tjr._save_changes(payload)
+
+    assert "confirmed pick(s) were not saved as learnings this time" in status
+    assert not any(p.suffix == ".yaml" for p in tmp_path.iterdir())
+
+
 def test_apply_changes_ambiguous_row_accepts_non_tied_account():
     """PR B (code-level gate on LLM overrides): the gate lives ONLY in
     skill_26as_journal/tools.py._gate_ambiguous_overrides, on the LLM

@@ -120,6 +120,9 @@ help:
   tips: >
     Entries whose deductor could not be matched to an account are flagged so you
     can fix the account name in your book (or add the missing account) and re-run.
+    Confirming a credit account on the Review screen is remembered for that
+    deductor (by its TAN) for next time — a later run applies it automatically,
+    without a fresh guess and without asking you to confirm it again.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
       fix: "This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings)."

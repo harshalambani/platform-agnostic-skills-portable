@@ -505,7 +505,7 @@ _JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description",
                     "Account", "Amount", "Currency"]
 _REVIEW_HEADERS = ["Sr", "Deductor", "Section", "Category", "Credit Account",
                    "Confidence", "Account Exists", "Balanced", "Debit",
-                   "Credit", "Needs Review", "Basis", "Tied Candidates"]
+                   "Credit", "Needs Review", "Basis", "Tied Candidates", "TAN"]
 
 
 def _read_csv_rows(path: Path) -> list[dict]:
@@ -528,6 +528,68 @@ def _stage_for_download(path: Path) -> str | None:
     staged = staging / path.name
     shutil.copy2(path, staged)
     return str(staged.resolve())
+
+
+def _import_tds_learnings():
+    """Import tds_learnings.py -- a sibling script under
+    skill_26as_journal/scripts/, NOT part of the `agents` package (see that
+    module's own docstring: build_tds_journals.py runs as a subprocess and
+    cannot rely on `agents` being importable in a frozen child, so
+    tds_learnings.py must stay import-able as a plain sibling module rather
+    than a package submodule).
+
+    Located via `agents.skill_26as_journal`'s own installed __file__ rather
+    than a hardcoded relative path from this UI module, so this resolves
+    unchanged in both a source checkout and a frozen (PyInstaller) build --
+    the same reasoning gnucash_review.py's _save_changes() gives for
+    importing persistent_rules via the `agents` package rather than a bare
+    sys.path insert.
+    """
+    import sys as _sys
+
+    import agents.skill_26as_journal as _skill_pkg
+    scripts_dir = Path(_skill_pkg.__file__).resolve().parent / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    import tds_learnings
+    return tds_learnings
+
+
+def _collect_learnings_to_save(changes: list[dict], review_rows: list[dict]) -> list:
+    """Build [(key, account), ...] for rows THIS Save actually applied.
+
+    `review_rows` must be the post-_apply_changes() rows (Confidence ==
+    OVERRIDE_CONFIDENCE, the human-save marker, only on rows that call
+    genuinely wrote -- see _apply_changes). A `changes` entry _apply_changes
+    skipped (blank Sr, no matching row, no fy_prefix, an unresolvable
+    Transaction ID series, no matching split) never reaches that Confidence
+    value, so it is correctly excluded here with no separate bookkeeping.
+
+    Mirrors gnucash_review.py's _save_changes(): an account containing
+    "Suspense" is never learned -- an unresolved row must not be persisted
+    as if it were a confirmed answer.
+    """
+    tds_learnings = _import_tds_learnings()
+    review_by_sr = {
+        (str(r.get("Sr", "")).strip(), (r.get("Category") or "").strip()): r
+        for r in review_rows
+    }
+    items = []
+    for ch in changes:
+        sr = str(ch.get("Sr", "")).strip()
+        category = (ch.get("Category") or "").strip()
+        row = review_by_sr.get((sr, category))
+        if row is None or row.get("Confidence") != OVERRIDE_CONFIDENCE:
+            continue
+        account = (row.get(TARGET_COL) or "").strip()
+        if not account or "Suspense" in account:
+            continue
+        domain = (tds_learnings.DOMAIN_TCS if category.strip().upper() == "T"
+                  else tds_learnings.DOMAIN_INCOME)
+        key = tds_learnings.deductor_key(domain, row.get("TAN") or "",
+                                         row.get("Deductor") or "")
+        items.append((key, account))
+    return items
 
 
 def _save_changes(
@@ -580,6 +642,36 @@ def _save_changes(
     review_rows, journal_rows, problems, applied = _apply_changes(
         review_rows, journal_rows, changes, known_accounts=known_accounts,
     )
+
+    # TDS-11: persist this Save's human-confirmed credit-account picks as
+    # learnings (src/agents/skill_26as_journal/scripts/tds_learnings.py), so
+    # a later run of the 26AS journal builder can resolve the same
+    # deductor/collector automatically instead of asking again. Only ever
+    # fires from a genuinely HUMAN save via this function -- never from the
+    # LLM-override path in build_tds_journals.py, which deliberately keeps
+    # needs_review=True precisely so an accepted model pick is never
+    # mistaken for a human confirmation (see FL1.2). A failure here must
+    # never block the actual CSV save that follows -- caught and reported
+    # as a warning, same pattern as gnucash_review.py's override save.
+    learnings_msg = ""
+    if applied:
+        if gnucash_path:
+            try:
+                tds_learnings = _import_tds_learnings()
+                learn_items = _collect_learnings_to_save(changes, review_rows)
+                if learn_items:
+                    tds_learnings.save_learnings_batch(gnucash_path, learn_items)
+                    learnings_msg = (
+                        f"Learned {len(learn_items)} deductor/collector account "
+                        "pick(s) for next time."
+                    )
+            except Exception as e:
+                learnings_msg = f"Warning: could not save learnings -- {e}"
+        else:
+            learnings_msg = (
+                "No GnuCash book loaded -- confirmed pick(s) were not saved "
+                "as learnings this time."
+            )
 
     _write_csv_rows(review_p, _REVIEW_HEADERS, review_rows)
     _write_csv_rows(journal_p, _JOURNAL_HEADERS, journal_rows)
@@ -635,6 +727,8 @@ def _save_changes(
     lines = ["**Saved**", ""]
     lines.append(f"Applied {applied} of {len(changes)} change(s).")
     lines.append(f"Rewrote {review_p.name} and {journal_p.name}.")
+    if learnings_msg:
+        lines.append(learnings_msg)
     if problems:
         lines.append("")
         lines.append(f"{len(problems)} change(s) skipped (not guessed):")

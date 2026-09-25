@@ -78,6 +78,16 @@ from typing import Optional
 
 from openpyxl import load_workbook
 
+# tds_learnings.py is a sibling script, not part of the `agents` package --
+# this module runs as a subprocess (see the module docstring and tools.py's
+# _run_script()) and cannot rely on `agents` being importable in a frozen
+# child. Same sys.path-insert pattern used elsewhere in this codebase for
+# sibling-script imports (e.g. skill_gnucash_intercompany_matrix's
+# matrix_recon.py).
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+import tds_learnings  # noqa: E402
+
 # -------------------- fixed account names --------------------
 
 ACC_TDS_INTEREST = "Expense:TDS on Interest"
@@ -197,6 +207,7 @@ class Deductor:
     amount_paid: float
     tax_deducted: float
     tds_deposited: float
+    tan: str = ""  # column 3 ("TAN of Deductor" / "TAN of Collector"); may be blank
 
 
 @dataclass
@@ -228,6 +239,7 @@ class Journal:
     tied_candidates: list = field(default_factory=list)  # populated only when Ambiguous
     needs_review: bool = False
     excluded_from_journal: bool = False  # Category C, partner-comp already books it
+    tan: str = ""  # deductor/collector TAN, carried through for the review CSV/tab
 
     @property
     def total_debit(self) -> float:
@@ -304,7 +316,12 @@ def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
             continue
         sr = a
         if sr not in hdr:
-            hdr[sr] = [ws.cell(r, 2).value, ws.cell(r, 4).value,
+            # Column 3 is "TAN of Deductor" (Part I/II) / "TAN of Collector"
+            # (Part VI) -- see skill_26as/scripts/extract_26as_to_xlsx.py's
+            # P1_HEADER_TOKENS/P6_HEADER_TOKENS. Previously silently skipped
+            # (only columns 1/2/4/5/6/8 were read); now carried through so
+            # the learnings store (tds_learnings.py) can key on it.
+            hdr[sr] = [ws.cell(r, 2).value, ws.cell(r, 3).value, ws.cell(r, 4).value,
                        ws.cell(r, 5).value, ws.cell(r, 6).value]
             secs[sr] = []
         sec = ws.cell(r, 8).value
@@ -312,11 +329,12 @@ def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
             secs[sr].append(str(sec))
 
     deductors = []
-    for sr, (name, amt, tax, tds) in hdr.items():
+    for sr, (name, tan, amt, tax, tds) in hdr.items():
         deductors.append(Deductor(
             sr=sr, name=str(name).strip(), sections=tuple(secs[sr]),
             amount_paid=float(amt or 0), tax_deducted=float(tax or 0),
             tds_deposited=float(tds or 0),
+            tan=str(tan).strip() if tan is not None else "",
         ))
     return deductors, fy
 
@@ -615,10 +633,23 @@ def categorize(sections: tuple) -> tuple[Optional[str], str]:
 
 def build_journals(deductors: list[Deductor], accounts: list[Account],
                    overrides: Optional[dict] = None,
-                   partner_comp_configured: bool = False) -> list[Journal]:
+                   partner_comp_configured: bool = False,
+                   learnings: Optional[dict] = None) -> list[Journal]:
     """overrides: {deductor_sr (int) -> credit account full path}. Used by the
     LLM-fallback path to resolve deductors the deterministic matcher sent to
     Suspense. An override always wins over the deterministic choice.
+
+    learnings: {tds_learnings.deductor_key(...) -> credit account full path},
+    persisted confirmations from a PRIOR human Review-tab save (see
+    tds_learnings.py). Applied only when this run has no explicit `overrides`
+    entry for the same deductor (an override is this run's deliberate,
+    one-off choice and always wins) and takes priority over the deterministic
+    matcher's own scoring -- a human already resolved this exact
+    deductor once; a fresh fuzzy match is never a better answer than that. A
+    learning is applied to Category C exactly like any other category before
+    the partner-comp-exclusion check below runs, so it never bypasses that
+    check: excluded_from_journal is still decided the same way regardless of
+    how credit_account/confidence got set.
 
     partner_comp_configured: True when this entity has partner_comp_accounts
     set up (skill_partner_comp_recon/jv_emitter.py's _monthly_journal() books
@@ -632,6 +663,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
     When False (not configured, or unknown), today's behaviour is kept but
     made loud: the credit_basis carries an explicit double-booking warning."""
     overrides = overrides or {}
+    learnings = learnings or {}
     # The generic FD-interest debit account ('Interest on FD' in the spec) is
     # fuzzy-found from the actual chart, since its name varies per book
     # ('Interest on Fixed Deposit', etc.). Falls back to the canonical name
@@ -640,7 +672,8 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
     journals = []
     for d in deductors:
         cat, label = categorize(d.sections)
-        j = Journal(sr=d.sr, deductor=d.name, category=cat or "?", section_label=label)
+        j = Journal(sr=d.sr, deductor=d.name, category=cat or "?", section_label=label,
+                    tan=d.tan)
         a = round(d.tax_deducted, 2)
         c = round(d.amount_paid, 2)
 
@@ -657,6 +690,8 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
         acct, conf, basis, cands, tied = match_credit_account(d.name, cat, accounts, fd_account)
         j.candidates = cands
         j.tied_candidates = tied
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_INCOME, d.tan, d.name)
+        learned_acct = learnings.get(learn_key)
         if d.sr in overrides and overrides[d.sr]:
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
@@ -669,6 +704,18 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             # _apply_changes) may clear this flag.
             j.credit_basis = "Model pick - confirm"
             j.needs_review = True
+        elif learned_acct:
+            # TDS-11: a prior HUMAN save already resolved this exact
+            # deductor (by TAN, or by normalised name when no TAN was
+            # parsed) -- take priority over a fresh fuzzy match, but this is
+            # still just this run's normal credit-account pick, not a
+            # per-run override, so it is free to be re-learned again on a
+            # later save.
+            credit_acc = learned_acct
+            j.credit_account = credit_acc
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
         else:
             credit_acc = acct or ACC_SUSPENSE
             j.credit_account = credit_acc
@@ -712,7 +759,8 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
 
 
 def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
-                       overrides: Optional[dict] = None) -> list[Journal]:
+                       overrides: Optional[dict] = None,
+                       learnings: Optional[dict] = None) -> list[Journal]:
     """Part II (15G/15H) -> Category G journals.
 
     Reuses Category A's exact posting template and account-matching pool
@@ -731,13 +779,20 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
     overrides: {deductor_sr (int) -> credit account full path}, same shape
     as build_journals' — Part II Sr numbers restart per part (like Part VI),
     so this is deliberately a separate map from the Part I overrides.
+
+    learnings: same shape and priority as build_journals' -- Part II shares
+    Category A's DOMAIN_INCOME namespace (both search the income subtree for
+    an interest account), so a deductor learned via a Part I Category A save
+    is reused here too, and vice versa.
     """
     overrides = overrides or {}
+    learnings = learnings or {}
     fd_account = find_generic_fd_account(accounts) or ACC_INTEREST_ON_FD
     journals = []
     for d in deductors:
         label = "/".join(d.sections)
-        j = Journal(sr=d.sr, deductor=d.name, category="G", section_label=label)
+        j = Journal(sr=d.sr, deductor=d.name, category="G", section_label=label,
+                    tan=d.tan)
         a = round(d.tax_deducted, 2)
         c = round(d.amount_paid, 2)
 
@@ -747,6 +802,8 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
         acct, conf, basis, cands, tied = match_credit_account(d.name, "A", accounts, fd_account)
         j.candidates = cands
         j.tied_candidates = tied
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_INCOME, d.tan, d.name)
+        learned_acct = learnings.get(learn_key)
         if d.sr in overrides and overrides[d.sr]:
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
@@ -755,6 +812,13 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
             # the identical comment in build_journals() above.
             j.credit_basis = "Model pick - confirm"
             j.needs_review = True
+        elif learned_acct:
+            # TDS-11: see the identical branch in build_journals() above.
+            credit_acc = learned_acct
+            j.credit_account = credit_acc
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
         else:
             credit_acc = acct or ACC_SUSPENSE
             j.credit_account = credit_acc
@@ -790,7 +854,8 @@ def is_tcs_section(sections: tuple) -> bool:
 
 def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
                        tcs_account: str = "", credit_account: str = "",
-                       overrides: Optional[dict] = None) -> list[Journal]:
+                       overrides: Optional[dict] = None,
+                       learnings: Optional[dict] = None) -> list[Journal]:
     """One 2-split journal per collector:
 
         Dr  <TCS account>       = Tax Collected
@@ -811,16 +876,27 @@ def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
     income leg to match.
 
     overrides: {collector_sr -> credit account path}, same shape as the TDS path.
+
+    learnings: same shape and priority as build_journals', but namespaced
+    under tds_learnings.DOMAIN_TCS rather than DOMAIN_INCOME -- the credit
+    leg here is a spending-side contra account (Drawings/Bank), not an
+    income account, and a TCS collector's TAN colliding with an unrelated
+    TDS deductor's TAN (the same bank can plausibly be both) must never let
+    a learned income-account pick leak into a TCS contra-account slot.
     """
     overrides = overrides or {}
+    learnings = learnings or {}
     dr = tcs_account or find_tcs_account(accounts) or ACC_TCS_DEFAULT
     cr_default = credit_account or find_drawings_account(accounts) or ACC_DRAWINGS
 
     journals = []
     for c in collectors:
         label = "/".join(c.sections)
-        j = Journal(sr=c.sr, deductor=c.name, category="T", section_label=label)
+        j = Journal(sr=c.sr, deductor=c.name, category="T", section_label=label,
+                    tan=c.tan)
         tax = round(c.tax_deducted, 2)
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_TCS, c.tan, c.name)
+        learned_acct = learnings.get(learn_key)
 
         if c.sr in overrides and overrides[c.sr]:
             cr = overrides[c.sr]
@@ -831,6 +907,12 @@ def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
             # the same effect as the other two categories' explicit False.)
             j.credit_basis = "Model pick - confirm"
             j.needs_review = True
+        elif learned_acct:
+            # TDS-11: see the identical branch in build_journals() above.
+            cr = learned_acct
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
         else:
             cr = cr_default
             j.credit_confidence = "High" if credit_account or \
@@ -1051,19 +1133,22 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
     existing = {a.path for a in accounts}
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
-        # "Tied Candidates" is appended LAST, after "Basis" — anything that
-        # reads this CSV by column position (rather than by header name) must
-        # keep working unchanged. It is empty except for "Ambiguous" rows.
+        # "Tied Candidates" and "TAN" are appended LAST, in that order, after
+        # "Basis" — anything that reads this CSV by column position (rather
+        # than by header name) must keep working unchanged for the first 12
+        # columns. "Tied Candidates" is empty except for "Ambiguous" rows;
+        # "TAN" is empty when the 26AS workbook carried no TAN for that
+        # deductor/collector (see _parse_party_sheet).
         w.writerow(["Sr", "Deductor", "Section", "Category", "Credit Account",
                     "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
-                    "Needs Review", "Basis", "Tied Candidates"])
+                    "Needs Review", "Basis", "Tied Candidates", "TAN"])
         for j in journals:
             w.writerow([
                 j.sr, j.deductor, j.section_label, j.category, j.credit_account,
                 j.credit_confidence, "yes" if j.credit_account in existing else "NO",
                 "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
                 f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
-                j.credit_basis, "; ".join(j.tied_candidates),
+                j.credit_basis, "; ".join(j.tied_candidates), j.tan,
             ])
 
 
@@ -1076,17 +1161,29 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         partner_comp_configured: bool = False) -> dict:
     deductors, g_deductors, collectors, fy = parse_parts(xlsx_path)
     accounts = load_accounts(gnucash_path)
+    # TDS-11: auto-load persisted human confirmations for this book. The
+    # sidecar path is derived purely from gnucash_path (see
+    # tds_learnings.learnings_path) -- no new CLI flag/plumbing needed
+    # through main()'s already-fragile positional-argv scheme. A missing or
+    # corrupt sidecar loads as {} (see load_learnings' docstring), so a
+    # brand-new book with no learnings yet behaves exactly as before this
+    # change.
+    learnings = tds_learnings.load_learnings(str(gnucash_path))
     journals = build_journals(deductors, accounts, overrides,
-                              partner_comp_configured=partner_comp_configured)
+                              partner_comp_configured=partner_comp_configured,
+                              learnings=learnings)
     # Part II (15G/15H). Sr numbers restart per part, so this is a separate
     # overrides map — a shared one would let Part I Sr.2 silently redirect
-    # Part II Sr.2.
-    journals += build_15g_journals(g_deductors, accounts, overrides=g_overrides)
+    # Part II Sr.2. Shares the DOMAIN_INCOME learnings namespace with
+    # Category A (see build_15g_journals' docstring).
+    journals += build_15g_journals(g_deductors, accounts, overrides=g_overrides,
+                                   learnings=learnings)
     # Part VI TCS. Sr numbers restart per part, so TCS overrides are a separate
     # map — a shared one would let Part I Sr.2 silently redirect Part VI Sr.2.
     journals += build_tcs_journals(collectors, accounts,
                                    credit_account=tcs_credit_account,
-                                   overrides=tcs_overrides)
+                                   overrides=tcs_overrides,
+                                   learnings=learnings)
     csv_rows = build_csv_rows(journals, fy)
     write_rows_csv(csv_rows, out_path)
 
