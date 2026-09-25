@@ -237,7 +237,8 @@ help:
         and the LLP statement of account (llp_statement) parsed and its
         "Profit Share for the Year" figure is available, writes a SEPARATE
         one-transaction CSV -- never merged into journal_path's file --
-        dated 31 March of the financial year, accruing the difference
+        dated 31 March of the financial year's END year (e.g. FY "2025-26"
+        -> 2026-03-31, never the FY start year), accruing the difference
         between the L5 statement's own year-end profit-share figure and
         the total already booked by the monthly journal (Dr
         current_account / Cr share_of_profit_income). No file is written,
@@ -287,8 +288,9 @@ help:
       - name: "<accrual_journal_path> (optional -- H35-02, only written if accrual_journal_path is set AND an accrual was computed)"
         tooltip: >
           A SEPARATE one-transaction GnuCash multi-split journal CSV,
-          dated 31 March of the financial year: the year-end
-          share-of-profit accrual per the LLP statement of account. Same
+          dated 31 March of the financial year's END year (e.g. FY
+          "2025-26" -> 2026-03-31): the year-end share-of-profit accrual
+          per the LLP statement of account. Same
           import settings as journal_path's file, above. Never contains
           the monthly transactions -- import both files if both were
           produced.

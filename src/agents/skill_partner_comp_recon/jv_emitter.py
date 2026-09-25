@@ -469,7 +469,25 @@ def build_accrual_journal(report, accounts: dict) -> tuple:
             f"financial_year {fy!r} is not in 'YYYY-YY' form -- cannot date the "
             "31 March year-end accrual entry."
         )
-    date = f"{m.group(1)}-03-31"
+    # The accrual belongs in the FY being reconciled, i.e. 31 March of the FY
+    # END year -- "2025-26" means the year that ENDS 31 March 2026, not the
+    # year that STARTS in 2025. Dating this from the FY start year (a past
+    # defect) would misbook the accrual into the wrong, already-closed FY.
+    # Computed from the integer start year (never string-glued from the "YY"
+    # suffix) so the century rolls over correctly, e.g. "2099-00" -> 2100,
+    # not the nonsensical "209900" a naive f"{start}{yy}" concat would give.
+    start_year = int(m.group(1))
+    yy_suffix = int(m.group(2))
+    end_year = start_year + 1
+    expected_yy = end_year % 100
+    if yy_suffix != expected_yy:
+        raise JournalValidationError(
+            f"financial_year {fy!r} is not a valid 'YYYY-YY' span -- the "
+            f"second year must be {start_year} + 1 = {end_year} (suffix "
+            f"'{expected_yy:02d}'), not '{yy_suffix:02d}'. Cannot date the 31 "
+            "March year-end accrual entry against an inconsistent FY."
+        )
+    date = f"{end_year:04d}-03-31"
     fy_pfx = fy_prefix(fy)
     firm_name = getattr(report, "firm_name", "") or ""
     ctx = "year-end share-of-profit accrual (H35-02, per L5)"

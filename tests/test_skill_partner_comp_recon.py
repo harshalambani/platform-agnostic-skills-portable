@@ -5387,3 +5387,79 @@ def test_h35_02_residual_returned_even_when_l5_missing_current_closing():
     assert journal is not None  # the profit-share accrual still books fine
     assert residual.agree is None
     assert CANNOT_RECONCILE in residual.note
+
+
+# 8 -- accrual date: the accrual belongs in the FY being reconciled, i.e. 31
+# March of the FY END year, never the FY start year (a past defect dated
+# "2025-26" as 2025-03-31, which is inside the closed prior FY 2024-25).
+# Positive cases, including the century rollover.
+@pytest.mark.parametrize(
+    "financial_year, expected_date",
+    [
+        ("2025-26", "2026-03-31"),
+        ("2099-00", "2100-03-31"),
+    ],
+)
+def test_h35_02_accrual_date_is_31_march_of_fy_end_year(financial_year, expected_date, tmp_path):
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    data["financial_year"] = financial_year
+    report = build_report(data)
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is not None
+    # Assert on the dated journal object itself, not just a helper.
+    assert journal.date == expected_date
+
+    # And on the actual emitted CSV row, not just the in-memory object.
+    accrual_path = tmp_path / f"accrual_{financial_year.replace('-', '_')}.csv"
+    jv_emitter.write_accrual_journal_csv(journal, str(accrual_path))
+    rows = list(csv.DictReader(accrual_path.open(newline="", encoding="utf-8")))
+    assert rows, "accrual CSV must have at least one row"
+    assert all(r["Date"] == expected_date for r in rows)
+
+
+# 9 -- NEGATIVE: the accrual date must NOT be 31 March of the FY start year
+# (the exact past defect), and must fall inside the FY's own window (1 April
+# of the start year through 31 March of the end year), for several FYs.
+@pytest.mark.parametrize(
+    "financial_year, wrong_start_year_date, window_start, window_end",
+    [
+        ("2025-26", "2025-03-31", "2025-04-01", "2026-03-31"),
+        ("2031-32", "2031-03-31", "2031-04-01", "2032-03-31"),
+        ("2099-00", "2099-03-31", "2099-04-01", "2100-03-31"),
+    ],
+)
+def test_h35_02_accrual_date_not_fy_start_year_falls_in_fy_window(
+    financial_year, wrong_start_year_date, window_start, window_end,
+):
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    data["financial_year"] = financial_year
+    report = build_report(data)
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is not None
+    assert journal.date != wrong_start_year_date
+    assert window_start <= journal.date <= window_end
+
+
+# 10 -- NEGATIVE: a mismatched YY suffix (e.g. "2025-27", where 27 is not
+# 25 + 1) must raise JournalValidationError, never silently guess which year
+# was meant.
+def test_h35_02_accrual_mismatched_fy_suffix_raises():
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    data["financial_year"] = "2025-27"
+    report = build_report(data)
+
+    with pytest.raises(jv_emitter.JournalValidationError):
+        jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+
+
+# 11 -- NEGATIVE: a malformed financial_year string still raises (unchanged
+# pre-existing behaviour -- confirms the fix did not weaken this guard).
+def test_h35_02_accrual_malformed_fy_still_raises():
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    data["financial_year"] = "not-a-fy"
+    report = build_report(data)
+
+    with pytest.raises(jv_emitter.JournalValidationError):
+        jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)

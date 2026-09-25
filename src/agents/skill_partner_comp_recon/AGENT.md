@@ -301,7 +301,10 @@ supplied and parseable) and is now the sole source for four things:
 3. **A separate year-end accrual journal** (`jv_emitter.build_accrual_journal()`
    / `write_accrual_journal_csv()`, its own CSV file via `run()`'s
    `accrual_journal_path` parameter -- never merged into the monthly
-   journal CSV `journal_path` produces). Dated 31 March of the FY. Posts:
+   journal CSV `journal_path` produces). Dated 31 March of the FY END year
+   (e.g. FY "2025-26" -> 2026-03-31, never 2025-03-31 -- the accrual
+   belongs in the year being reconciled, not the prior, already-closed
+   year). Posts:
 
    ```
    Dr  current_account          = L5 profit share - already-booked monthly SoP total
