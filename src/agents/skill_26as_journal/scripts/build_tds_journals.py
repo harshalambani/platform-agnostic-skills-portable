@@ -227,6 +227,7 @@ class Journal:
     candidates: list = field(default_factory=list)
     tied_candidates: list = field(default_factory=list)  # populated only when Ambiguous
     needs_review: bool = False
+    excluded_from_journal: bool = False  # Category C, partner-comp already books it
 
     @property
     def total_debit(self) -> float:
@@ -613,10 +614,23 @@ def categorize(sections: tuple) -> tuple[Optional[str], str]:
 
 
 def build_journals(deductors: list[Deductor], accounts: list[Account],
-                   overrides: Optional[dict] = None) -> list[Journal]:
+                   overrides: Optional[dict] = None,
+                   partner_comp_configured: bool = False) -> list[Journal]:
     """overrides: {deductor_sr (int) -> credit account full path}. Used by the
     LLM-fallback path to resolve deductors the deterministic matcher sent to
-    Suspense. An override always wins over the deterministic choice."""
+    Suspense. An override always wins over the deterministic choice.
+
+    partner_comp_configured: True when this entity has partner_comp_accounts
+    set up (skill_partner_comp_recon/jv_emitter.py's _monthly_journal() books
+    s.194T TDS -- Category C here -- month-by-month already, Dr TDS / Cr
+    Remuneration). Importing this journal's own Category C postings on top of
+    that would double-book the TDS and overstate remuneration by the full TDS
+    amount. When True, Category C journals are still built and still fully
+    populated (so the Review CSV/tab shows them) but are marked
+    excluded_from_journal so build_csv_rows() leaves them out of the
+    importable CSV (and, as a consequence, out of the -partI.csv split too).
+    When False (not configured, or unknown), today's behaviour is kept but
+    made loud: the credit_basis carries an explicit double-booking warning."""
     overrides = overrides or {}
     # The generic FD-interest debit account ('Interest on FD' in the spec) is
     # fuzzy-found from the actual chart, since its name varies per book
@@ -672,6 +686,21 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                 Split(ACC_TDS_PARTNERSHIP, debit=a),
                 Split(credit_acc, credit=a),
             ]
+            if partner_comp_configured:
+                j.excluded_from_journal = True
+                j.needs_review = False
+                j.credit_basis = (
+                    "Booked by the Partner Comp journal - not in this CSV"
+                    + (f" (matcher basis: {basis})" if basis else "")
+                )
+            else:
+                j.credit_basis = (
+                    (j.credit_basis + " -- " if j.credit_basis else "")
+                    + "WARNING: s.194T TDS is also booked month-by-month by the "
+                    "Partner Comp Recon journal if that entity has "
+                    "partner_comp_accounts configured -- importing both "
+                    "double-books this TDS and overstates remuneration."
+                )
         journals.append(j)
     return journals
 
@@ -861,6 +890,12 @@ def build_csv_rows(journals: list[Journal], fy: str) -> list[dict]:
     fy_pfx = fy_prefix(fy)
     rows: list[dict] = []
     for j in journals:
+        if j.excluded_from_journal:
+            # Category C, partner-comp already books this month-by-month --
+            # leave it out of the importable CSV (and, since -partI.csv is
+            # derived from this same output, out of that split too). It
+            # still appears in full in the -review.csv sidecar.
+            continue
         # Each category gets its own ID series (see CATEGORY_SERIES): Part
         # I Sr.1, Part II Sr.1 and Part VI Sr.1 are different parties, and
         # a shared prefix would make GnuCash's multi-split importer fuse
@@ -1024,10 +1059,12 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
 def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         overrides: Optional[dict] = None, tcs_credit_account: str = "",
         tcs_overrides: Optional[dict] = None,
-        g_overrides: Optional[dict] = None) -> dict:
+        g_overrides: Optional[dict] = None,
+        partner_comp_configured: bool = False) -> dict:
     deductors, g_deductors, collectors, fy = parse_parts(xlsx_path)
     accounts = load_accounts(gnucash_path)
-    journals = build_journals(deductors, accounts, overrides)
+    journals = build_journals(deductors, accounts, overrides,
+                              partner_comp_configured=partner_comp_configured)
     # Part II (15G/15H). Sr numbers restart per part, so this is a separate
     # overrides map — a shared one would let Part I Sr.2 silently redirect
     # Part II Sr.2.
@@ -1055,8 +1092,8 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     # Any split account (debit or credit) not present in the book must be
     # created by the user before import (e.g. 'Expense:TDS on Partnership
     # Payments'). Surface them explicitly so nothing imports silently wrong.
-    missing = sorted({s.account for j in journals for s in j.splits
-                      if s.account not in existing})
+    missing = sorted({s.account for j in journals if not j.excluded_from_journal
+                      for s in j.splits if s.account not in existing})
 
     review_rows = []
     for j in journals:
@@ -1104,10 +1141,17 @@ def _review_flag(needs_review: bool, confidence: str) -> str:
     return "  <-- REVIEW"
 
 
+_PARTNER_COMP_FLAG = "--partner-comp-configured"
+
+
 def main(argv: list[str]) -> int:
+    argv = list(argv)
+    partner_comp_configured = _PARTNER_COMP_FLAG in argv
+    if partner_comp_configured:
+        argv = [a for a in argv if a != _PARTNER_COMP_FLAG]
     if len(argv) not in (4, 5):
         print("Usage: python build_tds_journals.py <26as.xlsx> <book.gnucash> "
-              "<out.csv> [overrides.json]", file=sys.stderr)
+              f"<out.csv> [overrides.json] [{_PARTNER_COMP_FLAG}]", file=sys.stderr)
         return 2
     overrides = None
     if len(argv) == 5:
@@ -1122,7 +1166,8 @@ def main(argv: list[str]) -> int:
             m = re.search(r"\d+", str(k))
             if m:
                 overrides[int(m.group(0))] = v
-    stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides)
+    stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides,
+               partner_comp_configured=partner_comp_configured)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
           f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")

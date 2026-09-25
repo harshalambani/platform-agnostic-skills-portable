@@ -472,9 +472,26 @@ def _run_from_documents(
         gnucash_note = "GnuCash books tie-out: not available (no book supplied)."
     else:
         gnucash_note = f"GnuCash books tie-out: pending ({gnucash_path} not yet checked)."
-    xlsx_note, form_26as_total_credit = read_form_26as_tds_credit(xlsx_26as)
+    # xlsx_note/form_26as_total_credit start as placeholders: the real read
+    # needs firm_name (xlsx_26as_reader.py's A2 fix filters Part I to this
+    # firm's own s.194T rows, not the whole sheet), which isn't resolved
+    # until after the required documents parse below. Overwritten in place
+    # via _xlsx_note_idx once firm_name is known -- same pattern gnucash_note
+    # uses via _gnucash_note_idx. Any early-exit ERROR path below (before
+    # firm_name resolves) only ever shows this placeholder, which is
+    # correct: the 26AS read genuinely hasn't happened yet at that point.
+    # Mirrors gnucash_note's own pattern immediately above: when no workbook
+    # was supplied at all, that is already the final answer ("not
+    # available") and must say so even on an early-exit ERROR path below --
+    # only a SUPPLIED-but-not-yet-read workbook shows "pending".
+    if not xlsx_26as:
+        xlsx_note = "26AS TDS-credit tie-out: not available (no workbook supplied)."
+    else:
+        xlsx_note = f"26AS TDS-credit tie-out: pending ({xlsx_26as} not yet computed)."
+    form_26as_total_credit = None
     optional_notes = [llp_note, schedule_note, gnucash_note, xlsx_note]
     _gnucash_note_idx = 2
+    _xlsx_note_idx = 3
 
     # Required legs: the Advisory letter, then every monthly payout advice.
     # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
@@ -533,6 +550,11 @@ def _run_from_documents(
             if rec.get("entity_name"):
                 firm_name = rec["entity_name"]
                 break
+
+    # Now that firm_name is known, do the real 26AS read (filtered to
+    # s.194T rows for this firm's deductor -- see xlsx_26as_reader.py).
+    xlsx_note, form_26as_total_credit = read_form_26as_tds_credit(xlsx_26as, firm_name)
+    optional_notes[_xlsx_note_idx] = xlsx_note
 
     try:
         data = build_input_data(

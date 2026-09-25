@@ -52,15 +52,42 @@ import openpyxl
 
 _SHEET_TITLE = "Part I"
 _DATA_START_ROW = 4
+_COL_DEDUCTOR_NAME = 2  # 1-indexed; "Name of Deductor", repeated per row
 _COL_TXN_SR_NO = 7      # 1-indexed; blank on subtotal/grand-total rows
+_COL_SECTION = 8        # 1-indexed; e.g. "194T", "194A", "194"
 _COL_TAX_DEDUCTED = 14  # 1-indexed; "Tax Deducted ##"
 
 _LABEL = "26AS TDS-credit tie-out"
 
+# The only section this recon owns: s.194T (partner remuneration/interest
+# TDS). build_tds_journals.py's SECTION_CATEGORY maps this exact literal to
+# Category C ("194T": "C") -- kept in sync deliberately, not imported,
+# because this module runs standalone the same way that script does.
+_PARTNER_TDS_SECTION = "194T"
 
-def read_form_26as_tds_credit(xlsx_path: str) -> tuple[str, float | None]:
+
+def read_form_26as_tds_credit(
+    xlsx_path: str, firm_name: str | None = None,
+) -> tuple[str, float | None]:
     """Read `xlsx_path`'s "Part I" sheet and sum column 14 ("Tax Deducted
-    ##") over genuine transaction rows only (column 7 non-empty).
+    ##") over genuine s.194T transaction rows only (column 7 non-empty AND
+    column 8 == "194T").
+
+    Filtering to s.194T fixes a real defect: Part I carries every TDS a
+    taxpayer suffered in the year -- interest (194A/193), dividend (194), 194T
+    partnership remuneration, etc. Summing the WHOLE sheet (the previous
+    behaviour) pulled in unrelated interest/dividend TDS and produced a false
+    VARIANCE against this recon's partner-comp TDS total, which only ever
+    concerns s.194T.
+
+    firm_name: when supplied (agent.py resolves it from the advisory/
+    schedule records — see AGENT.md), only s.194T rows whose deductor name
+    matches it (case-insensitive substring, either direction) are summed. If
+    s.194T rows exist for MORE THAN ONE deductor and firm_name cannot narrow
+    them to exactly one, this is NOT silently summed across deductors --
+    it degrades to a "not available" / flagged result instead (see the
+    multi-deductor branch below), since EntityProfile carries no TAN field
+    to disambiguate deductors by TAN.
 
     Returns (status note, total-or-None):
       - xlsx_path == "" -> ("... not available (no workbook supplied).", None)
@@ -70,9 +97,12 @@ def read_form_26as_tds_credit(xlsx_path: str) -> tuple[str, float | None]:
         no 'Part I' sheet).", None)
       - a row under column 14 cannot be read as a number -> ("... not
         available (could not read rows ...)", None)
-      - "Part I" has zero genuine transaction rows (an explicit "No
-        Transactions Present" sheet, or any other reason there are no
-        column-7-populated rows) -> a successful note, 0.0
+      - s.194T rows exist for more than one deductor and firm_name does not
+        narrow them to exactly one -> ("... not available (multiple 194T
+        deductors ...)", None) -- flagged, never silently summed
+      - "Part I" has zero genuine s.194T transaction rows (no 194T section at
+        all, or an explicit "No Transactions Present" sheet) -> a
+        successful note, 0.0
       - otherwise -> a successful note naming the transaction count and
         total, the summed total
 
@@ -94,8 +124,7 @@ def read_form_26as_tds_credit(xlsx_path: str) -> tuple[str, float | None]:
             ), None
         ws = wb[_SHEET_TITLE]
 
-        total = 0.0
-        txn_count = 0
+        rows_by_deductor: dict[str, list[float]] = {}
         try:
             for row in ws.iter_rows(min_row=_DATA_START_ROW):
                 if len(row) < _COL_TAX_DEDUCTED:
@@ -103,23 +132,47 @@ def read_form_26as_tds_credit(xlsx_path: str) -> tuple[str, float | None]:
                 sr_no = row[_COL_TXN_SR_NO - 1].value
                 if sr_no in (None, ""):
                     continue  # subtotal / grand-total / trailing blank row
+                section = str(row[_COL_SECTION - 1].value or "").strip()
+                if section != _PARTNER_TDS_SECTION:
+                    continue  # not this recon's TDS -- e.g. 194A/194 interest/dividend
+                deductor = str(row[_COL_DEDUCTOR_NAME - 1].value or "").strip()
                 tax_value = row[_COL_TAX_DEDUCTED - 1].value
-                total += 0.0 if tax_value is None else float(tax_value)
-                txn_count += 1
+                rows_by_deductor.setdefault(deductor, []).append(
+                    0.0 if tax_value is None else float(tax_value))
         except Exception as e:
             return (
                 f"{_LABEL}: not available (could not read rows from "
                 f"{xlsx_path!r}'s {_SHEET_TITLE!r} sheet: {e})."
             ), None
 
-        if txn_count == 0:
+        if not rows_by_deductor:
             return (
-                f"{_LABEL}: 0.00 -- no TDS entries found in "
+                f"{_LABEL}: 0.00 -- no {_PARTNER_TDS_SECTION} TDS entries found in "
                 f"{_SHEET_TITLE!r} ({xlsx_path})."
             ), 0.0
+
+        if len(rows_by_deductor) > 1:
+            fn = (firm_name or "").strip().lower()
+            matched = [d for d in rows_by_deductor
+                      if fn and (fn in d.lower() or d.lower() in fn)] if fn else []
+            if len(matched) == 1:
+                rows_by_deductor = {matched[0]: rows_by_deductor[matched[0]]}
+            else:
+                deductors = ", ".join(sorted(rows_by_deductor))
+                return (
+                    f"{_LABEL}: not available -- {len(rows_by_deductor)} distinct "
+                    f"{_PARTNER_TDS_SECTION} deductors found in {_SHEET_TITLE!r} "
+                    f"({deductors}) and the firm could not be singled out "
+                    f"(firm_name={firm_name!r}); refusing to sum across "
+                    "deductors rather than silently merging them."
+                ), None
+
+        values = [v for vs in rows_by_deductor.values() for v in vs]
+        total = round(sum(values), 2)
+        txn_count = len(values)
         return (
-            f"{_LABEL}: {total:.2f} from {txn_count} transaction(s) in "
-            f"{_SHEET_TITLE!r} ({xlsx_path})."
+            f"{_LABEL}: {total:.2f} from {txn_count} {_PARTNER_TDS_SECTION} "
+            f"transaction(s) in {_SHEET_TITLE!r} ({xlsx_path})."
         ), total
     finally:
         wb.close()

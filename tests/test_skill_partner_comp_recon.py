@@ -4403,7 +4403,9 @@ _P1_HEADERS = [
 
 
 def _write_part_i_workbook(path: Path, *, transactions=None, no_transactions_marker=False,
-                            omit_part_i=False, blank_sheet=False):
+                            omit_part_i=False, blank_sheet=False, section="194T",
+                            deductor_name="Synthetic Deductor",
+                            extra_deductor=None):
     """Build a synthetic xlsx matching build_part_i()'s geometry.
     `transactions` is a list of (txn_sr_no, tax_deducted) pairs, each
     written as a full 15-column data row followed (once all of a
@@ -4411,7 +4413,18 @@ def _write_part_i_workbook(path: Path, *, transactions=None, no_transactions_mar
     Sub-total row (columns 1/2/13/14/15 only, column 7 blank) and a Grand
     Total row (columns 2/13/14/15 only, column 7 blank), exactly like the
     real writer. No real document/PII involved -- every value here is
-    invented for this test."""
+    invented for this test.
+
+    section: the "Section" column (8) value written on every transaction
+    row -- defaults to "194T" (the only section xlsx_26as_reader.py's A2
+    fix sums) so existing positive-path tests keep summing what they always
+    summed; a test proving OTHER sections are excluded passes something
+    else here.
+
+    extra_deductor: optional (name, [(txn_sr_no, tax_deducted), ...], section)
+    tuple for a SECOND deductor block, used by the multi-194T-deductor tests.
+    Sr.No (column 1) is 2 for this block so it reads as a distinct deductor.
+    """
     import openpyxl
 
     wb = openpyxl.Workbook()
@@ -4427,22 +4440,27 @@ def _write_part_i_workbook(path: Path, *, transactions=None, no_transactions_mar
             if no_transactions_marker or not transactions:
                 ws.cell(row=r, column=1, value="No Transactions Present")
             else:
-                for sr, tax in transactions:
-                    vals = [1, "Synthetic Deductor", "SYNT12345D", 100000.0, tax, tax,
-                            sr, "194J", "01-Apr-2025", "F", "07-May-2025", "",
-                            10000.0, tax, tax]
-                    for c, v in enumerate(vals, 1):
-                        ws.cell(row=r, column=c, value=v)
-                    r += 1
-                sub_tax = sum(t for _, t in transactions)
-                ws.cell(row=r, column=1, value="#1")
-                ws.cell(row=r, column=2, value="Sub-total -- Synthetic Deductor")
-                ws.cell(row=r, column=13, value=sum(10000.0 for _ in transactions))
-                ws.cell(row=r, column=14, value=sub_tax)
-                ws.cell(row=r, column=15, value=sub_tax)
-                r += 1
+                def _write_block(row, sr_no, name, tan, txns, sec):
+                    for sr, tax in txns:
+                        vals = [sr_no, name, tan, 100000.0, tax, tax,
+                                sr, sec, "01-Apr-2025", "F", "07-May-2025", "",
+                                10000.0, tax, tax]
+                        for c, v in enumerate(vals, 1):
+                            ws.cell(row=row, column=c, value=v)
+                        row += 1
+                    sub_tax = sum(t for _, t in txns)
+                    ws.cell(row=row, column=1, value=sr_no)
+                    ws.cell(row=row, column=2, value=f"Sub-total -- {name}")
+                    ws.cell(row=row, column=13, value=sum(10000.0 for _ in txns))
+                    ws.cell(row=row, column=14, value=sub_tax)
+                    ws.cell(row=row, column=15, value=sub_tax)
+                    return row + 1
+
+                r = _write_block(r, 1, deductor_name, "SYNT12345D", transactions, section)
+                if extra_deductor:
+                    ex_name, ex_txns, ex_section = extra_deductor
+                    r = _write_block(r, 2, ex_name, "SYNT99999D", ex_txns, ex_section)
                 ws.cell(row=r, column=2, value="GRAND TOTAL (all deductors)")
-                ws.cell(row=r, column=14, value=sub_tax)
     wb.save(str(path))
     return path
 
@@ -4478,7 +4496,7 @@ def test_26as_reader_empty_sheet_with_marker_is_zero_and_success(tmp_path):
     note, value = read_form_26as_tds_credit(str(path))
     assert value == 0.0
     assert "not available" not in note
-    assert "no TDS entries" in note
+    assert "no 194T TDS entries" in note
 
 
 def test_26as_reader_blank_part_i_sheet_no_header_at_all_is_also_zero_success(tmp_path):
@@ -4488,7 +4506,7 @@ def test_26as_reader_blank_part_i_sheet_no_header_at_all_is_also_zero_success(tm
     path = _write_part_i_workbook(tmp_path / "blank_26as.xlsx", blank_sheet=True)
     note, value = read_form_26as_tds_credit(str(path))
     assert value == 0.0
-    assert "no TDS entries" in note
+    assert "no 194T TDS entries" in note
 
 
 def test_26as_reader_sums_only_genuine_transaction_rows(tmp_path):
@@ -4502,7 +4520,7 @@ def test_26as_reader_sums_only_genuine_transaction_rows(tmp_path):
     # instead of discriminating on column 7, it would report 15000.0
     # (5000 real + 5000 subtotal + 5000 grand total) instead of 5000.0.
     assert value == 5000.0
-    assert "3 transaction(s)" in note
+    assert "3 194T transaction(s)" in note
 
 
 def test_26as_reader_single_transaction_matches_exactly(tmp_path):
@@ -4511,6 +4529,102 @@ def test_26as_reader_single_transaction_matches_exactly(tmp_path):
     )
     note, value = read_form_26as_tds_credit(str(path))
     assert value == 4321.0
+
+
+# ---------------------------------------------------------------------------
+# A2 (194T wrong-scope fix): the reader must sum ONLY s.194T rows, and only
+# this firm's deductor when more than one exists. Proven to fail on
+# b3a9df6 (pre-fix): that build summed every Part I row regardless of
+# section, so test_26as_reader_other_sections_excluded's non-194T rows would
+# have been counted (asserting 0.0 there fails on b3a9df6, which reports
+# 7500.0), and multi-deductor cases were silently merged instead of flagged
+# (test_26as_reader_multiple_194t_deductors_without_firm_name_is_flagged's
+# `value is None` assertion fails on b3a9df6, which returns a summed float).
+# ---------------------------------------------------------------------------
+
+def test_26as_reader_other_sections_excluded(tmp_path):
+    """194A (interest) / 194 (dividend) rows must never enter the s.194T
+    total -- the real-data defect this fix exists for: unrelated interest/
+    dividend TDS was pulled into what is supposed to be a 194T-only figure,
+    producing a false VARIANCE."""
+    path = _write_part_i_workbook(
+        tmp_path / "non_194t.xlsx",
+        transactions=[(1, 3000.0), (2, 4500.0)],
+        section="194A",
+    )
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value == 0.0
+    assert "no 194T TDS entries" in note
+
+
+def test_26as_reader_mixed_sections_sums_only_194t(tmp_path):
+    """A 194A row and a 194T row for the SAME deductor block -- only the
+    194T portion may be summed (the per-row Section column, not the
+    per-deductor block, decides)."""
+    path = _write_part_i_workbook(
+        tmp_path / "mixed_sections.xlsx",
+        transactions=[(1, 3000.0)], section="194A",
+    )
+    # add a 194T row into the same workbook by rewriting with a helper call
+    # is awkward with the block-based fixture, so build it directly here.
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Part I"
+    for c, h in enumerate(_P1_HEADERS, 1):
+        ws.cell(row=3, column=c, value=h)
+    rows = [
+        [1, "Synthetic Deductor", "SYNT12345D", 100000.0, 3000.0, 3000.0,
+         1, "194A", "01-Apr-2025", "F", "07-May-2025", "", 10000.0, 3000.0, 3000.0],
+        [1, "Synthetic Deductor", "SYNT12345D", 100000.0, 2000.0, 2000.0,
+         2, "194T", "01-Apr-2025", "F", "07-May-2025", "", 10000.0, 2000.0, 2000.0],
+    ]
+    for r_idx, vals in enumerate(rows, start=4):
+        for c, v in enumerate(vals, 1):
+            ws.cell(row=r_idx, column=c, value=v)
+    wb.save(str(path))
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value == 2000.0
+    assert "1 194T transaction(s)" in note
+
+
+def test_26as_reader_multiple_194t_deductors_without_firm_name_is_flagged(tmp_path):
+    """Two distinct 194T deductors and no firm_name to disambiguate -- must
+    NOT silently sum across them; must return (note, None) instead."""
+    path = _write_part_i_workbook(
+        tmp_path / "two_194t_deductors.xlsx",
+        transactions=[(1, 1000.0)], deductor_name="Alpha LLP",
+        extra_deductor=("Beta LLP", [(1, 2000.0)], "194T"),
+    )
+    note, value = read_form_26as_tds_credit(str(path))
+    assert value is None
+    assert "not available" in note
+    assert "Alpha LLP" in note and "Beta LLP" in note
+
+
+def test_26as_reader_multiple_194t_deductors_firm_name_singles_out_one(tmp_path):
+    """With firm_name supplied and matching exactly one of the two 194T
+    deductors, the total is that deductor's alone -- the other's 194T TDS
+    (a different firm entirely) is never merged in."""
+    path = _write_part_i_workbook(
+        tmp_path / "two_194t_deductors_named.xlsx",
+        transactions=[(1, 1000.0)], deductor_name="Alpha LLP",
+        extra_deductor=("Beta LLP", [(1, 2000.0)], "194T"),
+    )
+    note, value = read_form_26as_tds_credit(str(path), firm_name="Alpha LLP")
+    assert value == 1000.0
+
+
+def test_26as_reader_clean_single_firm_case_no_variance(tmp_path):
+    """A single 194T deductor, firm_name supplied and matching -- a clean
+    read with no ambiguity, exactly the total, no variance-inducing noise."""
+    path = _write_part_i_workbook(
+        tmp_path / "single_firm.xlsx",
+        transactions=[(1, 1500.0), (2, 2500.0)], deductor_name="Alpha LLP",
+    )
+    note, value = read_form_26as_tds_credit(str(path), firm_name="Alpha LLP")
+    assert value == 4000.0
+    assert "not available" not in note
 
 
 def test_26as_reader_wired_into_external_form_26as_total_credit(monkeypatch, tmp_path):

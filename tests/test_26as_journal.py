@@ -428,6 +428,120 @@ def test_all_sample_journals_balanced():
 
 
 # ---------------------------------------------------------------------------
+# A1 (194T double-booking fix): when partner_comp_configured is True, this
+# skill's own Category C journals must be left OUT of the importable CSV
+# (partner_comp_recon's jv_emitter already books that TDS month-by-month) --
+# but still fully present in the Journal objects (for the review CSV/tab),
+# with a clear basis instead of a needs-review flag. When False (today's
+# default), Category C is unchanged except for a new double-booking warning
+# appended to credit_basis.
+#
+# Proven to fail on b3a9df6 (pre-fix): partner_comp_configured did not exist
+# as a build_journals()/build_csv_rows() parameter at all, so Category C rows
+# were always included in the CSV -- test_partner_comp_configured_excludes_
+# category_c_from_csv's "no Category C row present" assertion fails on
+# b3a9df6 (TypeError: build_journals() got an unexpected keyword argument
+# 'partner_comp_configured').
+# ---------------------------------------------------------------------------
+
+def test_partner_comp_configured_excludes_category_c_from_csv():
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=True)
+    j = journals[0]
+    assert j.category == "C"
+    assert j.excluded_from_journal is True
+    assert j.needs_review is False
+    assert "Partner Comp journal" in j.credit_basis
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert rows == []  # excluded entirely -- not merely re-labelled
+
+
+def test_partner_comp_not_configured_keeps_category_c_with_warning():
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=False)
+    j = journals[0]
+    assert j.excluded_from_journal is False
+    assert "WARNING" in j.credit_basis and "double-book" in j.credit_basis
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert len(rows) == 2  # both splits still emitted, exactly as before
+
+
+def test_partner_comp_configured_other_categories_unchanged_byte_for_byte():
+    """A/B categories in the SAME batch as an excluded Category C must come
+    out identical whether partner_comp_configured is True or False -- the
+    exclusion must not perturb any other deductor's rows."""
+    deds = [
+        _deductor(1, "BANK OF BARODA", "194A", 250237, 25024),
+        _deductor(2, "DR REDDY'S LABORATORIES LTD.", "194", 208000, 20800),
+        _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628),
+    ]
+    rows_off = m.build_csv_rows(
+        m.build_journals(deds, _accounts(), partner_comp_configured=False), "2025-26")
+    rows_on = m.build_csv_rows(
+        m.build_journals(deds, _accounts(), partner_comp_configured=True), "2025-26")
+    non_c_off = [r for r in rows_off if "Sec 194T" not in r["Description"]]
+    non_c_on = [r for r in rows_on if "Sec 194T" not in r["Description"]]
+    assert non_c_off == non_c_on
+    assert len(rows_on) == len(rows_off) - 2  # exactly the 194T splits dropped
+
+
+def test_end_to_end_194t_tds_counted_exactly_once_across_both_journals():
+    """Cross-skill assertion: the s.194T TDS debit total, summed across BOTH
+    partner_comp_recon's monthly journal CSV (jv_emitter) and this skill's
+    26AS journal CSV (build_tds_journals, partner_comp_configured=True), must
+    equal the 26AS-reported TDS figure exactly ONCE -- not twice (the double-
+    booking this fix exists to close) and not zero (the exclusion must not
+    silently drop the TDS from every ledger)."""
+    from agents.skill_partner_comp_recon.jv_emitter import build_journals as pc_build_journals
+    from agents.skill_partner_comp_recon.mapper import build_input_data
+    from agents.skill_partner_comp_recon.engine import build_report
+
+    pc_accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "current_account": "Assets:Firm Current Account",
+        "capital_contribution": "Assets:Firm Capital Account",
+        "medical_expense": "Expenses:Medical",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    advice = {
+        "month": "2025-04",
+        "source_name": "synthetic_l1_classA_2025-04.pdf",
+        "total_paid": 480000.0,
+        "remuneration": 200000.0,
+        "share_of_profit_gross": 300000.0,
+        "additional_share_of_profit": 0.0,
+        "tds": -20000.0,
+    }
+    data = build_input_data(
+        financial_year="2025-26", advice_records=[advice],
+        accounts=pc_accounts, firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    pc_journals = pc_build_journals(report, pc_accounts)
+    pc_tds_total = sum(
+        s.debit for j in pc_journals for s in j.splits
+        if s.account == pc_accounts["tds_expense"]
+    )
+    assert pc_tds_total == pytest.approx(20000.0, abs=0.01)
+
+    # The SAME s.194T TDS (20000.0) as it would appear in the 26AS workbook
+    # for this firm's deductor -- this skill must exclude it from its CSV.
+    d = _deductor(1, "SYNTHETIC TEST LLP", "194T", 220000, 20000.0)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=True)
+    rows = m.build_csv_rows(journals, "2025-26")
+    journal_194t_total = sum(
+        float(r["Amount"]) for r in rows if float(r["Amount"]) > 0
+    )
+    assert journal_194t_total == 0.0  # nothing from THIS skill's CSV
+
+    combined_total = pc_tds_total + journal_194t_total
+    assert combined_total == pytest.approx(20000.0, abs=0.01)  # counted once
+
+
+# ---------------------------------------------------------------------------
 # Category G -- 15G/15H (Part II)
 #
 # The 15G/15H interest is already booked in a generic FD-interest bucket --
@@ -973,6 +1087,75 @@ def test_run_apply_none_is_noop_and_touches_nothing():
     assert not Path(missing).exists()
 
 
+# ---------------------------------------------------------------------------
+# A1 wiring: run_build/run_apply must thread partner_comp_configured through
+# to the build_tds_journals.py subprocess as the --partner-comp-configured
+# CLI flag (see that script's `main()` / _PARTNER_COMP_FLAG). agent.py's
+# run() already resolves partner_comp_configured and passes it into both
+# tool closures unconditionally -- if these two functions didn't accept the
+# kwarg, EVERY real call to build_journals()/apply_overrides() would raise
+# TypeError, not just entities with partner_comp_accounts configured.
+#
+# Proven to fail on b3a9df6 (pre-fix): run_build/run_apply had no
+# partner_comp_configured parameter at all, so both calls below raised
+# `TypeError: ...got an unexpected keyword argument 'partner_comp_configured'`.
+# ---------------------------------------------------------------------------
+
+def test_run_build_appends_partner_comp_flag_when_configured(monkeypatch):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv", partner_comp_configured=True)
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv",
+                                "--partner-comp-configured"]
+
+
+def test_run_build_omits_partner_comp_flag_when_not_configured(monkeypatch):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv")
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv"]
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv", partner_comp_configured=False)
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv"]
+
+
+def test_run_apply_appends_partner_comp_flag_when_configured(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    out = str(tmp_path / "out.csv")
+    tl.run_apply("x.xlsx", "y.gnucash", out, {"2": "Income:X"},
+                 partner_comp_configured=True)
+    assert captured["args"][:3] == ["x.xlsx", "y.gnucash", out]
+    assert captured["args"][-1] == "--partner-comp-configured"
+
+
+def test_run_apply_omits_partner_comp_flag_when_not_configured(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    out = str(tmp_path / "out.csv")
+    tl.run_apply("x.xlsx", "y.gnucash", out, {"2": "Income:X"})
+    assert "--partner-comp-configured" not in captured["args"]
+
+
 def test_apply_overrides_tool_param_is_optional():
     """The real tool schema must NOT list `overrides` as required — that is what
     prevents strict endpoints from 400-ing an argument-less call."""
@@ -983,3 +1166,202 @@ def test_apply_overrides_tool_param_is_optional():
     assert "overrides" in schema.get("properties", {}), "param must still exist"
     assert "overrides" not in schema.get("required", []), \
         "overrides must be optional so a no-arg tool call is accepted, not 400'd"
+
+
+# ---------------------------------------------------------------------------
+# FL1.1 -- `entity` is now a required input (skill.yaml). A blank entity, or
+# one not found in entities.yaml, must fail loud in agent.run() BEFORE any
+# CSV is written -- never fall back to silently journalling Category C. An
+# entity that IS found but has no partner_comp_accounts configured must
+# proceed exactly as before (double-booking warning kept only for that case).
+# ---------------------------------------------------------------------------
+
+import yaml as _yaml  # noqa: E402
+
+
+def _write_entities_yaml_26as(tmp_path, *, key="syn-firm", partner_comp_accounts=None):
+    fields = {"name": "Synthetic Firm", "pan": "AAAAA0000A", "status": "Firm"}
+    if partner_comp_accounts is not None:
+        fields["partner_comp_accounts"] = partner_comp_accounts
+    path = tmp_path / "entities.yaml"
+    path.write_text(_yaml.safe_dump({key: fields}), encoding="utf-8")
+    return path
+
+
+def test_run_refuses_blank_entity_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path)
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entity is blank")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert "entity" in result.lower()
+    assert not out.exists(), "no CSV may be written when entity resolution fails"
+
+
+def test_run_refuses_unknown_entity_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path, key="syn-firm")
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entity is unknown")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="does-not-exist",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert "does-not-exist" in result
+    assert not out.exists(), "no CSV may be written when entity resolution fails"
+
+
+def test_run_proceeds_when_entity_found_without_partner_comp(tmp_path, monkeypatch):
+    """An entity that IS found but has no partner_comp_accounts configured must
+    proceed exactly as today (no fail-loud refusal) -- only the resolved
+    `partner_comp_configured` bool changes, and it must be False here."""
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path, key="syn-firm")
+    captured = {}
+
+    class _FakeAgent:
+        def invoke(self, _messages):
+            return {"messages": [type("M", (), {"content": "ok"})()]}
+
+    def _fake_build_agent(tools, prompt, config_path, model_override):
+        captured["tools"] = tools
+        return _FakeAgent()
+
+    def _fake_make_tools(xlsx_path, gnucash_path, output_path, partner_comp_configured=False):
+        captured["partner_comp_configured"] = partner_comp_configured
+        return []
+
+    def _fake_final_summary(output_path, gnucash_path):
+        return "Done."
+
+    monkeypatch.setattr(AG, "build_agent", _fake_build_agent)
+    monkeypatch.setattr(AG, "_make_tools", _fake_make_tools)
+    monkeypatch.setattr(AG.T, "final_summary", _fake_final_summary)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(tmp_path / "out.csv"),
+        entity="syn-firm",
+        entities_path=str(entities_path),
+    )
+    assert not result.startswith("ERROR")
+    assert captured["partner_comp_configured"] is False
+
+
+def test_skill_yaml_entity_input_is_required():
+    import yaml as _y
+
+    skill_yaml = SRC / "agents" / "skill_26as_journal" / "skill.yaml"
+    data = _y.safe_load(skill_yaml.read_text(encoding="utf-8"))
+    inputs = data["inputs"]
+    names = [i["name"] for i in inputs]
+    entity_input = next(i for i in inputs if i["name"] == "entity")
+    assert entity_input["required"] is True, "entity must be required per FL1.1"
+    assert "optional" not in entity_input["label"].lower(), \
+        "label must drop the stale (optional) wording now that entity is required"
+    # entity must stay out of first place -- it is a "consumed" input (used
+    # in run_args), and ui/tabs/_generic.py names the output after whichever
+    # consumed input is FIRST in this list. xlsx_path must still lead.
+    assert names[0] == "xlsx_path", \
+        "entity must not become the first input -- would break output-file naming"
+
+
+# ---------------------------------------------------------------------------
+# FL1.1 amendment (PR #269 hand-back ruling): entities.yaml itself being
+# missing, unreadable, or unparsable must ALSO fail loud -- the earlier cut
+# of this fix left that case as a silent fallback to
+# partner_comp_configured=False, which is exactly the silent fallback the
+# double-booking ruling was meant to close: if the file cannot be read, we
+# cannot know whether Category C (s.194T) would double-book TDS that
+# skill_partner_comp_recon's monthly journal already booked. The ONLY path
+# that may still journal Category C is an entity that IS found in
+# entities.yaml and has no partner_comp_accounts configured.
+# ---------------------------------------------------------------------------
+
+def test_run_refuses_missing_entities_yaml_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    missing_path = tmp_path / "does-not-exist-entities.yaml"
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entities.yaml is missing")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="syn-firm",
+        entities_path=str(missing_path),
+    )
+    assert result.startswith("ERROR")
+    assert str(missing_path) in result or "entities.yaml" in result.lower()
+    assert not out.exists(), "no CSV may be written when entities.yaml cannot be read"
+
+
+def test_run_refuses_unparsable_entities_yaml_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = tmp_path / "entities.yaml"
+    # Deliberately malformed YAML (unbalanced flow mapping) -- must raise a
+    # YAML parse error inside configs.load_entities(), not resolve to False.
+    entities_path.write_text("syn-firm: {name: Synthetic Firm, pan: [unterminated\n",
+                              encoding="utf-8")
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entities.yaml doesn't parse")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="syn-firm",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert not out.exists(), "no CSV may be written when entities.yaml cannot be parsed"
+
+
+def test_resolve_partner_comp_configured_raises_not_returns_false_on_bad_entities_yaml(tmp_path):
+    """Direct unit-level proof (not just through run()): the earlier cut of
+    this fix had `except Exception: return False` here -- this pins the
+    fixed contract, a raised EntityResolutionError, so a future change
+    cannot silently reintroduce that fallback."""
+    from agents.skill_26as_journal.agent import EntityResolutionError, _resolve_partner_comp_configured
+
+    missing_path = tmp_path / "nope.yaml"
+    try:
+        _resolve_partner_comp_configured("syn-firm", str(missing_path))
+        assert False, "must raise EntityResolutionError, not return False"
+    except EntityResolutionError:
+        pass
