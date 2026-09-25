@@ -90,6 +90,10 @@ inputs:
     type: "text"
     label: "GnuCash journal CSV output path (optional -- Stage 1b)"
     required: false
+  - name: "accrual_journal_path"
+    type: "text"
+    label: "Year-end share-of-profit accrual journal CSV output path (optional -- H35-02, requires journal_path and the LLP statement of account)"
+    required: false
 
 run_args:
   entity: "{inputs.entity}"
@@ -104,6 +108,7 @@ run_args:
   config_path: "{config_path}"
   model_override: "{model_override}"
   journal_path: "{inputs.journal_path}"
+  accrual_journal_path: "{inputs.accrual_journal_path}"
 
 output:
   extension: ".xlsx"
@@ -226,6 +231,28 @@ help:
         remuneration_income, share_of_profit_income) -- a missing account
         needed by a non-zero month comes back as an "ERROR: ..." naming
         the key and the month, not a traceback.
+    - name: "accrual_journal_path"
+      tooltip: >
+        Optional (H35-02). Requires journal_path to also be set. When set,
+        and the LLP statement of account (llp_statement) parsed and its
+        "Profit Share for the Year" figure is available, writes a SEPARATE
+        one-transaction CSV -- never merged into journal_path's file --
+        dated 31 March of the financial year, accruing the difference
+        between the L5 statement's own year-end profit-share figure and
+        the total already booked by the monthly journal (Dr
+        current_account / Cr share_of_profit_income). No file is written,
+        and a note explains why, when: no LLP statement was supplied or it
+        didn't parse; its profit-share figure is missing; the difference
+        is within Rs 1.00 (already ties); or the difference is negative
+        (the monthly total already booked exceeds the L5 figure --
+        FLAGGED for manual review, never reversed automatically).
+      accepts: "A full output file path ending in .csv, different from journal_path."
+      gotchas: >
+        Reuses the same accounts: block as journal_path -- specifically
+        current_account and share_of_profit_income must both be supplied.
+        A residual current-account comparison against the L5 statement is
+        always performed after this accrual and reported in the run
+        summary; it is never booked, even when it shows a variance.
   steps:
     - "Pick the entity."
     - "Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter."
@@ -257,6 +284,14 @@ help:
           via File > Import > Import Transactions from CSV with Multi-split
           ticked, skipping the 1 header line, Date mapped as ISO, and the
           Amount column mapped to the importer's Amount column type.
+      - name: "<accrual_journal_path> (optional -- H35-02, only written if accrual_journal_path is set AND an accrual was computed)"
+        tooltip: >
+          A SEPARATE one-transaction GnuCash multi-split journal CSV,
+          dated 31 March of the financial year: the year-end
+          share-of-profit accrual per the LLP statement of account. Same
+          import settings as journal_path's file, above. Never contains
+          the monthly transactions -- import both files if both were
+          produced.
   tips: >
     Start with the Reconciliation sheet, then Exceptions -- a
     "CANNOT RECONCILE" status names exactly which source figure for that
@@ -270,7 +305,7 @@ help:
     - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
       fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
     - problem: "Reconciliation shows AGREE for two sources that are not byte-for-byte equal."
-      fix: "Every reconciliation in this skill uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie, anything more is reported as VARIANCE. This is a fixed, named constant (engine.RECONCILIATION_TOLERANCE), never a per-run setting -- it absorbs paisa-level rounding between sources, not a genuine discrepancy."
+      fix: "Every reconciliation in this skill (including the L5 tie-out rows) uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie, anything more is reported as VARIANCE. This is a fixed, named constant (engine.RECONCILIATION_TOLERANCE), never a per-run setting -- it absorbs paisa-level rounding between sources, not a genuine discrepancy."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."
       fix: "A VARIANCE means the supplied payment schedule and a payout advice genuinely disagree on gross share of profit or a firm's-tax figure for that month -- check the Note column for the exact numbers. The schedule's own figure is what is used; the disagreement is reported, not silently resolved."
     - problem: "'ERROR: could not parse ...' naming the advisory letter or a payout advice."

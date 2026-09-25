@@ -61,6 +61,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .engine import RECONCILIATION_TOLERANCE, residual_current_account_check
+
 CURRENCY = "INR"
 
 # Column order for the GnuCash multi-split journal CSV -- see dialect point
@@ -368,6 +370,139 @@ def build_journals(report, accounts: dict) -> list:
         journals.append(journal)
 
     return journals
+
+
+def build_accrual_journal(report, accounts: dict) -> tuple:
+    """H35-02: the year-end share-of-profit accrual journal.
+
+    The L5 LLP Statement of Account is the final authority for the year's
+    actual "Profit Share for the Year" (user ruling: "Y-3 should come from
+    the Statement of account as the final say" -- see engine.py's Exempt-SoP
+    reconciliation row). _monthly_journal(), above, only ever books
+    share_of_profit_income month by month from the payout advices; when the
+    L5 statement's own year-end figure is higher, the shortfall (arrears
+    included -- it is a single lump comparison against the whole year's
+    monthly total, not booked per-month) is accrued ONCE here, as a
+    separate 31-March entry -- never inside the monthly journal, and never
+    as a second share_of_profit_income posting layered on top of what
+    build_journals()'s monthly loop already booked (that loop is untouched
+    by this function).
+
+    RED-FLAG-relevant by construction: this function posts Dr
+    current_account / Cr share_of_profit_income ONLY. It never reads or
+    writes tds_expense (or any account other than those two), so it cannot
+    create or duplicate a TDS posting -- s.194T TDS is deducted at source on
+    each MONTHLY remuneration/share-of-profit payout and is already fully
+    booked by _monthly_journal(); this accrual is a pure profit-recognition
+    entry with no cash movement, so there is nothing for it to withhold tax
+    on. See tests/test_skill_partner_comp_recon.py's H35-02 tests for the
+    exact proof that monthly-booked SoP + this accrual == the L5 figure,
+    i.e. share of profit is booked once in total, never twice.
+
+    Returns (Journal | None, note, residual):
+      - `residual` (H35-02 item 4) is always an engine.ReconciliationResult
+        from engine.residual_current_account_check(), comparing the L5
+        statement's current_closing_balance against the booked current
+        account AFTER whatever this call applied to it (0.0 in every branch
+        below that returns Journal None). It is computed and returned on
+        every path -- including "no L5" -- so the caller always has it,
+        never something the caller must remember to compute separately. A
+        VARIANCE there is reported, never booked -- this function's own
+        splits never react to it.
+      - report.llp_record is None -> (None, a note saying no L5 was
+        supplied, so no accrual journal was produced, residual).
+      - L5 present but 'current_profit_share' ("Profit Share for the Year")
+        is None -> (None, a note naming the missing field, residual).
+      - |L5 profit share - already-booked monthly total| <=
+        RECONCILIATION_TOLERANCE (the shared Re 1 tolerance -- see
+        engine.RECONCILIATION_TOLERANCE) -> (None, "ties, no accrual
+        needed", residual).
+      - Difference negative (the monthly total already booked EXCEEDS the
+        L5 figure) -> (None, a note flagging this for manual review --
+        never a silent reversing/negative entry, residual).
+      - Otherwise -> (Journal, a note stating the amount booked and how it
+        was derived, residual computed with that amount applied).
+    """
+    llp_record = getattr(report, "llp_record", None)
+    if llp_record is None:
+        return None, (
+            "No L5 (LLP Statement of Account) was supplied for this FY -- the "
+            "year-end share-of-profit accrual cannot be computed and no "
+            "accrual journal was produced. Supply the L5 statement to enable it."
+        ), residual_current_account_check(report, 0.0)
+    l5_profit_share = llp_record.get("current_profit_share")
+    if l5_profit_share is None:
+        return None, (
+            "The L5 (LLP Statement of Account) was supplied but its 'Profit "
+            "Share for the Year' figure could not be parsed -- the year-end "
+            "accrual cannot be computed and no accrual journal was produced."
+        ), residual_current_account_check(report, 0.0)
+
+    monthly = getattr(report, "monthly", None) or []
+    # Arrears included: this is the WHOLE year's already-booked total in one
+    # comparison, not a per-month accrual -- exactly mirrors the
+    # share_of_profit_income leg formula in _monthly_journal(), above.
+    booked_sop = sum(
+        (m.share_of_profit_gross + m.firms_tax_sop + m.additional_share_of_profit)
+        for m in monthly
+    )
+    diff = round(l5_profit_share - booked_sop, 2)
+
+    if abs(diff) <= RECONCILIATION_TOLERANCE:
+        return None, (
+            f"L5 'Profit Share for the Year' ({l5_profit_share:,.2f}) already "
+            f"ties to the monthly total already booked ({booked_sop:,.2f}) "
+            f"within Rs {RECONCILIATION_TOLERANCE:.2f} -- no accrual journal needed."
+        ), residual_current_account_check(report, 0.0)
+    if diff < 0:
+        return None, (
+            f"FLAGGED, NOT BOOKED: the monthly total already booked "
+            f"({booked_sop:,.2f}) EXCEEDS the L5 'Profit Share for the Year' "
+            f"({l5_profit_share:,.2f}) by {abs(diff):,.2f}. This is not reversed "
+            "automatically -- review manually before any correcting entry."
+        ), residual_current_account_check(report, 0.0)
+
+    fy = report.financial_year
+    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
+    if not m:
+        raise JournalValidationError(
+            f"financial_year {fy!r} is not in 'YYYY-YY' form -- cannot date the "
+            "31 March year-end accrual entry."
+        )
+    date = f"{m.group(1)}-03-31"
+    fy_pfx = fy_prefix(fy)
+    firm_name = getattr(report, "firm_name", "") or ""
+    ctx = "year-end share-of-profit accrual (H35-02, per L5)"
+
+    splits: list = []
+    _add_leg(splits, accounts, "current_account", ctx, diff)
+    _add_leg(splits, accounts, "share_of_profit_income", ctx, -diff)
+
+    if firm_name:
+        description = f"{firm_name} - year-end share-of-profit accrual per L5 (FY{fy})"
+    else:
+        description = f"Year-end share-of-profit accrual per L5 (FY{fy})"
+
+    txn_id = _txn_id(fy_pfx, firm_name, "ACCR")
+    journal = Journal(txn_id=txn_id, date=date, description=description, splits=splits)
+    _check_balanced(journal)
+    return journal, (
+        f"Accrual of {diff:,.2f} booked (Dr current account / Cr share of "
+        f"profit income): L5 'Profit Share for the Year' {l5_profit_share:,.2f} "
+        f"vs {booked_sop:,.2f} already booked by the monthly journal."
+    ), residual_current_account_check(report, diff)
+
+
+def write_accrual_journal_csv(journal, output_path: str) -> None:
+    """Writes the H35-02 year-end accrual journal to its OWN, SEPARATE CSV
+    file, in exactly write_journal_csv()'s dialect -- it must never be
+    merged into the monthly journal CSV (H35-02 item 3). `journal` is a
+    single Journal or None (as returned by build_accrual_journal()); if
+    None, no file is written at all -- the caller already has a note
+    explaining why."""
+    if journal is None:
+        return
+    write_journal_csv([journal], output_path)
 
 
 def write_journal_csv(journals: list, output_path: str) -> None:

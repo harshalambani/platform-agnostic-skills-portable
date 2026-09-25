@@ -389,6 +389,65 @@ def reconcile_category(category: str, sources: dict,
     return ReconciliationResult(category=category, sources=sources, agree=agree, note=note)
 
 
+def booked_current_account_closing(monthly: "list[MonthlyLine]", llp_record: dict | None):
+    """H35-02: the current-account closing balance implied purely by the
+    booked monthly figures, rolled forward from the L5 statement's own
+    OPENING balance (this module has no I/O, so it has no other source for
+    an opening balance) plus this FY's booked current-account movement --
+    the sum of every month's prior_cohort_drawdown, which CREDITS (reduces)
+    the balance the firm owes the partner (see MonthlyLine's docstring).
+    Shared by the pre-accrual L5 tie-out row in build_report() and by
+    residual_current_account_check() below, so the two can never desync.
+    Returns None if llp_record is None or has no current_opening_balance.
+    """
+    l5_current_opening = llp_record.get("current_opening_balance") if llp_record else None
+    if l5_current_opening is None:
+        return None
+    booked_movement = -sum(m.prior_cohort_drawdown for m in monthly) if monthly else 0.0
+    return l5_current_opening + booked_movement
+
+
+def residual_current_account_check(report: "Report", applied_accrual: float = 0.0) -> ReconciliationResult:
+    """H35-02 item 4: after the year-end accrual (if any) is applied, compare
+    the resulting current-account balance against the L5 statement's own
+    current_closing_balance ONE more time.
+
+    `applied_accrual` is the signed amount jv_emitter.build_accrual_journal()
+    actually posted to current_account -- 0.0 whenever no accrual journal was
+    produced (no L5 supplied, the L5 profit-share field was unparseable, the
+    monthly total already ties, or the difference was negative and only
+    flagged). Passing the wrong applied_accrual would silently mask or
+    fabricate a residual, so callers must pass exactly what
+    build_accrual_journal() returned, never a value computed independently.
+
+    A residual beyond RECONCILIATION_TOLERANCE is reported as a VARIANCE and
+    is NEVER booked automatically by this function or any other -- it only
+    reports the difference, exactly like every other reconciliation row.
+    """
+    llp_record = getattr(report, "llp_record", None)
+    category = "L5 tie-out: current-account closing balance after year-end accrual"
+    if llp_record is None or llp_record.get("current_closing_balance") is None:
+        return ReconciliationResult(
+            category=category,
+            sources={"Booked (monthly + accrual)": None, "LLP Statement (L5)": None},
+            agree=None,
+            note=(
+                f"{CANNOT_RECONCILE} -- the LLP Statement of Account (L5) is "
+                "required for this figure and was not supplied or could not "
+                "be parsed."
+            ),
+        )
+    booked_closing = booked_current_account_closing(report.monthly, llp_record)
+    booked_after_accrual = (
+        (booked_closing + applied_accrual) if booked_closing is not None else None
+    )
+    return reconcile_category(
+        category,
+        {"Booked (monthly + accrual)": booked_after_accrual,
+         "LLP Statement (L5)": llp_record.get("current_closing_balance")},
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level report assembly.
 # ---------------------------------------------------------------------------
@@ -436,6 +495,12 @@ class Report:
     # existing fixture and test keeps working unchanged.
     firm_name: str = ""
     opening_reclass: dict | None = None
+    # H35-02: the whole parsed L5 (LLP Statement of Account) dict, or None
+    # if that optional leg was not supplied/could not be parsed -- see
+    # parsers.llp_statement.parse_l5_words() for its shape. Consumed by
+    # jv_emitter.build_accrual_journal() as well as the L5 tie-out rows
+    # below, so it is carried on the Report rather than only used locally.
+    llp_record: dict | None = None
 
 
 def build_report(data: dict) -> Report:
@@ -449,6 +514,10 @@ def build_report(data: dict) -> Report:
     advisory = data.get("advisory") or {}
     external = data.get("external") or {}
     payroll = data.get("payroll") or []
+    # H35-02: the L5 (LLP Statement of Account) leg, whole. None if not
+    # supplied/unparseable -- every L5-dependent row below must fail loud
+    # in that case, never substitute a computed figure.
+    llp_record = data.get("llp_record")
 
     firms_tax_rate, _ = driver(drivers, "firms_tax_rate", fy, "firm's tax rate")
 
@@ -537,19 +606,95 @@ def build_report(data: dict) -> Report:
     total_sop = sum(m.share_of_profit_gross for m in monthly) if monthly else None
     return_exempt_sop, _ = field_or_reason(external, "return_exempt_share_of_profit",
                                             "return's exempt share of profit")
-    reconciliation.append(reconcile_category(
-        "Exempt share of profit (s.10(2A)) vs the filed return",
-        {"Computed (monthly)": total_sop, "Return": return_exempt_sop},
-    ))
+    # H35-02 / user ruling ("Y-3 should come from the Statement of account
+    # as the final say"): this row compares the L5 LLP Statement of
+    # Account's own "Profit Share for the Year" figure against the filed
+    # return -- NEVER the monthly total (total_sop, above, still feeds
+    # jv_emitter's monthly journal, but is not an acceptable substitute
+    # here). Absent/unparseable L5 is a fail-loud placeholder naming the
+    # L5 statement as required, not a silent fallback to total_sop.
+    if llp_record is not None and llp_record.get("current_profit_share") is not None:
+        reconciliation.append(reconcile_category(
+            "Exempt share of profit (s.10(2A)) vs the filed return",
+            {"L5 Statement (Profit Share for the Year)": llp_record["current_profit_share"],
+             "Return": return_exempt_sop},
+        ))
+    else:
+        reconciliation.append(ReconciliationResult(
+            category="Exempt share of profit (s.10(2A)) vs the filed return",
+            sources={"L5 Statement (Profit Share for the Year)": None,
+                     "Return": return_exempt_sop},
+            agree=None,
+            note=(
+                f"{CANNOT_RECONCILE} -- the LLP Statement of Account (L5) is "
+                "required for this row and was not supplied or could not be "
+                "parsed. The monthly total is never substituted here, even "
+                "though it is available -- see AGENT.md/H35-02. No year-end "
+                "accrual journal is produced either, for the same reason."
+            ),
+        ))
 
     advisory_closing, _ = field_or_reason(advisory, "stated_closing_capital",
                                            "Advisory's stated closing capital")
     return_closing, _ = field_or_reason(external, "return_closing_capital",
                                          "return's closing capital")
+    capital_sources = {
+        "Rule (Drivers)": capital_rule.required_cumulative_capital,
+        "Advisory": advisory_closing, "Return": return_closing,
+    }
+    if llp_record is not None:
+        # H35-02 item 1: add the L5 capital-closing figure as an extra
+        # source in this SAME row (rather than a wholly separate row) --
+        # capital already has three cross-checking sources here, and the L5
+        # figure is one more of the same kind, not a different comparison.
+        capital_sources["LLP Statement (L5)"] = llp_record.get("capital_closing_balance")
     reconciliation.append(reconcile_category(
         "Closing capital: rule vs Advisory vs the filed return",
-        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
-         "Advisory": advisory_closing, "Return": return_closing},
+        capital_sources,
+    ))
+
+    # H35-02 item 1: three further L5 tie-out rows -- current-account
+    # closing balance, remuneration for the year, and interest on capital.
+    # "Booked (monthly)" is computed purely from `monthly` -- the same
+    # totals jv_emitter.py's monthly journal would post -- so it means
+    # exactly "the booked figure (existing monthly journal totals)" per
+    # the H35-02 instruction; it is NOT a live GnuCash book read (this
+    # module is pure, no I/O). A missing/unparseable L5 fails loud on
+    # every one of these rows rather than being silently omitted.
+    l5_required_note = (
+        f"{CANNOT_RECONCILE} -- the LLP Statement of Account (L5) is required "
+        "for this figure and was not supplied or could not be parsed; no "
+        "other document substitutes for the L5 closing figures."
+    )
+
+    def _l5_tieout_row(category: str, booked, l5_key: str) -> ReconciliationResult:
+        if llp_record is None:
+            return ReconciliationResult(
+                category=category,
+                sources={"Booked (monthly)": booked, "LLP Statement (L5)": None},
+                agree=None, note=l5_required_note,
+            )
+        return reconcile_category(
+            category,
+            {"Booked (monthly)": booked, "LLP Statement (L5)": llp_record.get(l5_key)},
+        )
+
+    booked_current_closing = booked_current_account_closing(monthly, llp_record)
+    reconciliation.append(_l5_tieout_row(
+        "L5 tie-out: current-account closing balance",
+        booked_current_closing, "current_closing_balance",
+    ))
+
+    booked_remuneration = sum(m.remuneration for m in monthly) if monthly else None
+    reconciliation.append(_l5_tieout_row(
+        "L5 tie-out: remuneration for the year",
+        booked_remuneration, "current_remuneration",
+    ))
+
+    booked_interest_on_capital = sum(m.interest_on_capital for m in monthly) if monthly else None
+    reconciliation.append(_l5_tieout_row(
+        "L5 tie-out: interest on capital",
+        booked_interest_on_capital, "capital_interest_on_capital",
     ))
 
     total_tds_credit = -sum(m.tds for m in monthly) if monthly else None
@@ -631,4 +776,5 @@ def build_report(data: dict) -> Report:
         payroll=payroll,
         firm_name=data.get("firm_name", "") or "",
         opening_reclass=data.get("opening_reclass"),
+        llp_record=llp_record,
     )

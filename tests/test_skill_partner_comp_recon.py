@@ -7,6 +7,7 @@ number was chosen and what it is meant to exercise.
 """
 from __future__ import annotations
 
+import csv
 import re
 import sys
 import zipfile
@@ -5138,3 +5139,251 @@ def test_agent_run_wires_gnucash_tieout_note_and_reconciliation_rows(tmp_path, m
 
     wb = openpyxl.load_workbook(str(out_path))
     assert "Posted check" in wb.sheetnames
+
+
+# ---------------------------------------------------------------------------
+# H35-02: the L5 (LLP Statement of Account) is the final authority for
+# year-end partner figures (user ruling: "Y-3 should come from the
+# Statement of account as the final say"). Synthetic, invented, self-
+# consistent data only -- not derived from any real document. See engine.py
+# (booked_current_account_closing / residual_current_account_check / the L5
+# tie-out + Exempt-SoP reconciliation rows) and jv_emitter.py
+# (build_accrual_journal / write_accrual_journal_csv) for the production
+# code these tests exercise.
+# ---------------------------------------------------------------------------
+
+_H35_ACCOUNTS = {
+    "bank": "Assets:Bank:Current Account",
+    "tds_expense": "Expenses:Tax:TDS",
+    "remuneration_income": "Income:PGBP:Remuneration",
+    "share_of_profit_income": "Income:PGBP:Share of Profit",
+    "current_account": "Assets:Firm Current Account",
+}
+
+# Non-default account names (test 6, below): different leaf names from
+# _H35_ACCOUNTS above, proving build_accrual_journal() reads them from the
+# accounts: config rather than a hardcoded default.
+_H35_NONDEFAULT_ACCOUNTS = {
+    "bank": "Assets:Bank:Current Account",
+    "tds_expense": "Expenses:Tax:TDS",
+    "remuneration_income": "Income:PGBP:Remuneration",
+    "share_of_profit_income": "Income:Other:Custom Profit Share Bucket",
+    "current_account": "Liabilities:Partner:Custom Current Account",
+}
+
+
+def _h35_02_data(
+    *,
+    llp_record=None,
+    share_of_profit_gross=200000,
+    firms_tax_sop=-50000,
+    prior_cohort_drawdown=0,
+) -> dict:
+    """Two identical synthetic months -- booked_sop per month =
+    share_of_profit_gross + firms_tax_sop (+0 additional_share_of_profit) =
+    150000 with the defaults, so booked_sop for the year = 300000. Kept
+    deliberately small and round so accrual/residual arithmetic in the
+    tests below is easy to verify by eye."""
+    data = {
+        "financial_year": "2031-32",
+        "firm_name": "Testcorp Alpha LLP",
+        "drivers": {"firms_tax_rate": 0.35},
+        "monthly": [
+            {
+                "month": "2031-04", "remuneration": 100000,
+                "share_of_profit_gross": share_of_profit_gross,
+                "additional_share_of_profit": 0,
+                "firms_tax_sop": firms_tax_sop, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+                "prior_cohort_drawdown": prior_cohort_drawdown,
+            },
+            {
+                "month": "2031-05", "remuneration": 100000,
+                "share_of_profit_gross": share_of_profit_gross,
+                "additional_share_of_profit": 0,
+                "firms_tax_sop": firms_tax_sop, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+            },
+        ],
+        "external": {"bank_credits_total": 480000},
+    }
+    if llp_record is not None:
+        data["llp_record"] = llp_record
+    return data
+
+
+# 1 -- monthly SoP + accrual == L5 profit share exactly (no doubling).
+def test_h35_02_accrual_plus_monthly_equals_l5_profit_share_exactly():
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    report = build_report(data)
+
+    booked_sop = sum(
+        m.share_of_profit_gross + m.firms_tax_sop + m.additional_share_of_profit
+        for m in report.monthly
+    )
+    assert booked_sop == 300000
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is not None
+    accrual_amount = next(
+        s.debit - s.credit for s in journal.splits
+        if s.account == _H35_ACCOUNTS["current_account"]
+    )
+    # No doubling: booked total (from the untouched monthly journal loop)
+    # plus exactly this one accrual amount equals the L5 figure -- never
+    # booked_sop + accrual*2, never accrual alone without booked_sop.
+    assert booked_sop + accrual_amount == 350000
+    assert accrual_amount == 50000
+
+
+# 2 -- the accrual CSV is a separate file, and the monthly journal CSV is
+# byte-for-byte unchanged by whether an accrual is also requested.
+def test_h35_02_accrual_csv_is_separate_file_monthly_csv_unchanged(tmp_path):
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    report = build_report(data)
+
+    monthly_path_a = tmp_path / "monthly_a.csv"
+    journals = build_journals(report, _H35_ACCOUNTS)
+    write_journal_csv(journals, str(monthly_path_a))
+    monthly_csv_without_accrual = monthly_path_a.read_bytes()
+
+    # Now do it again, this time also building + writing the accrual CSV,
+    # to its OWN path -- the monthly journal build/write path above is
+    # untouched code, but re-run it fresh here to prove no shared mutable
+    # state leaks between the two.
+    monthly_path_b = tmp_path / "monthly_b.csv"
+    accrual_path = tmp_path / "accrual.csv"
+    journals_again = build_journals(report, _H35_ACCOUNTS)
+    write_journal_csv(journals_again, str(monthly_path_b))
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    jv_emitter.write_accrual_journal_csv(journal, str(accrual_path))
+
+    assert monthly_path_b.read_bytes() == monthly_csv_without_accrual
+    assert accrual_path.exists()
+    assert accrual_path != monthly_path_b
+
+    monthly_rows = list(csv.DictReader(monthly_path_b.open(newline="", encoding="utf-8")))
+    accrual_rows = list(csv.DictReader(accrual_path.open(newline="", encoding="utf-8")))
+    monthly_txn_ids = {r["Transaction ID"] for r in monthly_rows}
+    accrual_txn_ids = {r["Transaction ID"] for r in accrual_rows}
+    # The two CSVs never share a transaction id -- the accrual transaction
+    # never lands inside the monthly journal file, and vice versa.
+    assert monthly_txn_ids.isdisjoint(accrual_txn_ids)
+    assert len(accrual_txn_ids) == 1
+    assert all(t.endswith("-ACCR") for t in accrual_txn_ids)
+
+
+# 3 -- no L5 supplied -> no accrual CSV, and the Exempt-SoP row is NOT the
+# monthly total (the old, pre-H35-02 fallback).
+def test_h35_02_no_l5_means_no_accrual_and_exempt_sop_is_not_monthly_total():
+    data = _h35_02_data(llp_record=None)
+    data["external"]["return_exempt_share_of_profit"] = 999999  # deliberately
+    # not equal to the monthly total (300000), so a wrongly-reintroduced
+    # monthly-total fallback would AGREE here and this test would catch it.
+    report = build_report(data)
+    assert report.llp_record is None
+
+    exempt_row = next(
+        r for r in report.reconciliation
+        if r.category == "Exempt share of profit (s.10(2A)) vs the filed return"
+    )
+    assert exempt_row.agree is None
+    assert CANNOT_RECONCILE in exempt_row.note
+    assert exempt_row.sources["L5 Statement (Profit Share for the Year)"] is None
+    # The monthly total (300000) must never appear as a silent substitute.
+    assert 300000 not in exempt_row.sources.values()
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is None
+    assert "No L5" in note
+    assert residual.agree is None
+    assert CANNOT_RECONCILE in residual.note
+
+
+# 4 -- residual current-account comparison: Rs 6 off -> VARIANCE (never
+# booked, never in any CSV); Re 1 off -> ties.
+def test_h35_02_residual_variance_vs_tie():
+    accrual_amount = 50000  # from L5 profit share 350000 - booked_sop 300000
+
+    # 4a: residual exactly Rs 6 off -> VARIANCE.
+    data_variance = _h35_02_data(
+        llp_record={
+            "current_profit_share": 350000,
+            "current_opening_balance": 100000,
+            # booked_current_closing (opening + 0 movement) = 100000;
+            # after the 50000 accrual, booked = 150000. L5 states 150006,
+            # a Rs 6 residual -- must VARIANCE, never be booked anywhere.
+            "current_closing_balance": 150006,
+        },
+    )
+    report_variance = build_report(data_variance)
+    journal, note, residual = jv_emitter.build_accrual_journal(report_variance, _H35_ACCOUNTS)
+    assert journal is not None  # the profit-share accrual itself still books
+    assert residual.agree is False
+    assert "Variance" in residual.note
+    # The residual is reported, never folded into the accrual's own splits.
+    posted_current_leg = next(
+        s.debit - s.credit for s in journal.splits
+        if s.account == _H35_ACCOUNTS["current_account"]
+    )
+    assert posted_current_leg == accrual_amount  # exactly the SoP accrual, not +6
+
+    # 4b: residual exactly Re 1 off -> ties (within RECONCILIATION_TOLERANCE).
+    data_tie = _h35_02_data(
+        llp_record={
+            "current_profit_share": 350000,
+            "current_opening_balance": 100000,
+            "current_closing_balance": 150001,
+        },
+    )
+    report_tie = build_report(data_tie)
+    _, _, residual_tie = jv_emitter.build_accrual_journal(report_tie, _H35_ACCOUNTS)
+    assert residual_tie.agree is True
+
+
+# 5 -- negative difference (booked already exceeds L5) -> no journal,
+# flagged for manual review, never a reversing/negative entry.
+def test_h35_02_negative_difference_is_flagged_not_booked():
+    # booked_sop = 300000; L5 profit share below that by 20000.
+    data = _h35_02_data(llp_record={"current_profit_share": 280000})
+    report = build_report(data)
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is None
+    assert "FLAGGED, NOT BOOKED" in note
+    assert "20,000" in note or "20000" in note
+    # No journal at all -- nothing was written, nothing to inspect for a
+    # reversing/negative posting.
+
+
+# 6 -- accounts come from config, never hardcoded: the accrual posts to
+# whatever accounts.current_account / accounts.share_of_profit_income name,
+# even when they are non-default leaf names.
+def test_h35_02_accrual_uses_accounts_from_config_not_hardcoded():
+    data = _h35_02_data(llp_record={"current_profit_share": 350000})
+    report = build_report(data)
+
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_NONDEFAULT_ACCOUNTS)
+    assert journal is not None
+    posted_accounts = {s.account for s in journal.splits}
+    assert _H35_NONDEFAULT_ACCOUNTS["current_account"] in posted_accounts
+    assert _H35_NONDEFAULT_ACCOUNTS["share_of_profit_income"] in posted_accounts
+    # None of the default-account-name test fixtures' leaf names appear --
+    # proving this run did not fall back to any hardcoded default.
+    assert _H35_ACCOUNTS["current_account"] not in posted_accounts
+    assert _H35_ACCOUNTS["share_of_profit_income"] not in posted_accounts
+
+
+# 7 -- residual is always returned (even with no L5 at all), so the caller
+# never has to compute it separately, and a missing accounts.current_account
+# does not silently skip the residual computation (residual has no I/O and
+# does not depend on accounts:).
+def test_h35_02_residual_returned_even_when_l5_missing_current_closing():
+    data = _h35_02_data(
+        llp_record={"current_profit_share": 350000},  # no current_closing_balance key
+    )
+    report = build_report(data)
+    journal, note, residual = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is not None  # the profit-share accrual still books fine
+    assert residual.agree is None
+    assert CANNOT_RECONCILE in residual.note
