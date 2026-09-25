@@ -1156,6 +1156,111 @@ def test_run_apply_omits_partner_comp_flag_when_not_configured(monkeypatch, tmp_
     assert "--partner-comp-configured" not in captured["args"]
 
 
+# ---------------------------------------------------------------------------
+# FJ1.4 -- code gate on LLM overrides of Ambiguous rows.
+#
+# Proven to fail on b3a9df6 (pre-fix): tl._gate_ambiguous_overrides did not
+# exist at all on that build, so every test in this block fails with
+# AttributeError on b3a9df6, and (at the run_apply level)
+# test_run_apply_rejects_non_tied_ambiguous_override_before_subprocess would
+# have called the real subprocess with the bad override instead of
+# short-circuiting.
+# ---------------------------------------------------------------------------
+
+def _write_review_csv(path: Path, rows: list[dict]) -> None:
+    fieldnames = ["Sr", "Deductor", "Section", "Category", "Credit Account",
+                 "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
+                 "Needs Review", "Basis", "Tied Candidates"]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k, "") for k in fieldnames})
+
+
+def _ambiguous_review_row(sr="2", deductor="ACME BANK", tied=("Income:A", "Income:B")):
+    return {"Sr": sr, "Deductor": deductor, "Section": "194A", "Category": "A",
+            "Credit Account": "Income:A", "Confidence": "Ambiguous",
+            "Needs Review": "no", "Basis": "tied on score",
+            "Tied Candidates": "; ".join(tied)}
+
+
+def test_gate_ambiguous_overrides_rejects_non_tied_account(tmp_path):
+    out = tmp_path / "out.csv"
+    _write_review_csv(out.with_name("out-review.csv"), [_ambiguous_review_row()])
+    result = tl._gate_ambiguous_overrides({"2": "Income:NotTied"}, str(out))
+    assert isinstance(result, str)
+    assert "REJECTED" in result
+    assert "Sr 2" in result and "ACME BANK" in result
+
+
+def test_gate_ambiguous_overrides_accepts_tied_candidate(tmp_path):
+    out = tmp_path / "out.csv"
+    _write_review_csv(out.with_name("out-review.csv"), [_ambiguous_review_row()])
+    result = tl._gate_ambiguous_overrides({"2": "Income:A"}, str(out))
+    accepted, rejections = result
+    assert accepted == {"2": "Income:A"}
+    assert rejections == []
+
+
+def test_gate_ambiguous_overrides_no_review_file_passthrough(tmp_path):
+    out = tmp_path / "out.csv"  # no -review.csv sibling written
+    result = tl._gate_ambiguous_overrides({"5": "Income:Anything"}, str(out))
+    accepted, rejections = result
+    assert accepted == {"5": "Income:Anything"}
+    assert rejections == []
+
+
+def test_gate_ambiguous_overrides_non_ambiguous_row_unaffected(tmp_path):
+    out = tmp_path / "out.csv"
+    row = _ambiguous_review_row(sr="7")
+    row["Confidence"] = "Suspense"  # not Ambiguous -- gate must not apply
+    _write_review_csv(out.with_name("out-review.csv"), [row])
+    result = tl._gate_ambiguous_overrides({"7": "Income:Whatever:NotInTiedList"}, str(out))
+    accepted, rejections = result
+    assert accepted == {"7": "Income:Whatever:NotInTiedList"}
+    assert rejections == []
+
+
+def test_run_apply_rejects_non_tied_ambiguous_override_before_subprocess(tmp_path, monkeypatch):
+    """Integration-level: run_apply must short-circuit BEFORE invoking the
+    builder subprocess when every override is rejected, and must leave the
+    existing output CSV byte-for-byte unchanged."""
+    out = tmp_path / "out.csv"
+    out.write_text("Date,Transaction ID\n2025-01-01,X\n", encoding="utf-8")
+    before = out.read_bytes()
+    _write_review_csv(out.with_name("out-review.csv"), [_ambiguous_review_row()])
+
+    def _boom(args):
+        raise AssertionError("subprocess must not run when all overrides are rejected")
+    monkeypatch.setattr(tl, "_run_script", _boom)
+
+    result = tl.run_apply("x.xlsx", "y.gnucash", str(out), {"2": "Income:NotTied"})
+    assert "REJECTED" in result
+    assert out.read_bytes() == before
+
+
+def test_run_apply_accepts_tied_candidate_override_and_invokes_subprocess(tmp_path, monkeypatch):
+    out = tmp_path / "out.csv"
+    out.write_text("Date,Transaction ID\n2025-01-01,X\n", encoding="utf-8")
+    _write_review_csv(out.with_name("out-review.csv"), [_ambiguous_review_row()])
+
+    calls = []
+
+    def _fake_run_script(args):
+        calls.append(args)
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    monkeypatch.setattr(tl, "_verify", lambda p: "VERIFIED — 1 transactions, all balanced.")
+
+    result = tl.run_apply("x.xlsx", "y.gnucash", str(out), {"2": "Income:A"})
+    assert len(calls) == 1
+    assert "VERIFIED" in result
+    assert "REJECTED" not in result
+
+
+
 def test_apply_overrides_tool_param_is_optional():
     """The real tool schema must NOT list `overrides` as required — that is what
     prevents strict endpoints from 400-ing an argument-less call."""
