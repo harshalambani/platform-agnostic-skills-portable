@@ -661,8 +661,14 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
             j.credit_confidence = "Override"
-            j.credit_basis = "resolved by override/LLM"
-            j.needs_review = False
+            # FL1.2: an LLM/model-picked override must never skip human
+            # review -- needs_review stays True here (was False) so the row
+            # still surfaces in the Review tab, labelled as a pick to
+            # confirm rather than an already-verified match. Only a human
+            # save from the Review tab (ui/tabs/tds_journal_review.py's
+            # _apply_changes) may clear this flag.
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
         else:
             credit_acc = acct or ACC_SUSPENSE
             j.credit_account = credit_acc
@@ -745,8 +751,10 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
             j.credit_confidence = "Override"
-            j.credit_basis = "resolved by override/LLM"
-            j.needs_review = False
+            # FL1.2: keep needs_review True on an LLM/model override -- see
+            # the identical comment in build_journals() above.
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
         else:
             credit_acc = acct or ACC_SUSPENSE
             j.credit_account = credit_acc
@@ -817,7 +825,12 @@ def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
         if c.sr in overrides and overrides[c.sr]:
             cr = overrides[c.sr]
             j.credit_confidence = "Override"
-            j.credit_basis = "resolved by override/LLM"
+            # FL1.2: keep needs_review True on an LLM/model override -- see
+            # the identical comment in build_journals() above. (This branch
+            # previously left needs_review at its False default, which had
+            # the same effect as the other two categories' explicit False.)
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
         else:
             cr = cr_default
             j.credit_confidence = "High" if credit_account or \

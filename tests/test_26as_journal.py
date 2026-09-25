@@ -761,7 +761,13 @@ def test_override_wins():
     d = _deductor(7, "OFFICE OF REGIONAL PROVIDENT FUND COMMISSIONER BANDRA EAST", "194A", 19380, 1938)
     j = m.build_journals([d], _accounts(), overrides={7: "Liabilities:Suspense"})[0]
     assert j.credit_account == "Liabilities:Suspense"
-    assert j.credit_confidence == "Override" and not j.needs_review
+    # FL1.2: an accepted LLM override must still need human confirmation --
+    # it is a model pick, not a verified match, until the Review tab clears
+    # it. This is a deliberate behavior change from the pre-fix "not
+    # j.needs_review" (see test_override_stays_needs_review_fl1_2 below for
+    # the proof this changed).
+    assert j.credit_confidence == "Override" and j.needs_review
+    assert j.credit_basis == "Model pick - confirm"
     assert j.balanced
 
 
@@ -848,7 +854,70 @@ def test_tcs_override_wins():
                              _tcs_accounts(),
                              overrides={3: "Liabilities:Suspense"})[0]
     assert j.credit_account == "Liabilities:Suspense"
-    assert j.credit_confidence == "Override" and not j.needs_review
+    # FL1.2: same as test_override_wins -- a TCS override is still a model
+    # pick, so it must keep needs_review True until a human confirms it.
+    assert j.credit_confidence == "Override" and j.needs_review
+    assert j.credit_basis == "Model pick - confirm"
+
+
+# ---------------------------------------------------------------------------
+# FL1.2 -- an accepted LLM/model override must never skip human review.
+# Before this fix, all three builders forced needs_review=False the moment
+# an override was accepted, so a model pick on a Suspense row -- or on an
+# Ambiguous row with a tied candidate the gate (_gate_ambiguous_overrides in
+# tools.py) let through -- silently became "reviewed" with no human ever
+# looking at it. Only a human save from the Review tab
+# (ui/tabs/tds_journal_review.py's _apply_changes) may now clear the flag.
+#
+# Proven to fail pre-fix (tip bbbe369, rebased onto 2245b3b): each assertion
+# below on `j.needs_review is True` for an override fails with
+# `assert False is True`, since the pre-fix code set needs_review = False
+# (build_journals/build_15g_journals explicitly; build_tcs_journals via the
+# Journal dataclass's needs_review=False default, since it never touched
+# the field on the override branch at all).
+# ---------------------------------------------------------------------------
+
+def test_override_on_suspense_row_stays_needs_review_fl1_2():
+    """A deductor that would otherwise land on Suspense (unmatched name) but
+    gets an accepted LLM override must still be flagged needs_review -- the
+    override is a model pick, not a human-verified match."""
+    d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0)
+    accts = [
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
+        m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
+    ]
+    # Without an override this deductor goes to Suspense (see
+    # test_build_journals_places_placeholder_only_deductor_on_suspense).
+    j = m.build_journals([d], accts, overrides={1: "Liabilities:Suspense"})[0]
+    assert j.credit_confidence == "Override"
+    assert j.needs_review is True
+    assert j.credit_basis == "Model pick - confirm"
+
+
+def test_override_on_ambiguous_tied_candidate_stays_needs_review_fl1_2():
+    """An Ambiguous row with a tied candidate, accepted as an override (the
+    only kind _gate_ambiguous_overrides lets through), must still be flagged
+    needs_review -- it is a confirmed-as-plausible model pick, not a
+    human-confirmed one."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0)
+    accts = _tie_accounts()
+    tied_candidate = "Income:Interest Income:Interest on Zenith Global"
+    j = m.build_journals([d], accts, overrides={1: tied_candidate})[0]
+    assert j.credit_account == tied_candidate
+    assert j.credit_confidence == "Override"
+    assert j.needs_review is True
+    assert j.credit_basis == "Model pick - confirm"
+
+
+def test_15g_override_stays_needs_review_fl1_2():
+    """Same FL1.2 guarantee for the Part II (15G/15H) builder."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 0.0)
+    j = m.build_15g_journals([d], _tie_accounts(),
+                             overrides={1: "Income:Interest Income:Interest on Zenith Bank"})[0]
+    assert j.credit_confidence == "Override"
+    assert j.needs_review is True
+    assert j.credit_basis == "Model pick - confirm"
 
 
 def test_non_206c_section_in_part_vi_goes_suspense():
