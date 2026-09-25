@@ -258,6 +258,30 @@ def test_apply_changes_reassigns_both_row_sets():
     assert journal_rows[1]["Account"] == "Income:Interest Income:Interest on FD"
 
 
+def test_apply_changes_human_save_clears_needs_review_fl1_2():
+    """FL1.2: a human save from this Review tab is the only thing allowed to
+    clear "Needs Review" -- confirmed here for a row that arrived flagged
+    (as a "Model pick - confirm" override row now does per
+    build_tds_journals.py). Before this fix, _apply_changes never touched
+    "Needs Review" at all, so this assertion fails pre-fix with
+    review_rows[0]["Needs Review"] still "yes"."""
+    review_rows = [_review_row(needs_review="yes")]
+    journal_rows = [
+        {"Transaction ID": "2526-TDSJ01", "Account": "Expense:TDS on Interest", "Amount": "10.00"},
+        {"Transaction ID": "2526-TDSJ01", "Account": "Income:Interest Income:Interest on FD", "Amount": "90.00"},
+        {"Transaction ID": "2526-TDSJ01", "Account": "Liabilities:Suspense", "Amount": "-100.00"},
+    ]
+    changes = [{
+        "Sr": "1", "Category": "A", "Credit Account": "Income:Interest:ACME FD",
+        "_orig": "Liabilities:Suspense",
+    }]
+
+    review_rows, journal_rows, problems, applied = tjr._apply_changes(review_rows, journal_rows, changes)
+
+    assert applied == 1
+    assert review_rows[0]["Needs Review"] == ""
+
+
 def test_apply_changes_reports_ambiguous_without_mutating():
     review_rows = [_review_row(sr="2")]
     journal_rows = [
@@ -708,3 +732,35 @@ def test_load_review_data_hostile_content_not_live_markup(tmp_path):
 
     assert "</script><img src=x onerror=alert(1)>" not in html
     assert "%%APP%%" not in html
+
+
+def test_apply_changes_ambiguous_row_accepts_non_tied_account():
+    """PR B (code-level gate on LLM overrides): the gate lives ONLY in
+    skill_26as_journal/tools.py._gate_ambiguous_overrides, on the LLM
+    apply_overrides path. The human Review tab's _apply_changes is a
+    completely separate code path (this module) and must stay unrestricted
+    -- a person can assign an Ambiguous row to ANY account, including one
+    that is not in its Tied Candidates list. This is a positive control:
+    if a future change accidentally wired the same tied-candidate gate into
+    this tab, this test would start failing."""
+    review_rows = [_review_row(sr="3")]
+    review_rows[0]["Confidence"] = "Ambiguous"
+    review_rows[0]["Tied Candidates"] = "Income:Interest:Tied A; Income:Interest:Tied B"
+    journal_rows = [
+        {"Transaction ID": "2526-TDSJ03", "Account": "Expense:TDS on Interest", "Amount": "10.00"},
+        {"Transaction ID": "2526-TDSJ03", "Account": "Income:Interest Income:Interest on FD", "Amount": "90.00"},
+        {"Transaction ID": "2526-TDSJ03", "Account": "Liabilities:Suspense", "Amount": "-100.00"},
+    ]
+    changes = [{
+        "Sr": "3", "Category": "A",
+        "Credit Account": "Income:Interest:Not Tied At All",
+        "_orig": "Liabilities:Suspense",
+    }]
+
+    review_rows, journal_rows, problems, applied = tjr._apply_changes(
+        review_rows, journal_rows, changes)
+
+    assert problems == []
+    assert applied == 1
+    assert review_rows[0]["Credit Account"] == "Income:Interest:Not Tied At All"
+    assert journal_rows[2]["Account"] == "Income:Interest:Not Tied At All"

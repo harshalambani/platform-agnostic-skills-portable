@@ -99,6 +99,58 @@ def _normalize_overrides(overrides) -> "dict | str":
     return out
 
 
+def _gate_ambiguous_overrides(overrides: dict, output_path: str):
+    """LLM overrides for an Ambiguous row (two or more tied credit-account
+    candidates) are accepted ONLY if the chosen account is one of that row's
+    Tied Candidates. An override to any other account is REJECTED before the
+    builder subprocess ever runs -- the row keeps its existing first-wins
+    account and Needs Review flag, exactly as if no override had been
+    supplied for it. This gate applies only to Ambiguous rows: Suspense and
+    every other row pass through untouched, and the human Review tab
+    (skill_26as_journal's Gradio review UI, `_apply_changes`) is a completely
+    separate code path this gate does not reach -- a person can still assign
+    an Ambiguous row to any account there.
+
+    Returns (accepted_dict, []) when every requested override is either
+    accepted or not subject to the gate (row missing / not Ambiguous), or a
+    "REJECTED: ..." string naming each rejected Sr, its deductor and why, if
+    at least one override is rejected -- in which case the whole call is
+    short-circuited (no overrides are applied) so the caller can report the
+    rejection before touching the subprocess or the output file.
+    """
+    out = Path(output_path)
+    review = out.with_name(out.stem + "-review.csv")
+    if not review.is_file():
+        return overrides, []
+
+    with review.open(newline="", encoding="utf-8") as f:
+        rows_by_sr = {(r.get("Sr") or "").strip(): r for r in csv.DictReader(f)}
+
+    accepted: dict[str, str] = {}
+    rejections: list[str] = []
+    for sr, account in overrides.items():
+        row = rows_by_sr.get(str(sr))
+        if row is None or (row.get("Confidence") or "").strip() != "Ambiguous":
+            accepted[sr] = account
+            continue
+        tied = [t.strip() for t in (row.get("Tied Candidates") or "").split(";")
+                if t.strip()]
+        if account in tied:
+            accepted[sr] = account
+        else:
+            deductor = (row.get("Deductor") or "?").strip()
+            rejections.append(
+                f"Sr {sr} ({deductor}): '{account}' is not one of the tied "
+                f"candidates ({', '.join(tied) or 'none listed'}); the row "
+                f"keeps its existing account and stays flagged for manual "
+                f"review in the Review tab."
+            )
+
+    if rejections:
+        return "REJECTED:\n" + "\n".join(rejections)
+    return accepted, rejections
+
+
 def run_build(xlsx_path: str, gnucash_path: str, output_path: str,
               partner_comp_configured: bool = False) -> str:
     """Deterministic build + self-verify. Returns the summary + verification."""
@@ -163,7 +215,7 @@ def final_summary(output_path: str, gnucash_path: str = "") -> str:
             parser = [r for r in rows if conf(r) in ("High", "Medium")]
             llm = [r for r in rows if conf(r) == "Override"]
             ambiguous = [r for r in rows if conf(r) == "Ambiguous"]
-            suspense = [r for r in rows if conf(r) in ("Suspense", "Low")
+            suspense = [r for r in rows if conf(r) == "Suspense"
                         or "Suspense" in (r.get("Credit Account") or "")]
             n = len(rows)
             lines.append(
@@ -204,6 +256,12 @@ def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
     norm = _normalize_overrides(overrides)
     if isinstance(norm, str):       # error message
         return norm
+    if not norm:
+        return "No overrides supplied; the existing CSV is unchanged and valid."
+    gated = _gate_ambiguous_overrides(norm, output_path)
+    if isinstance(gated, str):      # one or more overrides rejected
+        return gated
+    norm, _rejections = gated
     if not norm:
         return "No overrides supplied; the existing CSV is unchanged and valid."
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,

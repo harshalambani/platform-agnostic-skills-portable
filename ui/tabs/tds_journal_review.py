@@ -482,6 +482,16 @@ def _apply_changes(
             review_row["Tied Candidates"] = ""
         if known_accounts is not None:
             review_row["Account Exists"] = "yes" if new_account in known_accounts else "NO"
+        # FL1.2: a HUMAN save from this Review tab is the only thing allowed
+        # to clear "Needs Review" -- an LLM/model override never does (see
+        # build_tds_journals.py's build_journals()/build_15g_journals()/
+        # build_tcs_journals(), which now keep needs_review True on an
+        # override so a "Model pick - confirm" row still lands here). Once a
+        # person has actually looked at this row and (re)assigned its
+        # account, it is reviewed, regardless of what state it arrived in
+        # (Suspense, Ambiguous, or an unconfirmed model pick).
+        if "Needs Review" in review_row:
+            review_row["Needs Review"] = ""
         applied += 1
 
     return review_rows, journal_rows, problems, applied
