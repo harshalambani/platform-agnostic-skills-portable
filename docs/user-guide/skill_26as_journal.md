@@ -14,9 +14,9 @@ Use this after "26AS Convert", when you want the TDS and TCS recorded in GnuCash
 - **26AS workbook (Convert output)** (required) — accepts: Excel (.xlsx) matching *-26AS.xlsx.
   - The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs.
   - ⚠️ Run 26AS Convert first; the picker only shows workbooks from earlier runs.
-- **Entity (optional) -- fills in the GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
-  - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
-  - ⚠️ UI convenience only; leave unset to pick the file manually as before.
+- **Entity -- fills in the GnuCash book below from the registry** (required) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - Pick the entity this 26AS workbook belongs to. Also auto-fills the GnuCash book field from the registered book for that entity.
+  - ⚠️ Required — the skill uses this to check whether s.194T partner-comp TDS is already booked elsewhere, so it does not double-book it.
 - **GnuCash file** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used only to read account names for matching.
   - ⚠️ Close the book in GnuCash before running so the file is not locked. It is never modified.

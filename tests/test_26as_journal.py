@@ -1166,3 +1166,126 @@ def test_apply_overrides_tool_param_is_optional():
     assert "overrides" in schema.get("properties", {}), "param must still exist"
     assert "overrides" not in schema.get("required", []), \
         "overrides must be optional so a no-arg tool call is accepted, not 400'd"
+
+
+# ---------------------------------------------------------------------------
+# FL1.1 -- `entity` is now a required input (skill.yaml). A blank entity, or
+# one not found in entities.yaml, must fail loud in agent.run() BEFORE any
+# CSV is written -- never fall back to silently journalling Category C. An
+# entity that IS found but has no partner_comp_accounts configured must
+# proceed exactly as before (double-booking warning kept only for that case).
+# ---------------------------------------------------------------------------
+
+import yaml as _yaml  # noqa: E402
+
+
+def _write_entities_yaml_26as(tmp_path, *, key="syn-firm", partner_comp_accounts=None):
+    fields = {"name": "Synthetic Firm", "pan": "AAAAA0000A", "status": "Firm"}
+    if partner_comp_accounts is not None:
+        fields["partner_comp_accounts"] = partner_comp_accounts
+    path = tmp_path / "entities.yaml"
+    path.write_text(_yaml.safe_dump({key: fields}), encoding="utf-8")
+    return path
+
+
+def test_run_refuses_blank_entity_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path)
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entity is blank")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert "entity" in result.lower()
+    assert not out.exists(), "no CSV may be written when entity resolution fails"
+
+
+def test_run_refuses_unknown_entity_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path, key="syn-firm")
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entity is unknown")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="does-not-exist",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert "does-not-exist" in result
+    assert not out.exists(), "no CSV may be written when entity resolution fails"
+
+
+def test_run_proceeds_when_entity_found_without_partner_comp(tmp_path, monkeypatch):
+    """An entity that IS found but has no partner_comp_accounts configured must
+    proceed exactly as today (no fail-loud refusal) -- only the resolved
+    `partner_comp_configured` bool changes, and it must be False here."""
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = _write_entities_yaml_26as(tmp_path, key="syn-firm")
+    captured = {}
+
+    class _FakeAgent:
+        def invoke(self, _messages):
+            return {"messages": [type("M", (), {"content": "ok"})()]}
+
+    def _fake_build_agent(tools, prompt, config_path, model_override):
+        captured["tools"] = tools
+        return _FakeAgent()
+
+    def _fake_make_tools(xlsx_path, gnucash_path, output_path, partner_comp_configured=False):
+        captured["partner_comp_configured"] = partner_comp_configured
+        return []
+
+    def _fake_final_summary(output_path, gnucash_path):
+        return "Done."
+
+    monkeypatch.setattr(AG, "build_agent", _fake_build_agent)
+    monkeypatch.setattr(AG, "_make_tools", _fake_make_tools)
+    monkeypatch.setattr(AG.T, "final_summary", _fake_final_summary)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(tmp_path / "out.csv"),
+        entity="syn-firm",
+        entities_path=str(entities_path),
+    )
+    assert not result.startswith("ERROR")
+    assert captured["partner_comp_configured"] is False
+
+
+def test_skill_yaml_entity_input_is_required():
+    import yaml as _y
+
+    skill_yaml = SRC / "agents" / "skill_26as_journal" / "skill.yaml"
+    data = _y.safe_load(skill_yaml.read_text(encoding="utf-8"))
+    inputs = data["inputs"]
+    names = [i["name"] for i in inputs]
+    entity_input = next(i for i in inputs if i["name"] == "entity")
+    assert entity_input["required"] is True, "entity must be required per FL1.1"
+    assert "optional" not in entity_input["label"].lower(), \
+        "label must drop the stale (optional) wording now that entity is required"
+    # entity must stay out of first place -- it is a "consumed" input (used
+    # in run_args), and ui/tabs/_generic.py names the output after whichever
+    # consumed input is FIRST in this list. xlsx_path must still lead.
+    assert names[0] == "xlsx_path", \
+        "entity must not become the first input -- would break output-file naming"
