@@ -99,9 +99,13 @@ def _normalize_overrides(overrides) -> "dict | str":
     return out
 
 
-def run_build(xlsx_path: str, gnucash_path: str, output_path: str) -> str:
+def run_build(xlsx_path: str, gnucash_path: str, output_path: str,
+              partner_comp_configured: bool = False) -> str:
     """Deterministic build + self-verify. Returns the summary + verification."""
-    out = _run_script([xlsx_path, gnucash_path, output_path])
+    args = [xlsx_path, gnucash_path, output_path]
+    if partner_comp_configured:
+        args.append("--partner-comp-configured")
+    out = _run_script(args)
     if out.startswith("ERROR"):
         return out
     return out + "\n\n" + _verify(output_path)
@@ -195,7 +199,7 @@ def final_summary(output_path: str, gnucash_path: str = "") -> str:
 
 
 def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
-              overrides) -> str:
+              overrides, partner_comp_configured: bool = False) -> str:
     """Re-build applying credit-account overrides, then self-verify."""
     norm = _normalize_overrides(overrides)
     if isinstance(norm, str):       # error message
@@ -206,7 +210,10 @@ def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
                                      encoding="utf-8") as f:
         json.dump(norm, f)
         ov_path = f.name
-    out = _run_script([xlsx_path, gnucash_path, output_path, ov_path])
+    args = [xlsx_path, gnucash_path, output_path, ov_path]
+    if partner_comp_configured:
+        args.append("--partner-comp-configured")
+    out = _run_script(args)
     if out.startswith("ERROR"):
         return out
     return out + "\n\n" + _verify(output_path)

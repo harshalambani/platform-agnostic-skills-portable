@@ -1087,6 +1087,75 @@ def test_run_apply_none_is_noop_and_touches_nothing():
     assert not Path(missing).exists()
 
 
+# ---------------------------------------------------------------------------
+# A1 wiring: run_build/run_apply must thread partner_comp_configured through
+# to the build_tds_journals.py subprocess as the --partner-comp-configured
+# CLI flag (see that script's `main()` / _PARTNER_COMP_FLAG). agent.py's
+# run() already resolves partner_comp_configured and passes it into both
+# tool closures unconditionally -- if these two functions didn't accept the
+# kwarg, EVERY real call to build_journals()/apply_overrides() would raise
+# TypeError, not just entities with partner_comp_accounts configured.
+#
+# Proven to fail on b3a9df6 (pre-fix): run_build/run_apply had no
+# partner_comp_configured parameter at all, so both calls below raised
+# `TypeError: ...got an unexpected keyword argument 'partner_comp_configured'`.
+# ---------------------------------------------------------------------------
+
+def test_run_build_appends_partner_comp_flag_when_configured(monkeypatch):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv", partner_comp_configured=True)
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv",
+                                "--partner-comp-configured"]
+
+
+def test_run_build_omits_partner_comp_flag_when_not_configured(monkeypatch):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv")
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv"]
+    tl.run_build("x.xlsx", "y.gnucash", "z.csv", partner_comp_configured=False)
+    assert captured["args"] == ["x.xlsx", "y.gnucash", "z.csv"]
+
+
+def test_run_apply_appends_partner_comp_flag_when_configured(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    out = str(tmp_path / "out.csv")
+    tl.run_apply("x.xlsx", "y.gnucash", out, {"2": "Income:X"},
+                 partner_comp_configured=True)
+    assert captured["args"][:3] == ["x.xlsx", "y.gnucash", out]
+    assert captured["args"][-1] == "--partner-comp-configured"
+
+
+def test_run_apply_omits_partner_comp_flag_when_not_configured(monkeypatch, tmp_path):
+    captured = {}
+
+    def _fake_run_script(args):
+        captured["args"] = args
+        return "Done."
+
+    monkeypatch.setattr(tl, "_run_script", _fake_run_script)
+    out = str(tmp_path / "out.csv")
+    tl.run_apply("x.xlsx", "y.gnucash", out, {"2": "Income:X"})
+    assert "--partner-comp-configured" not in captured["args"]
+
+
 def test_apply_overrides_tool_param_is_optional():
     """The real tool schema must NOT list `overrides` as required — that is what
     prevents strict endpoints from 400-ing an argument-less call."""
