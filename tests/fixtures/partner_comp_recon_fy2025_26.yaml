@@ -251,6 +251,16 @@ advisory:
 #   - current_opening_balance (500,000, invented) minus the one non-zero
 #     prior_cohort_drawdown (60,000, April) gives current_closing_balance
 #     (440,000) -- the "booked (monthly)" side of that tie-out row.
+#   - current_drawings (-8,217,920, printed negative/parenthesised per the
+#     L5 convention -- see parsers/llp_statement.py) is the magnitude of
+#     the twelve months' total_paid (7,857,920) plus the s.194T TDS
+#     withheld on them (360,000) = 8,217,920 -- H35-04's D1 identity row
+#     ("Current-account drawings: statement vs (net monthly payouts +
+#     s.194T TDS withheld)"). Only `current_drawings` itself is read by
+#     engine.py for this row; current_total_withdrawals/capital_drawings
+#     below are not consumed by build_report() and are left as originally
+#     invented (they matter only to the L5 *parser's* own arithmetic
+#     checks, not exercised by this structured-input fixture).
 llp_record:
   document_type: "llp_statement"
   financial_year: "2025-26"
@@ -265,7 +275,7 @@ llp_record:
   current_remuneration: 3600000
   current_profit_share: 6000000
   current_total_additions: 10100000
-  current_drawings: 0
+  current_drawings: -8217920
   current_transfer_to_capital: 0
   current_total_withdrawals: 60000
   current_closing_balance: 440000

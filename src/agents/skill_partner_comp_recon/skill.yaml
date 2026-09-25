@@ -274,9 +274,12 @@ help:
           reporting/prior/future FY-assignment column), Capital (the rule
           as a formula off Drivers, the Advisory cross-check, and the
           mid-year rate-change detector), Reconciliation (agree / variance
-          / cannot-reconcile per category), Exceptions (every
-          non-agreeing or non-reconcilable row collected together), and
-          Open items (anything left unresolved and what would close it).
+          / cannot-reconcile per category -- topped by a highlighted
+          "STATEMENT DISAGREES" block when the LLP Statement of Account
+          disagrees with another source or fails its own arithmetic; see
+          the tip below), Exceptions (every non-agreeing or
+          non-reconcilable row collected together), and Open items
+          (anything left unresolved and what would close it).
       - name: "<journal_path> (optional -- Stage 1b, only written if journal_path is set)"
         tooltip: >
           A GnuCash multi-split journal CSV: one balanced transaction per
@@ -302,10 +305,24 @@ help:
     CHANGE SUSPECTED" row means the incentive cohort's instalments show
     unequal capital-deducted amounts -- re-read that year's Compensation
     Advisory, since it will have been reissued at a new rate part-way
-    through the cohort.
+    through the cohort. The LLP Statement of Account (L5), when supplied,
+    is the REFERENCE for every row it carries a figure for (closing
+    capital, current-account closing, remuneration, interest on capital,
+    profit share, drawings) -- every other source is measured against it,
+    never averaged in as an equal peer. Any disagreement beyond the Re 1
+    tolerance, or a failure in the statement's own arithmetic, is flagged
+    both at the top of the run summary text and in a highlighted
+    "STATEMENT DISAGREES" block above the Reconciliation sheet's table --
+    check that block first, before the per-row statuses below it.
   troubleshooting:
     - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
       fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
+    - problem: "A 'STATEMENT DISAGREES' block appears at the top of the run summary / Reconciliation sheet."
+      fix: "The LLP Statement of Account (L5) is the reference for that row, and another supplied source (or the statement's own printed arithmetic) disagrees with it beyond the Re 1 tolerance -- the note spells out 'Statement says X; <source> says Y; difference Z' or names the failed arithmetic check. Investigate the disagreement; this skill never picks a winner for you."
+    - problem: "'Total cash received (monthly payouts) vs Bank' always shows CANNOT RECONCILE."
+      fix: "This row expects the partner's own bank statement credit total (external.bank_credits_total in the input) -- no document parser in this skill produces that figure yet, so it must be supplied directly in the input if this leg is wanted. It is a different figure from any GnuCash books tie-out, which compares the firm's own bank account movement, not this partner's personal receipts."
+    - problem: "'Incentive instalments: award-year Advisory vs payment schedule' note now starts with 'INFORMATIONAL (superseded by ...)'."
+      fix: "This category is no longer the primary drawings check -- see the new 'Current-account drawings: statement vs (net monthly payouts + s.194T TDS withheld)' row for that. This one still reports a genuine Advisory-vs-schedule disagreement when it fires; it is informational, not retired."
     - problem: "Reconciliation shows AGREE for two sources that are not byte-for-byte equal."
       fix: "Every reconciliation in this skill (including the L5 tie-out rows) uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie, anything more is reported as VARIANCE. This is a fixed, named constant (engine.RECONCILIATION_TOLERANCE), never a per-run setting -- it absorbs paisa-level rounding between sources, not a genuine discrepancy."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."

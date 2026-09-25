@@ -389,6 +389,72 @@ def reconcile_category(category: str, sources: dict,
     return ReconciliationResult(category=category, sources=sources, agree=agree, note=note)
 
 
+def statement_reference_row(
+    category: str, statement_value, statement_label: str, other_sources: dict,
+    tolerance: float = RECONCILIATION_TOLERANCE,
+) -> ReconciliationResult:
+    """H35-04 item A: for every row where the LLP Statement of Account (L5)
+    carries a figure, the statement is the reference ("gospel truth") --
+    every other supplied source is measured AGAINST it, never treated as an
+    equal peer the way reconcile_category()'s "first value happens to be
+    the baseline" idiom would. Each disagreement beyond `tolerance` is
+    spelled out explicitly: "Statement says X; <source> says Y; difference
+    Z" -- never just "variance across sources".
+
+    When `statement_value` is None (no statement supplied for this row, or
+    the field could not be parsed), this degrades to the OLD (pre-H35-04)
+    all-sources-equal reconcile_category() behaviour over `other_sources`
+    alone (the statement is never in the sources dict in that case, exactly
+    as before), with a note stating plainly that no statement was supplied
+    -- it never silently promotes another source to be the reference.
+    """
+    if statement_value is None:
+        result = reconcile_category(category, dict(other_sources), tolerance=tolerance)
+        prefix = (
+            "No LLP Statement of Account (L5) figure supplied for this row -- "
+            "the statement is not available as the reference here. "
+        )
+        result.note = prefix + (result.note or "")
+        return result
+
+    sources = {statement_label: statement_value, **other_sources}
+    present_others = {k: v for k, v in other_sources.items() if v is not None}
+    missing_others = [k for k, v in other_sources.items() if v is None]
+
+    if not present_others:
+        note = (
+            f"{CANNOT_RECONCILE} -- the statement's figure ({statement_value:,.2f}) is "
+            "the reference for this row, but no other source is available to "
+            f"compare it against (missing: {', '.join(missing_others) or 'all other sources'})."
+        )
+        return ReconciliationResult(category=category, sources=sources, agree=None, note=note)
+
+    disagreements = []
+    agreements = []
+    for label, value in present_others.items():
+        diff = value - statement_value
+        if abs(diff) > tolerance:
+            disagreements.append(
+                f"Statement says {statement_value:,.2f}; {label} says {value:,.2f}; "
+                f"difference {diff:,.2f}."
+            )
+        else:
+            agreements.append(label)
+
+    if disagreements:
+        note = "STATEMENT DISAGREES -- " + " ".join(disagreements)
+        if agreements:
+            note += f" (agrees with: {', '.join(agreements)})."
+        if missing_others:
+            note += f" Not supplied: {', '.join(missing_others)}."
+        return ReconciliationResult(category=category, sources=sources, agree=False, note=note)
+
+    note = "All supplied sources agree with the LLP Statement of Account (the reference)."
+    if missing_others:
+        note += f" Not supplied: {', '.join(missing_others)}."
+    return ReconciliationResult(category=category, sources=sources, agree=True, note=note)
+
+
 def booked_current_account_closing(monthly: "list[MonthlyLine]", llp_record: dict | None):
     """H35-02: the current-account closing balance implied purely by the
     booked monthly figures, rolled forward from the L5 statement's own
@@ -501,6 +567,17 @@ class Report:
     # jv_emitter.build_accrual_journal() as well as the L5 tie-out rows
     # below, so it is carried on the Report rather than only used locally.
     llp_record: dict | None = None
+    # H35-04 item B: every LOUD flag this run raised -- one line per
+    # statement-referenced reconciliation row whose note starts with
+    # "STATEMENT DISAGREES" (see statement_reference_row()), plus one line
+    # per ERROR-level entry in llp_record["diagnostics"] (item C -- the
+    # statement's own arithmetic, already computed by
+    # parsers/llp_statement.py's _balance_check()/_section_sum_check(),
+    # never re-derived here). Empty when the statement agrees with every
+    # other source and its own arithmetic checks out (or no statement was
+    # supplied at all). Consumed by agent.py (top of the text summary) and
+    # writer.py (top of the Reconciliation sheet) to build the loud block.
+    statement_flags: list[str] = field(default_factory=list)
 
 
 def build_report(data: dict) -> Report:
@@ -597,6 +674,25 @@ def build_report(data: dict) -> Report:
     # top double-counts cash the monthly total already contains. The
     # monthly payouts alone ARE the cash received.
     total_monthly_paid = sum(m.total_paid for m in monthly) if monthly else None
+    # H35-04 item D2 (investigated, left unwired -- see PR description /
+    # AGENT.md for the full note): external["bank_credits_total"] is meant
+    # to be the PARTNER's own bank statement total credit for the cash
+    # received -- no parser or document flow in this skill produces that
+    # figure, and none is asked for by skill.yaml either, so it always
+    # degrades to CANNOT RECONCILE unless a caller injects it directly (as
+    # the H35-02 structured-input test fixtures do). gnucash_tieout.py's
+    # build_balance_tieout() (wired separately, below, into a "bank"-keyed
+    # ReconciliationResult appended onto report.reconciliation by agent.py)
+    # looks similar but is NOT a substitute: it compares the FIRM's own
+    # book bank account FY movement against the journal this run implies,
+    # not the specific cash this one partner personally received -- the
+    # firm's bank account carries many other flows (other partners, trade
+    # payments, etc.) that would swamp the partner-specific comparison this
+    # row exists for. Wiring it in here would silently misstate a firm-wide
+    # bank movement as if it were this partner's own bank credit, which is
+    # exactly the kind of wrong-scope mis-statement that must never be
+    # done quietly -- so this row is deliberately left CANNOT RECONCILE
+    # unless a real per-partner bank-credit source is supplied.
     bank_total, _ = field_or_reason(external, "bank_credits_total", "bank credits total")
     reconciliation.append(reconcile_category(
         "Total cash received (monthly payouts) vs Bank",
@@ -614,10 +710,10 @@ def build_report(data: dict) -> Report:
     # here). Absent/unparseable L5 is a fail-loud placeholder naming the
     # L5 statement as required, not a silent fallback to total_sop.
     if llp_record is not None and llp_record.get("current_profit_share") is not None:
-        reconciliation.append(reconcile_category(
+        reconciliation.append(statement_reference_row(
             "Exempt share of profit (s.10(2A)) vs the filed return",
-            {"L5 Statement (Profit Share for the Year)": llp_record["current_profit_share"],
-             "Return": return_exempt_sop},
+            llp_record["current_profit_share"], "L5 Statement (Profit Share for the Year)",
+            {"Return": return_exempt_sop},
         ))
     else:
         reconciliation.append(ReconciliationResult(
@@ -638,19 +734,20 @@ def build_report(data: dict) -> Report:
                                            "Advisory's stated closing capital")
     return_closing, _ = field_or_reason(external, "return_closing_capital",
                                          "return's closing capital")
-    capital_sources = {
-        "Rule (Drivers)": capital_rule.required_cumulative_capital,
-        "Advisory": advisory_closing, "Return": return_closing,
-    }
-    if llp_record is not None:
-        # H35-02 item 1: add the L5 capital-closing figure as an extra
-        # source in this SAME row (rather than a wholly separate row) --
-        # capital already has three cross-checking sources here, and the L5
-        # figure is one more of the same kind, not a different comparison.
-        capital_sources["LLP Statement (L5)"] = llp_record.get("capital_closing_balance")
-    reconciliation.append(reconcile_category(
+    # H35-04 item A: the LLP Statement of Account (L5), when supplied, is
+    # the REFERENCE for this row -- the rule/Advisory/Return are each
+    # measured against it ("Statement says X; <source> says Y; difference
+    # Z"), never averaged in as equal peers the way this row used to work
+    # (H35-02 added the L5 figure as a fourth equal source; H35-04 changes
+    # that). Absent a statement, this falls back to the old three-way
+    # equal-peers comparison unchanged, with a plain note that no statement
+    # was supplied.
+    reconciliation.append(statement_reference_row(
         "Closing capital: rule vs Advisory vs the filed return",
-        capital_sources,
+        llp_record.get("capital_closing_balance") if llp_record is not None else None,
+        "LLP Statement (L5)",
+        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
+         "Advisory": advisory_closing, "Return": return_closing},
     ))
 
     # H35-02 item 1: three further L5 tie-out rows -- current-account
@@ -674,9 +771,12 @@ def build_report(data: dict) -> Report:
                 sources={"Booked (monthly)": booked, "LLP Statement (L5)": None},
                 agree=None, note=l5_required_note,
             )
-        return reconcile_category(
-            category,
-            {"Booked (monthly)": booked, "LLP Statement (L5)": llp_record.get(l5_key)},
+        # H35-04 item A: the L5 figure is the reference here too -- a
+        # disagreement is reported as "Statement says X; Booked (monthly)
+        # says Y; difference Z", not a generic two-way variance.
+        return statement_reference_row(
+            category, llp_record.get(l5_key), "LLP Statement (L5)",
+            {"Booked (monthly)": booked},
         )
 
     booked_current_closing = booked_current_account_closing(monthly, llp_record)
@@ -702,6 +802,42 @@ def build_report(data: dict) -> Report:
     reconciliation.append(reconcile_category(
         "TDS credit: computed (monthly remuneration TDS) vs Form 26AS",
         {"Computed (monthly TDS)": total_tds_credit, "Form 26AS": form_26as},
+    ))
+
+    # H35-04 item D1: the current account's Drawings, per the L5 statement,
+    # should equal the net cash the partner actually received (this FY's
+    # monthly payouts, prior-cohort instalments included -- same
+    # `total_monthly_paid` figure the Bank row above uses) PLUS the s.194T
+    # TDS withheld on that cash (TDS is deducted before payment, so it
+    # never reaches the bank, but it is still money "drawn" out of the
+    # partner's account on the firm's books). The identity is built
+    # explicitly as payouts + TDS -- NOT payouts alone -- so a TDS-blind
+    # comparison can never be mistaken for agreement when TDS is non-zero.
+    #
+    # Sign note: the L5 statement prints Drawings parenthesised (negative
+    # -- see parsers/llp_statement.py's module docstring and
+    # _balance_check()'s "withdrawals are already negative" convention),
+    # while payouts + TDS is a positive cash-out figure. The statement
+    # value is negated here purely to compare magnitudes on the same sign
+    # -- statement_reference_row() still receives the statement's own
+    # printed sign as the displayed reference value would be misleading,
+    # so the negated (positive, "cash drawn") figure is what is shown and
+    # compared, named accordingly.
+    payouts_plus_tds = (
+        total_monthly_paid + total_tds_credit
+        if total_monthly_paid is not None and total_tds_credit is not None
+        else None
+    )
+    statement_drawings_raw = (
+        llp_record.get("current_drawings") if llp_record is not None else None
+    )
+    statement_drawings_magnitude = (
+        -statement_drawings_raw if statement_drawings_raw is not None else None
+    )
+    reconciliation.append(statement_reference_row(
+        "Current-account drawings: statement vs (net monthly payouts + s.194T TDS withheld)",
+        statement_drawings_magnitude, "LLP Statement (L5) Drawings (magnitude, as cash drawn)",
+        {"Net monthly payouts + TDS withheld": payouts_plus_tds},
     ))
 
     # The cohort instalments' firms_tax is NOT added here: mapper.py sources
@@ -732,6 +868,24 @@ def build_report(data: dict) -> Report:
     # entirely, so a mismatch there is a missing-document CANNOT RECONCILE
     # naming the specific award-year Advisory that is missing, never a
     # silent comparison against the wrong year's figures.
+    # H35-04 item E: this category is SUPERSEDED by D1's drawings-vs-
+    # payouts-plus-TDS identity above, which reconciles the same "did the
+    # cash the partner actually drew match what should have gone out"
+    # question directly against the statement (the gospel-truth reference)
+    # instead of only cross-checking the Advisory's award-year schedule
+    # against the payment schedule's own cohort ledger -- two sources that
+    # both originate upstream of the statement. It is NOT retired outright:
+    # several existing tests assert specific agree/note values for this
+    # exact category (test_reconciliation_incentive_instalments_*), so
+    # removing it would drop real coverage for a still-useful cross-check
+    # (advisory vs schedule) that D1 does not replace one-for-one. It is
+    # demoted to informational instead -- every branch's note below is
+    # prefixed to say so plainly, without changing `agree`/`sources`/the
+    # rest of the note (existing substring assertions keep passing).
+    _informational_prefix = (
+        "INFORMATIONAL (superseded by the D1 drawings-vs-payouts identity "
+        "check, H35-04) -- "
+    )
     category_name = "Incentive instalments: award-year Advisory vs payment schedule"
     if not cohorts_raw:
         reconciliation.append(ReconciliationResult(
@@ -739,7 +893,8 @@ def build_report(data: dict) -> Report:
             sources={"Award-year Advisory (schedule_instalments)": None,
                      "Payment-schedule cohort ledger": None},
             agree=None,
-            note=f"{CANNOT_RECONCILE} -- no cohort (Previous Year PLMIs) data "
+            note=_informational_prefix +
+                 f"{CANNOT_RECONCILE} -- no cohort (Previous Year PLMIs) data "
                  "supplied for this FY.",
         ))
     else:
@@ -754,7 +909,8 @@ def build_report(data: dict) -> Report:
                 sources={"Award-year Advisory (schedule_instalments)": None,
                          "Payment-schedule cohort ledger": cohort_gross_total},
                 agree=None,
-                note=f"{CANNOT_RECONCILE} -- the cohort's award year is FY{award_fy}, "
+                note=_informational_prefix +
+                     f"{CANNOT_RECONCILE} -- the cohort's award year is FY{award_fy}, "
                      f"but the Compensation Advisory supplied is for FY"
                      f"{advisory_fy or '<none supplied>'}; the FY{award_fy} Advisory "
                      "is missing and its schedule_instalments cannot be substituted "
@@ -762,11 +918,29 @@ def build_report(data: dict) -> Report:
             ))
         else:
             advisory_gross_total = advisory.get("schedule_instalments_gross_total")
-            reconciliation.append(reconcile_category(
+            informational_row = reconcile_category(
                 category_name,
                 {"Award-year Advisory (schedule_instalments)": advisory_gross_total,
                  "Payment-schedule cohort ledger": cohort_gross_total},
-            ))
+            )
+            informational_row.note = _informational_prefix + (informational_row.note or "")
+            reconciliation.append(informational_row)
+
+    # ---- H35-04 item B: assemble the LOUD block ---------------------------
+    # One line per statement-referenced row that disagrees with the L5
+    # statement (its note starts with "STATEMENT DISAGREES" -- see
+    # statement_reference_row()), plus one line per ERROR-level entry in
+    # the L5 parser's own arithmetic diagnostics (item C -- surfaced here,
+    # never re-derived). Empty when the statement agrees everywhere and its
+    # own arithmetic checks out (or no statement was supplied at all).
+    statement_flags: list[str] = []
+    for r in reconciliation:
+        if r.agree is False and r.note.startswith("STATEMENT DISAGREES"):
+            statement_flags.append(f"{r.category}: {r.note}")
+    if llp_record is not None:
+        for line in llp_record.get("diagnostics", []) or []:
+            if line.startswith("ERROR:"):
+                statement_flags.append(f"Statement arithmetic -- {line}")
 
     return Report(
         financial_year=fy, drivers=drivers, monthly=monthly, cohorts_raw=cohorts_raw,
@@ -777,4 +951,5 @@ def build_report(data: dict) -> Report:
         firm_name=data.get("firm_name", "") or "",
         opening_reclass=data.get("opening_reclass"),
         llp_record=llp_record,
+        statement_flags=statement_flags,
     )

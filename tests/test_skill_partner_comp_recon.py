@@ -26,6 +26,7 @@ from agents.skill_partner_comp_recon import engine, jv_emitter, writer
 from agents.skill_partner_comp_recon.agent import run
 from agents.skill_partner_comp_recon.engine import (
     CANNOT_RECONCILE,
+    RECONCILIATION_TOLERANCE,
     build_report,
     classify_cohort_instalments,
     derive_misc,
@@ -34,7 +35,9 @@ from agents.skill_partner_comp_recon.engine import (
     field_or_reason,
     fy_of_date,
     gross_up_one_off,
+    reconcile_category,
     required_cumulative_capital,
+    statement_reference_row,
 )
 from agents.skill_partner_comp_recon.jv_emitter import (
     JOURNAL_HEADERS,
@@ -5463,3 +5466,280 @@ def test_h35_02_accrual_malformed_fy_still_raises():
 
     with pytest.raises(jv_emitter.JournalValidationError):
         jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+
+
+# ---------------------------------------------------------------------------
+# H35-04 -- the LLP Statement of Account (L5) is the REFERENCE for every row
+# it carries a figure for, disagreements are flagged loudly (top of the
+# Reconciliation sheet / summary text, via Report.statement_flags), the
+# statement's own arithmetic (already checked by parsers/llp_statement.py)
+# is surfaced, drawings are checked against payouts + s.194T TDS (D1), and
+# the FJ3.7 cohort cross-check is demoted to informational (E). All figures
+# below are invented and self-consistent -- see this file's module
+# docstring and AGENT.md's Safety section.
+# ---------------------------------------------------------------------------
+
+# ---- A) statement_reference_row() itself -- the core new function --------
+
+def test_h35_04_statement_reference_row_flags_disagreement_beyond_tolerance():
+    result = statement_reference_row(
+        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100500.0},
+    )
+    assert result.agree is False
+    assert result.note.startswith("STATEMENT DISAGREES")
+    assert "Statement says 100,000.00; Other source says 100,500.00" in result.note
+    assert "difference 500.00" in result.note
+    assert result.sources == {"LLP Statement (L5)": 100000.0, "Other source": 100500.0}
+    # NEGATIVE: the statement is the reference, never itself reported as the
+    # disagreeing party -- the note never says the statement's own label
+    # "says" something different from itself.
+    assert "LLP Statement (L5) says" not in result.note
+
+
+def test_h35_04_statement_reference_row_agrees_exactly_at_re1_boundary():
+    # Exactly Re 1 off -> ties (abs(diff) > tolerance is False at diff==1.0).
+    result = statement_reference_row(
+        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100001.0},
+        tolerance=RECONCILIATION_TOLERANCE,
+    )
+    assert result.agree is True
+    assert "STATEMENT DISAGREES" not in result.note
+    assert "agree with the LLP Statement of Account" in result.note
+
+
+def test_h35_04_statement_reference_row_disagrees_just_beyond_re1_boundary():
+    result = statement_reference_row(
+        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100001.01},
+    )
+    assert result.agree is False
+    assert result.note.startswith("STATEMENT DISAGREES")
+
+
+def test_h35_04_statement_reference_row_cannot_reconcile_with_no_other_sources():
+    result = statement_reference_row(
+        "Some category", 5000.0, "LLP Statement (L5)", {"Other source": None},
+    )
+    assert result.agree is None
+    assert CANNOT_RECONCILE in result.note
+    assert "5,000.00" in result.note
+
+
+def test_h35_04_statement_reference_row_no_statement_falls_back_to_old_equal_peers():
+    # No statement supplied -> the OLD reconcile_category() all-sources-
+    # equal behaviour over other_sources alone, statement key absent
+    # entirely from sources, with a plain "not supplied" note prefixed on.
+    other_sources = {"Rule (Drivers)": 100000.0, "Advisory": 100000.0}
+    result = statement_reference_row(
+        "Some category", None, "LLP Statement (L5)", other_sources,
+    )
+    expected = reconcile_category("Some category", dict(other_sources))
+    assert result.agree == expected.agree
+    assert result.sources == expected.sources
+    assert "LLP Statement (L5)" not in result.sources
+    assert result.note.startswith(
+        "No LLP Statement of Account (L5) figure supplied for this row"
+    )
+    # NEGATIVE: no other source is ever silently promoted to be "the
+    # reference" -- reconcile_category()'s own equal-peers note (or lack of
+    # one) is what follows the prefix, never a statement-style "X says...
+    # Y says" comparison.
+    assert "STATEMENT DISAGREES" not in result.note
+
+
+# ---- B) the LOUD block (Report.statement_flags), via build_report --------
+
+def _h35_04_data(*, llp_record=None, advisory_closing=None, return_closing=None,
+                  return_exempt_sop=None):
+    """Built on top of _h35_02_data()'s two-month fixture (total_paid
+    480000 combined, tds -20000 combined) so D1's payouts+TDS identity and
+    the closing-capital / exempt-SoP statement-reference rows can all be
+    exercised from one small, self-consistent set of numbers."""
+    data = _h35_02_data(llp_record=llp_record)
+    if advisory_closing is not None:
+        data["advisory"] = {"stated_closing_capital": advisory_closing}
+    if return_closing is not None:
+        data["external"]["return_closing_capital"] = return_closing
+    if return_exempt_sop is not None:
+        data["external"]["return_exempt_share_of_profit"] = return_exempt_sop
+    return data
+
+
+def _find(report, category):
+    return next(r for r in report.reconciliation if r.category == category)
+
+
+_CLOSING_CAPITAL_CATEGORY = "Closing capital: rule vs Advisory vs the filed return"
+_EXEMPT_SOP_CATEGORY = "Exempt share of profit (s.10(2A)) vs the filed return"
+_D1_CATEGORY = (
+    "Current-account drawings: statement vs "
+    "(net monthly payouts + s.194T TDS withheld)"
+)
+
+
+def test_h35_04_closing_capital_row_statement_is_reference_others_measured_against_it():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_closing=990000,   # disagrees (diff 10,000)
+        return_closing=1000000,    # agrees exactly
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert row.sources["LLP Statement (L5)"] == 1000000
+    assert "Statement says 1,000,000.00; Advisory says 990,000.00" in row.note
+    assert "difference -10,000.00" in row.note
+    # NEGATIVE: the statement is never itself reported as disagreeing, and
+    # the row that agrees (Return) is named as agreeing, not as a second
+    # disagreement.
+    assert "LLP Statement (L5) says" not in row.note
+    assert "agrees with: Return" in row.note
+
+    assert any(f.startswith(_CLOSING_CAPITAL_CATEGORY) for f in report.statement_flags)
+
+
+def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
+        advisory_closing=1000000,
+        return_closing=1000000,
+        return_exempt_sop=300000,
+    )
+    report = build_report(data)
+    assert report.statement_flags == []
+
+
+def test_h35_04_loud_block_not_triggered_by_an_exact_re1_difference():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
+        advisory_closing=999999,   # exactly Re 1 off -> ties
+        return_closing=1000000,
+        return_exempt_sop=300000,
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_CATEGORY)
+    assert row.agree is True
+    assert report.statement_flags == []
+
+
+def test_h35_04_loud_block_triggered_just_beyond_re1_difference():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
+        advisory_closing=999998.99,   # Rs 1.01 off -> disagrees
+        return_closing=1000000,
+        return_exempt_sop=300000,
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_CATEGORY)
+    assert row.agree is False
+    assert report.statement_flags != []
+
+
+# ---- C) the statement's own arithmetic (surfaced, never re-derived) ------
+
+def test_h35_04_statement_arithmetic_error_diagnostic_becomes_a_loud_flag():
+    data = _h35_02_data(llp_record={
+        "diagnostics": [
+            "ERROR: capital account does not balance: opening + additions + "
+            "withdrawals (999,500.00) != closing (1,000,000.00), diff 500.00",
+        ],
+    })
+    report = build_report(data)
+    assert any(
+        f.startswith("Statement arithmetic -- ERROR:") for f in report.statement_flags
+    )
+
+
+def test_h35_04_statement_arithmetic_note_only_diagnostic_is_not_a_loud_flag():
+    data = _h35_02_data(llp_record={
+        "diagnostics": [
+            "NOTE: withdrawals section skipped -- no withdrawal rows printed this year.",
+        ],
+    })
+    report = build_report(data)
+    assert report.statement_flags == []
+
+
+# ---- D1) drawings vs (net monthly payouts + s.194T TDS withheld) ---------
+
+def test_h35_04_d1_drawings_identity_holds_with_tds_added_back():
+    # _h35_02_data(): total_paid 240000 + 240000 = 480000; tds -10000 x2
+    # -> total_tds_credit = 20000; payouts_plus_tds = 500000. The L5 prints
+    # Drawings parenthesised (negative) -- -500000 here is the printed
+    # figure for a 500000 drawing, matching payouts_plus_tds exactly.
+    data = _h35_02_data(llp_record={"current_drawings": -500000})
+    report = build_report(data)
+    row = _find(report, _D1_CATEGORY)
+
+    assert row.agree is True
+    assert row.sources["Net monthly payouts + TDS withheld"] == 500000
+
+    # NEGATIVE: payouts ALONE (480000, without adding back the 20000 TDS
+    # withheld) would NOT have agreed with the statement's 500000 -- proving
+    # the identity genuinely includes the TDS leg rather than coincidentally
+    # matching on payouts alone.
+    total_monthly_paid_alone = sum(m.total_paid for m in report.monthly)
+    assert total_monthly_paid_alone == 480000
+    assert abs(total_monthly_paid_alone - 500000) > RECONCILIATION_TOLERANCE
+
+
+def test_h35_04_d1_drawings_flags_disagreement_when_statement_matches_payouts_alone():
+    # NEGATIVE (the mandatory one): the L5 states Drawings equal to the raw
+    # monthly payouts total (480000) with the TDS withheld left out --
+    # payouts_plus_tds is 500000, so this must be reported as a genuine
+    # STATEMENT DISAGREES, never silently accepted as agreement. If D1's
+    # identity were built from payouts alone (a bug), this would wrongly
+    # show AGREE instead.
+    data = _h35_02_data(llp_record={"current_drawings": -480000})
+    report = build_report(data)
+    row = _find(report, _D1_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference 20,000.00" in row.note
+    assert any(f.startswith(_D1_CATEGORY) for f in report.statement_flags)
+
+
+# ---- E) FJ3.7 cohort check demoted to informational, not retired ---------
+
+def test_h35_04_incentive_instalments_check_demoted_to_informational():
+    # No cohort data supplied at all -- the existing CANNOT RECONCILE
+    # branch (pre-H35-04 behaviour, still exercised by
+    # test_reconciliation_incentive_instalments_cannot_reconcile_when_no_cohorts_at_all)
+    # must now also carry the informational prefix, with everything else
+    # (category name, agree value, CANNOT_RECONCILE substring) unchanged.
+    data = _h35_02_data()
+    report = build_report(data)
+    row = _find(report, "Incentive instalments: award-year Advisory vs payment schedule")
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert row.note.startswith(
+        "INFORMATIONAL (superseded by the D1 drawings-vs-payouts identity "
+        "check, H35-04) -- "
+    )
+
+
+# ---- No statement supplied at all: old behaviour preserved, no crash -----
+
+def test_h35_04_no_statement_supplied_old_behaviour_preserved_no_crash():
+    data = _h35_04_data(
+        llp_record=None, advisory_closing=1000000, return_closing=1000000,
+    )
+    report = build_report(data)  # must not raise
+
+    closing_row = _find(report, _CLOSING_CAPITAL_CATEGORY)
+    assert closing_row.note.startswith(
+        "No LLP Statement of Account (L5) figure supplied for this row"
+    )
+    assert "LLP Statement (L5)" not in closing_row.sources
+    assert closing_row.agree is True  # Rule/Advisory/Return still compared as equal peers
+
+    d1_row = _find(report, _D1_CATEGORY)
+    assert d1_row.note.startswith(
+        "No LLP Statement of Account (L5) figure supplied for this row"
+    )
+    assert d1_row.agree is None  # a single remaining source -> CANNOT RECONCILE
+
+    assert report.statement_flags == []
+    assert report.llp_record is None

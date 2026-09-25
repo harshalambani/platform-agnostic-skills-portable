@@ -376,9 +376,30 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
 
 def _write_reconciliation_sheet(wb, report: Report):
     ws = wb.create_sheet("Reconciliation")
+    # H35-04 item B: the LOUD block goes ABOVE the header/table, not just
+    # as another row inside it -- every disagreement with the LLP
+    # Statement of Account (L5, the reference for every row it carries a
+    # figure for) plus every failure in the statement's own arithmetic
+    # (report.statement_flags, built once in engine.build_report()). Only
+    # rendered when non-empty; the header row then starts wherever this
+    # block leaves off, so the sheet is unchanged when there is nothing to
+    # flag.
+    header_row = 1
+    if report.statement_flags:
+        _set(ws, 1, 1, "STATEMENT DISAGREES", fill=BAD, bold=True)
+        _set(ws, 1, 2,
+             f"{len(report.statement_flags)} issue(s) with the LLP Statement of "
+             "Account (L5), the reference for this reconciliation -- see below.",
+             fill=BAD, wrap=True)
+        flag_row = 2
+        for flag in report.statement_flags:
+            _set(ws, flag_row, 1, "!", fill=BAD, bold=True)
+            _set(ws, flag_row, 2, flag, fill=BAD, wrap=True)
+            flag_row += 1
+        header_row = flag_row + 1  # blank row separates the loud block from the table
     headers = ["Category", "Sources", "Status", "Note"]
-    _write_header(ws, 1, headers)
-    row = 2
+    _write_header(ws, header_row, headers)
+    row = header_row + 1
     for r in report.reconciliation:
         _set(ws, row, 1, r.category, wrap=True)
         sources_text = "; ".join(

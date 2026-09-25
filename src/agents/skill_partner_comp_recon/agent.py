@@ -300,11 +300,32 @@ def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
 
-    lines_out = [
+    lines_out: list[str] = []
+    # H35-04 item B: the LOUD block. Any disagreement with the LLP
+    # Statement of Account (L5) -- the reference for every row it carries a
+    # figure for -- or a failure in the statement's own arithmetic, is
+    # surfaced here, at the very top, ahead of even the headline
+    # "Partner Compensation Reconciliation for FY..." line. This is in
+    # ADDITION to the per-row status already covered by the variances/
+    # undecidable counts below, never a replacement for it. Nothing is
+    # shown here when report.statement_flags is empty (statement agrees
+    # everywhere and its own arithmetic checks out, or no statement was
+    # supplied at all).
+    if report.statement_flags:
+        lines_out.append("=" * 72)
+        lines_out.append(
+            f"STATEMENT DISAGREES -- {len(report.statement_flags)} issue(s) with the "
+            "LLP Statement of Account (L5), the reference for this reconciliation:"
+        )
+        for flag in report.statement_flags:
+            lines_out.append(f"  ! {flag}")
+        lines_out.append("=" * 72)
+
+    lines_out.append(
         f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
         f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
-        "instalment(s).",
-    ]
+        "instalment(s)."
+    )
     if variances:
         lines_out.append(
             f"  WARNING: reconciliation variance in {len(variances)} category(ies) "

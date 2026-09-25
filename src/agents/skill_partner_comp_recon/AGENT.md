@@ -341,6 +341,83 @@ accrual equals the L5 figure exactly (no doubling), that the accrual CSV
 is always a separate file leaving the monthly CSV byte-for-byte unchanged,
 and the other required-negative-test categories.
 
+## H35-04 -- the L5 Statement of Account is the REFERENCE, and disagreements
+are flagged loudly, not just row-by-row
+
+H35-02 (above) made the L5 the sole *source* for four figures. H35-04 goes
+further: everywhere the L5 carries a figure, it is now the **reference**
+that every other source is measured against -- not one equal peer among
+several, and no longer silently averaged in.
+
+1. **`engine.statement_reference_row()`** replaces the old
+   all-sources-equal `reconcile_category()` idiom for every L5-carried
+   row: closing capital (`Rule (Drivers)` / `Advisory` / `Return`, all
+   three now measured against the L5, not averaged in as a fourth equal
+   source the way H35-02 left it), the current-account closing balance,
+   remuneration for the year, interest on capital, and the exempt share of
+   profit. A disagreement is spelled out explicitly -- "Statement says X;
+   \<source> says Y; difference Z" -- never a generic "variance across
+   sources" note. When no L5 was supplied for a row, this degrades to the
+   exact pre-H35-04 all-sources-equal comparison, with a note stating
+   plainly that no statement was supplied -- it never silently promotes
+   another source to be the reference.
+2. **The LOUD block (`Report.statement_flags`).** Every row whose note
+   starts `STATEMENT DISAGREES` (an L5-referenced row beyond the Re 1
+   tolerance), plus every `ERROR:`-level entry in the L5 parser's own
+   `diagnostics` (item 3, below), is collected into `Report.statement_flags`
+   and surfaced TWICE, always ahead of anything else: at the very top of
+   `agent._summarize_report()`'s text (before the "Partner Compensation
+   Reconciliation for FY..." line), and as a highlighted block above the
+   header row of the Reconciliation sheet in the workbook. This is in
+   addition to, never instead of, the existing per-row AGREE/VARIANCE/
+   CANNOT RECONCILE status.
+3. **The L5's own arithmetic is surfaced, not re-derived.**
+   `parsers/llp_statement.py`'s `_balance_check()` / `_section_sum_check()`
+   already verify, per column (capital and current): opening +
+   total_additions + total_withdrawals == closing, and that the addition/
+   withdrawal rows sum to the printed totals -- appending `"ERROR: ..."` to
+   the parsed record's `diagnostics` list on failure. `build_report()`
+   reads that list (never recomputes the arithmetic itself) and turns each
+   `ERROR:` entry into a `statement_flags` line prefixed `"Statement
+   arithmetic -- "`.
+4. **D1 -- drawings vs payouts vs TDS.** A new reconciliation row,
+   "Current-account drawings: statement vs (net monthly payouts + s.194T
+   TDS withheld)", checks the L5's current-account Drawings figure against
+   the explicit identity `total_monthly_paid + total_tds_credit` (payouts
+   ALONE, without adding back the TDS withheld at source, is never treated
+   as agreeing with the statement -- TDS is deducted before the partner
+   sees the cash, but it was still money drawn out of the partner's
+   account on the firm's books). Sign note: the L5 prints Drawings
+   parenthesised (negative); this row negates it to a positive "cash
+   drawn" magnitude before comparing, and labels the source accordingly,
+   so the comparison is never a spurious full-statement-value mismatch.
+5. **D2 -- the bank leg, investigated and left unwired.**
+   `external["bank_credits_total"]` (the "Total cash received (monthly
+   payouts) vs Bank" row) is meant to be the PARTNER's own bank statement
+   credit total; no parser or document flow in this skill produces that
+   figure, and `gnucash_tieout.py`'s `build_balance_tieout()` "bank" leg
+   (compared separately, appended onto `report.reconciliation` by
+   `agent.py`) is NOT a substitute -- it compares the FIRM's own book bank
+   account FY movement against this run's implied journal, a figure that
+   includes every other partner's and every trade cash flow, not this
+   partner's own receipts. Wiring the firm-wide figure into this
+   partner-specific row would misstate scope, so it is left as
+   `CANNOT RECONCILE` unless a real per-partner bank-credit source is
+   supplied by the caller (as the H35-02 structured-input test fixtures
+   already do). See `engine.py`'s inline comment at this row for the full
+   reasoning.
+6. **E -- the FJ3.7 incentive-instalment cross-check is demoted, not
+   retired.** "Incentive instalments: award-year Advisory vs payment
+   schedule" (Advisory's `schedule_instalments` vs the payment-schedule
+   cohort ledger) is superseded by D1's statement-referenced identity for
+   the "did the cash match" question, but it is not removed: it checks a
+   genuinely different pair of upstream sources (Advisory vs schedule,
+   neither of which is the L5), and several existing tests assert its
+   exact `agree`/`CANNOT RECONCILE` behaviour by category name. Every
+   branch's note is now prefixed `"INFORMATIONAL (superseded by the D1
+   drawings-vs-payouts identity check, H35-04) -- "`; `agree` values,
+   `category`, and `sources` are unchanged.
+
 ## Non-goals (explicit, not deferred silently)
 
 - **No tax computation.** No slab, surcharge, cess, or exemption
