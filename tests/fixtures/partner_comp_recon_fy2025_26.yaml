@@ -231,6 +231,45 @@ advisory:
   financial_year: "2024-25"
   schedule_instalments_gross_total: 2000000
 
+# H35-02: the L5 LLP Statement of Account, whole (see
+# parsers/llp_statement.py's field shape). Every figure here is chosen to
+# agree exactly with this fixture's own monthly/capital/advisory figures,
+# same as every other external source in this file -- so the new L5
+# tie-out rows (engine.py) and the Exempt-SoP row (which now reads
+# current_profit_share here, never the monthly total) all AGREE, keeping
+# this fixture's single documented non-AGREE signal the Capital rate-change
+# suspect noted above.
+#   - capital_closing_balance (1,000,000) matches the Rule/Advisory/Return
+#     closing capital already agreeing above.
+#   - current_profit_share (6,000,000) matches the twelve months'
+#     share_of_profit_gross total (12 x 500,000) -- and, not coincidentally,
+#     also return_exempt_share_of_profit below, same as before H35-02.
+#   - current_remuneration (3,600,000) matches the twelve months' summed
+#     remuneration (12 x 300,000).
+#   - capital_interest_on_capital (12,000) matches the one non-zero
+#     interest_on_capital monthly figure (April).
+#   - current_opening_balance (500,000, invented) minus the one non-zero
+#     prior_cohort_drawdown (60,000, April) gives current_closing_balance
+#     (440,000) -- the "booked (monthly)" side of that tie-out row.
+llp_record:
+  document_type: "llp_statement"
+  financial_year: "2025-26"
+  capital_opening_balance: 988000
+  capital_introduced_transferred: 0
+  capital_interest_on_capital: 12000
+  capital_total_additions: 12000
+  capital_drawings: 0
+  capital_total_withdrawals: 0
+  capital_closing_balance: 1000000
+  current_opening_balance: 500000
+  current_remuneration: 3600000
+  current_profit_share: 6000000
+  current_total_additions: 10100000
+  current_drawings: 0
+  current_transfer_to_capital: 0
+  current_total_withdrawals: 60000
+  current_closing_balance: 440000
+
 external:
   # bank_credits_total is the sum of the twelve monthly total_paid figures
   # ALONE (7,857,920) -- the reconciliation compares monthly payouts to the

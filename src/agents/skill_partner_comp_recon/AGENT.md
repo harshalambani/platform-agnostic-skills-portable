@@ -275,6 +275,72 @@ closed, filed year is corrected by a prior-period reclassification booked
 in the *following* year, never by reopening the closed year and never by
 crediting current-year income.
 
+## H35-02 -- the L5 Statement of Account is the final authority for
+year-end figures, and its own year-end accrual journal
+
+User ruling: "Y-3 should come from the Statement of account as the final
+say." The L5 (LLP Statement of Account, `llp_statement.py`) is passed
+through whole to `engine.build_report()` (as `Report.llp_record`, when
+supplied and parseable) and is now the sole source for four things:
+
+1. **Four L5 tie-out reconciliation rows**, each `Booked (monthly)` vs
+   `LLP Statement (L5)`, at the shared Re 1 tolerance
+   (`engine.RECONCILIATION_TOLERANCE`, the same constant item 3.2 named):
+   closing capital (added as a fourth source alongside Rule/Advisory/
+   Return, in that existing row), current-account closing balance,
+   remuneration for the year, and interest on capital. A missing/
+   unparseable L5 fails these loud (`CANNOT RECONCILE`, naming the L5 as
+   required) -- no other document substitutes for it.
+2. **The "Exempt share of profit (s.10(2A)) vs the filed return" row now
+   reads the L5's own "Profit Share for the Year" figure, never the
+   monthly total.** Before H35-02 this row compared the monthly total
+   against the return; that fallback is gone -- an absent/unparseable L5
+   fails this row loud instead of silently substituting the monthly
+   figure, and no year-end accrual journal (below) is produced either, for
+   the same reason.
+3. **A separate year-end accrual journal** (`jv_emitter.build_accrual_journal()`
+   / `write_accrual_journal_csv()`, its own CSV file via `run()`'s
+   `accrual_journal_path` parameter -- never merged into the monthly
+   journal CSV `journal_path` produces). Dated 31 March of the FY END year
+   (e.g. FY "2025-26" -> 2026-03-31, never 2025-03-31 -- the accrual
+   belongs in the year being reconciled, not the prior, already-closed
+   year). Posts:
+
+   ```
+   Dr  current_account          = L5 profit share - already-booked monthly SoP total
+   Cr  share_of_profit_income   = -(the same amount)
+   ```
+
+   "Already-booked monthly SoP total" is the SAME formula the monthly
+   journal's `share_of_profit_income` leg uses
+   (`share_of_profit_gross + firms_tax_sop + additional_share_of_profit`),
+   summed across the whole year (arrears included -- one lump comparison,
+   not booked per month). This function posts to `current_account` /
+   `share_of_profit_income` ONLY -- it never touches `tds_expense` or any
+   other account, so it cannot create or duplicate a TDS posting: s.194T
+   TDS is deducted at source on each monthly payout and is already fully
+   booked by the monthly journal; this accrual is a pure profit-recognition
+   entry with no cash movement, so there is nothing here for TDS to apply
+   to. Skipped (no journal, a note explaining why) when: no L5 supplied;
+   the L5's profit-share figure is unparseable; the difference is within
+   Re 1 of zero (already ties); or the difference is negative (the monthly
+   total already booked EXCEEDS the L5 figure) -- that last case is
+   FLAGGED for manual review, never a silent reversing/negative entry.
+4. **A residual current-account comparison after the accrual**
+   (`engine.residual_current_account_check()`, always computed and
+   returned as the third element of `build_accrual_journal()`'s tuple,
+   even when no accrual was booked): the L5's `current_closing_balance`
+   vs. the booked current-account balance rolled forward from the L5's own
+   opening balance plus whatever the accrual (if any) applied. A residual
+   beyond Re 1 is reported as a VARIANCE -- it is never booked or
+   corrected automatically by any function in this package.
+
+See `tests/test_skill_partner_comp_recon.py`'s "H35-02" test section for
+the negative-test proof that monthly-booked share of profit plus this
+accrual equals the L5 figure exactly (no doubling), that the accrual CSV
+is always a separate file leaving the monthly CSV byte-for-byte unchanged,
+and the other required-negative-test categories.
+
 ## Non-goals (explicit, not deferred silently)
 
 - **No tax computation.** No slab, surcharge, cess, or exemption

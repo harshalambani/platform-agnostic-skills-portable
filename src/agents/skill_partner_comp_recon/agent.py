@@ -65,7 +65,14 @@ import yaml
 from .. import gnucash_accounts
 from .engine import build_report
 from .gnucash_tieout import build_balance_tieout, build_posted_check
-from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, write_journal_csv
+from .jv_emitter import (
+    ACCOUNT_KEYS,
+    JournalValidationError,
+    build_accrual_journal,
+    build_journals,
+    write_accrual_journal_csv,
+    write_journal_csv,
+)
 from .mapper import FinancialYearMismatchError, build_input_data
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
@@ -339,6 +346,7 @@ def run(
     config_path: str | None = None,
     model_override: str | None = None,
     journal_path: str = "",
+    accrual_journal_path: str = "",
     input_path: str = "",
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
@@ -346,6 +354,12 @@ def run(
     YAML/JSON path (unchanged from before this reshape); it is not part of
     skill.yaml's `inputs:` and never renders in the UI. Otherwise, this
     is the document-driven path described in _run_from_documents().
+
+    `accrual_journal_path` (H35-02, optional): when set AND journal_path is
+    also set, also writes the year-end share-of-profit accrual journal (a
+    SEPARATE CSV, never merged into journal_path's monthly journal --see
+    jv_emitter.build_accrual_journal()) to this path, if the L5 statement
+    supports it. Left blank, behaviour is unchanged from before H35-02.
     """
     if input_path:
         return _run_from_structured_input(
@@ -354,6 +368,7 @@ def run(
             config_path=config_path,
             model_override=model_override,
             journal_path=journal_path,
+            accrual_journal_path=accrual_journal_path,
         )
     return _run_from_documents(
         entity=entity,
@@ -368,6 +383,7 @@ def run(
         config_path=config_path,
         model_override=model_override,
         journal_path=journal_path,
+        accrual_journal_path=accrual_journal_path,
     )
 
 
@@ -385,6 +401,7 @@ def _run_from_documents(
     config_path: str | None,
     model_override: str | None,
     journal_path: str,
+    accrual_journal_path: str = "",
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -626,6 +643,25 @@ def _run_from_documents(
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
+        if accrual_journal_path:
+            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
+            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+            if accrual_journal is not None:
+                journal_line += (
+                    f"\n  Accrual journal CSV: {accrual_journal_path} "
+                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                )
+            else:
+                journal_line += f"\n  Accrual journal: not written. {accrual_note}"
+            # H35-02 item 4: the residual current-account comparison after
+            # whatever the accrual applied -- reported here, never booked.
+            residual_status = (
+                "AGREE" if residual.agree else
+                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
+            )
+            journal_line += (
+                f"\n  {residual.category}: {residual_status}. {residual.note}"
+            )
 
     summary = _summarize_report(report, output_path, journal_line)
     lines = [summary, "  Optional-leg status:"]
@@ -642,6 +678,7 @@ def _run_from_structured_input(
     config_path: str | None,
     model_override: str | None,
     journal_path: str,
+    accrual_journal_path: str = "",
 ) -> str:
     """TEST-ONLY entry path (see module docstring). Read the structured
     YAML/JSON input for one financial year, compute the reconciliation
@@ -656,6 +693,12 @@ def _run_from_structured_input(
     mentions it (with transaction/row counts) in the returned summary. When
     empty, behaviour is byte-identical to before Stage 1b existed -- no CSV
     is written.
+
+    accrual_journal_path is optional (H35-02). When non-empty AND
+    journal_path is also non-empty, also builds and writes the year-end
+    share-of-profit accrual journal (jv_emitter.build_accrual_journal /
+    write_accrual_journal_csv) to this SEPARATE path -- never merged into
+    journal_path's CSV -- if the input's llp_record supports it.
     """
     in_path = Path(input_path)
     if not in_path.is_file():
@@ -696,5 +739,24 @@ def _run_from_structured_input(
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
+        if accrual_journal_path:
+            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
+            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+            if accrual_journal is not None:
+                journal_line += (
+                    f"\n  Accrual journal CSV: {accrual_journal_path} "
+                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                )
+            else:
+                journal_line += f"\n  Accrual journal: not written. {accrual_note}"
+            # H35-02 item 4: the residual current-account comparison after
+            # whatever the accrual applied -- reported here, never booked.
+            residual_status = (
+                "AGREE" if residual.agree else
+                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
+            )
+            journal_line += (
+                f"\n  {residual.category}: {residual_status}. {residual.note}"
+            )
 
     return _summarize_report(report, output_path, journal_line)

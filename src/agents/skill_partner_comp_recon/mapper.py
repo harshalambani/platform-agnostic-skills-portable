@@ -616,7 +616,10 @@ def build_input_data(
     -------
     dict with keys: financial_year, firm_name, and (only when the source
     data supports them) drivers, advisory, monthly, cohorts, accounts,
-    ctc_structuring. `cohorts` is assembled from the L4 payment schedule's
+    ctc_structuring, llp_record (H35-02: the whole parsed L5 dict, carried
+    through unchanged, for engine.build_report()'s L5 tie-out rows and
+    Exempt-SoP row -- see parsers.llp_statement.parse_l5_words() for its
+    shape). `cohorts` is assembled from the L4 payment schedule's
     "Previous Year PLMIs" row (the only source that carries payment dates
     for these instalments -- see _build_cohorts()) and is only ever
     emitted as a non-empty list with one cohort; it is never emitted as
@@ -672,6 +675,14 @@ def build_input_data(
         # Recon-only -- never posted to any journal split (jv_emitter.py
         # never reads this key). See module docstring.
         data["ctc_structuring"] = schedule_record["ctc_structuring"]
+    if llp_record is not None:
+        # H35-02: carried through whole (not just the interest-on-capital
+        # figure _place_interest_on_capital() already extracts above) so
+        # engine.build_report() can build the L5 tie-out rows and the
+        # Exempt-SoP row against the L5 statement's "Profit Share for the
+        # Year" -- the user's ruling is that this document is the final
+        # authority for those year-end figures, never the monthly total.
+        data["llp_record"] = llp_record
 
     diagnostics = [*monthly_diagnostics, *ioc_diagnostics]
     if diagnostics:
