@@ -46,13 +46,16 @@ def _resolve_partner_comp_configured(entity: str, entities_path: str) -> bool:
     EntityResolutionError -- the caller must refuse the run before writing
     any CSV, per the s.194T double-booking check this value drives.
 
-    entities_path itself being missing/unparsable is a separate, system-
-    level problem (not a bad `entity` value) and is NOT treated as a hard
-    failure here: it resolves to False -- "not configured, or cannot be
-    determined" -- which keeps this skill's pre-existing behaviour
-    (Category C journalled as before, with a loud double-booking warning)
-    rather than blocking every run whenever entities.yaml itself has an
-    unrelated problem."""
+    entities_path itself being missing, unreadable, or unparsable is ALSO
+    a hard failure, not a silent fallback: if this file cannot be read, we
+    cannot know whether `entity`'s partner_comp_accounts is configured,
+    and cannot tell whether Category C (s.194T) would double-book TDS
+    that skill_partner_comp_recon's monthly journal already booked.
+    Falling back to False here would be exactly the silent fallback the
+    double-booking ruling closed elsewhere -- so this raises
+    EntityResolutionError naming the path, and no CSV is written. The
+    ONLY path that still journals Category C is an entity that IS found
+    in entities.yaml and has no partner_comp_accounts configured."""
     if not entity:
         raise EntityResolutionError(
             "No entity selected. Pick the entity this 26AS workbook belongs "
@@ -63,8 +66,15 @@ def _resolve_partner_comp_configured(entity: str, entities_path: str) -> bool:
     try:
         import configs  # type: ignore
         entities = configs.load_entities(entities_path)
-    except Exception:
-        return False
+    except Exception as e:
+        raise EntityResolutionError(
+            f"entities.yaml could not be read or parsed at '{entities_path}' "
+            f"({type(e).__name__}: {e}). Fix or restore this file before "
+            f"running -- this is required so the skill can check whether "
+            f"s.194T partner-comp TDS is already booked elsewhere and avoid "
+            f"double-booking it; this run has been refused and no CSV was "
+            f"written."
+        ) from e
     profile = entities.get(entity)
     if profile is None:
         raise EntityResolutionError(
@@ -123,7 +133,8 @@ def run(
     them — it only chooses accounts for the NEEDS REVIEW deductors.
 
     entity/entities_path: `entity` is required (skill.yaml). A blank entity,
-    or one not found in entities.yaml, fails loud here -- before build_agent
+    one not found in entities.yaml, or an entities.yaml that is itself
+    missing/unreadable/unparsable, all fail loud here -- before build_agent
     or any tool runs, so no CSV is ever written -- rather than silently
     falling back to journalling Category C. When `entity` resolves and has
     partner_comp_accounts configured in entities.yaml

@@ -1289,3 +1289,79 @@ def test_skill_yaml_entity_input_is_required():
     # consumed input is FIRST in this list. xlsx_path must still lead.
     assert names[0] == "xlsx_path", \
         "entity must not become the first input -- would break output-file naming"
+
+
+# ---------------------------------------------------------------------------
+# FL1.1 amendment (PR #269 hand-back ruling): entities.yaml itself being
+# missing, unreadable, or unparsable must ALSO fail loud -- the earlier cut
+# of this fix left that case as a silent fallback to
+# partner_comp_configured=False, which is exactly the silent fallback the
+# double-booking ruling was meant to close: if the file cannot be read, we
+# cannot know whether Category C (s.194T) would double-book TDS that
+# skill_partner_comp_recon's monthly journal already booked. The ONLY path
+# that may still journal Category C is an entity that IS found in
+# entities.yaml and has no partner_comp_accounts configured.
+# ---------------------------------------------------------------------------
+
+def test_run_refuses_missing_entities_yaml_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    missing_path = tmp_path / "does-not-exist-entities.yaml"
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entities.yaml is missing")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="syn-firm",
+        entities_path=str(missing_path),
+    )
+    assert result.startswith("ERROR")
+    assert str(missing_path) in result or "entities.yaml" in result.lower()
+    assert not out.exists(), "no CSV may be written when entities.yaml cannot be read"
+
+
+def test_run_refuses_unparsable_entities_yaml_and_writes_no_csv(tmp_path, monkeypatch):
+    from agents.skill_26as_journal import agent as AG
+
+    entities_path = tmp_path / "entities.yaml"
+    # Deliberately malformed YAML (unbalanced flow mapping) -- must raise a
+    # YAML parse error inside configs.load_entities(), not resolve to False.
+    entities_path.write_text("syn-firm: {name: Synthetic Firm, pan: [unterminated\n",
+                              encoding="utf-8")
+    out = tmp_path / "out.csv"
+
+    def _boom(*a, **k):
+        raise AssertionError("build_agent must not be called when entities.yaml doesn't parse")
+
+    monkeypatch.setattr(AG, "build_agent", _boom)
+
+    result = AG.run(
+        xlsx_path="x.xlsx",
+        gnucash_path="y.gnucash",
+        output_path=str(out),
+        entity="syn-firm",
+        entities_path=str(entities_path),
+    )
+    assert result.startswith("ERROR")
+    assert not out.exists(), "no CSV may be written when entities.yaml cannot be parsed"
+
+
+def test_resolve_partner_comp_configured_raises_not_returns_false_on_bad_entities_yaml(tmp_path):
+    """Direct unit-level proof (not just through run()): the earlier cut of
+    this fix had `except Exception: return False` here -- this pins the
+    fixed contract, a raised EntityResolutionError, so a future change
+    cannot silently reintroduce that fallback."""
+    from agents.skill_26as_journal.agent import EntityResolutionError, _resolve_partner_comp_configured
+
+    missing_path = tmp_path / "nope.yaml"
+    try:
+        _resolve_partner_comp_configured("syn-firm", str(missing_path))
+        assert False, "must raise EntityResolutionError, not return False"
+    except EntityResolutionError:
+        pass
