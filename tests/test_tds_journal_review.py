@@ -180,6 +180,46 @@ def test_row_presentation_clean_matched_row_is_green():
 
 
 # ---------------------------------------------------------------------------
+# TDS-06 -- Ambiguous rows get their own tag/badge, distinct from a
+# non-ambiguous High-confidence row, and carry their tied candidates.
+# ---------------------------------------------------------------------------
+
+def test_row_presentation_ambiguous_gets_its_own_tag_and_badge():
+    row = {
+        "Needs Review": "yes", "Credit Account": "Income:Interest:Zenith Bank",
+        "Account Exists": "yes", "Balanced": "yes", "Confidence": "Ambiguous",
+        "Basis": "Income:Interest:Zenith Bank: token:ZENITH",
+        "Tied Candidates": "Income:Interest:Zenith Bank; Income:Interest:Zenith Global",
+    }
+    tjr._row_presentation(row)
+    assert "ambiguous" in row["_tags"]
+    assert row["_rowclass"] == "accent-red"
+    assert row["_badges"][tjr.TARGET_COL] == {"text": "AMBIGUOUS", "cls": "amber"}
+    assert "Zenith Global" in row["_note"]
+
+
+def test_row_presentation_non_ambiguous_high_row_does_not_get_ambiguous_tag():
+    # NEGATIVE: a plain High-confidence match (not tied) must never pick up
+    # the "ambiguous" tag or badge just because it happens to be a Category A
+    # interest row -- only Confidence == "Ambiguous" triggers it.
+    row = {
+        "Needs Review": "", "Credit Account": "Income:Interest:ACME FD",
+        "Account Exists": "yes", "Balanced": "yes", "Confidence": "High",
+        "Basis": "token:ACME", "Tied Candidates": "",
+    }
+    tjr._row_presentation(row)
+    assert "ambiguous" not in row["_tags"]
+    assert row.get("_badges", {}).get(tjr.TARGET_COL, {}).get("text") != "AMBIGUOUS"
+    assert row["_rowclass"] == "accent-green"
+
+
+def test_spec_has_ambiguous_status_filter_and_tied_candidates_column():
+    spec = tjr._spec([], "irrelevant-path.csv")
+    assert ("ambiguous", "Ambiguous") in spec.status_options
+    assert any(col.key == "Tied Candidates" for col in spec.columns)
+
+
+# ---------------------------------------------------------------------------
 # _apply_changes -- in-memory row mutation
 # ---------------------------------------------------------------------------
 

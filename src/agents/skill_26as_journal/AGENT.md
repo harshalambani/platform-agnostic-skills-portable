@@ -32,8 +32,17 @@ year.
 `build_tds_journals` already runs deterministic matching (token overlap,
 acronym, alias table, single-candidate rule). It assigns a credit account and
 a confidence to each deductor and routes anything it cannot resolve to
-`Liabilities:Suspense`, marking it **NEEDS REVIEW** and listing candidate
-accounts.
+`Liabilities:Suspense`, marking it **REVIEW** and listing candidate accounts.
+
+Some deductors are instead marked **AMBIGUOUS**: two or more candidate
+accounts tied on score, so the (still-posted, first-wins) credit account is
+only a guess among equally-likely options. These are listed with their
+**tied candidates**, not plain candidates. **AMBIGUOUS is not REVIEW — never
+call `apply_overrides` for an AMBIGUOUS deductor**, no matter how clearly one
+of the tied candidates looks right to you. Two candidates tied deterministic
+scoring precisely because the deterministic matcher could not tell them
+apart from the deductor name alone; that same ambiguity is real for you too,
+and it is the user's call to make in the Review tab, not yours.
 
 Your tools take NO file paths — the workbook, GnuCash file and output path are
 already configured. Never pass a path or filename to any tool.
@@ -45,14 +54,15 @@ Your job is only the optional fallback:
    `Liabilities:Suspense`. If you do nothing else, the task is DONE and
    successful.
 
-2. (Optional) Read the summary. For each deductor marked **NEEDS REVIEW**, look
-   at its listed candidate accounts. If exactly one clearly fits the deductor
-   name, call:
+2. (Optional) Read the summary. For each deductor marked **REVIEW** (Suspense
+   or low confidence — never one marked **AMBIGUOUS**), look at its listed
+   candidate accounts. If exactly one clearly fits the deductor name, call:
    `apply_overrides(overrides={"<Sr.No>": "<full account path>"})`
    - `overrides` is the ONLY argument and is an OBJECT (not a string). Keys are
      the flagged Sr numbers as strings; values are full account paths from that
      deductor's candidate list.
-   - Include ONLY flagged Sr numbers. Never change a High/Medium match.
+   - Include ONLY flagged Sr numbers that are REVIEW, never AMBIGUOUS. Never
+     change a High/Medium match.
    - If no candidate clearly fits, do NOT call this tool — leaving the deductor
      on Suspense is the correct, valid outcome.
 
@@ -81,8 +91,10 @@ remap those debit accounts.
   Transfer Account are two-split-mode only and can't represent the 3-split
   Interest entries, so they are not used.)
 - `<output>-review.csv` — per-deductor audit: section, category, credit
-  account, confidence, whether the account exists, balance check, basis.
+  account, confidence, whether the account exists, balance check, basis, and
+  (last column) tied candidates for any AMBIGUOUS row.
 
 ## Final reply
-Summarise: number of deductors, how many matched vs. routed to Suspense, any
-accounts the user must create before import, and the verification result.
+Summarise: number of deductors, how many matched vs. routed to Suspense vs.
+left AMBIGUOUS for the user to tag, any accounts the user must create before
+import, and the verification result.

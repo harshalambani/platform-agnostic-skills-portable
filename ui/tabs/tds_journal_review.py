@@ -111,6 +111,7 @@ def _row_presentation(row: dict) -> None:
     needs_review = (row.get("Needs Review") or "").strip().lower() == "yes"
     credit_account = row.get("Credit Account") or ""
     is_suspense = "suspense" in credit_account.lower()
+    is_ambiguous = (row.get("Confidence") or "").strip() == "Ambiguous"
     missing_account = (row.get("Account Exists") or "").strip().upper() == "NO"
     unbalanced = (row.get("Balanced") or "").strip().upper() == "NO"
 
@@ -119,6 +120,8 @@ def _row_presentation(row: dict) -> None:
         tags.append("needs_review")
     if is_suspense:
         tags.append("suspense")
+    if is_ambiguous:
+        tags.append("ambiguous")
     if missing_account:
         tags.append("missing_account")
     if unbalanced:
@@ -129,9 +132,9 @@ def _row_presentation(row: dict) -> None:
 
     # unbalanced is the loudest failure state -- a transaction whose splits
     # don't sum to zero is a harder error than an unrecognised account name --
-    # so it's ranked with (not below) needs_review/suspense, above
+    # so it's ranked with (not below) needs_review/suspense/ambiguous, above
     # missing_account, and it must never fall through to a plain row.
-    if needs_review or is_suspense or unbalanced:
+    if needs_review or is_suspense or is_ambiguous or unbalanced:
         row["_rowclass"] = "accent-red"
     elif missing_account:
         row["_rowclass"] = "accent-amber"
@@ -139,14 +142,20 @@ def _row_presentation(row: dict) -> None:
         row["_rowclass"] = "accent-green"
 
     badges: dict = {}
-    if is_suspense:
+    if is_ambiguous:
+        badges[TARGET_COL] = {"text": "AMBIGUOUS", "cls": "amber"}
+    elif is_suspense:
         badges[TARGET_COL] = {"text": "SUSPENSE", "cls": "red"}
     elif missing_account:
         badges[TARGET_COL] = {"text": "NO ACCOUNT", "cls": "amber"}
     if badges:
         row["_badges"] = badges
 
-    row["_note"] = row.get("Basis") or ""
+    note = row.get("Basis") or ""
+    tied = (row.get("Tied Candidates") or "").strip()
+    if tied:
+        note = (note + " | tied candidates: " + tied) if note else ("tied candidates: " + tied)
+    row["_note"] = note
 
 
 def _load_review_rows(review_path: str) -> list[dict]:
@@ -172,6 +181,7 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str = 
             Column("Debit", "Debit", sort="number"),
             Column("Credit", "Credit", sort="number"),
             Column("Needs Review", "Needs Review"),
+            Column("Tied Candidates", "Tied Candidates"),
         ],
         target_col=TARGET_COL,
         payload_var="_tdsJrSavePayload",
@@ -181,6 +191,7 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str = 
         status_options=[
             ("needs_review", "Needs review"),
             ("suspense", "Suspense"),
+            ("ambiguous", "Ambiguous"),
             ("missing_account", "Missing account"),
             ("unbalanced", "Unbalanced"),
             ("matched", "Matched"),
@@ -464,6 +475,11 @@ def _apply_changes(
         review_row["Credit Account"] = new_account
         review_row["Confidence"] = OVERRIDE_CONFIDENCE
         review_row["Basis"] = OVERRIDE_BASIS
+        # Once the user has picked an account, the row is no longer
+        # ambiguous — any stale tied-candidate list from an Ambiguous row
+        # would otherwise linger after it's been resolved.
+        if "Tied Candidates" in review_row:
+            review_row["Tied Candidates"] = ""
         if known_accounts is not None:
             review_row["Account Exists"] = "yes" if new_account in known_accounts else "NO"
         applied += 1
@@ -479,7 +495,7 @@ _JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description",
                     "Account", "Amount", "Currency"]
 _REVIEW_HEADERS = ["Sr", "Deductor", "Section", "Category", "Credit Account",
                    "Confidence", "Account Exists", "Balanced", "Debit",
-                   "Credit", "Needs Review", "Basis"]
+                   "Credit", "Needs Review", "Basis", "Tied Candidates"]
 
 
 def _read_csv_rows(path: Path) -> list[dict]:

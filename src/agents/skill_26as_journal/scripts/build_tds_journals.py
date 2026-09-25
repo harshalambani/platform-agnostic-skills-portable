@@ -222,9 +222,10 @@ class Journal:
     section_label: str
     splits: list = field(default_factory=list)
     credit_account: str = ""
-    credit_confidence: str = ""        # High / Medium / Low / Suspense
+    credit_confidence: str = ""        # High / Medium / Low / Suspense / Ambiguous
     credit_basis: str = ""
     candidates: list = field(default_factory=list)
+    tied_candidates: list = field(default_factory=list)  # populated only when Ambiguous
     needs_review: bool = False
 
     @property
@@ -513,24 +514,42 @@ def _candidates_for(category: str, accounts: list[Account],
 
 def match_credit_account(deductor: str, category: str,
                          accounts: list[Account],
-                         fd_account: str = "") -> tuple[Optional[str], str, str, list]:
-    """Return (account_path|None, confidence, basis, candidate_paths)."""
+                         fd_account: str = "") -> tuple[Optional[str], str, str, list, list]:
+    """Return (account_path|None, confidence, basis, candidate_paths, tied_paths).
+
+    Matching is FIRST-WINS: when two or more candidates tie on the winning
+    score, the first one in chart order (cands' order, i.e. accounts' order)
+    is still the account returned/posted — this function never routes a tie
+    to Suspense and never picks a different candidate because of a tie. What
+    changes is visibility: a tie at a score that would otherwise be a
+    confident match (>= 1.5, the existing Suspense threshold) is reported as
+    confidence "Ambiguous" instead of "High"/"Medium", with every tied
+    candidate's path in tied_paths and named (with its own hits) in basis —
+    so the caller can flag it for the user to manually confirm which tied
+    candidate is actually correct, without ever silently guessing on their
+    behalf. A tie BELOW the threshold is indistinguishable from any other
+    unconfident result and still returns "Suspense" (tied_paths == []) —
+    "Ambiguous" means "confidently tied", not "equally bad".
+    """
     cands = _candidates_for(category, accounts, fd_account)
     cand_paths = [c.path for c in cands]
     if not cands:
-        return None, "Suspense", "no income accounts in category subtree", []
+        return None, "Suspense", "no income accounts in category subtree", [], []
 
     # Single-candidate rule (e.g. Category C has only 'Remuneration from Partnership').
     if len(cands) == 1:
-        return cands[0].path, "Medium", "only candidate in category subtree", cand_paths
+        return cands[0].path, "Medium", "only candidate in category subtree", cand_paths, []
 
     d_tokens_list = [t for t in _tokens(deductor) if t not in STOPWORDS and len(t) > 1]
     d_tokens = set(d_tokens_list)
     d_acro = _acronym(d_tokens_list)
 
-    best = None
-    best_score = 0.0
-    best_basis = ""
+    # Score every candidate first (rather than tracking a running "best" with
+    # a strict '>' comparison) so ties at the winning score can be detected
+    # afterwards — a running strict-greater comparison silently keeps only
+    # the first candidate to reach a score and can never notice that a later
+    # candidate tied it.
+    scored: list[tuple[Account, float, str]] = []
     for c in cands:
         c_tokens = _sig_tokens(c.leaf, ACC_NOISE)
         score = 0.0
@@ -559,15 +578,26 @@ def match_credit_account(deductor: str, category: str,
             if alias and (alias & d_tokens):
                 score += 2.0
                 hits.append(f"alias:{ct}")
-        if score > best_score:
-            best_score = score
-            best = c
-            best_basis = ", ".join(hits)
+        scored.append((c, score, ", ".join(hits)))
 
-    if best is None or best_score < 1.5:
-        return None, "Suspense", "no confident match", cand_paths
+    best_score = max(score for _c, score, _hits in scored)
+    if best_score < 1.5:
+        return None, "Suspense", "no confident match", cand_paths, []
+
+    # Ties: every candidate within float-rounding of best_score, in chart
+    # order (the order `cands`/`scored` was built in, i.e. `accounts`' order)
+    # — first-wins picks tied[0], never a different candidate because of the
+    # tie.
+    tied = [(c, hits) for c, score, hits in scored if abs(score - best_score) < 1e-9]
+    best, best_basis = tied[0]
+
+    if len(tied) > 1:
+        tied_paths = [c.path for c, _hits in tied]
+        basis = "; ".join(f"{c.path}: {hits or '(no hits)'}" for c, hits in tied)
+        return best.path, "Ambiguous", basis, cand_paths, tied_paths
+
     conf = "High" if best_score >= 2.0 else "Medium"
-    return best.path, conf, best_basis, cand_paths
+    return best.path, conf, best_basis, cand_paths, []
 
 
 # -------------------- journal construction --------------------
@@ -610,8 +640,9 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             journals.append(j)
             continue
 
-        acct, conf, basis, cands = match_credit_account(d.name, cat, accounts, fd_account)
+        acct, conf, basis, cands, tied = match_credit_account(d.name, cat, accounts, fd_account)
         j.candidates = cands
+        j.tied_candidates = tied
         if d.sr in overrides and overrides[d.sr]:
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
@@ -623,7 +654,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             j.credit_account = credit_acc
             j.credit_confidence = conf
             j.credit_basis = basis
-            j.needs_review = acct is None or conf in ("Low", "Suspense")
+            j.needs_review = acct is None or conf in ("Low", "Suspense", "Ambiguous")
 
         if cat == "A":
             j.splits = [
@@ -678,8 +709,9 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
         # Account matching reuses Category A's candidate pool (interest income
         # accounts) — a 15G/15H deductor's amount is interest income exactly
         # like a Category A one; only the tax-withholding status differs.
-        acct, conf, basis, cands = match_credit_account(d.name, "A", accounts, fd_account)
+        acct, conf, basis, cands, tied = match_credit_account(d.name, "A", accounts, fd_account)
         j.candidates = cands
+        j.tied_candidates = tied
         if d.sr in overrides and overrides[d.sr]:
             credit_acc = overrides[d.sr]
             j.credit_account = credit_acc
@@ -691,7 +723,7 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
             j.credit_account = credit_acc
             j.credit_confidence = conf
             j.credit_basis = basis
-            j.needs_review = acct is None or conf in ("Low", "Suspense")
+            j.needs_review = acct is None or conf in ("Low", "Suspense", "Ambiguous")
 
         if a:
             # Tax deducted despite 15G/15H (shouldn't happen, but if it does,
@@ -971,16 +1003,19 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
     existing = {a.path for a in accounts}
     with path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
+        # "Tied Candidates" is appended LAST, after "Basis" — anything that
+        # reads this CSV by column position (rather than by header name) must
+        # keep working unchanged. It is empty except for "Ambiguous" rows.
         w.writerow(["Sr", "Deductor", "Section", "Category", "Credit Account",
                     "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
-                    "Needs Review", "Basis"])
+                    "Needs Review", "Basis", "Tied Candidates"])
         for j in journals:
             w.writerow([
                 j.sr, j.deductor, j.section_label, j.category, j.credit_account,
                 j.credit_confidence, "yes" if j.credit_account in existing else "NO",
                 "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
                 f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
-                j.credit_basis,
+                j.credit_basis, "; ".join(j.tied_candidates),
             ])
 
 
@@ -1032,6 +1067,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
             "account_exists": j.credit_account in existing,
             "balanced": j.balanced, "needs_review": j.needs_review,
             "candidates": j.candidates, "basis": j.credit_basis,
+            "tied_candidates": j.tied_candidates,
         })
 
     return {
@@ -1049,6 +1085,23 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "part_i_output": part_i_output,
         "part_ii_problems": part_ii_problems,
     }
+
+
+def _review_flag(needs_review: bool, confidence: str) -> str:
+    """CLI flag text for one review row.
+
+    "Ambiguous" gets its own flag text, distinct from the plain "REVIEW"
+    used for Suspense/low-confidence rows: AGENT.md instructs the LLM
+    fallback (agent.py) to only resolve deductors flagged REVIEW via
+    apply_overrides. An Ambiguous row has two or more candidates tied on
+    score — it is for the user to tag in the Review tab, never for the LLM
+    to guess — so its flag text must never read "REVIEW".
+    """
+    if not needs_review:
+        return ""
+    if confidence == "Ambiguous":
+        return "  <-- AMBIGUOUS (tag manually in Review tab)"
+    return "  <-- REVIEW"
 
 
 def main(argv: list[str]) -> int:
@@ -1074,13 +1127,22 @@ def main(argv: list[str]) -> int:
           f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
     for r in stats["rows"]:
-        flag = "  <-- REVIEW" if r["needs_review"] else ""
+        flag = _review_flag(r["needs_review"], r["confidence"])
         print(f"  Sr{r['sr']:>2} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
               f"-> {r['credit_account']}  ({r['confidence']}){flag}")
-        if r["needs_review"] and r["candidates"]:
+        if r["needs_review"] and r.get("tied_candidates"):
+            print(f"        tied candidates: {', '.join(r['tied_candidates'])}")
+        elif r["needs_review"] and r["candidates"]:
             print(f"        candidates: {', '.join(r['candidates'])}")
     if stats["needs_review"]:
-        print(f"\n{len(stats['needs_review'])} deductor(s) need review (Suspense/low confidence).")
+        amb_n = sum(1 for r in stats["needs_review"] if r["confidence"] == "Ambiguous")
+        susp_n = len(stats["needs_review"]) - amb_n
+        parts = []
+        if susp_n:
+            parts.append(f"{susp_n} Suspense/low confidence")
+        if amb_n:
+            parts.append(f"{amb_n} Ambiguous (tied candidates — tag manually in Review tab)")
+        print(f"\n{len(stats['needs_review'])} deductor(s) need review ({', '.join(parts)}).")
     if stats["missing_accounts"]:
         print("\nAccounts to CREATE in GnuCash before import:")
         for acc in stats["missing_accounts"]:
