@@ -16,21 +16,28 @@ mode: "agent"
 entry_point: "agent:run"
 
 inputs:
-  # Entity leads the form: picking someone here fills in the GnuCash book
-  # below, so it belongs before the field it answers for. Safe to declare
-  # first because it is UI-only (absent from run_args) and ui/tabs/_generic.py
-  # only lets inputs the skill actually consumes name the output file.
-  - name: "entity"
-    type: "select"
-    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
-    options_from: "itr_entities"
-    required: false
+  # xlsx_path leads the form now that `entity` is a consumed input (below) --
+  # see ui/tabs/_generic.py's "consumed" filename logic: only an input that
+  # appears in some run_args `{inputs.<name>}` token may name the output
+  # file, and among those, whichever is FIRST in this list wins. `entity`
+  # used to be safe to declare first because it was UI-only (absent from
+  # run_args); now that this fix (A1, s.194T double-booking) reads it to
+  # check partner_comp_accounts, it is consumed too, so it must not lead --
+  # doing so would name every output "<entity name>-tds-journals.csv"
+  # instead of after the 26AS workbook (mirrors skill_partner_comp_recon's
+  # skill.yaml, which orders its required "entity" the same way for the
+  # same reason).
   - name: "xlsx_path"
     type: "output_file"
     label: "26AS workbook (Convert output)"
     match: "*-26AS.xlsx"
     file_types: [".xlsx"]
     required: true
+  - name: "entity"
+    type: "select"
+    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: false
   - name: "gnucash_path"
     type: "file"
     label: "GnuCash file"
@@ -39,11 +46,20 @@ inputs:
     book_from: "entity"
 
 run_args:
+  entity: "{inputs.entity}"
   xlsx_path: "{inputs.xlsx_path}"
   gnucash_path: "{inputs.gnucash_path}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
+  # Same {data_root} token as skill_itr_workbook / skill_ais_reconcile /
+  # skill_gnucash_coverage use for entities_path -- NOT the {config_path}
+  # token above, which is the LLM endpoint config.yaml, not entities.yaml.
+  # Used only to check whether `entity` has partner_comp_accounts configured
+  # (skill_partner_comp_recon already books s.194T TDS month-by-month for
+  # such an entity; this skill must not also book it via Category C, or the
+  # TDS is counted twice and remuneration is overstated by the full amount).
+  entities_path: "{data_root}/itr/entities.yaml"
 
 output:
   extension: ".csv"

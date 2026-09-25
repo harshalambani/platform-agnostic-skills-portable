@@ -428,6 +428,120 @@ def test_all_sample_journals_balanced():
 
 
 # ---------------------------------------------------------------------------
+# A1 (194T double-booking fix): when partner_comp_configured is True, this
+# skill's own Category C journals must be left OUT of the importable CSV
+# (partner_comp_recon's jv_emitter already books that TDS month-by-month) --
+# but still fully present in the Journal objects (for the review CSV/tab),
+# with a clear basis instead of a needs-review flag. When False (today's
+# default), Category C is unchanged except for a new double-booking warning
+# appended to credit_basis.
+#
+# Proven to fail on b3a9df6 (pre-fix): partner_comp_configured did not exist
+# as a build_journals()/build_csv_rows() parameter at all, so Category C rows
+# were always included in the CSV -- test_partner_comp_configured_excludes_
+# category_c_from_csv's "no Category C row present" assertion fails on
+# b3a9df6 (TypeError: build_journals() got an unexpected keyword argument
+# 'partner_comp_configured').
+# ---------------------------------------------------------------------------
+
+def test_partner_comp_configured_excludes_category_c_from_csv():
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=True)
+    j = journals[0]
+    assert j.category == "C"
+    assert j.excluded_from_journal is True
+    assert j.needs_review is False
+    assert "Partner Comp journal" in j.credit_basis
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert rows == []  # excluded entirely -- not merely re-labelled
+
+
+def test_partner_comp_not_configured_keeps_category_c_with_warning():
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=False)
+    j = journals[0]
+    assert j.excluded_from_journal is False
+    assert "WARNING" in j.credit_basis and "double-book" in j.credit_basis
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert len(rows) == 2  # both splits still emitted, exactly as before
+
+
+def test_partner_comp_configured_other_categories_unchanged_byte_for_byte():
+    """A/B categories in the SAME batch as an excluded Category C must come
+    out identical whether partner_comp_configured is True or False -- the
+    exclusion must not perturb any other deductor's rows."""
+    deds = [
+        _deductor(1, "BANK OF BARODA", "194A", 250237, 25024),
+        _deductor(2, "DR REDDY'S LABORATORIES LTD.", "194", 208000, 20800),
+        _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628),
+    ]
+    rows_off = m.build_csv_rows(
+        m.build_journals(deds, _accounts(), partner_comp_configured=False), "2025-26")
+    rows_on = m.build_csv_rows(
+        m.build_journals(deds, _accounts(), partner_comp_configured=True), "2025-26")
+    non_c_off = [r for r in rows_off if "Sec 194T" not in r["Description"]]
+    non_c_on = [r for r in rows_on if "Sec 194T" not in r["Description"]]
+    assert non_c_off == non_c_on
+    assert len(rows_on) == len(rows_off) - 2  # exactly the 194T splits dropped
+
+
+def test_end_to_end_194t_tds_counted_exactly_once_across_both_journals():
+    """Cross-skill assertion: the s.194T TDS debit total, summed across BOTH
+    partner_comp_recon's monthly journal CSV (jv_emitter) and this skill's
+    26AS journal CSV (build_tds_journals, partner_comp_configured=True), must
+    equal the 26AS-reported TDS figure exactly ONCE -- not twice (the double-
+    booking this fix exists to close) and not zero (the exclusion must not
+    silently drop the TDS from every ledger)."""
+    from agents.skill_partner_comp_recon.jv_emitter import build_journals as pc_build_journals
+    from agents.skill_partner_comp_recon.mapper import build_input_data
+    from agents.skill_partner_comp_recon.engine import build_report
+
+    pc_accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "current_account": "Assets:Firm Current Account",
+        "capital_contribution": "Assets:Firm Capital Account",
+        "medical_expense": "Expenses:Medical",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    advice = {
+        "month": "2025-04",
+        "source_name": "synthetic_l1_classA_2025-04.pdf",
+        "total_paid": 480000.0,
+        "remuneration": 200000.0,
+        "share_of_profit_gross": 300000.0,
+        "additional_share_of_profit": 0.0,
+        "tds": -20000.0,
+    }
+    data = build_input_data(
+        financial_year="2025-26", advice_records=[advice],
+        accounts=pc_accounts, firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    pc_journals = pc_build_journals(report, pc_accounts)
+    pc_tds_total = sum(
+        s.debit for j in pc_journals for s in j.splits
+        if s.account == pc_accounts["tds_expense"]
+    )
+    assert pc_tds_total == pytest.approx(20000.0, abs=0.01)
+
+    # The SAME s.194T TDS (20000.0) as it would appear in the 26AS workbook
+    # for this firm's deductor -- this skill must exclude it from its CSV.
+    d = _deductor(1, "SYNTHETIC TEST LLP", "194T", 220000, 20000.0)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=True)
+    rows = m.build_csv_rows(journals, "2025-26")
+    journal_194t_total = sum(
+        float(r["Amount"]) for r in rows if float(r["Amount"]) > 0
+    )
+    assert journal_194t_total == 0.0  # nothing from THIS skill's CSV
+
+    combined_total = pc_tds_total + journal_194t_total
+    assert combined_total == pytest.approx(20000.0, abs=0.01)  # counted once
+
+
+# ---------------------------------------------------------------------------
 # Category G -- 15G/15H (Part II)
 #
 # The 15G/15H interest is already booked in a generic FD-interest bucket --
