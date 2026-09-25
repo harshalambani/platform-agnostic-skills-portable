@@ -25,6 +25,16 @@ from datetime import date, datetime
 
 CANNOT_RECONCILE = "CANNOT RECONCILE"
 
+# The Re 1 reconciliation tolerance (item 3.2 / H35-02): a difference of up
+# to this many rupees between two sources ties; anything more is reported as
+# a VARIANCE, never silently rounded away. This is the single named source
+# of truth for that figure across this package -- reconcile_category()'s
+# default below, the L5 tie-out rows, and the year-end accrual/residual
+# logic all reference this constant rather than restating "1.0" or "Re 1"
+# independently, so a future change to the tolerance cannot desync between
+# call sites.
+RECONCILIATION_TOLERANCE = 1.0
+
 
 def _parse_date(value) -> date:
     if isinstance(value, date):
@@ -354,7 +364,8 @@ class ReconciliationResult:
     note: str = ""
 
 
-def reconcile_category(category: str, sources: dict, tolerance: float = 1.0) -> ReconciliationResult:
+def reconcile_category(category: str, sources: dict,
+                        tolerance: float = RECONCILIATION_TOLERANCE) -> ReconciliationResult:
     """Generic N-source reconciliation, exactly the skill_mf_cas idiom
     generalised past three columns: every present value must agree with
     every other present value within tolerance to AGREE; any two disagree

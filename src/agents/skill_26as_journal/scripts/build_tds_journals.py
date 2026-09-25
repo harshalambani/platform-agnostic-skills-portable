@@ -1012,6 +1012,18 @@ def build_csv_rows(journals: list[Journal], fy: str) -> list[dict]:
         # continuation rows -- blank rows show up as parse errors.
         for s in j.splits:
             signed = round(s.debit - s.credit, 2)   # Dr +, Cr -
+            # Drop zero-amount splits (e.g. Category A's statutorily-zero
+            # NBFC tax-deducted leg -- see the module docstring above). A
+            # split contributing exactly 0.00 never changes whether the
+            # transaction balances, so omitting it is always safe, and
+            # importing a Rs 0.00 row into GnuCash is pure line noise (some
+            # importer builds even warn/reject on it). This is the single
+            # shared row builder for both the full journal CSV and the
+            # Part-I-only sibling (write_part_i_split() partitions THESE
+            # rows), so filtering here drops the zero rows from both files
+            # in lockstep.
+            if signed == 0.0:
+                continue
             # Number duplicates Transaction ID -> GnuCash visible Num field.
             rows.append({
                 "Date": date, "Transaction ID": txn_id, "Number": txn_id,

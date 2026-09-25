@@ -55,22 +55,33 @@ Stage 2 parser would eventually produce.
 **Stage 1b**, shipped after Stage 1: the GnuCash journal CSV emitter
 (`jv_emitter.py`), optional and additive -- see its own section below.
 
-**Stage 2, mostly NOT this build**: the PDF parsers under `parsers/`
-(`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
-`llp_statement.py`). Every source document for this skill is a free-form,
-unpublished layout and a personal financial record -- none are in this
-repo, and only one partner's one (incomplete) year of them has ever been
-seen. Writing layout/regex parsing logic from a prose description of a
-document instead of a real specimen produces code that passes its own
-tests and fails on the real document -- that exact failure mode has
-already shipped once in this codebase (see the MF CAS skill's history).
-So `payment_schedule.py` remains a guarded placeholder that raises
-`NotImplementedError` naming the missing specimen; it has a guard test
-asserting it raises. **Do not implement it against an invented fixture.
-This is deliberate and must not be "finished" opportunistically.**
+**Stage 2, originally NOT this build, now all shipped**: the PDF parsers
+under `parsers/` (`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
+`llp_statement.py`) and the two tie-out readers (`gnucash_tieout.py`,
+`xlsx_26as_reader.py`). Every source document for this skill is a
+free-form, unpublished layout and a personal financial record -- none are
+in this repo, and only one partner's one (incomplete) year of them has
+ever been seen. Writing layout/regex parsing logic from a prose
+description of a document instead of a real specimen produces code that
+passes its own tests and fails on the real document -- that exact failure
+mode has already shipped once in this codebase (see the MF CAS skill's
+history), so each of these four parsers was written and is documented
+(see each module's own docstring) as **transcribed from first-hand
+reading of a real specimen**, never from an invented fixture -- no real
+specimen is ever committed to the repo or used in tests; only synthetic,
+self-consistent fixtures are. `payout_advice.py` (L1), `advisory.py`
+(L3), `llp_statement.py` (L5), and `payment_schedule.py` (L4) are all
+real parsers on this basis -- **none of the four remains a guarded
+`NotImplementedError` placeholder any more.** (Historical note: earlier
+revisions of this document described `payment_schedule.py` specifically
+as still a placeholder pending a specimen; that specimen has since been
+seen and the parser implemented against it, and this document is now
+brought in line with `agent.py`'s own comments and
+`parsers/payment_schedule.py`'s own docstring, both of which already say
+so.)
 
-`payout_advice.py`, `advisory.py`, and `llp_statement.py` are the three
-exceptions. Their documents -- the "L1" monthly partner payout
+`payout_advice.py`, `advisory.py`, and `llp_statement.py` were the first
+three implemented. Their documents -- the "L1" monthly partner payout
 certificate (a one-page, password-protected PDF headed "To Whomsoever It
 may concern" with a two-column Particulars/AMOUNTS table), the "L3"
 annual Compensation Advisory letter (a component build-up, a PAYMENTS
@@ -82,17 +93,22 @@ module's own docstring) that they have been implemented against
 synthetic, self-consistent fixtures, each split into a pure
 `parse_l1_text(text)` / `parse_l3_text(text)` / `parse_l5_words(words,
 source_name)` core and a thin pdfplumber-opening shell (`parse(path,
-password)`), mirroring `skill_mf_cas/parser.py`'s split. This does not
-yet make the skill runnable end-to-end: `agent.py`'s document-driven path
-now parses both REQUIRED documents (the advices and the advisory) for
-real, and still fails loud (naming the document and the reason) if either
-is missing, unreadable, or doesn't match its expected layout; the L5
-statement is an OPTIONAL leg (it is issued months after year-end, so it
-may not exist yet for the current FY) and degrades to an explicit "not
-available" note when its input path is absent -- but successfully parsing
-all three does not yet assemble a workbook, since that assembly step, and
-the `payment_schedule.py` parser it would also need, remain out of this
-build's scope.
+password)`), mirroring `skill_mf_cas/parser.py`'s split. `payment_schedule.py`
+(L4, the incentive payment schedule) followed the same pattern once its
+own specimen was seen -- `parse_l4_words(words, source_name)` / `parse(path,
+password)`, per its own module docstring.
+
+`agent.py`'s document-driven path parses both REQUIRED documents (the
+advices and the advisory) for real, and fails loud (naming the document
+and the reason) if either is missing, unreadable, or doesn't match its
+expected layout. The L5 statement of account and the L4 payment schedule
+are OPTIONAL legs (each may not exist yet for the current FY) and degrade
+to an explicit "not available" note when their input path is absent or
+their document fails to parse -- never a crash, never a fabricated
+figure. `gnucash_path` (the GnuCash books tie-out, Sections B/C of
+`gnucash_tieout.py`) and `xlsx_26as` (the 26AS TDS-credit tie-out,
+Section A of `xlsx_26as_reader.py`) are likewise optional and degrade the
+same way when absent.
 
 ## Inputs
 
@@ -269,9 +285,9 @@ crediting current-year income.
   book, even in Stage 1b -- the journal emitter writes a plain CSV for
   GnuCash's own importer, not a `.gnucash` file.
 - **No ITR workbook injection.** Output is a standalone workbook only.
-- **`payment_schedule.py` is a placeholder pending a real specimen** (see
-  Stage 1/Stage 2 above) -- it is not a partially-done feature, it is an
-  intentional stopping point.
+- **`payment_schedule.py` is no longer a placeholder** (see Stage 1/Stage
+  2 above) -- it was implemented against a real specimen, the same as the
+  other three document parsers in this package.
 - **Every rate, percentage and period is an input** (see N1) -- there is
   no scenario in which a later change should reintroduce a constant or a
   fallback default for one of these values.
