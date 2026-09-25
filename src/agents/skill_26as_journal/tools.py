@@ -158,6 +158,7 @@ def final_summary(output_path: str, gnucash_path: str = "") -> str:
                 return (r.get("Confidence") or "").strip()
             parser = [r for r in rows if conf(r) in ("High", "Medium")]
             llm = [r for r in rows if conf(r) == "Override"]
+            ambiguous = [r for r in rows if conf(r) == "Ambiguous"]
             suspense = [r for r in rows if conf(r) in ("Suspense", "Low")
                         or "Suspense" in (r.get("Credit Account") or "")]
             n = len(rows)
@@ -165,6 +166,17 @@ def final_summary(output_path: str, gnucash_path: str = "") -> str:
                 f"- Matched: {len(parser) + len(llm)} of {n} "
                 f"({len(parser)} by the parser, {len(llm)} resolved by the LLM)"
             )
+            if ambiguous:
+                # Ambiguous rows already have a real (first-wins) credit
+                # account posted — they are not Suspense and the LLM must
+                # not try to resolve them (two or more candidates tied on
+                # score); only the user, in the Review tab, can pick the
+                # right one from "Tied Candidates".
+                amb_line = (f"- Ambiguous (tied candidates — tag manually in "
+                            f"the Review tab, not for the LLM): {len(ambiguous)}")
+                amb_line += " — " + ", ".join(
+                    (r.get("Deductor") or "?").strip() for r in ambiguous)
+                lines.append(amb_line)
             susp_line = f"- On Suspense (need manual review): {len(suspense)}"
             if suspense:
                 susp_line += " — " + ", ".join(

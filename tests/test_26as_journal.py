@@ -100,14 +100,169 @@ def test_categorize_unknown():
     ("ACME CONSULTING LLP", "C", "Income:xBusiness Income:Remuneration from Partnership"),
 ])
 def test_match_sample_deductors(name, cat, expected):
-    acct, conf, basis, cands = m.match_credit_account(name, cat, _accounts())
+    acct, conf, basis, cands, tied = m.match_credit_account(name, cat, _accounts())
     assert acct == expected, f"{name}: got {acct} ({basis})"
+    # NEGATIVE: a clear winner (strictly higher score than every other
+    # candidate) must never be reported Ambiguous, and needs_review's
+    # confidence check must see the same value it always has.
+    assert conf != "Ambiguous"
+    assert tied == []
 
 
 def test_match_no_candidate_goes_suspense():
     """An interest deductor with no resembling account stays unmatched (Suspense)."""
-    acct, conf, basis, cands = m.match_credit_account("ZZ UNKNOWN ENTITY XQ", "A", _accounts())
+    acct, conf, basis, cands, tied = m.match_credit_account("ZZ UNKNOWN ENTITY XQ", "A", _accounts())
     assert acct is None and conf == "Suspense"
+    assert tied == []
+
+
+# ---------------------------------------------------------------------------
+# TDS-06 — tied candidates flag "Ambiguous" (first-wins matching is
+# unchanged: the FIRST tied candidate in chart order is still posted).
+# ---------------------------------------------------------------------------
+
+def _tie_accounts():
+    """Two Category-A income accounts that score EXACTLY the same against
+    "ZENITH LIMITED" -- both share only the token ZENITH (LIMITED is a
+    stopword, dropped from the deductor tokens; the extra token on the
+    second leaf, GLOBAL, has no relationship to the deductor name and picks
+    up neither a token nor a prefix hit, so it does not break the tie)."""
+    return [
+        m.Account("Income:Interest Income:Interest on Zenith Bank",
+                  "Interest on Zenith Bank", "INCOME"),
+        m.Account("Income:Interest Income:Interest on Zenith Global",
+                  "Interest on Zenith Global", "INCOME"),
+        m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
+        m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
+    ]
+
+
+def _tie_accounts_below_threshold():
+    """Two Category-A accounts that BOTH score 0 against the deductor (no
+    shared tokens at all) -- a tie, but below the 1.5 confidence threshold,
+    so it must stay Suspense, not become Ambiguous."""
+    return [
+        m.Account("Income:Interest Income:Interest on Foo Bank",
+                  "Interest on Foo Bank", "INCOME"),
+        m.Account("Income:Interest Income:Interest on Bar Bank",
+                  "Interest on Bar Bank", "INCOME"),
+    ]
+
+
+def test_match_tied_candidates_flag_ambiguous_first_wins():
+    accts = _tie_accounts()
+    acct, conf, basis, cands, tied = m.match_credit_account("ZENITH LIMITED", "A", accts)
+    assert conf == "Ambiguous"
+    # First-wins: the account actually returned is the FIRST tied candidate
+    # in chart order, never a different one because of the tie.
+    assert acct == "Income:Interest Income:Interest on Zenith Bank"
+    assert tied == [
+        "Income:Interest Income:Interest on Zenith Bank",
+        "Income:Interest Income:Interest on Zenith Global",
+    ]
+    # basis names each tied candidate and its own hits.
+    assert "Zenith Bank" in basis and "Zenith Global" in basis
+
+
+def test_match_tie_below_threshold_stays_suspense_not_ambiguous():
+    """NEGATIVE: a tie that never clears the 1.5 confidence threshold is
+    indistinguishable from any other unconfident result -- still Suspense."""
+    acct, conf, basis, cands, tied = m.match_credit_account(
+        "UNKNOWN ENTITY QQ", "A", _tie_accounts_below_threshold())
+    assert acct is None
+    assert conf == "Suspense"
+    assert tied == []
+
+
+def test_build_journals_ambiguous_row_not_moved_to_suspense_and_balances():
+    """NEGATIVE: an Ambiguous row keeps its first-wins (real) credit account
+    -- it must never be redirected to Suspense -- and its splits still
+    balance exactly like any other Category A journal."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0)
+    j = m.build_journals([d], _tie_accounts())[0]
+    assert j.credit_confidence == "Ambiguous"
+    assert j.needs_review is True
+    assert j.credit_account == "Income:Interest Income:Interest on Zenith Bank"
+    assert j.credit_account != m.ACC_SUSPENSE
+    assert j.tied_candidates == [
+        "Income:Interest Income:Interest on Zenith Bank",
+        "Income:Interest Income:Interest on Zenith Global",
+    ]
+    assert j.balanced
+
+
+def test_build_journals_ambiguous_row_fails_on_pre_tds06_matcher():
+    """This is the primary regression test: on the pre-fix matcher (strict
+    'score > best_score'), the tie is silently resolved to the FIRST
+    candidate with confidence High/Medium and needs_review stays False --
+    the exact defect TDS-06 fixes. This assertion demonstrably FAILS against
+    the code as it stood at ea227b7 (needs_review was False, confidence was
+    "High", not "Ambiguous")."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0)
+    j = m.build_journals([d], _tie_accounts())[0]
+    assert j.credit_confidence == "Ambiguous"
+    assert j.needs_review is True
+
+
+def test_build_15g_journals_tied_candidates_flagged_ambiguous_too():
+    """The same tie in a Part II (15G/15H) deductor is flagged the same way
+    -- build_15g_journals reuses match_credit_account's Category A pool."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 0.0)
+    j = m.build_15g_journals([d], _tie_accounts())[0]
+    assert j.credit_confidence == "Ambiguous"
+    assert j.needs_review is True
+    assert j.credit_account == "Income:Interest Income:Interest on Zenith Bank"
+    assert j.tied_candidates == [
+        "Income:Interest Income:Interest on Zenith Bank",
+        "Income:Interest Income:Interest on Zenith Global",
+    ]
+    assert j.balanced
+
+
+def test_write_review_appends_tied_candidates_as_last_column():
+    """The review CSV has the new last column; every existing column keeps
+    its original position."""
+    d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0)
+    journals = m.build_journals([d], _tie_accounts())
+    out = Path(tempfile.gettempdir()) / "test_tds06_review.csv"
+    m.write_review(journals, out, _tie_accounts())
+    with out.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    header = rows[0]
+    assert header == ["Sr", "Deductor", "Section", "Category", "Credit Account",
+                      "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
+                      "Needs Review", "Basis", "Tied Candidates"]
+    data_row = rows[1]
+    assert data_row[-1] == (
+        "Income:Interest Income:Interest on Zenith Bank; "
+        "Income:Interest Income:Interest on Zenith Global"
+    )
+    assert data_row[5] == "Ambiguous"       # Confidence position unchanged
+    assert data_row[10] == "yes"            # Needs Review position unchanged
+
+
+def test_review_flag_ambiguous_is_never_review():
+    """LLM-fallback pin: AGENT.md tells the agent to call apply_overrides
+    only for rows flagged REVIEW. The CLI flag text for an Ambiguous row
+    must never contain the literal "REVIEW" (case-sensitive) that a
+    text-reading LLM keys its fallback decision on."""
+    assert m._review_flag(True, "Ambiguous") == "  <-- AMBIGUOUS (tag manually in Review tab)"
+    assert "REVIEW" not in m._review_flag(True, "Ambiguous")
+    assert m._review_flag(True, "Suspense") == "  <-- REVIEW"
+    assert m._review_flag(False, "High") == ""
+
+
+def test_agent_md_excludes_ambiguous_from_llm_fallback():
+    """Pin: the agent prompt must explicitly tell the LLM never to call
+    apply_overrides on an Ambiguous deductor -- otherwise a small
+    tool-calling model, seeing a NEEDS-REVIEW row with a plausible-looking
+    tied candidate, would guess exactly the account the user is supposed to
+    confirm by hand."""
+    agent_md = (ROOT / "src" / "agents" / "skill_26as_journal" / "AGENT.md").read_text(
+        encoding="utf-8")
+    normalized = " ".join(agent_md.split())
+    assert "AMBIGUOUS" in agent_md
+    assert "never call `apply_overrides` for an AMBIGUOUS deductor" in normalized
 
 
 # ---------------------------------------------------------------------------
@@ -131,9 +286,10 @@ def test_placeholder_only_interest_account_routes_to_suspense():
     must go to Suspense — never post directly to the placeholder."""
     accts = [m.Account("Income:Interest Income", "Interest Income", "INCOME",
                        special=True)]
-    acct, conf, basis, cands = m.match_credit_account("HDFC BANK LIMITED", "A", accts)
+    acct, conf, basis, cands, tied = m.match_credit_account("HDFC BANK LIMITED", "A", accts)
     assert acct is None and conf == "Suspense"
     assert cands == []
+    assert tied == []
 
 
 def test_hidden_account_never_matched():
@@ -144,7 +300,7 @@ def test_hidden_account_never_matched():
         m.Account("Income:Interest Income:Interest on HDFC - FD",
                   "Interest on HDFC - FD", "INCOME"),
     ]
-    acct, conf, basis, cands = m.match_credit_account("OLD BANK", "A", accts)
+    acct, conf, basis, cands, tied = m.match_credit_account("OLD BANK", "A", accts)
     assert "Income:Interest Income:Interest on Old Bank" not in cands
     assert acct != "Income:Interest Income:Interest on Old Bank"
 
@@ -182,7 +338,7 @@ def test_generic_interest_on_fd_never_a_credit_match():
     """The generic FD-interest account must never be returned as a credit match."""
     fd = m.find_generic_fd_account(_accounts())
     for name in ("BANK OF BARODA", "SOME RANDOM FD HOLDER"):
-        acct, _c, _b, cands = m.match_credit_account(name, "A", _accounts(), fd)
+        acct, _c, _b, cands, _tied = m.match_credit_account(name, "A", _accounts(), fd)
         assert acct != fd
         assert fd not in cands
 
