@@ -5020,6 +5020,12 @@ def test_build_balance_tieout_agree_variance_sweep_and_missing_shapes(tmp_path):
     assert sop.sources["GnuCash book (FY movement)"] == 0.0
     assert CANNOT_RECONCILE not in sop.note
     assert "sweep" in sop.note.lower() or "closed-book" in sop.note.lower()
+    # Item 3.3: a 0.00 book movement is equally consistent with a genuine
+    # unposted transaction, not only a closed-book sweep -- the note must
+    # not assert the sweep explanation as certain (e.g. "not a real
+    # discrepancy") before the user has actually checked Equity.
+    assert "not a real discrepancy" not in sop.note.lower()
+    assert "never posted" in sop.note.lower() or "unposted" in sop.note.lower()
 
     for key in ("interest_on_capital", "current_account", "capital_contribution", "medical_expense"):
         r = by_key[key]

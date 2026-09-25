@@ -206,11 +206,15 @@ def build_balance_tieout(
                 category=category, sources=result.sources, agree=None,
                 note=(
                     f"Book FY movement is 0.00 for this {acct_type} account while the "
-                    f"computed figure is {computed_figure:,.2f} -- likely a closed-book "
-                    "income/expense sweep to Equity at year-end (GnuCash's standard "
-                    "close-the-books behaviour), not a real discrepancy. Verify against "
-                    "the book's Equity account movement before treating this as a "
-                    "variance."
+                    f"computed figure is {computed_figure:,.2f}. This can happen for two "
+                    "different reasons that look identical on this account alone: (1) a "
+                    "closed-book income/expense sweep to Equity at year-end (GnuCash's "
+                    "standard close-the-books behaviour), in which case the movement is "
+                    "genuinely posted and sitting on the Equity account instead; or (2) "
+                    "the transaction was never posted at all. This tool cannot tell the "
+                    "two apart from this account's balance alone -- check the book's "
+                    "Equity account movement for the missing figure before treating this "
+                    "as either a false positive or a real variance."
                 ),
             )
         results.append(result)

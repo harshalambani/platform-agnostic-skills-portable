@@ -545,6 +545,51 @@ def test_end_to_end_194t_tds_counted_exactly_once_across_both_journals():
 
 
 # ---------------------------------------------------------------------------
+# TDS-... zero-amount rows must never reach either CSV (item 3.5): a split
+# whose signed Amount rounds to 0.00 never changes whether the transaction
+# balances, and importing a Rs 0.00 row is pure line noise some GnuCash
+# importer builds even warn/reject on.
+# ---------------------------------------------------------------------------
+
+def test_build_csv_rows_drops_zero_amount_tds_split():
+    """Category A with tax_deducted == 0 must not emit a Rs 0.00 TDS-account
+    row -- the two nonzero legs (Dr generic FD interest, Cr the specific
+    NBFC account) still fully represent and balance the transaction."""
+    d = _deductor(4, "BANK OF BARODA", "194A", 50000, 0)
+    j = m.build_journals([d], _accounts())[0]
+    assert j.category == "A" and len(j.splits) == 3  # Split objects unchanged
+    rows = m.build_csv_rows([j], "2025-26")
+    amounts = [float(r["Amount"]) for r in rows]
+    assert 0.0 not in amounts, f"a zero-amount row leaked into the CSV rows: {rows}"
+    assert len(rows) == 2, "only the two nonzero splits should reach the CSV"
+    assert abs(sum(amounts)) < 0.01, "remaining rows must still balance to zero"
+
+
+def test_build_csv_rows_drops_whole_transaction_when_all_splits_are_zero():
+    """A TCS row with tax == 0 has both splits at 0.00 -- the whole
+    (no-op) transaction must vanish from the CSV, not appear as two Rs 0.00
+    rows under a live Transaction ID."""
+    c = _collector(1, "X TOURS", "206CQ", 100, 0)
+    j = m.build_tcs_journals([c], _tcs_accounts())[0]
+    rows = m.build_csv_rows([j], "2025-26")
+    assert rows == []
+
+
+def test_write_csv_zero_amount_row_fails_on_pre_fix_build_csv_rows():
+    """Negative-test anchor: proves the zero-amount split really did reach
+    write_csv()'s output before the fix (guards against a future change
+    that reintroduces zero rows by writing straight from j.splits again
+    instead of through the filtered build_csv_rows())."""
+    d = _deductor(4, "BANK OF BARODA", "194A", 50000, 0)
+    j = m.build_journals([d], _accounts())[0]
+    out = Path(tempfile.gettempdir()) / "test_zero_amount_row.csv"
+    m.write_csv([j], out, "2025-26")
+    with out.open(newline="", encoding="utf-8") as f:
+        amounts = [float(row["Amount"]) for row in csv.DictReader(f)]
+    assert 0.0 not in amounts, f"a zero-amount row leaked into write_csv() output: {amounts}"
+
+
+# ---------------------------------------------------------------------------
 # Category G -- 15G/15H (Part II)
 #
 # The 15G/15H interest is already booked in a generic FD-interest bucket --
