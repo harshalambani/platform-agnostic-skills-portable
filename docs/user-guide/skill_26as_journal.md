@@ -43,7 +43,7 @@ Files produced:
 
 ## Tips
 
-Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run.
+Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again.
 
 ## Troubleshooting
 
