@@ -12,6 +12,7 @@ import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,8 @@ from agents.skill_partner_comp_recon.engine import (
     RECONCILIATION_TOLERANCE,
     build_report,
     classify_cohort_instalments,
+    compute_capital_interest_schedule,
+    compute_ctc_check,
     derive_misc,
     detect_mid_year_rate_change,
     driver,
@@ -530,6 +533,41 @@ def test_build_report_end_to_end_against_fixture():
             # never an agreement, pending H35-05's fuzzy match.
             assert r.agree is None, f"expected None (not checked yet) for {cat!r}, got {r.agree!r}"
             assert r.note.startswith("NOT CHECKED YET")
+        elif cat == (
+            "Interest on capital: computed (schedule, this FY's payslip capital "
+            "movements only) vs LLP Statement"
+        ):
+            # H35-06 correction: this row is now ALWAYS informational,
+            # whatever `agree` computes to -- its basis is checked against
+            # the L5 tie-out row instead, never against this schedule. The
+            # fixture supplies no drivers["capital_interest_rate"] (agent.py's
+            # run() is the one that injects the documented 6% default --
+            # build_report() itself never applies a fallback, per this
+            # module's governing rule), so the underlying figure is still
+            # CANNOT RECONCILE here -- see compute_capital_interest_schedule()
+            # -- but that must never read as a genuine failure.
+            assert r.agree is None, f"expected None (rate not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.informational is True
+            assert "capital interest rate not supplied" in r.note
+        elif cat == "s.194T TDS on interest on capital":
+            # H35-06 correction: now a REAL check (no longer NOT SUPPLIED by
+            # default). The fixture's one interest-on-capital month (April,
+            # 12,000) supplies a payslip tds figure but no payment-schedule
+            # tds_on_rem_ioc figure, so the interest-only TDS cannot be
+            # isolated -- CANNOT RECONCILE, never assumed 0, and never
+            # informational/not_checked (it is a genuine, counted gap now).
+            assert r.agree is None, f"expected None (missing schedule TDS) for {cat!r}, got {r.agree!r}"
+            assert r.informational is False
+            assert not getattr(r, "not_checked", False)
+            assert CANNOT_RECONCILE in r.note
+            assert "2025-04" in r.note
+        elif cat.startswith("CTC walk-down:"):
+            # H35-08: the fixture supplies no data["ctc_structuring"] block,
+            # so the cash pool cannot be computed -- CANNOT RECONCILE, never
+            # a failure, and always informational (never in the LOUD block).
+            assert r.agree is None, f"expected None (not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.informational is True
+            assert r.status_label == "NOT SUPPLIED"
         else:
             assert r.agree is True, f"expected AGREE for {cat!r}, got {r.agree!r} ({r.note})"
 
@@ -2937,6 +2975,7 @@ def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
 
 _ALL_SHEETS = [
     "Logic", "Drivers", "Monthly grid", "One-offs", "Cohorts", "Capital",
+    "Interest on capital", "CTC check",
     "Reconciliation", "Exceptions", "Open items",
 ]
 
@@ -5831,14 +5870,16 @@ def test_h35_04_statement_reference_row_no_statement_falls_back_to_old_equal_pee
 # ---- B) the LOUD block (Report.statement_flags), via build_report --------
 
 def _h35_04_data(*, llp_record=None, advisory_closing=None, return_closing=None,
-                  return_exempt_sop=None):
+                  return_exempt_sop=None, advisory_opening_next_fy=None):
     """Built on top of _h35_02_data()'s two-month fixture (total_paid
     480000 combined, tds -20000 combined) so D1's payouts+TDS identity and
     the closing-capital / exempt-SoP statement-reference rows can all be
     exercised from one small, self-consistent set of numbers."""
     data = _h35_02_data(llp_record=llp_record)
     if advisory_closing is not None:
-        data["advisory"] = {"stated_closing_capital": advisory_closing}
+        data.setdefault("advisory", {})["stated_closing_capital"] = advisory_closing
+    if advisory_opening_next_fy is not None:
+        data.setdefault("advisory", {})["opening_capital_next_fy"] = advisory_opening_next_fy
     if return_closing is not None:
         data["external"]["return_closing_capital"] = return_closing
     if return_exempt_sop is not None:
@@ -5850,7 +5891,17 @@ def _find(report, category):
     return next(r for r in report.reconciliation if r.category == category)
 
 
-_CLOSING_CAPITAL_CATEGORY = "Closing capital: rule vs Advisory vs the filed return"
+# H35-07: the old single conflated row ("Closing capital: rule vs Advisory
+# vs the filed return") is split into an actual-vs-actual row (statement vs
+# the filed return, still loud on disagreement) and a separate, purely
+# informational row (rule vs Advisory's own forward projection -- two
+# projections compared to each other, never to the statement, and never in
+# the LOUD block).
+_CLOSING_CAPITAL_CATEGORY = "Closing capital: statement vs the filed return"
+_CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY = (
+    "Closing capital: rule vs Advisory (informational -- both are "
+    "forward-looking projections, not the statement's own date)"
+)
 _EXEMPT_SOP_CATEGORY = "Exempt share of profit (s.10(2A)) vs the filed return"
 _D1_CATEGORY = (
     "Current-account drawings: statement vs (net monthly payouts + TDS + "
@@ -5897,10 +5948,15 @@ def test_h35_04_round2_exempt_sop_not_checked_when_return_not_supplied():
 
 
 def test_h35_04_closing_capital_row_statement_is_reference_others_measured_against_it():
+    # H35-07: this row now compares the statement's ACTUAL closing capital
+    # only against the filed return's closing capital (also an actual,
+    # same-date figure) -- the Advisory's forward PROJECTION is no longer a
+    # peer of the statement here at all; it moved to its own informational
+    # row (rule vs Advisory), checked below.
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000},
-        advisory_closing=990000,   # disagrees (diff 10,000)
-        return_closing=1000000,    # agrees exactly
+        advisory_closing=990000,   # a forward projection -- irrelevant to this row now
+        return_closing=990000,     # disagrees with the statement (diff -10,000)
     )
     report = build_report(data)
     row = _find(report, _CLOSING_CAPITAL_CATEGORY)
@@ -5908,15 +5964,169 @@ def test_h35_04_closing_capital_row_statement_is_reference_others_measured_again
     assert row.agree is False
     assert row.note.startswith("STATEMENT DISAGREES")
     assert row.sources["LLP Statement (L5)"] == 1000000
-    assert "Statement says 1,000,000.00; Advisory says 990,000.00" in row.note
+    assert "Statement says 1,000,000.00; Return says 990,000.00" in row.note
     assert "difference -10,000.00" in row.note
     # NEGATIVE: the statement is never itself reported as disagreeing, and
-    # the row that agrees (Return) is named as agreeing, not as a second
-    # disagreement.
+    # the Advisory's projection is never named in this row at all any more.
     assert "LLP Statement (L5) says" not in row.note
-    assert "agrees with: Return" in row.note
+    assert "Advisory" not in row.note
 
     assert any(f.startswith(_CLOSING_CAPITAL_CATEGORY) for f in report.statement_flags)
+
+    # NEGATIVE (H35-07, mandatory): the rule-vs-Advisory comparison (two
+    # forward projections against each other) is purely informational and
+    # must never enter the LOUD block, whatever it concludes -- including
+    # when the Advisory's own printed projection differs from the rule's
+    # purely because of KPMG's per-instalment rounding-down.
+    advisory_row = _find(report, _CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+    assert advisory_row.informational is True
+    assert not any(
+        f.startswith(_CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+        for f in report.statement_flags
+    )
+
+
+_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY = (
+    "Closing capital: statement vs Advisory's opening balance for the next FY"
+)
+_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY = (
+    "Closing capital: statement vs opening balance + this FY's payslip "
+    "capital deductions (roll-forward)"
+)
+
+
+# ---- H35-07 item 1(i): statement vs Advisory's own "Opening balance
+# (as on 1 Apr next FY)" line -----------------------------------------------
+
+def test_h35_07_advisory_opening_next_fy_ties_to_statement_not_loud():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_opening_next_fy=1000000,  # ties exactly
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is True
+    assert report.statement_flags == []
+
+
+def test_h35_07_advisory_opening_next_fy_genuine_difference_is_loud():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_opening_next_fy=990000,  # diff 10,000 -- genuinely disagrees
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference -10,000.00" in row.note
+    assert any(
+        f.startswith(_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+        for f in report.statement_flags
+    )
+
+
+def test_h35_07_advisory_opening_next_fy_absent_is_cannot_reconcile_never_agree_with_zero():
+    # NEGATIVE (mandatory): the Advisory does not print the "Opening
+    # balance (as on 1 Apr next FY)" line at all this run -- this must be
+    # CANNOT RECONCILE, never an AGREE against an invented 0.
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        # advisory_opening_next_fy intentionally omitted -- line absent
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert row.agree is not True
+    assert not any(
+        f.startswith(_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+        for f in report.statement_flags
+    )
+
+
+def test_h35_07_advisory_opening_next_fy_never_confused_with_projected_closing():
+    # NEGATIVE (mandatory): supplying only the Advisory's "Projected closing
+    # balance" (stated_closing_capital) must NOT be read as the "Opening
+    # balance (as on 1 Apr next FY)" line -- the two are parsed separately
+    # (see parsers/advisory.py's distinct _OPENING_BALANCE_RE /
+    # _CLOSING_BALANCE_RE) and must never be substituted for each other.
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_closing=1000000,  # only the projected closing balance supplied
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert "Advisory (opening balance, 1 Apr next FY)" not in row.sources or (
+        row.sources["Advisory (opening balance, 1 Apr next FY)"] is None
+    )
+
+
+# ---- H35-07 item 1(ii): statement vs opening + this FY's payslip capital
+# deductions (roll-forward). Additive to, never a duplicate of, the L5
+# parser's own internal `_balance_check()` self-consistency ERROR
+# diagnostic (llp_statement.py), which uses only the L5's own printed
+# opening/additions/withdrawals/closing figures -- this row instead
+# cross-checks against a SEPARATE document (the payment schedule/advices,
+# via `monthly.capital_transferred`). ----------------------------------------
+
+def test_h35_07_rollforward_ties_to_statement_not_loud():
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+    })
+    data["monthly"][0]["capital_transferred"] = -30000  # payslip deduction
+    data["monthly"][1]["capital_transferred"] = -30000  # 940000 + 60000 = 1,000,000
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    assert row.agree is True
+    assert report.statement_flags == []
+
+
+def test_h35_07_rollforward_genuine_gap_is_loud():
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+    })
+    data["monthly"][0]["capital_transferred"] = -20000
+    data["monthly"][1]["capital_transferred"] = -20000  # 940000 + 40000 = 980,000 != 1,000,000
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference -20,000.00" in row.note
+    assert any(
+        f.startswith(_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY) for f in report.statement_flags
+    )
+
+
+def test_h35_07_rollforward_is_not_a_duplicate_of_the_l5_self_check_row():
+    # NEGATIVE (mandatory): the roll-forward row and the L5's own internal
+    # arithmetic-diagnostic ERROR line are two DIFFERENT loud flags, from
+    # two different sources -- never collapsed into one row/one flag.
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+        "diagnostics": [
+            "ERROR: capital balance roll-forward does not reconcile -- "
+            "opening=940,000.00, additions=999.00, withdrawals=0.00; "
+            "computed 940,999.00 vs printed closing 1,000,000.00 (diff -59,001.00).",
+        ],
+    })
+    data["monthly"][0]["capital_transferred"] = -20000
+    data["monthly"][1]["capital_transferred"] = -20000
+    report = build_report(data)
+
+    rollforward_flags = [
+        f for f in report.statement_flags if f.startswith(_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    ]
+    l5_self_check_flags = [
+        f for f in report.statement_flags if f.startswith("Statement arithmetic -- ERROR:")
+    ]
+    assert len(rollforward_flags) == 1
+    assert len(l5_self_check_flags) == 1
+    assert rollforward_flags[0] != l5_self_check_flags[0]
 
 
 def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():
@@ -5931,10 +6141,12 @@ def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():
 
 
 def test_h35_04_loud_block_not_triggered_by_an_exact_re1_difference():
+    # H35-07: the boundary is now on statement-vs-return (the row's only
+    # remaining comparison), not statement-vs-Advisory.
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
-        advisory_closing=999999,   # exactly Re 1 off -> ties
-        return_closing=1000000,
+        advisory_closing=1000000,
+        return_closing=999999,   # exactly Re 1 off -> ties
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -5946,8 +6158,8 @@ def test_h35_04_loud_block_not_triggered_by_an_exact_re1_difference():
 def test_h35_04_loud_block_triggered_just_beyond_re1_difference():
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
-        advisory_closing=999998.99,   # Rs 1.01 off -> disagrees
-        return_closing=1000000,
+        advisory_closing=1000000,
+        return_closing=999998.99,   # Rs 1.01 off -> disagrees
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -6048,12 +6260,21 @@ def test_h35_04_no_statement_supplied_old_behaviour_preserved_no_crash():
     )
     report = build_report(data)  # must not raise
 
+    # H35-07: the statement-vs-return row now has only ONE other source
+    # (Return); with no statement supplied either, that leaves a single
+    # value -- CANNOT RECONCILE, not "agree" (there is nothing left to
+    # compare it against once the Advisory leg was removed from this row).
     closing_row = _find(report, _CLOSING_CAPITAL_CATEGORY)
     assert closing_row.note.startswith(
         "No LLP Statement of Account (L5) figure supplied for this row"
     )
     assert "LLP Statement (L5)" not in closing_row.sources
-    assert closing_row.agree is True  # Rule/Advisory/Return still compared as equal peers
+    assert closing_row.agree is None  # a single remaining source -> CANNOT RECONCILE
+
+    # The rule-vs-Advisory informational row is unaffected by the statement
+    # being absent -- it never used the statement at all.
+    advisory_row = _find(report, _CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+    assert advisory_row.informational is True
 
     d1_row = _find(report, _D1_CATEGORY)
     assert d1_row.note.startswith(
@@ -7659,3 +7880,343 @@ def test_h35_05_round5_header_counts_payouts_not_notes_guard_partial_gaps():
 
     assert "BANK MATCH -- 2 of 12 payout(s) could not be matched" in summary
     assert summary.count("genuine gap") == 2
+
+
+# ---------------------------------------------------------------------------
+# H35-06 -- computed capital-interest schedule (simple interest, actual
+# days/365, on this-FY capital tranches -- MonthlyLine.capital_transferred).
+# 4 required negative tests.
+# ---------------------------------------------------------------------------
+
+def _capital_tranche_line(month: str, capital_transferred: float) -> engine.MonthlyLine:
+    """A MonthlyLine carrying only a capital movement -- every other field
+    zeroed, since these tests exercise compute_capital_interest_schedule()
+    in isolation."""
+    return engine.MonthlyLine(
+        month=month, remuneration=0, share_of_profit_gross=0,
+        additional_share_of_profit=0, firms_tax_sop=0, firms_tax_other=0,
+        tds=0, capital_transferred=capital_transferred, total_paid=0, misc=0,
+    )
+
+
+# 1 -- NEGATIVE: an interest-from-date override changes only the named
+# tranche; every other tranche keeps its own default date.
+def test_h35_06_override_changes_only_named_tranche():
+    monthly = [
+        _capital_tranche_line("2025-07", -100000),
+        _capital_tranche_line("2025-10", -50000),
+    ]
+    drivers = {
+        "capital_interest_rate": 0.06,
+        "capital_interest_from_date_overrides": {"2025-10": "2025-11-15"},
+    }
+    schedule = compute_capital_interest_schedule(monthly, drivers, "2025-26")
+    by_month = {r.month: r for r in schedule.rows}
+
+    assert by_month["2025-07"].interest_from_date == date(2025, 7, 1)
+    assert by_month["2025-07"].interest_from_date_is_override is False
+
+    assert by_month["2025-10"].interest_from_date == date(2025, 11, 15)
+    assert by_month["2025-10"].interest_from_date_is_override is True
+
+
+# 2 -- NEGATIVE: with no override, interest-from-date defaults to the
+# tranche's own payslip month, never the FY start (1 April), which would
+# overstate the interest period for every mid-year tranche.
+def test_h35_06_no_override_defaults_to_tranche_month_not_fy_start():
+    monthly = [_capital_tranche_line("2025-07", -100000)]
+    schedule = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.06}, "2025-26",
+    )
+    assert len(schedule.rows) == 1
+    row = schedule.rows[0]
+    assert row.interest_from_date == date(2025, 7, 1)
+    assert row.interest_from_date != date(2025, 4, 1)
+    assert row.interest_from_date_is_override is False
+
+
+# 3 -- NEGATIVE (H35-06 correction): whatever size the gap between this
+# schedule and the LLP Statement is -- beyond Re 1 or within it -- the row
+# is ALWAYS informational, never a "STATEMENT DISAGREES" LOUD-block entry
+# and never counted in the header issue count, however large the gap.
+def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
+    category = (
+        "Interest on capital: computed (schedule, this FY's payslip capital "
+        "movements only) vs LLP Statement"
+    )
+    base = _h35_02_data(llp_record={"current_profit_share": 300000})
+    base["drivers"]["capital_interest_rate"] = 0.06
+    base["monthly"][0]["capital_transferred"] = -100000
+    base["drivers"]["capital_interest_from_date_overrides"] = {"2031-04": "2031-04-01"}
+    # principal 100000, rate 6%, 2031-04-01 -> FY close (2032-03-31) = 365
+    # days -> computed interest = 6000.00 exactly.
+
+    # (a) beyond Re 1: the underlying comparison still disagrees (visible in
+    # `agree`/`sources`), but it is NEVER a LOUD "STATEMENT DISAGREES" entry
+    # and NEVER counted in report.statement_flags -- see requirement 1.
+    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6002.0}}
+    report_over = build_report(over)
+    row_over = next(r for r in report_over.reconciliation if r.category == category)
+    assert row_over.agree is False
+    assert row_over.informational is True
+    assert not any(category in flag for flag in report_over.statement_flags)
+
+    # (b) within Re 1: agrees, and is (as always for this row) informational.
+    within = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6000.5}}
+    report_within = build_report(within)
+    row_within = next(r for r in report_within.reconciliation if r.category == category)
+    assert row_within.agree is True
+    assert row_within.informational is True
+
+    # NEGATIVE: a mismatch of ANY size (not just within Re 1) never enters
+    # the LOUD block or the header issue count -- prove this with a much
+    # larger, unambiguous gap too.
+    huge = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 60000.0}}
+    report_huge = build_report(huge)
+    row_huge = next(r for r in report_huge.reconciliation if r.category == category)
+    assert row_huge.agree is False
+    assert row_huge.informational is True
+    assert not any(category in flag for flag in report_huge.statement_flags)
+    variances = [
+        r for r in report_huge.reconciliation if r.agree is False and not r.informational
+    ]
+    assert category not in [r.category for r in variances]
+
+
+# 4 -- NEGATIVE: a rate override is not silently ignored -- a different
+# drivers["capital_interest_rate"] actually changes the computed total.
+def test_h35_06_rate_override_not_silently_ignored():
+    monthly = [_capital_tranche_line("2025-07", -100000)]
+    schedule_a = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.06}, "2025-26",
+    )
+    schedule_b = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.09}, "2025-26",
+    )
+    assert schedule_a.total_interest != schedule_b.total_interest
+    assert schedule_b.total_interest == round(schedule_a.total_interest * 0.09 / 0.06, 2)
+
+
+# ---------------------------------------------------------------------------
+# H35-06 correction -- s.194T TDS on interest on capital is now a REAL check
+# (no longer NOT-SUPPLIED-by-default): derived as the magnitude of the
+# spread between the payment schedule's tds_on_rem_ioc and the payslip's own
+# tds figure, summed across the months interest_on_capital was actually
+# paid (MonthlyLine.tds_schedule / .tds_payslip, carried through unmerged by
+# mapper.py 2.3b), and checked against the s.194T rate x the LLP Statement's
+# own interest-on-capital figure. 5 required negative tests.
+# ---------------------------------------------------------------------------
+
+def _s194t_data(
+    *,
+    tds_schedule=-1500.0,
+    tds_payslip=-300.0,
+    tds=None,
+    interest_on_capital=12000.0,
+    capital_interest_on_capital=12000.0,
+    capital_interest_tds_rate=None,
+    remuneration_tds_rate=0.10,
+    extra_month=True,
+) -> dict:
+    """One interest-paying month (April) plus, by default, one ordinary
+    non-interest month (May) so the "only interest months count" logic is
+    always exercised. `tds` (the precedence-combined, already-booked figure)
+    defaults to whichever of tds_schedule/tds_payslip is supplied -- this
+    helper never touches that field's own precedence logic, it only feeds
+    the two new read-only fields the H35-06 correction added."""
+    if tds is None:
+        tds = tds_schedule if tds_schedule is not None else tds_payslip
+    april = {
+        "month": "2031-04", "remuneration": 100000, "share_of_profit_gross": 0,
+        "additional_share_of_profit": 0, "firms_tax_sop": 0, "tds": tds,
+        "capital_transferred": 0,
+        # balances the journal: Dr bank = total_paid; Dr tds_expense = -tds;
+        # Cr remuneration = 100000; Cr interest_on_capital = interest_on_capital.
+        "total_paid": 100000 + interest_on_capital + (tds or 0),
+        "interest_on_capital": interest_on_capital,
+    }
+    if tds_schedule is not None:
+        april["tds_schedule"] = tds_schedule
+    if tds_payslip is not None:
+        april["tds_payslip"] = tds_payslip
+    monthly = [april]
+    if extra_month:
+        monthly.append({
+            "month": "2031-05", "remuneration": 100000, "share_of_profit_gross": 0,
+            "additional_share_of_profit": 0, "firms_tax_sop": 0, "tds": -10000,
+            "capital_transferred": 0, "total_paid": 90000,
+        })
+    drivers = {"remuneration_tds_rate": remuneration_tds_rate}
+    if capital_interest_tds_rate is not None:
+        drivers["capital_interest_tds_rate"] = capital_interest_tds_rate
+    data = {
+        "financial_year": "2031-32",
+        "firm_name": "Testcorp Alpha LLP",
+        "drivers": drivers,
+        "monthly": monthly,
+        "llp_record": {"capital_interest_on_capital": capital_interest_on_capital},
+        "external": {},
+    }
+    return data
+
+
+_S194T_CATEGORY = "s.194T TDS on interest on capital"
+
+
+# 1 -- NEGATIVE: a mismatch of any size (computed vs expected) must never
+# enter the LOUD block or the header issue count -- ONLY the OLD
+# schedule-vs-statement row is barred from the LOUD block (H35-06
+# correction requirement 1); this is a genuinely new, counted check, and a
+# real variance here is expected to surface as an ordinary (non-LOUD)
+# reconciliation VARIANCE, never suppressed.
+def test_s194t_mismatch_of_any_size_never_forced_into_loud_block():
+    # computed = |-1500 - (-300)| = 1200; expected = 0.10 x 12000 = 1200 --
+    # these agree, so first prove the AGREE path never appears in the LOUD
+    # block (it wouldn't anyway, since agree=True rows are never flagged),
+    # then prove a genuine large variance still stays OUT of statement_flags
+    # (the LOUD block is reserved for LLP-Statement-referenced disagreements
+    # -- this check is never routed through statement_reference_row()).
+    data = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0)  # computed=4700
+    report = build_report(data)
+    row = next(r for r in report.reconciliation if r.category == _S194T_CATEGORY)
+    assert row.agree is False  # 4700 vs expected 1200 -- a genuine, large variance
+    assert not any(_S194T_CATEGORY in flag for flag in report.statement_flags)
+
+
+# 2 -- NEGATIVE: journal tds_expense totals and leg count are IDENTICAL
+# with and without this new row's inputs present -- proving requirement 3
+# ("NO new journal leg") holds even when the new check actually runs.
+def test_s194t_no_new_journal_leg_totals_and_leg_count_unchanged():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    data_with = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0)
+    data_without = _s194t_data(
+        tds_schedule=None, tds_payslip=None, tds=-5000.0,
+    )
+    journals_with = build_journals(build_report(data_with), accounts)
+    journals_without = build_journals(build_report(data_without), accounts)
+
+    april_with = next(j for j in journals_with if j.txn_id.endswith("-M01"))
+    april_without = next(j for j in journals_without if j.txn_id.endswith("-M01"))
+
+    assert len(april_with.splits) == len(april_without.splits)
+    tds_with = next(s for s in april_with.splits if s.account == accounts["tds_expense"])
+    tds_without = next(s for s in april_without.splits if s.account == accounts["tds_expense"])
+    assert tds_with.debit == pytest.approx(tds_without.debit, abs=0.01)
+    assert tds_with.credit == pytest.approx(tds_without.credit, abs=0.01) == 0.0
+
+
+# 3 -- NEGATIVE: interest on capital was paid this month but the payment
+# schedule's tds_on_rem_ioc is absent -- CANNOT RECONCILE naming the month,
+# never treated as a 0 contribution to the computed figure.
+def test_s194t_interest_paid_schedule_tds_absent_cannot_reconcile_not_zero():
+    data = _s194t_data(tds_schedule=None, tds_payslip=-300.0, tds=-300.0)
+    report = build_report(data)
+    row = next(r for r in report.reconciliation if r.category == _S194T_CATEGORY)
+    assert row.agree is None
+    assert row.informational is False
+    assert not getattr(row, "not_checked", False)
+    assert CANNOT_RECONCILE in row.note
+    assert "2031-04" in row.note
+    assert row.sources["Computed (schedule TDS - payslip TDS, interest months)"] is None
+
+
+# 4 -- NEGATIVE: a TDS difference beyond Re 1 is a loud (non-informational)
+# VARIANCE; a difference of Re 1 or less agrees.
+def test_s194t_tds_diff_over_re1_variance_within_re1_agrees():
+    # expected = 0.10 x 12000 = 1200.00 exactly.
+    # (a) computed = |-1500 - (-300)| = 1200.00 -- agrees exactly.
+    exact = _s194t_data(tds_schedule=-1500.0, tds_payslip=-300.0)
+    report_exact = build_report(exact)
+    row_exact = next(r for r in report_exact.reconciliation if r.category == _S194T_CATEGORY)
+    assert row_exact.agree is True
+
+    # (b) computed = |-1501.50 - (-300)| = 1201.50 -- 1.50 over Re 1: variance.
+    over = _s194t_data(tds_schedule=-1501.50, tds_payslip=-300.0)
+    report_over = build_report(over)
+    row_over = next(r for r in report_over.reconciliation if r.category == _S194T_CATEGORY)
+    assert row_over.agree is False
+    assert row_over.informational is False
+
+
+# 5 -- NEGATIVE: the combined journal TDS leg (tds_expense) uses the
+# SCHEDULE's figure, never the payslip's, when the two differ -- proving
+# requirement 3's "schedule precedence over payslip" guarantee holds even
+# in a month the new s.194T check also reads (an interest-paying month).
+def test_s194t_combined_journal_tds_uses_schedule_not_payslip_when_they_differ():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    # Precedence figure `tds` is set to the SCHEDULE's own value (-5000),
+    # exactly as mapper.py's existing 2.3 precedence logic would have picked
+    # -- the payslip's own (unmerged) figure is deliberately different
+    # (-300) so the journal leg is provably NOT using it.
+    data = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0, tds=-5000.0)
+    journal = next(
+        j for j in build_journals(build_report(data), accounts) if j.txn_id.endswith("-M01")
+    )
+    tds_split = next(s for s in journal.splits if s.account == accounts["tds_expense"])
+    assert tds_split.debit == pytest.approx(5000.0, abs=0.01)
+    assert tds_split.debit != pytest.approx(300.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# H35-08 -- CTC structuring check: walks Target Compensation down to the
+# cash pool actually paid (remuneration + gross share of profit + CTC
+# structuring + arrears). 2 required negative tests.
+# ---------------------------------------------------------------------------
+
+# 1 -- NEGATIVE: arrears are IN the cash pool -- excluding them would show a
+# rate variance, but the code (which includes them) does not produce one.
+def test_h35_08_arrears_included_no_variance_when_excluded_would_show_one():
+    data = _h35_02_data()
+    # remuneration total = 2 x 100000 = 200000; gross SoP total =
+    # 2 x 200000 = 400000; arrears (additional_share_of_profit) = 100000 in
+    # one month only; CTC structuring total = 0. Cash pool WITH arrears =
+    # 700000, which is set to tie exactly with Target Compensation.
+    data["monthly"][0]["additional_share_of_profit"] = 100000
+    data["drivers"]["target_compensation"] = 700000
+    data["ctc_structuring"] = {"total": 0, "months": {}, "rows": {}}
+
+    report = build_report(data)
+    assert report.ctc_check.status == "OK"
+    assert report.ctc_check.arrears_total == 100000
+    assert report.ctc_check.cash_pool == 700000
+    assert report.ctc_check.gap == 0
+
+    # Prove the "excluded" cash pool WOULD have shown a >Re1 variance --
+    # i.e. arrears genuinely matter here, they are not a no-op.
+    pool_without_arrears = report.ctc_check.cash_pool - report.ctc_check.arrears_total
+    assert abs(data["drivers"]["target_compensation"] - pool_without_arrears) > RECONCILIATION_TOLERANCE
+
+    row = next(
+        r for r in report.reconciliation if r.category.startswith("CTC walk-down:")
+    )
+    assert row.agree is True
+    assert row.informational is True
+
+
+# 2 -- NEGATIVE: a missing CTC-structuring input shows "not supplied",
+# never a silent 0.
+def test_h35_08_missing_ctc_structuring_shows_not_supplied_never_zero():
+    monthly = [
+        engine.MonthlyLine(
+            month="2031-04", remuneration=100000, share_of_profit_gross=200000,
+            additional_share_of_profit=0, firms_tax_sop=-50000, firms_tax_other=0,
+            tds=-10000, capital_transferred=0, total_paid=240000, misc=0,
+        ),
+    ]
+    result = compute_ctc_check(monthly, {"target_compensation": 500000}, None, "2031-32")
+    assert result.status == CANNOT_RECONCILE
+    assert result.ctc_structuring_total is None
+    assert result.cash_pool is None
+    assert "not supplied" in result.reason.lower()

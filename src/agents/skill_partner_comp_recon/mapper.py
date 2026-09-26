@@ -397,6 +397,20 @@ def _build_monthly(
         if rec.get("tds_label") is not None:
             line["tds_label"] = rec["tds_label"]
 
+        # 2.3b (H35-06 correction) -- the two UNMERGED figures behind the
+        # precedence pick just above, carried straight through unchanged
+        # (never re-derived, never re-parsed) so the s.194T-on-interest
+        # check in engine.py can isolate the interest component of the
+        # combined TDS figure: a month's schedule-vs-payslip TDS spread is
+        # attributable to interest only when interest_on_capital was also
+        # paid that month. `tds` above (the precedence-combined figure,
+        # already used for journal posting) is left untouched by this --
+        # these are read-only reconciliation inputs, not booking sources.
+        if sched_tds is not None:
+            line["tds_schedule"] = sched_tds
+        if payslip_tds is not None:
+            line["tds_payslip"] = payslip_tds
+
         # 2.4 -- additional_share_of_profit is booked from the schedule's
         # arrears_share_of_profit ONLY. The payslip's own
         # additional_share_of_profit field is polymorphic across the year
@@ -654,6 +668,21 @@ def build_input_data(
             adv["stated_closing_capital"] = advisory_record["schedule_projected_closing_balance"]
         if advisory_record.get("financial_year"):
             adv["financial_year"] = advisory_record["financial_year"]
+        # H35-07 item 1(i): the SAME Advisory's own "Opening balance (as on
+        # 1 Apr <next year>)" line, under the Capital/PLMI/Special Incentive
+        # schedule heading -- "1 Apr" of the year after this FY's own 31
+        # March is the day after this FY's close, so this is an ACTUAL
+        # figure describing the very same date as the LLP Statement's own
+        # closing capital, not a projection. Forwarded only when the line
+        # was actually printed (None means the line is absent -- see
+        # parsers/advisory.py's _parse_balance_row() nil-vs-absent
+        # contract); absence is never promoted to 0.
+        if advisory_record.get("schedule_opening_balance") is not None:
+            adv["opening_capital_next_fy"] = advisory_record["schedule_opening_balance"]
+        # H35-08: forwarded so the CTC walk-down has a Target Compensation
+        # baseline to walk down from.
+        if advisory_record.get("target_compensation") is not None:
+            adv["target_compensation"] = advisory_record["target_compensation"]
         adv_instalments = advisory_record.get("schedule_instalments") or []
         adv_grosses = [
             inst.get("gross")

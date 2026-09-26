@@ -321,7 +321,11 @@ help:
           roundness check), Cohorts (the incentive ledger with its
           reporting/prior/future FY-assignment column), Capital (the rule
           as a formula off Drivers, the Advisory cross-check, and the
-          mid-year rate-change detector), Reconciliation (agree / variance
+          mid-year rate-change detector), Interest on capital (H35-06 --
+          the computed simple-interest schedule per capital tranche added
+          this year -- informational; its basis is not established against
+          the LLP Statement's own method), CTC check (H35-08 -- the informational Target
+          Compensation walk-down), Reconciliation (agree / variance
           / cannot-reconcile per category -- topped by a highlighted
           "STATEMENT DISAGREES" block when the LLP Statement of Account
           disagrees with another source or fails its own arithmetic; see
@@ -353,6 +357,54 @@ help:
           the monthly transactions -- import both files if both were
           produced.
   tips: >
+    The computed Interest on Capital schedule (H35-06, its own workbook
+    sheet) applies simple interest, actual days / 365, to every capital
+    tranche added this financial year, from an interest-from-date
+    defaulting to the first day of that tranche's own payslip month. The
+    rate defaults to 6% p.a. unless the entity's partner_comp_drivers config
+    sets drivers.capital_interest_rate for this financial year explicitly
+    (e.g. the year the LLP actually changed its rate) -- this default is
+    never applied inside the reconciliation engine itself, only here, and a
+    per-tranche interest-from-date can likewise be overridden via
+    drivers.capital_interest_from_date_overrides ({"YYYY-MM": "YYYY-MM-DD"},
+    keyed by the tranche's own payslip month). This schedule's total is
+    shown against the LLP Statement's own interest-on-capital figure as its
+    own reconciliation row, but that row is always INFORMATIONAL (H35-06
+    correction): this schedule's BASIS (rate, day-count convention,
+    interest-from date) is not established to be the same one the LLP
+    Statement itself uses, so a gap here -- of any size -- is never a
+    disagreement with the statement and never enters the "STATEMENT
+    DISAGREES" block or the reconciliation counts. The statement's
+    interest-on-capital figure is independently checked by the "L5
+    tie-out: interest on capital" row instead (that row ties the payslip's
+    own printed figure to the statement). This schedule sheet only models
+    one possible (KPMG's) computation method.
+
+    Separately, "s.194T TDS on interest on capital" (H35-06 correction) IS
+    a real, non-informational check: it isolates the TDS withheld on
+    interest alone by taking, for each month interest on capital was paid,
+    the payment schedule's tds_on_rem_ioc less the payslip's own tds (the
+    schedule additionally covers interest; the payslip does not), and
+    compares the total against the configured s.194T rate times the LLP
+    Statement's interest-on-capital figure. The rate is read from
+    drivers.capital_interest_tds_rate for the financial year; if that is
+    not set, it falls back to drivers.remuneration_tds_rate (both are, in
+    substance, the same partner-payments withholding rate) -- never a
+    hardcoded rate. A month that paid interest but is missing either TDS
+    figure is CANNOT RECONCILE, never assumed to be 0. This check never
+    adds a journal leg of its own: the monthly journal's single
+    tds_expense leg already carries the COMBINED remuneration+interest TDS
+    (the schedule's tds_on_rem_ioc takes precedence over the payslip's own
+    figure -- see mapper.py), and reuses that same figure whether or not
+    this check runs.
+
+    The CTC structuring check (H35-08, its
+    own workbook sheet) walks Target Compensation down to the cash pool
+    actually paid (remuneration + gross share of profit + CTC structuring
+    components + arrears) using the same incentive payment schedule already
+    supplied above (payment_schedule) -- no separate input is needed; it is
+    purely informational and never enters the "STATEMENT DISAGREES" block.
+
     Start with the Reconciliation sheet, then Exceptions -- a
     "CANNOT RECONCILE" status names exactly which source figure for that
     category was not supplied, so a "cannot reconcile" row is something to
@@ -388,6 +440,10 @@ help:
       fix: "This is expected, not a defect. The LLP Statement's Profit Share for the Year is present and correct -- only the comparison against the filed income tax return is skipped because the return wasn't supplied. It never counts as a failure and never appears in the 'STATEMENT DISAGREES' block; supply the filed return to get an actual comparison."
     - problem: "'Incentive instalments: award-year Advisory vs payment schedule' note now starts with 'INFORMATIONAL (superseded by ...)'."
       fix: "This category is no longer the primary drawings check -- see the new 'Current-account drawings: statement vs (net monthly payouts + s.194T TDS withheld)' row for that. This one still reports a genuine Advisory-vs-schedule disagreement when it fires; it is informational, not retired."
+    - problem: "'Interest on capital: computed (schedule, ...) vs LLP Statement' shows INFORMATIONAL with a large gap, even though the LLP Statement is otherwise agreeing everywhere else."
+      fix: "This is expected (H35-06 correction), not a defect. This schedule models one possible (KPMG's) simple-interest computation off the payslip's own capital movements; its basis (rate, day-count, interest-from date) is not established to be the same one the LLP Statement uses, so it is never compared as a genuine disagreement, however large the gap. The statement's own interest-on-capital figure is independently checked by the 'L5 tie-out: interest on capital' row instead -- check that row for the real tie-out."
+    - problem: "'s.194T TDS on interest on capital' shows CANNOT RECONCILE even though interest on capital was paid this year."
+      fix: "This check needs, for every month interest on capital was paid, BOTH the payment schedule's tds_on_rem_ioc and the payslip's own tds figure (to isolate the interest-only TDS by difference), plus a configured rate (drivers.capital_interest_tds_rate, or drivers.remuneration_tds_rate as a fallback) and the LLP Statement's own interest-on-capital figure (to compute the expected TDS). The reason names exactly which of these is missing for which month; supply it rather than assuming the TDS was 0."
     - problem: "Reconciliation shows AGREE for two sources that are not byte-for-byte equal."
       fix: "Every reconciliation in this skill (including the L5 tie-out rows) uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie, anything more is reported as VARIANCE. This is a fixed, named constant (engine.RECONCILIATION_TOLERANCE), never a per-run setting -- it absorbs paisa-level rounding between sources, not a genuine discrepancy."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."

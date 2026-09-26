@@ -344,19 +344,28 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
 
     _set(ws, row, 1, "Cross-check vs Advisory's stated closing capital", bold=True)
     row += 1
-    advisory_stated = (report.reconciliation and next(
-        (r for r in report.reconciliation if r.category.startswith("Closing capital")), None
-    ))
-    if advisory_stated is not None:
-        for label, value in advisory_stated.sources.items():
+    # H35-07: this used to be a single row ("Closing capital: rule vs
+    # Advisory vs the filed return"); it is now split into an actual-vs-
+    # actual row (statement vs the filed return) and a separate informational
+    # row (rule vs Advisory's forward projection) -- loop over every
+    # "Closing capital"-prefixed row so both are shown, instead of picking
+    # only the first with next().
+    closing_capital_rows = ([
+        r for r in report.reconciliation if r.category.startswith("Closing capital")
+    ] if report.reconciliation else [])
+    for closing_row in closing_capital_rows:
+        _set(ws, row, 1, closing_row.category, bold=True)
+        row += 1
+        for label, value in closing_row.sources.items():
             _set(ws, row, 1, label)
             _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
             row += 1
-        status_fill, status_text = _status_fill(advisory_stated)
+        status_fill, status_text = _status_fill(closing_row)
         _set(ws, row, 1, "Status", bold=True)
         _set(ws, row, 2, status_text, fill=status_fill, bold=True)
         row += 1
-        _set(ws, row, 1, advisory_stated.note, wrap=True)
+        _set(ws, row, 1, closing_row.note, wrap=True)
+        row += 1
         row += 1
     row += 1
 
@@ -382,6 +391,110 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
             _set(ws, row, 6, s.note, fill=BAD, wrap=True, bold=True)
             row += 1
     _autosize(ws, 6)
+
+
+# ---------------------------------------------------------------------------
+# Interest on capital (H35-06) -- the computed schedule, one row per this-FY
+# capital tranche. Written whenever a Report carries one (build_report()
+# always computes it, even when the rate itself is not supplied -- see
+# engine.compute_capital_interest_schedule()).
+# ---------------------------------------------------------------------------
+
+def _write_interest_on_capital_sheet(wb, report: Report):
+    ws = wb.create_sheet("Interest on capital")
+    schedule = report.capital_interest_schedule
+    row = 1
+    if schedule is None:
+        _set(ws, row, 1, "Not computed for this run.")
+        _autosize(ws, 1)
+        return
+
+    # H35-06 correction: this schedule is informational -- its basis (rate,
+    # day-count, interest-from date) is not established against the LLP
+    # Statement's own method. The statement figure is independently checked
+    # by the "L5 tie-out: interest on capital" reconciliation row instead;
+    # this sheet only models one possible (KPMG's) computation method.
+    _set(ws, row, 1, "INFORMATIONAL -- models one possible (KPMG's) computation "
+                      "method; not the check on the LLP Statement's own figure "
+                      "(see the L5 tie-out row on the Reconciliation sheet)",
+         fill=TF, bold=True)
+    row += 2
+
+    if schedule.rate is None:
+        _set(ws, row, 1, "Rate", bold=True)
+        _set(ws, row, 2, schedule.reason or CANNOT_RECONCILE_LABEL, fill=TF)
+        row += 2
+    else:
+        _set(ws, row, 1, "Rate applied (p.a.)", bold=True)
+        _set(ws, row, 2, schedule.rate, fill=TF, number_format=P)
+        row += 2
+
+    headers = ["Month", "Principal (added to capital)", "Interest-from date",
+               "Override?", "Days (to FY close)", "Interest"]
+    _write_header(ws, row, headers)
+    row += 1
+    if not schedule.rows:
+        _set(ws, row, 1, "No capital tranches (capital_transferred) this FY.")
+        row += 1
+    for r in schedule.rows:
+        _set(ws, row, 1, r.month)
+        _set(ws, row, 2, r.principal, number_format=N)
+        _set(ws, row, 3, r.interest_from_date.isoformat())
+        _set(ws, row, 4, "Override" if r.interest_from_date_is_override else "Default")
+        _set(ws, row, 5, r.days if r.days is not None else "-- not computed --")
+        _set(ws, row, 6, r.interest if r.interest is not None else "-- not supplied (rate) --",
+             number_format=N)
+        row += 1
+    row += 1
+    _set(ws, row, 1, "Total computed interest", bold=True)
+    _set(ws, row, 2,
+         "-- not supplied --" if schedule.total_interest is None else schedule.total_interest,
+         fill=TF, number_format=N, bold=True)
+    _autosize(ws, len(headers))
+
+
+# ---------------------------------------------------------------------------
+# CTC check (H35-08) -- the informational Target Compensation walk-down.
+# Purely informational: no journal/posted-check impact.
+# ---------------------------------------------------------------------------
+
+def _write_ctc_check_sheet(wb, report: Report):
+    ws = wb.create_sheet("CTC check")
+    ctc = report.ctc_check
+    row = 1
+    if ctc is None:
+        _set(ws, row, 1, "Not computed for this run.")
+        _autosize(ws, 1)
+        return
+
+    _set(ws, row, 1, "Target Compensation vs cash pool actually paid "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational", bold=True)
+    row += 2
+
+    if ctc.status != "OK":
+        _set(ws, row, 1, "Status", bold=True)
+        _set(ws, row, 2, "NOT SUPPLIED", fill=TF, bold=True)
+        row += 1
+        _set(ws, row, 1, ctc.reason or CANNOT_RECONCILE_LABEL, wrap=True)
+        _autosize(ws, 2)
+        return
+
+    rows = [
+        ("Target Compensation", ctc.target_compensation),
+        ("Remuneration (total)", ctc.remuneration_total),
+        ("Gross share of profit (total)", ctc.gross_sop_total),
+        ("CTC structuring (total)", ctc.ctc_structuring_total),
+        ("Arrears (additional share of profit, total)", ctc.arrears_total),
+        ("Cash pool actually paid", ctc.cash_pool),
+        ("Gap (Target Compensation - cash pool)", ctc.gap),
+        ("Firm's tax on pool (with arrears in scope)", ctc.firms_tax_on_pool),
+    ]
+    for label, value in rows:
+        _set(ws, row, 1, label)
+        _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
+        row += 1
+    _autosize(ws, 2)
 
 
 # ---------------------------------------------------------------------------
@@ -597,6 +710,8 @@ def write_report_workbook(report: Report, out_path: str, posted_check=None, bank
     _write_one_offs_sheet(wb, report)
     _write_cohorts_sheet(wb, report)
     _write_capital_sheet(wb, report, driver_refs)
+    _write_interest_on_capital_sheet(wb, report)
+    _write_ctc_check_sheet(wb, report)
     _write_reconciliation_sheet(wb, report)
     _write_exceptions_sheet(wb, report)
     _write_open_items_sheet(wb, report)

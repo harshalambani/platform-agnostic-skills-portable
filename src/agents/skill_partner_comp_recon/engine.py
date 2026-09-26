@@ -694,6 +694,301 @@ def residual_current_account_check(report: "Report", applied_accrual: float = 0.
     )
 
 
+def fy_end_date(fy: str) -> date:
+    """The last day of a "2025-26"-style FY label -- 2026-03-31."""
+    return date(fy_start_year(fy) + 1, 3, 31)
+
+
+@dataclass
+class CapitalInterestRow:
+    """H35-06: one row per capital tranche ADDED this FY -- one per
+    MonthlyLine whose capital_transferred is non-zero (capital_transferred
+    is carried "sign as parsed" from the payment schedule, i.e. negative,
+    being a deduction on the payslip -- see the H35-07 roll-forward row's
+    own comment on this sign convention -- so `principal` here is its
+    negation, the amount actually added to the capital account)."""
+    month: str  # the MonthlyLine.month ("YYYY-MM") this tranche came from
+    principal: float
+    interest_from_date: date
+    interest_from_date_is_override: bool
+    days: int  # actual days, interest_from_date -> this FY's close (31 Mar)
+    rate: float | None
+    interest: float | None  # None only when the rate itself is not supplied
+
+
+@dataclass
+class CapitalInterestSchedule:
+    """H35-06: simple interest, actual days / 365, on every capital tranche
+    added this FY. `reason` carries the CANNOT-RECONCILE wording when the
+    rate itself was not supplied (see compute_capital_interest_schedule());
+    `rows`/`total_interest` are still populated (with `interest=None` on
+    each row) in that case, so the schedule sheet can still show the
+    principals and dates even though no rupee interest can be shown."""
+    fy: str
+    rate: float | None
+    rows: list[CapitalInterestRow]
+    total_interest: float | None
+    reason: str | None = None
+
+
+def compute_capital_interest_schedule(
+    monthly: "list[MonthlyLine]", drivers: dict, fy: str,
+) -> CapitalInterestSchedule:
+    """H35-06: one CapitalInterestRow per this-FY capital tranche (a
+    MonthlyLine with a non-zero capital_transferred), simple interest at
+    drivers["capital_interest_rate"] for actual days from an
+    interest-from-date through this FY's close (31 March), divided by 365.
+
+    The rate is read exactly like every other driver (see this module's
+    governing rule at the top of the file): a missing rate is a
+    CANNOT-RECONCILE result, never a silent default applied here. The 6%
+    documented default (skill.yaml) is applied, when the caller supplied no
+    explicit override, by agent.py's run() into drivers
+    ["capital_interest_rate"] BEFORE build_report() is ever called -- this
+    function only ever reads what is already in `drivers`.
+
+    interest_from_date defaults to the FIRST DAY of the tranche's own
+    payslip month (MonthlyLine.month + "-01") -- the best proxy this module
+    has for "the date of the payslip deduction", since no day-of-month is
+    carried on a payslip line -- and is deliberately NOT the FY start date
+    (1 April), which would overstate every tranche's interest period.
+    drivers["capital_interest_from_date_overrides"], an optional
+    {month: "YYYY-MM-DD"} dict keyed by the SAME MonthlyLine.month, lets one
+    named tranche's date be overridden without touching any other tranche.
+    """
+    rate, reason = driver(drivers, "capital_interest_rate", fy, "capital interest rate")
+    overrides = drivers.get("capital_interest_from_date_overrides") or {}
+    # A malformed `fy` string is a pre-existing, separately-guarded failure
+    # mode (jv_emitter.build_accrual_journal() raises JournalValidationError
+    # for it) -- this function must degrade gracefully rather than raising,
+    # so build_report() itself never fails on a bad fy; days/interest simply
+    # cannot be computed in that case (fy_end stays None).
+    try:
+        fy_end = fy_end_date(fy)
+    except (ValueError, IndexError):
+        fy_end = None
+
+    rows: list[CapitalInterestRow] = []
+    for m in monthly:
+        principal = -m.capital_transferred
+        if not principal:
+            continue
+        override_raw = overrides.get(m.month)
+        if override_raw is not None:
+            interest_from = _parse_date(override_raw)
+            is_override = True
+        else:
+            interest_from = _parse_date(f"{m.month}-01")
+            is_override = False
+        if fy_end is None:
+            days = None
+            interest = None
+        else:
+            days = max(0, (fy_end - interest_from).days)
+            interest = round(principal * rate * days / 365, 2) if rate is not None else None
+        rows.append(CapitalInterestRow(
+            month=m.month, principal=principal, interest_from_date=interest_from,
+            interest_from_date_is_override=is_override, days=days,
+            rate=rate, interest=interest,
+        ))
+
+    total_interest = None
+    if rate is not None and fy_end is not None:
+        total_interest = round(sum(r.interest for r in rows), 2) if rows else 0.0
+    return CapitalInterestSchedule(
+        fy=fy, rate=rate, rows=rows, total_interest=total_interest,
+        reason=reason if rate is None else None,
+    )
+
+
+@dataclass
+class S194tInterestTdsResult:
+    """H35-06 correction: isolates the s.194T TDS specifically on interest
+    on capital out of MonthlyLine.tds (the COMBINED remuneration+interest
+    TDS figure booked by jv_emitter.py -- this function never changes that
+    booking figure, only reports on it separately).
+
+    For every month interest_on_capital was actually paid, the payment
+    schedule's tds_on_rem_ioc exceeds the payslip's own tds by exactly the
+    TDS withheld on that month's interest (the schedule additionally
+    covers interest; the payslip does not -- see mapper.py 2.3/2.3b for
+    the two UNMERGED figures this reads, MonthlyLine.tds_schedule and
+    .tds_payslip). Summed across those months (as magnitudes), this is
+    `computed`. `expected` is the configured s.194T rate times the LLP
+    Statement's own interest-on-capital figure for the year (there is no
+    per-month statement breakdown to compare against instead).
+
+    `status` is CANNOT_RECONCILE (with `reason` set) whenever a month that
+    paid interest is missing either TDS figure, the rate driver, or the
+    statement's interest figure -- never treated as 0. `external`, when
+    supplied, is a third, independently reported figure shown alongside
+    (never invented, never required)."""
+    status: str  # "OK" or CANNOT_RECONCILE
+    computed: float | None = None
+    expected: float | None = None
+    rate: float | None = None
+    external: float | None = None
+    reason: str | None = None
+
+
+def compute_s194t_interest_tds(
+    monthly: "list[MonthlyLine]", drivers: dict, llp_record: dict | None,
+    external: dict, fy: str,
+) -> S194tInterestTdsResult:
+    """See S194tInterestTdsResult for the full method. The rate is read
+    from drivers["capital_interest_tds_rate"] for this FY; if that is not
+    supplied, this FALLS BACK to drivers["remuneration_tds_rate"] (both
+    are, in substance, the same partner-payments s.194T withholding rate)
+    -- never a hardcoded rate, per this module's governing rule.
+    """
+    missing_months: list[str] = []
+    computed = 0.0
+    saw_interest_month = False
+    for m in monthly:
+        if not m.interest_on_capital:
+            continue
+        saw_interest_month = True
+        if m.tds_schedule is None or m.tds_payslip is None:
+            missing_months.append(m.month)
+            continue
+        computed += abs(m.tds_schedule - m.tds_payslip)
+
+    external_value, _ = field_or_reason(
+        external, "tds_on_interest_on_capital", "s.194T TDS on interest on capital"
+    )
+
+    if not saw_interest_month:
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- no month this FY shows interest on "
+                   "capital paid (MonthlyLine.interest_on_capital); there is "
+                   "nothing to isolate a s.194T TDS-on-interest figure from.",
+        )
+    if missing_months:
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- interest on capital was paid in "
+                   f"{', '.join(missing_months)} but the payment schedule's "
+                   "tds_on_rem_ioc and/or the payslip's own tds figure is not "
+                   "supplied for that month; the interest-only TDS cannot be "
+                   "isolated (never assumed to be 0).",
+        )
+    computed = round(computed, 2)
+
+    rate, rate_reason = driver(drivers, "capital_interest_tds_rate", fy,
+                                "s.194T TDS rate on interest on capital")
+    if rate is None:
+        rate, rate_reason = driver(
+            drivers, "remuneration_tds_rate", fy,
+            "s.194T TDS rate on interest on capital (capital_interest_tds_rate "
+            "not supplied; falls back to remuneration_tds_rate)",
+        )
+
+    statement_interest = (
+        llp_record.get("capital_interest_on_capital") if llp_record is not None else None
+    )
+
+    if rate is None or statement_interest is None:
+        missing = []
+        if rate is None:
+            missing.append("capital_interest_tds_rate/remuneration_tds_rate driver")
+        if statement_interest is None:
+            missing.append("LLP Statement's interest on capital")
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, computed=computed, rate=rate,
+            external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- expected TDS (rate x statement "
+                   f"interest) not computable; not supplied: "
+                   f"{', '.join(missing)}.",
+        )
+
+    expected = round(rate * statement_interest, 2)
+    return S194tInterestTdsResult(
+        status="OK", computed=computed, expected=expected, rate=rate,
+        external=external_value,
+    )
+
+
+@dataclass
+class CtcCheckResult:
+    """H35-08: walks Target Compensation down to the cash pool actually
+    paid this FY -- remuneration + gross share of profit + CTC structuring
+    components + arrears (MonthlyLine.additional_share_of_profit, which the
+    payment schedule's own arrears_share_of_profit row populates when
+    present -- see mapper.py). Purely informational (no journal/posted-check
+    impact); `status` is CANNOT_RECONCILE (with `reason` set) whenever
+    Target Compensation or any cash-pool component is not supplied -- a
+    missing component is NEVER treated as 0."""
+    status: str  # "OK" or CANNOT_RECONCILE
+    target_compensation: float | None = None
+    remuneration_total: float | None = None
+    gross_sop_total: float | None = None
+    arrears_total: float | None = None
+    ctc_structuring_total: float | None = None
+    cash_pool: float | None = None
+    gap: float | None = None  # target_compensation - cash_pool
+    firms_tax_on_pool: float | None = None  # WITH arrears in scope (see below)
+    reason: str | None = None
+
+
+def compute_ctc_check(
+    monthly: "list[MonthlyLine]", drivers: dict, ctc_structuring: dict | None, fy: str,
+) -> CtcCheckResult:
+    """H35-08: consumes payment_schedule.py's already-parsed CTC-structuring
+    block, forwarded unchanged as data["ctc_structuring"] (mapper.py) --
+    no new parser/mapper input is added for this check.
+
+    cash pool = remuneration + gross share of profit + CTC structuring
+    total + arrears, all summed over `monthly` for the CTC-structuring
+    total's own "total" field). The firm's tax figure carried alongside
+    (`firms_tax_on_pool`) reuses MonthlyLine.firms_tax_sop AND
+    firms_tax_other -- the latter is already the firm's tax on a PRIOR-YEAR
+    PLMI instalment drawn down this month, i.e. arrears -- so summing both
+    fields is what puts arrears "in scope" for the firm's-tax figure this
+    check reports; no separate arrears-tax computation is invented.
+    """
+    target_compensation, reason = driver(drivers, "target_compensation", fy, "Target Compensation")
+    if target_compensation is None:
+        return CtcCheckResult(status=CANNOT_RECONCILE, reason=reason)
+
+    remuneration_total = sum(m.remuneration for m in monthly) if monthly else None
+    gross_sop_total = sum(m.share_of_profit_gross for m in monthly) if monthly else None
+    arrears_total = sum(m.additional_share_of_profit for m in monthly) if monthly else None
+    ctc_structuring_total = (
+        ctc_structuring.get("total") if ctc_structuring is not None else None
+    )
+    firms_tax_on_pool = (
+        sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else None
+    )
+
+    missing = []
+    if not monthly:
+        missing.append("monthly payout data")
+    if ctc_structuring_total is None:
+        missing.append("CTC structuring total (not supplied)")
+    if missing:
+        return CtcCheckResult(
+            status=CANNOT_RECONCILE,
+            target_compensation=target_compensation,
+            remuneration_total=remuneration_total, gross_sop_total=gross_sop_total,
+            arrears_total=arrears_total, ctc_structuring_total=ctc_structuring_total,
+            firms_tax_on_pool=firms_tax_on_pool,
+            reason=f"{CANNOT_RECONCILE} -- cash pool cannot be computed; not "
+                   f"supplied: {', '.join(missing)}.",
+        )
+
+    cash_pool = round(
+        remuneration_total + gross_sop_total + arrears_total + ctc_structuring_total, 2
+    )
+    gap = round(target_compensation - cash_pool, 2)
+    return CtcCheckResult(
+        status="OK", target_compensation=target_compensation,
+        remuneration_total=remuneration_total, gross_sop_total=gross_sop_total,
+        arrears_total=arrears_total, ctc_structuring_total=ctc_structuring_total,
+        cash_pool=cash_pool, gap=gap, firms_tax_on_pool=firms_tax_on_pool,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level report assembly.
 # ---------------------------------------------------------------------------
@@ -721,6 +1016,14 @@ class MonthlyLine:
     # CREDITS (reduces) the current-account balance owed by the firm. NOT
     # current-year income -- the income and its firm's tax were already
     # recognised in the award year (see jv_emitter.py).
+    # H35-06 correction: the two UNMERGED TDS figures behind `tds` (the
+    # precedence-combined figure above, already used for journal posting --
+    # see jv_emitter.py, unchanged by these). None (never 0.0) when that
+    # source has no figure for this month -- see mapper.py 2.3b. Read-only
+    # reconciliation inputs for compute_s194t_interest_tds() below; never a
+    # booking source.
+    tds_schedule: float | None = None  # payment schedule's tds_on_rem_ioc
+    tds_payslip: float | None = None   # payslip's own tds figure
 
 
 @dataclass
@@ -747,6 +1050,14 @@ class Report:
     # jv_emitter.build_accrual_journal() as well as the L5 tie-out rows
     # below, so it is carried on the Report rather than only used locally.
     llp_record: dict | None = None
+    # H35-06: the computed capital-interest schedule (one row per this-FY
+    # capital tranche), or None only if it was never computed (it always is,
+    # by build_report() -- see compute_capital_interest_schedule()).
+    capital_interest_schedule: "CapitalInterestSchedule | None" = None
+    # H35-08: the CTC walk-down (Target Compensation vs the actual cash
+    # pool), or None only if it was never computed (it always is, by
+    # build_report() -- see compute_ctc_check()).
+    ctc_check: "CtcCheckResult | None" = None
     # H35-04 item B: every LOUD flag this run raised -- one line per
     # statement-referenced reconciliation row whose note starts with
     # "STATEMENT DISAGREES" (see statement_reference_row()), plus one line
@@ -802,6 +1113,8 @@ def build_report(data: dict) -> Report:
             interest_on_capital=m.get("interest_on_capital", 0.0) or 0.0,
             medical_topup=m.get("medical_topup", 0.0) or 0.0,
             prior_cohort_drawdown=m.get("prior_cohort_drawdown", 0.0) or 0.0,
+            tds_schedule=m.get("tds_schedule"),
+            tds_payslip=m.get("tds_payslip"),
         ))
         addl = m.get("additional_share_of_profit", 0.0) or 0.0
         if addl:
@@ -954,21 +1267,100 @@ def build_report(data: dict) -> Report:
                                            "Advisory's stated closing capital")
     return_closing, _ = field_or_reason(external, "return_closing_capital",
                                          "return's closing capital")
-    # H35-04 item A: the LLP Statement of Account (L5), when supplied, is
-    # the REFERENCE for this row -- the rule/Advisory/Return are each
-    # measured against it ("Statement says X; <source> says Y; difference
-    # Z"), never averaged in as equal peers the way this row used to work
-    # (H35-02 added the L5 figure as a fourth equal source; H35-04 changes
-    # that). Absent a statement, this falls back to the old three-way
-    # equal-peers comparison unchanged, with a plain note that no statement
-    # was supplied.
+    # H35-07: the old single row here compared the LLP Statement's ACTUAL
+    # 31-March closing capital against a mix of (a) the rule's forward
+    # projection, (b) the Advisory's own "Projected closing balance" (both
+    # of which describe capital ONE YEAR AFTER the statement date, not the
+    # statement's own date), and (c) the filed return's closing capital --
+    # treating all three as equal peers. That produced false "gaps" whenever
+    # the projection simply differed from the eventual actual, which it
+    # almost always does.
+    #
+    # Fixed: the statement is compared only against another ACTUAL,
+    # same-date figure -- the filed return's closing capital (both describe
+    # the position as at the statement's own year end). The rule-vs-Advisory
+    # comparison is a genuine, useful check, but of two FORWARD PROJECTIONS
+    # against each other, not of the statement against a projection -- so it
+    # is kept as its own row, explicitly INFORMATIONAL, and is never allowed
+    # into the LOUD block.
+    #
+    # H35-07 item 1(i): the SAME Advisory carries its own "Opening balance
+    # (as on 1 Apr <next year>)" line under the Capital/PLMI/Special
+    # Incentive schedule heading -- "1 Apr" of the year after this FY's own
+    # 31 March is the day after this FY's close, so this is an ACTUAL
+    # figure at the same date as the statement's own closing capital, not a
+    # projection (confirmed against real specimens for two years). Absence
+    # of the line (mapper.py never forwards a None) falls through
+    # statement_reference_row()'s "no other source available" branch to a
+    # plain CANNOT RECONCILE -- never an AGREE against an invented 0.
+    advisory_opening_next_fy, _ = field_or_reason(
+        advisory, "opening_capital_next_fy",
+        "Advisory's Opening balance (as on 1 Apr next FY) line",
+    )
     reconciliation.append(statement_reference_row(
-        "Closing capital: rule vs Advisory vs the filed return",
+        "Closing capital: statement vs Advisory's opening balance for the next FY",
         llp_record.get("capital_closing_balance") if llp_record is not None else None,
         "LLP Statement (L5)",
-        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
-         "Advisory": advisory_closing, "Return": return_closing},
+        {"Advisory (opening balance, 1 Apr next FY)": advisory_opening_next_fy},
     ))
+    reconciliation.append(statement_reference_row(
+        "Closing capital: statement vs the filed return",
+        llp_record.get("capital_closing_balance") if llp_record is not None else None,
+        "LLP Statement (L5)",
+        {"Return": return_closing},
+    ))
+    # H35-07 item 1(ii): statement's OWN opening capital + this FY's
+    # payslip capital deductions (MonthlyLine.capital_transferred, from the
+    # payment schedule/advices -- a DIFFERENT document to the L5) vs the
+    # statement's own closing capital. This is additive to, and not a
+    # duplicate of, the L5 parser's own internal
+    # `_balance_check()`/"capital balance roll-forward does not reconcile"
+    # ERROR diagnostic (llp_statement.py) already surfaced loud via the
+    # statement-arithmetic block below: that existing check is a
+    # SELF-consistency check using only the L5's own printed opening/
+    # additions/withdrawals/closing figures. This new row cross-checks the
+    # L5's own opening + closing against what a SEPARATE document (the
+    # payment schedule/advices, via `monthly`) says was actually deducted
+    # for capital this year -- a genuine gap here (the L5 self-balances,
+    # but not against what was actually paid) would not be caught by the
+    # existing diagnostic at all.
+    # capital_transferred is carried "sign as parsed" from the payment
+    # schedule -- negative, being a deduction on the payslip (see
+    # jv_emitter.py's `Dr capital_contribution = -capital_transferred`) --
+    # so the amount actually ADDED to the capital account this year is its
+    # negation.
+    capital_movement_this_fy = (
+        sum(-m.capital_transferred for m in monthly) if monthly else None
+    )
+    llp_opening_capital = (
+        llp_record.get("capital_opening_balance") if llp_record is not None else None
+    )
+    if llp_opening_capital is not None and capital_movement_this_fy is not None:
+        rollforward_value = llp_opening_capital + capital_movement_this_fy
+    else:
+        rollforward_value = None
+    reconciliation.append(statement_reference_row(
+        "Closing capital: statement vs opening balance + this FY's payslip "
+        "capital deductions (roll-forward)",
+        llp_record.get("capital_closing_balance") if llp_record is not None else None,
+        "LLP Statement (L5)",
+        {"Opening + this FY's payslip capital deductions": rollforward_value},
+    ))
+    _capital_rule_vs_advisory = reconcile_category(
+        "Closing capital: rule vs Advisory (informational -- both are "
+        "forward-looking projections, not the statement's own date)",
+        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
+         "Advisory": advisory_closing},
+    )
+    _capital_rule_vs_advisory.informational = True
+    if _capital_rule_vs_advisory.agree is False:
+        _capital_rule_vs_advisory.note += (
+            " -- informational only, never a reconciliation gap: KPMG's own "
+            "per-instalment rounding-down of the capital contribution routinely "
+            "produces a small difference between the rule's projection and the "
+            "Advisory's printed projected closing balance."
+        )
+    reconciliation.append(_capital_rule_vs_advisory)
 
     # H35-02 item 1: three further L5 tie-out rows -- current-account
     # closing balance, remuneration for the year, and interest on capital.
@@ -1043,6 +1435,90 @@ def build_report(data: dict) -> Report:
         "L5 tie-out: interest on capital",
         booked_interest_on_capital, "capital_interest_on_capital",
     ))
+
+    # H35-06: a genuinely DIFFERENT check from the L5 tie-out row just
+    # above. That row compares the payslip's OWN already-reported
+    # `interest_on_capital` figure (MonthlyLine.interest_on_capital) against
+    # the L5. This row instead computes a fresh interest schedule -- simple
+    # interest at drivers["capital_interest_rate"], actual days/365 -- off
+    # the capital MOVEMENTS this FY (MonthlyLine.capital_transferred), and
+    # compares THAT computed total against the same L5 field.
+    #
+    # H35-06 correction: this row is ALWAYS informational, regardless of the
+    # size of the gap. Real-run corroboration (two independent sources: the
+    # L5 tie-out row above, and the final month's payslip arrears figure
+    # net of s.194T) showed the LLP Statement's interest-on-capital figure
+    # is correct and this schedule's BASIS (rate/day-count/interest-from
+    # date) simply isn't established to match the statement's own method --
+    # so a gap here, however large, is never a "STATEMENT DISAGREES"
+    # disagreement and never enters the reconciliation counts. The
+    # statement's own figure is independently checked by the L5 tie-out row
+    # instead; this schedule sheet only models one possible (KPMG's)
+    # computation method.
+    capital_interest_schedule = compute_capital_interest_schedule(monthly, drivers, fy)
+    _interest_schedule_category = (
+        "Interest on capital: computed (schedule, this FY's payslip capital "
+        "movements only) vs LLP Statement"
+    )
+    _schedule_informational_prefix = (
+        "INFORMATIONAL -- this schedule's basis (rate, day-count, "
+        "interest-from date) is not established against the LLP Statement's "
+        "own method; the statement figure is independently checked by the "
+        "'L5 tie-out: interest on capital' row above. This row only models "
+        "KPMG's own computation method and is never a disagreement with the "
+        "statement, however large the gap. "
+    )
+    if capital_interest_schedule.rate is None:
+        reconciliation.append(ReconciliationResult(
+            category=_interest_schedule_category,
+            sources={"Computed (interest schedule)": None,
+                     "LLP Statement (L5)": llp_record.get("capital_interest_on_capital")
+                     if llp_record is not None else None},
+            agree=None,
+            note=_schedule_informational_prefix + (capital_interest_schedule.reason or ""),
+            informational=True,
+        ))
+    else:
+        _schedule_row = statement_reference_row(
+            _interest_schedule_category,
+            llp_record.get("capital_interest_on_capital") if llp_record is not None else None,
+            "LLP Statement (L5)",
+            {"Computed (interest schedule)": capital_interest_schedule.total_interest},
+        )
+        _schedule_row.note = _schedule_informational_prefix + (_schedule_row.note or "")
+        _schedule_row.informational = True
+        reconciliation.append(_schedule_row)
+
+    # H35-06 correction: "s.194T TDS on interest on capital" is now a real,
+    # non-informational check (it was previously always "NOT SUPPLIED" --
+    # no field anywhere in this skill isolated interest-only TDS). It is
+    # derived by DIFFERENCE from figures already carried through unmerged
+    # (mapper.py 2.3b: MonthlyLine.tds_schedule / .tds_payslip) -- see
+    # compute_s194t_interest_tds() for the full method and its CANNOT-
+    # RECONCILE conditions. No new journal leg results from this: the
+    # monthly journal's tds_expense leg already carries the COMBINED
+    # remuneration+interest TDS (MonthlyLine.tds, schedule-precedence --
+    # see mapper.py 2.3), unaffected by this check.
+    s194t_interest = compute_s194t_interest_tds(monthly, drivers, llp_record, external, fy)
+    _s194t_category = "s.194T TDS on interest on capital"
+    if s194t_interest.status == "OK":
+        _s194t_sources = {
+            "Computed (schedule TDS - payslip TDS, interest months)": s194t_interest.computed,
+            "Expected (s.194T rate x statement interest)": s194t_interest.expected,
+        }
+        if s194t_interest.external is not None:
+            _s194t_sources["Externally reported"] = s194t_interest.external
+        reconciliation.append(reconcile_category(_s194t_category, _s194t_sources))
+    else:
+        reconciliation.append(ReconciliationResult(
+            category=_s194t_category,
+            sources={"Computed (schedule TDS - payslip TDS, interest months)":
+                         s194t_interest.computed,
+                     "Expected (s.194T rate x statement interest)": s194t_interest.expected,
+                     "Externally reported": s194t_interest.external},
+            agree=None,
+            note=s194t_interest.reason,
+        ))
 
     total_tds_credit = -sum(m.tds for m in monthly) if monthly else None
     form_26as, _ = field_or_reason(external, "form_26as_total_credit", "Form 26AS total credit")
@@ -1212,6 +1688,42 @@ def build_report(data: dict) -> Report:
             informational_row.informational = True
             reconciliation.append(informational_row)
 
+    # H35-08: the CTC walk-down. Purely informational (no journal/posted-
+    # check impact) -- shown on its own sheet plus this one informational
+    # summary line, never in the statement LOUD block unless a figure
+    # actually contradicts the LLP statement (which this check never
+    # compares against -- it only compares Target Compensation to the cash
+    # actually paid, so it is always `informational=True` here).
+    ctc_check = compute_ctc_check(monthly, drivers, data.get("ctc_structuring"), fy)
+    if ctc_check.status == "OK":
+        reconciliation.append(ReconciliationResult(
+            category="CTC walk-down: Target Compensation vs cash pool "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational",
+            sources={"Target Compensation": ctc_check.target_compensation,
+                     "Cash pool actually paid": ctc_check.cash_pool},
+            agree=abs(ctc_check.gap) <= RECONCILIATION_TOLERANCE,
+            note=f"Gap (Target Compensation - cash pool): {ctc_check.gap:,.2f} "
+                 f"(remuneration {ctc_check.remuneration_total:,.2f} + gross "
+                 f"share of profit {ctc_check.gross_sop_total:,.2f} + CTC "
+                 f"structuring {ctc_check.ctc_structuring_total:,.2f} + "
+                 f"arrears {ctc_check.arrears_total:,.2f}).",
+            informational=True,
+        ))
+    else:
+        reconciliation.append(ReconciliationResult(
+            category="CTC walk-down: Target Compensation vs cash pool "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational",
+            sources={"Target Compensation": ctc_check.target_compensation,
+                     "Cash pool actually paid": ctc_check.cash_pool},
+            agree=None,
+            note=ctc_check.reason,
+            informational=True,
+            not_checked=True,
+            status_label="NOT SUPPLIED",
+        ))
+
     # ---- H35-04 item B: assemble the LOUD block ---------------------------
     # One line per statement-referenced row that disagrees with the L5
     # statement (its note starts with "STATEMENT DISAGREES" -- see
@@ -1239,5 +1751,7 @@ def build_report(data: dict) -> Report:
         firm_name=data.get("firm_name", "") or "",
         opening_reclass=data.get("opening_reclass"),
         llp_record=llp_record,
+        capital_interest_schedule=capital_interest_schedule,
+        ctc_check=ctc_check,
         statement_flags=statement_flags,
     )

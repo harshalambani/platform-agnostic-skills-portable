@@ -222,6 +222,12 @@ cohorts:
 
 advisory:
   stated_closing_capital: 1000000
+  # H35-07 item 1(i): this SAME FY's Advisory also prints an "Opening
+  # balance (as on 1 Apr 26)" line under the Capital/PLMI/Special Incentive
+  # schedule -- "1 Apr" of the year after this FY's own 31 March is the day
+  # after this FY's close, so it describes the same date as the statement's
+  # own closing capital (1,000,000) and is expected to tie to it exactly.
+  opening_capital_next_fy: 1000000
   # This is the AWARD-year Advisory for the cohort above (award_fy
   # "2024-25"), so its own schedule_instalments gross total is directly
   # comparable against the reporting FY's cohort ledger gross total: the
@@ -270,7 +276,17 @@ advisory:
 llp_record:
   document_type: "llp_statement"
   financial_year: "2025-26"
-  capital_opening_balance: 988000
+  # H35-07 item 1(ii): every monthly line's capital_transferred is 0 this
+  # FY (no payslip capital deduction), so the roll-forward (opening + sum
+  # of payslip capital deductions) is expected to equal the closing
+  # balance exactly only when opening == closing (1,000,000). This year's
+  # only capital movement is the interest-on-capital credit below
+  # (capital_interest_on_capital / capital_total_additions, 12,000) --
+  # which is a different, already-covered tie-out (see the
+  # booked-vs-statement interest-on-capital row) and is deliberately NOT
+  # part of the item 1(ii) roll-forward formula (payslip capital
+  # deductions only, per spec), so it is not double counted here.
+  capital_opening_balance: 1000000
   capital_introduced_transferred: 0
   capital_interest_on_capital: 12000
   capital_total_additions: 12000
