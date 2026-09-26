@@ -5831,14 +5831,16 @@ def test_h35_04_statement_reference_row_no_statement_falls_back_to_old_equal_pee
 # ---- B) the LOUD block (Report.statement_flags), via build_report --------
 
 def _h35_04_data(*, llp_record=None, advisory_closing=None, return_closing=None,
-                  return_exempt_sop=None):
+                  return_exempt_sop=None, advisory_opening_next_fy=None):
     """Built on top of _h35_02_data()'s two-month fixture (total_paid
     480000 combined, tds -20000 combined) so D1's payouts+TDS identity and
     the closing-capital / exempt-SoP statement-reference rows can all be
     exercised from one small, self-consistent set of numbers."""
     data = _h35_02_data(llp_record=llp_record)
     if advisory_closing is not None:
-        data["advisory"] = {"stated_closing_capital": advisory_closing}
+        data.setdefault("advisory", {})["stated_closing_capital"] = advisory_closing
+    if advisory_opening_next_fy is not None:
+        data.setdefault("advisory", {})["opening_capital_next_fy"] = advisory_opening_next_fy
     if return_closing is not None:
         data["external"]["return_closing_capital"] = return_closing
     if return_exempt_sop is not None:
@@ -5943,6 +5945,149 @@ def test_h35_04_closing_capital_row_statement_is_reference_others_measured_again
         f.startswith(_CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
         for f in report.statement_flags
     )
+
+
+_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY = (
+    "Closing capital: statement vs Advisory's opening balance for the next FY"
+)
+_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY = (
+    "Closing capital: statement vs opening balance + this FY's payslip "
+    "capital deductions (roll-forward)"
+)
+
+
+# ---- H35-07 item 1(i): statement vs Advisory's own "Opening balance
+# (as on 1 Apr next FY)" line -----------------------------------------------
+
+def test_h35_07_advisory_opening_next_fy_ties_to_statement_not_loud():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_opening_next_fy=1000000,  # ties exactly
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is True
+    assert report.statement_flags == []
+
+
+def test_h35_07_advisory_opening_next_fy_genuine_difference_is_loud():
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_opening_next_fy=990000,  # diff 10,000 -- genuinely disagrees
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference -10,000.00" in row.note
+    assert any(
+        f.startswith(_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+        for f in report.statement_flags
+    )
+
+
+def test_h35_07_advisory_opening_next_fy_absent_is_cannot_reconcile_never_agree_with_zero():
+    # NEGATIVE (mandatory): the Advisory does not print the "Opening
+    # balance (as on 1 Apr next FY)" line at all this run -- this must be
+    # CANNOT RECONCILE, never an AGREE against an invented 0.
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        # advisory_opening_next_fy intentionally omitted -- line absent
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert row.agree is not True
+    assert not any(
+        f.startswith(_CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+        for f in report.statement_flags
+    )
+
+
+def test_h35_07_advisory_opening_next_fy_never_confused_with_projected_closing():
+    # NEGATIVE (mandatory): supplying only the Advisory's "Projected closing
+    # balance" (stated_closing_capital) must NOT be read as the "Opening
+    # balance (as on 1 Apr next FY)" line -- the two are parsed separately
+    # (see parsers/advisory.py's distinct _OPENING_BALANCE_RE /
+    # _CLOSING_BALANCE_RE) and must never be substituted for each other.
+    data = _h35_04_data(
+        llp_record={"capital_closing_balance": 1000000},
+        advisory_closing=1000000,  # only the projected closing balance supplied
+    )
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ADVISORY_OPENING_CATEGORY)
+    assert row.agree is None
+    assert CANNOT_RECONCILE in row.note
+    assert "Advisory (opening balance, 1 Apr next FY)" not in row.sources or (
+        row.sources["Advisory (opening balance, 1 Apr next FY)"] is None
+    )
+
+
+# ---- H35-07 item 1(ii): statement vs opening + this FY's payslip capital
+# deductions (roll-forward). Additive to, never a duplicate of, the L5
+# parser's own internal `_balance_check()` self-consistency ERROR
+# diagnostic (llp_statement.py), which uses only the L5's own printed
+# opening/additions/withdrawals/closing figures -- this row instead
+# cross-checks against a SEPARATE document (the payment schedule/advices,
+# via `monthly.capital_transferred`). ----------------------------------------
+
+def test_h35_07_rollforward_ties_to_statement_not_loud():
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+    })
+    data["monthly"][0]["capital_transferred"] = -30000  # payslip deduction
+    data["monthly"][1]["capital_transferred"] = -30000  # 940000 + 60000 = 1,000,000
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    assert row.agree is True
+    assert report.statement_flags == []
+
+
+def test_h35_07_rollforward_genuine_gap_is_loud():
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+    })
+    data["monthly"][0]["capital_transferred"] = -20000
+    data["monthly"][1]["capital_transferred"] = -20000  # 940000 + 40000 = 980,000 != 1,000,000
+    report = build_report(data)
+    row = _find(report, _CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference -20,000.00" in row.note
+    assert any(
+        f.startswith(_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY) for f in report.statement_flags
+    )
+
+
+def test_h35_07_rollforward_is_not_a_duplicate_of_the_l5_self_check_row():
+    # NEGATIVE (mandatory): the roll-forward row and the L5's own internal
+    # arithmetic-diagnostic ERROR line are two DIFFERENT loud flags, from
+    # two different sources -- never collapsed into one row/one flag.
+    data = _h35_04_data(llp_record={
+        "capital_closing_balance": 1000000,
+        "capital_opening_balance": 940000,
+        "diagnostics": [
+            "ERROR: capital balance roll-forward does not reconcile -- "
+            "opening=940,000.00, additions=999.00, withdrawals=0.00; "
+            "computed 940,999.00 vs printed closing 1,000,000.00 (diff -59,001.00).",
+        ],
+    })
+    data["monthly"][0]["capital_transferred"] = -20000
+    data["monthly"][1]["capital_transferred"] = -20000
+    report = build_report(data)
+
+    rollforward_flags = [
+        f for f in report.statement_flags if f.startswith(_CLOSING_CAPITAL_ROLLFORWARD_CATEGORY)
+    ]
+    l5_self_check_flags = [
+        f for f in report.statement_flags if f.startswith("Statement arithmetic -- ERROR:")
+    ]
+    assert len(rollforward_flags) == 1
+    assert len(l5_self_check_flags) == 1
+    assert rollforward_flags[0] != l5_self_check_flags[0]
 
 
 def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():

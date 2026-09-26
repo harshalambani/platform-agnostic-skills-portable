@@ -654,6 +654,21 @@ def build_input_data(
             adv["stated_closing_capital"] = advisory_record["schedule_projected_closing_balance"]
         if advisory_record.get("financial_year"):
             adv["financial_year"] = advisory_record["financial_year"]
+        # H35-07 item 1(i): the SAME Advisory's own "Opening balance (as on
+        # 1 Apr <next year>)" line, under the Capital/PLMI/Special Incentive
+        # schedule heading -- "1 Apr" of the year after this FY's own 31
+        # March is the day after this FY's close, so this is an ACTUAL
+        # figure describing the very same date as the LLP Statement's own
+        # closing capital, not a projection. Forwarded only when the line
+        # was actually printed (None means the line is absent -- see
+        # parsers/advisory.py's _parse_balance_row() nil-vs-absent
+        # contract); absence is never promoted to 0.
+        if advisory_record.get("schedule_opening_balance") is not None:
+            adv["opening_capital_next_fy"] = advisory_record["schedule_opening_balance"]
+        # H35-08: forwarded so the CTC walk-down has a Target Compensation
+        # baseline to walk down from.
+        if advisory_record.get("target_compensation") is not None:
+            adv["target_compensation"] = advisory_record["target_compensation"]
         adv_instalments = advisory_record.get("schedule_instalments") or []
         adv_grosses = [
             inst.get("gross")

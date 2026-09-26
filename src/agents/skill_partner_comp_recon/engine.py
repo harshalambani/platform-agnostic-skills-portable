@@ -971,22 +971,67 @@ def build_report(data: dict) -> Report:
     # is kept as its own row, explicitly INFORMATIONAL, and is never allowed
     # into the LOUD block.
     #
-    # H35-07 items 1(i) (statement vs the Advisory's own "Opening balance
-    # (as on 1 Apr N+1)" line) and 1(ii) (statement vs a prior-year-closing
-    # + this-FY roll-forward) are NOT implemented here -- see the build
-    # handback. (i) would require loading the FOLLOWING FY's Advisory
-    # alongside this FY's data to get an actual, same-date opening figure;
-    # today's data model (mapper.py `advisory` dict, merge_advisories())
-    # only carries one FY's Advisory per report. (ii) would require a
-    # prior-year closing capital input that does not exist anywhere in the
-    # current `data`/`advisory`/`external` shape. Implementing either would
-    # mean inventing a new input/shape, which is a redesign, not a fix --
-    # per instruction this is reported, not guessed at.
+    # H35-07 item 1(i): the SAME Advisory carries its own "Opening balance
+    # (as on 1 Apr <next year>)" line under the Capital/PLMI/Special
+    # Incentive schedule heading -- "1 Apr" of the year after this FY's own
+    # 31 March is the day after this FY's close, so this is an ACTUAL
+    # figure at the same date as the statement's own closing capital, not a
+    # projection (confirmed against real specimens for two years). Absence
+    # of the line (mapper.py never forwards a None) falls through
+    # statement_reference_row()'s "no other source available" branch to a
+    # plain CANNOT RECONCILE -- never an AGREE against an invented 0.
+    advisory_opening_next_fy, _ = field_or_reason(
+        advisory, "opening_capital_next_fy",
+        "Advisory's Opening balance (as on 1 Apr next FY) line",
+    )
+    reconciliation.append(statement_reference_row(
+        "Closing capital: statement vs Advisory's opening balance for the next FY",
+        llp_record.get("capital_closing_balance") if llp_record is not None else None,
+        "LLP Statement (L5)",
+        {"Advisory (opening balance, 1 Apr next FY)": advisory_opening_next_fy},
+    ))
     reconciliation.append(statement_reference_row(
         "Closing capital: statement vs the filed return",
         llp_record.get("capital_closing_balance") if llp_record is not None else None,
         "LLP Statement (L5)",
         {"Return": return_closing},
+    ))
+    # H35-07 item 1(ii): statement's OWN opening capital + this FY's
+    # payslip capital deductions (MonthlyLine.capital_transferred, from the
+    # payment schedule/advices -- a DIFFERENT document to the L5) vs the
+    # statement's own closing capital. This is additive to, and not a
+    # duplicate of, the L5 parser's own internal
+    # `_balance_check()`/"capital balance roll-forward does not reconcile"
+    # ERROR diagnostic (llp_statement.py) already surfaced loud via the
+    # statement-arithmetic block below: that existing check is a
+    # SELF-consistency check using only the L5's own printed opening/
+    # additions/withdrawals/closing figures. This new row cross-checks the
+    # L5's own opening + closing against what a SEPARATE document (the
+    # payment schedule/advices, via `monthly`) says was actually deducted
+    # for capital this year -- a genuine gap here (the L5 self-balances,
+    # but not against what was actually paid) would not be caught by the
+    # existing diagnostic at all.
+    # capital_transferred is carried "sign as parsed" from the payment
+    # schedule -- negative, being a deduction on the payslip (see
+    # jv_emitter.py's `Dr capital_contribution = -capital_transferred`) --
+    # so the amount actually ADDED to the capital account this year is its
+    # negation.
+    capital_movement_this_fy = (
+        sum(-m.capital_transferred for m in monthly) if monthly else None
+    )
+    llp_opening_capital = (
+        llp_record.get("capital_opening_balance") if llp_record is not None else None
+    )
+    if llp_opening_capital is not None and capital_movement_this_fy is not None:
+        rollforward_value = llp_opening_capital + capital_movement_this_fy
+    else:
+        rollforward_value = None
+    reconciliation.append(statement_reference_row(
+        "Closing capital: statement vs opening balance + this FY's payslip "
+        "capital deductions (roll-forward)",
+        llp_record.get("capital_closing_balance") if llp_record is not None else None,
+        "LLP Statement (L5)",
+        {"Opening + this FY's payslip capital deductions": rollforward_value},
     ))
     _capital_rule_vs_advisory = reconcile_category(
         "Closing capital: rule vs Advisory (informational -- both are "
