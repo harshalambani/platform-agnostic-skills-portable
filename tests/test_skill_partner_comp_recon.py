@@ -6608,6 +6608,11 @@ def test_match_payouts_nearer_date_wins(tmp_path):
 
 
 def test_match_payouts_no_credit_found_is_loud_genuine_gap(tmp_path):
+    # H35-05 round 3, item 3: a book with ZERO deposits at all anywhere in
+    # the FY means the bank import itself never ran for this year -- the
+    # skill must say so with ONE loud line, not per-payout "genuine gap"
+    # notes (which would misleadingly imply the import ran but these
+    # specific payouts are missing).
     accounts, guids = _gc_tree()
     book_path = _write_gnucash_book(
         tmp_path / "book_empty.gnucash", _gc_document_xml(accounts, []),
@@ -6618,9 +6623,12 @@ def test_match_payouts_no_credit_found_is_loud_genuine_gap(tmp_path):
 
     assert matches[1].outcome == NO_MATCH
     assert len(notes) == 1
-    assert "2025-04" in notes[0]
-    assert "no bank credit found" in notes[0]
-    assert "genuine gap" in notes[0]
+    assert "no deposits at all on" in notes[0]
+    assert "does not appear to have run" in notes[0]
+    assert "import the bank statement first" in notes[0]
+    assert "No payout journals written" in notes[0]
+    # NEGATIVE: must not be misreported as a per-payout genuine gap.
+    assert "genuine gap" not in notes[0]
 
 
 def test_match_payouts_degrades_cleanly_when_no_book_or_no_bank_account():
@@ -6946,10 +6954,17 @@ def test_build_balance_tieout_no_match_payout_is_not_pending_journal_posting(tmp
     )
 
     by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
-    for key in ("bank", "tds_expense", "remuneration_income", "share_of_profit_income"):
+    for key in ("tds_expense", "remuneration_income", "share_of_profit_income"):
         row = by_key[key]
         assert PENDING_JOURNAL_VERDICT not in (row.note or "")
         assert row.agree is True
+
+    # H35-05 round 3, item 2: since bank_matches is supplied (even though
+    # this one payout is NO_MATCH), the "bank" row is the new informational
+    # row -- never a plain AGREE/VARIANCE verdict.
+    bank_row = by_key["bank"]
+    assert bank_row.informational is True
+    assert bank_row.agree is None
 
 
 def test_build_posted_check_and_balance_tieout_matched_payout_reroutes_off_bank(tmp_path):
@@ -6986,7 +7001,8 @@ def test_build_posted_check_and_balance_tieout_matched_payout_reroutes_off_bank(
     )
 
     by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
-    assert by_key["bank"].sources["Computed (this run's journal)"] == 0.0
+    assert by_key["bank"].sources["Computed (posted to bank by this run)"] == 0.0
+    assert by_key["bank"].informational is True
 
     reroute_rows = [
         r for r in results
@@ -6994,10 +7010,278 @@ def test_build_posted_check_and_balance_tieout_matched_payout_reroutes_off_bank(
     ]
     assert len(reroute_rows) == 1
     reroute_row = reroute_rows[0]
-    rerouted_amount = reroute_row.sources["Computed (this run's journal, rerouted bank-match leg)"]
+    rerouted_amount = reroute_row.sources[
+        "Computed (this run's rerouted leg(s) plus the bank import's own "
+        "matched counter-leg(s) -- expected nil)"
+    ]
     assert rerouted_amount == 480000.0
 
     # The posted check and the journal this run would actually write agree
     # on exactly which txn_id(s) exist.
     journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=bank_matches)
     assert {j.txn_id for j in journals} == {p.txn_id for p in posted_check}
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 3, item 1 -- the bank-match counter-account ("item 2b") row
+# must compare this run's rerouted leg(s) PLUS the bank import's own
+# matched counter-leg(s) (expected nil once both are posted) against the
+# book's FY movement on that account -- never this run's rerouted leg alone
+# against the account's whole FY movement (a false VARIANCE every time).
+# These use REAL match_payouts_to_bank() matching (so credit_txn_guid is a
+# genuine book transaction guid, never hand-faked) against a genuine extra
+# "Other Clearing" income account that is NOT one of _GC_TIEOUT_ACCOUNTS's
+# configured paths.
+# ---------------------------------------------------------------------------
+
+def _gc_tree_with_clearing() -> tuple[list, dict]:
+    """_gc_tree() plus one extra INCOME leaf, "Other Clearing" under PGBP --
+    a genuine bank-import counter-account that is NOT one of
+    _GC_TIEOUT_ACCOUNTS's configured paths. Additive, does not touch
+    _gc_tree()'s own accounts/guids so the existing Section B/C/D tests
+    above are unaffected."""
+    accounts, guids = _gc_tree()
+    guids["Other Clearing"] = _gc_guid("Other Clearing")
+    accounts.append(
+        _gc_account_xml(guids["Other Clearing"], "Other Clearing", "INCOME", guids["PGBP"]),
+    )
+    return accounts, guids
+
+
+def _item1_reversing_journal_txn(guids: dict, num: str = "SYNTHETIC-2526-M01") -> str:
+    """The book-side mirror of the monthly journal build_journals() would
+    write once a payout is MATCHED and rerouted to "Other Clearing":
+    Dr Other Clearing 480000 (reverses the bank import's own credit there),
+    Dr TDS 20000, Cr Remuneration 200000, Cr Share of Profit 300000 -- the
+    exact split shape of _class_a_advice("2025-04")'s default figures."""
+    return _gc_txn_xml(
+        _gc_guid("rev-txn"), "2025-04-30", "monthly payout journal",
+        [
+            _gc_split_xml(_gc_guid("s-rev-clearing"), 480000.0, guids["Other Clearing"]),
+            _gc_split_xml(_gc_guid("s-rev-tds"), 20000.0, guids["TDS"]),
+            _gc_split_xml(_gc_guid("s-rev-rem"), -200000.0, guids["Remuneration"]),
+            _gc_split_xml(_gc_guid("s-rev-sop"), -300000.0, guids["Share of Profit"]),
+        ],
+        num=num,
+    )
+
+
+def _item1_reroute_row(results):
+    reroute_rows = [
+        r for r in results
+        if "bank-match counter-account" in r.category and "Other Clearing" in r.category
+    ]
+    assert len(reroute_rows) == 1
+    return reroute_rows[0]
+
+
+def test_h35_05_round3_item1_counter_account_posted_gives_agree(tmp_path):
+    # Once BOTH the bank import's original credit AND this run's rerouted
+    # journal are posted, the counter-account's net movement from these
+    # matched transactions is nil -- AGREE, never VARIANCE.
+    accounts, guids = _gc_tree_with_clearing()
+    deposit = _bank_deposit_txn(
+        "dep-clearing", "2025-04-30", 480000.0, guids["Current Account"],
+        guids["Other Clearing"],
+    )
+    reversing = _item1_reversing_journal_txn(guids)
+    book_path = _write_gnucash_book(
+        tmp_path / "book_item1_posted.gnucash",
+        _gc_document_xml(accounts, [deposit, reversing]),
+    )
+    report = _gc_tieout_report()
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    assert reason is None
+    assert matches[1].outcome == MATCHED
+    assert matches[1].credit_account == "Income:PGBP:Other Clearing"
+
+    posted_check, _ = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=matches,
+    )
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26",
+        posted_check=posted_check, bank_matches=matches,
+    )
+
+    row = _item1_reroute_row(results)
+    assert row.agree is True
+    assert PENDING_JOURNAL_VERDICT not in (row.note or "")
+    assert "Variance" not in (row.note or "")
+
+
+def test_h35_05_round3_item1_counter_account_not_posted_gives_pending_not_variance(tmp_path):
+    # NEGATIVE: this run's own journal is not yet posted, so the book still
+    # holds only the bank import's original credit -- this must read
+    # PENDING JOURNAL POSTING, never VARIANCE.
+    accounts, guids = _gc_tree_with_clearing()
+    deposit = _bank_deposit_txn(
+        "dep-clearing", "2025-04-30", 480000.0, guids["Current Account"],
+        guids["Other Clearing"],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_item1_pending.gnucash",
+        _gc_document_xml(accounts, [deposit]),
+    )
+    report = _gc_tieout_report()
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    assert reason is None
+    assert matches[1].outcome == MATCHED
+
+    posted_check, _ = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=matches,
+    )
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26",
+        posted_check=posted_check, bank_matches=matches,
+    )
+
+    row = _item1_reroute_row(results)
+    assert PENDING_JOURNAL_VERDICT in (row.note or "")
+    assert row.agree is True
+    # NEGATIVE: a not-yet-posted journal must never read as a variance.
+    assert "Variance" not in (row.note or "")
+
+
+def test_h35_05_round3_item1_counter_account_unrelated_credit_is_variance(tmp_path):
+    # Both the bank import's credit and this run's journal are posted (net
+    # nil from these matched transactions), but a genuine EXTRA, unrelated
+    # credit also sits on that same counter-account within the FY -- a real
+    # residual that must surface as VARIANCE, naming the amount.
+    accounts, guids = _gc_tree_with_clearing()
+    deposit = _bank_deposit_txn(
+        "dep-clearing", "2025-04-30", 480000.0, guids["Current Account"],
+        guids["Other Clearing"],
+    )
+    reversing = _item1_reversing_journal_txn(guids)
+    unrelated = _gc_txn_xml(
+        _gc_guid("txn-unrelated-clearing"), "2025-06-15", "unrelated credit",
+        [_gc_split_xml(_gc_guid("s-unrelated-clearing"), -50000.0, guids["Other Clearing"])],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_item1_variance.gnucash",
+        _gc_document_xml(accounts, [deposit, reversing, unrelated]),
+    )
+    report = _gc_tieout_report()
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    assert reason is None
+    assert matches[1].outcome == MATCHED
+
+    posted_check, _ = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=matches,
+    )
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26",
+        posted_check=posted_check, bank_matches=matches,
+    )
+
+    row = _item1_reroute_row(results)
+    assert row.agree is False
+    assert "Variance" in (row.note or "")
+    assert "50,000.00" in row.note
+    # NEGATIVE: a genuine residual must never be misreported as pending.
+    assert PENDING_JOURNAL_VERDICT not in (row.note or "")
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 3, item 2 -- the "bank" ACCOUNT_KEYS row must be
+# informational (never a verdict row, never counted in variance totals)
+# whenever bank_matches is supplied, since this skill then never posts a
+# leg to the bank account itself.
+# ---------------------------------------------------------------------------
+
+def test_h35_05_round3_item2_bank_row_informational_even_with_real_bank_movement(tmp_path):
+    accounts, guids = _gc_tree()
+    # A real, unrelated deposit/withdrawal pair on the bank account itself
+    # -- if the bank row were still a plain verdict row, this non-zero FY
+    # movement against this run's computed 0 would be a false VARIANCE.
+    unrelated_bank_txn = _gc_txn_xml(
+        _gc_guid("txn-bank-unrelated"), "2025-05-10", "unrelated bank movement",
+        [
+            _gc_split_xml(_gc_guid("s-bank-unrelated-1"), 75000.0, guids["Current Account"]),
+            _gc_split_xml(_gc_guid("s-bank-unrelated-2"), -75000.0, guids["Remuneration"]),
+        ],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_item2_bank.gnucash",
+        _gc_document_xml(accounts, [unrelated_bank_txn]),
+    )
+    report = _gc_tieout_report()
+    bank_matches = {
+        1: PayoutMatch(
+            idx=1, month="2025-04", payout_date="2025-04-30", payout_amount=480000.0,
+            outcome=NO_MATCH,
+        ),
+    }
+
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=bank_matches,
+    )
+    by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
+    bank_row = by_key["bank"]
+
+    assert bank_row.informational is True
+    assert bank_row.agree is None
+
+    # NEGATIVE: an informational row must never be counted as a variance,
+    # even though the book's own bank movement here is non-zero (75,000.00).
+    variance_rows = [r for r in results if r.agree is False]
+    assert bank_row not in variance_rows
+    undecidable_rows = [r for r in results if r.agree is None and not r.informational]
+    assert bank_row not in undecidable_rows
+
+
+def test_h35_05_round3_item2_this_skills_journals_carry_zero_on_bank(tmp_path):
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=480000.0)])
+    bank_matches = {
+        1: PayoutMatch(
+            idx=1, month="2025-04", payout_date="2025-04-30", payout_amount=480000.0,
+            outcome=MATCHED, credit_date="2025-04-30", credit_amount=480000.0,
+            credit_account="Income:PGBP:Other Clearing",
+        ),
+    }
+
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=bank_matches)
+
+    bank_path = _GC_TIEOUT_ACCOUNTS["bank"]
+    posted_to_bank = sum(
+        s.debit - s.credit for j in journals for s in j.splits if s.account == bank_path
+    )
+    assert posted_to_bank == 0.0
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 3, item 3 -- when the bank has deposits somewhere in the FY,
+# a genuinely missing payout still gets its own per-payout gap line (the
+# per-payout wording is unchanged in this case; only the fully-empty-FY
+# case, covered above by test_match_payouts_no_credit_found_is_loud_genuine_gap,
+# collapses to the one loud line).
+# ---------------------------------------------------------------------------
+
+def test_h35_05_round3_item3_bank_with_deposits_still_gives_per_payout_gap(tmp_path):
+    accounts, guids = _gc_tree()
+    # A real, unrelated deposit somewhere else in the FY -- the bank import
+    # for this FY clearly HAS run -- but nothing matches this payout at all.
+    unrelated_deposit = _bank_deposit_txn(
+        "dep-unrelated", "2025-08-15", 12345.0, guids["Current Account"],
+        guids["Share of Profit"],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_item3_haslater.gnucash",
+        _gc_document_xml(accounts, [unrelated_deposit]),
+    )
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+
+    assert reason is None
+    assert matches[1].outcome == NO_MATCH
+    assert len(notes) == 1
+    assert "2025-04" in notes[0]
+    assert "no bank credit found" in notes[0]
+    assert "genuine gap" in notes[0]
+    # NEGATIVE: since the bank import clearly did run this FY, the loud
+    # "does not appear to have run" line must never appear here.
+    assert "does not appear to have run" not in notes[0]

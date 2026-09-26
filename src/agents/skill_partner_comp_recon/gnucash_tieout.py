@@ -175,7 +175,7 @@ def build_balance_tieout(
     posted movement this run's own (monthly-only) journal never claims to
     represent.
 
-    H35-05 round 2, item 2b: `bank_matches` (optional), threaded straight
+    H35-05 round 2/3, item 2b: `bank_matches` (optional), threaded straight
     into `_journals_safely()`, makes every ACCOUNT_KEYS row above compare
     against the SAME journals this run will actually write -- a MATCHED
     payout's cash leg is on the bank import's own counter-account, never a
@@ -183,12 +183,27 @@ def build_balance_tieout(
     one of ACCOUNT_KEYS, so its rerouted amount would otherwise appear on
     no row at all. To avoid silently dropping it, one EXTRA
     ReconciliationResult is appended per distinct rerouted counter-account
-    that is not already one of ACCOUNT_KEYS' configured paths, comparing
-    this run's journals' movement on that account against the book's own
-    FY movement for it (same tolerance/normalize_value() convention as the
-    main loop). When the account cannot be resolved in the book at all,
-    the row still appears, naming the amount and the reason it could not
-    be reconciled -- never silently left out.
+    that is not already one of ACCOUNT_KEYS' configured paths. Round 3
+    rewrote the comparison itself: the computed side is this run's
+    rerouted leg(s) PLUS the bank import's OWN counter-leg(s) on the exact
+    matched credit(s) (looked up by transaction guid, kept on
+    PayoutMatch.credit_txn_guid) -- expected to net to nil once posted --
+    compared against the account's whole FY book movement, reusing the
+    SAME PENDING_JOURNAL_VERDICT mechanism as the main loop above when a
+    contributing journal is not yet posted. When the account cannot be
+    resolved in the book at all, the row still appears, naming the
+    combined amount and the reason it could not be reconciled -- never
+    silently left out.
+
+    H35-05 round 3, item 2: the "bank" ACCOUNT_KEYS row itself is now
+    INFORMATIONAL (H35-04 item D's mechanism), not a verdict row -- since
+    H35-05 this skill never posts a leg to accounts['bank'] itself, so
+    "Computed" was always 0 while "book" was the account's WHOLE FY
+    movement (every deposit/withdrawal all year), which gave a false
+    VARIANCE on any real bank account. It now shows what this run actually
+    posted to the bank (0) plus how many/how much of the book's own
+    already-posted credits it matched against, for visibility only -- never
+    counted toward variance/undecidable totals or the LOUD block.
     """
     def _blank(note: str | None = None) -> list[ReconciliationResult]:
         results = []
@@ -251,6 +266,56 @@ def build_balance_tieout(
             }))
             continue
         stripped_path = _jv_strip_root(configured_path)
+
+        if key == "bank" and bank_matches:
+            # H35-05 round 3, item 2: since H35-05 this skill never posts
+            # a leg to accounts["bank"] itself -- a MATCHED payout's cash
+            # leg lands on the bank import's OWN counter-account instead
+            # (see jv_emitter._monthly_journal()'s bank_match branch) --
+            # so "Computed" is always 0 here, while the book side is the
+            # bank account's WHOLE FY movement (every deposit and
+            # withdrawal all year, from every source, not just these
+            # matched payouts). Comparing those is not a real check and
+            # gave a false VARIANCE on any real bank account. Make this
+            # row informational (H35-04 item D's mechanism -- never
+            # counted toward variance/undecidable totals or the LOUD
+            # block), showing what this run actually posted plus how many
+            # of the book's own already-posted credits it matched
+            # against, for visibility only.
+            guid = path_to_guid.get(stripped_path)
+            book_figure = (
+                parse_gnucash.account_fy_sum(book, guid, year_key)
+                if guid is not None else None
+            )
+            posted_to_bank = sum(
+                s.debit - s.credit for j in journals for s in j.splits
+                if s.account == stripped_path
+            )
+            matched_here = [
+                m for m in (bank_matches or {}).values() if m.outcome == MATCHED
+            ]
+            matched_count = len(matched_here)
+            matched_total = round(sum(m.credit_amount or 0.0 for m in matched_here), 2)
+            results.append(ReconciliationResult(
+                category=category,
+                sources={
+                    "Computed (posted to bank by this run)": posted_to_bank,
+                    "GnuCash book (FY movement, informational only)": book_figure,
+                },
+                agree=None,
+                note=(
+                    "INFORMATIONAL (H35-05 round 3) -- since H35-05 this skill never "
+                    "posts a leg to the bank account itself (a matched payout's cash "
+                    "leg lands on the bank import's own counter-account instead), so "
+                    "the book's whole-FY bank movement (every deposit and withdrawal, "
+                    "not just these matched payouts) is not a comparable figure here. "
+                    f"posted to bank by this run: {posted_to_bank:,.2f}; matched "
+                    f"bank-import credits: {matched_count} totalling {matched_total:,.2f}."
+                ),
+                informational=True,
+            ))
+            continue
+
         guid = path_to_guid.get(stripped_path)
         if guid is None:
             sources = {"Computed (this run's journal)": None, "GnuCash book (FY movement)": None}
@@ -396,49 +461,147 @@ def build_balance_tieout(
             )
         results.append(result)
 
-    # H35-05 round 2, item 2b: report the rerouted counter-account(s) of
-    # any MATCHED bank_matches entry that is not already one of
-    # ACCOUNT_KEYS -- never silently drop the amount from every row.
+    # H35-05 round 3, item 1 (rewrite of round 2's item 2b): report the
+    # rerouted counter-account(s) of any MATCHED bank_matches entry that is
+    # not already one of ACCOUNT_KEYS -- never silently drop the amount
+    # from every row.
+    #
+    # THE DEFECT this replaces: the old computed side was only this run's
+    # rerouted leg (a lone debit); the old book side was the account's
+    # WHOLE FY movement. Before this run's journal is posted, the book
+    # holds only the bank import's own credit on that account; after it is
+    # posted, the book nets to 0 (the debit reverses the credit). The old
+    # computed debit never agreed with either state, so this row gave a
+    # false VARIANCE every single time.
+    #
+    # THE FIX: "Computed" is now this run's rerouted leg(s) PLUS the bank
+    # import's OWN counter-leg(s) on the exact matched credit(s) -- looked
+    # up by the matched transaction's guid (kept on PayoutMatch as
+    # `credit_txn_guid`, never re-derived by a second date/amount search).
+    # Once both are posted these sum to nil (a matched payout's rerouted
+    # leg is a DEBIT of the payout amount on this account; the bank
+    # import's original leg there was a CREDIT of the same raw amount --
+    # see _add_leg_raw()/parse_gnucash.py's shared raw sign convention).
+    # "Book" stays the account's whole FY movement, same as before. Then:
+    #   (a) every contributing journal for this account already posted,
+    #       and the book ties to the expected-nil figure within tolerance
+    #       -> AGREE;
+    #   (b) some contributing journal(s) not yet posted (per posted_check)
+    #       but accounting for them ties the book -> PENDING_JOURNAL_VERDICT
+    #       (the SAME mechanism/verdict the main ACCOUNT_KEYS loop above
+    #       uses, never a new one);
+    #   (c) any residual beyond (a)/(b) is a genuine movement on this
+    #       account within the FY that is NOT from these matched
+    #       transactions -- reported as a real variance, naming the
+    #       amount (reconcile_category()'s own "Variance of ..." wording).
     known_paths = {
         _jv_strip_root(p) for p in accounts.values()
         if isinstance(p, str) and p.strip()
     }
-    rerouted_paths = sorted({
-        s.account
-        for j in journals for s in j.splits
-        if s.account not in known_paths
+    txns_by_guid = {t.guid: t for t in book.transactions}
+    matched_by_account: dict[str, list] = {}
+    for m in (bank_matches or {}).values():
+        if m.outcome == MATCHED and m.credit_account:
+            matched_by_account.setdefault(m.credit_account, []).append(m)
+    rerouted_accounts = sorted({
+        acct for acct in matched_by_account if acct not in known_paths
     })
-    for stripped_path in rerouted_paths:
+
+    _COMPUTED_LABEL = (
+        "Computed (this run's rerouted leg(s) plus the bank import's own "
+        "matched counter-leg(s) -- expected nil)"
+    )
+
+    for stripped_path in rerouted_accounts:
         category = f"{_TIEOUT_LABEL}: bank-match counter-account {stripped_path}"
+        account_matches = matched_by_account[stripped_path]
+
         computed_raw = sum(
             s.debit - s.credit
             for j in journals
             for s in j.splits
             if s.account == stripped_path
         )
+        book_matched_raw = 0.0
+        for m in account_matches:
+            txn = txns_by_guid.get(m.credit_txn_guid) if m.credit_txn_guid else None
+            if txn is None:
+                continue
+            book_matched_raw += float(sum(
+                sp.value for sp in txn.splits
+                if colon_paths.get(sp.account_guid) == stripped_path
+            ))
+
         guid = path_to_guid.get(stripped_path)
         if guid is None:
+            combined_raw = computed_raw + book_matched_raw
             results.append(ReconciliationResult(
                 category=category,
-                sources={
-                    "Computed (this run's journal, rerouted bank-match leg)": computed_raw,
-                    "GnuCash book (FY movement)": None,
-                },
+                sources={_COMPUTED_LABEL: combined_raw, "GnuCash book (FY movement)": None},
                 agree=None,
                 note=(
                     f"{CANNOT_RECONCILE} -- account path {stripped_path!r} (the bank "
                     "import's own counter-account for a matched payout, H35-05) was "
-                    "not found in the supplied GnuCash book. The rerouted amount "
-                    f"({computed_raw:,.2f}) is still shown here so it is never "
-                    "silently missing from every row."
+                    "not found in the supplied GnuCash book. The combined, "
+                    f"expected-nil figure ({combined_raw:,.2f}) is still shown here "
+                    "so it is never silently missing from every row."
                 ),
             ))
             continue
+
         acct_type = book.accounts[guid].type
-        computed_figure = parse_gnucash.normalize_value(computed_raw, acct_type)
         book_figure = parse_gnucash.account_fy_sum(book, guid, year_key)
+
+        contributing = [
+            j for j in journals if any(s.account == stripped_path for s in j.splits)
+        ]
+        pending = [
+            j for j in contributing
+            if posted_status_by_id.get(j.txn_id) == NOT_POSTED
+        ]
+
+        if pending:
+            pending_raw = sum(
+                s.debit - s.credit for j in pending for s in j.splits
+                if s.account == stripped_path
+            )
+            posted_computed_raw = computed_raw - pending_raw + book_matched_raw
+            posted_computed_figure = parse_gnucash.normalize_value(posted_computed_raw, acct_type)
+            expected_figure = parse_gnucash.normalize_value(computed_raw + book_matched_raw, acct_type)
+            pending_figure = parse_gnucash.normalize_value(pending_raw, acct_type)
+            ids = ", ".join(sorted({j.txn_id for j in pending}))
+            sources = {_COMPUTED_LABEL: expected_figure, "GnuCash book (FY movement)": book_figure}
+            if abs(book_figure - posted_computed_figure) <= RECONCILIATION_TOLERANCE:
+                note = (
+                    f"{PENDING_JOURNAL_VERDICT}: journal(s) {ids} for this account "
+                    f"({pending_figure:,.2f}) are not yet posted in the book. Book "
+                    f"FY movement ({book_figure:,.2f}) plus the pending journal(s) "
+                    f"ties to the expected-nil figure ({expected_figure:,.2f}) "
+                    "within tolerance -- reconciled, nothing further to post beyond "
+                    "the journal(s) already named."
+                )
+                results.append(ReconciliationResult(
+                    category=category, sources=sources, agree=True, note=note,
+                ))
+            else:
+                residual = book_figure - posted_computed_figure
+                note = (
+                    f"Genuine residual after posting {ids}: {residual:,.2f} -- book "
+                    f"FY movement {book_figure:,.2f}, expected-nil computed figure "
+                    f"{expected_figure:,.2f}; journal(s) {ids} ({pending_figure:,.2f}) "
+                    "not yet posted account for part of the gap but not all of it "
+                    "-- this residual is the genuine gap, most likely a movement on "
+                    "this account within the FY that is not from these matched "
+                    "transactions."
+                )
+                results.append(ReconciliationResult(
+                    category=category, sources=sources, agree=False, note=note,
+                ))
+            continue
+
+        expected_figure = parse_gnucash.normalize_value(computed_raw + book_matched_raw, acct_type)
         result = reconcile_category(category, {
-            "Computed (this run's journal, rerouted bank-match leg)": computed_figure,
+            _COMPUTED_LABEL: expected_figure,
             "GnuCash book (FY movement)": book_figure,
         })
         results.append(result)
@@ -624,6 +787,7 @@ def build_posted_check(
 # ---------------------------------------------------------------------------
 
 from datetime import datetime as _datetime  # noqa: E402
+from datetime import timedelta as _timedelta  # noqa: E402
 
 from .jv_emitter import _month_end as _jv_month_end  # noqa: E402
 
@@ -650,11 +814,18 @@ class BankMatchCandidate:
     bank import spread it across. `account is None` is the signal used
     downstream (match_payouts_to_bank()'s winner-selection) to route to
     the SPLIT outcome instead of MATCHED -- no journal is ever built from
-    a split candidate."""
+    a split candidate.
+
+    H35-05 round 3, item 1: `txn_guid` (the book transaction's own guid)
+    is kept so a MATCHED candidate's ORIGINAL counter-leg(s) can be looked
+    up exactly, by guid, from the book -- see PayoutMatch.credit_txn_guid
+    and build_balance_tieout()'s rewritten "bank-match counter-account"
+    rows. Never used for matching itself (date/amount/account only)."""
     date: str       # ISO YYYY-MM-DD
     amount: float
     account: str | None       # colon path, the bank import's counter-account; None if split
     split_accounts: "list[str] | None" = None  # >=2 counter-accounts, when account is None
+    txn_guid: str = ""  # the book transaction's own guid (H35-05 round 3)
 
 
 @dataclass
@@ -671,6 +842,11 @@ class PayoutMatch:
     credit_date: str | None = None
     credit_amount: float | None = None
     credit_account: str | None = None
+    credit_txn_guid: str | None = None  # H35-05 round 3: the matched book
+    # transaction's own guid -- MATCHED only, None otherwise. Lets
+    # build_balance_tieout() look up the bank import's ORIGINAL counter-leg
+    # on this exact transaction, by guid, instead of the account's whole
+    # FY movement (see item 2b's rewrite).
     candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE/SPLIT only
 
 
@@ -704,6 +880,7 @@ def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict
                 date=txn.date_posted.isoformat(),
                 amount=amount,
                 account=colon_paths.get(other_splits[0].account_guid, ""),
+                txn_guid=txn.guid,
             ))
         else:
             split_accounts = sorted({
@@ -714,6 +891,7 @@ def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict
                 amount=amount,
                 account=None,
                 split_accounts=split_accounts,
+                txn_guid=txn.guid,
             ))
     return deposits
 
@@ -767,6 +945,19 @@ def match_payouts_to_bank(
 
     Never raises: a book-load failure or an unresolvable accounts["bank"]
     path degrades to ({}, [note], reason) exactly like Sections B/C above.
+
+    H35-05 round 3, item 3: when accounts['bank'] has NO deposits at all
+    within this FY (report.financial_year's 1 Apr-31 Mar window, extended
+    by `window_days` on each side -- the same tolerance the per-payout
+    matching below already applies), every payout's own "no bank credit
+    found -- genuine gap" note is suppressed (it would misleadingly imply
+    the import ran and this one payout is specifically missing) and ONE
+    loud line is emitted instead, naming the bank path and the FY window,
+    saying the bank import for this FY does not appear to have run. Each
+    payout still gets a `matches[idx]` entry with outcome NO_MATCH -- the
+    Bank match sheet still lists every payout, only the notes differ. When
+    the bank DOES have deposits in the FY but a specific payout still has
+    no match, that payout's own per-payout gap note is unchanged.
     """
     if not gnucash_path:
         reason = (
@@ -810,6 +1001,26 @@ def match_payouts_to_bank(
         all_deposits.extend(_bank_deposits(book, guid, colon_paths))
     used = [False] * len(all_deposits)
 
+    # H35-05 round 3, item 3: when the bank import for this FY has not run
+    # at all, EVERY payout would otherwise show its own "no bank credit
+    # found -- genuine gap" line, which is misleading -- there is no gap
+    # to speak of, the whole import is simply missing. Detect that case up
+    # front: no deposit at all on accounts.bank falls within the FY (1 Apr
+    # to 31 Mar), extended by `window_days` on each side to match the same
+    # tolerance the per-payout matching below already applies (so a
+    # deposit just outside the FY boundary but still within the matching
+    # window is not wrongly treated as "the import never ran"). When true,
+    # the per-payout loop below is told (via `fy_has_deposits=False`) to
+    # suppress its own "genuine gap" note for every payout -- one single
+    # loud line is emitted instead, after the loop.
+    fy_start, fy_end = parse_gnucash.fy_window(report.financial_year)
+    window_start = fy_start - _timedelta(days=window_days)
+    window_end = fy_end + _timedelta(days=window_days)
+    fy_has_deposits = any(
+        window_start <= _datetime.strptime(c.date, "%Y-%m-%d").date() <= window_end
+        for c in all_deposits
+    )
+
     matches: dict[int, PayoutMatch] = {}
     notes: list[str] = []
 
@@ -837,10 +1048,18 @@ def match_payouts_to_bank(
 
         if not scored:
             matches[idx] = pm
-            notes.append(
-                f"payout {line.month} on {payout_date_iso}: no bank credit found "
-                "-- genuine gap."
-            )
+            # H35-05 round 3, item 3: only report this per-payout as a
+            # "genuine gap" when the bank DOES have deposits in this FY at
+            # all -- when it has none whatsoever, the single loud line
+            # appended below covers it, and this per-payout line would be
+            # misleading noise ("genuine gap" implies the import ran and
+            # this one payout specifically is missing, which is not known
+            # to be true here).
+            if fy_has_deposits:
+                notes.append(
+                    f"payout {line.month} on {payout_date_iso}: no bank credit found "
+                    "-- genuine gap."
+                )
             continue
 
         scored.sort(key=lambda t: t[0])
@@ -894,6 +1113,15 @@ def match_payouts_to_bank(
         pm.credit_date = win_c.date
         pm.credit_amount = win_c.amount
         pm.credit_account = win_c.account
+        pm.credit_txn_guid = win_c.txn_guid
         matches[idx] = pm
+
+    if not fy_has_deposits:
+        notes.insert(0, (
+            f"no deposits at all on {bank_path} between {fy_start.isoformat()} and "
+            f"{fy_end.isoformat()} -- the bank import for this FY does not appear "
+            "to have run; import the bank statement first, then re-run. No payout "
+            "journals written."
+        ))
 
     return matches, notes, None
