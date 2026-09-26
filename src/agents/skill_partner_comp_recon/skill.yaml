@@ -321,7 +321,9 @@ help:
           roundness check), Cohorts (the incentive ledger with its
           reporting/prior/future FY-assignment column), Capital (the rule
           as a formula off Drivers, the Advisory cross-check, and the
-          mid-year rate-change detector), Reconciliation (agree / variance
+          mid-year rate-change detector), Interest on capital (H35-06 --
+          the computed simple-interest schedule per capital tranche added
+          this year), Reconciliation (agree / variance
           / cannot-reconcile per category -- topped by a highlighted
           "STATEMENT DISAGREES" block when the LLP Statement of Account
           disagrees with another source or fails its own arithmetic; see
@@ -353,6 +355,22 @@ help:
           the monthly transactions -- import both files if both were
           produced.
   tips: >
+    The computed Interest on Capital schedule (H35-06, its own workbook
+    sheet) applies simple interest, actual days / 365, to every capital
+    tranche added this financial year, from an interest-from-date
+    defaulting to the first day of that tranche's own payslip month. The
+    rate defaults to 6% p.a. unless the entity's partner_comp_drivers config
+    sets drivers.capital_interest_rate for this financial year explicitly
+    (e.g. the year the LLP actually changed its rate) -- this default is
+    never applied inside the reconciliation engine itself, only here, and a
+    per-tranche interest-from-date can likewise be overridden via
+    drivers.capital_interest_from_date_overrides ({"YYYY-MM": "YYYY-MM-DD"},
+    keyed by the tranche's own payslip month). This schedule's total is
+    compared against the LLP Statement's own interest-on-capital figure as
+    its own reconciliation row -- a genuine, real disagreement (e.g. a FY
+    with an interest credit but no new capital tranche) is expected and
+    reported, never forced to tie.
+
     Start with the Reconciliation sheet, then Exceptions -- a
     "CANNOT RECONCILE" status names exactly which source figure for that
     category was not supplied, so a "cannot reconcile" row is something to

@@ -694,6 +694,113 @@ def residual_current_account_check(report: "Report", applied_accrual: float = 0.
     )
 
 
+def fy_end_date(fy: str) -> date:
+    """The last day of a "2025-26"-style FY label -- 2026-03-31."""
+    return date(fy_start_year(fy) + 1, 3, 31)
+
+
+@dataclass
+class CapitalInterestRow:
+    """H35-06: one row per capital tranche ADDED this FY -- one per
+    MonthlyLine whose capital_transferred is non-zero (capital_transferred
+    is carried "sign as parsed" from the payment schedule, i.e. negative,
+    being a deduction on the payslip -- see the H35-07 roll-forward row's
+    own comment on this sign convention -- so `principal` here is its
+    negation, the amount actually added to the capital account)."""
+    month: str  # the MonthlyLine.month ("YYYY-MM") this tranche came from
+    principal: float
+    interest_from_date: date
+    interest_from_date_is_override: bool
+    days: int  # actual days, interest_from_date -> this FY's close (31 Mar)
+    rate: float | None
+    interest: float | None  # None only when the rate itself is not supplied
+
+
+@dataclass
+class CapitalInterestSchedule:
+    """H35-06: simple interest, actual days / 365, on every capital tranche
+    added this FY. `reason` carries the CANNOT-RECONCILE wording when the
+    rate itself was not supplied (see compute_capital_interest_schedule());
+    `rows`/`total_interest` are still populated (with `interest=None` on
+    each row) in that case, so the schedule sheet can still show the
+    principals and dates even though no rupee interest can be shown."""
+    fy: str
+    rate: float | None
+    rows: list[CapitalInterestRow]
+    total_interest: float | None
+    reason: str | None = None
+
+
+def compute_capital_interest_schedule(
+    monthly: "list[MonthlyLine]", drivers: dict, fy: str,
+) -> CapitalInterestSchedule:
+    """H35-06: one CapitalInterestRow per this-FY capital tranche (a
+    MonthlyLine with a non-zero capital_transferred), simple interest at
+    drivers["capital_interest_rate"] for actual days from an
+    interest-from-date through this FY's close (31 March), divided by 365.
+
+    The rate is read exactly like every other driver (see this module's
+    governing rule at the top of the file): a missing rate is a
+    CANNOT-RECONCILE result, never a silent default applied here. The 6%
+    documented default (skill.yaml) is applied, when the caller supplied no
+    explicit override, by agent.py's run() into drivers
+    ["capital_interest_rate"] BEFORE build_report() is ever called -- this
+    function only ever reads what is already in `drivers`.
+
+    interest_from_date defaults to the FIRST DAY of the tranche's own
+    payslip month (MonthlyLine.month + "-01") -- the best proxy this module
+    has for "the date of the payslip deduction", since no day-of-month is
+    carried on a payslip line -- and is deliberately NOT the FY start date
+    (1 April), which would overstate every tranche's interest period.
+    drivers["capital_interest_from_date_overrides"], an optional
+    {month: "YYYY-MM-DD"} dict keyed by the SAME MonthlyLine.month, lets one
+    named tranche's date be overridden without touching any other tranche.
+    """
+    rate, reason = driver(drivers, "capital_interest_rate", fy, "capital interest rate")
+    overrides = drivers.get("capital_interest_from_date_overrides") or {}
+    # A malformed `fy` string is a pre-existing, separately-guarded failure
+    # mode (jv_emitter.build_accrual_journal() raises JournalValidationError
+    # for it) -- this function must degrade gracefully rather than raising,
+    # so build_report() itself never fails on a bad fy; days/interest simply
+    # cannot be computed in that case (fy_end stays None).
+    try:
+        fy_end = fy_end_date(fy)
+    except (ValueError, IndexError):
+        fy_end = None
+
+    rows: list[CapitalInterestRow] = []
+    for m in monthly:
+        principal = -m.capital_transferred
+        if not principal:
+            continue
+        override_raw = overrides.get(m.month)
+        if override_raw is not None:
+            interest_from = _parse_date(override_raw)
+            is_override = True
+        else:
+            interest_from = _parse_date(f"{m.month}-01")
+            is_override = False
+        if fy_end is None:
+            days = None
+            interest = None
+        else:
+            days = max(0, (fy_end - interest_from).days)
+            interest = round(principal * rate * days / 365, 2) if rate is not None else None
+        rows.append(CapitalInterestRow(
+            month=m.month, principal=principal, interest_from_date=interest_from,
+            interest_from_date_is_override=is_override, days=days,
+            rate=rate, interest=interest,
+        ))
+
+    total_interest = None
+    if rate is not None and fy_end is not None:
+        total_interest = round(sum(r.interest for r in rows), 2) if rows else 0.0
+    return CapitalInterestSchedule(
+        fy=fy, rate=rate, rows=rows, total_interest=total_interest,
+        reason=reason if rate is None else None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level report assembly.
 # ---------------------------------------------------------------------------
@@ -747,6 +854,10 @@ class Report:
     # jv_emitter.build_accrual_journal() as well as the L5 tie-out rows
     # below, so it is carried on the Report rather than only used locally.
     llp_record: dict | None = None
+    # H35-06: the computed capital-interest schedule (one row per this-FY
+    # capital tranche), or None only if it was never computed (it always is,
+    # by build_report() -- see compute_capital_interest_schedule()).
+    capital_interest_schedule: "CapitalInterestSchedule | None" = None
     # H35-04 item B: every LOUD flag this run raised -- one line per
     # statement-referenced reconciliation row whose note starts with
     # "STATEMENT DISAGREES" (see statement_reference_row()), plus one line
@@ -1123,6 +1234,56 @@ def build_report(data: dict) -> Report:
         booked_interest_on_capital, "capital_interest_on_capital",
     ))
 
+    # H35-06: a genuinely DIFFERENT check from the L5 tie-out row just
+    # above. That row compares the payslip's OWN already-reported
+    # `interest_on_capital` figure (MonthlyLine.interest_on_capital) against
+    # the L5. This row instead computes a fresh interest schedule -- simple
+    # interest at drivers["capital_interest_rate"], actual days/365 -- off
+    # the capital MOVEMENTS this FY (MonthlyLine.capital_transferred), and
+    # compares THAT computed total against the same L5 field. The two rows
+    # can legitimately disagree (e.g. this FY's only capital movement is an
+    # interest CREDIT with no new capital_transferred tranche, so this
+    # schedule computes 0.0 while the L5 shows the credited amount) -- this
+    # row is never forced to tie against the other.
+    capital_interest_schedule = compute_capital_interest_schedule(monthly, drivers, fy)
+    _interest_schedule_category = (
+        "Interest on capital: computed (schedule, this FY's payslip capital "
+        "movements only) vs LLP Statement"
+    )
+    if capital_interest_schedule.rate is None:
+        reconciliation.append(ReconciliationResult(
+            category=_interest_schedule_category,
+            sources={"Computed (interest schedule)": None,
+                     "LLP Statement (L5)": llp_record.get("capital_interest_on_capital")
+                     if llp_record is not None else None},
+            agree=None,
+            note=capital_interest_schedule.reason,
+        ))
+    else:
+        reconciliation.append(statement_reference_row(
+            _interest_schedule_category,
+            llp_record.get("capital_interest_on_capital") if llp_record is not None else None,
+            "LLP Statement (L5)",
+            {"Computed (interest schedule)": capital_interest_schedule.total_interest},
+        ))
+
+    # s.194T TDS on interest-on-capital specifically: no driver or parsed
+    # field anywhere in this skill isolates a TDS figure for interest alone
+    # -- MonthlyLine.tds is explicitly a COMBINED remuneration + interest
+    # figure (see the D1 current-account identity below). Reporting this as
+    # "not supplied" rather than inventing a split or a hardcoded rate.
+    s194t_tds_on_interest, s194t_reason = field_or_reason(
+        external, "tds_on_interest_on_capital", "s.194T TDS on interest on capital"
+    )
+    reconciliation.append(ReconciliationResult(
+        category="s.194T TDS on interest on capital",
+        sources={"Reported": s194t_tds_on_interest},
+        agree=None if s194t_tds_on_interest is None else True,
+        note=s194t_reason or "Reported as supplied; not independently recomputed here.",
+        not_checked=True,
+        status_label="NOT SUPPLIED" if s194t_tds_on_interest is None else None,
+    ))
+
     total_tds_credit = -sum(m.tds for m in monthly) if monthly else None
     form_26as, _ = field_or_reason(external, "form_26as_total_credit", "Form 26AS total credit")
     reconciliation.append(reconcile_category(
@@ -1318,5 +1479,6 @@ def build_report(data: dict) -> Report:
         firm_name=data.get("firm_name", "") or "",
         opening_reclass=data.get("opening_reclass"),
         llp_record=llp_record,
+        capital_interest_schedule=capital_interest_schedule,
         statement_flags=statement_flags,
     )

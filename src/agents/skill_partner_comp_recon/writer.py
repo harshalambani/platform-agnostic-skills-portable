@@ -394,6 +394,55 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
 
 
 # ---------------------------------------------------------------------------
+# Interest on capital (H35-06) -- the computed schedule, one row per this-FY
+# capital tranche. Written whenever a Report carries one (build_report()
+# always computes it, even when the rate itself is not supplied -- see
+# engine.compute_capital_interest_schedule()).
+# ---------------------------------------------------------------------------
+
+def _write_interest_on_capital_sheet(wb, report: Report):
+    ws = wb.create_sheet("Interest on capital")
+    schedule = report.capital_interest_schedule
+    row = 1
+    if schedule is None:
+        _set(ws, row, 1, "Not computed for this run.")
+        _autosize(ws, 1)
+        return
+
+    if schedule.rate is None:
+        _set(ws, row, 1, "Rate", bold=True)
+        _set(ws, row, 2, schedule.reason or CANNOT_RECONCILE_LABEL, fill=TF)
+        row += 2
+    else:
+        _set(ws, row, 1, "Rate applied (p.a.)", bold=True)
+        _set(ws, row, 2, schedule.rate, fill=TF, number_format=P)
+        row += 2
+
+    headers = ["Month", "Principal (added to capital)", "Interest-from date",
+               "Override?", "Days (to FY close)", "Interest"]
+    _write_header(ws, row, headers)
+    row += 1
+    if not schedule.rows:
+        _set(ws, row, 1, "No capital tranches (capital_transferred) this FY.")
+        row += 1
+    for r in schedule.rows:
+        _set(ws, row, 1, r.month)
+        _set(ws, row, 2, r.principal, number_format=N)
+        _set(ws, row, 3, r.interest_from_date.isoformat())
+        _set(ws, row, 4, "Override" if r.interest_from_date_is_override else "Default")
+        _set(ws, row, 5, r.days if r.days is not None else "-- not computed --")
+        _set(ws, row, 6, r.interest if r.interest is not None else "-- not supplied (rate) --",
+             number_format=N)
+        row += 1
+    row += 1
+    _set(ws, row, 1, "Total computed interest", bold=True)
+    _set(ws, row, 2,
+         "-- not supplied --" if schedule.total_interest is None else schedule.total_interest,
+         fill=TF, number_format=N, bold=True)
+    _autosize(ws, len(headers))
+
+
+# ---------------------------------------------------------------------------
 # 8. Reconciliation / 9. Exceptions
 # ---------------------------------------------------------------------------
 
@@ -606,6 +655,7 @@ def write_report_workbook(report: Report, out_path: str, posted_check=None, bank
     _write_one_offs_sheet(wb, report)
     _write_cohorts_sheet(wb, report)
     _write_capital_sheet(wb, report, driver_refs)
+    _write_interest_on_capital_sheet(wb, report)
     _write_reconciliation_sheet(wb, report)
     _write_exceptions_sheet(wb, report)
     _write_open_items_sheet(wb, report)

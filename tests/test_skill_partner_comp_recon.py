@@ -12,6 +12,7 @@ import re
 import sys
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ from agents.skill_partner_comp_recon.engine import (
     RECONCILIATION_TOLERANCE,
     build_report,
     classify_cohort_instalments,
+    compute_capital_interest_schedule,
     derive_misc,
     detect_mid_year_rate_change,
     driver,
@@ -530,6 +532,24 @@ def test_build_report_end_to_end_against_fixture():
             # never an agreement, pending H35-05's fuzzy match.
             assert r.agree is None, f"expected None (not checked yet) for {cat!r}, got {r.agree!r}"
             assert r.note.startswith("NOT CHECKED YET")
+        elif cat == (
+            "Interest on capital: computed (schedule, this FY's payslip capital "
+            "movements only) vs LLP Statement"
+        ):
+            # H35-06: the fixture supplies no drivers["capital_interest_rate"]
+            # (agent.py's run() is the one that injects the documented 6%
+            # default -- build_report() itself never applies a fallback, per
+            # this module's governing rule), so this row CANNOT RECONCILE
+            # here, never a failure -- see compute_capital_interest_schedule().
+            assert r.agree is None, f"expected None (rate not supplied) for {cat!r}, got {r.agree!r}"
+            assert "capital interest rate not supplied" in r.note
+        elif cat == "s.194T TDS on interest on capital":
+            # H35-06: no driver/parsed field in this skill isolates a TDS
+            # figure for interest alone (MonthlyLine.tds is a COMBINED
+            # remuneration + interest figure) -- always NOT SUPPLIED, never a
+            # failure, until such a source exists.
+            assert r.agree is None, f"expected None (not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.status_label == "NOT SUPPLIED"
         else:
             assert r.agree is True, f"expected AGREE for {cat!r}, got {r.agree!r} ({r.note})"
 
@@ -2937,6 +2957,7 @@ def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
 
 _ALL_SHEETS = [
     "Logic", "Drivers", "Monthly grid", "One-offs", "Cohorts", "Capital",
+    "Interest on capital",
     "Reconciliation", "Exceptions", "Open items",
 ]
 
@@ -7841,3 +7862,98 @@ def test_h35_05_round5_header_counts_payouts_not_notes_guard_partial_gaps():
 
     assert "BANK MATCH -- 2 of 12 payout(s) could not be matched" in summary
     assert summary.count("genuine gap") == 2
+
+
+# ---------------------------------------------------------------------------
+# H35-06 -- computed capital-interest schedule (simple interest, actual
+# days/365, on this-FY capital tranches -- MonthlyLine.capital_transferred).
+# 4 required negative tests.
+# ---------------------------------------------------------------------------
+
+def _capital_tranche_line(month: str, capital_transferred: float) -> engine.MonthlyLine:
+    """A MonthlyLine carrying only a capital movement -- every other field
+    zeroed, since these tests exercise compute_capital_interest_schedule()
+    in isolation."""
+    return engine.MonthlyLine(
+        month=month, remuneration=0, share_of_profit_gross=0,
+        additional_share_of_profit=0, firms_tax_sop=0, firms_tax_other=0,
+        tds=0, capital_transferred=capital_transferred, total_paid=0, misc=0,
+    )
+
+
+# 1 -- NEGATIVE: an interest-from-date override changes only the named
+# tranche; every other tranche keeps its own default date.
+def test_h35_06_override_changes_only_named_tranche():
+    monthly = [
+        _capital_tranche_line("2025-07", -100000),
+        _capital_tranche_line("2025-10", -50000),
+    ]
+    drivers = {
+        "capital_interest_rate": 0.06,
+        "capital_interest_from_date_overrides": {"2025-10": "2025-11-15"},
+    }
+    schedule = compute_capital_interest_schedule(monthly, drivers, "2025-26")
+    by_month = {r.month: r for r in schedule.rows}
+
+    assert by_month["2025-07"].interest_from_date == date(2025, 7, 1)
+    assert by_month["2025-07"].interest_from_date_is_override is False
+
+    assert by_month["2025-10"].interest_from_date == date(2025, 11, 15)
+    assert by_month["2025-10"].interest_from_date_is_override is True
+
+
+# 2 -- NEGATIVE: with no override, interest-from-date defaults to the
+# tranche's own payslip month, never the FY start (1 April), which would
+# overstate the interest period for every mid-year tranche.
+def test_h35_06_no_override_defaults_to_tranche_month_not_fy_start():
+    monthly = [_capital_tranche_line("2025-07", -100000)]
+    schedule = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.06}, "2025-26",
+    )
+    assert len(schedule.rows) == 1
+    row = schedule.rows[0]
+    assert row.interest_from_date == date(2025, 7, 1)
+    assert row.interest_from_date != date(2025, 4, 1)
+    assert row.interest_from_date_is_override is False
+
+
+# 3 -- NEGATIVE: the statement-referenced row reports a mismatch beyond
+# Re 1, and does NOT report one when the difference is Re 1 or less.
+def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
+    category = (
+        "Interest on capital: computed (schedule, this FY's payslip capital "
+        "movements only) vs LLP Statement"
+    )
+    base = _h35_02_data(llp_record={"current_profit_share": 300000})
+    base["drivers"]["capital_interest_rate"] = 0.06
+    base["monthly"][0]["capital_transferred"] = -100000
+    base["drivers"]["capital_interest_from_date_overrides"] = {"2031-04": "2031-04-01"}
+    # principal 100000, rate 6%, 2031-04-01 -> FY close (2032-03-31) = 365
+    # days -> computed interest = 6000.00 exactly.
+
+    # (a) beyond Re 1: reported as a genuine disagreement.
+    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6002.0}}
+    report_over = build_report(over)
+    row_over = next(r for r in report_over.reconciliation if r.category == category)
+    assert row_over.agree is False
+    assert row_over.note.startswith("STATEMENT DISAGREES")
+
+    # (b) within Re 1: not reported as a disagreement.
+    within = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6000.5}}
+    report_within = build_report(within)
+    row_within = next(r for r in report_within.reconciliation if r.category == category)
+    assert row_within.agree is True
+
+
+# 4 -- NEGATIVE: a rate override is not silently ignored -- a different
+# drivers["capital_interest_rate"] actually changes the computed total.
+def test_h35_06_rate_override_not_silently_ignored():
+    monthly = [_capital_tranche_line("2025-07", -100000)]
+    schedule_a = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.06}, "2025-26",
+    )
+    schedule_b = compute_capital_interest_schedule(
+        monthly, {"capital_interest_rate": 0.09}, "2025-26",
+    )
+    assert schedule_a.total_interest != schedule_b.total_interest
+    assert schedule_b.total_interest == round(schedule_a.total_interest * 0.09 / 0.06, 2)

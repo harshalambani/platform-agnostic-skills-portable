@@ -87,6 +87,17 @@ from .parsers import payout_advice as _payout_advice_parser
 from .writer import write_report_workbook
 from .xlsx_26as_reader import read_form_26as_tds_credit
 
+# H35-06: the documented default rate for the computed capital-interest
+# schedule (see skill.yaml's help text) -- 6% simple interest. This is the
+# ONE place in this whole skill a rate is ever applied as a fallback
+# default rather than failing loud; engine.py's own governing rule (see its
+# module docstring) forbids that inside engine.py itself, so it lives here,
+# applied into data["drivers"]["capital_interest_rate"] only when the
+# entity's own partner_comp_drivers config does not already set it for this
+# financial year -- an explicit per-year override in that config always
+# wins over this default.
+_DEFAULT_CAPITAL_INTEREST_RATE = 0.06
+
 # skill_itr_workbook/scripts is a separate package (not importable via the
 # agents.* package path) that carries the entities.yaml loader this skill
 # reuses rather than re-implementing its own -- same sys.path pattern
@@ -709,6 +720,19 @@ def _run_from_documents(
     drivers = drivers_by_fy.get(data["financial_year"])
     if drivers is not None:
         data["drivers"] = drivers
+    # H35-06: the only rate this skill ever applies a documented DEFAULT
+    # for, rather than failing loud on a missing driver -- 6% simple
+    # interest on capital, per skill.yaml's own help text for this input.
+    # This is applied HERE, never inside engine.py (see engine.py's
+    # governing rule: no rate is ever a module-level constant or fallback
+    # default there) -- build_report() itself always treats a missing
+    # drivers["capital_interest_rate"] as CANNOT RECONCILE, exactly like
+    # every other driver, whether called from here or directly from a test.
+    # An entity's own partner_comp_drivers config always wins when it sets
+    # this key explicitly (including to a different rate for a year the LLP
+    # actually changed it) -- this default only fills a genuine gap.
+    data.setdefault("drivers", {})
+    data["drivers"].setdefault("capital_interest_rate", _DEFAULT_CAPITAL_INTEREST_RATE)
     # Section A: feed the 26AS reader's result into the existing
     # external["form_26as_total_credit"] reconciliation leg (engine.py's
     # field_or_reason() treats a None value the same as the key being
