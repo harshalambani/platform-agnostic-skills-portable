@@ -79,6 +79,7 @@ from agents.skill_partner_comp_recon.gnucash_tieout import (
     NO_MATCH,
     NOT_POSTED,
     PARTIALLY_POSTED,
+    SPLIT,
     TIE,
     BankMatchCandidate,
     PayoutMatch,
@@ -5382,9 +5383,22 @@ def test_agent_run_wires_gnucash_tieout_note_and_reconciliation_rows(tmp_path, m
     )
 
     accounts, guids = _gc_tree()
+    # H35-05 round 2: this deposit is now ALSO the bank-match candidate the
+    # skill matches this payout's cash movement against, so it must have
+    # exactly ONE non-bank split (a real bank-import posting), never the
+    # old 4-way combined split -- that shape now correctly reads as a SPLIT
+    # deposit (fix 3) rather than a single matchable credit. `num` is still
+    # the deterministic txn_id this run's OWN journal will carry, so the
+    # ALREADY POSTED detection (an exact Num match, independent of the
+    # journal's split shape) is unaffected by which counter-account the
+    # bank import used.
     txn = _gc_txn_xml(
         _gc_guid("txn-integration"), "2025-04-30", "matching posted txn",
-        _gc_matching_splits(guids), num="SYNTHETIC-2526-M01",
+        [
+            _gc_split_xml(_gc_guid("s-integration-bank"), 480000.0, guids["Current Account"]),
+            _gc_split_xml(_gc_guid("s-integration-counter"), -480000.0, guids["Remuneration"]),
+        ],
+        num="SYNTHETIC-2526-M01",
     )
     book_path = _write_gnucash_book(
         tmp_path / "book_integration.gnucash", _gc_document_xml(accounts, [txn]),
@@ -6427,7 +6441,7 @@ def test_match_payouts_exact_amount_and_date_matches(tmp_path):
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
 
     assert notes == []
     assert matches[1].outcome == MATCHED
@@ -6447,7 +6461,7 @@ def test_match_payouts_re1_tolerance_matches_rs2_does_not(tmp_path):
         tmp_path / "book_re1.gnucash", _gc_document_xml(accounts, [txn_ok]),
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_ok)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_ok)
     assert matches[1].outcome == MATCHED
     assert notes == []
 
@@ -6461,7 +6475,7 @@ def test_match_payouts_re1_tolerance_matches_rs2_does_not(tmp_path):
         tmp_path / "book_rs2.gnucash", _gc_document_xml(accounts, [txn_bad]),
     )
     report2 = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
-    matches2, notes2 = match_payouts_to_bank(report2, _GC_TIEOUT_ACCOUNTS, book_bad)
+    matches2, notes2, _ = match_payouts_to_bank(report2, _GC_TIEOUT_ACCOUNTS, book_bad)
     assert matches2[1].outcome == NO_MATCH
     assert "no bank credit found" in notes2[0]
 
@@ -6477,7 +6491,7 @@ def test_match_payouts_day7_matches_day8_does_not_default_window(tmp_path):
         tmp_path / "book_day7.gnucash", _gc_document_xml(accounts, [txn_day7]),
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
-    matches, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_day7)
+    matches, _, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_day7)
     assert matches[1].outcome == MATCHED
 
     # NEGATIVE: 8 days later must NOT match under the default 7-day window.
@@ -6488,7 +6502,7 @@ def test_match_payouts_day7_matches_day8_does_not_default_window(tmp_path):
         tmp_path / "book_day8.gnucash", _gc_document_xml(accounts, [txn_day8]),
     )
     report2 = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
-    matches2, notes2 = match_payouts_to_bank(report2, _GC_TIEOUT_ACCOUNTS, book_day8)
+    matches2, notes2, _ = match_payouts_to_bank(report2, _GC_TIEOUT_ACCOUNTS, book_day8)
     assert matches2[1].outcome == NO_MATCH
     assert "no bank credit found" in notes2[0]
 
@@ -6506,11 +6520,11 @@ def test_match_payouts_custom_window_honored(tmp_path):
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    matches_default, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches_default, _, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
     assert matches_default[1].outcome == NO_MATCH  # NEGATIVE: default window must not reach 10 days
 
     report2 = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
-    matches_custom, _ = match_payouts_to_bank(
+    matches_custom, _, _ = match_payouts_to_bank(
         report2, _GC_TIEOUT_ACCOUNTS, book_path, window_days=14,
     )
     assert matches_custom[1].outcome == MATCHED
@@ -6530,7 +6544,7 @@ def test_match_payouts_one_credit_two_identical_payouts_only_one_matches(tmp_pat
         _class_a_advice("2025-05", total_paid=100000.0),
     ])
 
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
 
     outcomes = {idx: pm.outcome for idx, pm in matches.items()}
     matched_idxs = [idx for idx, o in outcomes.items() if o == MATCHED]
@@ -6556,7 +6570,7 @@ def test_match_payouts_two_equal_distance_candidates_is_tie_never_auto_picked(tm
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
 
     # NEGATIVE: a tie must NEVER be auto-picked as MATCHED.
     assert matches[1].outcome == TIE
@@ -6583,7 +6597,7 @@ def test_match_payouts_nearer_date_wins(tmp_path):
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
 
     assert matches[1].outcome == MATCHED
     assert matches[1].credit_date == "2025-05-01"
@@ -6600,7 +6614,7 @@ def test_match_payouts_no_credit_found_is_loud_genuine_gap(tmp_path):
     )
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+    matches, notes, _ = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
 
     assert matches[1].outcome == NO_MATCH
     assert len(notes) == 1
@@ -6612,16 +6626,22 @@ def test_match_payouts_no_credit_found_is_loud_genuine_gap(tmp_path):
 def test_match_payouts_degrades_cleanly_when_no_book_or_no_bank_account():
     report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
 
-    # No gnucash_path at all.
-    matches, notes = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, "")
+    # No gnucash_path at all -- H35-05 round 2, item 1: `unavailable_reason`
+    # must be set (not None) so a journal-writing caller knows matching did
+    # NOT run, as opposed to running with zero results.
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, "")
     assert matches == {}
     assert notes == []
+    assert reason is not None
+    assert "GnuCash book" in reason
 
     # accounts has no "bank" key.
     accounts_no_bank = {k: v for k, v in _GC_TIEOUT_ACCOUNTS.items() if k != "bank"}
-    matches2, notes2 = match_payouts_to_bank(report, accounts_no_bank, "some/path.gnucash")
+    matches2, notes2, reason2 = match_payouts_to_bank(report, accounts_no_bank, "some/path.gnucash")
     assert matches2 == {}
     assert notes2 == []
+    assert reason2 is not None
+    assert "accounts['bank']" in reason2
 
 
 def test_match_payouts_bank_path_not_in_book_is_flagged(tmp_path):
@@ -6633,11 +6653,50 @@ def test_match_payouts_bank_path_not_in_book_is_flagged(tmp_path):
     bad_accounts = dict(_GC_TIEOUT_ACCOUNTS)
     bad_accounts["bank"] = "Assets:Bank:Does Not Exist"
 
-    matches, notes = match_payouts_to_bank(report, bad_accounts, book_path)
+    matches, notes, reason = match_payouts_to_bank(report, bad_accounts, book_path)
 
     assert matches == {}
     assert len(notes) == 1
     assert "was not found in the book" in notes[0]
+    # NEGATIVE (H35-05 round 2, item 1): an unresolvable accounts['bank']
+    # path must also surface as `unavailable_reason`, not just as a note --
+    # a caller about to write a journal only ever inspects the reason.
+    assert reason is not None
+    assert "Does Not Exist" in reason
+
+
+def test_match_payouts_book_load_failure_sets_unavailable_reason(tmp_path):
+    # NEGATIVE (H35-05 round 2, item 1): a book that cannot be read/parsed
+    # must ALSO surface as `unavailable_reason`, not just degrade silently.
+    garbage_path = tmp_path / "garbage.gnucash"
+    garbage_path.write_text("not a gnucash file", encoding="utf-8")
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
+
+    matches, notes, reason = match_payouts_to_bank(
+        report, _GC_TIEOUT_ACCOUNTS, str(garbage_path),
+    )
+
+    assert matches == {}
+    assert reason is not None
+    assert len(notes) == 1
+
+
+def test_match_payouts_when_matching_runs_reason_is_none_even_for_all_no_match(tmp_path):
+    # POSITIVE contrast to the three degrade cases above: when matching
+    # genuinely runs -- even if every payout comes back NO_MATCH --
+    # `unavailable_reason` must be None. An empty/falsy `matches` value is
+    # NOT sufficient on its own to tell "ran with zero results" apart from
+    # "could not run at all"; only this flag is.
+    accounts, guids = _gc_tree()
+    book_path = _write_gnucash_book(
+        tmp_path / "book_allgap.gnucash", _gc_document_xml(accounts, []),
+    )
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+
+    assert reason is None
+    assert matches[1].outcome == NO_MATCH
 
 
 # --- build_journals()/_monthly_journal() bank_matches wiring ---------------
@@ -6750,3 +6809,195 @@ def test_build_journals_full_emit_total_posted_to_bank_account_is_zero():
     all_accounts = {s.account for j in journals for s in j.splits}
     assert "Income:PGBP:Clearing A" in all_accounts
     assert "Income:PGBP:Clearing B" in all_accounts
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 2, item 3 -- a deposit split across >=2 counter-accounts must
+# be kept as a candidate (never silently skipped as if it did not exist),
+# and must surface as its own loud SPLIT outcome -- never as a false
+# NO_MATCH "genuine gap" (a matching credit WAS found) and never auto-routed
+# to any one of the split accounts.
+# ---------------------------------------------------------------------------
+
+def _split_bank_deposit_txn(guid_seed: str, iso_date: str, amount: float, bank_guid: str,
+                             counter_guids_and_shares: list) -> str:
+    """A single deposit transaction split across >=2 non-bank accounts:
+    one split on the bank account (positive = money in), one split per
+    (guid, share) in counter_guids_and_shares (negative, summing to
+    -amount)."""
+    splits = [_gc_split_xml(_gc_guid(f"{guid_seed}-bank"), amount, bank_guid)]
+    for i, (guid, share) in enumerate(counter_guids_and_shares):
+        splits.append(_gc_split_xml(_gc_guid(f"{guid_seed}-counter-{i}"), -share, guid))
+    return _gc_txn_xml(_gc_guid(guid_seed), iso_date, f"split deposit {guid_seed}", splits)
+
+
+def test_match_payouts_split_deposit_that_matches_is_flagged_split_not_genuine_gap(tmp_path):
+    accounts, guids = _gc_tree()
+    txn = _split_bank_deposit_txn(
+        "dep-split", "2025-04-30", 100000.0, guids["Current Account"],
+        [(guids["Remuneration"], 60000.0), (guids["Share of Profit"], 40000.0)],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_split.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+
+    assert reason is None
+    # NEGATIVE: a split deposit that DID match must never read as NO_MATCH
+    # ("genuine gap" would be untrue -- a matching credit was found) and
+    # must never be silently auto-picked as MATCHED (there is no single
+    # counter-account to route a journal leg to).
+    assert matches[1].outcome == SPLIT
+    assert matches[1].outcome != NO_MATCH
+    assert matches[1].outcome != MATCHED
+    assert len(notes) == 1
+    assert "split across" in notes[0]
+    assert "2" in notes[0]  # split across 2 accounts
+    assert "genuine gap" not in notes[0]
+
+    # And no journal is ever built from a SPLIT outcome.
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=matches)
+    assert journals == []
+
+
+def test_match_payouts_split_deposit_that_does_not_match_changes_nothing(tmp_path):
+    accounts, guids = _gc_tree()
+    # Split deposit for an amount that does NOT match the payout at all --
+    # must behave exactly like any other non-matching candidate: NO_MATCH,
+    # genuine gap, nothing routed.
+    txn = _split_bank_deposit_txn(
+        "dep-split-nomatch", "2025-04-30", 55000.0, guids["Current Account"],
+        [(guids["Remuneration"], 30000.0), (guids["Share of Profit"], 25000.0)],
+    )
+    book_path = _write_gnucash_book(
+        tmp_path / "book_split_nomatch.gnucash", _gc_document_xml(accounts, [txn]),
+    )
+    report = _bank_match_report([_class_a_advice("2025-04", total_paid=100000.0)])
+
+    matches, notes, reason = match_payouts_to_bank(report, _GC_TIEOUT_ACCOUNTS, book_path)
+
+    assert reason is None
+    assert matches[1].outcome == NO_MATCH
+    assert "genuine gap" in notes[0]
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 2, item 2 -- build_posted_check() and build_balance_tieout()
+# must be fed the SAME `bank_matches` this run will actually write, so they
+# never report against a scope of journals that will never be written
+# (wrong-scope totals -- RED FLAG #2 of the round-2 brief).
+# ---------------------------------------------------------------------------
+
+def test_build_posted_check_no_match_payout_never_appears_as_not_posted(tmp_path):
+    # NEGATIVE: a NO_MATCH payout will NEVER get a journal written for it
+    # (see test_build_journals_no_match_or_tie_payout_gets_no_journal above),
+    # so it must not show up in build_posted_check()'s results at all --
+    # neither as NOT POSTED (a false "still needs posting" reading) nor as
+    # anything else. An empty book is enough: with bank_matches supplied and
+    # the payout NO_MATCH, `_journals_safely()` builds zero journals, so
+    # there is nothing for build_posted_check() to look for.
+    accounts, guids = _gc_tree()
+    book_path = _write_gnucash_book(
+        tmp_path / "book_bpc_nomatch.gnucash", _gc_document_xml(accounts, []),
+    )
+    report = _gc_tieout_report()
+    bank_matches = {
+        1: PayoutMatch(
+            idx=1, month="2025-04", payout_date="2025-04-30", payout_amount=480000.0,
+            outcome=NO_MATCH,
+        ),
+    }
+
+    results, note = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=bank_matches,
+    )
+
+    assert results == []
+    assert "0 not posted" in note or "not posted" not in note
+
+
+def test_build_balance_tieout_no_match_payout_is_not_pending_journal_posting(tmp_path):
+    # NEGATIVE: with the payout NO_MATCH, this run's own journals list is
+    # empty (no journal will ever be written for it), so no account can be
+    # "pending" a journal that will never exist. The book is also empty, so
+    # every ACCOUNT_KEYS row must fall to the plain 0.00-vs-0.00 comparison
+    # (AGREE), never the PENDING JOURNAL POSTING verdict.
+    accounts, guids = _gc_tree()
+    book_path = _write_gnucash_book(
+        tmp_path / "book_tieout_nomatch.gnucash", _gc_document_xml(accounts, []),
+    )
+    report = _gc_tieout_report()
+    bank_matches = {
+        1: PayoutMatch(
+            idx=1, month="2025-04", payout_date="2025-04-30", payout_amount=480000.0,
+            outcome=NO_MATCH,
+        ),
+    }
+    posted_check, _ = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=bank_matches,
+    )
+    assert posted_check == []
+
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26",
+        posted_check=posted_check, bank_matches=bank_matches,
+    )
+
+    by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
+    for key in ("bank", "tds_expense", "remuneration_income", "share_of_profit_income"):
+        row = by_key[key]
+        assert PENDING_JOURNAL_VERDICT not in (row.note or "")
+        assert row.agree is True
+
+
+def test_build_posted_check_and_balance_tieout_matched_payout_reroutes_off_bank(tmp_path):
+    # A MATCHED payout's own journal (per _monthly_journal()) never touches
+    # accounts["bank"] -- its cash leg lands on the bank-match counter-
+    # account instead. Both build_posted_check() and build_balance_tieout()
+    # must see that SAME rerouted journal (via the same bank_matches), so:
+    #   - the "bank" ACCOUNT_KEYS row's computed movement is exactly 0;
+    #   - the rerouted counter-account amount appears on ITS OWN row
+    #     (never silently dropped), even though it is not one of
+    #     ACCOUNT_KEYS and is not present in this synthetic book;
+    #   - build_posted_check() and the journal this run would actually
+    #     write (build_journals() with the SAME bank_matches) name the same
+    #     txn_id.
+    accounts, guids = _gc_tree()
+    book_path = _write_gnucash_book(
+        tmp_path / "book_bpc_matched.gnucash", _gc_document_xml(accounts, []),
+    )
+    report = _gc_tieout_report()
+    bank_matches = {
+        1: PayoutMatch(
+            idx=1, month="2025-04", payout_date="2025-04-30", payout_amount=480000.0,
+            outcome=MATCHED, credit_date="2025-04-30", credit_amount=480000.0,
+            credit_account="Income:PGBP:Other Clearing",
+        ),
+    }
+
+    posted_check, _ = build_posted_check(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26", bank_matches=bank_matches,
+    )
+    results = build_balance_tieout(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, "2025-26",
+        posted_check=posted_check, bank_matches=bank_matches,
+    )
+
+    by_key = {r.category.rsplit(": ", 1)[-1]: r for r in results}
+    assert by_key["bank"].sources["Computed (this run's journal)"] == 0.0
+
+    reroute_rows = [
+        r for r in results
+        if "bank-match counter-account" in r.category and "Other Clearing" in r.category
+    ]
+    assert len(reroute_rows) == 1
+    reroute_row = reroute_rows[0]
+    rerouted_amount = reroute_row.sources["Computed (this run's journal, rerouted bank-match leg)"]
+    assert rerouted_amount == 480000.0
+
+    # The posted check and the journal this run would actually write agree
+    # on exactly which txn_id(s) exist.
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=bank_matches)
+    assert {j.txn_id for j in journals} == {p.txn_id for p in posted_check}

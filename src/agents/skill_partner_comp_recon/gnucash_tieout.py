@@ -102,10 +102,19 @@ def _load_book_safely(gnucash_path: str):
         return None, f"could not open/parse GnuCash book {gnucash_path!r}: {e}"
 
 
-def _journals_safely(report, accounts: dict):
-    """Returns (journals, error_or_None). Never raises."""
+def _journals_safely(report, accounts: dict, bank_matches: dict | None = None):
+    """Returns (journals, error_or_None). Never raises.
+
+    H35-05 round 2, item 2: `bank_matches` (optional), when supplied, is
+    threaded straight into build_journals() so every caller of this helper
+    (build_posted_check, build_balance_tieout) sees the SAME journals the
+    run will actually write -- a payout that is NO_MATCH/TIE/SPLIT drops
+    out of these journals entirely (jv_emitter._monthly_journal() already
+    returns None for any bank_match.outcome != MATCHED), and a MATCHED
+    payout's cash leg lands on the bank import's own counter-account
+    instead of a second, unconditional leg on accounts['bank']."""
     try:
-        return build_journals(report, accounts or {}), None
+        return build_journals(report, accounts or {}, bank_matches=bank_matches), None
     except JournalValidationError as e:
         return None, f"could not build this run's implied journal: {e}"
 
@@ -120,6 +129,7 @@ _RECLASS_ACCOUNTS = ("current_account", "capital_contribution")
 def build_balance_tieout(
     report, accounts: dict, gnucash_path: str, year_key: str,
     posted_check: "list[PostedCheckResult] | None" = None,
+    bank_matches: dict | None = None,
 ) -> list[ReconciliationResult]:
     """One ReconciliationResult per jv_emitter.ACCOUNT_KEYS entry, comparing
     this run's implied FY movement against the GnuCash book's actual FY
@@ -164,6 +174,21 @@ def build_balance_tieout(
     addition -- never into "variance" -- because it is a real, already-
     posted movement this run's own (monthly-only) journal never claims to
     represent.
+
+    H35-05 round 2, item 2b: `bank_matches` (optional), threaded straight
+    into `_journals_safely()`, makes every ACCOUNT_KEYS row above compare
+    against the SAME journals this run will actually write -- a MATCHED
+    payout's cash leg is on the bank import's own counter-account, never a
+    second leg on accounts['bank']. That counter-account is very often NOT
+    one of ACCOUNT_KEYS, so its rerouted amount would otherwise appear on
+    no row at all. To avoid silently dropping it, one EXTRA
+    ReconciliationResult is appended per distinct rerouted counter-account
+    that is not already one of ACCOUNT_KEYS' configured paths, comparing
+    this run's journals' movement on that account against the book's own
+    FY movement for it (same tolerance/normalize_value() convention as the
+    main loop). When the account cannot be resolved in the book at all,
+    the row still appears, naming the amount and the reason it could not
+    be reconciled -- never silently left out.
     """
     def _blank(note: str | None = None) -> list[ReconciliationResult]:
         results = []
@@ -190,7 +215,7 @@ def build_balance_tieout(
     if err:
         return _blank(err)
 
-    journals, err = _journals_safely(report, accounts)
+    journals, err = _journals_safely(report, accounts, bank_matches=bank_matches)
     if err:
         return _blank(err)
 
@@ -370,6 +395,54 @@ def build_balance_tieout(
                 ),
             )
         results.append(result)
+
+    # H35-05 round 2, item 2b: report the rerouted counter-account(s) of
+    # any MATCHED bank_matches entry that is not already one of
+    # ACCOUNT_KEYS -- never silently drop the amount from every row.
+    known_paths = {
+        _jv_strip_root(p) for p in accounts.values()
+        if isinstance(p, str) and p.strip()
+    }
+    rerouted_paths = sorted({
+        s.account
+        for j in journals for s in j.splits
+        if s.account not in known_paths
+    })
+    for stripped_path in rerouted_paths:
+        category = f"{_TIEOUT_LABEL}: bank-match counter-account {stripped_path}"
+        computed_raw = sum(
+            s.debit - s.credit
+            for j in journals
+            for s in j.splits
+            if s.account == stripped_path
+        )
+        guid = path_to_guid.get(stripped_path)
+        if guid is None:
+            results.append(ReconciliationResult(
+                category=category,
+                sources={
+                    "Computed (this run's journal, rerouted bank-match leg)": computed_raw,
+                    "GnuCash book (FY movement)": None,
+                },
+                agree=None,
+                note=(
+                    f"{CANNOT_RECONCILE} -- account path {stripped_path!r} (the bank "
+                    "import's own counter-account for a matched payout, H35-05) was "
+                    "not found in the supplied GnuCash book. The rerouted amount "
+                    f"({computed_raw:,.2f}) is still shown here so it is never "
+                    "silently missing from every row."
+                ),
+            ))
+            continue
+        acct_type = book.accounts[guid].type
+        computed_figure = parse_gnucash.normalize_value(computed_raw, acct_type)
+        book_figure = parse_gnucash.account_fy_sum(book, guid, year_key)
+        result = reconcile_category(category, {
+            "Computed (this run's journal, rerouted bank-match leg)": computed_figure,
+            "GnuCash book (FY movement)": book_figure,
+        })
+        results.append(result)
+
     return results
 
 
@@ -436,6 +509,7 @@ def _fallback_classify(journal, fy_txns, colon_paths: dict) -> tuple[str, str]:
 
 def build_posted_check(
     report, accounts: dict, gnucash_path: str, year_key: str,
+    bank_matches: dict | None = None,
 ) -> tuple[list[PostedCheckResult], str]:
     """Classify every journal build_journals() would produce for this run
     as NOT POSTED / ALREADY POSTED / PARTIALLY POSTED -- AMBIGUOUS /
@@ -448,6 +522,14 @@ def build_posted_check(
     definite; its absence only ever falls through to the exact fallback
     match, which itself only ever reports ALREADY POSTED for a full,
     exact, single-transaction match.
+
+    H35-05 round 2, item 2a: `bank_matches` (optional), threaded straight
+    into `_journals_safely()`, makes this check see exactly the journals
+    this run will actually write -- a NO_MATCH/TIE/SPLIT payout's journal
+    is never built at all (so it can never wrongly appear here as
+    NOT_POSTED / "pending journal posting"), and a MATCHED payout's cash
+    leg is the bank import's own counter-account rather than a second leg
+    on accounts['bank'].
     """
     if not gnucash_path:
         return [], f"{_POSTED_LABEL}: not available (no GnuCash book supplied)."
@@ -461,7 +543,7 @@ def build_posted_check(
     if err:
         return [], f"{_POSTED_LABEL}: not available ({err})."
 
-    journals, err = _journals_safely(report, accounts)
+    journals, err = _journals_safely(report, accounts, bank_matches=bank_matches)
     if err:
         return [], f"{_POSTED_LABEL}: not available ({err})."
 
@@ -550,6 +632,7 @@ DEFAULT_BANK_MATCH_WINDOW_DAYS = 7
 MATCHED = "matched"
 NO_MATCH = "no_match"
 TIE = "tie"
+SPLIT = "split"
 
 
 @dataclass
@@ -557,10 +640,21 @@ class BankMatchCandidate:
     """One bank-side deposit transaction that is amount/date-eligible for a
     given payout: its date, its amount, and the COUNTER-account (colon
     path) the bank import already posted the other side of that deposit
-    to -- never accounts["bank"] itself."""
+    to -- never accounts["bank"] itself.
+
+    H35-05 round 2, item 3: a deposit with TWO OR MORE non-bank splits has
+    no single counter-account to route a journal leg to. Such a candidate
+    is still built (never silently skipped -- a matching credit that
+    happens to be split is a real deposit, not a "genuine gap"), but with
+    `account=None` and `split_accounts` naming every counter-account the
+    bank import spread it across. `account is None` is the signal used
+    downstream (match_payouts_to_bank()'s winner-selection) to route to
+    the SPLIT outcome instead of MATCHED -- no journal is ever built from
+    a split candidate."""
     date: str       # ISO YYYY-MM-DD
     amount: float
-    account: str    # colon path, the bank import's counter-account
+    account: str | None       # colon path, the bank import's counter-account; None if split
+    split_accounts: "list[str] | None" = None  # >=2 counter-accounts, when account is None
 
 
 @dataclass
@@ -573,27 +667,30 @@ class PayoutMatch:
     month: str
     payout_date: str       # ISO YYYY-MM-DD (the journal's own _month_end date)
     payout_amount: float
-    outcome: str            # MATCHED / NO_MATCH / TIE
+    outcome: str            # MATCHED / NO_MATCH / TIE / SPLIT
     credit_date: str | None = None
     credit_amount: float | None = None
     credit_account: str | None = None
-    candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE only
+    candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE/SPLIT only
 
 
 def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict) -> list[BankMatchCandidate]:
     """Every deposit (money IN) posted to the bank account, paired with the
-    single OTHER account the bank import posted the counter-leg to. A
-    transaction is only usable here when exactly one non-bank split exists
-    -- with two or more, there is no single counter-account to identify, so
-    it is skipped rather than guessed at (never improvise a design the
-    coordinator did not specify)."""
+    OTHER account(s) the bank import posted the counter-leg(s) to.
+
+    H35-05 round 2, item 3: a deposit split across TWO OR MORE counter-
+    accounts is kept as a candidate (never skipped -- see
+    BankMatchCandidate's docstring), with `account=None` and
+    `split_accounts` naming every counter-account it touched. Only a
+    deposit with NO non-bank split at all (a book anomaly, not a real
+    transfer) is skipped."""
     deposits: list[BankMatchCandidate] = []
     for txn in book.transactions:
         bank_splits = [s for s in txn.splits if s.account_guid == bank_guid]
         if not bank_splits:
             continue
         other_splits = [s for s in txn.splits if s.account_guid != bank_guid]
-        if len(other_splits) != 1:
+        if not other_splits:
             continue
         # ASSET/BANK accounts are debit-normal and not in FLIP_TYPES (see
         # parse_gnucash.py's own docstring) -- a positive raw split value on
@@ -602,52 +699,111 @@ def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict
         amount = round(float(sum(s.value for s in bank_splits)), 2)
         if amount <= 0:
             continue
-        deposits.append(BankMatchCandidate(
-            date=txn.date_posted.isoformat(),
-            amount=amount,
-            account=colon_paths.get(other_splits[0].account_guid, ""),
-        ))
+        if len(other_splits) == 1:
+            deposits.append(BankMatchCandidate(
+                date=txn.date_posted.isoformat(),
+                amount=amount,
+                account=colon_paths.get(other_splits[0].account_guid, ""),
+            ))
+        else:
+            split_accounts = sorted({
+                colon_paths.get(s.account_guid, "") for s in other_splits
+            })
+            deposits.append(BankMatchCandidate(
+                date=txn.date_posted.isoformat(),
+                amount=amount,
+                account=None,
+                split_accounts=split_accounts,
+            ))
     return deposits
+
+
+def _candidate_label(c: "BankMatchCandidate") -> str:
+    """Human-readable label for one BankMatchCandidate, used in both the
+    LOUD notes (TIE/SPLIT) and the workbook's Bank match sheet -- shared so
+    the two never drift apart."""
+    if c.account is None:
+        accts = ", ".join(c.split_accounts or [])
+        return f"{c.date} {c.amount:,.2f} -> split across {accts}"
+    return f"{c.date} {c.amount:,.2f} -> {c.account}"
 
 
 def match_payouts_to_bank(
     report, accounts: dict, gnucash_path: str,
     window_days: int = DEFAULT_BANK_MATCH_WINDOW_DAYS,
-) -> tuple[dict[int, PayoutMatch], list[str]]:
+) -> tuple[dict[int, PayoutMatch], list[str], str | None]:
     """H35-05: match each of report.monthly's payouts (1-indexed, matching
     jv_emitter.build_journals()'s own enumerate) against a bank deposit
     already posted in the book at accounts["bank"]. Read-only end to end.
 
-    Returns (matches, notes):
+    Returns (matches, notes, unavailable_reason):
       - matches: dict[idx -> PayoutMatch], one entry per payout in
         report.monthly (always fully populated -- every payout gets an
-        outcome, even NO_MATCH/TIE) unless gnucash_path/accounts["bank"] is
-        missing or the book cannot be read/parsed, in which case matches is
-        {} (empty -- callers must not treat an empty dict as "every payout
-        matched"; treat it as "matching did not run" and fall back).
+        outcome, even NO_MATCH/TIE/SPLIT) when matching actually ran, even
+        if every one of them came back NO_MATCH/TIE/SPLIT -- an empty
+        result set is a legitimate outcome of a run that DID happen. It is
+        {} ONLY when matching could not run at all (see
+        `unavailable_reason` below).
       - notes: human-readable strings for the LOUD block -- one per
-        NO_MATCH ("genuine gap") or TIE (naming every candidate), plus a
-        single explanatory note when matching could not run at all. Never
-        one for a MATCHED payout (matching cleanly is not loud).
+        NO_MATCH ("genuine gap"), TIE (naming every candidate) or SPLIT
+        (naming the accounts it was split across), plus a single
+        explanatory note when matching could not run at all. Never one for
+        a MATCHED payout (matching cleanly is not loud).
+      - unavailable_reason (H35-05 round 2, item 1): None when matching
+        genuinely ran (whatever its per-payout outcomes were -- this is
+        the ONLY way a caller may tell "ran with zero/all-gap results"
+        apart from "could not run at all"; `matches` being falsy is NOT
+        sufficient on its own). A human-readable reason string when
+        matching could NOT run: no gnucash_path supplied, no
+        accounts['bank'] configured, the book failed to load/parse, or the
+        accounts['bank'] path was not found in the book. A caller that is
+        about to WRITE a journal CSV with a bank leg MUST treat a non-None
+        `unavailable_reason` as a hard stop (return an ERROR before any
+        write) -- the bank import always runs first, so a journal with an
+        unconditional bank leg written under any of these conditions would
+        double-book the exact same cash movement the bank import already
+        posted. Reading/reporting-only callers (build_posted_check,
+        build_balance_tieout) may keep degrading gracefully as before.
 
     Never raises: a book-load failure or an unresolvable accounts["bank"]
-    path degrades to ({}, [note]) exactly like Sections B/C above.
+    path degrades to ({}, [note], reason) exactly like Sections B/C above.
     """
-    if not gnucash_path or not accounts.get("bank"):
-        return {}, []
+    if not gnucash_path:
+        reason = (
+            "no GnuCash book was supplied -- the bank import's own postings "
+            "cannot be read, so payouts cannot be matched against bank "
+            "credits already booked."
+        )
+        return {}, [], reason
+    if not accounts.get("bank"):
+        reason = (
+            "no accounts['bank'] is configured for this entity -- the GnuCash "
+            "book (with accounts.bank set) is required so payouts can be "
+            "matched against bank credits already booked."
+        )
+        return {}, [], reason
 
     book, err = _load_book_safely(gnucash_path)
     if err:
-        return {}, [f"Bank match (H35-05): {err} -- bank leg(s) not matched, unchanged."]
+        reason = (
+            f"{err} -- the GnuCash book (with accounts.bank) is required so "
+            "payouts can be matched against bank credits already booked."
+        )
+        return {}, [f"Bank match (H35-05): {err} -- bank leg(s) not matched, unchanged."], reason
 
     colon_paths = _colon_paths(book)
     bank_path = _jv_strip_root(accounts["bank"])
     bank_guids = [g for g, p in colon_paths.items() if p == bank_path]
     if not bank_guids:
+        reason = (
+            f"accounts['bank'] path {bank_path!r} was not found in the supplied "
+            "GnuCash book -- payouts cannot be matched against bank credits "
+            "already booked."
+        )
         return {}, [
             f"Bank match (H35-05): accounts['bank'] path {bank_path!r} was not "
             "found in the book -- bank leg(s) not matched, unchanged."
-        ]
+        ], reason
 
     all_deposits: list[BankMatchCandidate] = []
     for guid in bank_guids:
@@ -694,13 +850,14 @@ def match_payouts_to_bank(
         if len(tied) > 1:
             pm.outcome = TIE
             pm.candidates = [
-                BankMatchCandidate(date=c.date, amount=c.amount, account=c.account)
+                BankMatchCandidate(
+                    date=c.date, amount=c.amount, account=c.account,
+                    split_accounts=c.split_accounts,
+                )
                 for _, _, c in tied
             ]
             matches[idx] = pm
-            cand_text = "; ".join(
-                f"{c.date} {c.amount:,.2f} -> {c.account}" for c in pm.candidates
-            )
+            cand_text = "; ".join(_candidate_label(c) for c in pm.candidates)
             notes.append(
                 f"payout {line.month} on {payout_date_iso}: TIE between "
                 f"{len(tied)} equally-close bank credits, none auto-picked "
@@ -710,10 +867,33 @@ def match_payouts_to_bank(
 
         _, win_i, win_c = tied[0]
         used[win_i] = True
+
+        if win_c.account is None:
+            # H35-05 round 2, item 3: the winning credit is a deposit split
+            # across >=2 counter-accounts -- consumed one-to-one like any
+            # other candidate (`used[win_i] = True` above), but there is no
+            # single account to route a journal leg to, so this is a
+            # distinct LOUD flag, never silently reported as a "genuine
+            # gap" (NO_MATCH would be untrue -- a matching credit WAS
+            # found) and never auto-routed to any one of the split
+            # accounts.
+            pm.outcome = SPLIT
+            pm.credit_date = win_c.date
+            pm.credit_amount = win_c.amount
+            pm.candidates = [win_c]
+            matches[idx] = pm
+            notes.append(
+                f"payout {line.month} on {payout_date_iso}: bank credit found "
+                f"but split across {len(win_c.split_accounts or [])} accounts "
+                f"({', '.join(win_c.split_accounts or [])}) -- cannot route the "
+                "journal, no journal written."
+            )
+            continue
+
         pm.outcome = MATCHED
         pm.credit_date = win_c.date
         pm.credit_amount = win_c.amount
         pm.credit_account = win_c.account
         matches[idx] = pm
 
-    return matches, notes
+    return matches, notes, None

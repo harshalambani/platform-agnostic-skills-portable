@@ -706,8 +706,24 @@ def _run_from_documents(
         dict(entity_profile.partner_comp_accounts)
         if (entity_profile and entity_profile.partner_comp_accounts) else {}
     )
+
+    # H35-05 round 2, item 2: run the bank match FIRST and thread the SAME
+    # `bank_matches` into build_posted_check() and build_balance_tieout()
+    # below, so every check sees exactly the journals this run will
+    # actually write (a NO_MATCH/TIE/SPLIT payout's journal never exists;
+    # a MATCHED payout's cash leg is the bank import's own counter-
+    # account). Running this before the tie-out/posted checks (the
+    # pre-round-2 order was the other way around) is what fixes the
+    # wrong-scope totals defect -- see match_payouts_to_bank()'s own
+    # docstring for the full contract, including `unavailable_reason`.
+    bank_matches, bank_match_notes, bank_match_unavailable = match_payouts_to_bank(
+        report, accounts_for_tieout, gnucash_path,
+        window_days=_window_days(bank_match_window),
+    )
+
     posted_check, gnucash_note = build_posted_check(
         report, accounts_for_tieout, gnucash_path, report.financial_year,
+        bank_matches=bank_matches or None,
     )
     optional_notes[_gnucash_note_idx] = gnucash_note
     # H35-04 round 2 item 1: build_balance_tieout() now needs the SAME
@@ -718,24 +734,17 @@ def _run_from_documents(
     report.reconciliation.extend(
         build_balance_tieout(
             report, accounts_for_tieout, gnucash_path, report.financial_year,
-            posted_check=posted_check,
+            posted_check=posted_check, bank_matches=bank_matches or None,
         )
     )
 
-    # H35-05: per-payout fuzzy match of the monthly payouts against bank
-    # credits already posted in the book (read-only -- see
-    # gnucash_tieout.match_payouts_to_bank()). Returns ({}, []) whenever
-    # there is no book or no accounts.bank configured, in which case the
-    # engine.py NOT_CHECKED_YET placeholder row (built into report.reconciliation
-    # by build_report() already) is left exactly as-is -- there is nothing
-    # to check yet. Only when a real match ran do we replace that row with
-    # a real verdict, and only then do we have anything to feed into
-    # build_journals()'s new bank_matches parameter (below) or the workbook's
-    # Bank match sheet.
-    bank_matches, bank_match_notes = match_payouts_to_bank(
-        report, accounts_for_tieout, gnucash_path,
-        window_days=_window_days(bank_match_window),
-    )
+    # H35-05: per-payout fuzzy match result reported above. `bank_matches`
+    # is {} whenever matching could not run at all (see
+    # `bank_match_unavailable`) -- in that case the engine.py
+    # NOT_CHECKED_YET placeholder row (built into report.reconciliation by
+    # build_report() already) is left exactly as-is, there is nothing to
+    # check yet. Only when a real match ran do we replace that row with a
+    # real verdict.
     if bank_matches:
         total_computed = sum(m.payout_amount for m in bank_matches.values())
         total_matched_credits = sum(
@@ -790,6 +799,57 @@ def _run_from_documents(
         )
         if accounts_error:
             return accounts_error
+
+        # H35-02: the accrual journal (Dr current_account / Cr
+        # share_of_profit_income, see jv_emitter.build_accrual_journal())
+        # has NO bank leg at all -- it is structurally immune to the
+        # double-booking defect this section's bank-match gate exists for,
+        # so it is written here, independently and FIRST, regardless of
+        # whether bank matching is available. Its own journal_line text is
+        # assembled now and prefixed onto whatever this block returns
+        # below, so it is never lost even when the monthly journal itself
+        # is refused.
+        accrual_line = ""
+        if accrual_journal_path:
+            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
+            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+            if accrual_journal is not None:
+                accrual_line = (
+                    f"  Accrual journal CSV: {accrual_journal_path} "
+                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                )
+            else:
+                accrual_line = f"  Accrual journal: not written. {accrual_note}"
+            # H35-02 item 4: the residual current-account comparison after
+            # whatever the accrual applied -- reported here, never booked.
+            residual_status = (
+                "AGREE" if residual.agree else
+                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
+            )
+            accrual_line += f"\n  {residual.category}: {residual_status}. {residual.note}"
+
+        # H35-05 round 2, item 1 (RED FLAG fix): the pre-H35-05
+        # unconditional "Dr bank = total_paid on every payout" leg must be
+        # UNREACHABLE from any path that writes a journal CSV. The bank
+        # import always runs first, so a monthly journal with its own bank
+        # leg -- written whenever bank matching could not run, for ANY
+        # reason -- double-books the exact same cash movement. Refuse the
+        # write and say why, naming the reason match_payouts_to_bank()
+        # itself returned; the recon workbook (and the accrual journal
+        # above, which has no bank leg and is unaffected) are already
+        # written by this point.
+        if bank_match_unavailable is not None:
+            lines = [
+                f"ERROR: cannot write the journal CSV -- {bank_match_unavailable}",
+                (
+                    "  The recon workbook has already been written to "
+                    f"{output_path}."
+                ),
+            ]
+            if accrual_line:
+                lines.append(accrual_line)
+            return "\n".join(lines)
+
         try:
             journals = build_journals(report, accounts, bank_matches=bank_matches or None)
         except JournalValidationError as e:
@@ -800,25 +860,8 @@ def _run_from_documents(
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
-        if accrual_journal_path:
-            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
-            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
-            if accrual_journal is not None:
-                journal_line += (
-                    f"\n  Accrual journal CSV: {accrual_journal_path} "
-                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
-                )
-            else:
-                journal_line += f"\n  Accrual journal: not written. {accrual_note}"
-            # H35-02 item 4: the residual current-account comparison after
-            # whatever the accrual applied -- reported here, never booked.
-            residual_status = (
-                "AGREE" if residual.agree else
-                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
-            )
-            journal_line += (
-                f"\n  {residual.category}: {residual_status}. {residual.note}"
-            )
+        if accrual_line:
+            journal_line += f"\n{accrual_line}"
 
     summary = _summarize_report(
         report, output_path, journal_line, bank_match_notes=bank_match_notes or None,
