@@ -479,6 +479,97 @@ several, and no longer silently averaged in.
    out of the totals. Its figures still print on the Reconciliation
    sheet.
 
+## H35-04 round 2 -- the pending-journal rule applies to EVERY row, not just
+one
+
+Round 1 (above) applied "compare against the book PLUS this skill's own
+pending journals" to exactly one row (the current-account-closing L5
+tie-out, via `statement_reference_row()`'s `pending_journal` argument). A
+read-only run against real documents showed the other 8 GnuCash tie-out
+rows (`gnucash_tieout.build_balance_tieout()`, one per
+`jv_emitter.ACCOUNT_KEYS`) still printed VARIANCE/CANNOT RECONCILE whenever
+this run's own monthly journal for that account simply had not been
+posted yet -- exactly the gap round 1 already knew how to close for the L5
+rows, just not wired up here. Round 2 closes that gap, plus three smaller
+Status-column/labelling issues found on the same real-data run.
+
+1. **`build_balance_tieout()` now takes an optional `posted_check`
+   parameter** -- the SAME list of `PostedCheckResult` objects
+   `build_posted_check()` (Section B, unchanged) already produces for the
+   "posted already?" per-journal check, threaded through from
+   `agent.py`'s existing call site. For each of the 8 accounts, this run's
+   own journal splits touching that account are split into "already
+   posted" and "not yet posted" using that same classification (`status ==
+   NOT_POSTED`). When any are not yet posted:
+   - The book is compared against **this run's computed figure minus the
+     not-yet-posted portion** (i.e. the posted-only slice of what this run
+     implies). If that ties to the book within `RECONCILIATION_TOLERANCE`,
+     the row is `agree=True`, and the note starts with
+     `PENDING_JOURNAL_VERDICT`, naming the pending journal id(s) and the
+     amount per account -- reconciled, not a gap.
+   - If a genuine residual remains even after crediting the pending
+     journal(s), the row is a real `agree=False` VARIANCE -- and, mirroring
+     round 1's L5 rule, the note LEADS with the genuine residual ("Genuine
+     residual after posting <ids>: <amount> -- ...", never the raw
+     pre-journal difference), naming the pending journal(s) as only
+     explaining part of the gap.
+   - When every journal touching an account is already posted (or
+     `posted_check` was not supplied at all, e.g. by the pre-round-2 test
+     call sites, which are all still valid with the new parameter
+     defaulting to `None`), the row falls straight back to today's plain
+     `reconcile_category()` comparison, unchanged -- including the
+     existing closed-book income-sweep-to-Equity downgrade.
+2. **A posted prior-period reclassification journal is recognised and
+   folded into the computed side, never into the variance, on
+   `current_account`/`capital_contribution` specifically.** The real book's
+   FY movement on these two accounts can include a separate
+   reclassification journal (this skill's own, from a PRIOR run of this
+   skill posting `report.opening_reclass` -- see `jv_emitter.py`'s
+   `_opening_reclass_journal()`) dated the first day of the FY, moving an
+   amount from capital to the current account. **Recognition rule chosen:
+   an EXACT match** of a book transaction's `num` field against
+   `journal_txn_id(fy_prefix(year_key), report.firm_name, "RECT")` -- the
+   SAME deterministic Transaction-ID convention `build_posted_check()`'s
+   Section B already relies on for its own trn:num hits, never a
+   fuzzy/prefix match on the Num string. This lookup is skipped entirely
+   when THIS run's own `journals` already contains a journal under that
+   exact id (i.e. `report.opening_reclass` was supplied this run --
+   `build_journals()` would have produced it itself, and double-counting
+   the book's copy on top would be wrong). When found, its split amount for
+   the account is added to the "Computed (this run's journal)" side as an
+   explicitly-named line in the note (e.g. "; plus posted reclassification
+   journal <id> (<amount>)") -- it never appears as, or contributes to, a
+   variance figure, on either the AGREE or the pending-journal branch.
+3. **Status column vs Status derivation.** `ReconciliationResult` gained
+   two fields: `not_checked: bool = False` (same contract as
+   `informational` -- never a genuine gap, never counted, never LOUD, but
+   semantically distinct: the comparison genuinely has not happened yet,
+   vs. superseded by a better check) and `status_label: str | None = None`
+   (when set, the EXACT Status-column text `writer._status_fill()` shows,
+   overriding the derived AGREE/VARIANCE/CANNOT RECONCILE text). D2 (item
+   5 above) now sets `not_checked=True, status_label="NOT CHECKED YET"`;
+   the exempt-share-of-profit row, when only the filed return is missing
+   (see item 4 next), sets `not_checked=True, status_label="NOT CHECKED
+   (return not supplied)"`. `writer._status_fill()` now takes the full
+   `ReconciliationResult` (not a bare `agree` value) so it can check
+   `informational`/`not_checked`/`status_label` first, before falling back
+   to deriving AGREE/VARIANCE/CANNOT RECONCILE from `agree`. The
+   Exceptions and Open-items sheets now also exclude `informational`/
+   `not_checked` rows from their inclusion filters, the same way the
+   summary counts already did from round 1.
+4. **A missing filed return is not a reconciliation gap.** "Exempt share of
+   profit (s.10(2A)) vs the filed return" used to read CANNOT RECONCILE
+   whenever the return wasn't supplied, even though the L5 Statement's
+   Profit Share for the Year (the reference for this row) was present and
+   correct -- a missing SOURCE, not a genuine disagreement. This one branch
+   of the row (return not supplied, `llp_record` present) now sets
+   `not_checked=True, status_label="NOT CHECKED (return not supplied)"`
+   with an explanatory note; the other branch (no `llp_record` at all, a
+   required L5 figure genuinely missing) is unchanged, still plain CANNOT
+   RECONCILE -- and the closing-capital row (item 6, unchanged, still
+   LOUD by design: a genuine disagreement between the firm's own
+   documents).
+
 ## Non-goals (explicit, not deferred silently)
 
 - **No tax computation.** No slab, surcharge, cess, or exemption

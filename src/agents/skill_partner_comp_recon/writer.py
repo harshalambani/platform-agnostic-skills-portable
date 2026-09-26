@@ -116,7 +116,20 @@ def _autosize(ws, ncols, min_width=10, max_width=48):
         ws.column_dimensions[letter].width = max(min_width, min(max_width, longest + 2))
 
 
-def _status_fill(agree):
+def _status_fill(r):
+    """Accepts a full ReconciliationResult (H35-04 round 2, item 3): a row
+    that has not genuinely been compared yet (`informational` -- superseded
+    by a better check; `not_checked` -- the comparison hasn't happened,
+    e.g. D2's bank-credit match deferred to H35-05, or the exempt-share-of-
+    profit row when only the filed return is missing) must never print as
+    "CANNOT RECONCILE". `status_label`, when the row sets one, is shown
+    verbatim instead of a derived label.
+    """
+    if getattr(r, "informational", False):
+        return TF, "INFORMATIONAL"
+    if getattr(r, "not_checked", False):
+        return TF, (getattr(r, "status_label", None) or "NOT CHECKED")
+    agree = r.agree
     if agree is True:
         return OK, "AGREE"
     if agree is False:
@@ -338,7 +351,7 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
             _set(ws, row, 1, label)
             _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
             row += 1
-        status_fill, status_text = _status_fill(advisory_stated.agree)
+        status_fill, status_text = _status_fill(advisory_stated)
         _set(ws, row, 1, "Status", bold=True)
         _set(ws, row, 2, status_text, fill=status_fill, bold=True)
         row += 1
@@ -407,7 +420,7 @@ def _write_reconciliation_sheet(wb, report: Report):
             for k, v in r.sources.items()
         )
         _set(ws, row, 2, sources_text, wrap=True)
-        fill, text = _status_fill(r.agree)
+        fill, text = _status_fill(r)
         _set(ws, row, 3, text, fill=fill, bold=True)
         _set(ws, row, 4, r.note, wrap=True)
         row += 1
@@ -420,8 +433,12 @@ def _write_exceptions_sheet(wb, report: Report):
     _write_header(ws, 1, headers)
     row = 2
     for r in report.reconciliation:
-        if r.agree is not True:
-            fill, text = _status_fill(r.agree)
+        # H35-04 round 2, item 3: an informational/not_checked row is not a
+        # genuine failure -- it never belongs on the Exceptions sheet, the
+        # same way it never counts toward the summary's variance/
+        # undecidable totals.
+        if r.agree is not True and not r.informational and not getattr(r, "not_checked", False):
+            fill, text = _status_fill(r)
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, text, fill=fill, bold=True)
             _set(ws, row, 3, r.note, wrap=True)
@@ -460,7 +477,10 @@ def _write_open_items_sheet(wb, report: Report):
     _write_header(ws, 1, headers)
     row = 2
     for r in report.reconciliation:
-        if r.agree is None:
+        # H35-04 round 2, item 3: same exclusion as the Exceptions sheet --
+        # an informational/not_checked row is not an open item either, it
+        # is a deliberate "not yet in scope for this comparison" row.
+        if r.agree is None and not r.informational and not getattr(r, "not_checked", False):
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, r.note, wrap=True)
             _set(ws, row, 3, "Supply the missing source figure for this financial year.",

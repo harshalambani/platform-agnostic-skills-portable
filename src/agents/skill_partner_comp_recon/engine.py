@@ -425,6 +425,21 @@ class ReconciliationResult:
     # what `agree` happens to be on a given run. Figures stay visible on
     # the row; only the counting/aggregation in agent.py excludes it.
     informational: bool = False
+    # H35-04 round 2 item 3/4: True marks a row as NOT a genuine gap -- a
+    # required REFERENCE figure is present and correct, but one comparison
+    # source simply has not been supplied/matched yet (D2's bank-credit
+    # match, deferred to H35-05; the exempt-share-of-profit row when only
+    # the filed return is missing). Same contract as `informational`: never
+    # counted toward the variance/undecidable totals, never in the LOUD
+    # block, regardless of `agree`. Distinct from `informational` (which
+    # marks a row superseded by a better check) because the underlying
+    # comparison here genuinely has not happened yet, not "no longer the
+    # right check". `status_label`, when set, is the exact Status-column
+    # text writer.py shows for this row instead of deriving one from
+    # `agree` -- so a "NOT CHECKED YET"/"NOT CHECKED (return not
+    # supplied)" row never prints as "CANNOT RECONCILE".
+    not_checked: bool = False
+    status_label: str | None = None
 
 
 def reconcile_category(category: str, sources: dict,
@@ -544,13 +559,24 @@ def statement_reference_row(
                     f"Post {ids} and this row is reconciled; it is not a disagreement."
                 )
                 continue
+            # H35-04 round 2 item 5: LEAD with the genuine residual (the
+            # figure that matters once the pending journal posts), then
+            # name the pending journal -- never lead with the large,
+            # pre-journal raw difference, which reads as the headline gap
+            # when it is not. Also fixes a grammar defect in the previous
+            # wording ("The not-yet-posted this skill's ... journal" --
+            # two possessive/article phrases colliding): `journal_desc` is
+            # itself a full noun phrase (e.g. "this skill's year-end
+            # share-of-profit accrual journal"), so it takes "not yet
+            # posted" as a trailing clause instead of a leading article.
             journal_desc = pj_description or "this skill's journal"
             disagreements.append(
-                f"Statement says {statement_value:,.2f}; {label} says {value:,.2f}; "
-                f"difference {diff:,.2f}. The not-yet-posted {journal_desc} "
-                f"(journal {ids}, {pj_amount:,.2f}) explains part of the gap: "
-                f"{label} plus that journal = {adjusted_value:,.2f}. Genuine "
-                f"residual after posting {ids}: {adjusted_diff:,.2f}."
+                f"Genuine residual after posting {ids}: {adjusted_diff:,.2f} -- "
+                f"statement says {statement_value:,.2f}, {label} says "
+                f"{value:,.2f} (raw difference {diff:,.2f}); {journal_desc}, "
+                f"not yet posted (journal {ids}, {pj_amount:,.2f}), explains "
+                f"part of the gap: {label} plus that journal = "
+                f"{adjusted_value:,.2f}."
             )
             continue
         disagreements.append(
@@ -862,6 +888,12 @@ def build_report(data: dict) -> Report:
             f"Bank statement: {bank_total if bank_total is not None else 'not supplied'}. "
             "See H35-05 (partner-side fuzzy match of payouts to bank credits)."
         ),
+        # H35-04 round 2 item 3: this row is not a genuine gap (see the
+        # NOT_CHECKED_YET note above) -- the Status column must say so
+        # plainly rather than "CANNOT RECONCILE", and it must never count
+        # as a failure in the summary.
+        not_checked=True,
+        status_label="NOT CHECKED YET",
     ))
 
     total_sop = sum(m.share_of_profit_gross for m in monthly) if monthly else None
@@ -875,11 +907,34 @@ def build_report(data: dict) -> Report:
     # here). Absent/unparseable L5 is a fail-loud placeholder naming the
     # L5 statement as required, not a silent fallback to total_sop.
     if llp_record is not None and llp_record.get("current_profit_share") is not None:
-        reconciliation.append(statement_reference_row(
+        _exempt_row = statement_reference_row(
             "Exempt share of profit (s.10(2A)) vs the filed return",
             llp_record["current_profit_share"], "L5 Statement (Profit Share for the Year)",
             {"Return": return_exempt_sop},
-        ))
+        )
+        # H35-04 round 2 item 4: a MISSING RETURN is not a genuine
+        # reconciliation gap -- the L5 statement (the reference for this
+        # row) is present and its own figure is not in doubt; there is
+        # simply nothing yet to compare it against. Distinct from the
+        # "L5 itself is missing" branch below (a genuine required-document
+        # gap, which keeps its CANNOT RECONCILE verdict unchanged).
+        # statement_reference_row()'s generic "no other source available"
+        # branch (used by every other row that calls it, e.g. the
+        # closing-capital row a few lines below) is deliberately left
+        # untouched -- this override is scoped to this one row only, via
+        # the exact condition that produced it here (Return not supplied).
+        if return_exempt_sop is None:
+            _exempt_row.not_checked = True
+            _exempt_row.status_label = "NOT CHECKED (return not supplied)"
+            _exempt_row.note = (
+                "NOT CHECKED (return not supplied) -- the LLP Statement of "
+                f"Account's Profit Share for the Year "
+                f"({llp_record['current_profit_share']:,.2f}) is the reference for "
+                "this row, but the filed return was not supplied to compare it "
+                "against. This is not a reconciliation gap; it will be checked "
+                "once the return is supplied."
+            )
+        reconciliation.append(_exempt_row)
     else:
         reconciliation.append(ReconciliationResult(
             category="Exempt share of profit (s.10(2A)) vs the filed return",
@@ -1166,7 +1221,7 @@ def build_report(data: dict) -> Report:
     # own arithmetic checks out (or no statement was supplied at all).
     statement_flags: list[str] = []
     for r in reconciliation:
-        if r.informational:
+        if r.informational or r.not_checked:
             continue
         if r.agree is False and r.note.startswith("STATEMENT DISAGREES"):
             statement_flags.append(f"{r.category}: {r.note}")
