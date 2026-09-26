@@ -94,6 +94,37 @@ def _colon_paths(book: "parse_gnucash.Book") -> dict[str, str]:
     return paths
 
 
+def _book_matched_raw_for_account(
+    stripped_path: str,
+    matched_by_account: dict[str, list],
+    txns_by_guid: dict,
+    colon_paths: dict,
+) -> float:
+    """H35-05 round 4, defect 2: the bank import's OWN original counter-leg
+    raw value(s), on `stripped_path`, for every MATCHED bank_matches entry
+    whose credit_account is this same path -- looked up by the matched
+    transaction's own guid (PayoutMatch.credit_txn_guid), never re-derived
+    by a second date/amount search. Returns 0.0 when this account was not
+    the matched counter-account of anything.
+
+    Shared by BOTH build_balance_tieout()'s main ACCOUNT_KEYS loop (when a
+    configured account happens to ALSO be a matched bank-import
+    counter-account -- e.g. a payout credited straight to
+    share_of_profit_income) and its "bank-match counter-account" extra-row
+    loop (for a matched counter-account that is NOT one of ACCOUNT_KEYS) --
+    the two must never compute this independently (do not duplicate it)."""
+    total = 0.0
+    for m in matched_by_account.get(stripped_path, []):
+        txn = txns_by_guid.get(m.credit_txn_guid) if m.credit_txn_guid else None
+        if txn is None:
+            continue
+        total += float(sum(
+            sp.value for sp in txn.splits
+            if colon_paths.get(sp.account_guid) == stripped_path
+        ))
+    return total
+
+
 def _load_book_safely(gnucash_path: str):
     """Returns (book, error_or_None). Never raises."""
     try:
@@ -255,6 +286,22 @@ def build_balance_tieout(
     )
     posted_status_by_id = {p.txn_id: p.status for p in (posted_check or [])}
 
+    # H35-05 round 3, item 1 / round 4, defect 2: computed ONCE, up front,
+    # and shared by BOTH the main ACCOUNT_KEYS loop below (a configured
+    # account that also happens to be a matched bank-import counter-account
+    # -- round 4, defect 2) and the "bank-match counter-account" extra-row
+    # loop further down (a matched counter-account that is NOT one of
+    # ACCOUNT_KEYS) -- never computed twice.
+    known_paths = {
+        _jv_strip_root(p) for p in accounts.values()
+        if isinstance(p, str) and p.strip()
+    }
+    txns_by_guid = {t.guid: t for t in book.transactions}
+    matched_by_account: dict[str, list] = {}
+    for m in (bank_matches or {}).values():
+        if m.outcome == MATCHED and m.credit_account:
+            matched_by_account.setdefault(m.credit_account, []).append(m)
+
     results: list[ReconciliationResult] = []
     for key in ACCOUNT_KEYS:
         category = f"{_TIEOUT_LABEL}: {key}"
@@ -340,6 +387,21 @@ def build_balance_tieout(
             for s in j.splits
             if s.account == stripped_path
         )
+
+        # H35-05 round 4, defect 2: this configured account may ALSO be the
+        # bank import's matched counter-account for one or more payouts
+        # (e.g. a payout credited straight to share_of_profit_income). When
+        # so, the book's FY movement for this account already includes the
+        # bank import's own original credit -- so "Computed" must include
+        # it too, exactly as the "bank-match counter-account" extra-row
+        # loop below already does for a non-configured account, or this row
+        # shows a false VARIANCE equal to the matched credit(s) once
+        # posted. Shared helper -- never re-derived here.
+        matched_raw = _book_matched_raw_for_account(
+            stripped_path, matched_by_account, txns_by_guid, colon_paths,
+        )
+        computed_raw += matched_raw
+
         acct_type = book.accounts[guid].type
         computed_figure = parse_gnucash.normalize_value(computed_raw, acct_type)
         book_figure = parse_gnucash.account_fy_sum(book, guid, year_key)
@@ -358,10 +420,16 @@ def build_balance_tieout(
                 if colon_paths.get(sp.account_guid) == stripped_path
             )
         reclass_figure = parse_gnucash.normalize_value(reclass_raw, acct_type) if reclass_raw else 0.0
-        reclass_bit = (
-            f"; plus posted reclassification journal {rect_id} ({reclass_figure:,.2f})"
-            if reclass_raw else ""
-        )
+        matched_figure = parse_gnucash.normalize_value(matched_raw, acct_type) if matched_raw else 0.0
+        extra_bits = []
+        if reclass_raw:
+            extra_bits.append(f"plus posted reclassification journal {rect_id} ({reclass_figure:,.2f})")
+        if matched_raw:
+            extra_bits.append(
+                "plus the bank import's own matched counter-leg(s) on this "
+                f"account ({matched_figure:,.2f})"
+            )
+        reclass_bit = f"; {'; '.join(extra_bits)}" if extra_bits else ""
 
         if pending:
             # Item 1: compare the book against the PORTION of this run's
@@ -420,12 +488,13 @@ def build_balance_tieout(
             "Computed (this run's journal)": computed_figure_with_reclass,
             "GnuCash book (FY movement)": book_figure,
         })
-        if reclass_raw:
-            # Always name the reclassification line explicitly -- even on
-            # a silent AGREE, where reconcile_category()'s own note would
-            # otherwise be empty -- so "Computed" is never a figure that
-            # silently includes a posted prior-period movement with no
-            # trace of it in the note.
+        if reclass_raw or matched_raw:
+            # Always name the reclassification line and/or the folded-in
+            # bank-match counter-leg(s) explicitly -- even on a silent
+            # AGREE, where reconcile_category()'s own note would otherwise
+            # be empty -- so "Computed" is never a figure that silently
+            # includes a posted prior-period movement or matched bank
+            # credit with no trace of it in the note.
             base_note = result.note or "Sources agree."
             result = ReconciliationResult(
                 category=category, sources=result.sources, agree=result.agree,
@@ -494,15 +563,6 @@ def build_balance_tieout(
     #       account within the FY that is NOT from these matched
     #       transactions -- reported as a real variance, naming the
     #       amount (reconcile_category()'s own "Variance of ..." wording).
-    known_paths = {
-        _jv_strip_root(p) for p in accounts.values()
-        if isinstance(p, str) and p.strip()
-    }
-    txns_by_guid = {t.guid: t for t in book.transactions}
-    matched_by_account: dict[str, list] = {}
-    for m in (bank_matches or {}).values():
-        if m.outcome == MATCHED and m.credit_account:
-            matched_by_account.setdefault(m.credit_account, []).append(m)
     rerouted_accounts = sorted({
         acct for acct in matched_by_account if acct not in known_paths
     })
@@ -514,7 +574,6 @@ def build_balance_tieout(
 
     for stripped_path in rerouted_accounts:
         category = f"{_TIEOUT_LABEL}: bank-match counter-account {stripped_path}"
-        account_matches = matched_by_account[stripped_path]
 
         computed_raw = sum(
             s.debit - s.credit
@@ -522,15 +581,9 @@ def build_balance_tieout(
             for s in j.splits
             if s.account == stripped_path
         )
-        book_matched_raw = 0.0
-        for m in account_matches:
-            txn = txns_by_guid.get(m.credit_txn_guid) if m.credit_txn_guid else None
-            if txn is None:
-                continue
-            book_matched_raw += float(sum(
-                sp.value for sp in txn.splits
-                if colon_paths.get(sp.account_guid) == stripped_path
-            ))
+        book_matched_raw = _book_matched_raw_for_account(
+            stripped_path, matched_by_account, txns_by_guid, colon_paths,
+        )
 
         guid = path_to_guid.get(stripped_path)
         if guid is None:
@@ -1001,23 +1054,28 @@ def match_payouts_to_bank(
         all_deposits.extend(_bank_deposits(book, guid, colon_paths))
     used = [False] * len(all_deposits)
 
-    # H35-05 round 3, item 3: when the bank import for this FY has not run
-    # at all, EVERY payout would otherwise show its own "no bank credit
-    # found -- genuine gap" line, which is misleading -- there is no gap
-    # to speak of, the whole import is simply missing. Detect that case up
-    # front: no deposit at all on accounts.bank falls within the FY (1 Apr
-    # to 31 Mar), extended by `window_days` on each side to match the same
-    # tolerance the per-payout matching below already applies (so a
-    # deposit just outside the FY boundary but still within the matching
-    # window is not wrongly treated as "the import never ran"). When true,
-    # the per-payout loop below is told (via `fy_has_deposits=False`) to
-    # suppress its own "genuine gap" note for every payout -- one single
-    # loud line is emitted instead, after the loop.
+    # H35-05 round 3, item 3 (round 4, defect 1 fix): when the bank import
+    # for this FY has not run at all, EVERY payout would otherwise show its
+    # own "no bank credit found -- genuine gap" line, which is misleading --
+    # there is no gap to speak of, the whole import is simply missing.
+    # Detect that case up front: no deposit at all on accounts.bank falls
+    # within the STRICT FY window (1 Apr to 31 Mar, parse_gnucash.
+    # fy_window() -- no +/- window_days widening here).
+    #
+    # THE DEFECT round 4 fixes: round 3 widened this check by window_days
+    # on each side, the SAME tolerance the per-payout matching below
+    # already applies. On a real book, one leftover deposit from the PRIOR
+    # FY, a few days before 1 Apr, falls inside that widened window -- the
+    # check then wrongly reports "has deposits", and every payout prints
+    # its own misleading "no bank credit found -- genuine gap" line, the
+    # exact double-report round 3 was meant to stop. "Has the import run"
+    # and "does this payout have a matching credit" are two different
+    # questions and must not share one window: the former is decided on
+    # the strict FY only; the latter (per-payout matching, below) keeps its
+    # own +/- window_days tolerance, completely unchanged.
     fy_start, fy_end = parse_gnucash.fy_window(report.financial_year)
-    window_start = fy_start - _timedelta(days=window_days)
-    window_end = fy_end + _timedelta(days=window_days)
     fy_has_deposits = any(
-        window_start <= _datetime.strptime(c.date, "%Y-%m-%d").date() <= window_end
+        fy_start <= _datetime.strptime(c.date, "%Y-%m-%d").date() <= fy_end
         for c in all_deposits
     )
 
