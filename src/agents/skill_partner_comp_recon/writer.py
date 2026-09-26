@@ -57,6 +57,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .engine import Report
+from .gnucash_tieout import _candidate_label as _format_bank_candidate
 
 FONT_NAME = "Arial"
 
@@ -539,10 +540,54 @@ def _write_posted_check_sheet(wb, posted_check):
 
 
 # ---------------------------------------------------------------------------
+# H35-05: bank match sheet -- one row per monthly payout, showing which bank
+# credit (already posted in the book) it was matched to, or why it was not.
+# Mirrors _write_posted_check_sheet() above: a dedicated sheet rather than
+# folding into Reconciliation/Exceptions, since a per-payout match narrative
+# (candidate dates/amounts/accounts for a TIE) does not fit those sheets'
+# Category/Status/Detail shape either.
+# ---------------------------------------------------------------------------
+
+def _write_bank_match_sheet(wb, bank_matches):
+    ws = wb.create_sheet("Bank match")
+    headers = [
+        "Month", "Payout date", "Payout amount", "Outcome",
+        "Matched credit date", "Matched credit amount", "Matched credit account",
+        "Candidates (TIE/SPLIT only)",
+    ]
+    _write_header(ws, 1, headers)
+    row = 2
+    # H35-05 round 2, item 3: "split" (a bank credit found but posted across
+    # >=2 counter-accounts, so no single journal leg can be routed to it) is
+    # its own distinct, loud outcome -- never rendered as either matched
+    # (OK/green) or no_match (BAD/red, which would misleadingly read as "no
+    # bank credit found" when one WAS found).
+    outcome_fills = {"matched": OK, "no_match": BAD, "tie": TF, "split": TF}
+    for pm in (bank_matches or {}).values():
+        _set(ws, row, 1, pm.month)
+        _set(ws, row, 2, pm.payout_date)
+        _set(ws, row, 3, pm.payout_amount)
+        _set(ws, row, 4, pm.outcome.upper(), fill=outcome_fills.get(pm.outcome), bold=True)
+        _set(ws, row, 5, pm.credit_date or "")
+        _set(ws, row, 6, pm.credit_amount if pm.credit_amount is not None else "")
+        _set(ws, row, 7, pm.credit_account or "")
+        candidates_text = "; ".join(
+            _format_bank_candidate(c) for c in (pm.candidates or [])
+        )
+        _set(ws, row, 8, candidates_text, wrap=True)
+        row += 1
+    if row == 2:
+        _set(ws, row, 1, "No payouts to match -- either no GnuCash book was supplied, no "
+                         "accounts.bank is configured, or this run has no monthly payouts.",
+             wrap=True)
+    _autosize(ws, len(headers))
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
-def write_report_workbook(report: Report, out_path: str, posted_check=None) -> None:
+def write_report_workbook(report: Report, out_path: str, posted_check=None, bank_matches=None) -> None:
     wb = Workbook()
     wb.remove(wb.active)
     _write_logic_sheet(wb, report)
@@ -557,4 +602,6 @@ def write_report_workbook(report: Report, out_path: str, posted_check=None) -> N
     _write_open_items_sheet(wb, report)
     if posted_check is not None:
         _write_posted_check_sheet(wb, posted_check)
+    if bank_matches is not None:
+        _write_bank_match_sheet(wb, bank_matches)
     wb.save(out_path)
