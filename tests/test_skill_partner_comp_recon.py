@@ -7574,3 +7574,88 @@ def test_h35_05_round4_defect2_configured_counter_account_gets_exactly_one_row(t
     assert len(sop_rows) == 1
     extra_rows = [r for r in results if "bank-match counter-account" in r.category]
     assert not any("Share of Profit" in r.category for r in extra_rows)
+
+
+# ---------------------------------------------------------------------------
+# H35-05 round 5 -- the "BANK MATCH -- N payout(s) could not be matched..."
+# LOUD header must count PAYOUTS, not NOTE lines. Since round 4 (defect 1),
+# an entire FY of unmatched payouts collapses into ONE note (the "does not
+# appear to have run" line), so len(bank_match_notes) undercounts whenever
+# that collapse fires -- e.g. 12 genuinely-unmatched payouts would print
+# "1 payout(s) could not be matched", misstating the position. The fix
+# derives N (and the total) from `bank_matches` itself: the number of
+# PayoutMatch entries whose outcome is not MATCHED, out of the total.
+# ---------------------------------------------------------------------------
+
+_ROUND5_MONTHS = [
+    "2025-04", "2025-05", "2025-06", "2025-07", "2025-08", "2025-09",
+    "2025-10", "2025-11", "2025-12", "2026-01", "2026-02", "2026-03",
+]
+
+
+def test_h35_05_round5_header_counts_payouts_not_notes_when_import_not_run():
+    # NEGATIVE: the bank import has not run at all for the FY -- all 12
+    # payouts are genuinely unmatched, but match_payouts_to_bank() collapses
+    # that into exactly ONE note (round 4, defect 1). The header must still
+    # say 12 (of 12), never 1 -- 1 would misstate 11 of the 12 gaps away.
+    from agents.skill_partner_comp_recon.agent import _summarize_report
+
+    report = _bank_match_report([_class_a_advice(m) for m in _ROUND5_MONTHS])
+    bank_matches = {
+        idx: PayoutMatch(
+            idx=idx, month=m, payout_date=f"{m}-28", payout_amount=480000.0,
+            outcome=NO_MATCH,
+        )
+        for idx, m in enumerate(_ROUND5_MONTHS, start=1)
+    }
+    notes = [
+        "the bank import for FY2025-26 does not appear to have run -- no "
+        "deposit at all was found on accounts.bank within the financial "
+        "year; every payout below is left unmatched rather than reported "
+        "as an individual genuine gap."
+    ]
+
+    summary = _summarize_report(
+        report, "dummy.xlsx", bank_match_notes=notes, bank_matches=bank_matches,
+    )
+
+    assert "BANK MATCH -- 12 of 12 payout(s) could not be matched" in summary
+    assert "BANK MATCH -- 1 payout(s) could not be matched" not in summary
+    # Exactly one detail note line follows the header, as this note supplied.
+    assert summary.count("does not appear to have run") == 1
+
+
+def test_h35_05_round5_header_counts_payouts_not_notes_guard_partial_gaps():
+    # GUARD: the FY has deposits (the import clearly ran), and only 2 of 12
+    # payouts are genuinely unmatched -- each gets its OWN per-payout note
+    # line, so len(bank_match_notes) == 2 already agrees with the true
+    # payout count here. The header must still read "2 of 12", proving the
+    # fix does not overcount when notes and payouts already happen to line
+    # up one-to-one.
+    from agents.skill_partner_comp_recon.agent import _summarize_report
+
+    report = _bank_match_report([_class_a_advice(m) for m in _ROUND5_MONTHS])
+    bank_matches = {}
+    notes = []
+    for idx, m in enumerate(_ROUND5_MONTHS, start=1):
+        if m in ("2025-07", "2025-11"):
+            bank_matches[idx] = PayoutMatch(
+                idx=idx, month=m, payout_date=f"{m}-28", payout_amount=480000.0,
+                outcome=NO_MATCH,
+            )
+            notes.append(
+                f"payout {m} on {m}-28: no bank credit found -- genuine gap."
+            )
+        else:
+            bank_matches[idx] = PayoutMatch(
+                idx=idx, month=m, payout_date=f"{m}-28", payout_amount=480000.0,
+                outcome=MATCHED, credit_date=f"{m}-28", credit_amount=480000.0,
+                credit_account="Income:PGBP:Remuneration",
+            )
+
+    summary = _summarize_report(
+        report, "dummy.xlsx", bank_match_notes=notes, bank_matches=bank_matches,
+    )
+
+    assert "BANK MATCH -- 2 of 12 payout(s) could not be matched" in summary
+    assert summary.count("genuine gap") == 2

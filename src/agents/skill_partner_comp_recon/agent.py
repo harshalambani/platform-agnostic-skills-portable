@@ -309,6 +309,7 @@ def _resolve_accounts_for_journal(
 
 def _summarize_report(
     report, output_path: str, journal_line: str = "", bank_match_notes: list[str] | None = None,
+    bank_matches: dict | None = None,
 ) -> str:
     """The shared reporting tail for both entry paths: variance WARNINGs,
     undecidable NOTEs, rate-change-suspect WARNINGs, one-off-roundness
@@ -323,7 +324,17 @@ def _summarize_report(
     with the LLP Statement of Account, so folding them into that block
     would mislabel them. Never populated for a MATCHED payout (matching
     cleanly is not loud) and never populated at all when no GnuCash book
-    was supplied (see match_payouts_to_bank()'s own contract)."""
+    was supplied (see match_payouts_to_bank()'s own contract).
+
+    bank_matches (H35-05 round 5, optional): the SAME {month: PayoutMatch}
+    mapping match_payouts_to_bank() returned. The loud block's header count
+    is derived from THIS, never from len(bank_match_notes) -- since round 4
+    (defect 1), an entire FY of unmatched payouts collapses to ONE note (the
+    "bank import does not appear to have run" line), so len(bank_match_notes)
+    undercounts the actual number of unmatched payouts whenever that
+    collapse fires. bank_matches gives the true payout-level count: the
+    number of PayoutMatch entries whose outcome is not MATCHED, out of the
+    total number of payouts."""
     # H35-04 item D: informational rows (e.g. the incentive-instalment
     # cross-check, superseded by D1's drawings identity) are excluded from
     # every count and from the summary verdict below -- they are never a
@@ -373,8 +384,23 @@ def _summarize_report(
     # credit already in the book). Only rendered when non-empty.
     if bank_match_notes:
         lines_out.append("=" * 72)
+        # H35-05 round 5: N must be the number of PAYOUTS not matched, not
+        # the number of NOTE lines -- since round 4, when the bank import
+        # has not run at all, every unmatched payout for the FY collapses
+        # into ONE note ("does not appear to have run"), so
+        # len(bank_match_notes) would misreport, e.g., 12 unmatched payouts
+        # as "1 payout(s)". Derive the count from bank_matches itself
+        # (every payout's own outcome) when available; fall back to the
+        # note count only when bank_matches was not supplied (defensive --
+        # every real caller supplies both together).
+        if bank_matches:
+            unmatched = sum(1 for m in bank_matches.values() if m.outcome != MATCHED)
+            total = len(bank_matches)
+            header_count = f"{unmatched} of {total}"
+        else:
+            header_count = str(len(bank_match_notes))
         lines_out.append(
-            f"BANK MATCH -- {len(bank_match_notes)} payout(s) could not be matched "
+            f"BANK MATCH -- {header_count} payout(s) could not be matched "
             "to a bank credit already posted in the book (H35-05):"
         )
         for flag in bank_match_notes:
@@ -865,6 +891,7 @@ def _run_from_documents(
 
     summary = _summarize_report(
         report, output_path, journal_line, bank_match_notes=bank_match_notes or None,
+        bank_matches=bank_matches or None,
     )
     lines = [summary, "  Optional-leg status:"]
     lines.extend(f"  - {note}" for note in optional_notes)
