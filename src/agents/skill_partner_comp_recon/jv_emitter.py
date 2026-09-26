@@ -191,6 +191,25 @@ def _add_leg(splits: list, accounts: dict, key: str, ctx: str, signed_amount: fl
         splits.append(Split(account=account, credit=-signed_amount))
 
 
+def _add_leg_raw(splits: list, account: str, signed_amount: float) -> None:
+    """H35-05: same as _add_leg() above, but for a leg whose account is
+    already a resolved colon-path (the bank import's OWN counter-account
+    for a matched payout -- see gnucash_tieout.match_payouts_to_bank()),
+    not an accounts.* KEY. Used only for the cash leg of a matched monthly
+    payout, replacing the old plain accounts["bank"] posting so this
+    skill's journal lands on the SAME account the bank import already used
+    for that credit, never on accounts["bank"] itself -- see
+    _monthly_journal()'s bank_match branch."""
+    signed_amount = round(float(signed_amount or 0.0), 2)
+    if abs(signed_amount) < _ZERO_TOLERANCE:
+        return
+    account = _strip_root(account)
+    if signed_amount >= 0:
+        splits.append(Split(account=account, debit=signed_amount))
+    else:
+        splits.append(Split(account=account, credit=-signed_amount))
+
+
 def _check_balanced(journal: "Journal") -> None:
     if not journal.balanced:
         diff = journal.total_debit - journal.total_credit
@@ -202,7 +221,9 @@ def _check_balanced(journal: "Journal") -> None:
         )
 
 
-def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int) -> Journal:
+def _monthly_journal(
+    line, accounts: dict, fy_pfx: str, firm_name: str, idx: int, bank_match=None,
+) -> "Journal | None":
     """Build the one transaction implied by a single monthly payout line
     (spec 2.4):
 
@@ -257,6 +278,28 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
     (the firm's own tax on its profit share, which is never booked as an
     expense at all): tds_expense is the partner's own TDS credit, and this
     ledger's convention is to expense it.
+
+    H35-05: `bank_match`, when supplied, is one
+    gnucash_tieout.PayoutMatch for this payout (idx must match). It
+    replaces the old unconditional "Dr bank = total_paid" leg above with
+    the RESULT of matching this payout against a bank credit the bank
+    import already posted (the bank import always runs first; this skill
+    matches against what it already booked, per the user's ruling that
+    double booking is ALWAYS a defect):
+
+      - bank_match.outcome == "matched": the cash leg posts to
+        bank_match.credit_account (the bank import's OWN counter-account
+        for that credit) instead of accounts["bank"] -- this transaction
+        NEVER carries a second leg on the bank account itself.
+      - bank_match.outcome in ("no_match", "tie"): this function returns
+        None -- no journal is emitted for this payout at all (the genuine
+        gap / ambiguous tie is reported elsewhere, in the loud block and
+        the Bank match sheet, never silently booked).
+
+    bank_match=None (the default) is the pre-H35-05 behaviour: post
+    accounts["bank"] directly -- used only when no GnuCash book was
+    available to match against (see agent.py), so there is nothing yet
+    known to double-book against.
     """
     ctx = f"month {line.month}"
     date = _month_end(line.month)
@@ -266,7 +309,12 @@ def _monthly_journal(line, accounts: dict, fy_pfx: str, firm_name: str, idx: int
         desc = f"monthly payout {line.month}"
 
     splits: list = []
-    _add_leg(splits, accounts, "bank", ctx, line.total_paid)
+    if bank_match is not None:
+        if bank_match.outcome != "matched":
+            return None
+        _add_leg_raw(splits, bank_match.credit_account, line.total_paid)
+    else:
+        _add_leg(splits, accounts, "bank", ctx, line.total_paid)
     _add_leg(splits, accounts, "tds_expense", ctx, -line.tds)
     _add_leg(splits, accounts, "capital_contribution", ctx, -line.capital_transferred)
     _add_leg(splits, accounts, "medical_expense", ctx, -line.medical_topup)
@@ -323,13 +371,26 @@ def _opening_reclass_journal(block: dict | None, fy_pfx: str, firm_name: str = "
     return Journal(txn_id=txn_id, date=date, description=description, splits=splits)
 
 
-def build_journals(report, accounts: dict) -> list:
+def build_journals(report, accounts: dict, bank_matches: dict | None = None) -> list:
     """Build the list of Journal objects implied by a reconciled Report
     (pure -- no I/O, no openpyxl, does not import writer.py).
 
     accounts is the raw accounts: block from the structured input (see
     ACCOUNT_KEYS / AGENT.md) -- kept separate from Report rather than a
     Report field, since it is purely an output-formatting concern.
+
+    bank_matches (H35-05, optional): a dict keyed by the SAME 1-based idx
+    this function's own enumerate(report.monthly, start=1) below uses,
+    valued with a gnucash_tieout.PayoutMatch -- the pre-computed result of
+    matching each payout against a bank credit already in the book (this
+    function itself is still pure/no-I/O; the actual book read happens in
+    gnucash_tieout.match_payouts_to_bank(), called by agent.py BEFORE this
+    function, with the result threaded in here). When a key's payout is
+    "matched", its cash leg posts to that match's credit_account instead of
+    accounts["bank"]. When "no_match" or "tie", no journal is emitted for
+    that payout at all -- see _monthly_journal()'s bank_match branch. None
+    (the default) keeps the pre-H35-05 behaviour of always posting
+    accounts["bank"] unconditionally, for every payout.
 
     Raises JournalValidationError (a ValueError) for a missing required
     account key or an unbalanced transaction -- agent.run() catches this
@@ -346,8 +407,9 @@ def build_journals(report, accounts: dict) -> list:
         journals.append(opening)
 
     for idx, line in enumerate(report.monthly, start=1):
-        journal = _monthly_journal(line, accounts, fy_pfx, firm_name, idx)
-        if not journal.splits:
+        bank_match = bank_matches.get(idx) if bank_matches else None
+        journal = _monthly_journal(line, accounts, fy_pfx, firm_name, idx, bank_match=bank_match)
+        if journal is None or not journal.splits:
             continue
         _check_balanced(journal)
         journals.append(journal)

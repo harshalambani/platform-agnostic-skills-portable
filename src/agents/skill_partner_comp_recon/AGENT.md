@@ -570,6 +570,93 @@ Status-column/labelling issues found on the same real-data run.
    LOUD by design: a genuine disagreement between the firm's own
    documents).
 
+## H35-05 -- stop double-booking a payout the bank import already booked
+
+**The defect.** `_monthly_journal()` used to book `Dr bank = total_paid` on
+every monthly payout, unconditionally. The bank import (a separate,
+upstream process) already books that same cash credit into the same bank
+account, under its own counter-account. Posting both means the money lands
+twice in the book -- a double booking, which the user ruled is ALWAYS a
+defect, never a design question, regardless of scope.
+
+**The fix.** The bank import always runs first; this skill runs last and
+*matches* against what is already posted, instead of booking a second bank
+leg. `gnucash_tieout.match_payouts_to_bank()` (new, Section D of that
+module) reads the book read-only (via the same `parse_gnucash.parse_book()`
+Sections B/C already use -- this skill never opens a write handle on
+`gnucash_path`, in Stage 1b or here) and, for each monthly payout, looks for
+a deposit already posted to `accounts["bank"]`:
+
+- **amount** within `RECONCILIATION_TOLERANCE` (Re 1);
+- **date** within `+/- bank_match_window` days of the payout's month-end
+  date (`bank_match_window` is a new skill setting, default 7, mirroring
+  `skill_gnucash_intercompany`'s `date_tolerance` idiom -- see `agent.py`'s
+  `_window_days()` helper and `skill.yaml`'s `bank_match_window` input);
+- **one-to-one**: a bank credit satisfies at most one payout, a payout at
+  most one credit -- enforced by consuming a credit the moment it is
+  assigned, payouts processed in `report.monthly`'s own chronological
+  order;
+- **nearer date wins** among the remaining eligible candidates for a given
+  payout;
+- **a tie is never auto-picked.** Two or more candidates equally close to a
+  payout leaves that payout with outcome `TIE`, naming every candidate
+  (date/amount/account) -- treated exactly like a no-match for posting
+  purposes: no journal, but a distinct LOUD label.
+
+**Outcomes**, per payout:
+
+- **Matched** -- `_monthly_journal()`'s cash leg posts to
+  `bank_match.credit_account` (the bank import's OWN counter-account for
+  that credit, via the new `_add_leg_raw()`), never a second leg on
+  `accounts["bank"]` itself.
+- **No bank credit found** -- no journal is emitted for that payout at all
+  (`_monthly_journal()` returns `None`); a LOUD note: `"payout <month> on
+  <date>: no bank credit found -- genuine gap."`.
+- **Tie** -- no journal; a LOUD note naming every candidate.
+- **No GnuCash book, or no `accounts.bank` configured** -- matching does
+  not run at all (`match_payouts_to_bank()` returns `({}, [])`); the
+  monthly journal falls back to the pre-H35-05 behaviour of booking
+  `accounts["bank"]` unconditionally, since there is then no book to check
+  a double-booking risk against. No clearing account is used anywhere
+  (considered and rejected) -- a matched leg always lands on the REAL
+  counter-account the bank import already chose.
+
+**Where this surfaces:**
+
+- `report.reconciliation`'s "Total cash received (monthly payouts) vs
+  Bank" row (previously a permanent `NOT_CHECKED_YET` placeholder written
+  by `engine.build_report()` in anticipation of this build) is replaced,
+  post-hoc in `agent.py`, with a real AGREE / CANNOT RECONCILE verdict
+  once matching has actually run; it is left as `NOT_CHECKED_YET` exactly
+  when matching could not run (no book / no `accounts.bank`).
+- The run summary gets a new, separate "BANK MATCH -- N payout(s) could
+  not be matched..." LOUD block (`agent._summarize_report()`'s new
+  `bank_match_notes` parameter) -- kept structurally parallel to, but
+  never merged into, the existing "STATEMENT DISAGREES" block, since that
+  one is specifically about the LLP Statement of Account (L5) and folding
+  bank-match findings into it would mislabel them.
+- The workbook gets a new "Bank match" sheet (`writer._write_bank_match_sheet()`,
+  mirroring the existing "Posted check" sheet's pattern) -- one row per
+  monthly payout: month, payout date/amount, outcome, matched credit
+  date/amount/account, and (TIE only) every candidate.
+
+**Purity preserved.** `jv_emitter.build_journals()` remains pure (no I/O,
+no openpyxl) per its own architectural contract -- the actual book read
+happens in `gnucash_tieout.match_payouts_to_bank()`, called by `agent.py`
+*before* `build_journals()`, with the result threaded in as a new optional
+`bank_matches: dict[int, PayoutMatch] | None` parameter (keyed by the same
+1-based index `build_journals()`'s own `enumerate(report.monthly, start=1)`
+uses). `bank_matches=None` (the default) keeps the exact pre-H35-05
+behaviour, used only by the internal Section C tie-out helper
+(`gnucash_tieout._journals_safely()`), which still needs the OLD
+unconditional-bank-leg journal shape to compare against the book in its own
+existing (unrelated) check -- Section C's own "bank" `ACCOUNT_KEYS` leg is
+therefore unchanged by this build and should be re-examined separately.
+
+See `tests/test_skill_partner_comp_recon.py`'s "H35-05" test section for
+every case above, plus a regression test asserting the total amount posted
+to the bank account across a full `build_journals()` emit is exactly 0.
+
 ## Non-goals (explicit, not deferred silently)
 
 - **No tax computation.** No slab, surcharge, cess, or exemption

@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import sys
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from .engine import (
@@ -498,3 +498,222 @@ def build_posted_check(
         f"({summary or 'nothing to report'}). See the 'Posted check' sheet for detail."
     )
     return results, note
+
+
+# ---------------------------------------------------------------------------
+# Section D (H35-05) -- payout-to-bank-credit matching.
+#
+# THE DEFECT this section fixes: _monthly_journal() used to book
+# "Dr bank = total_paid" on EVERY monthly payout, unconditionally -- but the
+# bank import (a separate, upstream process) already books that same cash
+# credit into the same bank account, under its own counter-account. Posting
+# both means the money lands twice in the book. The user's ruling: double
+# booking is ALWAYS a defect, never a design question.
+#
+# THE FIX: the bank import always runs first; this skill runs last and
+# MATCHES against what is already posted, instead of booking its own second
+# bank-account leg. For each payout, find the bank credit (a deposit split
+# on accounts["bank"]) already in the book:
+#   - amount within RECONCILIATION_TOLERANCE (Re 1);
+#   - date within +/- window_days of the payout's month-end date (default
+#     DEFAULT_BANK_MATCH_WINDOW_DAYS, a skill setting -- see agent.py's
+#     `bank_match_window` run() parameter / skill.yaml input, mirroring
+#     skill_gnucash_intercompany's `date_tolerance` pattern);
+#   - one-to-one (a credit satisfies at most one payout, a payout at most
+#     one credit) -- enforced by consuming a credit the moment it is
+#     assigned, payouts processed in report.monthly's own (chronological)
+#     order;
+#   - the nearer date wins;
+#   - a tie (two or more candidates equally close) is NEVER auto-picked --
+#     that payout is flagged TIE, naming every tied candidate, and gets NO
+#     journal, exactly like a genuine no-match.
+#
+# Matched: the cash leg posts to the bank import's OWN counter-account for
+# that credit (never a second leg on the bank account itself -- see
+# jv_emitter._monthly_journal()'s bank_match branch). No match: no journal
+# for that payout, a LOUD "genuine gap" flag. Tie: no journal, a LOUD "TIE"
+# flag naming the candidates. No clearing account is used anywhere (rejected
+# by the user) -- the matched leg always lands on the REAL counter-account
+# the bank import already chose.
+#
+# Read-only, exactly like Sections B/C above: the only GnuCash access is
+# parse_gnucash.parse_book() (via _load_book_safely()); this module never
+# opens a write handle on gnucash_path.
+# ---------------------------------------------------------------------------
+
+from datetime import datetime as _datetime  # noqa: E402
+
+from .jv_emitter import _month_end as _jv_month_end  # noqa: E402
+
+DEFAULT_BANK_MATCH_WINDOW_DAYS = 7
+
+MATCHED = "matched"
+NO_MATCH = "no_match"
+TIE = "tie"
+
+
+@dataclass
+class BankMatchCandidate:
+    """One bank-side deposit transaction that is amount/date-eligible for a
+    given payout: its date, its amount, and the COUNTER-account (colon
+    path) the bank import already posted the other side of that deposit
+    to -- never accounts["bank"] itself."""
+    date: str       # ISO YYYY-MM-DD
+    amount: float
+    account: str    # colon path, the bank import's counter-account
+
+
+@dataclass
+class PayoutMatch:
+    """The H35-05 matching outcome for one monthly payout (report.monthly
+    index idx, 1-based -- the SAME index jv_emitter.build_journals()'s own
+    enumerate(report.monthly, start=1) uses, so a dict keyed by idx threads
+    straight into build_journals(bank_matches=...) unchanged)."""
+    idx: int
+    month: str
+    payout_date: str       # ISO YYYY-MM-DD (the journal's own _month_end date)
+    payout_amount: float
+    outcome: str            # MATCHED / NO_MATCH / TIE
+    credit_date: str | None = None
+    credit_amount: float | None = None
+    credit_account: str | None = None
+    candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE only
+
+
+def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict) -> list[BankMatchCandidate]:
+    """Every deposit (money IN) posted to the bank account, paired with the
+    single OTHER account the bank import posted the counter-leg to. A
+    transaction is only usable here when exactly one non-bank split exists
+    -- with two or more, there is no single counter-account to identify, so
+    it is skipped rather than guessed at (never improvise a design the
+    coordinator did not specify)."""
+    deposits: list[BankMatchCandidate] = []
+    for txn in book.transactions:
+        bank_splits = [s for s in txn.splits if s.account_guid == bank_guid]
+        if not bank_splits:
+            continue
+        other_splits = [s for s in txn.splits if s.account_guid != bank_guid]
+        if len(other_splits) != 1:
+            continue
+        # ASSET/BANK accounts are debit-normal and not in FLIP_TYPES (see
+        # parse_gnucash.py's own docstring) -- a positive raw split value on
+        # the bank account IS a deposit (money in); a negative one is a
+        # withdrawal, never a candidate here.
+        amount = round(float(sum(s.value for s in bank_splits)), 2)
+        if amount <= 0:
+            continue
+        deposits.append(BankMatchCandidate(
+            date=txn.date_posted.isoformat(),
+            amount=amount,
+            account=colon_paths.get(other_splits[0].account_guid, ""),
+        ))
+    return deposits
+
+
+def match_payouts_to_bank(
+    report, accounts: dict, gnucash_path: str,
+    window_days: int = DEFAULT_BANK_MATCH_WINDOW_DAYS,
+) -> tuple[dict[int, PayoutMatch], list[str]]:
+    """H35-05: match each of report.monthly's payouts (1-indexed, matching
+    jv_emitter.build_journals()'s own enumerate) against a bank deposit
+    already posted in the book at accounts["bank"]. Read-only end to end.
+
+    Returns (matches, notes):
+      - matches: dict[idx -> PayoutMatch], one entry per payout in
+        report.monthly (always fully populated -- every payout gets an
+        outcome, even NO_MATCH/TIE) unless gnucash_path/accounts["bank"] is
+        missing or the book cannot be read/parsed, in which case matches is
+        {} (empty -- callers must not treat an empty dict as "every payout
+        matched"; treat it as "matching did not run" and fall back).
+      - notes: human-readable strings for the LOUD block -- one per
+        NO_MATCH ("genuine gap") or TIE (naming every candidate), plus a
+        single explanatory note when matching could not run at all. Never
+        one for a MATCHED payout (matching cleanly is not loud).
+
+    Never raises: a book-load failure or an unresolvable accounts["bank"]
+    path degrades to ({}, [note]) exactly like Sections B/C above.
+    """
+    if not gnucash_path or not accounts.get("bank"):
+        return {}, []
+
+    book, err = _load_book_safely(gnucash_path)
+    if err:
+        return {}, [f"Bank match (H35-05): {err} -- bank leg(s) not matched, unchanged."]
+
+    colon_paths = _colon_paths(book)
+    bank_path = _jv_strip_root(accounts["bank"])
+    bank_guids = [g for g, p in colon_paths.items() if p == bank_path]
+    if not bank_guids:
+        return {}, [
+            f"Bank match (H35-05): accounts['bank'] path {bank_path!r} was not "
+            "found in the book -- bank leg(s) not matched, unchanged."
+        ]
+
+    all_deposits: list[BankMatchCandidate] = []
+    for guid in bank_guids:
+        all_deposits.extend(_bank_deposits(book, guid, colon_paths))
+    used = [False] * len(all_deposits)
+
+    matches: dict[int, PayoutMatch] = {}
+    notes: list[str] = []
+
+    for idx, line in enumerate(report.monthly, start=1):
+        payout_date_iso = _jv_month_end(line.month)
+        payout_date = _datetime.strptime(payout_date_iso, "%Y-%m-%d").date()
+        payout_amount = round(float(line.total_paid), 2)
+
+        scored = []
+        for i, c in enumerate(all_deposits):
+            if used[i]:
+                continue
+            if abs(c.amount - payout_amount) > RECONCILIATION_TOLERANCE + 1e-9:
+                continue
+            c_date = _datetime.strptime(c.date, "%Y-%m-%d").date()
+            delta = abs((c_date - payout_date).days)
+            if delta > window_days:
+                continue
+            scored.append((delta, i, c))
+
+        pm = PayoutMatch(
+            idx=idx, month=line.month, payout_date=payout_date_iso,
+            payout_amount=payout_amount, outcome=NO_MATCH,
+        )
+
+        if not scored:
+            matches[idx] = pm
+            notes.append(
+                f"payout {line.month} on {payout_date_iso}: no bank credit found "
+                "-- genuine gap."
+            )
+            continue
+
+        scored.sort(key=lambda t: t[0])
+        best_delta = scored[0][0]
+        tied = [t for t in scored if t[0] == best_delta]
+
+        if len(tied) > 1:
+            pm.outcome = TIE
+            pm.candidates = [
+                BankMatchCandidate(date=c.date, amount=c.amount, account=c.account)
+                for _, _, c in tied
+            ]
+            matches[idx] = pm
+            cand_text = "; ".join(
+                f"{c.date} {c.amount:,.2f} -> {c.account}" for c in pm.candidates
+            )
+            notes.append(
+                f"payout {line.month} on {payout_date_iso}: TIE between "
+                f"{len(tied)} equally-close bank credits, none auto-picked "
+                f"-- candidates: {cand_text}."
+            )
+            continue
+
+        _, win_i, win_c = tied[0]
+        used[win_i] = True
+        pm.outcome = MATCHED
+        pm.credit_date = win_c.date
+        pm.credit_amount = win_c.amount
+        pm.credit_account = win_c.account
+        matches[idx] = pm
+
+    return matches, notes

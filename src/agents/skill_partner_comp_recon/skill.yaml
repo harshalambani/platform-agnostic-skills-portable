@@ -94,6 +94,10 @@ inputs:
     type: "text"
     label: "Year-end share-of-profit accrual journal CSV output path (optional -- H35-02, requires journal_path and the LLP statement of account)"
     required: false
+  - name: "bank_match_window"
+    type: "text"
+    label: "Bank-match date window in days (optional -- H35-05, default 7)"
+    required: false
 
 run_args:
   entity: "{inputs.entity}"
@@ -109,6 +113,7 @@ run_args:
   model_override: "{model_override}"
   journal_path: "{inputs.journal_path}"
   accrual_journal_path: "{inputs.accrual_journal_path}"
+  bank_match_window: "{inputs.bank_match_window}"
 
 output:
   extension: ".xlsx"
@@ -254,6 +259,25 @@ help:
         A residual current-account comparison against the L5 statement is
         always performed after this accrual and reported in the run
         summary; it is never booked, even when it shows a variance.
+    - name: "bank_match_window"
+      tooltip: >
+        Optional (H35-05). How many days either side of a monthly payout's
+        month-end date to look for a matching bank credit already posted in
+        the book. Defaults to 7 when left blank or unparsable.
+      accepts: "A whole number of days, e.g. 7 or 14."
+      gotchas: >
+        Only used when both gnucash_path and accounts.bank are available --
+        otherwise the monthly journal still books its own bank leg
+        unconditionally (the pre-H35-05 behaviour), since there is then no
+        book to check for a double-booking risk against. When a book IS
+        available: each payout is matched to a bank credit within Re 1 and
+        within this window, one-to-one, nearer date wins; two
+        equally-close candidates are NEVER auto-picked -- that payout gets
+        no journal and is flagged TIE (candidates listed) instead. A
+        matched payout's cash leg posts to the bank import's OWN
+        counter-account for that credit, never a second leg on the bank
+        account itself. See the workbook's "Bank match" sheet and the run
+        summary's "BANK MATCH" block for full detail, per payout.
   steps:
     - "Pick the entity."
     - "Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter."
@@ -279,7 +303,12 @@ help:
           disagrees with another source or fails its own arithmetic; see
           the tip below), Exceptions (every non-agreeing or
           non-reconcilable row collected together), and Open items
-          (anything left unresolved and what would close it).
+          (anything left unresolved and what would close it). A "Bank
+          match" sheet (H35-05) is also added whenever a GnuCash book and
+          accounts.bank are both available: one row per monthly payout
+          showing which bank credit already posted in the book it matched
+          to (date/amount/account), or why it did not (no bank credit
+          found, or a TIE naming every equally-close candidate).
       - name: "<journal_path> (optional -- Stage 1b, only written if journal_path is set)"
         tooltip: >
           A GnuCash multi-split journal CSV: one balanced transaction per
@@ -319,8 +348,10 @@ help:
       fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
     - problem: "A 'STATEMENT DISAGREES' block appears at the top of the run summary / Reconciliation sheet."
       fix: "The LLP Statement of Account (L5) is the reference for that row, and another supplied source (or the statement's own printed arithmetic) disagrees with it beyond the Re 1 tolerance -- the note spells out 'Statement says X; <source> says Y; difference Z' or names the failed arithmetic check. Investigate the disagreement; this skill never picks a winner for you."
-    - problem: "'Total cash received (monthly payouts) vs Bank' always shows 'NOT CHECKED YET (bank credits are matched in H35-05)'."
-      fix: "This is expected, not a defect. This row is never scored agree/disagree by this skill -- it never appears in the 'STATEMENT DISAGREES' block and never counts as a failure -- because matching payouts to bank credits is a fuzzy per-transaction match, done by H35-05, not a straight numeric comparison. The computed and (if supplied) bank figures still print on the row so you can eyeball them; external.bank_credits_total in the input is the partner's OWN bank statement credit total, a different figure from any GnuCash books tie-out (which compares the firm's own bank account movement, not this partner's personal receipts)."
+    - problem: "'Total cash received (monthly payouts) vs Bank' still shows 'NOT CHECKED YET (bank credits are matched in H35-05)'."
+      fix: "As of H35-05, this row is only left as NOT CHECKED YET when there is nothing to check against -- no GnuCash book was supplied, or no accounts.bank is configured for this entity. Whenever both are available, this row is replaced with a real per-payout bank match result: AGREE when every monthly payout matched a bank credit already posted in the book (within Re 1 and the bank_match_window), or CANNOT RECONCILE naming how many payouts did not (see the 'BANK MATCH' block in the run summary and the workbook's 'Bank match' sheet for the per-payout detail, including any TIE candidates)."
+    - problem: "The run summary shows a 'BANK MATCH -- N payout(s) could not be matched...' block, or the 'Bank match' sheet shows NO_MATCH / TIE rows."
+      fix: "NO_MATCH means no bank credit within Re 1 and bank_match_window days of that payout's month-end date was found in the book at all -- a genuine gap, never silently booked; investigate the bank statement/book for that period. TIE means two or more equally-close bank credits qualified and none was auto-picked (the user's ruling: a tie is never auto-picked) -- the candidates are listed with date/amount/account; either narrow bank_match_window, or resolve the ambiguity in the book, then re-run. Neither case ever gets a journal line for that payout's cash leg -- see journal_path's output, which simply omits that month's transaction rather than guessing."
     - problem: "The D1 drawings row ('Current-account drawings: statement vs (net monthly payouts + TDS + other payslip deductions - gross interest on capital)') shows a gap I can't explain."
       fix: "The identity is: statement current drawings = net monthly payouts + s.194T TDS withheld + other payslip deductions paid on the partner's behalf (e.g. medical top-up) - interest on capital, GROSS. Interest on capital is credited to/drawn from the CAPITAL column of the LLP Statement, not the current account, so it is backed OUT of this current-account identity -- and it must be the GROSS figure, not the net-of-its-own-s.194T-TDS amount that lands in the payout (that TDS is already inside the TDS total above, so subtracting the net figure would double-count it). The row's note spells out the full build-up (each component and its value) so you can see exactly where a gap comes from."
     - problem: "A row's note starts with 'PENDING JOURNAL POSTING (provided by this skill)'."

@@ -63,8 +63,14 @@ from pathlib import Path
 import yaml
 
 from .. import gnucash_accounts
-from .engine import build_report
-from .gnucash_tieout import build_balance_tieout, build_posted_check
+from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
+from .gnucash_tieout import (
+    DEFAULT_BANK_MATCH_WINDOW_DAYS,
+    MATCHED,
+    build_balance_tieout,
+    build_posted_check,
+    match_payouts_to_bank,
+)
 from .jv_emitter import (
     ACCOUNT_KEYS,
     JournalValidationError,
@@ -246,6 +252,19 @@ def _validate_accounts_against_book(accounts: dict, gnucash_path: str) -> list[s
     return errors
 
 
+def _window_days(value, default: int = DEFAULT_BANK_MATCH_WINDOW_DAYS) -> int:
+    """H35-05's bank-match date window, as a skill setting: the same
+    string-in/int-out conversion idiom skill_gnucash_intercompany/agent.py
+    uses for its own `date_tolerance` run() parameter (that skill's `_tol`
+    helper) -- an out-of-range or unparsable value falls back to `default`
+    (DEFAULT_BANK_MATCH_WINDOW_DAYS, gnucash_tieout.py) rather than raising,
+    since this is a UI text field."""
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 def _resolve_accounts_for_journal(
     entity_profile: "configs.EntityProfile | None",
     entity: str,
@@ -288,13 +307,23 @@ def _resolve_accounts_for_journal(
     return accounts, [], None
 
 
-def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
+def _summarize_report(
+    report, output_path: str, journal_line: str = "", bank_match_notes: list[str] | None = None,
+) -> str:
     """The shared reporting tail for both entry paths: variance WARNINGs,
     undecidable NOTEs, rate-change-suspect WARNINGs, one-off-roundness
     WARNINGs (or the single "all agree" line), the Workbook: line, and the
     Journal CSV: line if a journal was written. Factored out of the
     (pre-existing) structured-input path so the document-driven path
-    reuses it verbatim rather than duplicating it."""
+    reuses it verbatim rather than duplicating it.
+
+    bank_match_notes (H35-05, optional): gnucash_tieout.match_payouts_to_bank()'s
+    per-payout NO_MATCH/TIE notes. Rendered as a SEPARATE loud block from
+    the "STATEMENT DISAGREES" one below -- these are never a disagreement
+    with the LLP Statement of Account, so folding them into that block
+    would mislabel them. Never populated for a MATCHED payout (matching
+    cleanly is not loud) and never populated at all when no GnuCash book
+    was supplied (see match_payouts_to_bank()'s own contract)."""
     # H35-04 item D: informational rows (e.g. the incentive-instalment
     # cross-check, superseded by D1's drawings identity) are excluded from
     # every count and from the summary verdict below -- they are never a
@@ -334,6 +363,21 @@ def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
             "LLP Statement of Account (L5), the reference for this reconciliation:"
         )
         for flag in report.statement_flags:
+            lines_out.append(f"  ! {flag}")
+        lines_out.append("=" * 72)
+
+    # H35-05: a second, separate loud block for bank-match NO_MATCH/TIE
+    # findings -- never merged into the "STATEMENT DISAGREES" block above
+    # (that one is specifically about the LLP Statement of Account, L5;
+    # this one is about a monthly payout that could not be tied to a bank
+    # credit already in the book). Only rendered when non-empty.
+    if bank_match_notes:
+        lines_out.append("=" * 72)
+        lines_out.append(
+            f"BANK MATCH -- {len(bank_match_notes)} payout(s) could not be matched "
+            "to a bank credit already posted in the book (H35-05):"
+        )
+        for flag in bank_match_notes:
             lines_out.append(f"  ! {flag}")
         lines_out.append("=" * 72)
 
@@ -385,6 +429,7 @@ def run(
     journal_path: str = "",
     accrual_journal_path: str = "",
     input_path: str = "",
+    bank_match_window: str = "7",
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -397,6 +442,15 @@ def run(
     SEPARATE CSV, never merged into journal_path's monthly journal --see
     jv_emitter.build_accrual_journal()) to this path, if the L5 statement
     supports it. Left blank, behaviour is unchanged from before H35-02.
+
+    `bank_match_window` (H35-05, optional, default "7"): the +/- day window
+    used to match a monthly payout against a bank credit already posted in
+    the book (see gnucash_tieout.match_payouts_to_bank()) -- this skill's
+    setting for that match, converted via _window_days() (an unparsable/
+    negative value falls back to DEFAULT_BANK_MATCH_WINDOW_DAYS, mirroring
+    skill_gnucash_intercompany's own `date_tolerance` UI setting). Only
+    consulted when journal_path AND gnucash_path are both supplied -- see
+    _run_from_documents().
     """
     if input_path:
         return _run_from_structured_input(
@@ -421,6 +475,7 @@ def run(
         model_override=model_override,
         journal_path=journal_path,
         accrual_journal_path=accrual_journal_path,
+        bank_match_window=bank_match_window,
     )
 
 
@@ -439,6 +494,7 @@ def _run_from_documents(
     model_override: str | None,
     journal_path: str,
     accrual_journal_path: str = "",
+    bank_match_window: str = "7",
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -666,9 +722,65 @@ def _run_from_documents(
         )
     )
 
+    # H35-05: per-payout fuzzy match of the monthly payouts against bank
+    # credits already posted in the book (read-only -- see
+    # gnucash_tieout.match_payouts_to_bank()). Returns ({}, []) whenever
+    # there is no book or no accounts.bank configured, in which case the
+    # engine.py NOT_CHECKED_YET placeholder row (built into report.reconciliation
+    # by build_report() already) is left exactly as-is -- there is nothing
+    # to check yet. Only when a real match ran do we replace that row with
+    # a real verdict, and only then do we have anything to feed into
+    # build_journals()'s new bank_matches parameter (below) or the workbook's
+    # Bank match sheet.
+    bank_matches, bank_match_notes = match_payouts_to_bank(
+        report, accounts_for_tieout, gnucash_path,
+        window_days=_window_days(bank_match_window),
+    )
+    if bank_matches:
+        total_computed = sum(m.payout_amount for m in bank_matches.values())
+        total_matched_credits = sum(
+            m.credit_amount for m in bank_matches.values() if m.outcome == MATCHED
+        )
+        gap_count = sum(1 for m in bank_matches.values() if m.outcome != MATCHED)
+        if gap_count == 0:
+            bank_row = ReconciliationResult(
+                category="Total cash received (monthly payouts) vs Bank",
+                sources={
+                    "Computed (monthly payouts)": total_computed,
+                    "Bank (matched credits)": total_matched_credits,
+                },
+                agree=True,
+                note=(
+                    "All monthly payouts matched to a bank credit already posted "
+                    "in the book (H35-05) -- see the Bank match sheet for detail."
+                ),
+            )
+        else:
+            bank_row = ReconciliationResult(
+                category="Total cash received (monthly payouts) vs Bank",
+                sources={
+                    "Computed (monthly payouts)": total_computed,
+                    "Bank (matched credits)": total_matched_credits,
+                },
+                agree=None,
+                note=(
+                    f"{CANNOT_RECONCILE} -- {gap_count} of {len(bank_matches)} "
+                    "monthly payout(s) could not be matched to a bank credit "
+                    "already posted in the book (H35-05) -- see the BANK MATCH "
+                    "notes below and the Bank match sheet."
+                ),
+            )
+        report.reconciliation = [
+            r for r in report.reconciliation
+            if r.category != "Total cash received (monthly payouts) vs Bank"
+        ]
+        report.reconciliation.append(bank_row)
+
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    write_report_workbook(report, str(out_path), posted_check=posted_check)
+    write_report_workbook(
+        report, str(out_path), posted_check=posted_check, bank_matches=bank_matches or None,
+    )
 
     journal_line = ""
     account_notes: list[str] = []
@@ -679,7 +791,7 @@ def _run_from_documents(
         if accounts_error:
             return accounts_error
         try:
-            journals = build_journals(report, accounts)
+            journals = build_journals(report, accounts, bank_matches=bank_matches or None)
         except JournalValidationError as e:
             return f"ERROR: {e}"
         write_journal_csv(journals, journal_path)
@@ -708,7 +820,9 @@ def _run_from_documents(
                 f"\n  {residual.category}: {residual_status}. {residual.note}"
             )
 
-    summary = _summarize_report(report, output_path, journal_line)
+    summary = _summarize_report(
+        report, output_path, journal_line, bank_match_notes=bank_match_notes or None,
+    )
     lines = [summary, "  Optional-leg status:"]
     lines.extend(f"  - {note}" for note in optional_notes)
     lines.extend(f"  - {note}" for note in account_notes)
