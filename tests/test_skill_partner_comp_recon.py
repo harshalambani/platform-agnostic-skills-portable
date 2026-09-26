@@ -26,6 +26,8 @@ from agents.skill_partner_comp_recon import engine, jv_emitter, writer
 from agents.skill_partner_comp_recon.agent import run
 from agents.skill_partner_comp_recon.engine import (
     CANNOT_RECONCILE,
+    NOT_CHECKED_YET,
+    PENDING_JOURNAL_VERDICT,
     RECONCILIATION_TOLERANCE,
     build_report,
     classify_cohort_instalments,
@@ -38,6 +40,7 @@ from agents.skill_partner_comp_recon.engine import (
     reconcile_category,
     required_cumulative_capital,
     statement_reference_row,
+    year_end_accrual_diff,
 )
 from agents.skill_partner_comp_recon.jv_emitter import (
     JOURNAL_HEADERS,
@@ -349,7 +352,12 @@ def test_build_report_does_not_double_count_cash_from_cohort_instalments():
     # regression that re-adds the cohort instalment net (45000) on top
     # would compute 525000 here instead, and fail this assertion.
     assert cash.sources["Computed (monthly payouts)"] == 480000
-    assert cash.agree is True
+    # H35-04 item C: this row is NEVER a failure and NEVER an agreement --
+    # it is NOT CHECKED YET regardless of whether bank_credits_total is
+    # supplied (or matches), pending H35-05's fuzzy match of payouts to
+    # bank credits. agree is always None here, never True.
+    assert cash.agree is None
+    assert cash.note.startswith("NOT CHECKED YET")
 
 
 def test_build_report_does_not_double_count_firms_tax_from_cohort_instalments():
@@ -498,6 +506,11 @@ def test_build_report_end_to_end_against_fixture():
                 f"matches the cohort's award_fy and the gross totals match), "
                 f"got {r.agree!r} ({r.note})"
             )
+        elif cat == "Total cash received (monthly payouts) vs Bank":
+            # H35-04 item C: always NOT CHECKED YET, never a failure and
+            # never an agreement, pending H35-05's fuzzy match.
+            assert r.agree is None, f"expected None (not checked yet) for {cat!r}, got {r.agree!r}"
+            assert r.note.startswith("NOT CHECKED YET")
         else:
             assert r.agree is True, f"expected AGREE for {cat!r}, got {r.agree!r} ({r.note})"
 
@@ -5571,8 +5584,11 @@ def _find(report, category):
 _CLOSING_CAPITAL_CATEGORY = "Closing capital: rule vs Advisory vs the filed return"
 _EXEMPT_SOP_CATEGORY = "Exempt share of profit (s.10(2A)) vs the filed return"
 _D1_CATEGORY = (
-    "Current-account drawings: statement vs "
-    "(net monthly payouts + s.194T TDS withheld)"
+    "Current-account drawings: statement vs (net monthly payouts + TDS + "
+    "other payslip deductions - gross interest on capital)"
+)
+_D1_SOURCE_KEY = (
+    "Net monthly payouts + TDS + other deductions - gross interest on capital"
 )
 
 
@@ -5673,7 +5689,7 @@ def test_h35_04_d1_drawings_identity_holds_with_tds_added_back():
     row = _find(report, _D1_CATEGORY)
 
     assert row.agree is True
-    assert row.sources["Net monthly payouts + TDS withheld"] == 500000
+    assert row.sources[_D1_SOURCE_KEY] == 500000
 
     # NEGATIVE: payouts ALONE (480000, without adding back the 20000 TDS
     # withheld) would NOT have agreed with the statement's 500000 -- proving
@@ -5743,3 +5759,301 @@ def test_h35_04_no_statement_supplied_old_behaviour_preserved_no_crash():
 
     assert report.statement_flags == []
     assert report.llp_record is None
+
+
+# ===========================================================================
+# H35-04 REWORK (this pass): pre-journal vs post-journal comparison (item A),
+# D1's corrected identity (item B), D2's relabel/wording fix (item C), and
+# the incentive-instalment check's true informational status (item D).
+# ===========================================================================
+
+_CURRENT_CLOSING_CATEGORY = "L5 tie-out: current-account closing balance"
+_D2_CATEGORY = "Total cash received (monthly payouts) vs Bank"
+_INCENTIVE_CATEGORY = "Incentive instalments: award-year Advisory vs payment schedule"
+
+
+def _h35_04_rework_data(*, current_opening_balance, current_closing_balance,
+                         current_profit_share) -> dict:
+    """Two identical synthetic months, same shape as _h35_02_data() but with
+    prior_cohort_drawdown left at 0 on both months, so
+    booked_current_account_closing() == current_opening_balance exactly --
+    isolating the year-end accrual as the only thing that can move the
+    current-account-closing tie-out row. booked_sop per month = 200000 +
+    (-50000) = 150000, so booked_sop for the year = 300000; the caller picks
+    current_profit_share to land year_end_accrual_diff() at whatever this
+    test needs."""
+    return {
+        "financial_year": "2031-32",
+        "firm_name": "Testcorp Alpha LLP",
+        "drivers": {"firms_tax_rate": 0.35},
+        "monthly": [
+            {
+                "month": "2031-04", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+                "prior_cohort_drawdown": 0,
+            },
+            {
+                "month": "2031-05", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+            },
+        ],
+        "external": {"bank_credits_total": 480000},
+        "llp_record": {
+            "current_opening_balance": current_opening_balance,
+            "current_closing_balance": current_closing_balance,
+            "current_profit_share": current_profit_share,
+        },
+    }
+
+
+# ---- A) pending journal fully closes the gap -> reconciled, never LOUD ----
+
+def test_h35_04_pending_accrual_fully_closes_gap_verdict_and_not_in_loud_block():
+    # booked_current_closing = 400000 (opening, no movement); L5 closing =
+    # 450000 -> raw gap 50000. current_profit_share 350000 -> booked_sop
+    # 300000 -> accrual diff exactly 50000, which fully closes the gap.
+    data = _h35_04_rework_data(
+        current_opening_balance=400000, current_closing_balance=450000,
+        current_profit_share=350000,
+    )
+    report = build_report(data)
+    row = _find(report, _CURRENT_CLOSING_CATEGORY)
+
+    assert row.agree is True
+    assert PENDING_JOURNAL_VERDICT in row.note
+    assert "ACCR" in row.note  # the journal id this skill would post
+
+    # NEGATIVE: a fully-closed gap must never appear in the LOUD block.
+    assert not any(f.startswith(_CURRENT_CLOSING_CATEGORY) for f in report.statement_flags)
+
+
+def test_h35_04_pending_accrual_journal_id_matches_build_accrual_journal():
+    # The Transaction ID engine.py displays for the pending closure must be
+    # the SAME id jv_emitter.build_accrual_journal() would actually use --
+    # they are built from the same journal_txn_id()/fy_prefix()/firm_token()
+    # helpers, so this can never drift.
+    data = _h35_04_rework_data(
+        current_opening_balance=400000, current_closing_balance=450000,
+        current_profit_share=350000,
+    )
+    report = build_report(data)
+    row = _find(report, _CURRENT_CLOSING_CATEGORY)
+
+    journal, _, _ = jv_emitter.build_accrual_journal(report, _H35_ACCOUNTS)
+    assert journal is not None
+    assert journal.txn_id in row.note
+
+
+# ---- A) partial closure: the GENUINE RESIDUAL is reported, never the raw
+#         pre-journal gap, and the literal PENDING JOURNAL POSTING phrase
+#         never appears for a partial closure. ---------------------------
+
+def test_h35_04_pending_accrual_partial_closure_reports_genuine_residual():
+    # Raw gap is 70000 (400000 booked vs 470000 L5 closing); the accrual
+    # only closes 50000 of it (current_profit_share 350000, same as above)
+    # -- genuine residual after posting the journal is 20000, which is what
+    # must be reported as the disagreement, never the raw 70000.
+    data = _h35_04_rework_data(
+        current_opening_balance=400000, current_closing_balance=470000,
+        current_profit_share=350000,
+    )
+    report = build_report(data)
+    row = _find(report, _CURRENT_CLOSING_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    # NEGATIVE: the full-closure phrase is reserved for full closures only.
+    assert PENDING_JOURNAL_VERDICT not in row.note
+    assert "Genuine residual" in row.note
+    assert "20,000.00" in row.note  # the genuine residual, explicitly labelled as such
+    assert any(f.startswith(_CURRENT_CLOSING_CATEGORY) for f in report.statement_flags)
+
+
+def test_h35_04_pending_accrual_not_offered_when_it_does_not_move_the_needle():
+    # current_profit_share == booked_sop (300000) -> accrual diff is 0, so
+    # no pending journal is offered at all (year_end_accrual_diff() gate:
+    # diff must be > RECONCILIATION_TOLERANCE). The row falls back to a
+    # plain disagreement -- the literal PENDING JOURNAL POSTING phrase must
+    # never appear when nothing was actually offered to close the gap.
+    data = _h35_04_rework_data(
+        current_opening_balance=400000, current_closing_balance=450000,
+        current_profit_share=300000,
+    )
+    report = build_report(data)
+    row = _find(report, _CURRENT_CLOSING_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert PENDING_JOURNAL_VERDICT not in row.note
+    assert "50,000.00" in row.note  # the raw, unaddressed gap
+    assert any(f.startswith(_CURRENT_CLOSING_CATEGORY) for f in report.statement_flags)
+
+
+def test_h35_04_pending_accrual_never_offered_when_diff_is_negative():
+    # current_profit_share (250000) is BELOW booked_sop (300000) -> diff is
+    # -50000, a manual-review case in build_accrual_journal() (never
+    # booked). year_end_accrual_diff() still returns -50000, but the
+    # positive-and-beyond-tolerance gate in build_report() must reject it,
+    # so this can never be offered as a "pending journal" closure.
+    data = _h35_04_rework_data(
+        current_opening_balance=400000, current_closing_balance=450000,
+        current_profit_share=250000,
+    )
+    report = build_report(data)
+    row = _find(report, _CURRENT_CLOSING_CATEGORY)
+    assert row.agree is False
+    assert PENDING_JOURNAL_VERDICT not in row.note
+
+
+# ---- B) D1's corrected identity: net payouts + TDS + other payslip
+#         deductions (medical top-up) - GROSS interest on capital ---------
+
+def _d1_identity_data(*, current_drawings) -> dict:
+    """480000 total_paid + 20000 TDS withheld + 5000 medical top-up (paid on
+    the partner's behalf) - 12000 GROSS interest on capital (credited to
+    the CAPITAL column, backed out of this current-account identity) =
+    493000. The caller supplies the L5's printed current_drawings (negative,
+    parenthesised) to exercise a specific scenario."""
+    return {
+        "financial_year": "2031-32",
+        "firm_name": "Testcorp Alpha LLP",
+        "drivers": {"firms_tax_rate": 0.35},
+        "monthly": [
+            {
+                "month": "2031-04", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+                "medical_topup": -5000, "interest_on_capital": 12000,
+            },
+            {
+                "month": "2031-05", "remuneration": 100000,
+                "share_of_profit_gross": 200000, "additional_share_of_profit": 0,
+                "firms_tax_sop": -50000, "tds": -10000,
+                "capital_transferred": 0, "total_paid": 240000,
+            },
+        ],
+        "external": {"bank_credits_total": 480000},
+        "llp_record": {"current_drawings": current_drawings},
+    }
+
+
+def test_h35_04_d1_no_gap_once_medical_and_gross_interest_included():
+    # 480000 + 20000 + 5000 - 12000 = 493000 -- ties exactly.
+    data = _d1_identity_data(current_drawings=-493000)
+    report = build_report(data)
+    row = _find(report, _D1_CATEGORY)
+
+    assert row.agree is True
+    assert row.sources[_D1_SOURCE_KEY] == 493000
+    assert "5,000.00" in row.note   # medical top-up shown on the row
+    assert "12,000.00" in row.note  # gross interest on capital shown on the row
+
+
+def test_h35_04_d1_shows_gap_for_unexplained_extra_amount():
+    # The statement shows 500000 -- 7000 more than the 493000 identity
+    # explains -- so this is a genuine, unexplained gap, not silently
+    # absorbed by the medical/interest components.
+    data = _d1_identity_data(current_drawings=-500000)
+    report = build_report(data)
+    row = _find(report, _D1_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "difference -7,000.00" in row.note
+    assert any(f.startswith(_D1_CATEGORY) for f in report.statement_flags)
+
+
+def test_h35_04_d1_subtracting_net_instead_of_gross_interest_would_be_caught():
+    # A regression that subtracted a NET interest-on-capital figure (gross
+    # 12000 less a hypothetical 1200 of TDS on that interest, i.e. 10800)
+    # instead of the correct GROSS 12000 would compute 480000 + 20000 +
+    # 5000 - 10800 = 494200. Rig the statement to that WRONG net-based
+    # value: if the code ever regresses to subtracting NET, this row would
+    # wrongly AGREE. The correct, gross-based code must instead show a
+    # genuine 1,200.00 disagreement (the exact TDS-on-interest amount that
+    # netting would have silently swallowed).
+    net_based_wrong_value = 480000 + 20000 + 5000 - 10800  # 494200
+    data = _d1_identity_data(current_drawings=-net_based_wrong_value)
+    report = build_report(data)
+    row = _find(report, _D1_CATEGORY)
+
+    assert row.agree is False
+    assert row.note.startswith("STATEMENT DISAGREES")
+    assert "1,200.00" in row.note
+    assert row.sources[_D1_SOURCE_KEY] == 493000  # the correct, GROSS-based figure
+
+
+# ---- C) D2 relabelled: never a failure, never in the LOUD block ----------
+
+def test_h35_04_d2_never_a_failure_even_when_bank_figure_mismatches():
+    data = _double_count_regression_data()
+    data = dict(data)
+    data["external"] = dict(data["external"])
+    data["external"]["bank_credits_total"] = 999999  # deliberately mismatched
+    report = build_report(data)
+    row = _find(report, _D2_CATEGORY)
+
+    assert row.agree is None
+    assert row.note.startswith(NOT_CHECKED_YET)
+    # NEGATIVE: never a failure, regardless of the mismatch, and never LOUD.
+    assert not any(f.startswith(_D2_CATEGORY) for f in report.statement_flags)
+
+    variances = [r for r in report.reconciliation if r.agree is False]
+    assert row not in variances
+
+
+def test_h35_04_d2_never_a_failure_when_bank_figure_missing():
+    data = _double_count_regression_data()
+    data = dict(data)
+    data["external"] = dict(data["external"])
+    del data["external"]["bank_credits_total"]
+    report = build_report(data)
+    row = _find(report, _D2_CATEGORY)
+
+    assert row.agree is None
+    assert row.note.startswith(NOT_CHECKED_YET)
+    assert not any(f.startswith(_D2_CATEGORY) for f in report.statement_flags)
+
+
+# ---- D) the incentive-instalment check is TRULY informational -----------
+
+def test_h35_04_informational_row_never_moves_variance_or_undecidable_counts():
+    from agents.skill_partner_comp_recon.agent import _summarize_report
+
+    data = _load_fixture()
+    data = dict(data)
+    data["advisory"] = dict(data["advisory"])
+    # Deliberately mismatch the advisory total against the cohort ledger
+    # (fixture default is 2,000,000, matching exactly) so the informational
+    # row would ordinarily count as a "variance" (agree is False) if it
+    # were not excluded.
+    data["advisory"]["schedule_instalments_gross_total"] = 1000000
+    report = build_report(data)
+    row = _find(report, _INCENTIVE_CATEGORY)
+
+    # The row itself still shows the real (dis)agreement and figures --
+    # only its participation in totals/verdict is suppressed.
+    assert row.agree is False
+    assert row.informational is True
+    assert "1,000,000" in row.note or 1000000 in row.sources.values()
+
+    variances = [r for r in report.reconciliation if r.agree is False and not r.informational]
+    undecidable = [r for r in report.reconciliation if r.agree is None and not r.informational]
+    assert row not in variances
+    assert row not in undecidable
+    assert not any(f.startswith(_INCENTIVE_CATEGORY) for f in report.statement_flags)
+
+    summary = _summarize_report(report, "dummy.xlsx")
+    # NEGATIVE: the informational row's own disagreement must never surface
+    # as a WARNING/variance count in the summary text -- any variance
+    # WARNING line present must be backed by a genuine (non-informational)
+    # variance, never inflated by this row alone.
+    if "WARNING: reconciliation variance" in summary:
+        assert len(variances) >= 1
+    else:
+        assert len(variances) == 0

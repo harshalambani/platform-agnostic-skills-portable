@@ -295,8 +295,14 @@ def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
     Journal CSV: line if a journal was written. Factored out of the
     (pre-existing) structured-input path so the document-driven path
     reuses it verbatim rather than duplicating it."""
-    variances = [r for r in report.reconciliation if r.agree is False]
-    undecidable = [r for r in report.reconciliation if r.agree is None]
+    # H35-04 item D: informational rows (e.g. the incentive-instalment
+    # cross-check, superseded by D1's drawings identity) are excluded from
+    # every count and from the summary verdict below -- they are never a
+    # "variance" or an "undecidable", no matter what `agree` they carry on
+    # a given run. Their figures still print on the Reconciliation sheet
+    # itself; only this aggregation ignores them.
+    variances = [r for r in report.reconciliation if r.agree is False and not r.informational]
+    undecidable = [r for r in report.reconciliation if r.agree is None and not r.informational]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
 

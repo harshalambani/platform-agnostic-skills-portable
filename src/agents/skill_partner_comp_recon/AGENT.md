@@ -361,6 +361,29 @@ several, and no longer silently averaged in.
    exact pre-H35-04 all-sources-equal comparison, with a note stating
    plainly that no statement was supplied -- it never silently promotes
    another source to be the reference.
+
+   **Rework (this pass): compare against book PLUS this skill's own
+   pending journals, not the book alone.** `statement_reference_row()`
+   takes an optional `pending_journal` dict
+   (`{"applies_to", "amount", "journal_ids", "description"}`). Only the
+   current-account-closing-balance row is ever given one, computed via
+   the shared `year_end_accrual_diff()` helper and gated on
+   `> RECONCILIATION_TOLERANCE` (a zero, negative, or sub-tolerance diff
+   is never offered as a closing journal -- a negative diff is a
+   manual-review case in `jv_emitter.build_accrual_journal()`, never
+   booked). If applying the named journal(s) closes the Statement-vs-book
+   gap to within Re 1, the row is treated as **reconciled**, `agree=True`,
+   and the note starts with the constant `PENDING_JOURNAL_VERDICT`
+   (`"PENDING JOURNAL POSTING (provided by this skill)"`), naming the
+   journal id(s) and amount -- it is never a disagreement and never enters
+   the LOUD block. If the journal only closes PART of the gap, the row
+   stays a genuine disagreement (`agree=False`, note starts
+   `"STATEMENT DISAGREES"`, and DOES enter the LOUD block), but the
+   figure reported as the gap is the **residual left after the journal**,
+   not the raw pre-journal difference -- the raw difference still appears
+   earlier in the note as context/build-up, but it is the residual that
+   is the standing disagreement figure. `PENDING_JOURNAL_VERDICT` is never
+   used for a partial closure.
 2. **The LOUD block (`Report.statement_flags`).** Every row whose note
    starts `STATEMENT DISAGREES` (an L5-referenced row beyond the Re 1
    tolerance), plus every `ERROR:`-level entry in the L5 parser's own
@@ -380,18 +403,38 @@ several, and no longer silently averaged in.
    reads that list (never recomputes the arithmetic itself) and turns each
    `ERROR:` entry into a `statement_flags` line prefixed `"Statement
    arithmetic -- "`.
-4. **D1 -- drawings vs payouts vs TDS.** A new reconciliation row,
-   "Current-account drawings: statement vs (net monthly payouts + s.194T
-   TDS withheld)", checks the L5's current-account Drawings figure against
-   the explicit identity `total_monthly_paid + total_tds_credit` (payouts
-   ALONE, without adding back the TDS withheld at source, is never treated
-   as agreeing with the statement -- TDS is deducted before the partner
-   sees the cash, but it was still money drawn out of the partner's
-   account on the firm's books). Sign note: the L5 prints Drawings
-   parenthesised (negative); this row negates it to a positive "cash
-   drawn" magnitude before comparing, and labels the source accordingly,
-   so the comparison is never a spurious full-statement-value mismatch.
-5. **D2 -- the bank leg, investigated and left unwired.**
+4. **D1 -- drawings vs payouts vs TDS vs other deductions vs interest on
+   capital (reworked this pass).** The reconciliation row "Current-account
+   drawings: statement vs (net monthly payouts + TDS + other payslip
+   deductions - gross interest on capital)" checks the L5's
+   current-account Drawings figure against the full identity:
+
+   ```
+   statement current drawings = net payouts + TDS
+       + other payslip deductions paid on the partner's behalf
+         (medical top-up, and any other such field the payout model carries)
+       - interest on capital paid out, GROSS
+   ```
+
+   Payouts ALONE, without adding back the TDS withheld at source, is
+   never treated as agreeing with the statement -- TDS is deducted before
+   the partner sees the cash, but it was still money drawn out of the
+   partner's account on the firm's books. Other payslip deductions (e.g.
+   medical top-up) are likewise added back for the same reason. Interest
+   on capital is credited to/drawn from the CAPITAL column of the
+   statement, not the current account, so it is backed OUT of this
+   current-account identity -- and it must be the GROSS figure: in the
+   monthly payouts it arrives net of its own s.194T TDS (that TDS is
+   already inside the TDS total above), so subtracting the net figure
+   would double-count that TDS. Every component (payouts, TDS, other
+   deductions, gross interest, and the resulting total) is appended to the
+   row's note as an explicit build-up string, so a gap is traceable
+   without re-deriving the arithmetic by hand. Sign note: the L5 prints
+   Drawings parenthesised (negative); this row negates it to a positive
+   "cash drawn" magnitude before comparing, and labels the source
+   accordingly, so the comparison is never a spurious full-statement-value
+   mismatch.
+5. **D2 -- the bank leg, deliberately never scored (reworked this pass).**
    `external["bank_credits_total"]` (the "Total cash received (monthly
    payouts) vs Bank" row) is meant to be the PARTNER's own bank statement
    credit total; no parser or document flow in this skill produces that
@@ -400,23 +443,41 @@ several, and no longer silently averaged in.
    `agent.py`) is NOT a substitute -- it compares the FIRM's own book bank
    account FY movement against this run's implied journal, a figure that
    includes every other partner's and every trade cash flow, not this
-   partner's own receipts. Wiring the firm-wide figure into this
-   partner-specific row would misstate scope, so it is left as
-   `CANNOT RECONCILE` unless a real per-partner bank-credit source is
-   supplied by the caller (as the H35-02 structured-input test fixtures
-   already do). See `engine.py`'s inline comment at this row for the full
-   reasoning.
-6. **E -- the FJ3.7 incentive-instalment cross-check is demoted, not
-   retired.** "Incentive instalments: award-year Advisory vs payment
-   schedule" (Advisory's `schedule_instalments` vs the payment-schedule
-   cohort ledger) is superseded by D1's statement-referenced identity for
-   the "did the cash match" question, but it is not removed: it checks a
-   genuinely different pair of upstream sources (Advisory vs schedule,
-   neither of which is the L5), and several existing tests assert its
-   exact `agree`/`CANNOT RECONCILE` behaviour by category name. Every
-   branch's note is now prefixed `"INFORMATIONAL (superseded by the D1
-   drawings-vs-payouts identity check, H35-04) -- "`; `agree` values,
-   `category`, and `sources` are unchanged.
+   partner's own receipts. (An earlier draft of this doc wrongly called
+   the comparison book here "the firm's own book" for this row too -- to
+   be precise: the L5/monthly-payout side of this specific row is the
+   PARTNER's OWN GnuCash book, never the firm's; it is the *bank* leg,
+   described above, that would be firm-wide if wired in.) Wiring the
+   firm-wide figure into this partner-specific row would misstate scope,
+   so this row is now unconditionally
+   `agree=None`, note `NOT_CHECKED_YET` ("NOT CHECKED YET (bank credits
+   are matched in H35-05)") -- regardless of whether
+   `bank_credits_total` was supplied or matches. This is a deliberate
+   behaviour CHANGE from the original CANNOT-RECONCILE wiring: this row
+   is never a failure and never enters the LOUD block, because matching
+   payouts to bank credits is a fuzzy per-transaction match (H35-05's
+   job), not a numeric comparison this skill can adjudicate. The computed
+   and (if supplied) bank figures still print on the row.
+6. **E -- the FJ3.7 incentive-instalment cross-check is TRULY
+   informational (reworked this pass).** "Incentive instalments:
+   award-year Advisory vs payment schedule" (Advisory's
+   `schedule_instalments` vs the payment-schedule cohort ledger) is
+   superseded by D1's statement-referenced identity for the "did the cash
+   match" question, but it is not removed: it checks a genuinely different
+   pair of upstream sources (Advisory vs schedule, neither of which is the
+   L5), and several existing tests assert its exact `agree`/note behaviour
+   by category name. Every branch of this row now sets the new
+   `ReconciliationResult.informational = True` flag (in addition to the
+   existing `"INFORMATIONAL (superseded by ...)"` note prefix); `agree`
+   values, `category`, and `sources` are unchanged. `informational=True`
+   rows are excluded from `agent._summarize_report()`'s `variances`/
+   `undecidable` counts and from the summary verdict, and are skipped in
+   the LOUD-block assembly loop, regardless of what `agree` value they
+   carry on a given run -- the flag, not the `agree` value, is what
+   decides "informational-ness", since this row can legitimately be
+   `True`, `False`, or `None` depending on data and all three must stay
+   out of the totals. Its figures still print on the Reconciliation
+   sheet.
 
 ## Non-goals (explicit, not deferred silently)
 
