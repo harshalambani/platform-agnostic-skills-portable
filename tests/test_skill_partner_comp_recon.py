@@ -5850,7 +5850,17 @@ def _find(report, category):
     return next(r for r in report.reconciliation if r.category == category)
 
 
-_CLOSING_CAPITAL_CATEGORY = "Closing capital: rule vs Advisory vs the filed return"
+# H35-07: the old single conflated row ("Closing capital: rule vs Advisory
+# vs the filed return") is split into an actual-vs-actual row (statement vs
+# the filed return, still loud on disagreement) and a separate, purely
+# informational row (rule vs Advisory's own forward projection -- two
+# projections compared to each other, never to the statement, and never in
+# the LOUD block).
+_CLOSING_CAPITAL_CATEGORY = "Closing capital: statement vs the filed return"
+_CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY = (
+    "Closing capital: rule vs Advisory (informational -- both are "
+    "forward-looking projections, not the statement's own date)"
+)
 _EXEMPT_SOP_CATEGORY = "Exempt share of profit (s.10(2A)) vs the filed return"
 _D1_CATEGORY = (
     "Current-account drawings: statement vs (net monthly payouts + TDS + "
@@ -5897,10 +5907,15 @@ def test_h35_04_round2_exempt_sop_not_checked_when_return_not_supplied():
 
 
 def test_h35_04_closing_capital_row_statement_is_reference_others_measured_against_it():
+    # H35-07: this row now compares the statement's ACTUAL closing capital
+    # only against the filed return's closing capital (also an actual,
+    # same-date figure) -- the Advisory's forward PROJECTION is no longer a
+    # peer of the statement here at all; it moved to its own informational
+    # row (rule vs Advisory), checked below.
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000},
-        advisory_closing=990000,   # disagrees (diff 10,000)
-        return_closing=1000000,    # agrees exactly
+        advisory_closing=990000,   # a forward projection -- irrelevant to this row now
+        return_closing=990000,     # disagrees with the statement (diff -10,000)
     )
     report = build_report(data)
     row = _find(report, _CLOSING_CAPITAL_CATEGORY)
@@ -5908,15 +5923,26 @@ def test_h35_04_closing_capital_row_statement_is_reference_others_measured_again
     assert row.agree is False
     assert row.note.startswith("STATEMENT DISAGREES")
     assert row.sources["LLP Statement (L5)"] == 1000000
-    assert "Statement says 1,000,000.00; Advisory says 990,000.00" in row.note
+    assert "Statement says 1,000,000.00; Return says 990,000.00" in row.note
     assert "difference -10,000.00" in row.note
     # NEGATIVE: the statement is never itself reported as disagreeing, and
-    # the row that agrees (Return) is named as agreeing, not as a second
-    # disagreement.
+    # the Advisory's projection is never named in this row at all any more.
     assert "LLP Statement (L5) says" not in row.note
-    assert "agrees with: Return" in row.note
+    assert "Advisory" not in row.note
 
     assert any(f.startswith(_CLOSING_CAPITAL_CATEGORY) for f in report.statement_flags)
+
+    # NEGATIVE (H35-07, mandatory): the rule-vs-Advisory comparison (two
+    # forward projections against each other) is purely informational and
+    # must never enter the LOUD block, whatever it concludes -- including
+    # when the Advisory's own printed projection differs from the rule's
+    # purely because of KPMG's per-instalment rounding-down.
+    advisory_row = _find(report, _CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+    assert advisory_row.informational is True
+    assert not any(
+        f.startswith(_CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+        for f in report.statement_flags
+    )
 
 
 def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():
@@ -5931,10 +5957,12 @@ def test_h35_04_loud_block_empty_when_everything_agrees_within_re1():
 
 
 def test_h35_04_loud_block_not_triggered_by_an_exact_re1_difference():
+    # H35-07: the boundary is now on statement-vs-return (the row's only
+    # remaining comparison), not statement-vs-Advisory.
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
-        advisory_closing=999999,   # exactly Re 1 off -> ties
-        return_closing=1000000,
+        advisory_closing=1000000,
+        return_closing=999999,   # exactly Re 1 off -> ties
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -5946,8 +5974,8 @@ def test_h35_04_loud_block_not_triggered_by_an_exact_re1_difference():
 def test_h35_04_loud_block_triggered_just_beyond_re1_difference():
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
-        advisory_closing=999998.99,   # Rs 1.01 off -> disagrees
-        return_closing=1000000,
+        advisory_closing=1000000,
+        return_closing=999998.99,   # Rs 1.01 off -> disagrees
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -6048,12 +6076,21 @@ def test_h35_04_no_statement_supplied_old_behaviour_preserved_no_crash():
     )
     report = build_report(data)  # must not raise
 
+    # H35-07: the statement-vs-return row now has only ONE other source
+    # (Return); with no statement supplied either, that leaves a single
+    # value -- CANNOT RECONCILE, not "agree" (there is nothing left to
+    # compare it against once the Advisory leg was removed from this row).
     closing_row = _find(report, _CLOSING_CAPITAL_CATEGORY)
     assert closing_row.note.startswith(
         "No LLP Statement of Account (L5) figure supplied for this row"
     )
     assert "LLP Statement (L5)" not in closing_row.sources
-    assert closing_row.agree is True  # Rule/Advisory/Return still compared as equal peers
+    assert closing_row.agree is None  # a single remaining source -> CANNOT RECONCILE
+
+    # The rule-vs-Advisory informational row is unaffected by the statement
+    # being absent -- it never used the statement at all.
+    advisory_row = _find(report, _CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
+    assert advisory_row.informational is True
 
     d1_row = _find(report, _D1_CATEGORY)
     assert d1_row.note.startswith(

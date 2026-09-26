@@ -954,21 +954,55 @@ def build_report(data: dict) -> Report:
                                            "Advisory's stated closing capital")
     return_closing, _ = field_or_reason(external, "return_closing_capital",
                                          "return's closing capital")
-    # H35-04 item A: the LLP Statement of Account (L5), when supplied, is
-    # the REFERENCE for this row -- the rule/Advisory/Return are each
-    # measured against it ("Statement says X; <source> says Y; difference
-    # Z"), never averaged in as equal peers the way this row used to work
-    # (H35-02 added the L5 figure as a fourth equal source; H35-04 changes
-    # that). Absent a statement, this falls back to the old three-way
-    # equal-peers comparison unchanged, with a plain note that no statement
-    # was supplied.
+    # H35-07: the old single row here compared the LLP Statement's ACTUAL
+    # 31-March closing capital against a mix of (a) the rule's forward
+    # projection, (b) the Advisory's own "Projected closing balance" (both
+    # of which describe capital ONE YEAR AFTER the statement date, not the
+    # statement's own date), and (c) the filed return's closing capital --
+    # treating all three as equal peers. That produced false "gaps" whenever
+    # the projection simply differed from the eventual actual, which it
+    # almost always does.
+    #
+    # Fixed: the statement is compared only against another ACTUAL,
+    # same-date figure -- the filed return's closing capital (both describe
+    # the position as at the statement's own year end). The rule-vs-Advisory
+    # comparison is a genuine, useful check, but of two FORWARD PROJECTIONS
+    # against each other, not of the statement against a projection -- so it
+    # is kept as its own row, explicitly INFORMATIONAL, and is never allowed
+    # into the LOUD block.
+    #
+    # H35-07 items 1(i) (statement vs the Advisory's own "Opening balance
+    # (as on 1 Apr N+1)" line) and 1(ii) (statement vs a prior-year-closing
+    # + this-FY roll-forward) are NOT implemented here -- see the build
+    # handback. (i) would require loading the FOLLOWING FY's Advisory
+    # alongside this FY's data to get an actual, same-date opening figure;
+    # today's data model (mapper.py `advisory` dict, merge_advisories())
+    # only carries one FY's Advisory per report. (ii) would require a
+    # prior-year closing capital input that does not exist anywhere in the
+    # current `data`/`advisory`/`external` shape. Implementing either would
+    # mean inventing a new input/shape, which is a redesign, not a fix --
+    # per instruction this is reported, not guessed at.
     reconciliation.append(statement_reference_row(
-        "Closing capital: rule vs Advisory vs the filed return",
+        "Closing capital: statement vs the filed return",
         llp_record.get("capital_closing_balance") if llp_record is not None else None,
         "LLP Statement (L5)",
-        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
-         "Advisory": advisory_closing, "Return": return_closing},
+        {"Return": return_closing},
     ))
+    _capital_rule_vs_advisory = reconcile_category(
+        "Closing capital: rule vs Advisory (informational -- both are "
+        "forward-looking projections, not the statement's own date)",
+        {"Rule (Drivers)": capital_rule.required_cumulative_capital,
+         "Advisory": advisory_closing},
+    )
+    _capital_rule_vs_advisory.informational = True
+    if _capital_rule_vs_advisory.agree is False:
+        _capital_rule_vs_advisory.note += (
+            " -- informational only, never a reconciliation gap: KPMG's own "
+            "per-instalment rounding-down of the capital contribution routinely "
+            "produces a small difference between the rule's projection and the "
+            "Advisory's printed projected closing balance."
+        )
+    reconciliation.append(_capital_rule_vs_advisory)
 
     # H35-02 item 1: three further L5 tie-out rows -- current-account
     # closing balance, remuneration for the year, and interest on capital.

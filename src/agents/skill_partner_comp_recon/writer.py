@@ -344,19 +344,28 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
 
     _set(ws, row, 1, "Cross-check vs Advisory's stated closing capital", bold=True)
     row += 1
-    advisory_stated = (report.reconciliation and next(
-        (r for r in report.reconciliation if r.category.startswith("Closing capital")), None
-    ))
-    if advisory_stated is not None:
-        for label, value in advisory_stated.sources.items():
+    # H35-07: this used to be a single row ("Closing capital: rule vs
+    # Advisory vs the filed return"); it is now split into an actual-vs-
+    # actual row (statement vs the filed return) and a separate informational
+    # row (rule vs Advisory's forward projection) -- loop over every
+    # "Closing capital"-prefixed row so both are shown, instead of picking
+    # only the first with next().
+    closing_capital_rows = ([
+        r for r in report.reconciliation if r.category.startswith("Closing capital")
+    ] if report.reconciliation else [])
+    for closing_row in closing_capital_rows:
+        _set(ws, row, 1, closing_row.category, bold=True)
+        row += 1
+        for label, value in closing_row.sources.items():
             _set(ws, row, 1, label)
             _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
             row += 1
-        status_fill, status_text = _status_fill(advisory_stated)
+        status_fill, status_text = _status_fill(closing_row)
         _set(ws, row, 1, "Status", bold=True)
         _set(ws, row, 2, status_text, fill=status_fill, bold=True)
         row += 1
-        _set(ws, row, 1, advisory_stated.note, wrap=True)
+        _set(ws, row, 1, closing_row.note, wrap=True)
+        row += 1
         row += 1
     row += 1
 
