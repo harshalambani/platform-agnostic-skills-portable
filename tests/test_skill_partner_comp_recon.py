@@ -33,6 +33,7 @@ from agents.skill_partner_comp_recon.engine import (
     build_report,
     classify_cohort_instalments,
     compute_capital_interest_schedule,
+    compute_ctc_check,
     derive_misc,
     detect_mid_year_rate_change,
     driver,
@@ -549,6 +550,13 @@ def test_build_report_end_to_end_against_fixture():
             # remuneration + interest figure) -- always NOT SUPPLIED, never a
             # failure, until such a source exists.
             assert r.agree is None, f"expected None (not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.status_label == "NOT SUPPLIED"
+        elif cat.startswith("CTC walk-down:"):
+            # H35-08: the fixture supplies no data["ctc_structuring"] block,
+            # so the cash pool cannot be computed -- CANNOT RECONCILE, never
+            # a failure, and always informational (never in the LOUD block).
+            assert r.agree is None, f"expected None (not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.informational is True
             assert r.status_label == "NOT SUPPLIED"
         else:
             assert r.agree is True, f"expected AGREE for {cat!r}, got {r.agree!r} ({r.note})"
@@ -2957,7 +2965,7 @@ def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
 
 _ALL_SHEETS = [
     "Logic", "Drivers", "Monthly grid", "One-offs", "Cohorts", "Capital",
-    "Interest on capital",
+    "Interest on capital", "CTC check",
     "Reconciliation", "Exceptions", "Open items",
 ]
 
@@ -7957,3 +7965,56 @@ def test_h35_06_rate_override_not_silently_ignored():
     )
     assert schedule_a.total_interest != schedule_b.total_interest
     assert schedule_b.total_interest == round(schedule_a.total_interest * 0.09 / 0.06, 2)
+
+
+# ---------------------------------------------------------------------------
+# H35-08 -- CTC structuring check: walks Target Compensation down to the
+# cash pool actually paid (remuneration + gross share of profit + CTC
+# structuring + arrears). 2 required negative tests.
+# ---------------------------------------------------------------------------
+
+# 1 -- NEGATIVE: arrears are IN the cash pool -- excluding them would show a
+# rate variance, but the code (which includes them) does not produce one.
+def test_h35_08_arrears_included_no_variance_when_excluded_would_show_one():
+    data = _h35_02_data()
+    # remuneration total = 2 x 100000 = 200000; gross SoP total =
+    # 2 x 200000 = 400000; arrears (additional_share_of_profit) = 100000 in
+    # one month only; CTC structuring total = 0. Cash pool WITH arrears =
+    # 700000, which is set to tie exactly with Target Compensation.
+    data["monthly"][0]["additional_share_of_profit"] = 100000
+    data["drivers"]["target_compensation"] = 700000
+    data["ctc_structuring"] = {"total": 0, "months": {}, "rows": {}}
+
+    report = build_report(data)
+    assert report.ctc_check.status == "OK"
+    assert report.ctc_check.arrears_total == 100000
+    assert report.ctc_check.cash_pool == 700000
+    assert report.ctc_check.gap == 0
+
+    # Prove the "excluded" cash pool WOULD have shown a >Re1 variance --
+    # i.e. arrears genuinely matter here, they are not a no-op.
+    pool_without_arrears = report.ctc_check.cash_pool - report.ctc_check.arrears_total
+    assert abs(data["drivers"]["target_compensation"] - pool_without_arrears) > RECONCILIATION_TOLERANCE
+
+    row = next(
+        r for r in report.reconciliation if r.category.startswith("CTC walk-down:")
+    )
+    assert row.agree is True
+    assert row.informational is True
+
+
+# 2 -- NEGATIVE: a missing CTC-structuring input shows "not supplied",
+# never a silent 0.
+def test_h35_08_missing_ctc_structuring_shows_not_supplied_never_zero():
+    monthly = [
+        engine.MonthlyLine(
+            month="2031-04", remuneration=100000, share_of_profit_gross=200000,
+            additional_share_of_profit=0, firms_tax_sop=-50000, firms_tax_other=0,
+            tds=-10000, capital_transferred=0, total_paid=240000, misc=0,
+        ),
+    ]
+    result = compute_ctc_check(monthly, {"target_compensation": 500000}, None, "2031-32")
+    assert result.status == CANNOT_RECONCILE
+    assert result.ctc_structuring_total is None
+    assert result.cash_pool is None
+    assert "not supplied" in result.reason.lower()

@@ -443,6 +443,50 @@ def _write_interest_on_capital_sheet(wb, report: Report):
 
 
 # ---------------------------------------------------------------------------
+# CTC check (H35-08) -- the informational Target Compensation walk-down.
+# Purely informational: no journal/posted-check impact.
+# ---------------------------------------------------------------------------
+
+def _write_ctc_check_sheet(wb, report: Report):
+    ws = wb.create_sheet("CTC check")
+    ctc = report.ctc_check
+    row = 1
+    if ctc is None:
+        _set(ws, row, 1, "Not computed for this run.")
+        _autosize(ws, 1)
+        return
+
+    _set(ws, row, 1, "Target Compensation vs cash pool actually paid "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational", bold=True)
+    row += 2
+
+    if ctc.status != "OK":
+        _set(ws, row, 1, "Status", bold=True)
+        _set(ws, row, 2, "NOT SUPPLIED", fill=TF, bold=True)
+        row += 1
+        _set(ws, row, 1, ctc.reason or CANNOT_RECONCILE_LABEL, wrap=True)
+        _autosize(ws, 2)
+        return
+
+    rows = [
+        ("Target Compensation", ctc.target_compensation),
+        ("Remuneration (total)", ctc.remuneration_total),
+        ("Gross share of profit (total)", ctc.gross_sop_total),
+        ("CTC structuring (total)", ctc.ctc_structuring_total),
+        ("Arrears (additional share of profit, total)", ctc.arrears_total),
+        ("Cash pool actually paid", ctc.cash_pool),
+        ("Gap (Target Compensation - cash pool)", ctc.gap),
+        ("Firm's tax on pool (with arrears in scope)", ctc.firms_tax_on_pool),
+    ]
+    for label, value in rows:
+        _set(ws, row, 1, label)
+        _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
+        row += 1
+    _autosize(ws, 2)
+
+
+# ---------------------------------------------------------------------------
 # 8. Reconciliation / 9. Exceptions
 # ---------------------------------------------------------------------------
 
@@ -656,6 +700,7 @@ def write_report_workbook(report: Report, out_path: str, posted_check=None, bank
     _write_cohorts_sheet(wb, report)
     _write_capital_sheet(wb, report, driver_refs)
     _write_interest_on_capital_sheet(wb, report)
+    _write_ctc_check_sheet(wb, report)
     _write_reconciliation_sheet(wb, report)
     _write_exceptions_sheet(wb, report)
     _write_open_items_sheet(wb, report)

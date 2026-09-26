@@ -801,6 +801,86 @@ def compute_capital_interest_schedule(
     )
 
 
+@dataclass
+class CtcCheckResult:
+    """H35-08: walks Target Compensation down to the cash pool actually
+    paid this FY -- remuneration + gross share of profit + CTC structuring
+    components + arrears (MonthlyLine.additional_share_of_profit, which the
+    payment schedule's own arrears_share_of_profit row populates when
+    present -- see mapper.py). Purely informational (no journal/posted-check
+    impact); `status` is CANNOT_RECONCILE (with `reason` set) whenever
+    Target Compensation or any cash-pool component is not supplied -- a
+    missing component is NEVER treated as 0."""
+    status: str  # "OK" or CANNOT_RECONCILE
+    target_compensation: float | None = None
+    remuneration_total: float | None = None
+    gross_sop_total: float | None = None
+    arrears_total: float | None = None
+    ctc_structuring_total: float | None = None
+    cash_pool: float | None = None
+    gap: float | None = None  # target_compensation - cash_pool
+    firms_tax_on_pool: float | None = None  # WITH arrears in scope (see below)
+    reason: str | None = None
+
+
+def compute_ctc_check(
+    monthly: "list[MonthlyLine]", drivers: dict, ctc_structuring: dict | None, fy: str,
+) -> CtcCheckResult:
+    """H35-08: consumes payment_schedule.py's already-parsed CTC-structuring
+    block, forwarded unchanged as data["ctc_structuring"] (mapper.py) --
+    no new parser/mapper input is added for this check.
+
+    cash pool = remuneration + gross share of profit + CTC structuring
+    total + arrears, all summed over `monthly` for the CTC-structuring
+    total's own "total" field). The firm's tax figure carried alongside
+    (`firms_tax_on_pool`) reuses MonthlyLine.firms_tax_sop AND
+    firms_tax_other -- the latter is already the firm's tax on a PRIOR-YEAR
+    PLMI instalment drawn down this month, i.e. arrears -- so summing both
+    fields is what puts arrears "in scope" for the firm's-tax figure this
+    check reports; no separate arrears-tax computation is invented.
+    """
+    target_compensation, reason = driver(drivers, "target_compensation", fy, "Target Compensation")
+    if target_compensation is None:
+        return CtcCheckResult(status=CANNOT_RECONCILE, reason=reason)
+
+    remuneration_total = sum(m.remuneration for m in monthly) if monthly else None
+    gross_sop_total = sum(m.share_of_profit_gross for m in monthly) if monthly else None
+    arrears_total = sum(m.additional_share_of_profit for m in monthly) if monthly else None
+    ctc_structuring_total = (
+        ctc_structuring.get("total") if ctc_structuring is not None else None
+    )
+    firms_tax_on_pool = (
+        sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else None
+    )
+
+    missing = []
+    if not monthly:
+        missing.append("monthly payout data")
+    if ctc_structuring_total is None:
+        missing.append("CTC structuring total (not supplied)")
+    if missing:
+        return CtcCheckResult(
+            status=CANNOT_RECONCILE,
+            target_compensation=target_compensation,
+            remuneration_total=remuneration_total, gross_sop_total=gross_sop_total,
+            arrears_total=arrears_total, ctc_structuring_total=ctc_structuring_total,
+            firms_tax_on_pool=firms_tax_on_pool,
+            reason=f"{CANNOT_RECONCILE} -- cash pool cannot be computed; not "
+                   f"supplied: {', '.join(missing)}.",
+        )
+
+    cash_pool = round(
+        remuneration_total + gross_sop_total + arrears_total + ctc_structuring_total, 2
+    )
+    gap = round(target_compensation - cash_pool, 2)
+    return CtcCheckResult(
+        status="OK", target_compensation=target_compensation,
+        remuneration_total=remuneration_total, gross_sop_total=gross_sop_total,
+        arrears_total=arrears_total, ctc_structuring_total=ctc_structuring_total,
+        cash_pool=cash_pool, gap=gap, firms_tax_on_pool=firms_tax_on_pool,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Top-level report assembly.
 # ---------------------------------------------------------------------------
@@ -858,6 +938,10 @@ class Report:
     # capital tranche), or None only if it was never computed (it always is,
     # by build_report() -- see compute_capital_interest_schedule()).
     capital_interest_schedule: "CapitalInterestSchedule | None" = None
+    # H35-08: the CTC walk-down (Target Compensation vs the actual cash
+    # pool), or None only if it was never computed (it always is, by
+    # build_report() -- see compute_ctc_check()).
+    ctc_check: "CtcCheckResult | None" = None
     # H35-04 item B: every LOUD flag this run raised -- one line per
     # statement-referenced reconciliation row whose note starts with
     # "STATEMENT DISAGREES" (see statement_reference_row()), plus one line
@@ -1452,6 +1536,42 @@ def build_report(data: dict) -> Report:
             informational_row.informational = True
             reconciliation.append(informational_row)
 
+    # H35-08: the CTC walk-down. Purely informational (no journal/posted-
+    # check impact) -- shown on its own sheet plus this one informational
+    # summary line, never in the statement LOUD block unless a figure
+    # actually contradicts the LLP statement (which this check never
+    # compares against -- it only compares Target Compensation to the cash
+    # actually paid, so it is always `informational=True` here).
+    ctc_check = compute_ctc_check(monthly, drivers, data.get("ctc_structuring"), fy)
+    if ctc_check.status == "OK":
+        reconciliation.append(ReconciliationResult(
+            category="CTC walk-down: Target Compensation vs cash pool "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational",
+            sources={"Target Compensation": ctc_check.target_compensation,
+                     "Cash pool actually paid": ctc_check.cash_pool},
+            agree=abs(ctc_check.gap) <= RECONCILIATION_TOLERANCE,
+            note=f"Gap (Target Compensation - cash pool): {ctc_check.gap:,.2f} "
+                 f"(remuneration {ctc_check.remuneration_total:,.2f} + gross "
+                 f"share of profit {ctc_check.gross_sop_total:,.2f} + CTC "
+                 f"structuring {ctc_check.ctc_structuring_total:,.2f} + "
+                 f"arrears {ctc_check.arrears_total:,.2f}).",
+            informational=True,
+        ))
+    else:
+        reconciliation.append(ReconciliationResult(
+            category="CTC walk-down: Target Compensation vs cash pool "
+                      "(remuneration + gross share of profit + CTC "
+                      "structuring + arrears) -- informational",
+            sources={"Target Compensation": ctc_check.target_compensation,
+                     "Cash pool actually paid": ctc_check.cash_pool},
+            agree=None,
+            note=ctc_check.reason,
+            informational=True,
+            not_checked=True,
+            status_label="NOT SUPPLIED",
+        ))
+
     # ---- H35-04 item B: assemble the LOUD block ---------------------------
     # One line per statement-referenced row that disagrees with the L5
     # statement (its note starts with "STATEMENT DISAGREES" -- see
@@ -1480,5 +1600,6 @@ def build_report(data: dict) -> Report:
         opening_reclass=data.get("opening_reclass"),
         llp_record=llp_record,
         capital_interest_schedule=capital_interest_schedule,
+        ctc_check=ctc_check,
         statement_flags=statement_flags,
     )

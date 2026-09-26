@@ -323,7 +323,8 @@ help:
           as a formula off Drivers, the Advisory cross-check, and the
           mid-year rate-change detector), Interest on capital (H35-06 --
           the computed simple-interest schedule per capital tranche added
-          this year), Reconciliation (agree / variance
+          this year), CTC check (H35-08 -- the informational Target
+          Compensation walk-down), Reconciliation (agree / variance
           / cannot-reconcile per category -- topped by a highlighted
           "STATEMENT DISAGREES" block when the LLP Statement of Account
           disagrees with another source or fails its own arithmetic; see
@@ -370,6 +371,13 @@ help:
     its own reconciliation row -- a genuine, real disagreement (e.g. a FY
     with an interest credit but no new capital tranche) is expected and
     reported, never forced to tie.
+
+    The CTC structuring check (H35-08, its
+    own workbook sheet) walks Target Compensation down to the cash pool
+    actually paid (remuneration + gross share of profit + CTC structuring
+    components + arrears) using the same incentive payment schedule already
+    supplied above (payment_schedule) -- no separate input is needed; it is
+    purely informational and never enters the "STATEMENT DISAGREES" block.
 
     Start with the Reconciliation sheet, then Exceptions -- a
     "CANNOT RECONCILE" status names exactly which source figure for that
