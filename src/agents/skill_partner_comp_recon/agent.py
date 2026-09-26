@@ -295,16 +295,53 @@ def _summarize_report(report, output_path: str, journal_line: str = "") -> str:
     Journal CSV: line if a journal was written. Factored out of the
     (pre-existing) structured-input path so the document-driven path
     reuses it verbatim rather than duplicating it."""
-    variances = [r for r in report.reconciliation if r.agree is False]
-    undecidable = [r for r in report.reconciliation if r.agree is None]
+    # H35-04 item D: informational rows (e.g. the incentive-instalment
+    # cross-check, superseded by D1's drawings identity) are excluded from
+    # every count and from the summary verdict below -- they are never a
+    # "variance" or an "undecidable", no matter what `agree` they carry on
+    # a given run. Their figures still print on the Reconciliation sheet
+    # itself; only this aggregation ignores them.
+    # H35-04 round 2 item 3: a `not_checked` row (D2's bank-credit match,
+    # deferred to H35-05; the exempt-share-of-profit row when only the
+    # filed return is missing) is excluded from these counts the same way
+    # an `informational` row already is -- neither is a genuine gap.
+    variances = [
+        r for r in report.reconciliation
+        if r.agree is False and not r.informational and not r.not_checked
+    ]
+    undecidable = [
+        r for r in report.reconciliation
+        if r.agree is None and not r.informational and not r.not_checked
+    ]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
 
-    lines_out = [
+    lines_out: list[str] = []
+    # H35-04 item B: the LOUD block. Any disagreement with the LLP
+    # Statement of Account (L5) -- the reference for every row it carries a
+    # figure for -- or a failure in the statement's own arithmetic, is
+    # surfaced here, at the very top, ahead of even the headline
+    # "Partner Compensation Reconciliation for FY..." line. This is in
+    # ADDITION to the per-row status already covered by the variances/
+    # undecidable counts below, never a replacement for it. Nothing is
+    # shown here when report.statement_flags is empty (statement agrees
+    # everywhere and its own arithmetic checks out, or no statement was
+    # supplied at all).
+    if report.statement_flags:
+        lines_out.append("=" * 72)
+        lines_out.append(
+            f"STATEMENT DISAGREES -- {len(report.statement_flags)} issue(s) with the "
+            "LLP Statement of Account (L5), the reference for this reconciliation:"
+        )
+        for flag in report.statement_flags:
+            lines_out.append(f"  ! {flag}")
+        lines_out.append("=" * 72)
+
+    lines_out.append(
         f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
         f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
-        "instalment(s).",
-    ]
+        "instalment(s)."
+    )
     if variances:
         lines_out.append(
             f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
@@ -617,8 +654,16 @@ def _run_from_documents(
         report, accounts_for_tieout, gnucash_path, report.financial_year,
     )
     optional_notes[_gnucash_note_idx] = gnucash_note
+    # H35-04 round 2 item 1: build_balance_tieout() now needs the SAME
+    # posted-check results to tell "this skill's own journal for this
+    # account is not yet posted" (-> PENDING JOURNAL POSTING, reconciled)
+    # apart from a genuine gap on an already-posted journal (-> today's
+    # plain VARIANCE/CANNOT-RECONCILE comparison, unchanged).
     report.reconciliation.extend(
-        build_balance_tieout(report, accounts_for_tieout, gnucash_path, report.financial_year)
+        build_balance_tieout(
+            report, accounts_for_tieout, gnucash_path, report.financial_year,
+            posted_check=posted_check,
+        )
     )
 
     out_path = Path(output_path)

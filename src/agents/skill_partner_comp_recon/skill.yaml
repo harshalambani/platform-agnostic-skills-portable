@@ -274,9 +274,12 @@ help:
           reporting/prior/future FY-assignment column), Capital (the rule
           as a formula off Drivers, the Advisory cross-check, and the
           mid-year rate-change detector), Reconciliation (agree / variance
-          / cannot-reconcile per category), Exceptions (every
-          non-agreeing or non-reconcilable row collected together), and
-          Open items (anything left unresolved and what would close it).
+          / cannot-reconcile per category -- topped by a highlighted
+          "STATEMENT DISAGREES" block when the LLP Statement of Account
+          disagrees with another source or fails its own arithmetic; see
+          the tip below), Exceptions (every non-agreeing or
+          non-reconcilable row collected together), and Open items
+          (anything left unresolved and what would close it).
       - name: "<journal_path> (optional -- Stage 1b, only written if journal_path is set)"
         tooltip: >
           A GnuCash multi-split journal CSV: one balanced transaction per
@@ -302,10 +305,32 @@ help:
     CHANGE SUSPECTED" row means the incentive cohort's instalments show
     unequal capital-deducted amounts -- re-read that year's Compensation
     Advisory, since it will have been reissued at a new rate part-way
-    through the cohort.
+    through the cohort. The LLP Statement of Account (L5), when supplied,
+    is the REFERENCE for every row it carries a figure for (closing
+    capital, current-account closing, remuneration, interest on capital,
+    profit share, drawings) -- every other source is measured against it,
+    never averaged in as an equal peer. Any disagreement beyond the Re 1
+    tolerance, or a failure in the statement's own arithmetic, is flagged
+    both at the top of the run summary text and in a highlighted
+    "STATEMENT DISAGREES" block above the Reconciliation sheet's table --
+    check that block first, before the per-row statuses below it.
   troubleshooting:
     - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
       fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
+    - problem: "A 'STATEMENT DISAGREES' block appears at the top of the run summary / Reconciliation sheet."
+      fix: "The LLP Statement of Account (L5) is the reference for that row, and another supplied source (or the statement's own printed arithmetic) disagrees with it beyond the Re 1 tolerance -- the note spells out 'Statement says X; <source> says Y; difference Z' or names the failed arithmetic check. Investigate the disagreement; this skill never picks a winner for you."
+    - problem: "'Total cash received (monthly payouts) vs Bank' always shows 'NOT CHECKED YET (bank credits are matched in H35-05)'."
+      fix: "This is expected, not a defect. This row is never scored agree/disagree by this skill -- it never appears in the 'STATEMENT DISAGREES' block and never counts as a failure -- because matching payouts to bank credits is a fuzzy per-transaction match, done by H35-05, not a straight numeric comparison. The computed and (if supplied) bank figures still print on the row so you can eyeball them; external.bank_credits_total in the input is the partner's OWN bank statement credit total, a different figure from any GnuCash books tie-out (which compares the firm's own bank account movement, not this partner's personal receipts)."
+    - problem: "The D1 drawings row ('Current-account drawings: statement vs (net monthly payouts + TDS + other payslip deductions - gross interest on capital)') shows a gap I can't explain."
+      fix: "The identity is: statement current drawings = net monthly payouts + s.194T TDS withheld + other payslip deductions paid on the partner's behalf (e.g. medical top-up) - interest on capital, GROSS. Interest on capital is credited to/drawn from the CAPITAL column of the LLP Statement, not the current account, so it is backed OUT of this current-account identity -- and it must be the GROSS figure, not the net-of-its-own-s.194T-TDS amount that lands in the payout (that TDS is already inside the TDS total above, so subtracting the net figure would double-count it). The row's note spells out the full build-up (each component and its value) so you can see exactly where a gap comes from."
+    - problem: "A row's note starts with 'PENDING JOURNAL POSTING (provided by this skill)'."
+      fix: "This is not a disagreement. The Statement and the books gap by more than Re 1 today, but this skill's own not-yet-posted journal (its monthly lines or its year-end share-of-profit accrual) closes that gap to within Re 1 once posted -- the note names the journal id(s) and amount. Post the journal(s) named and the row is reconciled; nothing further to investigate. If posting the journal only closes PART of the gap, the row instead reports the genuine residual left over (as a normal disagreement) rather than the pre-journal gap or this pending-journal wording."
+    - problem: "A GnuCash tie-out row (bank, TDS, interest on capital, current account, capital contribution, medical expense, remuneration income, or share of profit income) shows 'PENDING JOURNAL POSTING (provided by this skill)' instead of a plain AGREE/VARIANCE."
+      fix: "Same rule as the L5 rows above, extended to every GnuCash tie-out row: when this run's own posted-check finds that account's monthly journal not yet posted in the book, the row is compared against the book PLUS that journal rather than the book alone, and is reconciled once the named journal id(s) are posted. A row on 'current_account' or 'capital_contribution' may also name a separately posted prior-period reclassification journal (Num starting with this firm-FY's prefix, e.g. '<FIRM>-<FY>-RECT') -- that journal is a real posted movement from capital to the current account from an earlier run of this skill, folded into the computed side as its own named line, never counted toward a variance."
+    - problem: "'Exempt share of profit (s.10(2A)) vs the filed return' shows 'NOT CHECKED (return not supplied)' instead of AGREE."
+      fix: "This is expected, not a defect. The LLP Statement's Profit Share for the Year is present and correct -- only the comparison against the filed income tax return is skipped because the return wasn't supplied. It never counts as a failure and never appears in the 'STATEMENT DISAGREES' block; supply the filed return to get an actual comparison."
+    - problem: "'Incentive instalments: award-year Advisory vs payment schedule' note now starts with 'INFORMATIONAL (superseded by ...)'."
+      fix: "This category is no longer the primary drawings check -- see the new 'Current-account drawings: statement vs (net monthly payouts + s.194T TDS withheld)' row for that. This one still reports a genuine Advisory-vs-schedule disagreement when it fires; it is informational, not retired."
     - problem: "Reconciliation shows AGREE for two sources that are not byte-for-byte equal."
       fix: "Every reconciliation in this skill (including the L5 tie-out rows) uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie, anything more is reported as VARIANCE. This is a fixed, named constant (engine.RECONCILIATION_TOLERANCE), never a per-run setting -- it absorbs paisa-level rounding between sources, not a genuine discrepancy."
     - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."

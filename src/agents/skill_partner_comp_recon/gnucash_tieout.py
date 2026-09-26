@@ -45,7 +45,15 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from .engine import CANNOT_RECONCILE, ReconciliationResult, reconcile_category
+from .engine import (
+    CANNOT_RECONCILE,
+    PENDING_JOURNAL_VERDICT,
+    RECONCILIATION_TOLERANCE,
+    ReconciliationResult,
+    fy_prefix,
+    journal_txn_id,
+    reconcile_category,
+)
 from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals
 from .jv_emitter import _strip_root as _jv_strip_root
 
@@ -106,8 +114,12 @@ def _journals_safely(report, accounts: dict):
 # Section C -- balance tie-out.
 # ---------------------------------------------------------------------------
 
+_RECLASS_ACCOUNTS = ("current_account", "capital_contribution")
+
+
 def build_balance_tieout(
     report, accounts: dict, gnucash_path: str, year_key: str,
+    posted_check: "list[PostedCheckResult] | None" = None,
 ) -> list[ReconciliationResult]:
     """One ReconciliationResult per jv_emitter.ACCOUNT_KEYS entry, comparing
     this run's implied FY movement against the GnuCash book's actual FY
@@ -119,6 +131,39 @@ def build_balance_tieout(
     an account path absent from the book, an unbuildable journal) degrades
     that account's sources to None -- reconcile_category() already renders
     that as the package's "CANNOT RECONCILE -- missing: ..." shape.
+
+    H35-04 round 2, item 1 (`posted_check`, optional -- the SAME per-journal
+    results build_posted_check() already produces): "compare against the
+    book PLUS this skill's own journals" applies to these 8 rows too, not
+    only the L5 tie-out row. For each account, this run's own journal
+    splits that touch it are split into "already posted" (per
+    posted_check) and "not yet posted". When any are not yet posted, the
+    book is compared against the POSTED-ONLY portion of this run's
+    computed figure -- if that ties within tolerance, the row is
+    PENDING_JOURNAL_VERDICT (agree=True, reconciled, naming the pending
+    journal id(s) and the amount per account); if a gap remains even after
+    accounting for the pending journal(s), THAT gap is the genuine variance
+    reported (agree=False), never the raw pre-journal gap. When every
+    journal touching an account is already posted (or posted_check was not
+    supplied at all -- the pre-round-2 behaviour), this falls straight back
+    to today's plain comparison, unchanged.
+
+    Item 2: on `current_account` and `capital_contribution` specifically, a
+    POSTED prior-period reclassification journal -- this skill's own
+    opening-reclass journal for THIS financial year (jv_emitter.py's
+    `_opening_reclass_journal`), Num/Transaction ID exactly
+    `journal_txn_id(fy_prefix(year_key), report.firm_name, "RECT")` -- is
+    recognised the SAME way build_posted_check()'s Section B recognises any
+    of this skill's own journals: an EXACT match on the book transaction's
+    `num` field, never a fuzzy/prefix match. It is looked up only when this
+    run's OWN `journals` list does not already contain a journal with that
+    exact txn_id (report.opening_reclass supplied this run would mean
+    build_journals() already produced it, and double-counting it from the
+    book on top would be wrong). When found, its split amount for the
+    account is folded into the "Computed" side as an explicitly-named
+    addition -- never into "variance" -- because it is a real, already-
+    posted movement this run's own (monthly-only) journal never claims to
+    represent.
     """
     def _blank(note: str | None = None) -> list[ReconciliationResult]:
         results = []
@@ -154,6 +199,22 @@ def build_balance_tieout(
     for guid, path in colon_paths.items():
         path_to_guid.setdefault(path, guid)
 
+    # H35-04 round 2, items 1-2 pre-loop setup.
+    firm_name = getattr(report, "firm_name", "") or ""
+    fy_pfx = fy_prefix(year_key)
+    own_txn_ids = {j.txn_id for j in journals}
+    rect_id = journal_txn_id(fy_pfx, firm_name, "RECT")
+    fy_txns = parse_gnucash.fy_transactions(book, year_key)
+    # Only look for a POSTED prior-period reclass in the book when this
+    # run's own build_journals() did NOT already produce one under the same
+    # deterministic id -- otherwise the book hit and this run's own journal
+    # would be the same posting counted twice.
+    rect_txn = (
+        next((t for t in fy_txns if t.num == rect_id), None)
+        if rect_id not in own_txn_ids else None
+    )
+    posted_status_by_id = {p.txn_id: p.status for p in (posted_check or [])}
+
     results: list[ReconciliationResult] = []
     for key in ACCOUNT_KEYS:
         category = f"{_TIEOUT_LABEL}: {key}"
@@ -175,6 +236,14 @@ def build_balance_tieout(
             ))
             continue
 
+        contributing = [
+            j for j in journals if any(s.account == stripped_path for s in j.splits)
+        ]
+        pending = [
+            j for j in contributing
+            if posted_status_by_id.get(j.txn_id) == NOT_POSTED
+        ]
+
         computed_raw = sum(
             s.debit - s.credit
             for j in journals
@@ -185,10 +254,93 @@ def build_balance_tieout(
         computed_figure = parse_gnucash.normalize_value(computed_raw, acct_type)
         book_figure = parse_gnucash.account_fy_sum(book, guid, year_key)
 
+        # Item 2: fold a POSTED prior-period reclassification journal (this
+        # skill's own opening-reclass journal for THIS year, recognised by
+        # exact Num match -- see the docstring) into the computed side as
+        # its own named addition. It is a real, already-posted movement
+        # this run's own (monthly-only) `journals` never claims to
+        # represent, so it belongs on the "what we expect the book to
+        # show" side, never folded into a variance.
+        reclass_raw = 0.0
+        if key in _RECLASS_ACCOUNTS and rect_txn is not None:
+            reclass_raw = sum(
+                float(sp.value) for sp in rect_txn.splits
+                if colon_paths.get(sp.account_guid) == stripped_path
+            )
+        reclass_figure = parse_gnucash.normalize_value(reclass_raw, acct_type) if reclass_raw else 0.0
+        reclass_bit = (
+            f"; plus posted reclassification journal {rect_id} ({reclass_figure:,.2f})"
+            if reclass_raw else ""
+        )
+
+        if pending:
+            # Item 1: compare the book against the PORTION of this run's
+            # computed figure that is already posted (this run's total
+            # minus the not-yet-posted journal(s), plus any posted
+            # reclassification line) -- naming the pending journal(s)
+            # rather than letting them show up as a false gap.
+            pending_raw = sum(
+                s.debit - s.credit for j in pending for s in j.splits
+                if s.account == stripped_path
+            )
+            pending_figure = parse_gnucash.normalize_value(pending_raw, acct_type)
+            posted_computed_raw = computed_raw - pending_raw + reclass_raw
+            posted_computed_figure = parse_gnucash.normalize_value(posted_computed_raw, acct_type)
+            ids = ", ".join(sorted({j.txn_id for j in pending}))
+            sources = {
+                "Computed (this run's journal)": computed_figure,
+                "GnuCash book (FY movement)": book_figure,
+            }
+            if abs(book_figure - posted_computed_figure) <= RECONCILIATION_TOLERANCE:
+                note = (
+                    f"{PENDING_JOURNAL_VERDICT}: journal(s) {ids} for this account "
+                    f"({pending_figure:,.2f}) are not yet posted in the book{reclass_bit}. "
+                    f"Book FY movement ({book_figure:,.2f}) plus the pending journal(s) "
+                    f"ties to the computed figure ({computed_figure:,.2f}) within "
+                    "tolerance -- reconciled, nothing further to post beyond the "
+                    "journal(s) already named."
+                )
+                result = ReconciliationResult(
+                    category=category, sources=sources, agree=True, note=note,
+                )
+            else:
+                residual = book_figure - posted_computed_figure
+                note = (
+                    f"Genuine residual after posting {ids}: {residual:,.2f} -- book FY "
+                    f"movement {book_figure:,.2f}, computed {computed_figure:,.2f}"
+                    f"{reclass_bit}; journal(s) {ids} ({pending_figure:,.2f}) not yet "
+                    "posted account for part of the gap but not all of it -- this "
+                    "residual is the genuine gap."
+                )
+                result = ReconciliationResult(
+                    category=category, sources=sources, agree=False, note=note,
+                )
+            results.append(result)
+            continue
+
+        # No pending journal touches this account (or posted_check was not
+        # supplied at all): today's plain comparison, unchanged -- except
+        # that a posted reclassification line (item 2) is still folded into
+        # the computed side even here, since it can apply whether or not a
+        # pending journal is also in play.
+        computed_figure_with_reclass = parse_gnucash.normalize_value(
+            computed_raw + reclass_raw, acct_type,
+        )
         result = reconcile_category(category, {
-            "Computed (this run's journal)": computed_figure,
+            "Computed (this run's journal)": computed_figure_with_reclass,
             "GnuCash book (FY movement)": book_figure,
         })
+        if reclass_raw:
+            # Always name the reclassification line explicitly -- even on
+            # a silent AGREE, where reconcile_category()'s own note would
+            # otherwise be empty -- so "Computed" is never a figure that
+            # silently includes a posted prior-period movement with no
+            # trace of it in the note.
+            base_note = result.note or "Sources agree."
+            result = ReconciliationResult(
+                category=category, sources=result.sources, agree=result.agree,
+                note=f"{base_note}{reclass_bit}",
+            )
         # Closed-book income-sweep-to-Equity limitation: GnuCash's standard
         # "close the books" behaviour sweeps an INCOME/EXPENSE-type
         # account's balance to Equity at year-end, so a genuinely-posted
@@ -200,15 +352,15 @@ def build_balance_tieout(
             result.agree is False
             and acct_type in parse_gnucash.FLIP_TYPES
             and book_figure == 0.0
-            and computed_figure != 0.0
+            and computed_figure_with_reclass != 0.0
         ):
             result = ReconciliationResult(
                 category=category, sources=result.sources, agree=None,
                 note=(
                     f"Book FY movement is 0.00 for this {acct_type} account while the "
-                    f"computed figure is {computed_figure:,.2f}. This can happen for two "
-                    "different reasons that look identical on this account alone: (1) a "
-                    "closed-book income/expense sweep to Equity at year-end (GnuCash's "
+                    f"computed figure is {computed_figure_with_reclass:,.2f}. This can happen "
+                    "for two different reasons that look identical on this account alone: "
+                    "(1) a closed-book income/expense sweep to Equity at year-end (GnuCash's "
                     "standard close-the-books behaviour), in which case the movement is "
                     "genuinely posted and sitting on the Equity account instead; or (2) "
                     "the transaction was never posted at all. This tool cannot tell the "

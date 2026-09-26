@@ -61,7 +61,14 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .engine import RECONCILIATION_TOLERANCE, residual_current_account_check
+from .engine import (
+    RECONCILIATION_TOLERANCE,
+    residual_current_account_check,
+    year_end_accrual_diff,
+    fy_prefix,
+    firm_token as _firm_token,
+    journal_txn_id as _txn_id,
+)
 
 CURRENCY = "INR"
 
@@ -130,37 +137,13 @@ class Journal:
         return abs(self.total_debit - self.total_credit) < _ZERO_TOLERANCE
 
 
-def fy_prefix(fy: str) -> str:
-    """Compact financial-year prefix for Transaction IDs: '2025-26' ->
-    '2526'. Mirrors build_tds_journals.py's fy_prefix() so both skills'
-    journal CSVs use the same cross-year-unique ID shape."""
-    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
-    if m:
-        return m.group(1)[2:] + m.group(2)
-    return re.sub(r"[^0-9A-Za-z]", "", fy or "FY")
-
-
-def _firm_token(firm_name: str) -> str:
-    """Short firm-scoped Transaction ID prefix derived from firm_name, e.g.
-    "KPMG India Services LLP" -> "KPMG": the first whitespace-separated
-    word, stripped to alphanumerics and upper-cased. Returns "" when
-    firm_name is empty or the token would come out empty, so the caller
-    falls back to today's bare ID shape rather than crashing or emitting a
-    leading hyphen."""
-    words = (firm_name or "").split()
-    if not words:
-        return ""
-    return re.sub(r"[^0-9A-Za-z]", "", words[0]).upper()
-
-
-def _txn_id(fy_pfx: str, firm_name: str, suffix: str) -> str:
-    """Build a Transaction ID as '<firm_token>-<fy_pfx>-<suffix>' when a
-    firm token is available (dialect point h), else the bare
-    '<fy_pfx>-<suffix>' with no leading hyphen."""
-    token = _firm_token(firm_name)
-    if token:
-        return f"{token}-{fy_pfx}-{suffix}"
-    return f"{fy_pfx}-{suffix}"
+# H35-04 rework: fy_prefix / _firm_token (as firm_token) / _txn_id (as
+# journal_txn_id) moved to engine.py and imported back above under their
+# original names here, so build_report() can also compute a pending
+# journal's Transaction ID (for the "PENDING JOURNAL POSTING" verdict on
+# the current-account-closing tie-out row) without engine.py importing
+# FROM this module (which already imports from engine.py -- that would be
+# circular). Behaviour is unchanged; this is a pure relocation.
 
 
 def _strip_root(account: str) -> str:
@@ -442,11 +425,17 @@ def build_accrual_journal(report, accounts: dict) -> tuple:
     # Arrears included: this is the WHOLE year's already-booked total in one
     # comparison, not a per-month accrual -- exactly mirrors the
     # share_of_profit_income leg formula in _monthly_journal(), above.
+    # H35-04 rework: this diff is now computed by engine.year_end_accrual_diff(),
+    # which build_report() also calls (to offer this same journal as a
+    # "PENDING JOURNAL POSTING" closure on the current-account-closing L5
+    # tie-out row) -- routing both through one function means the two can
+    # never desync. booked_sop is recomputed here only for the human-
+    # readable note text below; it uses the identical formula.
     booked_sop = sum(
         (m.share_of_profit_gross + m.firms_tax_sop + m.additional_share_of_profit)
         for m in monthly
     )
-    diff = round(l5_profit_share - booked_sop, 2)
+    diff = year_end_accrual_diff(llp_record, monthly)
 
     if abs(diff) <= RECONCILIATION_TOLERANCE:
         return None, (
