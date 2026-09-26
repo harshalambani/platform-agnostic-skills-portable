@@ -3,7 +3,7 @@
 
 *Mode: agent · 🤖 needs an LLM endpoint*
 
-Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books.
+Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books. For an entity with a Partner Comp Recon book configured, s.194T (partnership) TDS is left out of the CSV — that TDS is already booked month-by-month by the Partner Comp Recon journal — and the summary instead shows a read-only reconciliation of the 26AS s.194T figures against what that journal has actually posted (MATCH / OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.
 
 ## When to use it
 
@@ -43,7 +43,7 @@ Files produced:
 
 ## Tips
 
-Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again.
+Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again. If the s.194T reconciliation reports OPEN, run "Partner Comp Recon" first, then re-run this skill — the expected order is bank, then Partner Comp Recon, then this skill.
 
 ## Troubleshooting
 
@@ -51,3 +51,4 @@ Entries whose deductor could not be matched to an account are flagged so you can
 |------|-------|
 | Run errors mentioning the endpoint / model. | This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings). |
 | A deductor was assigned the wrong account. | Rename/add the account in GnuCash so its name is closer to the deductor, then re-run. |
+| s.194T reconciliation shows OPEN or VARIANCE. | OPEN means the Partner Comp Recon journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal's postings for those months before importing. |

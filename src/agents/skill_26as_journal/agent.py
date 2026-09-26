@@ -35,27 +35,12 @@ class EntityResolutionError(Exception):
     actually check for double-booking."""
 
 
-def _resolve_partner_comp_configured(entity: str, entities_path: str) -> bool:
-    """True only when `entity` resolves to an EntityProfile in entities_path
-    AND that profile's partner_comp_accounts is non-empty (configs.py: empty
-    means "the [partner comp] skill cannot emit a journal for this entity at
-    all").
-
-    `entity` is now a required input (skill.yaml), so a blank value or one
-    that is not found in entities.yaml is a user-input problem and raises
-    EntityResolutionError -- the caller must refuse the run before writing
-    any CSV, per the s.194T double-booking check this value drives.
-
-    entities_path itself being missing, unreadable, or unparsable is ALSO
-    a hard failure, not a silent fallback: if this file cannot be read, we
-    cannot know whether `entity`'s partner_comp_accounts is configured,
-    and cannot tell whether Category C (s.194T) would double-book TDS
-    that skill_partner_comp_recon's monthly journal already booked.
-    Falling back to False here would be exactly the silent fallback the
-    double-booking ruling closed elsewhere -- so this raises
-    EntityResolutionError naming the path, and no CSV is written. The
-    ONLY path that still journals Category C is an entity that IS found
-    in entities.yaml and has no partner_comp_accounts configured."""
+def _load_partner_comp_profile(entity: str, entities_path: str):
+    """Resolve `entity` to its EntityProfile in entities_path, or raise
+    EntityResolutionError. Shared by _resolve_partner_comp_configured() and
+    _resolve_partner_comp_tds_expense_account() so both apply the identical
+    fail-loud rules (see _resolve_partner_comp_configured's docstring for
+    why each of these must raise rather than silently fall back)."""
     if not entity:
         raise EntityResolutionError(
             "No entity selected. Pick the entity this 26AS workbook belongs "
@@ -83,11 +68,56 @@ def _resolve_partner_comp_configured(entity: str, entities_path: str) -> bool:
             f"skill can check whether s.194T partner-comp TDS is already "
             f"booked elsewhere and avoid double-booking it."
         )
+    return profile
+
+
+def _resolve_partner_comp_configured(entity: str, entities_path: str) -> bool:
+    """True only when `entity` resolves to an EntityProfile in entities_path
+    AND that profile's partner_comp_accounts is non-empty (configs.py: empty
+    means "the [partner comp] skill cannot emit a journal for this entity at
+    all").
+
+    `entity` is now a required input (skill.yaml), so a blank value or one
+    that is not found in entities.yaml is a user-input problem and raises
+    EntityResolutionError -- the caller must refuse the run before writing
+    any CSV, per the s.194T double-booking check this value drives.
+
+    entities_path itself being missing, unreadable, or unparsable is ALSO
+    a hard failure, not a silent fallback: if this file cannot be read, we
+    cannot know whether `entity`'s partner_comp_accounts is configured,
+    and cannot tell whether Category C (s.194T) would double-book TDS
+    that skill_partner_comp_recon's monthly journal already booked.
+    Falling back to False here would be exactly the silent fallback the
+    double-booking ruling closed elsewhere -- so this raises
+    EntityResolutionError naming the path, and no CSV is written. The
+    ONLY path that still journals Category C is an entity that IS found
+    in entities.yaml and has no partner_comp_accounts configured."""
+    profile = _load_partner_comp_profile(entity, entities_path)
     return bool(getattr(profile, "partner_comp_accounts", None))
 
 
+def _resolve_partner_comp_tds_expense_account(entity: str, entities_path: str) -> str:
+    """The entity's configured partner_comp_accounts['tds_expense'] account
+    path, or "" when partner_comp_accounts is not configured (or has no
+    'tds_expense' key). TDS-13: drives the read-only s.194T reconciliation
+    against skill_partner_comp_recon's own monthly posting to that account
+    (build_tds_journals.py's reconcile_s194t()) -- never used to post
+    anything itself.
+
+    Applies the identical entity/entities.yaml failure modes as
+    _resolve_partner_comp_configured() (see _load_partner_comp_profile) --
+    in run() below this is only called after that function has already
+    returned True, so those raises are unreachable in practice, but this
+    keeps the same fail-loud contract rather than silently swallowing them
+    if the call order ever changes."""
+    profile = _load_partner_comp_profile(entity, entities_path)
+    accounts = getattr(profile, "partner_comp_accounts", None) or {}
+    return str(accounts.get("tds_expense") or "")
+
+
 def _make_tools(xlsx_path: str, gnucash_path: str, output_path: str,
-                partner_comp_configured: bool = False) -> list:
+                partner_comp_configured: bool = False,
+                tds_expense_account: str = "") -> list:
     """Build the closure tools that bind the file paths, so the LLM never has to
     pass a path (small local models garble long Windows paths) — it only chooses
     accounts. Defined at module scope (not nested in ``run``) so tests can
@@ -100,7 +130,8 @@ def _make_tools(xlsx_path: str, gnucash_path: str, output_path: str,
         the CSV and lists any NEEDS REVIEW deductors with their candidate
         accounts. Call this first."""
         return T.run_build(xlsx_path, gnucash_path, output_path,
-                           partner_comp_configured=partner_comp_configured)
+                           partner_comp_configured=partner_comp_configured,
+                           tds_expense_account=tds_expense_account)
 
     @tool
     def apply_overrides(overrides: dict | None = None) -> str:
@@ -113,7 +144,8 @@ def _make_tools(xlsx_path: str, gnucash_path: str, output_path: str,
         defaults to none — calling with no overrides is a harmless no-op that
         leaves the already-verified CSV unchanged."""
         return T.run_apply(xlsx_path, gnucash_path, output_path, overrides,
-                           partner_comp_configured=partner_comp_configured)
+                           partner_comp_configured=partner_comp_configured,
+                           tds_expense_account=tds_expense_account)
 
     return [build_journals, apply_overrides]
 
@@ -150,7 +182,16 @@ def run(
         partner_comp_configured = _resolve_partner_comp_configured(entity, entities_path)
     except EntityResolutionError as e:
         return f"ERROR: {e}"
-    tools = _make_tools(xlsx_path, gnucash_path, output_path, partner_comp_configured)
+    # TDS-13: drives the read-only s.194T reconciliation against the Partner
+    # Comp journal's own tds_expense postings. Only resolved when this
+    # entity IS configured -- an entity without partner_comp_accounts has no
+    # tds_expense account to compare against, and no reco item at all (brief
+    # 1.4).
+    tds_expense_account = ""
+    if partner_comp_configured:
+        tds_expense_account = _resolve_partner_comp_tds_expense_account(entity, entities_path)
+    tools = _make_tools(xlsx_path, gnucash_path, output_path,
+                        partner_comp_configured, tds_expense_account)
     agent = build_agent(tools, SYSTEM_PROMPT, config_path, model_override)
     result = agent.invoke({
         "messages": [(
@@ -166,7 +207,7 @@ def run(
     # the model's free-text narration — a small local model mislabels the counts
     # (and mistypes the filename), which contradicts the real numbers. The LLM's
     # only job was to make the apply_overrides tool calls; its prose is dropped.
-    summary = T.final_summary(output_path, gnucash_path)
+    summary = T.final_summary(output_path, gnucash_path, xlsx_path, tds_expense_account)
     if summary:
         return summary
     return result["messages"][-1].content

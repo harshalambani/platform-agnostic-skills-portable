@@ -1607,11 +1607,13 @@ def test_run_proceeds_when_entity_found_without_partner_comp(tmp_path, monkeypat
         captured["tools"] = tools
         return _FakeAgent()
 
-    def _fake_make_tools(xlsx_path, gnucash_path, output_path, partner_comp_configured=False):
+    def _fake_make_tools(xlsx_path, gnucash_path, output_path,
+                         partner_comp_configured=False, tds_expense_account=""):
         captured["partner_comp_configured"] = partner_comp_configured
         return []
 
-    def _fake_final_summary(output_path, gnucash_path):
+    def _fake_final_summary(output_path, gnucash_path, xlsx_path="",
+                            tds_expense_account=""):
         return "Done."
 
     monkeypatch.setattr(AG, "build_agent", _fake_build_agent)
@@ -1721,3 +1723,186 @@ def test_resolve_partner_comp_configured_raises_not_returns_false_on_bad_entitie
         assert False, "must raise EntityResolutionError, not return False"
     except EntityResolutionError:
         pass
+
+
+# ---------------------------------------------------------------------------
+# TDS-13: read-only s.194T reconciliation (26AS vs Partner Comp journal)
+# ---------------------------------------------------------------------------
+
+def _write_194t_workbook(path, rows, fy="2025-26"):
+    """Write a Part I sheet with real per-TRANSACTION rows: columns 1/2/4/5/6/8
+    as _party_sheet (above) does, PLUS column 9 (Transaction Date,
+    "DD-Mon-YYYY") and column 14 (that transaction's own Tax Deducted) --
+    which parse_194t_monthly reads directly and _party_sheet never populates
+    (it only carries the FY sub-totals, not per-transaction dates). `rows` is
+    a list of (sr, name, section, txn_date_str, txn_tax) tuples; columns
+    4/5/6 are set to the same per-row tax figure since these tests never
+    look at the FY sub-totals."""
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    ws = wb.create_sheet(title="Part I")
+    ws.cell(1, 1, "Part I - Details")
+    ws.cell(2, 1, f"Assessee Name: X  |  PAN: AAAAA1111A  |  Financial Year: {fy}")
+    ws.cell(3, 1, "Sr.No.")
+    r = 4
+    for sr, name, section, txn_date, txn_tax in rows:
+        ws.cell(r, 1, sr)
+        ws.cell(r, 2, name)
+        ws.cell(r, 4, txn_tax)
+        ws.cell(r, 5, txn_tax)
+        ws.cell(r, 6, txn_tax)
+        ws.cell(r, 8, section)
+        ws.cell(r, 9, txn_date)
+        ws.cell(r, 14, txn_tax)
+        r += 1
+    wb.save(path)
+    return path
+
+
+def test_parse_194t_monthly_sums_two_rows_same_month():
+    """26AS can carry two rows in one month (e.g. an interest-on-capital row
+    and a remuneration row) -- brief 1.2 -- these must sum per month."""
+    p = Path(tempfile.gettempdir()) / "test_194t_two_rows.xlsx"
+    _write_194t_workbook(p, [
+        (1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 500.0),
+        (1, "PARTNERSHIP FIRM", "194T", "20-Jun-2025", 700.0),
+    ])
+    assert m.parse_194t_monthly(p) == {"2025-06": 1200.0}
+
+
+def test_parse_194t_monthly_ignores_non_194t_sections():
+    p = Path(tempfile.gettempdir()) / "test_194t_ignores_other.xlsx"
+    _write_194t_workbook(p, [(1, "BANK OF BARODA", "194A", "12-Jun-2025", 100.0)])
+    assert m.parse_194t_monthly(p) == {}
+
+
+def _reco(p, months_book, fy="2025-26",
+         account="Expense:xBusiness Expense:TDS on Partner Comp"):
+    """reconcile_s194t against a stubbed monthly_debits_for_account -- this
+    tests reconcile_s194t's classification logic in isolation, without
+    hand-building a synthetic .gnucash XML fixture (monthly_debits_for_account
+    itself is plain read-only XML parsing, exercised directly by its own
+    docstring/adaptation from reconcile_intercompany.py; what TDS-13 needs
+    pinned here is reconcile_s194t's OPEN/MATCH/PARTIAL/VARIANCE decision
+    logic given a book-side result)."""
+    orig = m.monthly_debits_for_account
+    m.monthly_debits_for_account = lambda *a, **k: months_book
+    try:
+        return m.reconcile_s194t(p, Path("dummy.gnucash"), account, fy=fy)
+    finally:
+        m.monthly_debits_for_account = orig
+
+
+def test_reconcile_s194t_nothing_posted_is_open_and_loud():
+    """(a) Nothing posted is never MATCH, and it is loud."""
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_open.xlsx"
+    _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
+    reco = _reco(p, {})
+    assert reco is not None
+    assert reco.status == "OPEN"
+    assert reco.status != "MATCH"
+    assert reco.loud is True
+    assert "partner recon" in reco.message
+
+
+def test_reconcile_s194t_variance_over_re1_is_loud():
+    """(b) A variance over Re 1 is loud."""
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_variance.xlsx"
+    _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
+    reco = _reco(p, {"2025-06": 998.0})  # diff 2.00, over the Re 1 tolerance
+    assert reco.status == "VARIANCE"
+    assert reco.loud is True
+    assert "2025-06" in reco.message
+
+
+def test_reconcile_s194t_within_re1_is_match_and_not_loud():
+    """(b) Re 1 or less is not loud."""
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_within_tolerance.xlsx"
+    _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
+    reco = _reco(p, {"2025-06": 999.50})  # diff 0.50, at the Re 1 tolerance
+    assert reco.status == "MATCH"
+    assert reco.loud is False
+
+
+def test_reconcile_s194t_two_26as_rows_reconcile_against_one_posting():
+    """(d) Two 26AS rows in one month reconcile against one combined monthly
+    posting -- the partner journal books a single monthly transaction, so the
+    sum of 26AS's interest-on-capital + remuneration rows for that month must
+    match it, not either row alone."""
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_two_rows.xlsx"
+    _write_194t_workbook(p, [
+        (1, "PARTNERSHIP FIRM", "194T", "05-Jun-2025", 500.0),
+        (1, "PARTNERSHIP FIRM", "194T", "25-Jun-2025", 700.0),
+    ])
+    reco = _reco(p, {"2025-06": 1200.0})
+    assert reco.months_26as == {"2025-06": 1200.0}
+    assert reco.status == "MATCH"
+
+
+def test_reconcile_s194t_partial_names_missing_months():
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_partial.xlsx"
+    _write_194t_workbook(p, [
+        (1, "PARTNERSHIP FIRM", "194T", "05-Jun-2025", 500.0),
+        (1, "PARTNERSHIP FIRM", "194T", "05-Jul-2025", 600.0),
+    ])
+    reco = _reco(p, {"2025-06": 500.0})  # July never posted
+    assert reco.status == "PARTIAL"
+    assert reco.loud is True
+    assert "2025-07" in reco.message
+
+
+def test_reconcile_s194t_returns_none_when_26as_has_no_194t():
+    """26AS with no s.194T amounts at all -- nothing to reconcile, and this
+    must be distinguishable from OPEN (which means 194T IS present but
+    nothing is posted for it yet)."""
+    p = Path(tempfile.gettempdir()) / "test_194t_reco_none.xlsx"
+    _write_194t_workbook(p, [(1, "BANK OF BARODA", "194A", "12-Jun-2025", 100.0)])
+    assert _reco(p, {}) is None
+
+
+def test_194t_never_reaches_either_csv_regardless_of_reco_state():
+    """(c) No s.194T line reaches either importable CSV, in any reco state --
+    the exclusion (excluded_from_journal, driven only by
+    partner_comp_configured) is computed entirely independently of the
+    reconciliation's OPEN/MATCH/PARTIAL/VARIANCE outcome (tools.final_summary
+    computes the reco separately, after the CSV is already written), so the
+    CSV content is identical no matter what the reco says."""
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts(), partner_comp_configured=True)
+    j = journals[0]
+    assert j.excluded_from_journal is True
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert rows == []  # never reaches the importable CSV...
+
+    for fake_status in ("OPEN", "MATCH", "PARTIAL", "VARIANCE"):
+        # ...no matter what a hypothetical reco result for this run would be.
+        fake_reco = m.S194TReco(applicable=True, status=fake_status, message="x")
+        assert m.build_csv_rows(journals, "2025-26") == rows
+        del fake_reco  # constructed only to prove it plays no part above
+
+
+def test_no_partner_comp_accounts_entity_shows_no_reco_item():
+    """(e) An entity without partner_comp_accounts behaves as today (26AS
+    books s.194T itself, with the existing double-booking warning) and shows
+    NO reco item at all. tds_expense_account is "" for such an entity
+    (agent.py only ever resolves it when partner_comp_configured is True --
+    see _resolve_partner_comp_tds_expense_account's caller in agent.run()),
+    and final_summary must never append a reco line when it is empty, even
+    when the workbook DOES carry s.194T amounts."""
+    d = _deductor(8, "ACME CONSULTING LLP", "194T", 3656276, 365628)
+    journals = m.build_journals([d], _accounts())  # partner_comp_configured defaults False
+    j = journals[0]
+    assert j.excluded_from_journal is False  # booked as today, not excluded
+    assert "WARNING" in j.credit_basis and "double-book" in j.credit_basis
+    rows = m.build_csv_rows(journals, "2025-26")
+    assert len(rows) == 2  # both splits still emitted, exactly as before
+
+    out = Path(tempfile.gettempdir()) / "test_194t_no_partner_comp.csv"
+    m.write_csv(journals, out, "2025-26")
+
+    xlsx = Path(tempfile.gettempdir()) / "test_194t_no_partner_comp.xlsx"
+    _write_194t_workbook(xlsx, [(1, "ACME CONSULTING LLP", "194T", "12-Jun-2025", 365628.0)])
+
+    summary = tl.final_summary(str(out), "", str(xlsx), "")  # tds_expense_account=""
+    assert "s.194T reconciliation" not in summary
