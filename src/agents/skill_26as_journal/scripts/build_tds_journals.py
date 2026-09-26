@@ -63,6 +63,16 @@ the 1 header line.
 
 Usage:
   python build_tds_journals.py <26as.xlsx> <book.gnucash> <out.csv>
+      [overrides.json] [--partner-comp-configured]
+      [--tds-expense-account <account path>]
+
+TDS-13: for entities with partner_comp_accounts configured (the caller
+passes --partner-comp-configured plus the entity's tds_expense account via
+--tds-expense-account), Category C (s.194T) rows stay out of both
+importable CSVs as before (skill_partner_comp_recon already books them
+month-by-month), and a read-only reconciliation compares 26AS's own
+per-month s.194T TDS against what that journal has actually posted to
+tds_expense in the book -- see reconcile_s194t()/S194TReco above.
 """
 from __future__ import annotations
 
@@ -226,6 +236,37 @@ class Split:
 
 
 @dataclass
+class S194TReco:
+    """Read-only reconciliation of 26AS section-194T TDS against the Partner
+    Comp Recon journal's own monthly `tds_expense` postings (TDS-09's design
+    is unchanged -- that journal's leg is never written to here, only read).
+
+    Only meaningful for entities with partner_comp_accounts configured (the
+    caller must not construct/surface this for an entity without one -- see
+    reconcile_s194t's docstring and TDS-13 brief 1.4).
+
+    status is one of:
+      "OPEN"     -- nothing at all posted to tds_expense in the FY yet
+                    (loud: run the partner recon first).
+      "MATCH"    -- every month (and the FY total) agrees within Re 1.
+      "PARTIAL"  -- some months posted, but at least one 26AS month has NO
+                    matching book posting at all (loud: names the missing
+                    month(s)).
+      "VARIANCE" -- posted, but at least one month's amount differs from
+                    26AS by more than Re 1 (loud: names the month(s)).
+    """
+    applicable: bool
+    status: str = ""
+    message: str = ""
+    months_26as: dict = field(default_factory=dict)
+    months_book: dict = field(default_factory=dict)
+
+    @property
+    def loud(self) -> bool:
+        return self.status != "MATCH"
+
+
+@dataclass
 class Journal:
     sr: int
     deductor: str
@@ -337,6 +378,251 @@ def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
             tan=str(tan).strip() if tan is not None else "",
         ))
     return deductors, fy
+
+
+def parse_194t_monthly(xlsx_path: Path) -> dict[str, float]:
+    """Per-month totals of section-194T Tax Deducted, read directly from the
+    Part I sheet's raw per-TRANSACTION rows -- NOT the FY sub-totals
+    _parse_party_sheet() reads (that function only keeps the first row's
+    header fields per Sr and a deduplicated set of section strings; it never
+    reads columns 9/11/14). Sr/name/tan/FY-totals (columns 1-6) repeat on
+    every transaction row of a deductor and column 8 is the Section, exactly
+    as _parse_party_sheet relies on -- see skill_26as/scripts/
+    extract_26as_to_xlsx.py's build_part_i(). Column 9 is the Transaction
+    Date (string "DD-Mon-YYYY") -- the date of payment/credit, which is the
+    same month the Partner Comp Recon journal accrues and dates its own
+    monthly posting on (jv_emitter.py's _month_end/_monthly_journal) --
+    and column 14 is that transaction's own Tax Deducted. Sub-total rows
+    (column 1 a literal "#<sr>" string) and the grand-total row (column 1
+    blank) are skipped by the same `isinstance(a, int)` gate
+    _parse_party_sheet uses.
+
+    Returns {"YYYY-MM": total_tax_deducted} for section "194T" rows only. A
+    row with an unparsable date or blank tax is skipped (not counted) rather
+    than raising, since this reconciliation is read-only best-effort audit,
+    not the primary journal build.
+    """
+    wb = load_workbook(xlsx_path, data_only=True)
+    if "Part I" not in wb.sheetnames:
+        return {}
+    ws = wb["Part I"]
+    out: dict[str, float] = {}
+    for r in range(4, ws.max_row + 1):
+        a = ws.cell(r, 1).value
+        if not isinstance(a, int):
+            continue
+        sec = ws.cell(r, 8).value
+        if str(sec or "").strip() != "194T":
+            continue
+        txn_date = ws.cell(r, 9).value
+        tax = ws.cell(r, 14).value
+        if not txn_date or tax in (None, ""):
+            continue
+        try:
+            dt = _dt.datetime.strptime(str(txn_date).strip(), "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        try:
+            tax_f = float(tax)
+        except (TypeError, ValueError):
+            continue
+        key = f"{dt.year:04d}-{dt.month:02d}"
+        out[key] = round(out.get(key, 0.0) + tax_f, 2)
+    return out
+
+
+# GnuCash XML namespaces, self-contained (this module runs as a subprocess,
+# see the sys.path-insert comment near the top of this file) -- mirrors
+# skill_gnucash_intercompany/scripts/reconcile_intercompany.py's constants,
+# adapted rather than imported per this codebase's sibling-script convention.
+_GNC_NS = "{http://www.gnucash.org/XML/gnc}"
+_ACT_NS = "{http://www.gnucash.org/XML/act}"
+_TRN_NS = "{http://www.gnucash.org/XML/trn}"
+_SPLIT_NS = "{http://www.gnucash.org/XML/split}"
+_TS_NS = "{http://www.gnucash.org/XML/ts}"
+
+
+def _parse_split_amount(text: Optional[str]) -> float:
+    """GnuCash split values are either a plain decimal or an "n/d" fraction."""
+    text = (text or "0/1").strip()
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            return float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def monthly_debits_for_account(gnucash_path: Path, account_path: str,
+                                lo: Optional[_dt.date] = None,
+                                hi: Optional[_dt.date] = None) -> dict[str, float]:
+    """Read-only: {"YYYY-MM": signed total} of every split posted to
+    `account_path` in the .gnucash book, restricted to [lo, hi] inclusive by
+    the transaction's posted date when given. GnuCash's Debit-positive /
+    Credit-negative convention (matches this module's own Split dataclass) --
+    a monthly `tds_expense` DEBIT total is therefore positive here, the same
+    sign the Partner Comp Recon journal books it with.
+
+    Adapted from skill_gnucash_intercompany/scripts/reconcile_intercompany.py's
+    load_book/extract_movements pattern rather than importing it (this module
+    cannot rely on `agents` being importable in a frozen subprocess -- see
+    the sys.path-insert comment near the top of this file).
+
+    Never writes to gnucash_path. Returns {} if no account in the book
+    matches account_path exactly.
+    """
+    raw = gnucash_path.read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+
+    by_id: dict[str, tuple[str, Optional[str]]] = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    target_guids = {aid for aid in by_id if full_path(aid) == account_path}
+    if not target_guids:
+        return {}
+
+    out: dict[str, float] = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        posted = trn.find(f"{_TRN_NS}date-posted/{_TS_NS}date")
+        if posted is None or not posted.text:
+            continue
+        try:
+            dt = _dt.datetime.strptime(posted.text.strip()[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if lo and dt < lo:
+            continue
+        if hi and dt > hi:
+            continue
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in target_guids:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            amt = _parse_split_amount(val.text if val is not None else None)
+            key = f"{dt.year:04d}-{dt.month:02d}"
+            out[key] = round(out.get(key, 0.0) + amt, 2)
+    return out
+
+
+RECONCILIATION_TOLERANCE = 1.0  # Re 1, the standing tolerance convention
+                                 # used elsewhere in this codebase's recos
+                                 # (e.g. skill_partner_comp_recon/engine.py) --
+                                 # no shared constant is importable here (this
+                                 # module runs as a stand-alone subprocess),
+                                 # so it is restated as a local literal.
+
+
+def _fy_bounds(fy: str) -> Optional[tuple]:
+    """"2025-26" -> (date(2025,4,1), date(2026,3,31)), or None if fy doesn't
+    parse (in which case the book read is left unbounded rather than wrongly
+    scoped)."""
+    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
+    if not m:
+        return None
+    y1 = int(m.group(1))
+    return _dt.date(y1, 4, 1), _dt.date(y1 + 1, 3, 31)
+
+
+def reconcile_s194t(xlsx_path: Path, gnucash_path: Path,
+                    tds_expense_account: str,
+                    fy: Optional[str] = None) -> Optional[S194TReco]:
+    """Read-only s.194T reconciliation (TDS-13): 26AS section-194T TDS, by
+    month and for the FY, against the Partner Comp Recon journal's own
+    monthly `tds_expense` postings already in the book. Never writes to the
+    book or the CSV -- this only reads what skill_partner_comp_recon already
+    posted (TDS-09's design: that journal's tds_expense leg is unchanged).
+
+    Only call this for an entity with partner_comp_accounts configured --
+    an entity without one has no reco item at all (brief 1.4); the caller
+    (run()) gates on that, not this function.
+
+    Returns None when the 26AS workbook carries no section-194T amounts at
+    all (nothing to reconcile -- distinct from "OPEN", which means 26AS DOES
+    have 194T but the book has nothing posted for it yet).
+
+    `fy` is the already-parsed financial year string ("2025-26") when the
+    caller has it (run()); if omitted, it is derived from the workbook via
+    parse_part_i() so this function is also usable standalone (tools.py's
+    final_summary()).
+    """
+    months_26as = parse_194t_monthly(xlsx_path)
+    if not any(abs(v) >= 0.01 for v in months_26as.values()):
+        return None
+
+    if fy is None:
+        _, fy = parse_part_i(xlsx_path)
+
+    bounds = _fy_bounds(fy)
+    lo, hi = bounds if bounds else (None, None)
+    months_book = monthly_debits_for_account(gnucash_path, tds_expense_account, lo, hi)
+
+    total_book = round(sum(months_book.values()), 2)
+    if abs(total_book) < 0.01:
+        return S194TReco(
+            applicable=True, status="OPEN",
+            message="partner journal not yet posted -- run the partner recon",
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    missing: list[str] = []
+    variant: list[str] = []
+    for m in sorted(months_26as):
+        as_amt = months_26as[m]
+        if abs(as_amt) < 0.01:
+            continue
+        book_amt = months_book.get(m, 0.0)
+        if abs(book_amt) < 0.01:
+            missing.append(m)
+        elif abs(as_amt - book_amt) > RECONCILIATION_TOLERANCE:
+            variant.append(m)
+
+    if not missing and not variant:
+        return S194TReco(
+            applicable=True, status="MATCH",
+            message="26AS s.194T TDS matches the Partner Comp journal's "
+                    "tds_expense postings (within Re 1) for every month.",
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    if missing and not variant:
+        return S194TReco(
+            applicable=True, status="PARTIAL",
+            message=("partner journal only partly posted -- missing month(s): "
+                     + ", ".join(missing)),
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    named = sorted(set(variant) | set(missing))
+    return S194TReco(
+        applicable=True, status="VARIANCE",
+        message=("26AS s.194T TDS does not match the Partner Comp journal's "
+                 "tds_expense postings for month(s): " + ", ".join(named)),
+        months_26as=months_26as, months_book=months_book,
+    )
 
 
 # -------------------- gnucash account parsing --------------------
@@ -1170,7 +1456,8 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         overrides: Optional[dict] = None, tcs_credit_account: str = "",
         tcs_overrides: Optional[dict] = None,
         g_overrides: Optional[dict] = None,
-        partner_comp_configured: bool = False) -> dict:
+        partner_comp_configured: bool = False,
+        tds_expense_account: str = "") -> dict:
     deductors, g_deductors, collectors, fy = parse_parts(xlsx_path)
     accounts = load_accounts(gnucash_path)
     # TDS-11: auto-load persisted human confirmations for this book. The
@@ -1209,6 +1496,23 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     # stale hand-filtered copy) -- see write_part_i_split's docstring.
     part_i_output, part_ii_problems = write_part_i_split(csv_rows, out_path)
 
+    # TDS-13: read-only s.194T reconciliation, for entities with
+    # partner_comp_accounts configured only (partner_comp_configured=True
+    # implies the caller resolved a tds_expense account too -- if it is
+    # blank anyway, e.g. not configured in entities.yaml, the reco is simply
+    # skipped rather than raising, since this is an audit item, not the
+    # primary journal build).
+    s194t_reco: Optional[S194TReco] = None
+    if partner_comp_configured and tds_expense_account:
+        try:
+            s194t_reco = reconcile_s194t(xlsx_path, gnucash_path,
+                                         tds_expense_account, fy=fy)
+        except Exception as e:
+            s194t_reco = S194TReco(
+                applicable=True, status="VARIANCE",
+                message=f"could not complete the s.194T reconciliation: {e}",
+            )
+
     existing = {a.path for a in accounts}
 
     # Any split account (debit or credit) not present in the book must be
@@ -1243,6 +1547,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "review": str(review_path),
         "part_i_output": part_i_output,
         "part_ii_problems": part_ii_problems,
+        "s194t_reco": s194t_reco,
     }
 
 
@@ -1264,6 +1569,7 @@ def _review_flag(needs_review: bool, confidence: str) -> str:
 
 
 _PARTNER_COMP_FLAG = "--partner-comp-configured"
+_TDS_EXPENSE_FLAG = "--tds-expense-account"
 
 
 def main(argv: list[str]) -> int:
@@ -1271,9 +1577,18 @@ def main(argv: list[str]) -> int:
     partner_comp_configured = _PARTNER_COMP_FLAG in argv
     if partner_comp_configured:
         argv = [a for a in argv if a != _PARTNER_COMP_FLAG]
+    tds_expense_account = ""
+    if _TDS_EXPENSE_FLAG in argv:
+        i = argv.index(_TDS_EXPENSE_FLAG)
+        if i + 1 >= len(argv):
+            print(f"{_TDS_EXPENSE_FLAG} requires a value", file=sys.stderr)
+            return 2
+        tds_expense_account = argv[i + 1]
+        del argv[i:i + 2]
     if len(argv) not in (4, 5):
         print("Usage: python build_tds_journals.py <26as.xlsx> <book.gnucash> "
-              f"<out.csv> [overrides.json] [{_PARTNER_COMP_FLAG}]", file=sys.stderr)
+              f"<out.csv> [overrides.json] [{_PARTNER_COMP_FLAG}] "
+              f"[{_TDS_EXPENSE_FLAG} <account path>]", file=sys.stderr)
         return 2
     overrides = None
     if len(argv) == 5:
@@ -1289,7 +1604,8 @@ def main(argv: list[str]) -> int:
             if m:
                 overrides[int(m.group(0))] = v
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides,
-               partner_comp_configured=partner_comp_configured)
+               partner_comp_configured=partner_comp_configured,
+               tds_expense_account=tds_expense_account)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
           f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
@@ -1324,6 +1640,13 @@ def main(argv: list[str]) -> int:
     if stats["part_i_output"]:
         print(f"Part I only (excludes 15G/15H, for hand-posted Part II): "
               f"{stats['part_i_output']}")
+    reco = stats.get("s194t_reco")
+    if reco is not None:
+        header = "s.194T reconciliation (26AS vs Partner Comp journal)"
+        if reco.loud:
+            print(f"\n*** {header}: {reco.status} *** {reco.message}")
+        else:
+            print(f"\n{header}: {reco.status} -- {reco.message}")
     return 0
 
 

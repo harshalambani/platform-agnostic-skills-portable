@@ -20,6 +20,17 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).parent / "scripts" / "build_tds_journals.py"
 
+# build_tds_journals.py normally runs as a stand-alone subprocess (below), but
+# final_summary() needs its read-only reconcile_s194t()/S194TReco directly
+# (not scraped from subprocess stdout) so the reco appears in the single
+# authoritative summary agent.py returns -- see final_summary's docstring.
+# scripts/ is not a package (mirrors that module's own sys.path-insert
+# comment for tds_learnings.py), so import it the same way.
+_SCRIPTS_DIR = str(Path(__file__).parent / "scripts")
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import build_tds_journals as _BTJ  # noqa: E402
+
 
 def _run_script(args: list[str]) -> str:
     result = subprocess.run(
@@ -152,11 +163,14 @@ def _gate_ambiguous_overrides(overrides: dict, output_path: str):
 
 
 def run_build(xlsx_path: str, gnucash_path: str, output_path: str,
-              partner_comp_configured: bool = False) -> str:
+              partner_comp_configured: bool = False,
+              tds_expense_account: str = "") -> str:
     """Deterministic build + self-verify. Returns the summary + verification."""
     args = [xlsx_path, gnucash_path, output_path]
     if partner_comp_configured:
         args.append("--partner-comp-configured")
+    if tds_expense_account:
+        args += ["--tds-expense-account", tds_expense_account]
     out = _run_script(args)
     if out.startswith("ERROR"):
         return out
@@ -197,11 +211,18 @@ def _existing_account_paths(gnucash_path: str):
     return {full(i) for i in by_id}
 
 
-def final_summary(output_path: str, gnucash_path: str = "") -> str:
+def final_summary(output_path: str, gnucash_path: str = "",
+                  xlsx_path: str = "", tds_expense_account: str = "") -> str:
     """The single authoritative summary shown to the user, computed from the
     output CSV + review sidecar (NOT from the LLM's narration, which a small
     model gets wrong). Reports the matched total split into parser vs LLM,
-    Suspense, and accounts to create."""
+    Suspense, and accounts to create.
+
+    TDS-13: when xlsx_path and tds_expense_account are both given (i.e. this
+    entity has partner_comp_accounts configured), also appends the read-only
+    s.194T reconciliation result -- computed fresh here via
+    build_tds_journals.reconcile_s194t() rather than scraped from the build
+    subprocess's stdout, so this stays the single authoritative summary."""
     out = Path(output_path)
     review = out.with_name(out.stem + "-review.csv")
     lines = ["**Journals built**"]
@@ -247,11 +268,26 @@ def final_summary(output_path: str, gnucash_path: str = "") -> str:
         lines.append("- Accounts to create in GnuCash before import: "
                      + (", ".join(missing) if missing else "none"))
 
+    if xlsx_path and tds_expense_account:
+        try:
+            reco = _BTJ.reconcile_s194t(Path(xlsx_path), Path(gnucash_path),
+                                        tds_expense_account)
+        except Exception as e:
+            reco = _BTJ.S194TReco(
+                applicable=True, status="VARIANCE",
+                message=f"could not complete the s.194T reconciliation: {e}",
+            )
+        if reco is not None:
+            marker = "*** " if reco.loud else ""
+            lines.append(f"- {marker}s.194T reconciliation (26AS vs Partner "
+                         f"Comp journal): {reco.status} -- {reco.message}")
+
     return "\n".join(lines)
 
 
 def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
-              overrides, partner_comp_configured: bool = False) -> str:
+              overrides, partner_comp_configured: bool = False,
+              tds_expense_account: str = "") -> str:
     """Re-build applying credit-account overrides, then self-verify."""
     norm = _normalize_overrides(overrides)
     if isinstance(norm, str):       # error message
@@ -271,6 +307,8 @@ def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
     args = [xlsx_path, gnucash_path, output_path, ov_path]
     if partner_comp_configured:
         args.append("--partner-comp-configured")
+    if tds_expense_account:
+        args += ["--tds-expense-account", tds_expense_account]
     out = _run_script(args)
     if out.startswith("ERROR"):
         return out
