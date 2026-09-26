@@ -802,6 +802,114 @@ def compute_capital_interest_schedule(
 
 
 @dataclass
+class S194tInterestTdsResult:
+    """H35-06 correction: isolates the s.194T TDS specifically on interest
+    on capital out of MonthlyLine.tds (the COMBINED remuneration+interest
+    TDS figure booked by jv_emitter.py -- this function never changes that
+    booking figure, only reports on it separately).
+
+    For every month interest_on_capital was actually paid, the payment
+    schedule's tds_on_rem_ioc exceeds the payslip's own tds by exactly the
+    TDS withheld on that month's interest (the schedule additionally
+    covers interest; the payslip does not -- see mapper.py 2.3/2.3b for
+    the two UNMERGED figures this reads, MonthlyLine.tds_schedule and
+    .tds_payslip). Summed across those months (as magnitudes), this is
+    `computed`. `expected` is the configured s.194T rate times the LLP
+    Statement's own interest-on-capital figure for the year (there is no
+    per-month statement breakdown to compare against instead).
+
+    `status` is CANNOT_RECONCILE (with `reason` set) whenever a month that
+    paid interest is missing either TDS figure, the rate driver, or the
+    statement's interest figure -- never treated as 0. `external`, when
+    supplied, is a third, independently reported figure shown alongside
+    (never invented, never required)."""
+    status: str  # "OK" or CANNOT_RECONCILE
+    computed: float | None = None
+    expected: float | None = None
+    rate: float | None = None
+    external: float | None = None
+    reason: str | None = None
+
+
+def compute_s194t_interest_tds(
+    monthly: "list[MonthlyLine]", drivers: dict, llp_record: dict | None,
+    external: dict, fy: str,
+) -> S194tInterestTdsResult:
+    """See S194tInterestTdsResult for the full method. The rate is read
+    from drivers["capital_interest_tds_rate"] for this FY; if that is not
+    supplied, this FALLS BACK to drivers["remuneration_tds_rate"] (both
+    are, in substance, the same partner-payments s.194T withholding rate)
+    -- never a hardcoded rate, per this module's governing rule.
+    """
+    missing_months: list[str] = []
+    computed = 0.0
+    saw_interest_month = False
+    for m in monthly:
+        if not m.interest_on_capital:
+            continue
+        saw_interest_month = True
+        if m.tds_schedule is None or m.tds_payslip is None:
+            missing_months.append(m.month)
+            continue
+        computed += abs(m.tds_schedule - m.tds_payslip)
+
+    external_value, _ = field_or_reason(
+        external, "tds_on_interest_on_capital", "s.194T TDS on interest on capital"
+    )
+
+    if not saw_interest_month:
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- no month this FY shows interest on "
+                   "capital paid (MonthlyLine.interest_on_capital); there is "
+                   "nothing to isolate a s.194T TDS-on-interest figure from.",
+        )
+    if missing_months:
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- interest on capital was paid in "
+                   f"{', '.join(missing_months)} but the payment schedule's "
+                   "tds_on_rem_ioc and/or the payslip's own tds figure is not "
+                   "supplied for that month; the interest-only TDS cannot be "
+                   "isolated (never assumed to be 0).",
+        )
+    computed = round(computed, 2)
+
+    rate, rate_reason = driver(drivers, "capital_interest_tds_rate", fy,
+                                "s.194T TDS rate on interest on capital")
+    if rate is None:
+        rate, rate_reason = driver(
+            drivers, "remuneration_tds_rate", fy,
+            "s.194T TDS rate on interest on capital (capital_interest_tds_rate "
+            "not supplied; falls back to remuneration_tds_rate)",
+        )
+
+    statement_interest = (
+        llp_record.get("capital_interest_on_capital") if llp_record is not None else None
+    )
+
+    if rate is None or statement_interest is None:
+        missing = []
+        if rate is None:
+            missing.append("capital_interest_tds_rate/remuneration_tds_rate driver")
+        if statement_interest is None:
+            missing.append("LLP Statement's interest on capital")
+        return S194tInterestTdsResult(
+            status=CANNOT_RECONCILE, computed=computed, rate=rate,
+            external=external_value,
+            reason=f"{CANNOT_RECONCILE} -- expected TDS (rate x statement "
+                   f"interest) not computable; not supplied: "
+                   f"{', '.join(missing)}.",
+        )
+
+    expected = round(rate * statement_interest, 2)
+    return S194tInterestTdsResult(
+        status="OK", computed=computed, expected=expected, rate=rate,
+        external=external_value,
+    )
+
+
+@dataclass
 class CtcCheckResult:
     """H35-08: walks Target Compensation down to the cash pool actually
     paid this FY -- remuneration + gross share of profit + CTC structuring
@@ -908,6 +1016,14 @@ class MonthlyLine:
     # CREDITS (reduces) the current-account balance owed by the firm. NOT
     # current-year income -- the income and its firm's tax were already
     # recognised in the award year (see jv_emitter.py).
+    # H35-06 correction: the two UNMERGED TDS figures behind `tds` (the
+    # precedence-combined figure above, already used for journal posting --
+    # see jv_emitter.py, unchanged by these). None (never 0.0) when that
+    # source has no figure for this month -- see mapper.py 2.3b. Read-only
+    # reconciliation inputs for compute_s194t_interest_tds() below; never a
+    # booking source.
+    tds_schedule: float | None = None  # payment schedule's tds_on_rem_ioc
+    tds_payslip: float | None = None   # payslip's own tds figure
 
 
 @dataclass
@@ -997,6 +1113,8 @@ def build_report(data: dict) -> Report:
             interest_on_capital=m.get("interest_on_capital", 0.0) or 0.0,
             medical_topup=m.get("medical_topup", 0.0) or 0.0,
             prior_cohort_drawdown=m.get("prior_cohort_drawdown", 0.0) or 0.0,
+            tds_schedule=m.get("tds_schedule"),
+            tds_payslip=m.get("tds_payslip"),
         ))
         addl = m.get("additional_share_of_profit", 0.0) or 0.0
         if addl:
@@ -1324,15 +1442,31 @@ def build_report(data: dict) -> Report:
     # the L5. This row instead computes a fresh interest schedule -- simple
     # interest at drivers["capital_interest_rate"], actual days/365 -- off
     # the capital MOVEMENTS this FY (MonthlyLine.capital_transferred), and
-    # compares THAT computed total against the same L5 field. The two rows
-    # can legitimately disagree (e.g. this FY's only capital movement is an
-    # interest CREDIT with no new capital_transferred tranche, so this
-    # schedule computes 0.0 while the L5 shows the credited amount) -- this
-    # row is never forced to tie against the other.
+    # compares THAT computed total against the same L5 field.
+    #
+    # H35-06 correction: this row is ALWAYS informational, regardless of the
+    # size of the gap. Real-run corroboration (two independent sources: the
+    # L5 tie-out row above, and the final month's payslip arrears figure
+    # net of s.194T) showed the LLP Statement's interest-on-capital figure
+    # is correct and this schedule's BASIS (rate/day-count/interest-from
+    # date) simply isn't established to match the statement's own method --
+    # so a gap here, however large, is never a "STATEMENT DISAGREES"
+    # disagreement and never enters the reconciliation counts. The
+    # statement's own figure is independently checked by the L5 tie-out row
+    # instead; this schedule sheet only models one possible (KPMG's)
+    # computation method.
     capital_interest_schedule = compute_capital_interest_schedule(monthly, drivers, fy)
     _interest_schedule_category = (
         "Interest on capital: computed (schedule, this FY's payslip capital "
         "movements only) vs LLP Statement"
+    )
+    _schedule_informational_prefix = (
+        "INFORMATIONAL -- this schedule's basis (rate, day-count, "
+        "interest-from date) is not established against the LLP Statement's "
+        "own method; the statement figure is independently checked by the "
+        "'L5 tie-out: interest on capital' row above. This row only models "
+        "KPMG's own computation method and is never a disagreement with the "
+        "statement, however large the gap. "
     )
     if capital_interest_schedule.rate is None:
         reconciliation.append(ReconciliationResult(
@@ -1341,32 +1475,50 @@ def build_report(data: dict) -> Report:
                      "LLP Statement (L5)": llp_record.get("capital_interest_on_capital")
                      if llp_record is not None else None},
             agree=None,
-            note=capital_interest_schedule.reason,
+            note=_schedule_informational_prefix + (capital_interest_schedule.reason or ""),
+            informational=True,
         ))
     else:
-        reconciliation.append(statement_reference_row(
+        _schedule_row = statement_reference_row(
             _interest_schedule_category,
             llp_record.get("capital_interest_on_capital") if llp_record is not None else None,
             "LLP Statement (L5)",
             {"Computed (interest schedule)": capital_interest_schedule.total_interest},
-        ))
+        )
+        _schedule_row.note = _schedule_informational_prefix + (_schedule_row.note or "")
+        _schedule_row.informational = True
+        reconciliation.append(_schedule_row)
 
-    # s.194T TDS on interest-on-capital specifically: no driver or parsed
-    # field anywhere in this skill isolates a TDS figure for interest alone
-    # -- MonthlyLine.tds is explicitly a COMBINED remuneration + interest
-    # figure (see the D1 current-account identity below). Reporting this as
-    # "not supplied" rather than inventing a split or a hardcoded rate.
-    s194t_tds_on_interest, s194t_reason = field_or_reason(
-        external, "tds_on_interest_on_capital", "s.194T TDS on interest on capital"
-    )
-    reconciliation.append(ReconciliationResult(
-        category="s.194T TDS on interest on capital",
-        sources={"Reported": s194t_tds_on_interest},
-        agree=None if s194t_tds_on_interest is None else True,
-        note=s194t_reason or "Reported as supplied; not independently recomputed here.",
-        not_checked=True,
-        status_label="NOT SUPPLIED" if s194t_tds_on_interest is None else None,
-    ))
+    # H35-06 correction: "s.194T TDS on interest on capital" is now a real,
+    # non-informational check (it was previously always "NOT SUPPLIED" --
+    # no field anywhere in this skill isolated interest-only TDS). It is
+    # derived by DIFFERENCE from figures already carried through unmerged
+    # (mapper.py 2.3b: MonthlyLine.tds_schedule / .tds_payslip) -- see
+    # compute_s194t_interest_tds() for the full method and its CANNOT-
+    # RECONCILE conditions. No new journal leg results from this: the
+    # monthly journal's tds_expense leg already carries the COMBINED
+    # remuneration+interest TDS (MonthlyLine.tds, schedule-precedence --
+    # see mapper.py 2.3), unaffected by this check.
+    s194t_interest = compute_s194t_interest_tds(monthly, drivers, llp_record, external, fy)
+    _s194t_category = "s.194T TDS on interest on capital"
+    if s194t_interest.status == "OK":
+        _s194t_sources = {
+            "Computed (schedule TDS - payslip TDS, interest months)": s194t_interest.computed,
+            "Expected (s.194T rate x statement interest)": s194t_interest.expected,
+        }
+        if s194t_interest.external is not None:
+            _s194t_sources["Externally reported"] = s194t_interest.external
+        reconciliation.append(reconcile_category(_s194t_category, _s194t_sources))
+    else:
+        reconciliation.append(ReconciliationResult(
+            category=_s194t_category,
+            sources={"Computed (schedule TDS - payslip TDS, interest months)":
+                         s194t_interest.computed,
+                     "Expected (s.194T rate x statement interest)": s194t_interest.expected,
+                     "Externally reported": s194t_interest.external},
+            agree=None,
+            note=s194t_interest.reason,
+        ))
 
     total_tds_credit = -sum(m.tds for m in monthly) if monthly else None
     form_26as, _ = field_or_reason(external, "form_26as_total_credit", "Form 26AS total credit")

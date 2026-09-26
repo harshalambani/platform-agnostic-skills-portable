@@ -409,6 +409,17 @@ def _write_interest_on_capital_sheet(wb, report: Report):
         _autosize(ws, 1)
         return
 
+    # H35-06 correction: this schedule is informational -- its basis (rate,
+    # day-count, interest-from date) is not established against the LLP
+    # Statement's own method. The statement figure is independently checked
+    # by the "L5 tie-out: interest on capital" reconciliation row instead;
+    # this sheet only models one possible (KPMG's) computation method.
+    _set(ws, row, 1, "INFORMATIONAL -- models one possible (KPMG's) computation "
+                      "method; not the check on the LLP Statement's own figure "
+                      "(see the L5 tie-out row on the Reconciliation sheet)",
+         fill=TF, bold=True)
+    row += 2
+
     if schedule.rate is None:
         _set(ws, row, 1, "Rate", bold=True)
         _set(ws, row, 2, schedule.reason or CANNOT_RECONCILE_LABEL, fill=TF)

@@ -397,6 +397,20 @@ def _build_monthly(
         if rec.get("tds_label") is not None:
             line["tds_label"] = rec["tds_label"]
 
+        # 2.3b (H35-06 correction) -- the two UNMERGED figures behind the
+        # precedence pick just above, carried straight through unchanged
+        # (never re-derived, never re-parsed) so the s.194T-on-interest
+        # check in engine.py can isolate the interest component of the
+        # combined TDS figure: a month's schedule-vs-payslip TDS spread is
+        # attributable to interest only when interest_on_capital was also
+        # paid that month. `tds` above (the precedence-combined figure,
+        # already used for journal posting) is left untouched by this --
+        # these are read-only reconciliation inputs, not booking sources.
+        if sched_tds is not None:
+            line["tds_schedule"] = sched_tds
+        if payslip_tds is not None:
+            line["tds_payslip"] = payslip_tds
+
         # 2.4 -- additional_share_of_profit is booked from the schedule's
         # arrears_share_of_profit ONLY. The payslip's own
         # additional_share_of_profit field is polymorphic across the year

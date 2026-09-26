@@ -537,20 +537,30 @@ def test_build_report_end_to_end_against_fixture():
             "Interest on capital: computed (schedule, this FY's payslip capital "
             "movements only) vs LLP Statement"
         ):
-            # H35-06: the fixture supplies no drivers["capital_interest_rate"]
-            # (agent.py's run() is the one that injects the documented 6%
-            # default -- build_report() itself never applies a fallback, per
-            # this module's governing rule), so this row CANNOT RECONCILE
-            # here, never a failure -- see compute_capital_interest_schedule().
+            # H35-06 correction: this row is now ALWAYS informational,
+            # whatever `agree` computes to -- its basis is checked against
+            # the L5 tie-out row instead, never against this schedule. The
+            # fixture supplies no drivers["capital_interest_rate"] (agent.py's
+            # run() is the one that injects the documented 6% default --
+            # build_report() itself never applies a fallback, per this
+            # module's governing rule), so the underlying figure is still
+            # CANNOT RECONCILE here -- see compute_capital_interest_schedule()
+            # -- but that must never read as a genuine failure.
             assert r.agree is None, f"expected None (rate not supplied) for {cat!r}, got {r.agree!r}"
+            assert r.informational is True
             assert "capital interest rate not supplied" in r.note
         elif cat == "s.194T TDS on interest on capital":
-            # H35-06: no driver/parsed field in this skill isolates a TDS
-            # figure for interest alone (MonthlyLine.tds is a COMBINED
-            # remuneration + interest figure) -- always NOT SUPPLIED, never a
-            # failure, until such a source exists.
-            assert r.agree is None, f"expected None (not supplied) for {cat!r}, got {r.agree!r}"
-            assert r.status_label == "NOT SUPPLIED"
+            # H35-06 correction: now a REAL check (no longer NOT SUPPLIED by
+            # default). The fixture's one interest-on-capital month (April,
+            # 12,000) supplies a payslip tds figure but no payment-schedule
+            # tds_on_rem_ioc figure, so the interest-only TDS cannot be
+            # isolated -- CANNOT RECONCILE, never assumed 0, and never
+            # informational/not_checked (it is a genuine, counted gap now).
+            assert r.agree is None, f"expected None (missing schedule TDS) for {cat!r}, got {r.agree!r}"
+            assert r.informational is False
+            assert not getattr(r, "not_checked", False)
+            assert CANNOT_RECONCILE in r.note
+            assert "2025-04" in r.note
         elif cat.startswith("CTC walk-down:"):
             # H35-08: the fixture supplies no data["ctc_structuring"] block,
             # so the cash pool cannot be computed -- CANNOT RECONCILE, never
@@ -7925,8 +7935,10 @@ def test_h35_06_no_override_defaults_to_tranche_month_not_fy_start():
     assert row.interest_from_date_is_override is False
 
 
-# 3 -- NEGATIVE: the statement-referenced row reports a mismatch beyond
-# Re 1, and does NOT report one when the difference is Re 1 or less.
+# 3 -- NEGATIVE (H35-06 correction): whatever size the gap between this
+# schedule and the LLP Statement is -- beyond Re 1 or within it -- the row
+# is ALWAYS informational, never a "STATEMENT DISAGREES" LOUD-block entry
+# and never counted in the header issue count, however large the gap.
 def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
     category = (
         "Interest on capital: computed (schedule, this FY's payslip capital "
@@ -7939,18 +7951,36 @@ def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
     # principal 100000, rate 6%, 2031-04-01 -> FY close (2032-03-31) = 365
     # days -> computed interest = 6000.00 exactly.
 
-    # (a) beyond Re 1: reported as a genuine disagreement.
+    # (a) beyond Re 1: the underlying comparison still disagrees (visible in
+    # `agree`/`sources`), but it is NEVER a LOUD "STATEMENT DISAGREES" entry
+    # and NEVER counted in report.statement_flags -- see requirement 1.
     over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6002.0}}
     report_over = build_report(over)
     row_over = next(r for r in report_over.reconciliation if r.category == category)
     assert row_over.agree is False
-    assert row_over.note.startswith("STATEMENT DISAGREES")
+    assert row_over.informational is True
+    assert not any(category in flag for flag in report_over.statement_flags)
 
-    # (b) within Re 1: not reported as a disagreement.
+    # (b) within Re 1: agrees, and is (as always for this row) informational.
     within = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6000.5}}
     report_within = build_report(within)
     row_within = next(r for r in report_within.reconciliation if r.category == category)
     assert row_within.agree is True
+    assert row_within.informational is True
+
+    # NEGATIVE: a mismatch of ANY size (not just within Re 1) never enters
+    # the LOUD block or the header issue count -- prove this with a much
+    # larger, unambiguous gap too.
+    huge = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 60000.0}}
+    report_huge = build_report(huge)
+    row_huge = next(r for r in report_huge.reconciliation if r.category == category)
+    assert row_huge.agree is False
+    assert row_huge.informational is True
+    assert not any(category in flag for flag in report_huge.statement_flags)
+    variances = [
+        r for r in report_huge.reconciliation if r.agree is False and not r.informational
+    ]
+    assert category not in [r.category for r in variances]
 
 
 # 4 -- NEGATIVE: a rate override is not silently ignored -- a different
@@ -7965,6 +7995,178 @@ def test_h35_06_rate_override_not_silently_ignored():
     )
     assert schedule_a.total_interest != schedule_b.total_interest
     assert schedule_b.total_interest == round(schedule_a.total_interest * 0.09 / 0.06, 2)
+
+
+# ---------------------------------------------------------------------------
+# H35-06 correction -- s.194T TDS on interest on capital is now a REAL check
+# (no longer NOT-SUPPLIED-by-default): derived as the magnitude of the
+# spread between the payment schedule's tds_on_rem_ioc and the payslip's own
+# tds figure, summed across the months interest_on_capital was actually
+# paid (MonthlyLine.tds_schedule / .tds_payslip, carried through unmerged by
+# mapper.py 2.3b), and checked against the s.194T rate x the LLP Statement's
+# own interest-on-capital figure. 5 required negative tests.
+# ---------------------------------------------------------------------------
+
+def _s194t_data(
+    *,
+    tds_schedule=-1500.0,
+    tds_payslip=-300.0,
+    tds=None,
+    interest_on_capital=12000.0,
+    capital_interest_on_capital=12000.0,
+    capital_interest_tds_rate=None,
+    remuneration_tds_rate=0.10,
+    extra_month=True,
+) -> dict:
+    """One interest-paying month (April) plus, by default, one ordinary
+    non-interest month (May) so the "only interest months count" logic is
+    always exercised. `tds` (the precedence-combined, already-booked figure)
+    defaults to whichever of tds_schedule/tds_payslip is supplied -- this
+    helper never touches that field's own precedence logic, it only feeds
+    the two new read-only fields the H35-06 correction added."""
+    if tds is None:
+        tds = tds_schedule if tds_schedule is not None else tds_payslip
+    april = {
+        "month": "2031-04", "remuneration": 100000, "share_of_profit_gross": 0,
+        "additional_share_of_profit": 0, "firms_tax_sop": 0, "tds": tds,
+        "capital_transferred": 0,
+        # balances the journal: Dr bank = total_paid; Dr tds_expense = -tds;
+        # Cr remuneration = 100000; Cr interest_on_capital = interest_on_capital.
+        "total_paid": 100000 + interest_on_capital + (tds or 0),
+        "interest_on_capital": interest_on_capital,
+    }
+    if tds_schedule is not None:
+        april["tds_schedule"] = tds_schedule
+    if tds_payslip is not None:
+        april["tds_payslip"] = tds_payslip
+    monthly = [april]
+    if extra_month:
+        monthly.append({
+            "month": "2031-05", "remuneration": 100000, "share_of_profit_gross": 0,
+            "additional_share_of_profit": 0, "firms_tax_sop": 0, "tds": -10000,
+            "capital_transferred": 0, "total_paid": 90000,
+        })
+    drivers = {"remuneration_tds_rate": remuneration_tds_rate}
+    if capital_interest_tds_rate is not None:
+        drivers["capital_interest_tds_rate"] = capital_interest_tds_rate
+    data = {
+        "financial_year": "2031-32",
+        "firm_name": "Testcorp Alpha LLP",
+        "drivers": drivers,
+        "monthly": monthly,
+        "llp_record": {"capital_interest_on_capital": capital_interest_on_capital},
+        "external": {},
+    }
+    return data
+
+
+_S194T_CATEGORY = "s.194T TDS on interest on capital"
+
+
+# 1 -- NEGATIVE: a mismatch of any size (computed vs expected) must never
+# enter the LOUD block or the header issue count -- ONLY the OLD
+# schedule-vs-statement row is barred from the LOUD block (H35-06
+# correction requirement 1); this is a genuinely new, counted check, and a
+# real variance here is expected to surface as an ordinary (non-LOUD)
+# reconciliation VARIANCE, never suppressed.
+def test_s194t_mismatch_of_any_size_never_forced_into_loud_block():
+    # computed = |-1500 - (-300)| = 1200; expected = 0.10 x 12000 = 1200 --
+    # these agree, so first prove the AGREE path never appears in the LOUD
+    # block (it wouldn't anyway, since agree=True rows are never flagged),
+    # then prove a genuine large variance still stays OUT of statement_flags
+    # (the LOUD block is reserved for LLP-Statement-referenced disagreements
+    # -- this check is never routed through statement_reference_row()).
+    data = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0)  # computed=4700
+    report = build_report(data)
+    row = next(r for r in report.reconciliation if r.category == _S194T_CATEGORY)
+    assert row.agree is False  # 4700 vs expected 1200 -- a genuine, large variance
+    assert not any(_S194T_CATEGORY in flag for flag in report.statement_flags)
+
+
+# 2 -- NEGATIVE: journal tds_expense totals and leg count are IDENTICAL
+# with and without this new row's inputs present -- proving requirement 3
+# ("NO new journal leg") holds even when the new check actually runs.
+def test_s194t_no_new_journal_leg_totals_and_leg_count_unchanged():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    data_with = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0)
+    data_without = _s194t_data(
+        tds_schedule=None, tds_payslip=None, tds=-5000.0,
+    )
+    journals_with = build_journals(build_report(data_with), accounts)
+    journals_without = build_journals(build_report(data_without), accounts)
+
+    april_with = next(j for j in journals_with if j.txn_id.endswith("-M01"))
+    april_without = next(j for j in journals_without if j.txn_id.endswith("-M01"))
+
+    assert len(april_with.splits) == len(april_without.splits)
+    tds_with = next(s for s in april_with.splits if s.account == accounts["tds_expense"])
+    tds_without = next(s for s in april_without.splits if s.account == accounts["tds_expense"])
+    assert tds_with.debit == pytest.approx(tds_without.debit, abs=0.01)
+    assert tds_with.credit == pytest.approx(tds_without.credit, abs=0.01) == 0.0
+
+
+# 3 -- NEGATIVE: interest on capital was paid this month but the payment
+# schedule's tds_on_rem_ioc is absent -- CANNOT RECONCILE naming the month,
+# never treated as a 0 contribution to the computed figure.
+def test_s194t_interest_paid_schedule_tds_absent_cannot_reconcile_not_zero():
+    data = _s194t_data(tds_schedule=None, tds_payslip=-300.0, tds=-300.0)
+    report = build_report(data)
+    row = next(r for r in report.reconciliation if r.category == _S194T_CATEGORY)
+    assert row.agree is None
+    assert row.informational is False
+    assert not getattr(row, "not_checked", False)
+    assert CANNOT_RECONCILE in row.note
+    assert "2031-04" in row.note
+    assert row.sources["Computed (schedule TDS - payslip TDS, interest months)"] is None
+
+
+# 4 -- NEGATIVE: a TDS difference beyond Re 1 is a loud (non-informational)
+# VARIANCE; a difference of Re 1 or less agrees.
+def test_s194t_tds_diff_over_re1_variance_within_re1_agrees():
+    # expected = 0.10 x 12000 = 1200.00 exactly.
+    # (a) computed = |-1500 - (-300)| = 1200.00 -- agrees exactly.
+    exact = _s194t_data(tds_schedule=-1500.0, tds_payslip=-300.0)
+    report_exact = build_report(exact)
+    row_exact = next(r for r in report_exact.reconciliation if r.category == _S194T_CATEGORY)
+    assert row_exact.agree is True
+
+    # (b) computed = |-1501.50 - (-300)| = 1201.50 -- 1.50 over Re 1: variance.
+    over = _s194t_data(tds_schedule=-1501.50, tds_payslip=-300.0)
+    report_over = build_report(over)
+    row_over = next(r for r in report_over.reconciliation if r.category == _S194T_CATEGORY)
+    assert row_over.agree is False
+    assert row_over.informational is False
+
+
+# 5 -- NEGATIVE: the combined journal TDS leg (tds_expense) uses the
+# SCHEDULE's figure, never the payslip's, when the two differ -- proving
+# requirement 3's "schedule precedence over payslip" guarantee holds even
+# in a month the new s.194T check also reads (an interest-paying month).
+def test_s194t_combined_journal_tds_uses_schedule_not_payslip_when_they_differ():
+    accounts = {
+        "bank": "Assets:Bank:Current Account",
+        "tds_expense": "Expenses:Tax:TDS 194T",
+        "interest_on_capital": "Income:PGBP:Interest on Capital",
+        "remuneration_income": "Income:PGBP:Remuneration",
+        "share_of_profit_income": "Income:PGBP:Share of Profit",
+    }
+    # Precedence figure `tds` is set to the SCHEDULE's own value (-5000),
+    # exactly as mapper.py's existing 2.3 precedence logic would have picked
+    # -- the payslip's own (unmerged) figure is deliberately different
+    # (-300) so the journal leg is provably NOT using it.
+    data = _s194t_data(tds_schedule=-5000.0, tds_payslip=-300.0, tds=-5000.0)
+    journal = next(
+        j for j in build_journals(build_report(data), accounts) if j.txn_id.endswith("-M01")
+    )
+    tds_split = next(s for s in journal.splits if s.account == accounts["tds_expense"])
+    assert tds_split.debit == pytest.approx(5000.0, abs=0.01)
+    assert tds_split.debit != pytest.approx(300.0, abs=0.01)
 
 
 # ---------------------------------------------------------------------------
