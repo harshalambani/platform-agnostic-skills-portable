@@ -318,7 +318,7 @@ def test_run_completes_and_reports_correctly_when_rules_resolve_every_row(tmp_pa
     import skill_gnucash_mapping_generator.agent as mapgen_mod
     import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod
 
-    def fake_parse_gnucash_file(path):
+    def fake_parse_gnucash_file(path, gnucash_bank_account=None):
         return {"mappings": {"BankX": [
             {"account": "Income:Salary"}, {"account": "Expenses:Rent"},
         ]}}

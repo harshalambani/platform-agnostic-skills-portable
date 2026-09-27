@@ -89,7 +89,7 @@ def test_sweep_rows_excluded_from_llm_via_run_step_wiring(tmp_path, monkeypatch)
     import skill_gnucash_mapping_generator.agent as mapgen_mod
     import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod
 
-    def fake_parse_gnucash_file(path):
+    def fake_parse_gnucash_file(path, gnucash_bank_account=None):
         # Only sweep history -- no rule will ever be generated for the
         # unrelated coffee-shop row, so it stays 'none' until the LLM step.
         return {"mappings": {"BankX": list(_SWEEP_HISTORY)}}

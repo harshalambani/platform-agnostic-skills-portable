@@ -4,9 +4,10 @@
 import gzip
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 import xml.etree.ElementTree as ET
 
 logger = logging.getLogger(__name__)
@@ -26,14 +27,61 @@ BANK_PATTERNS = {
     'BoB': ['Bank of Baroda', 'BoB', 'bob'],
 }
 
+_ROOT_PREFIX = "Root Account:"
+
 
 def _match_bank(account_name: str) -> Optional[str]:
-    """Detect bank type from account name."""
+    """Detect which known bank an account NAME PATTERN belongs to.
+
+    This is a naming heuristic only -- it says nothing about whether the
+    account is that bank's own current/savings account versus, say, a term
+    deposit or a loan that merely happens to be named after the bank. Callers
+    that need "is this the bank's own transactable account" must combine this
+    with the account's GnuCash type (see _is_own_bank_account) or with an
+    explicitly known account path (see _norm_account_path).
+    """
     for bank, patterns in BANK_PATTERNS.items():
         for pattern in patterns:
             if pattern.lower() in account_name.lower():
                 return bank
     return None
+
+
+def _norm_account_path(path: str) -> str:
+    """Normalise a GnuCash account path for equality comparisons.
+
+    Some callers pass paths with a leading "Root Account:" and some don't;
+    normalise both sides before comparing so an explicitly-named bank account
+    matches regardless of which form the caller used.
+    """
+    if path and path.startswith(_ROOT_PREFIX):
+        return path[len(_ROOT_PREFIX):]
+    return path or ""
+
+
+def _is_own_bank_account(acc_path: str, acc_type: Optional[str]) -> Optional[str]:
+    """Structural rule for "this split is the bank's own current/savings account".
+
+    A path merely CONTAINING a bank's name is not enough -- a fixed deposit
+    ("...Fixed Deposits:ICICI Bank - FD"), a loan, or a credit card can all be
+    named after the issuing bank without being that bank's transactable
+    current/savings account, and treating any bank-named path as "the bank"
+    causes real transfer targets (FD sweeps, inter-bank transfers) to be
+    silently skipped -- see the module-level RED FLAG note above
+    parse_gnucash_file.
+
+    The sound structural signal GnuCash already gives us is the account's
+    <act:type> element: a real current/savings account is booked with type
+    BANK. A fixed deposit, loan, or credit card is booked under a different
+    type (typically ASSET, LIABILITY, or CREDIT respectively). So an account
+    only counts as a bank's own account when BOTH hold: its GnuCash type is
+    BANK, AND its name matches a known bank pattern (the pattern says *which*
+    bank; the type confirms it is actually that bank's transactable account
+    and not merely something named after it).
+    """
+    if acc_type != 'BANK':
+        return None
+    return _match_bank(acc_path)
 
 
 def _get_account_hierarchy(acc_id: str, account_ids: Dict, account_parents: Dict, visited: Optional[Set] = None) -> str:
@@ -53,8 +101,50 @@ def _get_account_hierarchy(acc_id: str, account_ids: Dict, account_parents: Dict
     return acc_name
 
 
-def parse_gnucash_file(gnucash_file: str) -> Dict[str, Any]:
-    """Parse .gnucash XML file and extract description→account mappings."""
+def _split_amount(value_elem) -> Optional[float]:
+    """Parse a GnuCash split <split:value> (plain decimal or N/D rational)."""
+    try:
+        value_text = (value_elem.text or "0").strip() if value_elem is not None else "0"
+        if '/' in value_text:
+            numerator, denominator = value_text.split('/')
+            return abs(float(numerator) / float(denominator))
+        return abs(float(value_text.replace(',', '')))
+    except (ValueError, AttributeError, ZeroDivisionError):
+        return None
+
+
+def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = None) -> Dict[str, Any]:
+    """Parse .gnucash XML file and extract description→account mappings.
+
+    RED FLAG (fixed here): the previous version classified any split whose
+    account PATH merely *contained* a bank's name (ICICI/HDFC/HSBC/BoB) as
+    "the bank" and never as a possible transfer target. That silently broke
+    three real cases: (a) a bank<->FD sweep where the FD account is named
+    after the bank (e.g. "...Fixed Deposits:ICICI Bank - FD") had BOTH splits
+    classified as "bank", so the transaction had no target and was skipped
+    entirely; (b) a genuine inter-bank transfer (ICICI<->HDFC, ICICI<->HSBC)
+    had a "bank" on both sides and was skipped the same way, so only
+    transfers to a bank whose name matched no pattern (e.g. SBM) survived —
+    and the self-transfer matcher then "learned" that self-transfers go to
+    SBM; (c) a card or loan account named after a bank was never eligible as
+    a target either.
+
+    Args:
+        gnucash_file: Path to the .gnucash book.
+        gnucash_bank_account: Optional, the caller's exact GnuCash account
+            path for the importing bank (e.g. from the pipeline's resolved
+            bank account). When given, that split is EXACTLY the source for
+            any transaction it appears in — regardless of whether the other
+            split's name also happens to contain a bank name — and the
+            target is the largest other split. This is the precise case that
+            silently broke FD sweeps and inter-bank transfers before.
+            When omitted, a split is only treated as a bank's own account
+            using the structural rule in _is_own_bank_account (GnuCash type
+            BANK + name pattern), never a bare name-substring match — see
+            that function's docstring for why. A transaction with two own
+            bank accounts (e.g. an ICICI<->HDFC transfer) now yields a pair
+            in EACH bank's own history, not just the "winning" one.
+    """
     logger.info(f"Parsing {gnucash_file}")
     gnucash_path = Path(gnucash_file)
     if not gnucash_path.exists():
@@ -68,17 +158,21 @@ def parse_gnucash_file(gnucash_file: str) -> Dict[str, Any]:
     accounts = root.findall(f'.//{NS["gnc"]}account')
     account_ids = {}
     account_parents = {}
+    account_types: Dict[str, str] = {}
 
     for acc in accounts:
         acc_id_elem = acc.find(f'{NS["act"]}id')
         acc_name_elem = acc.find(f'{NS["act"]}name')
         acc_parent_elem = acc.find(f'{NS["act"]}parent')
+        acc_type_elem = acc.find(f'{NS["act"]}type')
 
         if acc_id_elem is not None and acc_name_elem is not None:
             acc_id = acc_id_elem.text
             account_ids[acc_id] = acc_name_elem.text
             if acc_parent_elem is not None and acc_parent_elem.text:
                 account_parents[acc_id] = acc_parent_elem.text
+            if acc_type_elem is not None and acc_type_elem.text:
+                account_types[acc_id] = acc_type_elem.text
 
     logger.info(f"Extracted {len(account_ids)} accounts")
 
@@ -86,8 +180,11 @@ def parse_gnucash_file(gnucash_file: str) -> Dict[str, Any]:
     transactions = root.findall(f'.//{NS["gnc"]}transaction')
     logger.info(f"Found {len(transactions)} transactions")
 
-    mappings_by_bank = {'ICICI': [], 'HDFC': [], 'HSBC': [], 'BoB': []}
+    mappings_by_bank: Dict[str, List[Dict]] = defaultdict(list)
+    for _known_bank in BANK_PATTERNS:
+        mappings_by_bank[_known_bank] = []  # keep the four known keys present even if empty
     skipped_txns = 0
+    norm_forced_account = _norm_account_path(gnucash_bank_account) if gnucash_bank_account else None
 
     for txn in transactions:
         # Extract date
@@ -118,17 +215,16 @@ def parse_gnucash_file(gnucash_file: str) -> Dict[str, Any]:
             skipped_txns += 1
             continue
 
-        # Find source bank and target account
-        source_bank = None
-        source_account = None
-        target_split = None
-        target_amount = 0
-
         splits = splits_container.findall(f'{NS["trn"]}split')
         if len(splits) < 2:
             skipped_txns += 1
             continue
 
+        # Resolve every split's path/amount/classification once, up front, so
+        # target selection can compare across ALL other splits — including
+        # ones that also match a bank-name pattern (fix for the inter-bank
+        # and FD-sweep cases described above).
+        splits_info = []  # each: {'path', 'amount', 'forced_source', 'own_bank'}
         for split in splits:
             acc_id_elem = split.find(f'{NS["split"]}account')
             value_elem = split.find(f'{NS["split"]}value')
@@ -137,32 +233,69 @@ def parse_gnucash_file(gnucash_file: str) -> Dict[str, Any]:
                 continue
 
             acc_path = _get_account_hierarchy(acc_id_elem.text, account_ids, account_parents)
-            bank = _match_bank(acc_path)
+            amount = _split_amount(value_elem)
+            if amount is None:
+                continue
 
-            if bank:
-                if source_bank is None:
-                    source_bank = bank
-                    source_account = acc_path
-            else:
-                try:
-                    value_text = (value_elem.text or "0").strip()
-                    if '/' in value_text:
-                        numerator, denominator = value_text.split('/')
-                        amount = abs(float(numerator) / float(denominator))
-                    else:
-                        amount = abs(float(value_text.replace(',', '')))
+            forced_source = (
+                norm_forced_account is not None
+                and _norm_account_path(acc_path) == norm_forced_account
+            )
+            own_bank = None if forced_source else _is_own_bank_account(
+                acc_path, account_types.get(acc_id_elem.text)
+            )
+            splits_info.append({
+                'path': acc_path,
+                'amount': amount,
+                'forced_source': forced_source,
+                'own_bank': own_bank,
+            })
 
-                    if amount > target_amount:
-                        target_amount = amount
-                        target_split = acc_path
-                except (ValueError, AttributeError, ZeroDivisionError):
-                    pass
+        if norm_forced_account is not None:
+            # Fix #1: the caller told us exactly which account is the bank.
+            # That split is the source no matter what the other split's name
+            # contains; the target is simply the largest other split.
+            forced = [s for s in splits_info if s['forced_source']]
+            if not forced:
+                skipped_txns += 1
+                continue
+            source = forced[0]
+            others = [s for s in splits_info if s is not source]
+            if not others:
+                skipped_txns += 1
+                continue
+            target = max(others, key=lambda s: s['amount'])
+            bank_key = _match_bank(source['path']) or 'OWN'
+            mappings_by_bank[bank_key].append(
+                {'description': description, 'account': target['path'], 'date': date_str}
+            )
+            continue
 
-        if source_bank is None or target_split is None:
+        # Fix #2/#3: no explicit account given. Every split that is
+        # structurally a bank's own current/savings account (see
+        # _is_own_bank_account) gets its own mapping entry, targeting the
+        # largest OTHER split in the same transaction — regardless of
+        # whether that other split also matches a bank-name pattern. This is
+        # what makes an ICICI<->HDFC transfer yield a pair in EACH bank's
+        # history instead of just the first one seen.
+        own_bank_splits = [s for s in splits_info if s['own_bank']]
+        if not own_bank_splits:
             skipped_txns += 1
             continue
 
-        mappings_by_bank[source_bank].append({'description': description, 'account': target_split, 'date': date_str})
+        matched_any = False
+        for source in own_bank_splits:
+            others = [s for s in splits_info if s is not source]
+            if not others:
+                continue
+            target = max(others, key=lambda s: s['amount'])
+            mappings_by_bank[source['own_bank']].append(
+                {'description': description, 'account': target['path'], 'date': date_str}
+            )
+            matched_any = True
+
+        if not matched_any:
+            skipped_txns += 1
 
     logger.info(f"Extracted mappings; skipped {skipped_txns}")
 
@@ -210,11 +343,12 @@ def run(gnucash_files: list, output_path: str, **kwargs) -> dict:
     """
     logging.basicConfig(level=logging.INFO)
     results = []
+    gnucash_bank_account = kwargs.get('gnucash_bank_account')
 
     for gnucash_file in gnucash_files:
         try:
             print(f"🔄 Extracting: {Path(gnucash_file).name}")
-            result = parse_gnucash_file(gnucash_file)
+            result = parse_gnucash_file(gnucash_file, gnucash_bank_account=gnucash_bank_account)
 
             # Write output JSON
             output_name = Path(gnucash_file).stem + '_extract.json'

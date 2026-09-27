@@ -1977,7 +1977,14 @@ def run(
 
     # Step 1: Extract historical mappings from .gnucash
     _emit_mapper_progress(f"extracting history from {Path(gnucash_file).name}")
-    extractor_output = parse_gnucash_file(gnucash_file)
+    # RED FLAG fix: thread the caller's known bank account through to the
+    # extractor. Without it, the extractor could only guess "is this the
+    # bank" from the account NAME, which silently misclassified FD accounts
+    # and other-bank accounts named after the bank as "the bank" and dropped
+    # the transaction entirely (see skill_gnucash_xml_extractor.agent for the
+    # full explanation). When we already know the exact account, pass it so
+    # that split is treated as the definitive source.
+    extractor_output = parse_gnucash_file(gnucash_file, gnucash_bank_account=gnucash_bank_account)
 
     # Collect ALL account paths (all banks) before filtering — needed for LLM fallback
     all_account_paths = set()
@@ -2171,7 +2178,18 @@ def run(
                 match_confidence = match.get('confidence', 'smart')
                 row['Account'] = _strip_root(match['account']) if match['account'] else ''
                 row['Confidence'] = match_confidence
-                row['MatchReason'] = f"Smart: {match['reason']}"
+                # RED FLAG fix: this used to prefix EVERY match here with
+                # "Smart: ", including a weak prefix/keyword guess from
+                # _historical_prefix_match — so a low-confidence guess (e.g.
+                # a self-transfer narration that only matched by shared
+                # channel prefix, landing on the wrong bank) was displayed as
+                # "Smart: Prefix match", indistinguishable from a real
+                # high-precision smart-pattern hit. Label it by what it
+                # actually is.
+                if match_confidence == 'weak':
+                    row['MatchReason'] = f"Weak match: {match['reason']}"
+                else:
+                    row['MatchReason'] = f"Smart: {match['reason']}"
                 if match['account']:
                     if match_confidence == 'weak':
                         weak_mapped_count += 1

@@ -433,7 +433,7 @@ def test_weak_rows_reconsidered_by_llm_replace_and_keep_with_correct_counts(tmp_
     import skill_gnucash_mapping_generator.agent as mapgen_mod
     import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod
 
-    def fake_parse_gnucash_file(path):
+    def fake_parse_gnucash_file(path, gnucash_bank_account=None):
         return {"mappings": {"BankX": [
             {"account": "Expenses:WeakKeep"},
             {"account": "Expenses:WeakReplace"},
