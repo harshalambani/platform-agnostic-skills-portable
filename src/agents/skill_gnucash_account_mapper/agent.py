@@ -376,9 +376,17 @@ def _historical_prefix_match(
     if len(norm_desc) < 6:
         return None
 
-    best_account = None
-    best_score = 0
-    best_freq = 0
+    # Collect every candidate's score rather than tracking only a running
+    # "best" — a running best cannot detect a tie between the top two
+    # candidates, so it silently picked whichever account happened to come
+    # first (or last) in the caller's list order. Two RTGS/NEFT payments to
+    # different counterparties that share only a channel prefix and a
+    # reference-number run (e.g. "RTGS/ABCDR12345678901/PARTYA" and
+    # "RTGS/ABCDR12345678902/PARTYB") both normalise to the same prefix once
+    # the trailing digits are stripped, and used to collapse onto whichever
+    # of the two historical accounts happened to be scored first -- silently
+    # routing an unrelated bond purchase onto a loan account or vice versa.
+    scored_candidates: List[Tuple[int, int, str]] = []  # (score, freq, account)
 
     for m in historical_mappings:
         hist_norm = _norm(m['description'])
@@ -403,10 +411,19 @@ def _historical_prefix_match(
         else:
             continue
 
-        if score > best_score or (score == best_score and freq > best_freq):
-            best_score = score
-            best_freq = freq
-            best_account = m['account']
+        scored_candidates.append((score, freq, m['account']))
+
+    best_account = None
+    if scored_candidates:
+        scored_candidates.sort(key=lambda t: (-t[0], -t[1], t[2]))
+        best_score, best_freq, best_account = scored_candidates[0]
+        if len(scored_candidates) > 1:
+            second_score, second_freq, second_account = scored_candidates[1]
+            if (best_score, best_freq) == (second_score, second_freq) and second_account != best_account:
+                # Genuine tie between two DIFFERENT accounts -- no clear
+                # winner, so stay unmatched rather than guess (mirrors the
+                # keyword-fallback branch's tie handling below).
+                best_account = None
 
     if best_account:
         # MAP-10: a shared leading-character run is a much weaker signal than
