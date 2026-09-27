@@ -883,10 +883,29 @@ def _literal_bank_code_match(
     else:
         if not model or not plain_tokens:
             return None
-        evidence = {
-            acct: max((model.get(tok, {}).get(acct, 0) for tok in plain_tokens), default=0)
-            for acct in hits
-        }
+        # ROUND 3 real-book re-measure: `candidates` (and therefore `hits`)
+        # can be normalized (run() passes own_bank_accounts already stripped
+        # of "Root Account:"), while `model`'s own account keys are whatever
+        # form the historical pairs carried in -- the extractor emits them
+        # WITH the "Root Account:" prefix, and _build_history_token_model
+        # keys its buckets by that raw value verbatim. A direct
+        # `model.get(tok, {}).get(acct, 0)` lookup therefore compared a
+        # stripped key against prefixed keys and silently returned 0 for
+        # EVERY hit whenever a bank had 2+ own accounts -- the tie-break
+        # always saw all-zero evidence and abstained, so the row fell
+        # through to the weak prefix matcher regardless of how lopsided the
+        # real history actually was. Never assume both sides share a form:
+        # compare on `_strip_root`-normalized names on both sides instead of
+        # relying on a literal key match.
+        evidence = {}
+        for acct in hits:
+            norm_acct = _strip_root(acct)
+            best = 0
+            for tok in plain_tokens:
+                for bkey, cnt in model.get(tok, {}).items():
+                    if _strip_root(bkey) == norm_acct:
+                        best = max(best, cnt)
+            evidence[acct] = best
         ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
         best_acct, best_evidence = ranked[0]
         if best_evidence == 0:

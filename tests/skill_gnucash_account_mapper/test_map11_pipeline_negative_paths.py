@@ -799,3 +799,302 @@ def test_run_end_to_end_routes_hsbc_and_hdfc_self_transfers_never_to_sbm(tmp_pat
 
     assert hdfc_row["Account"] == agent._strip_root(OWN_HDFC)
     assert hdfc_row["Account"] != agent._strip_root(OWN_SBM)
+
+
+# ---------------------------------------------------------------------------
+# 9. ROUND 3 (2026-09-27 real-book re-measure): prefixed-vs-stripped form
+# mismatch in _literal_bank_code_match's evidence tie-break.
+#
+# RED FLAG (real defect, round 3): run() builds its own_bank_accounts (and
+# therefore the `candidates` passed into _literal_bank_code_match) via
+# _strip_root() -- but _build_history_token_model keys its per-token account
+# buckets by the RAW account value the historical pairs carried in, and the
+# real extractor ALWAYS emits those prefixed with "Root Account:" (see
+# test_bank_split_classification.py's own assertions, e.g.
+# `f"Root Account:{SBM_CUR_PATH}" in own`). The old evidence comprehension --
+# `model.get(tok, {}).get(acct, 0)` -- compared a STRIPPED acct against
+# PREFIXED model keys and always got 0, so the round-2 tie-break silently
+# never engaged whenever run() was exercised end-to-end with real extractor
+# output and a bank had 2+ own accounts: the row fell through to the weak
+# prefix matcher regardless of how lopsided the real history was. Round 2's
+# own end-to-end test never caught this because it mocked parse_gnucash_file
+# outright with hand-built, already-stripped fake data -- both sides always
+# shared one consistent form. The tests below use the REAL, unmocked
+# extractor against a real synthetic .gnucash XML fixture, so the prefixed
+# form the extractor actually emits is what flows into _build_history_token_
+# model, exactly reproducing the mismatch.
+#
+# Fixed in agent._literal_bank_code_match by comparing _strip_root-normalized
+# names on BOTH sides of the evidence lookup instead of relying on a literal
+# key match. _self_transfer_candidates was audited and found already safe
+# (routes through _is_book_asset_account, which strips internally);
+# _ifsc_contradiction was audited and found unaffected (it never touches
+# `model`, and both its inputs are already stripped by the time run() calls
+# it). Only _literal_bank_code_match needed the fix.
+# ---------------------------------------------------------------------------
+
+import gzip as _gzip
+
+_MAP11_NS_DECL = (
+    'xmlns:gnc="http://www.gnucash.org/XML/gnc" '
+    'xmlns:act="http://www.gnucash.org/XML/act" '
+    'xmlns:trn="http://www.gnucash.org/XML/trn" '
+    'xmlns:split="http://www.gnucash.org/XML/split" '
+    'xmlns:ts="http://www.gnucash.org/XML/ts"'
+)
+
+
+def _map11_account_xml(name: str, aid: str, atype: str, parent):
+    parts = [
+        ' <gnc:account version="2.0.0">',
+        f'  <act:name>{name}</act:name>',
+        f'  <act:id type="guid">{aid}</act:id>',
+        f'  <act:type>{atype}</act:type>',
+    ]
+    if parent is not None:
+        parts.append(f'  <act:parent type="guid">{parent}</act:parent>')
+    parts.append(' </gnc:account>')
+    return "\n".join(parts)
+
+
+def _map11_split_xml(acc_id: str, value: str) -> str:
+    return (
+        "   <trn:split>"
+        f"<split:value>{value}</split:value>"
+        f'<split:account type="guid">{acc_id}</split:account>'
+        "</trn:split>"
+    )
+
+
+def _map11_txn_xml(desc: str, date: str, splits) -> str:
+    return (
+        ' <gnc:transaction version="2.0.0">\n'
+        f'  <trn:description>{desc}</trn:description>\n'
+        f'  <trn:date-posted><ts:date>{date} 00:00:00 +0000</ts:date></trn:date-posted>\n'
+        '  <trn:splits>\n'
+        + "\n".join(splits) + "\n"
+        '  </trn:splits>\n'
+        ' </gnc:transaction>'
+    )
+
+
+def _map11_write_book(tmp_path: Path, accounts, transactions) -> Path:
+    book_xml = (
+        '<?xml version="1.0" encoding="utf-8"?>\n'
+        f"<gnc-v2 {_MAP11_NS_DECL}>\n"
+        "<gnc:book version=\"2.0.0\">\n"
+        + "\n".join(accounts) + "\n"
+        + "\n".join(transactions) + "\n"
+        "</gnc:book>\n</gnc-v2>\n"
+    )
+    p = tmp_path / "synthetic_round3.gnucash"
+    p.write_bytes(_gzip.compress(book_xml.encode("utf-8")))
+    return p
+
+
+_M11_ROOT_ACC = _map11_account_xml("Root Account", "root", "ROOT", None)
+_M11_ASSETS_ACC = _map11_account_xml("Assets", "assets", "ASSET", "root")
+_M11_ICICI_CUR = _map11_account_xml("ICICI Bank - 001", "icici_cur", "BANK", "assets")
+_M11_HSBC_1 = _map11_account_xml("HSBC Bank - 111", "hsbc_1", "BANK", "assets")
+_M11_HSBC_2 = _map11_account_xml("HSBC Bank - 222", "hsbc_2", "BANK", "assets")
+_M11_SBM_CUR = _map11_account_xml("SBM Bank - 004", "sbm_cur", "BANK", "assets")
+
+_M11_ICICI_PATH = "Assets:ICICI Bank - 001"
+_M11_HSBC_1_PATH = "Assets:HSBC Bank - 111"
+_M11_HSBC_2_PATH = "Assets:HSBC Bank - 222"
+_M11_SBM_PATH = "Assets:SBM Bank - 004"
+
+
+def _map11_patch_pipeline(monkeypatch, tmp_path):
+    """Stub every step of run() EXCEPT parse_gnucash_file (real) and the
+    Step 3.6 history matcher (real) — mirrors
+    test_end_to_end_run_sweeps_to_fd_and_self_transfer_to_hsbc_never_sbm_or_hdfc
+    in test_bank_split_classification.py, adapted to this file."""
+    agents_root = SRC / "agents"
+    if str(agents_root) not in sys.path:
+        sys.path.insert(0, str(agents_root))
+
+    import skill_gnucash_mapping_generator.agent as mapgen_mod
+    import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod
+
+    def fake_generate_rules(extractor_output, min_freq=1):
+        return {}
+
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+        return rules_by_bank
+
+    def fake_load_overrides(gnucash_file, config_path=None):
+        return []
+
+    def fake_migrate_legacy_overrides(gnucash_file, config_path=None):
+        return 0
+
+    def fake_rules_path(gnucash_file, config_path=None):
+        return tmp_path / "fake_persistent_rules_round3.yaml"
+
+    monkeypatch.setattr(mapgen_mod, "generate_rules", fake_generate_rules)
+    monkeypatch.setattr(persistent_rules_mod, "merge_auto_rules", fake_merge_auto_rules)
+    monkeypatch.setattr(persistent_rules_mod, "load_overrides", fake_load_overrides)
+    monkeypatch.setattr(persistent_rules_mod, "migrate_legacy_overrides", fake_migrate_legacy_overrides)
+    monkeypatch.setattr(persistent_rules_mod, "rules_path", fake_rules_path)
+    monkeypatch.setattr(agent, "_emit_mapper_progress", lambda msg: None)
+
+
+def test_run_end_to_end_real_extractor_routes_hsbc_self_transfer_to_evidenced_account(tmp_path, monkeypatch):
+    # (a) + (b): real, unmocked parse_gnucash_file against a real synthetic
+    # .gnucash book whose root account is literally named "Root Account", so
+    # every history account path the extractor emits carries the
+    # "Root Account:" prefix exactly as it does in the real book. Two HSBC
+    # BANK-type accounts exist; history has ~10 self-transfers to HSBC_1 and
+    # 0 to HSBC_2. A brand-new row addressed to an unseen HSBC IFSC must
+    # route to the EVIDENCED account (HSBC_1) — never the non-evidenced
+    # sibling, never SBM, never Suspense.
+    _map11_patch_pipeline(monkeypatch, tmp_path)
+
+    accounts = [_M11_ROOT_ACC, _M11_ASSETS_ACC, _M11_ICICI_CUR, _M11_HSBC_1, _M11_HSBC_2, _M11_SBM_CUR]
+
+    def _self_xfer_hsbc1(date):
+        return _map11_txn_xml(
+            "Xfer to self/Some Name/HSBC0111111", date,
+            [_map11_split_xml("icici_cur", "-10000/100"), _map11_split_xml("hsbc_1", "10000/100")],
+        )
+
+    def _self_xfer_sbm_decoy(date):
+        return _map11_txn_xml(
+            "Xfer to self/Some Name/SBMX0000004", date,
+            [_map11_split_xml("icici_cur", "-5000/100"), _map11_split_xml("sbm_cur", "5000/100")],
+        )
+
+    txns = [_self_xfer_hsbc1(f"2024-{m:02d}-05") for m in range(1, 11)]  # 10 historical hits
+    txns += [_self_xfer_sbm_decoy(f"2024-{m:02d}-06") for m in range(1, 3)]  # 2 SBM decoys
+
+    gnucash_file = _map11_write_book(tmp_path, accounts, txns)
+
+    canonical_csv = tmp_path / "canonical_round3.csv"
+    new_desc = "Xfer to self/Some Name/HSBC0400002"
+    with open(canonical_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Date", "Description", "Withdrawal", "Deposit"])
+        writer.writeheader()
+        writer.writerow({"Date": "05-04-2024", "Description": new_desc,
+                          "Withdrawal": "7000.00", "Deposit": ""})
+
+    output_path = tmp_path / "mapped_round3.csv"
+    agent.run(
+        gnucash_file=str(gnucash_file),
+        canonical_csv=str(canonical_csv),
+        output_path=str(output_path),
+        config_path=None,  # no LLM — the row must resolve purely on history
+        model_override=None,
+        bank_name="ICICI",
+        gnucash_bank_account=_M11_ICICI_PATH,
+    )
+
+    with open(output_path, newline="", encoding="utf-8") as f:
+        row = list(csv.DictReader(f))[0]
+
+    # (a) routes to the evidenced account.
+    assert row["Confidence"] == "history", row
+    assert row["Account"] == _M11_HSBC_1_PATH
+
+    # (b) negative: never the non-evidenced HSBC sibling, never another bank,
+    # never Suspense.
+    assert row["Account"] != _M11_HSBC_2_PATH
+    assert row["Account"] != _M11_SBM_PATH
+    assert row["Confidence"] != "suspense"
+
+
+def test_run_end_to_end_real_extractor_tied_hsbc_evidence_stays_unmatched_in_suspense(tmp_path, monkeypatch):
+    # (c) Negative: when historical evidence is EXACTLY TIED between the two
+    # same-bank accounts, the row stays unmatched (Suspense) — never rescued
+    # onto another bank by a later, weaker pass.
+    _map11_patch_pipeline(monkeypatch, tmp_path)
+
+    accounts = [_M11_ROOT_ACC, _M11_ASSETS_ACC, _M11_ICICI_CUR, _M11_HSBC_1, _M11_HSBC_2, _M11_SBM_CUR]
+
+    def _self_xfer(acc_id, code, date):
+        return _map11_txn_xml(
+            f"Xfer to self/Some Name/{code}", date,
+            [_map11_split_xml("icici_cur", "-10000/100"), _map11_split_xml(acc_id, "10000/100")],
+        )
+
+    txns = [_self_xfer("hsbc_1", "HSBC0111111", f"2024-{m:02d}-05") for m in range(1, 6)]  # 5 hits
+    txns += [_self_xfer("hsbc_2", "HSBC0222222", f"2024-{m:02d}-06") for m in range(1, 6)]  # 5 hits, tied
+
+    gnucash_file = _map11_write_book(tmp_path, accounts, txns)
+
+    canonical_csv = tmp_path / "canonical_round3_tied.csv"
+    new_desc = "Xfer to self/Some Name/HSBC0400002"
+    with open(canonical_csv, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=["Date", "Description", "Withdrawal", "Deposit"])
+        writer.writeheader()
+        writer.writerow({"Date": "05-04-2024", "Description": new_desc,
+                          "Withdrawal": "7000.00", "Deposit": ""})
+
+    output_path = tmp_path / "mapped_round3_tied.csv"
+    agent.run(
+        gnucash_file=str(gnucash_file),
+        canonical_csv=str(canonical_csv),
+        output_path=str(output_path),
+        config_path=None,
+        model_override=None,
+        bank_name="ICICI",
+        gnucash_bank_account=_M11_ICICI_PATH,
+    )
+
+    with open(output_path, newline="", encoding="utf-8") as f:
+        row = list(csv.DictReader(f))[0]
+
+    # Stays unmatched -> claimed by the Step 5 Suspense pass.
+    assert row["Confidence"] == "suspense", row
+    # Negative: never rescued onto either HSBC sibling by name order, and
+    # never onto another bank (SBM) either.
+    assert row["Account"] != _M11_HSBC_1_PATH
+    assert row["Account"] != _M11_HSBC_2_PATH
+    assert row["Account"] != _M11_SBM_PATH
+
+
+def test_literal_bank_code_match_same_answer_prefixed_or_stripped():
+    # (d) Unit test: _literal_bank_code_match must give the SAME winning
+    # account whether `candidates`/`model` use the "Root Account:"-prefixed
+    # form or the stripped form — and, crucially, the MIXED form that run()
+    # actually produces in real usage (own_bank_accounts stripped via
+    # _strip_root, but the history model's keys raw/prefixed from the
+    # extractor) must resolve identically too, since that mixed shape is
+    # exactly the round-3 defect this test guards against.
+    hsbc_1 = "Assets:Current Assets:Cash and Bank:HSBC Bank - 111"
+    hsbc_2 = "Assets:Current Assets:Cash and Bank:HSBC Bank - 222"
+    prefixed_1 = "Root Account:" + hsbc_1
+    prefixed_2 = "Root Account:" + hsbc_2
+    codes = {"ifsc:hsbc"}
+    plain_tokens = {"selfxferevidence"}
+
+    # Fully stripped on both sides.
+    stripped_result = agent._literal_bank_code_match(
+        codes,
+        {hsbc_1, hsbc_2},
+        model={"selfxferevidence": {hsbc_1: 10}},
+        plain_tokens=plain_tokens,
+    )
+
+    # Fully prefixed on both sides.
+    prefixed_result = agent._literal_bank_code_match(
+        codes,
+        {prefixed_1, prefixed_2},
+        model={"selfxferevidence": {prefixed_1: 10}},
+        plain_tokens=plain_tokens,
+    )
+
+    # The MIXED shape that actually occurs in run(): candidates stripped
+    # (own_bank_accounts), model keys prefixed (historical_pairs_for_llm as
+    # the real extractor emits them) — this is the exact round-3 bug shape.
+    mixed_result = agent._literal_bank_code_match(
+        codes,
+        {hsbc_1, hsbc_2},
+        model={"selfxferevidence": {prefixed_1: 10}},
+        plain_tokens=plain_tokens,
+    )
+
+    for result in (stripped_result, prefixed_result, mixed_result):
+        assert result is not None, "evidence-based tie-break must resolve, not abstain"
+        assert agent._strip_root(result["account"]) == hsbc_1
+        assert agent._strip_root(result["account"]) != hsbc_2
