@@ -536,16 +536,18 @@ def build_app(launch: bool = False) -> gr.Blocks:
         ("gnucash",     "GnuCash"),
         ("utilities",   "Other"),
     ]
-    # "krc" and "intercompany" have no top-level GROUP_ORDER entry of their
-    # own — "krc" is nested as a "KRChoksey" sub-tab and "intercompany" as an
-    # "Inter-entity" sub-tab, both inside "gnucash" (see below). "itr" is
-    # likewise nested inside "gnucash" as its own "ITR" sub-tab (mirroring
-    # "Banks"), containing "ITR Workbook", "Review Mapping" and "AIS Reconcile"
-    # as sub-sub-tabs, rather than getting a flat top-level tab. Exclude them here too,
-    # otherwise the fallback loop at the end of this function (for skills
-    # whose category isn't in _known_cats) renders them a second time as
-    # flat top-level tabs.
-    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany", "itr"}
+    # "krc", "intercompany" and "partner" have no top-level GROUP_ORDER entry
+    # of their own — "krc" is nested as a "KRChoksey" sub-tab, "intercompany"
+    # as an "Inter-entity" sub-tab, and "partner" as a "Partner" sub-tab
+    # (UI-01: moved out of "ITR", between "Banks" and "Inter-entity" — it
+    # reconciles the partner's own compensation, not a return), all inside
+    # "gnucash" (see below). "itr" is likewise nested inside "gnucash" as its
+    # own "ITR" sub-tab (mirroring "Banks"), containing "ITR Workbook",
+    # "Review Mapping" and "AIS Reconcile" as sub-sub-tabs, rather than
+    # getting a flat top-level tab. Exclude them here too, otherwise the
+    # fallback loop at the end of this function (for skills whose category
+    # isn't in _known_cats) renders them a second time as flat top-level tabs.
+    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany", "itr", "partner"}
 
     _grouped = defaultdict(list)
     for _s in skills:
@@ -621,6 +623,19 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     for _name in _after_names:
                                         with gr.Tab(_name) as _t:
                                             tab_generic.render(_by_name[_name], container_tab=_t)
+                            # UI-01: Partner Compensation Reconciliation gets its
+                            # own sub-tab, between "Banks" and "Inter-entity" — it
+                            # reconciles the partner's own pay against the bank,
+                            # 26AS and the Advisory, not a return, so "ITR" (a
+                            # collection of return-building tools) was the wrong
+                            # home for it.
+                            _partner_skills = _grouped.get("partner", [])
+                            if _partner_skills:
+                                with gr.Tab("Partner"):
+                                    with gr.Tabs():
+                                        for _skill in _partner_skills:
+                                            with gr.Tab(_skill.display_name) as _t:
+                                                tab_generic.render(_skill, container_tab=_t)
                             with gr.Tab("Inter-entity"):
                                 with gr.Tabs():
                                     # The pairwise Reconcile is the primary tool
@@ -673,7 +688,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                         # unknown skills land at 99 (last).
                                         _itr_order = {"ITR Workbook": 0,
                                                       "AIS Reconcile": 50,
-                                                      "MF CAS": 60}  # renders after AIS Reconcile
+                                                      "MF Capital Gain Statement": 60}  # renders after AIS Reconcile
                                         _rank = lambda s: _itr_order.get(s.display_name, 99)  # noqa: E731
                                         _itr_sorted = sorted(_itr_skills, key=_rank)
                                         for _skill in [s for s in _itr_sorted if _rank(s) < 50]:

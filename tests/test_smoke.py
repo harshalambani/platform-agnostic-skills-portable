@@ -303,3 +303,48 @@ def test_banks_tab_order_unknown_skill_defaults_before_review():
     )
     assert "Some Future Skill" in before
     assert after == ["Coverage Gap Detector"]
+
+
+# ---------------------------------------------------------------------------
+# UI-01: every tab-ordering key in webui.py must name a real display_name.
+#
+# Regression guard: the ITR ordering dict once had "MF CAS": 60, but the
+# skill's actual display_name is "MF Capital Gain Statement" -- the key
+# never matched, so the rank lookup silently fell back to the unknown-skill
+# default (99) instead of the intended 60. Nothing crashed and the skill
+# still got a tab (test_every_registered_skill_gets_a_tab would not have
+# caught this), but the intended ordering was silently lost. This test
+# statically scans every dict literal in webui.py whose variable name looks
+# like a tab-order table (matching a real skill's display_name in at least
+# one key) and asserts every one of its string keys is a real, registered
+# display_name.
+# ---------------------------------------------------------------------------
+
+def test_every_tab_ordering_key_matches_a_real_display_name():
+    import ast
+    from agents import registry
+
+    webui_path = PROJECT_ROOT / "ui" / "webui.py"
+    tree = ast.parse(webui_path.read_text(encoding="utf-8"), filename=str(webui_path))
+
+    real_names = {s.display_name for s in registry.discover(refresh=True)}
+    # "Review"/"Review Mapping"/"Advance Tax" etc. are hand-written tabs,
+    # not registered skills -- an ordering dict is only in scope for this
+    # check if at least one of its keys is a genuine skill display_name,
+    # which is what distinguishes _itr_order/_krc_order/_BANKS_TAB_ORDER
+    # from an unrelated dict literal elsewhere in the file.
+    bad: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        if not keys:
+            continue
+        if not any(k in real_names for k in keys):
+            continue  # not a tab-order-by-display_name dict at all
+        unknown = [k for k in keys if k not in real_names]
+        if unknown:
+            bad[repr(keys)] = unknown
+
+    assert not bad, f"tab-ordering dict(s) with keys matching no registered display_name: {bad}"

@@ -31,7 +31,7 @@ description: >
   implemented reader (see AGENT.md) -- a leg only degrades to an explicit
   "not available" note when its own input is absent or its document fails
   to parse, never failing this build.
-category: "itr"
+category: "partner"
 version: "0.2.0"
 
 mode: "direct"
