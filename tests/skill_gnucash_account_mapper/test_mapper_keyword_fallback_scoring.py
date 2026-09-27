@@ -154,15 +154,19 @@ def test_unique_discriminating_token_matches_with_weak_confidence():
     assert result["confidence"] != "smart"
 
 
-def test_prefix_match_branch_still_reports_smart_confidence():
-    """The prefix-matcher (the OTHER half of _historical_prefix_match, not
-    the keyword fallback under test above) must be unaffected: it stays
-    'smart' via the default in run()'s `match.get('confidence', 'smart')`."""
+def test_prefix_match_branch_reports_weak_confidence():
+    """MAP-10: the prefix-matcher (the OTHER half of _historical_prefix_match,
+    not the keyword fallback under test above) must never emit 'smart'
+    either -- a shared leading-character run is weaker evidence than a
+    rules-pass or history-pass match, so it is now stamped 'weak' explicitly
+    (no longer relying on run()'s old `match.get('confidence', 'smart')`
+    default), giving the LLM pass a chance to reconsider it."""
     hist = [_hist("BAJAJ FINANCE LIMITED -808693", "Liabilities:Loans:Bajaj Finance", frequency=3)]
     result = agent._historical_prefix_match("BAJAJ FINANCE LIMITED -5150102", hist)
     assert result is not None
     assert result["account"] == "Liabilities:Loans:Bajaj Finance"
-    assert "confidence" not in result  # prefix-match branch never sets it
+    assert result["confidence"] == "weak"
+    assert result["confidence"] != "smart"
 
 
 # ---------------------------------------------------------------------------

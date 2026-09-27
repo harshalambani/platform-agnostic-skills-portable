@@ -47,7 +47,7 @@ PAYLOAD_VAR = "_rvSavePayload"
 
 # Worst-first confidence order used for the Confidence column's "order" sort
 # and matches the mapper's own report ordering (see skill_gnucash_account_mapper).
-CONF_ORDER = ("suspense", "none", "low", "weak", "smart", "medium", "llm", "override", "high")
+CONF_ORDER = ("suspense", "none", "low", "weak", "smart", "medium", "history", "llm", "override", "high")
 
 
 # ---------------------------------------------------------------------------

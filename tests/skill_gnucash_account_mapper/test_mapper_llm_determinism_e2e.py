@@ -41,7 +41,7 @@ def test_ambiguous_first_answer_triggers_focused_retry_and_unique_answer_used(sc
         "Food and Dining",              # first answer: ambiguous tail -> None
         "Expenses:Food and Dining",     # retry answer: exact match -> resolves
     )
-    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "250.00", "withdrawal": "0"}]
+    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "0", "withdrawal": "250.00"}]
 
     result = agent.llm_fallback_mapping(
         unmatched_rows=rows,
@@ -65,7 +65,7 @@ def test_ambiguous_answer_never_written_as_matched_even_after_retry(scripted_llm
         "Food and Dining",   # first answer: ambiguous -> None
         "Food and Dining",   # retry answer: still ambiguous -> None
     )
-    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "250.00", "withdrawal": "0"}]
+    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "0", "withdrawal": "250.00"}]
 
     result = agent.llm_fallback_mapping(
         unmatched_rows=rows,
@@ -83,7 +83,7 @@ def test_wrapped_and_unique_answer_resolves_end_to_end(scripted_llm):
     """MAP-03 through the real pipeline: a markdown/quote-wrapped, uniquely
     resolving answer is accepted on the first pass, no retry needed."""
     scripted_llm.queue("**Expenses:Food and Dining**")
-    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "250.00", "withdrawal": "0"}]
+    rows = [{"row": 1, "description": "SWIGGY FOOD ORDER", "deposit": "0", "withdrawal": "250.00"}]
     historical_mappings = make_historical_mappings({
         "Expenses:Food and Dining": ["SWIGGY FOOD ORDER"],
     }, frequency=3)
