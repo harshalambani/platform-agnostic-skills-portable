@@ -546,6 +546,37 @@ HISTORY_MAX_TOKEN_SPREAD = 2            # a token seen with more than this many
                                          # though it still contributes its raw
                                          # probability to the combined score
 
+# RED FLAG fix (self-transfer shape test): on a real book, the OLD rule
+# required every one of a description's ordinary tokens to have led ONLY to
+# the book's own Assets accounts, ever, in history. That never holds on real
+# data -- "xfer", "to", "self", and the user's own name all also appear on
+# income/expense/loan descriptions elsewhere in the book, so the old rule's
+# `candidates` was always None and the literal bank-code fallback below it
+# was never reached. A weak prefix-match guess then won by default, which is
+# how an HSBC-IFSC self-transfer was landing on SBM (the only bank whose name
+# never collided with a pattern) instead of ever reaching the code check.
+#
+# New rule: a MAJORITY of the evidence MASS across ALL of a description's
+# plain (non-ifsc) tokens that lend to the book's own Assets accounts is
+# enough to call the shape "looks like a self-transfer" and hand the row to
+# the literal bank-code check. 0.5 would be a bare majority; 0.6 asks for a
+# clearer lean without demanding unanimity, which is the documented,
+# deliberate choice here.
+#
+# Deliberately NOT filtered by HISTORY_MAX_TOKEN_SPREAD the way the Bayes
+# score's "discriminating tokens" are: on real data the very words that mark
+# a self-transfer -- "xfer", "to", "self", the user's own name -- are
+# themselves high-spread (5-12+ distinct accounts each, per the real-book
+# measurement that found this defect), because they inevitably also appear
+# on a handful of income/expense/loan descriptions elsewhere in the book.
+# Excluding them the same way the Bayes score does would zero out every
+# self-transfer description's evidence and reproduce the exact bug this
+# fix exists to close. Instead, the majority-of-mass computation itself is
+# the discriminator: a word used mostly for self-transfers still carries
+# mostly-asset mass even though its spread (distinct accounts touched) is
+# high, and a word used mostly for something else does not.
+HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION = 0.6
+
 _VPA_TOKEN_RE = re.compile(r'[a-z0-9.\-_]{2,}@[a-z0-9.\-]{2,}')
 # IFSC format is a national standard (4 letters, literal '0', 6 alphanumerics)
 # -- not a bank-specific lookup table. Kept whole as a token, and its first 4
@@ -771,20 +802,45 @@ def _build_llm_shortlist(
 def _self_transfer_candidates(
     plain_tokens: set,
     model: Dict[str, Dict[str, int]],
+    own_bank_accounts: Optional[set] = None,
 ) -> Optional[set]:
-    """If a description's ordinary (non-bank-code) tokens only ever led to
-    the book's own Assets accounts in history, the description is shaped
-    like a transfer between the user's own accounts -- regardless of the
-    words used to say so. Returns that candidate account set, or None if the
-    description isn't shaped this way (or has no historical tokens at all)."""
-    accounts: set = set()
+    """Statistical (not all-or-nothing) self-transfer shape test.
+
+    See HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION above for why the old
+    all-tokens-must-be-unanimous rule never fired on real data, and for why
+    this version deliberately does NOT skip high-spread tokens the way the
+    Bayes score does -- it sums each plain token's own historical evidence
+    mass across ALL tokens seen before, and asks only that MOST of that
+    combined mass points at the book's own Assets accounts.
+
+    Returns the book's own bank accounts (`own_bank_accounts` — the
+    extractor's structural BANK-type list) when the shape test passes, never
+    just the accounts these particular tokens happened to reach: the point of
+    the literal bank-code fallback that follows is to find a branch/bank the
+    book has SEEN this description's shape point at before but never seen
+    THIS specific code from, so restricting to already-seen-with-this-code
+    accounts would defeat its purpose. Returns None if the test fails, or if
+    `own_bank_accounts` wasn't supplied (no structural own-bank list to
+    offer)."""
+    if not own_bank_accounts:
+        return None
+    total_mass = 0
+    asset_mass = 0
+    tokens_with_evidence = 0
     for tok in plain_tokens:
-        accounts.update(model.get(tok, {}))
-    if not accounts:
+        acct_counts = model.get(tok)
+        if not acct_counts:
+            continue
+        tokens_with_evidence += 1
+        for acct, cnt in acct_counts.items():
+            total_mass += cnt
+            if _is_book_asset_account(acct):
+                asset_mass += cnt
+    if tokens_with_evidence < HISTORY_MIN_DISCRIMINATING_TOKENS or total_mass == 0:
         return None
-    if not all(_is_book_asset_account(a) for a in accounts):
+    if (asset_mass / total_mass) < HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION:
         return None
-    return accounts
+    return set(own_bank_accounts)
 
 
 def _literal_bank_code_match(routing_tokens: set, candidates: set) -> Optional[Dict]:
@@ -812,10 +868,19 @@ def _literal_bank_code_match(routing_tokens: set, candidates: set) -> Optional[D
 def _history_token_match(
     desc: str,
     model: Dict[str, Dict[str, int]],
+    own_bank_accounts: Optional[set] = None,
+    source_account: Optional[str] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
-    literal bank-code fallback for a branch/bank never seen before."""
+    literal bank-code fallback for a branch/bank never seen before.
+
+    `own_bank_accounts`: the book's own structural BANK-type accounts (from
+    the extractor), used as the candidate set for the bank-code fallback --
+    never restricted to accounts this description's tokens happened to reach
+    (see `_self_transfer_candidates`). `source_account`: the account this row
+    is itself being imported for, excluded from candidates so a self-transfer
+    is never "matched" back onto its own source."""
     tokens_all = set(_tokenize_history(desc))
     if not tokens_all:
         return None
@@ -828,10 +893,46 @@ def _history_token_match(
     if not routing_tokens:
         return None
     plain_tokens = tokens_all - routing_tokens
-    candidates = _self_transfer_candidates(plain_tokens, model)
+    candidates = _self_transfer_candidates(plain_tokens, model, own_bank_accounts)
+    if not candidates:
+        return None
+    if source_account:
+        norm_source = _strip_root(source_account)
+        candidates = {a for a in candidates if _strip_root(a) != norm_source}
     if not candidates:
         return None
     return _literal_bank_code_match(routing_tokens, candidates)
+
+
+def _ifsc_contradiction(
+    desc: str,
+    account: str,
+    own_bank_accounts: Optional[set],
+) -> bool:
+    """RED FLAG fix, requirement #4 ("HSBC IFSC -> SBM must be impossible by
+    any path, including prefix, keyword and LLM"): True if `desc` carries an
+    IFSC-shaped bank-code token but `account` -- though itself one of the
+    book's own bank accounts -- does not carry ANY of those codes in its own
+    leaf name.
+
+    The dedicated self-transfer/IFSC route in `_history_token_match` (Step
+    3.6) either resolves such a row correctly or abstains; it cannot itself
+    stop a LATER, independent pass (smart pattern, weak prefix/keyword
+    fallback, or the LLM) from guessing a different own bank account for the
+    same row. This is the hard downstream gate for that: run once, after
+    every pass that could have produced such a guess, and revert it rather
+    than let a provably contradicted own-bank match ship.
+    """
+    if not account or not own_bank_accounts:
+        return False
+    norm_account = _strip_root(account)
+    if norm_account not in own_bank_accounts:
+        return False  # not one of the book's own bank accounts -- not this guard's concern
+    codes = {t[len('ifsc:'):] for t in set(_tokenize_history(desc)) if t.startswith('ifsc:')}
+    if not codes:
+        return False
+    leaf = norm_account.lower()
+    return not any(code in leaf for code in codes)
 
 
 # ---------------------------------------------------------------------------
@@ -2103,17 +2204,35 @@ def run(
     # smart-pattern / prefix / LLM passes (Step 4) ever see it. Matches are
     # labelled 'history' and are never sent to the LLM (Step 4b below only
     # collects 'none'/'weak' rows).
+    # RED FLAG fix: the book's own structural BANK-type accounts (from the
+    # extractor, see parse_gnucash_file()'s 'own_bank_accounts' key),
+    # normalized the same way already-stripped row/account values are.
+    # Computed unconditionally (not only when historical_pairs_for_llm is
+    # non-empty) because Step 4.9 below needs it too, regardless of whether
+    # the history pass itself ran.
+    own_bank_accounts = {
+        _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
+    }
     history_mapped_count = 0
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
         history_model = _build_history_token_model(historical_pairs_for_llm)
+        # The self-transfer/IFSC fallback below is offered the FULL set of
+        # own bank accounts as candidates, never restricted to the ones a
+        # description's tokens happened to reach. Excludes nothing here --
+        # the source account itself is excluded per-call via source_account.
         for row in mapped_rows:
             conf = row.get('Confidence') or 'none'
             if conf in ('high', 'override'):
                 continue
             desc = row.get('Description') or row.get('Narration') or ''
-            match = _history_token_match(desc, history_model)
+            match = _history_token_match(
+                desc,
+                history_model,
+                own_bank_accounts=own_bank_accounts,
+                source_account=gnucash_bank_account,
+            )
             if match and match.get('account'):
                 row['Account'] = _strip_root(match['account'])
                 row['Confidence'] = 'history'
@@ -2276,6 +2395,40 @@ def run(
             )
     else:
         _emit_mapper_progress("all rows matched by rules — no fallback needed")
+
+    # --- Step 4.9: IFSC-contradiction guard (RED FLAG fix, requirement #4) ---
+    # Once the dedicated self-transfer/IFSC route (Step 3.6) has abstained on
+    # an IFSC-bearing row, nothing downstream -- smart pattern, weak
+    # prefix/keyword fallback, or the LLM -- may silently ship a guess that
+    # lands the row on a DIFFERENT own bank account whose bank code openly
+    # contradicts the row's own IFSC. Any smart/weak/llm-confidence row
+    # caught doing this is reverted to unresolved here, so Step 5's suspense
+    # pass claims it instead of shipping a provably wrong own-bank guess.
+    contradiction_count = 0
+    reverted_from: Dict[str, int] = {}
+    for row in mapped_rows:
+        conf = row.get('Confidence', 'none')
+        if conf not in ('smart', 'weak', 'llm'):
+            continue
+        desc = row.get('Description') or row.get('Narration') or ''
+        acct = row.get('Account', '')
+        if _ifsc_contradiction(desc, acct, own_bank_accounts):
+            reverted_from[conf] = reverted_from.get(conf, 0) + 1
+            row['MatchReason'] = (
+                f"Reverted — IFSC in description contradicts resolved own-bank "
+                f"account (was: {row.get('MatchReason', '')})"
+            )
+            row['Account'] = ''
+            row['Confidence'] = 'none'
+            contradiction_count += 1
+    if contradiction_count:
+        for conf, n in reverted_from.items():
+            result['confidence_counts'][conf] = result['confidence_counts'].get(conf, 0) - n
+        result['confidence_counts']['none'] = result['confidence_counts'].get('none', 0) + contradiction_count
+        _emit_mapper_progress(
+            f"IFSC-contradiction guard: {contradiction_count} row(s) reverted to unresolved "
+            f"(bank code in description contradicted the resolved own-bank account)"
+        )
 
     # --- Step 5: Suspense pass — assign remaining unmapped rows ---
     # Find a Suspense account in the tree, or use a sensible default.

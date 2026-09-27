@@ -185,6 +185,14 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
         mappings_by_bank[_known_bank] = []  # keep the four known keys present even if empty
     skipped_txns = 0
     norm_forced_account = _norm_account_path(gnucash_bank_account) if gnucash_bank_account else None
+    # Every account path this book structurally recognises as a bank's own
+    # current/savings account (GnuCash type BANK + name pattern) — collected
+    # regardless of forced/fallback classification, so the mapper's
+    # self-transfer literal bank-code fallback has the BOOK'S OWN full list
+    # of bank accounts to choose among, not just the ones a given
+    # transaction's tokens happened to reach (see agent_mapper's
+    # _self_transfer_candidates for why that distinction matters).
+    own_bank_account_paths: Set[str] = set()
 
     for txn in transactions:
         # Extract date
@@ -241,9 +249,16 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
                 norm_forced_account is not None
                 and _norm_account_path(acc_path) == norm_forced_account
             )
-            own_bank = None if forced_source else _is_own_bank_account(
+            # Structural check runs regardless of forced_source -- it feeds
+            # the book-wide own_bank_account_paths set below, which is a
+            # fact about the account itself, not about how THIS transaction
+            # happens to be routed.
+            structural_own_bank = _is_own_bank_account(
                 acc_path, account_types.get(acc_id_elem.text)
             )
+            if structural_own_bank:
+                own_bank_account_paths.add(acc_path)
+            own_bank = None if forced_source else structural_own_bank
             splits_info.append({
                 'path': acc_path,
                 'amount': amount,
@@ -319,6 +334,7 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
     return {
         'account_tree': account_ids,
         'mappings': aggregated,
+        'own_bank_accounts': sorted(own_bank_account_paths),
         'metadata': {
             'gnucash_file': str(gnucash_path),
             'extraction_date': datetime.now().isoformat(),

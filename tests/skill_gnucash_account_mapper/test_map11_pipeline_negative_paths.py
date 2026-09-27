@@ -21,11 +21,24 @@ existing suite left uncovered or only weakly covered:
      also the regression test for a real defect found and fixed by this
      follow-up -- see the RED FLAG note above the relevant test below.
   4. Self-transfer / IFSC routing (_self_transfer_candidates,
-     _literal_bank_code_match, _history_token_match): correct-bank routing,
-     no-bank-code-match, ambiguous-two-bank-code-match, no-bank-marker at
-     all, and a non-self-transfer narration that happens to contain an IFSC.
+     _literal_bank_code_match, _history_token_match, _ifsc_contradiction):
+     correct-bank routing, no-bank-code-match, ambiguous-two-bank-code-match,
+     no-bank-marker at all, a non-self-transfer narration that happens to
+     contain an IFSC, and the real-book defect this follow-up fixes: an
+     all-or-nothing shape test that never fires once a description's plain
+     tokens (self-transfer marker words, the user's own name) also appear on
+     non-asset accounts elsewhere in the book -- which is true of every real
+     book. Fixtures here are REAL-SHAPED for that reason: the self-transfer
+     marker words and the user's own name deliberately also lead to
+     Income/Expenses/Liabilities accounts, mirroring the real-book
+     measurement that found the defect (see RED FLAG note above
+     _self_transfer_candidates in agent.py).
   5. Direction: a self-transfer/sweep match is never assigned to an Income
      or Expense account.
+  6. End-to-end: agent.run() itself, with a REAL-SHAPED history fixture,
+     routes an HSBC-IFSC self-transfer row to HSBC and an HDFC-IFSC one to
+     HDFC -- never to SBM (the bank that used to win by default via the
+     weak prefix matcher once the old shape test always abstained).
 
 All data (descriptions, account paths, IFSC-shaped codes) is synthetic --
 no real names, account numbers, FD numbers, PANs, or IFSC codes.
@@ -308,45 +321,103 @@ def test_rtgs_same_account_duplicate_descriptions_are_not_falsely_flagged_ambigu
 # 4. Self-transfer / IFSC routing.
 # ---------------------------------------------------------------------------
 
-def _own_asset_history_model():
-    # Three own accounts, each reached via generic self-transfer plain
-    # tokens ("xfer", "to", "self") with EQUAL frequency (so plain-token
-    # evidence ties across all three and the Bayesian pass abstains on its
-    # own, forcing the self-transfer/IFSC fallback to decide), plus a
-    # distinct synthetic IFSC-shaped code per account.
-    history = [
-        _mk("xfer to self hsbc0abc123", OWN_HSBC, frequency=5),
-        _mk("xfer to self stcb0xyz567", OWN_SBM, frequency=5),
-        _mk("xfer to self hdfc0def901", OWN_HDFC, frequency=5),
-    ]
-    return agent._build_history_token_model(history)
+OWN_NAME = "maskedname"  # stands in for the book owner's own name in narrations
+
+# Real-shaped fixture (mirrors the real-book measurement, names/codes
+# masked): SBM self-transfers are FREQUENT (12) in this book's history,
+# HSBC self-transfers are fewer (3) and, critically, carry NO IFSC code at
+# all in history (only a live, never-before-seen row supplies one), HDFC
+# self-transfers fewer still (2), and the self-transfer marker words PLUS
+# the user's own name also appear on ordinary Income/Expenses/Liabilities
+# narrations elsewhere in the book -- exactly the shape that made the old
+# all-or-nothing rule's `candidates` always None.
+_REAL_SHAPED_SELF_TRANSFER_HISTORY = [
+    _mk(f"xfer to self {OWN_NAME} stcb0abc999", OWN_SBM, frequency=12),
+    _mk(f"xfer to self {OWN_NAME} hsbc transfer", OWN_HSBC, frequency=3),
+    _mk(f"xfer to self {OWN_NAME} hdfc transfer", OWN_HDFC, frequency=2),
+    _mk(f"salary payment to {OWN_NAME}", INCOME_SALARY, frequency=5),
+    _mk(f"loan emi to {OWN_NAME}", LOAN_ACCOUNT, frequency=4),
+    _mk(f"vendor payment to {OWN_NAME}", EXPENSE_VENDOR, frequency=3),
+]
 
 
-def test_self_transfer_routes_to_correct_own_account_never_others_hsbc():
-    model = _own_asset_history_model()
-    match = agent._history_token_match("xfer to self hsbc0new456", model)
-    assert match is not None
+def _real_shaped_self_transfer_model():
+    return agent._build_history_token_model(_REAL_SHAPED_SELF_TRANSFER_HISTORY)
+
+
+_REAL_SHAPED_OWN_BANK_ACCOUNTS = {OWN_HSBC, OWN_SBM, OWN_HDFC}
+
+
+def test_self_transfer_routes_hsbc_ifsc_to_hsbc_never_sbm_real_shaped():
+    # The exact real-book defect: "self", "to", and the user's own name all
+    # also lead to non-asset accounts above, so the OLD all-or-nothing rule
+    # would have rejected this description outright (candidates=None) and
+    # let the weak prefix matcher default it onto SBM (frequency 12, the
+    # book's most common self-transfer destination) instead of ever reaching
+    # the literal HSBC bank-code check.
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        model,
+        own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    )
+    assert match is not None, "statistical shape test must fire even though HSBC is the rarer own account"
     assert match["account"] == OWN_HSBC
     assert match["account"] != OWN_SBM
     assert match["account"] != OWN_HDFC
 
 
-def test_self_transfer_routes_to_correct_own_account_never_others_sbm():
-    model = _own_asset_history_model()
-    match = agent._history_token_match("xfer to self stcb0new987", model)
-    assert match is not None
-    assert match["account"] == OWN_SBM
-    assert match["account"] != OWN_HSBC
-    assert match["account"] != OWN_HDFC
-
-
-def test_self_transfer_routes_to_correct_own_account_never_others_hdfc():
-    model = _own_asset_history_model()
-    match = agent._history_token_match("xfer to self hdfc0new112", model)
+def test_self_transfer_routes_hdfc_ifsc_to_hdfc_never_sbm_real_shaped():
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(
+        f"Xfer to self {OWN_NAME} HDFC0NEW789",
+        model,
+        own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    )
     assert match is not None
     assert match["account"] == OWN_HDFC
-    assert match["account"] != OWN_HSBC
     assert match["account"] != OWN_SBM
+    assert match["account"] != OWN_HSBC
+
+
+def test_self_transfer_without_own_bank_accounts_kwarg_abstains():
+    # If the caller doesn't wire in own_bank_accounts (e.g. an older call
+    # site, or an extractor run that found none), the fallback must abstain
+    # rather than silently reproduce the old always-None behaviour as a
+    # false "unmatched is safe" signal -- this documents that own_bank_
+    # accounts is REQUIRED for the fallback to ever engage.
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(f"Xfer to self {OWN_NAME} HSBC0NEW456", model)
+    assert match is None
+
+
+def test_ifsc_code_matching_two_own_accounts_stays_unmatched_real_shaped():
+    # A code that substring-matches TWO own accounts (HSBC + a second HSBC
+    # business account) must stay unmatched even though the statistical
+    # shape test itself passes -- ambiguity is _literal_bank_code_match's
+    # job to catch, and it must still catch it with the new candidate set.
+    model = _real_shaped_self_transfer_model()
+    own_bank_accounts = {OWN_HSBC, OWN_HSBC_BUSINESS, OWN_SBM, OWN_HDFC}
+    match = agent._history_token_match(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        model,
+        own_bank_accounts=own_bank_accounts,
+    )
+    assert match is None
+
+
+def test_ifsc_code_matching_no_own_account_not_rescued_onto_another_bank():
+    # A code that matches NO own account (e.g. a third-party bank the row's
+    # counterparty happens to bank with) must stay unmatched -- and,
+    # crucially, must never be "rescued" by silently landing on some OTHER
+    # own bank account just because the shape test passed.
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(
+        f"Xfer to self {OWN_NAME} SBIN0NEW111",
+        model,
+        own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    )
+    assert match is None
 
 
 def test_ifsc_bank_code_matching_no_own_account_stays_unmatched():
@@ -370,39 +441,62 @@ def test_self_transfer_with_no_bank_marker_at_all_stays_unmatched():
     # "xfer to self" alone, with no IFSC token whatsoever: _history_token_
     # match requires an ifsc: token to even attempt the self-transfer
     # fallback (there is nothing else to disambiguate the tied plain-token
-    # evidence), so this must abstain -- never guess one of the three tied
-    # own accounts.
-    model = _own_asset_history_model()
-    match = agent._history_token_match("xfer to self", model)
+    # evidence), so this must abstain -- never guess one of the three own
+    # accounts.
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(
+        f"xfer to self {OWN_NAME}",
+        model,
+        own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    )
     assert match is None
 
 
 def test_non_self_transfer_narration_with_incidental_ifsc_not_routed_to_own_account():
-    # A payment TO a vendor, whose plain tokens have only ever led to a
-    # non-asset (Expenses) account in history, must never be treated as
-    # self-transfer-shaped just because its narration happens to contain an
-    # IFSC-shaped code for a known own account.
+    # A payment TO a vendor, whose plain tokens' evidence mass is
+    # overwhelmingly non-asset (Expenses) even though a marker word ("self")
+    # also happens to touch the three own accounts a little, must never be
+    # treated as self-transfer-shaped just because its narration happens to
+    # contain an IFSC-shaped code for a known own account. Exercises the
+    # real statistical gate (own_bank_accounts supplied), not the "no kwarg"
+    # short-circuit.
     plain_tokens = {"self", "vendor"}
     model = {
-        "self": {OWN_HSBC: 5, OWN_SBM: 5, OWN_HDFC: 5},
-        "vendor": {EXPENSE_VENDOR: 5},
+        "self": {OWN_HSBC: 1, OWN_SBM: 1, OWN_HDFC: 1},
+        "vendor": {EXPENSE_VENDOR: 50},
     }
-    candidates = agent._self_transfer_candidates(plain_tokens, model)
+    candidates = agent._self_transfer_candidates(
+        plain_tokens, model, own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS
+    )
     assert candidates is None
 
 
-def test_self_transfer_candidates_requires_every_led_to_account_be_an_asset():
-    # Direct unit check of the guard itself: if the union of accounts a
-    # description's plain tokens have ever led to includes even one
-    # non-asset account, the whole description is rejected as
-    # self-transfer-shaped.
+def test_self_transfer_candidates_uses_majority_of_evidence_mass_not_unanimity():
+    # RED FLAG fix: the OLD rule rejected the whole description the instant
+    # ANY led-to account was non-asset, which never held on real data (see
+    # module docstring). The NEW rule tolerates a MINORITY of non-asset mass
+    # and only rejects when non-asset mass is the majority.
     plain_tokens = {"mixed"}
-    model = {"mixed": {OWN_HSBC: 3, EXPENSE_VENDOR: 3}}
-    assert agent._self_transfer_candidates(plain_tokens, model) is None
+    own_bank_accounts = {OWN_HSBC, OWN_SBM}
 
-    all_asset_model = {"mixed": {OWN_HSBC: 3, OWN_SBM: 3}}
-    result = agent._self_transfer_candidates(plain_tokens, all_asset_model)
-    assert result == {OWN_HSBC, OWN_SBM}
+    # 70% asset mass -- clears HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION
+    # (0.6) despite NOT being unanimous -- the old rule would have rejected
+    # this outright.
+    majority_asset_model = {"mixed": {OWN_HSBC: 7, EXPENSE_VENDOR: 3}}
+    result = agent._self_transfer_candidates(
+        plain_tokens, majority_asset_model, own_bank_accounts=own_bank_accounts
+    )
+    # Candidates are the FULL own_bank_accounts set, never just the
+    # accounts "mixed" happened to reach (OWN_HSBC only, here) -- the point
+    # of the fallback is to reach a bank/branch this exact code has never
+    # been seen at before.
+    assert result == own_bank_accounts
+
+    # 30% asset mass -- does not clear the threshold, correctly rejected.
+    minority_asset_model = {"mixed": {OWN_HSBC: 3, EXPENSE_VENDOR: 7}}
+    assert agent._self_transfer_candidates(
+        plain_tokens, minority_asset_model, own_bank_accounts=own_bank_accounts
+    ) is None
 
 
 # ---------------------------------------------------------------------------
@@ -410,8 +504,12 @@ def test_self_transfer_candidates_requires_every_led_to_account_be_an_asset():
 # ---------------------------------------------------------------------------
 
 def test_self_transfer_match_never_lands_on_income_or_expense_account():
-    model = _own_asset_history_model()
-    match = agent._history_token_match("xfer to self hsbc0new456", model)
+    model = _real_shaped_self_transfer_model()
+    match = agent._history_token_match(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        model,
+        own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    )
     assert match is not None
     top_level = agent._strip_root(match["account"]).split(":", 1)[0]
     assert top_level == "Assets"
@@ -438,14 +536,188 @@ def test_sweep_matches_never_land_on_income_or_expense_account():
 
 
 def test_self_transfer_candidates_can_never_surface_an_income_or_expense_account():
-    # Structural guarantee, independent of any specific description: even if
-    # a plain token's historical accounts include Income or Expenses
-    # entries alongside asset ones, _self_transfer_candidates rejects the
-    # whole set rather than ever returning a mixed or non-asset candidate
-    # pool that a downstream match could land on.
+    # Structural guarantee, independent of any specific description:
+    # _self_transfer_candidates only ever returns exactly `own_bank_accounts`
+    # (a set the caller itself controls) or None -- it can never hand back a
+    # mixed or non-asset candidate pool, no matter what the model contains.
+    own_bank_accounts = {OWN_HSBC}
+
+    # Bare-majority (50/50) mass is BELOW the 0.6 threshold -- still
+    # correctly rejected, not just because income/expense is "present" but
+    # because the mass isn't clearly asset-majority.
     plain_tokens = {"self"}
     model_with_income = {"self": {OWN_HSBC: 5, INCOME_SALARY: 5}}
-    assert agent._self_transfer_candidates(plain_tokens, model_with_income) is None
+    assert agent._self_transfer_candidates(
+        plain_tokens, model_with_income, own_bank_accounts=own_bank_accounts
+    ) is None
 
     model_with_expense = {"self": {OWN_HSBC: 5, EXPENSE_VENDOR: 5}}
-    assert agent._self_transfer_candidates(plain_tokens, model_with_expense) is None
+    assert agent._self_transfer_candidates(
+        plain_tokens, model_with_expense, own_bank_accounts=own_bank_accounts
+    ) is None
+
+    # Even when the shape test DOES pass (majority asset mass despite income
+    # also being present), the returned set is exactly own_bank_accounts --
+    # INCOME_SALARY can never leak into it.
+    model_majority_asset = {"self": {OWN_HSBC: 8, INCOME_SALARY: 2}}
+    result = agent._self_transfer_candidates(
+        plain_tokens, model_majority_asset, own_bank_accounts=own_bank_accounts
+    )
+    assert result == own_bank_accounts
+    assert INCOME_SALARY not in result
+
+
+# ---------------------------------------------------------------------------
+# 7. _ifsc_contradiction (Step 4.9 guard): "HSBC IFSC -> SBM must be
+#    impossible by any path, including prefix, keyword and LLM." Once Step
+#    3.6's dedicated self-transfer/IFSC route has abstained on a row, no
+#    LATER pass (smart pattern, weak prefix/keyword fallback, or the LLM) may
+#    silently ship a guess landing it on a DIFFERENT own bank account whose
+#    bank code contradicts the row's own IFSC. This is the hard downstream
+#    gate for that -- unit-tested directly here, and exercised through the
+#    real run() pipeline in section 8 below.
+# ---------------------------------------------------------------------------
+
+def test_ifsc_contradiction_flags_a_guess_onto_the_wrong_own_bank():
+    # A row whose description carries an HSBC IFSC, but whose Account was
+    # (hypothetically) resolved by some other pass to SBM -- exactly the
+    # live defect shape -- must be flagged as a contradiction.
+    assert agent._ifsc_contradiction(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        OWN_SBM,
+        _REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    ) is True
+
+
+def test_ifsc_contradiction_does_not_flag_the_correct_own_bank():
+    assert agent._ifsc_contradiction(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        OWN_HSBC,
+        _REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    ) is False
+
+
+def test_ifsc_contradiction_ignores_accounts_outside_own_bank_accounts():
+    # A row resolved to a non-bank account (Expenses, say) is not this
+    # guard's concern at all -- it only ever polices own-bank-vs-own-bank
+    # contradictions, never overrides an Income/Expenses resolution.
+    assert agent._ifsc_contradiction(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456",
+        EXPENSE_VENDOR,
+        _REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    ) is False
+
+
+def test_ifsc_contradiction_ignores_descriptions_with_no_ifsc():
+    assert agent._ifsc_contradiction(
+        f"xfer to self {OWN_NAME}",
+        OWN_SBM,
+        _REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    ) is False
+
+
+# ---------------------------------------------------------------------------
+# 8. End-to-end: agent.run() itself, real-shaped fixture. Drives the REAL
+#    pipeline (not a re-derivation of Step 3.6/4.9's logic) so a future
+#    change that reintroduces the defect at the wiring level -- not just in
+#    _self_transfer_candidates/_history_token_match themselves -- would be
+#    caught here too.
+# ---------------------------------------------------------------------------
+
+def test_run_end_to_end_routes_hsbc_and_hdfc_self_transfers_never_to_sbm(tmp_path, monkeypatch):
+    import csv as _csv
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    ROOT_ = _Path(__file__).resolve().parent.parent.parent
+    SRC_ = ROOT_ / "src"
+    AGENTS_ROOT_ = SRC_ / "agents"
+    if str(AGENTS_ROOT_) not in _sys.path:
+        _sys.path.insert(0, str(AGENTS_ROOT_))
+
+    import skill_gnucash_xml_extractor.agent as xml_agent_mod
+    import skill_gnucash_mapping_generator.agent as mapgen_mod
+    import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod
+
+    def fake_parse_gnucash_file(path, gnucash_bank_account=None):
+        return {
+            "mappings": {"BankX": list(_REAL_SHAPED_SELF_TRANSFER_HISTORY)},
+            "own_bank_accounts": sorted(_REAL_SHAPED_OWN_BANK_ACCOUNTS),
+        }
+
+    def fake_generate_rules(extractor_output, min_freq=1):
+        # No rules at all: the ONLY thing that can resolve the self-transfer
+        # rows is the real Step 3.6 history pass (or, if that fails, Step 4
+        # + the Step 4.9 guard) -- never a rule coincidentally matching.
+        return {}
+
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+        return rules_by_bank
+
+    def fake_load_overrides(gnucash_file, config_path=None):
+        return []
+
+    def fake_migrate_legacy_overrides(gnucash_file, config_path=None):
+        return 0
+
+    def fake_rules_path(gnucash_file, config_path=None):
+        return tmp_path / "fake_persistent_rules.yaml"
+
+    monkeypatch.setattr(xml_agent_mod, "parse_gnucash_file", fake_parse_gnucash_file)
+    monkeypatch.setattr(mapgen_mod, "generate_rules", fake_generate_rules)
+    monkeypatch.setattr(persistent_rules_mod, "merge_auto_rules", fake_merge_auto_rules)
+    monkeypatch.setattr(persistent_rules_mod, "load_overrides", fake_load_overrides)
+    monkeypatch.setattr(persistent_rules_mod, "migrate_legacy_overrides", fake_migrate_legacy_overrides)
+    monkeypatch.setattr(persistent_rules_mod, "rules_path", fake_rules_path)
+
+    hsbc_desc = f"Xfer to self {OWN_NAME} HSBC0NEW456"
+    hdfc_desc = f"Xfer to self {OWN_NAME} HDFC0NEW789"
+    canonical_rows = [
+        {"Date": "01-04-2025", "Description": hsbc_desc, "Withdrawal": "5000.00", "Deposit": ""},
+        {"Date": "02-04-2025", "Description": hdfc_desc, "Withdrawal": "3000.00", "Deposit": ""},
+    ]
+    canonical_csv = tmp_path / "canonical.csv"
+    with open(canonical_csv, "w", newline="", encoding="utf-8") as f:
+        writer = _csv.DictWriter(f, fieldnames=["Date", "Description", "Withdrawal", "Deposit"])
+        writer.writeheader()
+        writer.writerows(canonical_rows)
+
+    output_path = tmp_path / "mapped.csv"
+
+    from conftest import ScriptedLLM, _fake_resolve_llm_endpoint_config
+    import urllib.request
+
+    fake_llm = ScriptedLLM()
+    fake_llm.queue("0")
+    fake_llm.queue("0")
+
+    def _blocked_urlopen(*a, **k):
+        raise AssertionError("a real network call was attempted from a ScriptedLLM test")
+
+    monkeypatch.setattr(agent, "_llm_chat", fake_llm)
+    monkeypatch.setattr(agent, "_resolve_llm_endpoint_config", _fake_resolve_llm_endpoint_config)
+    monkeypatch.setattr(agent, "_emit_mapper_progress", lambda msg: None)
+    monkeypatch.setattr(urllib.request, "urlopen", _blocked_urlopen)
+
+    agent.run(
+        gnucash_file=str(tmp_path / "synthetic-nonexistent.gnucash"),
+        canonical_csv=str(canonical_csv),
+        output_path=str(output_path),
+        config_path="fake-config.yaml",
+        model_override=None,
+        bank_name=None,
+        gnucash_bank_account=None,
+    )
+
+    with open(output_path, newline="", encoding="utf-8") as f:
+        mapped_rows = list(_csv.DictReader(f))
+
+    by_desc = {row["Description"]: row for row in mapped_rows}
+    hsbc_row = by_desc[hsbc_desc]
+    hdfc_row = by_desc[hdfc_desc]
+
+    assert hsbc_row["Account"] == agent._strip_root(OWN_HSBC)
+    assert hsbc_row["Account"] != agent._strip_root(OWN_SBM)
+
+    assert hdfc_row["Account"] == agent._strip_root(OWN_HDFC)
+    assert hdfc_row["Account"] != agent._strip_root(OWN_SBM)
