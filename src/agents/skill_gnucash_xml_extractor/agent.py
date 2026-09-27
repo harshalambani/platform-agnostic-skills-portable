@@ -84,6 +84,34 @@ def _is_own_bank_account(acc_path: str, acc_type: Optional[str]) -> Optional[str
     return _match_bank(acc_path)
 
 
+def _is_structural_bank_account(acc_type: Optional[str]) -> bool:
+    """RED FLAG fix (round 2, real-book re-measure): whether an account is one
+    of THIS BOOK'S OWN bank accounts, for the mapper's self-transfer/IFSC
+    literal-code fallback (`own_bank_accounts`), must be purely structural —
+    GnuCash type BANK — with NO name-pattern filter at all.
+
+    The coordinator's real book has BANK-type accounts for SBM, Kotak, and
+    Barclays, none of which appear in BANK_PATTERNS (that list only names the
+    banks this book happens to partition per-bank HISTORY by — ICICI, HDFC,
+    HSBC, BoB). `_is_own_bank_account` above intersects type BANK with a name
+    match, which is exactly right for "which bank does this account's history
+    belong to" but wrong for "is this one of the book's own transactable
+    accounts a self-transfer could land on" — that second question has
+    nothing to do with whether the account's name happens to match one of the
+    four patterns we know how to partition history for. Using
+    `_is_own_bank_account` here silently dropped SBM out of
+    `own_bank_accounts`, so the IFSC-contradiction guard in the mapper
+    couldn't see SBM as "one of the book's own accounts" and never fired on
+    the HSBC-IFSC -> SBM misroute it exists to catch.
+
+    The standing rule is implicit/structural learning with no hand-coded bank
+    or keyword lists for "own account" — BANK_PATTERNS may keep existing as
+    the legacy per-bank partition key for history, never as part of the
+    definition of "own account".
+    """
+    return acc_type == 'BANK'
+
+
 def _get_account_hierarchy(acc_id: str, account_ids: Dict, account_parents: Dict, visited: Optional[Set] = None) -> str:
     """Build full account path."""
     if visited is None:
@@ -253,11 +281,18 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
             # the book-wide own_bank_account_paths set below, which is a
             # fact about the account itself, not about how THIS transaction
             # happens to be routed.
-            structural_own_bank = _is_own_bank_account(
-                acc_path, account_types.get(acc_id_elem.text)
-            )
-            if structural_own_bank:
+            #
+            # own_bank_account_paths (returned to the mapper as
+            # 'own_bank_accounts') uses the PURELY STRUCTURAL type-BANK test
+            # (_is_structural_bank_account), with no name-pattern filter --
+            # see that function's docstring. This is deliberately a WIDER set
+            # than own_bank (below), which still uses the name-pattern-gated
+            # _is_own_bank_account because that one drives per-bank HISTORY
+            # partitioning (mappings_by_bank), a different concern.
+            acc_type = account_types.get(acc_id_elem.text)
+            if _is_structural_bank_account(acc_type):
                 own_bank_account_paths.add(acc_path)
+            structural_own_bank = _is_own_bank_account(acc_path, acc_type)
             own_bank = None if forced_source else structural_own_bank
             splits_info.append({
                 'path': acc_path,

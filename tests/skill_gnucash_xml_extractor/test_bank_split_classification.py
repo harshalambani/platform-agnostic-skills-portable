@@ -247,6 +247,69 @@ SBM_CUR = _account_xml("SBM Bank - 004", "sbm_cur", "BANK", "assets")
 SBM_CUR_PATH = "Assets:SBM Bank - 004"
 
 
+# ---------------------------------------------------------------------------
+# 4.5. RED FLAG fix (round 2, real-book re-measure, 2026-09-27):
+# own_bank_accounts must be PURELY STRUCTURAL (GnuCash type BANK), with NO
+# name-pattern gate at all. The real book has BANK-type accounts for SBM,
+# Kotak, and Barclays -- none of which appear in BANK_PATTERNS (that list
+# only names the four banks history happens to be partitioned per-bank for:
+# ICICI/HDFC/HSBC/BoB). The previous version of own_bank_accounts reused
+# _is_own_bank_account (type BANK AND name-pattern match), which silently
+# dropped SBM out of the set -- so the mapper's IFSC-contradiction guard
+# could never recognise SBM as "one of the book's own accounts" and never
+# fired on the HSBC-IFSC -> SBM misroute it exists to catch. Also verifies
+# the converse: a legacy ASSET-type account named after a bank (an old
+# parent/placeholder, not a real transactable account) must NOT be pulled
+# into own_bank_accounts just because its name matches a pattern.
+# ---------------------------------------------------------------------------
+
+KOTAK_CUR = _account_xml("Kotak Bank - 005", "kotak_cur", "BANK", "assets")
+KOTAK_CUR_PATH = "Assets:Kotak Bank - 005"
+BARCLAYS_CUR = _account_xml("Barclays Bank - 006", "barclays_cur", "BANK", "assets")
+BARCLAYS_CUR_PATH = "Assets:Barclays Bank - 006"
+# A legacy ASSET-type account named after a bank -- not a real transactable
+# account (type ASSET, not BANK) -- must never be treated as "own".
+LEGACY_SBM_PARENT = _account_xml("SBM Bank (old)", "sbm_legacy", "ASSET", "assets")
+LEGACY_SBM_PARENT_PATH = "Assets:SBM Bank (old)"
+
+
+def test_own_bank_accounts_is_structural_type_bank_no_name_pattern_gate(tmp_path):
+    accounts = [
+        ROOT_ACC, ASSETS_ACC,
+        ICICI_CUR, HDFC_CUR, HSBC_CUR,
+        SBM_CUR, KOTAK_CUR, BARCLAYS_CUR,
+        LEGACY_SBM_PARENT,
+    ]
+    # No transactions needed -- own_bank_accounts is collected from every
+    # split it ever sees, but the structural type check itself only needs
+    # the accounts to exist and be touched by at least one split.
+    txns = [
+        _txn_xml(
+            "AUTOSWEEP TO 555555555555 SAMPLE PARTY", "2024-01-05",
+            [_split_xml("icici_cur", "-1000/100"), _split_xml("sbm_cur", "1000/100")],
+        ),
+        _txn_xml(
+            "AUTOSWEEP TO 555555555556 SAMPLE PARTY", "2024-01-06",
+            [_split_xml("kotak_cur", "-1000/100"), _split_xml("barclays_cur", "1000/100")],
+        ),
+        _txn_xml(
+            "LEGACY MOVE", "2024-01-07",
+            [_split_xml("icici_cur", "-1000/100"), _split_xml("sbm_legacy", "1000/100")],
+        ),
+    ]
+    book = _write_book(tmp_path, accounts, txns)
+    result = parse_gnucash_file(str(book))
+
+    own = set(result["own_bank_accounts"])
+    assert f"Root Account:{SBM_CUR_PATH}" in own
+    assert f"Root Account:{KOTAK_CUR_PATH}" in own
+    assert f"Root Account:{BARCLAYS_CUR_PATH}" in own
+    assert f"Root Account:{ICICI_CUR_PATH}" in own
+    # Negative: the legacy ASSET-type account is never "own" just because its
+    # name matches a bank pattern -- type BANK is required, no exceptions.
+    assert f"Root Account:{LEGACY_SBM_PARENT_PATH}" not in own
+
+
 def test_end_to_end_run_sweeps_to_fd_and_self_transfer_to_hsbc_never_sbm_or_hdfc(tmp_path, monkeypatch):
     import csv
 

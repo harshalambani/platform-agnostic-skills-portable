@@ -33,6 +33,29 @@ existing suite left uncovered or only weakly covered:
      Income/Expenses/Liabilities accounts, mirroring the real-book
      measurement that found the defect (see RED FLAG note above
      _self_transfer_candidates in agent.py).
+
+     ROUND 2 (2026-09-27 real-book re-measure): the round-1 fix above did
+     NOT change the real-book result -- 15 HSBC-IFSC and 1 HDFC-IFSC row
+     still went to SBM. Two further real-book-only defects, both now fixed
+     and covered here:
+       (a) own_bank_accounts was still gated by BANK_PATTERNS name matching
+           (fixed in the extractor, see test_bank_split_classification.py's
+           new test) -- SBM was silently never a member of own_bank_accounts,
+           so _ifsc_contradiction could not recognise it as "one of the
+           book's own accounts" and never fired;
+       (b) the real book has MULTIPLE own accounts per bank (e.g. two HSBC
+           BANK-type accounts -- a current account and an FD also of type
+           BANK) so "hsbc" always hit 2 own accounts and
+           _literal_bank_code_match abstained as ambiguous before ever
+           reaching a real decision, letting the row fall through to the
+           weak prefix matcher. Fixed with a deterministic historical-
+           evidence tie-break (most self-transfer support wins; still-tied
+           or zero evidence stays unmatched -- never a name-order pick).
+     The fixture below is rebuilt to have the SAME shape as the real book:
+     two BANK-type accounts per bank (ICICI/HDFC/HSBC), SBM/Kotak/Barclays as
+     BANK-type accounts NOT in any name-pattern list, an FD of BANK type
+     named after its bank, and self-transfer history concentrated 10-to-1 on
+     ONE of the two HSBC accounts (mirroring the real book's own numbers).
   5. Direction: a self-transfer/sweep match is never assigned to an Income
      or Expense account.
   6. End-to-end: agent.run() itself, with a REAL-SHAPED history fixture,
@@ -71,6 +94,18 @@ BOND_ACCOUNT = "Assets:Investments:Bonds:Sample Bond"
 LOAN_ACCOUNT = "Liabilities:Loans:Sample Loan"
 EXPENSE_VENDOR = "Expenses:Sample Vendor"
 INCOME_SALARY = "Income:Salary"
+
+# Real-book-shaped account structure (round 2, 2026-09-27): each of ICICI,
+# HDFC, HSBC has TWO of its own BANK-type accounts (a current account and an
+# FD, both type BANK -- a real book keeps some FDs as type BANK). SBM, Kotak,
+# and Barclays are BANK-type accounts whose names match NO entry in
+# BANK_PATTERNS at all -- the exact real-book shape that used to silently
+# fall out of own_bank_accounts.
+OWN_HSBC_FD = "Assets:Current Assets:Cash and Bank:HSBC Bank - FD"
+OWN_HDFC_FD = "Assets:Current Assets:Cash and Bank:HDFC Bank - FD"
+OWN_KOTAK = "Assets:Current Assets:Cash and Bank:Kotak Bank - 0002222"
+OWN_KOTAK_FD = "Assets:Current Assets:Cash and Bank:Kotak Bank FD - 0002223"
+OWN_BARCLAYS = "Assets:Current Assets:Cash and Bank:Barclays Bank - 0003333"
 
 
 # ---------------------------------------------------------------------------
@@ -323,17 +358,22 @@ def test_rtgs_same_account_duplicate_descriptions_are_not_falsely_flagged_ambigu
 
 OWN_NAME = "maskedname"  # stands in for the book owner's own name in narrations
 
-# Real-shaped fixture (mirrors the real-book measurement, names/codes
-# masked): SBM self-transfers are FREQUENT (12) in this book's history,
-# HSBC self-transfers are fewer (3) and, critically, carry NO IFSC code at
-# all in history (only a live, never-before-seen row supplies one), HDFC
-# self-transfers fewer still (2), and the self-transfer marker words PLUS
-# the user's own name also appear on ordinary Income/Expenses/Liabilities
-# narrations elsewhere in the book -- exactly the shape that made the old
-# all-or-nothing rule's `candidates` always None.
+# Real-shaped fixture (round 2, mirrors the actual real-book re-measurement,
+# names/codes masked): SBM self-transfers are FREQUENT (12) in this book's
+# history and carry no code any own account's name spells out ("stcb", which
+# no own account claims). HSBC self-transfer history is CONCENTRATED 10-to-1
+# on just ONE of the book's two HSBC BANK-type accounts (the current
+# account, never the FD) -- exactly the real book's own numbers. HDFC
+# likewise concentrates on its current account, not its FD. The self-transfer
+# marker words PLUS the user's own name also appear on ordinary
+# Income/Expenses/Liabilities narrations elsewhere in the book -- exactly the
+# shape that made the old all-or-nothing rule's `candidates` always None, and
+# neither HSBC_FD nor HDFC_FD ever appears as a self-transfer target in
+# history at all (zero evidence), which is what the round-2 tie-break must
+# use to prefer the evidenced account over its same-bank sibling.
 _REAL_SHAPED_SELF_TRANSFER_HISTORY = [
     _mk(f"xfer to self {OWN_NAME} stcb0abc999", OWN_SBM, frequency=12),
-    _mk(f"xfer to self {OWN_NAME} hsbc transfer", OWN_HSBC, frequency=3),
+    _mk(f"xfer to self {OWN_NAME} hsbc transfer", OWN_HSBC, frequency=10),
     _mk(f"xfer to self {OWN_NAME} hdfc transfer", OWN_HDFC, frequency=2),
     _mk(f"salary payment to {OWN_NAME}", INCOME_SALARY, frequency=5),
     _mk(f"loan emi to {OWN_NAME}", LOAN_ACCOUNT, frequency=4),
@@ -345,29 +385,37 @@ def _real_shaped_self_transfer_model():
     return agent._build_history_token_model(_REAL_SHAPED_SELF_TRANSFER_HISTORY)
 
 
-_REAL_SHAPED_OWN_BANK_ACCOUNTS = {OWN_HSBC, OWN_SBM, OWN_HDFC}
+# The FULL real-book-shaped own_bank_accounts set: two accounts per bank for
+# ICICI/HDFC/HSBC (only HSBC/HDFC are exercised by history here, but the
+# real book has an ICICI pair too -- omitted since no test below needs it),
+# plus SBM/Kotak/Barclays as BANK-type accounts outside any name pattern.
+_REAL_SHAPED_OWN_BANK_ACCOUNTS = {
+    OWN_HSBC, OWN_HSBC_FD, OWN_HDFC, OWN_HDFC_FD,
+    OWN_SBM, OWN_KOTAK, OWN_KOTAK_FD, OWN_BARCLAYS,
+}
 
 
-def test_self_transfer_routes_hsbc_ifsc_to_hsbc_never_sbm_real_shaped():
-    # The exact real-book defect: "self", "to", and the user's own name all
-    # also lead to non-asset accounts above, so the OLD all-or-nothing rule
-    # would have rejected this description outright (candidates=None) and
-    # let the weak prefix matcher default it onto SBM (frequency 12, the
-    # book's most common self-transfer destination) instead of ever reaching
-    # the literal HSBC bank-code check.
+def test_self_transfer_routes_hsbc_ifsc_to_the_evidenced_hsbc_account_real_shaped():
+    # The exact real-book defect, round 2: "hsbc" substring-matches BOTH
+    # OWN_HSBC and OWN_HSBC_FD (two real BANK-type accounts), so the round-1
+    # fix's ambiguity check alone would still abstain here and let the row
+    # fall through to the weak prefix matcher -> SBM. The evidence-based tie
+    # -break must prefer OWN_HSBC (10 historical self-transfers) over
+    # OWN_HSBC_FD (zero) -- never SBM, never a name-order pick.
     model = _real_shaped_self_transfer_model()
     match = agent._history_token_match(
         f"Xfer to self {OWN_NAME} HSBC0NEW456",
         model,
         own_bank_accounts=_REAL_SHAPED_OWN_BANK_ACCOUNTS,
     )
-    assert match is not None, "statistical shape test must fire even though HSBC is the rarer own account"
+    assert match is not None, "evidence tie-break must resolve the two-HSBC-account ambiguity"
     assert match["account"] == OWN_HSBC
+    assert match["account"] != OWN_HSBC_FD
     assert match["account"] != OWN_SBM
     assert match["account"] != OWN_HDFC
 
 
-def test_self_transfer_routes_hdfc_ifsc_to_hdfc_never_sbm_real_shaped():
+def test_self_transfer_routes_hdfc_ifsc_to_the_evidenced_hdfc_account_real_shaped():
     model = _real_shaped_self_transfer_model()
     match = agent._history_token_match(
         f"Xfer to self {OWN_NAME} HDFC0NEW789",
@@ -376,6 +424,7 @@ def test_self_transfer_routes_hdfc_ifsc_to_hdfc_never_sbm_real_shaped():
     )
     assert match is not None
     assert match["account"] == OWN_HDFC
+    assert match["account"] != OWN_HDFC_FD
     assert match["account"] != OWN_SBM
     assert match["account"] != OWN_HSBC
 
@@ -391,19 +440,33 @@ def test_self_transfer_without_own_bank_accounts_kwarg_abstains():
     assert match is None
 
 
-def test_ifsc_code_matching_two_own_accounts_stays_unmatched_real_shaped():
-    # A code that substring-matches TWO own accounts (HSBC + a second HSBC
-    # business account) must stay unmatched even though the statistical
-    # shape test itself passes -- ambiguity is _literal_bank_code_match's
-    # job to catch, and it must still catch it with the new candidate set.
-    model = _real_shaped_self_transfer_model()
-    own_bank_accounts = {OWN_HSBC, OWN_HSBC_BUSINESS, OWN_SBM, OWN_HDFC}
+def test_ifsc_code_tie_between_two_own_accounts_with_equal_evidence_stays_unmatched():
+    # Round 2: when the historical-evidence tie-break itself is TIED (both
+    # hit accounts have the SAME support), the row must still stay unmatched
+    # -- never resolved by name order, and never rescued downstream either
+    # (see the _ifsc_contradiction assertion below, mirroring how Step 4.9
+    # would revert a later pass's guess in this exact shape).
+    tied_a = "Assets:Current Assets:Cash and Bank:HSBC Bank - Alpha"
+    tied_b = "Assets:Current Assets:Cash and Bank:HSBC Bank - Beta"
+    own_bank_accounts = {tied_a, tied_b, OWN_SBM}
+    history = [
+        _mk(f"xfer to self {OWN_NAME} alpha route", tied_a, frequency=5),
+        _mk(f"xfer to self {OWN_NAME} beta route", tied_b, frequency=5),
+        _mk(f"xfer to self {OWN_NAME} stcb0abc999", OWN_SBM, frequency=12),
+    ]
+    model = agent._build_history_token_model(history)
     match = agent._history_token_match(
         f"Xfer to self {OWN_NAME} HSBC0NEW456",
         model,
         own_bank_accounts=own_bank_accounts,
     )
     assert match is None
+    # Not rescued by prefix onto SBM afterwards either: since HSBC is a code
+    # some own account visibly claims (both tied ones do), a later guess of
+    # SBM would be flagged as a contradiction by Step 4.9's guard.
+    assert agent._ifsc_contradiction(
+        f"Xfer to self {OWN_NAME} HSBC0NEW456", OWN_SBM, own_bank_accounts,
+    ) is True
 
 
 def test_ifsc_code_matching_no_own_account_not_rescued_onto_another_bank():
@@ -611,6 +674,21 @@ def test_ifsc_contradiction_ignores_accounts_outside_own_bank_accounts():
 def test_ifsc_contradiction_ignores_descriptions_with_no_ifsc():
     assert agent._ifsc_contradiction(
         f"xfer to self {OWN_NAME}",
+        OWN_SBM,
+        _REAL_SHAPED_OWN_BANK_ACCOUNTS,
+    ) is False
+
+
+def test_ifsc_contradiction_does_not_revert_an_stcb_row_no_own_account_spells_out():
+    # Round 2, requirement #3: SBM's own account name is simply "SBM Bank -
+    # 0009999" -- it never spells out "stcb" (the real book's SBM branch
+    # code) anywhere in its own name, and NO other own account does either.
+    # A code that no own account carries at all is not evidence the guess is
+    # wrong -- it just means the code isn't literally in any account's name.
+    # This must NOT be flagged as a contradiction, even though the guessed
+    # account (SBM) doesn't itself carry "stcb".
+    assert agent._ifsc_contradiction(
+        f"Xfer to self {OWN_NAME} STCB0ABC999",
         OWN_SBM,
         _REAL_SHAPED_OWN_BANK_ACCOUNTS,
     ) is False

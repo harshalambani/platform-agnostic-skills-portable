@@ -843,10 +843,31 @@ def _self_transfer_candidates(
     return set(own_bank_accounts)
 
 
-def _literal_bank_code_match(routing_tokens: set, candidates: set) -> Optional[Dict]:
+def _literal_bank_code_match(
+    routing_tokens: set,
+    candidates: set,
+    model: Optional[Dict[str, Dict[str, int]]] = None,
+    plain_tokens: Optional[set] = None,
+) -> Optional[Dict]:
     """Fallback for a bank code/branch this book has never seen before: match
-    the code literally against the candidates' OWN account names. Only a
-    unique hit counts -- ambiguous or absent evidence stays unmatched."""
+    the code literally against the candidates' OWN account names.
+
+    RED FLAG fix (round 2, real-book re-measure): a real book can have MORE
+    THAN ONE own account whose name carries the same bank code -- e.g. two
+    HSBC current accounts, or two/three ICICI ones. Treating that as
+    "ambiguous, stay unmatched" (the original rule) meant the row fell
+    through to the weak prefix matcher, which is exactly the path that
+    misrouted HSBC-IFSC rows onto SBM. Before giving up as ambiguous, break
+    the tie deterministically using the SAME historical evidence source
+    `_self_transfer_candidates` already used to decide this looked like a
+    self-transfer: the hit account with the largest per-token
+    distinct-transaction support (from `plain_tokens`, e.g. "xfer to self
+    <name>") in `model` wins -- a real book's HSBC self-transfers
+    concentrated 10-to-1 on one of its two HSBC accounts is exactly this
+    case. Never a name-order pick. If evidence is still tied (including two
+    hits with zero evidence each) or `model`/`plain_tokens` weren't supplied,
+    the row stays unmatched, same as the original all-ambiguous rule.
+    """
     codes = {t[len('ifsc:'):] for t in routing_tokens if t.startswith('ifsc:')}
     if not codes:
         return None
@@ -855,14 +876,29 @@ def _literal_bank_code_match(routing_tokens: set, candidates: set) -> Optional[D
         leaf = _strip_root(acct).lower()
         if any(code in leaf for code in codes):
             hits.add(acct)
+    if not hits:
+        return None
     if len(hits) == 1:
         acct = next(iter(hits))
-        return {
-            "account": acct,
-            "reason": f"Bank-code match ({', '.join(sorted(codes))})",
-            "confidence": "history",
+    else:
+        if not model or not plain_tokens:
+            return None
+        evidence = {
+            acct: max((model.get(tok, {}).get(acct, 0) for tok in plain_tokens), default=0)
+            for acct in hits
         }
-    return None
+        ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
+        best_acct, best_evidence = ranked[0]
+        if best_evidence == 0:
+            return None
+        if len(ranked) > 1 and ranked[1][1] == best_evidence:
+            return None  # still tied on actual evidence -- stay unmatched
+        acct = best_acct
+    return {
+        "account": acct,
+        "reason": f"Bank-code match ({', '.join(sorted(codes))})",
+        "confidence": "history",
+    }
 
 
 def _history_token_match(
@@ -901,7 +937,7 @@ def _history_token_match(
         candidates = {a for a in candidates if _strip_root(a) != norm_source}
     if not candidates:
         return None
-    return _literal_bank_code_match(routing_tokens, candidates)
+    return _literal_bank_code_match(routing_tokens, candidates, model=model, plain_tokens=plain_tokens)
 
 
 def _ifsc_contradiction(
@@ -922,6 +958,17 @@ def _ifsc_contradiction(
     same row. This is the hard downstream gate for that: run once, after
     every pass that could have produced such a guess, and revert it rather
     than let a provably contradicted own-bank match ship.
+
+    RED FLAG fix (round 2, real-book re-measure), requirement #3: this only
+    counts as a CONTRADICTION -- not merely "doesn't carry the code" -- when
+    some OTHER account in `own_bank_accounts` actually DOES carry one of the
+    row's IFSC-derived codes in its own name. A code that no own account
+    carries at all (e.g. an "STCB" branch code for a book whose SBM account
+    is simply named "SBM Bank", never spelling out "stcb") is not evidence
+    that the guessed account is wrong -- it just means this particular code
+    isn't literally spelled out anywhere in the book's account names, so
+    there is nothing to contradict the guess with. Only a code some other own
+    account visibly claims makes the current guess provably wrong.
     """
     if not account or not own_bank_accounts:
         return False
@@ -932,7 +979,15 @@ def _ifsc_contradiction(
     if not codes:
         return False
     leaf = norm_account.lower()
-    return not any(code in leaf for code in codes)
+    if any(code in leaf for code in codes):
+        return False  # the guessed account itself carries the code -- correct
+    for other in own_bank_accounts:
+        norm_other = _strip_root(other)
+        if norm_other == norm_account:
+            continue
+        if any(code in norm_other.lower() for code in codes):
+            return True  # some OTHER own account visibly claims this code
+    return False
 
 
 # ---------------------------------------------------------------------------
