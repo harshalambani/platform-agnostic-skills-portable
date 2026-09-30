@@ -60,6 +60,8 @@ def _save_endpoint(
     api_key: str,
     temperature: float,
     set_active: bool,
+    min_gap_seconds: float = 0,
+    daily_cap: int = 0,
 ) -> str:
     """Save or update an endpoint in the config. Returns a status message."""
     name = name.strip()
@@ -80,6 +82,16 @@ def _save_endpoint(
         "default_model": default_model.strip(),
         "temperature": round(temperature, 2),
     }
+    # MAP-20: AI call pacing. Stored only when switched on (default OFF).
+    try:
+        gap = max(0.0, float(min_gap_seconds or 0))
+        cap = max(0, int(daily_cap or 0))
+    except (TypeError, ValueError):
+        return "Error: minimum gap and daily cap must be numbers."
+    if gap > 0:
+        ep["min_gap_seconds"] = gap
+    if cap > 0:
+        ep["daily_cap"] = cap
     if provider == "openai_compatible":
         new_key = api_key.strip()
         if new_key:
@@ -260,6 +272,17 @@ def render() -> None:
                 value=0.0,
                 interactive=True,
             )
+            ep_min_gap = gr.Number(
+                label="Minimum gap between AI calls (seconds, 0 = off)",
+                info="Paces every AI call on this endpoint (all skills). Use e.g. 60 or 600 "
+                     "for a free tier with a call quota. Stop keeps what is done so far.",
+                value=0, minimum=0, precision=0, interactive=True,
+            )
+            ep_daily_cap = gr.Number(
+                label="Daily cap on AI calls (0 = off)",
+                info="Once reached, AI calls stop with a clear message until tomorrow.",
+                value=0, minimum=0, precision=0, interactive=True,
+            )
             ep_set_active = gr.Checkbox(
                 label="Set as active endpoint after saving",
                 value=False,
@@ -282,6 +305,8 @@ def render() -> None:
                 "",                              # ep_default_model
                 "",                              # ep_api_key
                 0.0,                             # ep_temperature
+                0,                               # ep_min_gap
+                0,                               # ep_daily_cap
                 False,                           # ep_set_active
                 f"_No endpoint named `{name}`._",  # save_status
             )
@@ -296,6 +321,8 @@ def render() -> None:
             ep.get("default_model", ""),
             "",                              # ep_api_key — never expose stored value
             float(ep.get("temperature", 0.0)),
+            float(ep.get("min_gap_seconds", 0) or 0),
+            int(ep.get("daily_cap", 0) or 0),
             False,
             f"_Loaded `{name}`. Edit and Save, or Delete._"
             + (f"\n\n{key_status}" if key_status else ""),
@@ -306,13 +333,16 @@ def render() -> None:
         inputs=[active_dd],
         outputs=[
             ep_name, ep_provider, ep_base_url, ep_default_model,
-            ep_api_key, ep_temperature, ep_set_active, save_status,
+            ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap,
+            ep_set_active, save_status,
         ],
     )
 
     # Save endpoint.
-    def _on_save(name, provider, base_url, default_model, api_key, temperature, set_active):
-        msg = _save_endpoint(name, provider, base_url, default_model, api_key, temperature, set_active)
+    def _on_save(name, provider, base_url, default_model, api_key, temperature,
+                 min_gap, daily_cap, set_active):
+        msg = _save_endpoint(name, provider, base_url, default_model, api_key, temperature,
+                             set_active, min_gap, daily_cap)
         # Refresh the dropdown choices and active value.
         new_names = _load_endpoint_names()
         new_active = _load_active()
@@ -321,7 +351,7 @@ def render() -> None:
     save_btn.click(
         fn=_on_save,
         inputs=[ep_name, ep_provider, ep_base_url, ep_default_model,
-                ep_api_key, ep_temperature, ep_set_active],
+                ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap, ep_set_active],
         outputs=[save_status, active_dd],
     )
 
@@ -341,6 +371,8 @@ def render() -> None:
             ep.get("default_model", ""),
             "",                              # ep_api_key — never expose stored value
             float(ep.get("temperature", 0.0)),
+            float(ep.get("min_gap_seconds", 0) or 0),
+            int(ep.get("daily_cap", 0) or 0),
             False,
         )
 
@@ -350,7 +382,7 @@ def render() -> None:
         outputs=[
             save_status, active_dd,
             ep_name, ep_provider, ep_base_url, ep_default_model,
-            ep_api_key, ep_temperature, ep_set_active,
+            ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap, ep_set_active,
         ],
     )
 

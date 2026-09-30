@@ -77,6 +77,12 @@ def load_model(config_path: str, model_override: str | None = None):
     cfg: dict[str, Any] = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
     provider = cfg.get("provider", "ollama")
 
+    # MAP-20: one shared pacer per endpoint (None when pacing is off, so an
+    # unpaced endpoint is built exactly as before).
+    from agents import llm_pacing  # noqa: PLC0415
+    _limiter = llm_pacing.langchain_rate_limiter(llm_pacing.configure_from_legacy(cfg))
+    _pace_kw: dict[str, Any] = {"rate_limiter": _limiter} if _limiter is not None else {}
+
     if provider == "ollama":
         ep: dict[str, Any] = cfg.get("ollama") or {}
         model = model_override or ep.get("default_model") or "gemma4:12b"
@@ -88,6 +94,7 @@ def load_model(config_path: str, model_override: str | None = None):
             base_url=base_url,
             model=model,
             temperature=temperature,
+            **_pace_kw,
         )
 
     elif provider == "openai_compatible":
@@ -103,6 +110,7 @@ def load_model(config_path: str, model_override: str | None = None):
             api_key=api_key,
             model=model,
             temperature=temperature,
+            **_pace_kw,
         )
 
     else:

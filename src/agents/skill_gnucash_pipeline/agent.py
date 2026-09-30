@@ -37,6 +37,7 @@ from agents.balance_utils import (
     _safe_float,
 )
 from agents.banks import discover as discover_banks, load_bank_skill
+from agents.skill_gnucash_xml_extractor.agent import _is_structural_bank_account
 from agents.canonical_io import (
     read_sidecar as _ci_read_sidecar,
     split_balance_carriers,
@@ -423,13 +424,28 @@ def _get_gnucash_account_balance(
             aid = acc_map[aid]["parent_id"]
         return ":".join(reversed(parts))
 
-    # Candidate accounts: name contains the bank, under Assets/Bank.
+    # Candidate accounts: name contains the bank. IMP-10: BANK-type accounts
+    # only (the same structural rule the mapper uses for own_bank_accounts);
+    # a fixed deposit or mutual fund named after the bank is typically ASSET
+    # and must never be offered or accepted as the statement's bank account.
+    # ASSET-type accounts are used ONLY when the bank has no BANK-type match,
+    # and then a visible warning is attached to the result.
     bank_lower = bank_name.lower()
-    candidates = [
-        (aid, _full_path(aid))
+    _named = [
+        (aid, _full_path(aid), info["type"])
         for aid, info in acc_map.items()
         if bank_lower in _full_path(aid).lower() and info["type"] in ("BANK", "ASSET")
     ]
+    candidates = [(a, f) for a, f, t in _named if _is_structural_bank_account(t)]
+    non_bank_at_bank = {_strip_root(f) for a, f, t in _named if not _is_structural_bank_account(t)}
+    fallback_warning = None
+    if not candidates and _named:
+        candidates = [(a, f) for a, f, t in _named]
+        non_bank_at_bank = set()
+        fallback_warning = (
+            f"No BANK-type account found at '{bank_name}'; using ASSET-type account(s) "
+            f"instead: {', '.join(_strip_root(f) for _a, f in candidates)}. Check the "
+            f"account type in GnuCash and that this is the right account.")
     all_same_bank = list(candidates)
     # IMP-09: a hidden / placeholder account (or one under a hidden parent) is
     # never a candidate, so it can never be picked even when first in book
@@ -450,7 +466,10 @@ def _get_gnucash_account_balance(
                 ambiguous=False, refused=False, cands=None):
         return {
             "found": found, "account_name": name, "balance": balance,
-            "last_txn_date": last, "match_warning": warn, "match_note": note,
+            "last_txn_date": last,
+            "match_warning": (f"{warn} {fallback_warning}".strip() if warn and fallback_warning
+                              else (warn or fallback_warning)),
+            "match_note": note,
             "ambiguous": ambiguous, "refused": refused,
             "candidates": cands if cands is not None else [],
         }
@@ -493,6 +512,10 @@ def _get_gnucash_account_balance(
             return _result(False, refused=True, cands=postable_paths, warn=(
                 f"bank_account '{want}' is not an account in the GnuCash book."))
         at_bank = {_strip_root(full): (aid, full) for aid, full in all_same_bank}
+        if want in non_bank_at_bank:
+            return _result(False, refused=True, cands=postable_paths, warn=(
+                f"bank_account '{want}' is not a BANK-type account (a fixed deposit, "
+                f"fund or other asset); choose one of: {'; '.join(postable_paths)}."))
         if want not in at_bank:
             return _result(False, refused=True, cands=postable_paths, warn=(
                 f"bank_account '{want}' is not an account at '{bank_name}'."))

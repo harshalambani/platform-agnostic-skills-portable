@@ -388,6 +388,16 @@ def _legacy_from_endpoint(endpoint: dict[str, Any],
         stored_key = endpoint.get("api_key", "not-needed")
         common["api_key"] = decrypt_api_key(stored_key)
 
+    # MAP-20: pacing is written only when switched on, so the legacy file of an
+    # unpaced endpoint is byte-for-byte what it was before.
+    for _k, _cast in (("min_gap_seconds", float), ("daily_cap", int)):
+        try:
+            _v = _cast(endpoint.get(_k) or 0)
+        except (TypeError, ValueError):
+            _v = 0
+        if _v > 0:
+            common[_k] = _v
+
     return {
         "provider": provider,
         provider: common,
