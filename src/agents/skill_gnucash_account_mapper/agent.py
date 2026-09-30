@@ -1090,6 +1090,97 @@ def _ifsc_contradiction(
 
 
 # ---------------------------------------------------------------------------
+# MAP-14: the LLM fallback may not book a row to the owner's OWN bank / FD
+# account on a hunch. A third-party UPI payment is not a transfer to yourself
+# just because the model likes a bank account. The evidence is derived from
+# the book's own history (no hand-coded lists), plus the literal "xfer to
+# self" marker the bank statements themselves carry.
+# ---------------------------------------------------------------------------
+
+_SELF_MARKER_RE = re.compile(
+    r'\b(?:xfer|transfer|trf|trfr)\s+to\s+self\b|\bself\s+(?:xfer|transfer|trf)\b'
+    r'|\bown\s+account\b')
+_OWN_VOCAB_MAX_DOC_FRACTION = 0.25   # a token in >25% of all rows is a channel word
+_OWN_VOCAB_MIN_ROWS_FOR_DOCFREQ = 8
+_OWN_VOCAB_MIN_OWN_SUPPORT = 2       # seen on >=2 own-account rows
+_OWN_VOCAB_MIN_OWN_FRACTION = 0.9    # and almost only ever on own-account rows
+_OWN_VOCAB_MIN_LEN = 3
+
+
+def _own_target_accounts(own_bank_accounts: Optional[set], all_accounts) -> set:
+    """Own bank accounts (BANK type) plus the Assets accounts that sit in the
+    same parent branch as one of them (where FD accounts live). Purely
+    structural: derived from the book's tree, not from any name list."""
+    own = {_strip_root(a) for a in (own_bank_accounts or ())}
+    parents = {a.rsplit(':', 1)[0] for a in own if ':' in a}
+    out = set(own)
+    for a in all_accounts or ():
+        s = _strip_root(a)
+        if _is_book_asset_account(s) and ':' in s and s.rsplit(':', 1)[0] in parents:
+            out.add(s)
+    return out
+
+
+def _build_own_transfer_vocab(historical_pairs: List[Dict], own_targets: set) -> set:
+    """Tokens that, in THIS book's history, almost only ever appear on rows
+    that went to one of the owner's own accounts (the owner's own VPA or name
+    tokens). Distinctiveness is measured from the book: a token present in a
+    large share of all rows (a channel word) never qualifies."""
+    if not historical_pairs or not own_targets:
+        return set()
+    rows = len(historical_pairs)
+    doc: Dict[str, int] = {}
+    own_n: Dict[str, int] = {}
+    for m in historical_pairs:
+        acct = _strip_root(m.get('account') or '')
+        w = m.get('frequency', 1) or 1
+        is_own = acct in own_targets
+        for tok in set(_tokenize_history(m.get('description', ''))):
+            doc[tok] = doc.get(tok, 0) + w
+            if is_own:
+                own_n[tok] = own_n.get(tok, 0) + w
+    total_w = sum((m.get('frequency', 1) or 1) for m in historical_pairs)
+    vocab = set()
+    for tok, n_own in own_n.items():
+        if len(tok) < _OWN_VOCAB_MIN_LEN or tok.isdigit() or tok.startswith('ifsc:'):
+            continue
+        if re.fullmatch(r'[a-z]{4}0[a-z0-9]{6}', tok):
+            continue  # a whole IFSC is a bank branch, not the owner
+        if n_own < _OWN_VOCAB_MIN_OWN_SUPPORT:
+            continue
+        if n_own / doc[tok] < _OWN_VOCAB_MIN_OWN_FRACTION:
+            continue
+        if rows >= _OWN_VOCAB_MIN_ROWS_FOR_DOCFREQ and doc[tok] / total_w > _OWN_VOCAB_MAX_DOC_FRACTION:
+            continue
+        vocab.add(tok)
+    return vocab
+
+
+def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set) -> bool:
+    """True only if `desc` carries positive evidence of a transfer between the
+    owner's own accounts: the 'xfer to self' marker, an own-history VPA/name
+    token, or a (non-year) digit run that is one of the own accounts' numbers."""
+    low = (desc or '').lower()
+    if _SELF_MARKER_RE.search(low):
+        return True
+    if own_vocab and (set(_tokenize_history(desc)) & own_vocab):
+        return True
+    runs = {r for r in re.findall(r'\d{4,}', low) if not re.fullmatch(r'(19|20)\d{2}', r)}
+    if runs:
+        for acct in own_targets:
+            for own_run in re.findall(r'\d{4,}', acct):
+                if own_run in runs:
+                    return True
+    return False
+
+
+def _llm_reason(reason: str) -> str:
+    """Prefix once. The LLM path's own reasons already start 'LLM:'."""
+    r = (reason or '').strip()
+    return r if r.lower().startswith('llm:') else f"LLM: {r}"
+
+
+# ---------------------------------------------------------------------------
 # Shared relevance tokeniser + ranking (MAP-02 / MAP-04)
 #
 # Both _retry_with_focused_prompt and _score_account_relevance rank
@@ -2456,6 +2547,7 @@ def run(
     smart_mapped_count = 0
     weak_mapped_count = 0
     llm_mapped_count = 0
+    llm_withheld: Dict[int, str] = {}   # MAP-14: row index -> own account the LLM proposed
 
     # Re-read the mapped CSV and build the full account list unconditionally —
     # both mapped_rows and account_list are needed below by the Step 5
@@ -2554,13 +2646,26 @@ def run(
             if llm_results:
                 llm_from_none = 0
                 llm_from_weak = 0
+                _own_targets = _own_target_accounts(
+                    own_bank_accounts,
+                    set(all_account_paths) | {
+                        v.get('account') for v in llm_results.values() if v.get('account')})
+                _own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _own_targets)
                 for i, row in enumerate(mapped_rows):
                     row_num = i + 1
                     if row_num in llm_results and llm_results[row_num].get('account'):
                         orig_conf = still_unmatched_orig_conf.get(row_num, 'none')
-                        row['Account'] = _strip_root(llm_results[row_num]['account'])
+                        _llm_acct = _strip_root(llm_results[row_num]['account'])
+                        # MAP-14: an own bank/FD account needs own-transfer
+                        # evidence; otherwise the row is left for Suspense.
+                        if _llm_acct in _own_targets and not _has_own_transfer_evidence(
+                                row.get('Description') or row.get('Narration') or '',
+                                _own_vocab, _own_targets):
+                            llm_withheld[i] = _llm_acct
+                            continue
+                        row['Account'] = _llm_acct
                         row['Confidence'] = 'llm'
-                        row['MatchReason'] = f"LLM: {llm_results[row_num]['reason']}"
+                        row['MatchReason'] = _llm_reason(llm_results[row_num]['reason'])
                         llm_mapped_count += 1
                         if orig_conf == 'weak':
                             llm_from_weak += 1
@@ -2646,6 +2751,11 @@ def run(
                     row.get('Description', ''), blocked_pairs, guard):
                 row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
                     row.get('Description', ''), blocked_pairs, guard)
+            elif _ri in llm_withheld:
+                row['MatchReason'] = (
+                    "Suspense — the AI suggested your own account "
+                    f"'{llm_withheld[_ri]}' but nothing in the narration shows a "
+                    "transfer to yourself; review and reassign")
             else:
                 row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
             suspense_count += 1
