@@ -230,6 +230,89 @@ def _generalize_pattern(desc: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# UI-06: editable Description
+#
+# The Review table lets the user reword a narration ("NEFT-XYZ-123 ..." ->
+# "Rent - June"). The reworded text REPLACES Description in the exported CSV,
+# but it must never become the key anything is learned or matched on:
+#
+#   * the row keeps its ORIGINAL narration in `Description` all the way through
+#     the review, so overrides / persistent rules / "apply to matching" are keyed
+#     on what the bank actually wrote, and a re-import of the same statement
+#     still hits them;
+#   * the reworded text travels in EDIT_KEY (review only, never exported);
+#   * at export, an edited row gets Description = edited text, ORIG_KEY = the
+#     original (so re-loading the file restores the original for learning) and
+#     NOTES_KEY = the original (GnuCash "Notes"), so the bank's own reference
+#     stays on the transaction for reference-based matching (contra detection)
+#     and for the human reading the register.
+#
+# Import duplicate check: the pipeline's check keys on (date, amount) within the
+# bank account -- see skill_gnucash_reconciler.reconcile -- and never reads the
+# description, so rewording cannot make an already-posted row look new.
+# ---------------------------------------------------------------------------
+
+EDIT_KEY = "Edited Description"
+ORIG_KEY = "Original Description"
+NOTES_KEY = "Notes"
+
+
+def _clean_edit(text: str) -> str:
+    """Single-line, trimmed form of an edit ('' when there is nothing to keep)."""
+    return " ".join((text or "").split())
+
+
+def _restore_description_edit(row: dict) -> None:
+    """Undo the export transform on load: a row exported with an edit carries
+    the original in ORIG_KEY; put it back in Description (the learning key) and
+    show the exported text as the edit. Idempotent for rows without ORIG_KEY."""
+    orig = (row.get(ORIG_KEY) or "").strip()
+    if not orig:
+        return
+    row[EDIT_KEY] = row.get("Description", "")
+    row["Description"] = orig
+    if (row.get(NOTES_KEY) or "").strip() == orig:
+        row[NOTES_KEY] = ""      # we wrote it; the next export writes it again
+    row.pop(ORIG_KEY, None)
+
+
+def _apply_description_edits(all_rows: list[dict]) -> tuple[list[dict], int]:
+    """Return (rows ready to write, number of rows whose Description changed).
+
+    Pure: the input rows are not mutated. With no edit anywhere the returned rows
+    equal the input rows exactly (minus a bare EDIT_KEY), so an unedited export
+    is byte-identical to the pre-UI-06 one.
+    """
+    out: list[dict] = []
+    n = 0
+    for src in all_rows:
+        row = dict(src)
+        edited = _clean_edit(row.pop(EDIT_KEY, ""))
+        original = row.get("Description", "") or ""
+        if edited and edited != " ".join(original.split()):
+            n += 1
+            existing = (row.get(NOTES_KEY) or "").strip()
+            if not existing:
+                row[NOTES_KEY] = original
+            elif original.strip() not in existing:
+                row[NOTES_KEY] = f"{original} | {existing}"
+            row[ORIG_KEY] = original
+            row["Description"] = edited
+        out.append(row)
+    return out, n
+
+
+def _export_headers(rows: list[dict]) -> list[str]:
+    """Union of every row's keys, first-seen order (the first row alone would
+    lose a column only later rows carry -- e.g. Notes on the one edited row)."""
+    seen: dict[str, None] = {}
+    for r in rows:
+        for k in r:
+            seen.setdefault(k)
+    return list(seen)
+
+
+# ---------------------------------------------------------------------------
 # Spec + load
 # ---------------------------------------------------------------------------
 
@@ -241,7 +324,9 @@ def _spec(
         app_id=APP_ID,
         columns=[
             Column("Date", "Date"),
-            Column("Description", "Description"),
+            # UI-06: double-click to edit. Description itself stays the ORIGINAL
+            # narration; the text lands in EDIT_KEY and replaces it only at export.
+            Column("Description", "Description", edit_key=EDIT_KEY),
             Column(TARGET_COL, "Account"),
             Column(deposit_key, "Deposit", sort="number"),
             Column(withdrawal_key, "Withdrawal", sort="number"),
@@ -311,6 +396,7 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
 
     contra_flags = _load_contra_sidecar(csv_p)
     for i, row in enumerate(rows):
+        _restore_description_edit(row)
         _row_presentation(row, contra_flags.get(str(i)))
 
     # Fallback column keys for older CSVs.
@@ -350,10 +436,16 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     gnucash_file = context.get("gnucash_file", "")
     csv_path = context.get("csv_path", "")
 
-    if not changes:
+    # UI-06: description edits are export-only; overrides above are learned from
+    # the ORIGINAL narration (Description is never overwritten in the payload).
+    all_rows, n_desc_edits = _apply_description_edits(all_rows)
+
+    if not changes and not n_desc_edits:
         return "No changes to save.", gr.update(interactive=False, value=None)
 
     # ── Save overrides YAML ──
+    # (With no account changes -- description edits only -- the loop below finds
+    # nothing to learn and writes nothing.)
     try:
         # Import via the `agents` package so it resolves in both source and
         # frozen (PyInstaller) builds. The old bare-name import relied on
@@ -412,7 +504,7 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
             # shared schema helper can't be imported.
             try:
                 from agents.canonical_io import order_import_ready_headers
-                headers = order_import_ready_headers(all_rows[0].keys())
+                headers = order_import_ready_headers(_export_headers(all_rows))
             except Exception:
                 try:
                     with open(csv_p, "r", encoding="utf-8", errors="replace") as rf:
@@ -429,6 +521,8 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
                 writer.writeheader()
                 writer.writerows(all_rows)
             export_msg = f"CSV re-exported: {csv_p.name} ({len(all_rows)} rows)"
+            if n_desc_edits:
+                export_msg += f"; {n_desc_edits} description(s) reworded (original kept in Notes)"
             # Copy to download staging dir so Gradio's file server can serve it
             try:
                 staging = _config_mod.download_staging_dir()

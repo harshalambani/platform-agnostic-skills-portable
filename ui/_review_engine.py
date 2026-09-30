@@ -73,6 +73,12 @@ class Column:
     sortable: bool = True
     sort: SortType = "text"
     order: tuple[str, ...] = ()
+    # UI-06. When set, the cell is editable (double-click). The user's text is
+    # stored under THIS row key, never over `key`: the value in `key` stays the
+    # original, so sorting, filtering, "apply to matching" and anything keyed on
+    # the original text keep working. What the save handler does with the edit
+    # is the consumer's business.
+    edit_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -585,7 +591,10 @@ _BODY = r"""
 
       COLS.forEach(c => {
         const td = document.createElement('td');
-        const val = cellText(r, c.key);
+        const orig = cellText(r, c.key);
+        const editedTxt = c.edit_key ? cellText(r, c.edit_key).trim() : '';
+        const isEdited = !!editedTxt && editedTxt !== orig.trim();
+        const val = isEdited ? editedTxt : orig;
         const badge = (r._badges || {})[c.key];
         let html = '';
         if (badge) {
@@ -600,7 +609,14 @@ _BODY = r"""
         } else {
           td.title = badge && badge.title ? badge.title : val;
         }
+        if (isEdited) {
+          html += '<span class="changed-marker">&#9998;</span>';
+          td.title = 'Edited. Original: ' + orig;
+        }
         td.innerHTML = html;
+        if (c.edit_key && !r._locked && !r._deleted) {
+          td.ondblclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); beginEdit(r, c, td, val, orig); };
+        }
         tr.appendChild(td);
       });
 
@@ -610,16 +626,55 @@ _BODY = r"""
 
     const changed = rows.filter(r => r._changed && !r._deleted).length;
     const deleted = rows.filter(r => r._deleted).length;
+    const editCols = COLS.filter(c => c.edit_key);
+    const edited = editCols.length
+      ? rows.filter(r => editCols.some(c => {
+          const t = cellText(r, c.edit_key).trim();
+          return t && t !== cellText(r, c.key).trim();
+        })).length
+      : 0;
     $('stats').textContent =
       filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
       (changed ? ' | ' + changed + ' changed' : '') +
+      (edited ? ' | ' + edited + ' edited' : '') +
       (deleted ? ' | ' + deleted + ' deleted' : '');
 
     if (activeFilterCol) {
       const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
       if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
     }
+  }
+
+  // ── Inline edit (opt-in via Column.edit_key). The text goes into
+  //    r[c.edit_key]; r[c.key] (the original) is never touched. A blank or
+  //    unchanged entry clears the edit. The value is set via the .value
+  //    property, never innerHTML.
+  function beginEdit(r, c, td, current, orig) {
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = current;
+    inp.style.width = '100%';
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) {
+        const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
+        r[c.edit_key] = (v && v !== orig.trim()) ? v : '';
+        syncPayload();
+      }
+      renderTable();
+    };
+    inp.onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); };
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { finish(false); }
+    };
+    inp.onblur = () => finish(true);
+    td.innerHTML = '';
+    td.appendChild(inp);
+    inp.focus();
   }
 
   function handleRowClick(idx, e) {
@@ -713,6 +768,7 @@ def _col_dict(c: Column) -> dict:
     return {
         "key": c.key, "label": c.label, "sortable": c.sortable,
         "sort": c.sort, "order": [o.lower() for o in c.order],
+        "edit_key": c.edit_key,
     }
 
 
