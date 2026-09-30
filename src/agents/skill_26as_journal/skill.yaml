@@ -78,8 +78,8 @@ help:
     cases), and writes a balanced journal CSV ready to import. TCS entries debit
     your TCS account and credit Drawings — only the tax moves, since the spend
     it was collected on is already in your books. For an entity with a Partner
-    Comp Recon book configured, s.194T (partnership) TDS is left out of the CSV
-    — that TDS is already booked month-by-month by the Partner Comp Recon
+    Compensation Reconciliation book configured, s.194T (partnership) TDS is left out of the CSV
+    — that TDS is already booked month-by-month by the Partner Compensation Reconciliation
     journal — and the summary instead shows a read-only reconciliation of the
     26AS s.194T figures against what that journal has actually posted (MATCH /
     OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.
@@ -128,8 +128,8 @@ help:
     Confirming a credit account on the Review screen is remembered for that
     deductor (by its TAN) for next time — a later run applies it automatically,
     without a fresh guess and without asking you to confirm it again. If the
-    s.194T reconciliation reports OPEN, run "Partner Comp Recon" first, then
-    re-run this skill — the expected order is bank, then Partner Comp Recon,
+    s.194T reconciliation reports OPEN, run "Partner Compensation Reconciliation" (GnuCash > Partner) first, then
+    re-run this skill — the expected order is bank, then Partner Compensation Reconciliation,
     then this skill.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
@@ -138,7 +138,7 @@ help:
       fix: "Rename/add the account in GnuCash so its name is closer to the deductor, then re-run."
     - problem: "s.194T reconciliation shows OPEN or VARIANCE."
       fix: >
-        OPEN means the Partner Comp Recon journal has not been run/posted yet for
+        OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for
         this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL
         names the month(s) where 26AS and the posted journal disagree (or a
         month is missing) -- check that journal's postings for those months

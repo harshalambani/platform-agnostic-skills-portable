@@ -3,21 +3,21 @@
 
 *Mode: direct · 🔌 offline (no LLM) · requires: poppler*
 
-Reads the organised credit-card PDFs from the CC Sort step and extracts every transaction table into one consolidated Excel workbook — one row per transaction across all cards. Runs fully offline.
+Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every transaction table into one consolidated Excel workbook — one row per transaction across all cards. Runs fully offline.
 
 ## When to use it
 
-Use this as the second step, right after "CC Sort". It expects the decrypted, sorted folder that CC Sort produced, not raw statement files.
+Use this as the second step, right after "Credit Card — Sort PDFs". It expects the decrypted, sorted folder that Credit Card — Sort PDFs produced, not raw statement files.
 
 ## Inputs
 
-- **Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort)** (required) — accepts: A folder of decrypted statement PDFs.
-  - The Decrypted_PDFs_Correct/ folder created by CC Sort.
+- **Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)** (required) — accepts: A folder of decrypted statement PDFs.
+  - The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs.
   - ⚠️ Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder.
 
 ## How to run
 
-1. Run CC Sort first if you have not already.
+1. Run Credit Card — Sort PDFs first if you have not already.
 2. Select the Decrypted_PDFs_Correct/ folder.
 3. Click Run and download the Excel.
 
@@ -41,4 +41,4 @@ Because the PDFs are already grouped by issuer, the consolidated sheet keeps car
 
 | If… | Then… |
 |------|-------|
-| Few or no transactions extracted. | You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from CC Sort. |
+| Few or no transactions extracted. | You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs. |

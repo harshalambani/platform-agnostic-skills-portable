@@ -698,9 +698,9 @@ def _save_changes(changes_json: str) -> str:
 # ---------------------------------------------------------------------------
 
 def render(container_tab=None) -> None:
-    """Render the ITR Mapping review tab. Must be called inside gr.Tab()."""
+    """Render the Review Mapping tab (GnuCash > ITR > Review Mapping). Must be called inside gr.Tab()."""
     gr.Markdown(
-        "## ITR Mapping\n\n"
+        "## Review Mapping\n\n"
         "Review and correct account-to-tag mappings for an entity. Select an "
         "entity, click Load, assign tags to unmapped (or mis-tagged) "
         "accounts via the searchable dropdown, select rows, Apply to "

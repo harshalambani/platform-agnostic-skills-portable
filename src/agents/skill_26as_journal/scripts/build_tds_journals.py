@@ -241,7 +241,7 @@ class Split:
 @dataclass
 class S194TReco:
     """Read-only reconciliation of 26AS section-194T TDS against the Partner
-    Comp Recon journal's own monthly `tds_expense` postings (TDS-09's design
+    Compensation Reconciliation journal's own monthly `tds_expense` postings (TDS-09's design
     is unchanged -- that journal's leg is never written to here, only read).
 
     Only meaningful for entities with partner_comp_accounts configured (the
@@ -393,7 +393,7 @@ def parse_194t_monthly(xlsx_path: Path) -> dict[str, float]:
     as _parse_party_sheet relies on -- see skill_26as/scripts/
     extract_26as_to_xlsx.py's build_part_i(). Column 9 is the Transaction
     Date (string "DD-Mon-YYYY") -- the date of payment/credit, which is the
-    same month the Partner Comp Recon journal accrues and dates its own
+    same month the Partner Compensation Reconciliation journal accrues and dates its own
     monthly posting on (jv_emitter.py's _month_end/_monthly_journal) --
     and column 14 is that transaction's own Tax Deducted. Sub-total rows
     (column 1 a literal "#<sr>" string) and the grand-total row (column 1
@@ -468,7 +468,7 @@ def monthly_debits_for_account(gnucash_path: Path, account_path: str,
     the transaction's posted date when given. GnuCash's Debit-positive /
     Credit-negative convention (matches this module's own Split dataclass) --
     a monthly `tds_expense` DEBIT total is therefore positive here, the same
-    sign the Partner Comp Recon journal books it with.
+    sign the Partner Compensation Reconciliation journal books it with.
 
     Adapted from skill_gnucash_intercompany/scripts/reconcile_intercompany.py's
     load_book/extract_movements pattern rather than importing it (this module
@@ -554,7 +554,7 @@ def reconcile_s194t(xlsx_path: Path, gnucash_path: Path,
                     tds_expense_account: str,
                     fy: Optional[str] = None) -> Optional[S194TReco]:
     """Read-only s.194T reconciliation (TDS-13): 26AS section-194T TDS, by
-    month and for the FY, against the Partner Comp Recon journal's own
+    month and for the FY, against the Partner Compensation Reconciliation journal's own
     monthly `tds_expense` postings already in the book. Never writes to the
     book or the CSV -- this only reads what skill_partner_comp_recon already
     posted (TDS-09's design: that journal's tds_expense leg is unchanged).
@@ -1073,7 +1073,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                 j.credit_basis = (
                     (j.credit_basis + " -- " if j.credit_basis else "")
                     + "WARNING: s.194T TDS is also booked month-by-month by the "
-                    "Partner Comp Recon journal if that entity has "
+                    "Partner Compensation Reconciliation journal if that entity has "
                     "partner_comp_accounts configured -- importing both "
                     "double-books this TDS and overstates remuneration."
                 )

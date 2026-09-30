@@ -3,7 +3,7 @@
 name: "CC Transactions"
 display_name: "Credit Card — Transactions"
 description: >
-  Scan a folder of organized credit card PDFs (output of the CC Sort skill),
+  Scan a folder of organized credit card PDFs (output of the Credit Card — Sort PDFs skill),
   apply bank-specific parsing rules, and produce a consolidated Excel workbook
   with all transactions plus a summary sheet.
 category: "credit_card"
@@ -15,7 +15,7 @@ entry_point: "agent:run"
 inputs:
   - name: "pdf_dir"
     type: "directory"
-    label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort)"
+    label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)"
     required: true
 
 run_args:
@@ -36,19 +36,19 @@ requires:
 
 help:
   overview: >
-    Reads the organised credit-card PDFs from the CC Sort step and extracts every
+    Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every
     transaction table into one consolidated Excel workbook — one row per
     transaction across all cards. Runs fully offline.
   when_to_use: >
-    Use this as the second step, right after "CC Sort". It expects the decrypted,
-    sorted folder that CC Sort produced, not raw statement files.
+    Use this as the second step, right after "Credit Card — Sort PDFs". It expects the decrypted,
+    sorted folder that Credit Card — Sort PDFs produced, not raw statement files.
   inputs:
     - name: "pdf_dir"
-      tooltip: "The Decrypted_PDFs_Correct/ folder created by CC Sort."
+      tooltip: "The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs."
       accepts: "A folder of decrypted statement PDFs."
       gotchas: "Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder."
   steps:
-    - "Run CC Sort first if you have not already."
+    - "Run Credit Card — Sort PDFs first if you have not already."
     - "Select the Decrypted_PDFs_Correct/ folder."
     - "Click Run and download the Excel."
   outputs:
@@ -64,4 +64,4 @@ help:
     cards together — handy for per-card filtering in Excel.
   troubleshooting:
     - problem: "Few or no transactions extracted."
-      fix: "You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from CC Sort."
+      fix: "You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs."
