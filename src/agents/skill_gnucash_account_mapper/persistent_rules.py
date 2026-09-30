@@ -344,6 +344,28 @@ def save_rules(gnucash_file: str, rules: Dict[str, List[Dict]],
 # Merge auto-generated rules (additive, never overwrites overrides)
 # ---------------------------------------------------------------------------
 
+def _norm_pattern(pattern) -> str:
+    """MAP-17: identity form of one pattern -- case-folded, with redundant
+    leading/trailing `.*` removed (an unanchored re.search treats `.*X.*`,
+    `X.*` and `X` alike). The stored pattern text is never altered; this is
+    only used to recognise a near-duplicate."""
+    p = str(pattern).strip().lower()
+    while p.startswith(".*"):
+        p = p[2:]
+    while p.endswith(".*") and not p.endswith("\\.*"):
+        p = p[:-2]
+    return p
+
+
+def _rule_keys(rule: Dict):
+    """The two identities a rule can be recognised by: its normalised first
+    pattern (the historic dedup key) and its (account, set of normalised
+    patterns)."""
+    pats = [_norm_pattern(x) for x in (rule.get("patterns") or []) if x]
+    first = pats[0] if pats else ""
+    return first, (rule.get("account", ""), frozenset(pats))
+
+
 def merge_auto_rules(
     gnucash_file: str,
     new_rules_by_bank: Dict[str, List[Dict]],
@@ -363,27 +385,36 @@ def merge_auto_rules(
             continue  # never overwrite user overrides via auto merge
 
         old_rules = existing.get(bank, [])
-        # Index existing auto-rules by their first pattern for dedup
-        pattern_index: Dict[str, int] = {}
+        # MAP-17: index existing auto-rules by BOTH identities so a
+        # near-duplicate (case, redundant `.*`, reordered patterns) updates
+        # the rule already there instead of adding another. Existing rules
+        # are never removed or rewritten here; first-seen wins the index.
+        first_index: Dict[str, int] = {}
+        ident_index: Dict[tuple, int] = {}
         for i, rule in enumerate(old_rules):
             if rule.get("source") == "user":
                 continue  # skip user overrides that somehow ended up here
-            first_pat = (rule.get("patterns") or [""])[0]
-            if first_pat:
-                pattern_index[first_pat] = i
+            first, ident = _rule_keys(rule)
+            if first:
+                first_index.setdefault(first, i)
+                ident_index.setdefault(ident, i)
 
         for nr in new_rules:
             nr["source"] = "auto"
-            first_pat = (nr.get("patterns") or [""])[0]
-            if not first_pat:
+            first, ident = _rule_keys(nr)
+            if not first:
                 continue
-            if first_pat in pattern_index:
+            idx = ident_index.get(ident)
+            if idx is None:
+                idx = first_index.get(first)
+            if idx is not None:
                 # Update existing rule (confidence/reason may have changed)
-                idx = pattern_index[first_pat]
                 old_rules[idx] = nr
             else:
                 old_rules.append(nr)
-                pattern_index[first_pat] = len(old_rules) - 1
+                idx = len(old_rules) - 1
+            first_index.setdefault(first, idx)
+            ident_index.setdefault(ident, idx)
 
         existing[bank] = old_rules
 

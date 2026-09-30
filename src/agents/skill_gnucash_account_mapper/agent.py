@@ -100,16 +100,69 @@ def load_mapping_yaml(yaml_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+_REGEX_META = set("\\^$.*+?{}[]()|")
+
+
+class CompiledRules:
+    """MAP-17: the rules list indexed once for the apply pass.
+
+    `match_rule` used to call `re.search(pattern_string, ...)` for every
+    pattern of every rule on every row. Python's `re` cache holds 512
+    patterns, so with thousands of rules it thrashed and recompiled the whole
+    list on every row. Here every pattern is compiled ONCE, and a pattern that
+    is a plain literal (optionally wrapped in `.*`) is tested as a lowercase
+    substring, which is what the regex would do. Order and first-match-wins
+    semantics are identical to the old scan.
+    """
+
+    def __init__(self, rules: List[dict]):
+        self.rules = rules
+        self._entries: List[tuple] = []
+        for rule in rules or []:
+            for pattern in rule.get('patterns', []):
+                lit = pattern
+                if lit.startswith('.*'):
+                    lit = lit[2:]
+                if lit.endswith('.*') and not lit.endswith('\\.*'):
+                    lit = lit[:-2]
+                if lit and not (set(lit) & _REGEX_META):
+                    self._entries.append(('lit', lit.lower(), pattern, rule))
+                    continue
+                try:
+                    self._entries.append(('re', re.compile(pattern, re.IGNORECASE), pattern, rule))
+                except re.error:
+                    self._entries.append(('sub', pattern.lower(), pattern, rule))
+
+    def __bool__(self) -> bool:
+        return bool(self._entries)
+
+    def match(self, description: str) -> Tuple[Optional[str], str, Optional[str], str]:
+        low = description.lower()
+        for kind, obj, pattern, rule in self._entries:
+            if kind == 're':
+                hit = obj.search(description) is not None
+            else:
+                hit = obj in low
+            if hit:
+                return (rule.get('account', ''), rule.get('confidence', 'medium'),
+                        pattern, rule.get('reason', f'Pattern matched: {pattern}'))
+        return None, 'none', None, 'No pattern match'
+
+
 def match_rule(
     description: str,
-    rules: List[dict],
+    rules,
 ) -> Tuple[Optional[str], str, Optional[str], str]:
     """
     Try to match description against rules.
     Return: (account, confidence_level, pattern_matched, reason)
+
+    `rules` may be a plain list or a `CompiledRules` (built once per run).
     """
     if not rules or not description:
         return None, 'none', None, 'No pattern match'
+    if isinstance(rules, CompiledRules):
+        return rules.match(description)
 
     for rule in rules:
         patterns = rule.get('patterns', [])
@@ -2283,6 +2336,7 @@ def map_accounts(
     ))
 
     print(f"[mapper] Loaded {len(all_rules)} rules")
+    compiled_rules = CompiledRules(all_rules)   # MAP-17: compile once, not per row
 
     # Apply mappings
     mapped_rows = []
@@ -2303,7 +2357,7 @@ def map_accounts(
             pattern = None
             reason = f"Override: {ov_reason}"
         else:
-            account, confidence, pattern, reason = match_rule(description, all_rules)
+            account, confidence, pattern, reason = match_rule(description, compiled_rules)
 
         mapped_row = row.copy()
         mapped_row['Account'] = _strip_root(account) if account else ''
