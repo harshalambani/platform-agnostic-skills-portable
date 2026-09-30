@@ -49,6 +49,39 @@ PAYLOAD_VAR = "_rvSavePayload"
 # and matches the mapper's own report ordering (see skill_gnucash_account_mapper).
 CONF_ORDER = ("suspense", "none", "low", "weak", "smart", "medium", "history", "llm", "override", "high")
 
+# UI-05: match-type bands. (colour, legend text, match types). One colour per
+# match type -- a type may appear in exactly one band. A type that is in no band
+# gets NO colour (never red by default: red must mean "needs you").
+# Violet is deliberately absent: it belongs to the IMP-09 DORMANT? badge.
+MATCH_BANDS = (
+    ("blue", "Override", ("override",)),
+    ("green", "High / history", ("high", "history")),
+    ("amber", "Medium / AI", ("medium", "llm", "smart")),
+    ("orange", "Weak / low", ("weak", "low")),
+    ("red", "Suspense / unmatched", ("suspense", "none")),
+)
+
+
+def match_band(confidence: str) -> str | None:
+    """Colour name for a match type, or None when the type is unknown."""
+    c = (confidence or "").strip().lower()
+    for colour, _label, types in MATCH_BANDS:
+        if c in types:
+            return colour
+    return None
+
+
+def _band_classes() -> dict[str, str]:
+    return {t: f"accent-{colour}" for colour, _l, types in MATCH_BANDS for t in types}
+
+
+def _legend_html() -> str:
+    items = "".join(
+        f'<span><span class="sw {colour}"></span>{label}</span>'
+        for colour, label, _t in MATCH_BANDS
+    )
+    return f'<div class="legend" title="Left-edge colour = match type">{items}</div>'
+
 
 # ---------------------------------------------------------------------------
 # Output-folder CSV scanner
@@ -162,6 +195,9 @@ def _row_presentation(row: dict, contra: dict | None) -> None:
         }
         note = contra.get("reason") or "Possible contra"
 
+    band = match_band(confidence)
+    # UI-05: the band rides in its own key so _rowclass keeps meaning "tone" only.
+    row["_band"] = f"accent-{band}" if band else ""
     row["_tags"] = tags
     row["_rowclass"] = rowclass
     if badges:
@@ -210,7 +246,8 @@ def _spec(
             Column(deposit_key, "Deposit", sort="number"),
             Column(withdrawal_key, "Withdrawal", sort="number"),
             Column("Balance", "Balance", sortable=False),
-            Column("Confidence", "Conf", sort="order", order=CONF_ORDER),
+            # UI-05: label only. The key -- and so the CSV column -- stays "Confidence".
+            Column("Confidence", "Match type", sort="order", order=CONF_ORDER),
             Column("MatchReason", "Reason"),
             # Transfer Acct holds the same bank account on nearly every row
             # -- displayed last so Description and Reason get the width
@@ -244,6 +281,8 @@ def _spec(
         also_set_matching={"Confidence": "override", "MatchReason": "User override (batch match)"},
         context={"csv_path": csv_path, "gnucash_file": gnucash_path},
         status_col="Confidence",  # UI-04: an assigned row loses its stale badge
+        status_classes=_band_classes(),  # UI-05: ...and its band follows the new type
+        extra_panel_html=_legend_html(),
     )
 
 
