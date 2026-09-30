@@ -1110,6 +1110,7 @@ def _history_token_match(
     own_bank_accounts: Optional[set] = None,
     source_account: Optional[str] = None,
     own_evidence: Optional[Callable[[str], bool]] = None,
+    own_targets: Optional[set] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
@@ -1128,7 +1129,16 @@ def _history_token_match(
     literal-code fallback fires only when it says True: a third party's bank
     code must not route a row onto the owner's own account at that bank.
     run() always supplies it; None (direct callers/unit tests of the
-    matcher) leaves the fallback ungated."""
+    matcher) leaves the fallback ungated.
+
+    MAP-22: `own_targets` (own banks + own FDs) extends the same evidence rule
+    to the Bayesian pass. If the score lands on an own target and the row
+    carries an `ifsc:<bank>` token (a third party at the owner's bank inherits
+    the owner's history for that bank code) but the narration has no
+    own-transfer evidence, the ifsc token's contribution is DROPPED for this
+    row and the row is re-scored on its ordinary tokens. If that still reaches
+    an own target the row abstains; if it reaches a non-own account that stands
+    (the literal fallback below is itself gated on the evidence)."""
     tokens_all = set(_tokenize_history(desc))
     if not tokens_all:
         return None
@@ -1136,7 +1146,18 @@ def _history_token_match(
     bank_names = _own_bank_name_tokens(own_bank_accounts)
     match = _history_bayes_score(tokens_all - bank_names, model)
     if match:
-        return match
+        _targets = own_targets if own_targets is not None else {
+            _strip_root(a) for a in (own_bank_accounts or ())}
+        if (own_evidence is not None
+                and _strip_root(match.get('account') or '') in _targets
+                and any(t.startswith('ifsc:') for t in tokens_all)
+                and not own_evidence(desc)):
+            no_ifsc = {t for t in tokens_all if not t.startswith('ifsc:')}
+            match = _history_bayes_score(no_ifsc - bank_names, model)
+            if match and _strip_root(match.get('account') or '') in _targets:
+                match = None   # still an own target, still no evidence
+        if match:
+            return match
 
     routing_tokens = {t for t in tokens_all if t.startswith('ifsc:')}
     if not routing_tokens:
@@ -1200,6 +1221,7 @@ def _ifsc_contradiction(
     desc: str,
     account: str,
     own_bank_accounts: Optional[set],
+    own_evidence: Optional[Callable[[str], bool]] = None,
 ) -> bool:
     """RED FLAG fix, requirement #4 ("HSBC IFSC -> SBM must be impossible by
     any path, including prefix, keyword and LLM"): True if `desc` carries an
@@ -1236,7 +1258,11 @@ def _ifsc_contradiction(
         return False
     leaf = norm_account.lower()
     if any(code in leaf for code in codes):
-        return False  # the guessed account itself carries the code -- correct
+        # The guessed account itself carries the code. That is only "correct"
+        # for the owner's own transfer; a THIRD party's payment at the same
+        # bank carries the same code (MAP-22), so with no own-transfer
+        # evidence the guess is unsupported and is reverted too.
+        return own_evidence is not None and not own_evidence(desc)
     for other in own_bank_accounts:
         norm_other = _strip_root(other)
         if norm_other == norm_account:
@@ -1365,6 +1391,18 @@ def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set) -> b
                 if own_run in runs:
                     return True
     return False
+
+
+def _gate_own_target(desc: str, account: str, own_vocab: set, own_targets: set) -> bool:
+    """MAP-22: the ONE gate every pass that can land a row on the owner's own
+    account goes through. True = the row may take `account`: it is not an own
+    target at all (bank, FD, ...), or the narration carries own-transfer
+    evidence (`_has_own_transfer_evidence`). False = refuse; the caller drops
+    the guess so the row falls to the next pass or to Suspense -- never to a
+    different own account."""
+    if not account or _strip_root(account) not in own_targets:
+        return True
+    return _has_own_transfer_evidence(desc, own_vocab, own_targets)
 
 
 def _llm_reason(reason: str) -> str:
@@ -2932,18 +2970,22 @@ def run(
     }
     history_mapped_count = 0
     self_tie: Dict[int, List[str]] = {}   # MAP-16: row index -> tied own accounts
+    # MAP-22: own-transfer evidence for EVERY pass that can land on an own
+    # account (Bayes ifsc token, weak prefix, Step 4.9, and the MAP-14 AI
+    # gate), derived once from this book's history.
+    _hist_own_targets = _own_target_accounts(
+        own_bank_accounts, all_account_paths, historical_pairs_for_llm)
+    _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
+
+    def _own_ev(_d: str) -> bool:
+        return _has_own_transfer_evidence(_d, _hist_own_vocab, _hist_own_targets)
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
         history_model = _build_history_token_model(historical_pairs_for_llm)
         # MAP-13: own-transfer evidence for the IFSC fallback, from this book's
         # history (same vocabulary as the MAP-14 gate on the AI pass).
-        _hist_own_targets = _own_target_accounts(
-            own_bank_accounts, all_account_paths, historical_pairs_for_llm)
-        _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
-
-        def _hist_own_evidence(_d: str) -> bool:
-            return _has_own_transfer_evidence(_d, _hist_own_vocab, _hist_own_targets)
+        _hist_own_evidence = _own_ev
         # The self-transfer/IFSC fallback below is offered the FULL set of
         # own bank accounts as candidates, never restricted to the ones a
         # description's tokens happened to reach. Excludes nothing here --
@@ -2959,6 +3001,7 @@ def run(
                 own_bank_accounts=own_bank_accounts,
                 source_account=gnucash_bank_account,
                 own_evidence=_hist_own_evidence,
+                own_targets=_hist_own_targets,
             )
             if match and match.get('tie'):
                 # MAP-16: a tie between own accounts is never guessed.
@@ -3025,6 +3068,13 @@ def run(
             match = smart_pattern_match(desc, account_list, withdrawal, deposit)
             if match is None and historical_pairs_for_llm:
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
+                if match is not None and not _gate_own_target(
+                        desc, match.get('account') or '', _hist_own_vocab,
+                        _hist_own_targets):
+                    # MAP-22: a shared prefix with past own-account rows is not
+                    # own-transfer evidence. Drop the guess; the AI pass / Suspense
+                    # take the row.
+                    match = None
             if match is not None and match.get('account') and _direction_clash(
                     match['account'], _safe_float(deposit), _safe_float(withdrawal)):
                 # MAP-18: same direction rule as MAP-12, now a REJECTION for
@@ -3137,9 +3187,9 @@ def run(
                         _llm_acct = _strip_root(llm_results[row_num]['account'])
                         # MAP-14: an own bank/FD account needs own-transfer
                         # evidence; otherwise the row is left for Suspense.
-                        if _llm_acct in _own_targets and not _has_own_transfer_evidence(
+                        if not _gate_own_target(
                                 row.get('Description') or row.get('Narration') or '',
-                                _own_vocab, _own_targets):
+                                _llm_acct, _own_vocab, _own_targets):
                             llm_withheld[i] = _llm_acct
                             continue
                         row['Account'] = _llm_acct
@@ -3196,10 +3246,11 @@ def run(
             continue
         desc = row.get('Description') or row.get('Narration') or ''
         acct = row.get('Account', '')
-        if _ifsc_contradiction(desc, acct, own_bank_accounts):
+        if _ifsc_contradiction(desc, acct, own_bank_accounts, _own_ev):
             reverted_from[conf] = reverted_from.get(conf, 0) + 1
             row['MatchReason'] = (
-                f"Reverted — IFSC in description contradicts resolved own-bank "
+                f"Reverted — IFSC in description contradicts, or is not backed by "
+                f"own-transfer evidence for, the resolved own-bank "
                 f"account (was: {row.get('MatchReason', '')})"
             )
             row['Account'] = ''

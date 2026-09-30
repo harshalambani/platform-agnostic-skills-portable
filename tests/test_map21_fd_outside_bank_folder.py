@@ -168,11 +168,8 @@ def test_sweeps_still_map_to_the_fd_from_history(tmp_path):
     assert r["Account"] == P_FD
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "RED FLAG (open, reported with MAP-13/21): the weak prefix-match pass books a "
-    "narration sharing a 10+ char prefix with past own-account rows straight onto "
-    "the own account; the MAP-14 evidence gate covers the AI pass only. "
-    "Flips to XPASS (failing the suite) when that path is gated - then remove the mark."))
 def test_weak_prefix_pass_does_not_book_a_third_party_to_the_own_fd(tmp_path):
+    """MAP-22: was a strict xfail (RED FLAG); the weak prefix pass now goes through
+    the same own-transfer evidence gate as the AI pass."""
     r = _run(tmp_path, None, "FD BOOKING ACMEVENDOR")
     assert r["Account"] != P_FD
