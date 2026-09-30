@@ -39,6 +39,7 @@ from agents.balance_utils import (
 from agents.banks import discover as discover_banks, load_bank_skill
 from agents.canonical_io import (
     read_sidecar as _ci_read_sidecar,
+    split_balance_carriers,
     write_canonical_csv,
     write_sidecar,
 )
@@ -202,6 +203,38 @@ def _apply_confirmed_contras(output_path: str, contra_flags: dict) -> int:
             writer.writeheader()
             writer.writerows(rows)
     return remapped
+
+
+def _drop_balance_carriers(output_path: str, contra_flags: dict) -> int:
+    """HSB-04: remove balance-carrier rows from the mapped CSV.
+
+    Runs AFTER the running-balance check, the opening-balance reconciliation,
+    duplicate detection and contra detection have all used the canonical rows.
+    ``contra_flags`` keys are 0-based row indices into the output CSV, so they
+    are shifted down past every dropped row (and a flag on a dropped row is
+    removed) to keep pointing at the same transactions. Returns rows dropped.
+    """
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    kept, dropped = split_balance_carriers(rows)
+    if not dropped:
+        return 0
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    gone = set(dropped)
+    remapped = {}
+    for key, val in list(contra_flags.items()):
+        idx = int(key)
+        if idx in gone:
+            continue
+        remapped[idx - sum(1 for d in dropped if d < idx)] = val
+    contra_flags.clear()
+    contra_flags.update(remapped)
+    return len(dropped)
 
 
 # Banks with dedicated extraction skills — registry-driven (agents.banks
@@ -1513,6 +1546,21 @@ def run(
             except Exception as e:
                 log.warning(f"Could not apply confirmed contras: {e}")
                 log_lines.append(f"⚠️ Contra remap skipped — {e}")
+
+        # HSB-04: the opening-balance carrier row (e.g. HSBC "BALANCE BROUGHT
+        # FORWARD") has done its job -- balance check, opening reconciliation,
+        # dedup and contra detection all read it above. Drop it now so it does
+        # not reach GnuCash as a zero-amount transaction.
+        try:
+            n_carrier = _drop_balance_carriers(output_path, contra_flags)
+            if n_carrier:
+                log_lines.append(
+                    f"Opening-balance row (no money movement) left out of the "
+                    f"import file: {n_carrier}"
+                )
+        except Exception as e:
+            log.warning(f"Could not drop balance-carrier rows: {e}")
+            log_lines.append(f"⚠️ Balance-carrier row not removed — {e}")
 
         # Write contra flags sidecar (if any) alongside the output CSV
         if contra_flags:
