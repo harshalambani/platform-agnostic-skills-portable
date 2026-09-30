@@ -577,6 +577,13 @@ HISTORY_MAX_TOKEN_SPREAD = 2            # a token seen with more than this many
 # high, and a word used mostly for something else does not.
 HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION = 0.6
 
+# MAP-15: shortest plain token that may count as history evidence, and the
+# share of the book's distinct accounts a token may touch before it is treated
+# as too common to identify anything (derived from the book, not a word list).
+HISTORY_MIN_TOKEN_LEN = 3
+HISTORY_MAX_ACCOUNT_SHARE = 0.5
+HISTORY_MIN_ACCOUNTS_FOR_SHARE = 4
+
 _VPA_TOKEN_RE = re.compile(r'[a-z0-9.\-_]{2,}@[a-z0-9.\-]{2,}')
 # IFSC format is a national standard (4 letters, literal '0', 6 alphanumerics)
 # -- not a bank-specific lookup table. Kept whole as a token, and its first 4
@@ -599,7 +606,10 @@ def _tokenize_history(text: str) -> List[str]:
         tokens.append(m.group(0))
         tokens.append(f"ifsc:{m.group(1)}")
     remaining = _IFSC_TOKEN_RE.sub(' ', remaining)
-    tokens.extend(t for t in re.split(r'[^a-z0-9]+', remaining) if t)
+    # MAP-15: a 1-2 character fragment ('to', 'a', 'sb') is not history
+    # evidence -- it is shared by far too many unrelated rows.
+    tokens.extend(t for t in re.split(r'[^a-z0-9]+', remaining)
+                  if len(t) >= HISTORY_MIN_TOKEN_LEN)
     return tokens
 
 
@@ -615,6 +625,33 @@ def _build_history_token_model(historical_mappings: List[Dict]) -> Dict[str, Dic
             bucket = model.setdefault(tok, {})
             bucket[acct] = bucket.get(acct, 0) + freq
     return model
+
+
+_MODEL_ACCT_COUNT_CACHE: Dict[tuple, int] = {}
+
+
+def _model_account_count(model: Dict[str, Dict[str, int]]) -> int:
+    """Distinct accounts the history model has ever seen (cached per model)."""
+    key = (id(model), len(model))
+    n = _MODEL_ACCT_COUNT_CACHE.get(key)
+    if n is None:
+        if len(_MODEL_ACCT_COUNT_CACHE) > 8:
+            _MODEL_ACCT_COUNT_CACHE.clear()
+        n = len({a for b in model.values() for a in b})
+        _MODEL_ACCT_COUNT_CACHE[key] = n
+    return n
+
+
+def _own_bank_name_tokens(own_bank_accounts: Optional[set]) -> set:
+    """Tokens that appear in the owner's own bank-account names ('hdfc',
+    'bank'): naming a bank is not evidence of WHICH account, so these never
+    drive a history match on their own. Derived from the book."""
+    out: set = set()
+    for a in own_bank_accounts or ():
+        leaf = _strip_root(a).rsplit(':', 1)[-1]
+        out.update(t for t in re.split(r'[^a-z0-9]+', leaf.lower())
+                   if len(t) >= HISTORY_MIN_TOKEN_LEN and not t.isdigit())
+    return out
 
 
 def _history_bayes_raw(
@@ -634,10 +671,14 @@ def _history_bayes_raw(
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
 
+    n_accounts = _model_account_count(model)
     for tok in tokens:
         acct_counts = model.get(tok)
         if not acct_counts:
             continue  # never seen in history -- contributes nothing
+        if (n_accounts >= HISTORY_MIN_ACCOUNTS_FOR_SHARE
+                and len(acct_counts) / n_accounts > HISTORY_MAX_ACCOUNT_SHARE):
+            continue  # MAP-15: touches most of the book -- identifies nothing
         total = sum(acct_counts.values())
         spread = len(acct_counts)
         for acct, cnt in acct_counts.items():
@@ -1020,7 +1061,8 @@ def _history_token_match(
     if not tokens_all:
         return None
 
-    match = _history_bayes_score(tokens_all, model)
+    bank_names = _own_bank_name_tokens(own_bank_accounts)
+    match = _history_bayes_score(tokens_all - bank_names, model)
     if match:
         return match
 
