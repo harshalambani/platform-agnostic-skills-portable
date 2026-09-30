@@ -26,6 +26,9 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 - **PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID.
   - Only used for HDFC when the statement PDF itself is password-protected.
   - ⚠️ Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output.
+- **Bank account (optional -- only if several of your accounts are at this bank and the statement does not say which)** (optional) — accepts: One of the postable accounts at the chosen bank, listed from your book.
+  - Which of your accounts at this bank the statement is for. Leave blank unless the run stops and asks.
+  - ⚠️ Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing.
 
 ## How to run
 

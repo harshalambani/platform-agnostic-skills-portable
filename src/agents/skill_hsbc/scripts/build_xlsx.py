@@ -66,10 +66,16 @@ def main():
                     help="Output .xlsx path")
     ap.add_argument("--title", default="HSBC Savings",
                     help="Sheet title (default: 'HSBC Savings')")
+    ap.add_argument("--meta", dest="meta_path", type=Path, default=None,
+                    help="statement_meta.json from parse_tsv.py (account number)")
     args = ap.parse_args()
 
     with open(args.in_path) as f:
         data = json.load(f)
+    account_number = None
+    if args.meta_path and args.meta_path.exists():
+        with open(args.meta_path) as f:
+            account_number = (json.load(f) or {}).get("account_number")
 
     # Drop trailing CLOSING BALANCE rows and any non-transactional stragglers.
     rows = []
@@ -188,6 +194,7 @@ def main():
 
     summary_data = [
         ("Period", f"{period_start} to {period_end}" if period_start else ""),
+        ("Account Number", account_number or ""),
         ("Opening balance", rows[0]['balance'] if rows else None),
         ("Closing balance", rows[-1]['balance'] if rows else None),
         ("Total transactions", len(data_only)),

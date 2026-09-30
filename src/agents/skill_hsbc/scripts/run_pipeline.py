@@ -79,7 +79,8 @@ def main():
     run([sys.executable, str(SCRIPTS / "build_xlsx.py"),
          "--in", str(enriched),
          "--out", str(args.out),
-         "--title", args.title])
+         "--title", args.title,
+         "--meta", str(args.work_dir / "statement_meta.json")])
 
     print(f"\nPipeline complete. Output: {args.out}")
 

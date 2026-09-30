@@ -38,6 +38,7 @@ from pathlib import Path
 # importable regardless of how this script was invoked.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from agents.bank_common.consolidate import StatementGroup, consolidate  # noqa: E402
+from agents.skill_hsbc.acct_number import find_account_number  # noqa: E402
 
 # Fallback column right-edges (tuned for HSBC Premier Savings statements at
 # 300 DPI, portrait A4). Auto-detection from the header row normally wins;
@@ -408,6 +409,7 @@ def main():
         raise SystemExit(f"No statement subfolders under {tsv_root}.")
 
     stmt_results = []  # (stmt_dir, tx, period_start, period_end)
+    account_numbers = []  # IMP-08: labelled account number from each page 1
     for stmt_dir in statement_dirs:
         pages = sorted(
             stmt_dir.glob("page-*.tsv"),
@@ -417,7 +419,12 @@ def main():
             continue
 
         # Auto-detect column edges from page 1, fall back to defaults/overrides.
-        edges = detect_column_edges(load_tsv_lines(pages[0]))
+        _p1_lines = load_tsv_lines(pages[0])
+        _acct = find_account_number(
+            [" ".join(w['text'] for w in L['words']) for L in _p1_lines])
+        if _acct and _acct not in account_numbers:
+            account_numbers.append(_acct)
+        edges = detect_column_edges(_p1_lines)
         if edges:
             dep_r, wd_r, bal_r = edges
         else:
@@ -485,6 +492,13 @@ def main():
     with open(out, 'w') as f:
         json.dump(cleaned, f, indent=2, default=str)
     print(f"Wrote {out}")
+
+    # IMP-08: the statement's own account number. One unambiguous number only;
+    # several different ones (or none) are recorded as None, never guessed.
+    meta_path = out.parent / "statement_meta.json"
+    with open(meta_path, 'w') as f:
+        json.dump({"account_number": account_numbers[0] if len(account_numbers) == 1 else None},
+                  f)
 
     if continuity_warnings:
         warnings_path = out.parent / "continuity_warnings.json"

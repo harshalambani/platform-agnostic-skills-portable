@@ -61,6 +61,10 @@ class SkillInput:
                               # than one value; its value is then a list of keys
                               # rather than a single key. Used by the Inter-entity
                               # Matrix, which reconciles every pair among N books.
+    depends_on: tuple[str, ...] = ()  # (select inputs with options_from only) names
+                              # of other inputs whose value feeds the option
+                              # resolver; the UI refreshes the choices when
+                              # any of them changes.
     fy_from: str = ""        # (file inputs only, optional) name of another input
                               # in this skill whose value is a bare FY string (e.g.
                               # "2025-26"), used together with book_from to pick the
@@ -233,6 +237,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             options_from=inp.get("options_from", ""),
             book_from=inp.get("book_from", ""),
             fy_from=inp.get("fy_from", ""),
+            depends_on=tuple(inp.get("depends_on") or ()),
             multiselect=bool(inp.get("multiselect", False)),
         ))
 

@@ -178,6 +178,23 @@ _OPTIONS_FROM_RESOLVERS = {
 }
 
 
+def _options_from_bank_accounts(book, bank) -> list[tuple[str, str]]:
+    """Postable accounts at ``bank`` in ``book`` (IMP-08); value is the full path."""
+    try:
+        from agents.skill_gnucash_pipeline.agent import postable_bank_accounts
+        return [(p, p) for p in postable_bank_accounts(str(book or ""), str(bank or ""))]
+    except Exception:
+        return []
+
+
+_DEPENDENT_RESOLVERS = {"bank_accounts": _options_from_bank_accounts}
+
+
+def _resolve_dependent_options(key: str, *vals) -> list[tuple[str, str]]:
+    resolver = _DEPENDENT_RESOLVERS.get(key)
+    return resolver(*vals) if resolver else []
+
+
 def _resolve_options_from(key: str) -> list[tuple[str, str]]:
     resolver = _OPTIONS_FROM_RESOLVERS.get(key)
     if resolver is None:
@@ -904,6 +921,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             input_by_name: dict[str, object] = {}  # inp.name -> its component, for book_from/fy_from wiring below
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
+            dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
@@ -1036,7 +1054,16 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         _pbtn = gr.Button("↻", scale=0, min_width=40)
                     parser_pickers.append((comp, _pbtn))
                 elif inp.type == "select":
-                    if inp.options_from:
+                    if inp.options_from and getattr(inp, "depends_on", ()):
+                        # Choices derive from OTHER inputs (e.g. the book and
+                        # bank): start empty, refreshed when they change.
+                        comp = gr.Dropdown(
+                            label=inp.label, choices=[], value=None,
+                            allow_custom_value=True, interactive=True,
+                            **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
+                        )
+                        dependent_pickers.append((comp, inp))
+                    elif inp.options_from:
                         _dchoices = _resolve_options_from(inp.options_from)
                         with gr.Row():
                             comp = gr.Dropdown(
@@ -1160,6 +1187,19 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     inputs=[file_comp],
                     outputs=[status_md],
                 )
+
+            for _dcomp, _dinp in dependent_pickers:
+                _srcs = [input_by_name[n] for n in _dinp.depends_on if n in input_by_name]
+                if len(_srcs) != len(_dinp.depends_on):
+                    raise ValueError(
+                        f"skill.yaml error in '{skill.name}': input '{_dinp.name}' "
+                        f"depends_on names an input that does not exist.")
+
+                def _refresh_dependent(*vals, _key=_dinp.options_from):
+                    return gr.update(choices=_resolve_dependent_options(_key, *vals), value=None)
+
+                for _s in _srcs:
+                    _s.change(fn=_refresh_dependent, inputs=_srcs, outputs=[_dcomp])
 
             # Model dropdown — only meaningful for LLM-powered skills; deterministic
             # skills ignore model_override entirely, so hide it there.

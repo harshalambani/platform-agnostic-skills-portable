@@ -240,8 +240,82 @@ def _normalize_digits(s: str | None) -> str:
     return "".join(c for c in (s or "") if c.isdigit())
 
 
+_ROOT_PREFIX = "Root Account:"
+
+
+def _strip_root(path: str) -> str:
+    return path[len(_ROOT_PREFIX):] if path.startswith(_ROOT_PREFIX) else path
+
+
+def _iso_date(text: str) -> str:
+    """DD/MM/YYYY, DD/MM/YY or ISO -> ISO (best effort, '' when unreadable)."""
+    t = (text or "").strip()
+    try:
+        if "/" in t:
+            d, m, y = t.split("/")[:3]
+            y = y if len(y) == 4 else f"20{y}"
+            return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+        return t[:10]
+    except ValueError:
+        return ""
+
+
+def _statement_evidence(canonical_rows: list[dict]) -> dict:
+    """What the statement itself can say about WHICH own account it belongs to:
+    the opening balance, the first transaction date and every narration."""
+    if not canonical_rows:
+        return {}
+    try:
+        oc = extract_opening_closing(canonical_rows)
+        opening = oc["opening_balance"]
+    except Exception:  # noqa: BLE001
+        opening = None
+    dates = sorted(d for d in (_iso_date(r.get("Date", "")) for r in canonical_rows) if d)
+    return {
+        "opening_balance": opening,
+        "start_date": dates[0] if dates else None,
+        "narrations": [str(r.get("Description", "")) for r in canonical_rows],
+    }
+
+
+def _looks_like_year(run: str) -> bool:
+    return len(run) == 4 and run[:2] in ("19", "20")
+
+
+def _narration_pick(pool: list[tuple[str, str]], narrations: list[str]) -> str | None:
+    """The id of the ONE pool account whose own account digits appear (as a
+    digit run of 4+ digits) in the statement narrations, or None when none or
+    more than one does. A run that fits two accounts votes for neither."""
+    own: dict[str, list[str]] = {}   # aid -> digit runs in its own name (leaf)
+    for aid, full in pool:
+        leaf = full.split(":")[-1]
+        own[aid] = re.findall(r"\d{4,}", leaf)
+    digits = {aid: _normalize_digits(full.split(":")[-1]) for aid, full in pool}
+    # a run that appears in more than one candidate's name says nothing
+    counts: dict[str, int] = {}
+    for runs in own.values():
+        for r in set(runs):
+            counts[r] = counts.get(r, 0) + 1
+    votes: set[str] = set()
+    for text in narrations:
+        for run in set(re.findall(r"\d{4,}", text or "")):
+            if _looks_like_year(run):
+                continue
+            hit = set()
+            for aid, _full in pool:
+                if any(r == run and counts.get(r, 0) == 1 for r in own[aid]):
+                    hit.add(aid)
+                elif digits[aid].endswith(run) and len(run) >= 4:
+                    hit.add(aid)
+            if len(hit) == 1:
+                votes |= hit
+    return next(iter(votes)) if len(votes) == 1 else None
+
+
 def _get_gnucash_account_balance(
-    gnucash_file: str, bank_name: str, account_number: str | None = None
+    gnucash_file: str, bank_name: str, account_number: str | None = None,
+    *, opening_balance: float | None = None, start_date: str | None = None,
+    narrations: list[str] | None = None, chosen_account: str | None = None,
 ) -> dict:
     """
     Parse a .gnucash XML file and find the bank account's ledger balance.
@@ -261,6 +335,18 @@ def _get_gnucash_account_balance(
     so this refuses to guess: it returns ``found: False`` with
     "match_warning" explaining why, rather than silently picking one.
 
+    IMP-08: several own accounts at one bank are NEVER resolved by picking the
+    first. Hidden/placeholder accounts are not candidates (IMP-09). With no
+    account number the choice is made by evidence -- the statement's opening
+    balance equals exactly one candidate's book balance at the statement
+    start, or the candidate's own account digits appear in the narrations for
+    exactly one candidate (``opening_balance`` / ``start_date`` /
+    ``narrations``). If that still leaves a tie the result is
+    ``found: False, ambiguous: True`` with the postable ``candidates``; the
+    caller must stop and ask. ``chosen_account`` (a full path) is the user's
+    explicit pick: it is refused when it is hidden/placeholder, not at this
+    bank, or not in the book.
+
     Returns:
         {
             "found": bool,
@@ -268,6 +354,10 @@ def _get_gnucash_account_balance(
             "balance": float,
             "last_txn_date": str or None,  # YYYY-MM-DD
             "match_warning": str or None,
+            "match_note": str or None,     # how an evidence pick was made
+            "ambiguous": bool,             # stop and ask
+            "refused": bool,               # chosen_account was not acceptable
+            "candidates": list[str],       # postable same-bank paths
         }
     """
     try:
@@ -307,24 +397,109 @@ def _get_gnucash_account_balance(
         for aid, info in acc_map.items()
         if bank_lower in _full_path(aid).lower() and info["type"] in ("BANK", "ASSET")
     ]
+    all_same_bank = list(candidates)
     # IMP-09: a hidden / placeholder account (or one under a hidden parent) is
     # never a candidate, so it can never be picked even when first in book
     # order.
+    _guard = None
     try:
         from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
         _guard = TargetGuard.from_book(gnucash_file)
         if _guard.known:
             candidates = [(aid, full) for aid, full in candidates
                           if not _guard.is_blocked(full)]
+        else:
+            _guard = None
     except Exception:  # noqa: BLE001 - the guard must never break the pick
-        pass
+        _guard = None
+
+    def _result(found, name="", balance=0.0, last=None, warn=None, note=None,
+                ambiguous=False, refused=False, cands=None):
+        return {
+            "found": found, "account_name": name, "balance": balance,
+            "last_txn_date": last, "match_warning": warn, "match_note": note,
+            "ambiguous": ambiguous, "refused": refused,
+            "candidates": cands if cands is not None else [],
+        }
+
+    postable_paths = [_strip_root(full) for _aid, full in candidates]
+
+    # One pass over the ledger: every split of every same-bank account.
+    ids = {aid for aid, _ in all_same_bank}
+    splits_by_acc: dict[str, list[tuple[str, float]]] = {aid: [] for aid in ids}
+    for trn in root.findall(f'.//{_NS["gnc"]}transaction'):
+        date_el = trn.find(f'{_NS["trn"]}date-posted/{_NS["ts"]}date')
+        trn_date = date_el.text[:10] if date_el is not None else ""
+        for sp in trn.findall(f'{_NS["trn"]}splits/{_NS["trn"]}split'):
+            sp_acc = sp.findtext(f'{_NS["split"]}account', '')
+            if sp_acc not in ids:
+                continue
+            val_str = sp.findtext(f'{_NS["split"]}value', '0/1')
+            parts = val_str.split('/')
+            v = 0.0
+            if len(parts) == 2:
+                try:
+                    v = int(parts[0]) / int(parts[1])
+                except (ValueError, ZeroDivisionError):
+                    v = 0.0
+            splits_by_acc[sp_acc].append((trn_date, v))
+
+    def _ask(reason: str) -> dict:
+        msg = (
+            f"{reason} Which one is this statement for? Choose it in 'Bank "
+            f"account' (or pass bank_account=). Postable accounts at "
+            f"'{bank_name}': " + "; ".join(postable_paths) + "."
+        )
+        return _result(False, warn=msg, ambiguous=True, cands=postable_paths)
+
+    # An explicit choice by the user: verified, never trusted blindly.
+    if chosen_account:
+        want = _strip_root(chosen_account.strip())
+        in_book = {_strip_root(_full_path(a)) for a in acc_map}
+        if want not in in_book:
+            return _result(False, refused=True, cands=postable_paths, warn=(
+                f"bank_account '{want}' is not an account in the GnuCash book."))
+        at_bank = {_strip_root(full): (aid, full) for aid, full in all_same_bank}
+        if want not in at_bank:
+            return _result(False, refused=True, cands=postable_paths, warn=(
+                f"bank_account '{want}' is not an account at '{bank_name}'."))
+        aid, full = at_bank[want]
+        if _guard is not None and _guard.is_blocked(full):
+            why = _guard.blocked_target_reason(full) or "target is hidden in the book"
+            return _result(False, refused=True, cands=postable_paths, warn=(
+                f"bank_account '{want}' was refused: {why}."))
+        candidates = [(aid, full)]
 
     target_id = None
     target_name = ""
     match_warning = None
+    match_note = None
     norm_number = _normalize_digits(account_number)
 
-    if norm_number:
+    def _decide(pool):
+        """Pick ONE of ``pool`` by evidence, or None (tie / no evidence)."""
+        nonlocal match_note
+        bal_hits = []
+        if opening_balance is not None:
+            for aid, full in pool:
+                bal = sum(v for d, v in splits_by_acc.get(aid, [])
+                          if not start_date or (d and d < start_date))
+                if abs(bal - opening_balance) <= 0.02:
+                    bal_hits.append((aid, full))
+        n_id = _narration_pick(pool, narrations or [])
+        n_hit = next(((a, f) for a, f in pool if a == n_id), None) if n_id else None
+        if len(bal_hits) == 1 and (n_hit is None or n_hit == bal_hits[0]):
+            match_note = (f"Resolved '{_strip_root(bal_hits[0][1])}' by evidence: the "
+                          f"statement's opening balance equals this account's book "
+                          f"balance at the statement start.")
+            return bal_hits[0]
+        if n_hit is not None and not bal_hits:
+            match_note = (f"Resolved '{_strip_root(n_hit[1])}' by evidence: its own "
+                          f"account number appears in the statement narrations.")
+            return n_hit
+        return None
+
+    if norm_number and not chosen_account:
         number_matches = [
             (aid, full) for aid, full in candidates
             if _normalize_digits(full) and (
@@ -332,13 +507,16 @@ def _get_gnucash_account_balance(
                 or _normalize_digits(full) in norm_number
             )
         ]
-        if number_matches:
+        if len(number_matches) == 1:
             target_id, target_name = number_matches[0]
-            if len(number_matches) > 1:
-                match_warning = (
-                    f"Multiple GnuCash accounts matched account number "
-                    f"'{account_number}'; using '{target_name}'."
-                )
+        elif len(number_matches) > 1:
+            picked = _decide(number_matches)
+            if picked is None:
+                return _ask(
+                    f"The account number '{account_number}' fits {len(number_matches)} "
+                    f"of your accounts at '{bank_name}' and nothing else on the "
+                    f"statement tells them apart.")
+            target_id, target_name = picked
         elif len(candidates) > 1:
             # An account number was supplied but matched none of several
             # same-bank-name candidates: with more than one account sharing
@@ -351,66 +529,50 @@ def _get_gnucash_account_balance(
                 f"'{bank_name}' ({', '.join(name for _, name in candidates)}); "
                 f"not resolving to any one of them automatically."
             )
-            return {
-                "found": False, "account_name": "", "balance": 0.0,
-                "last_txn_date": None, "match_warning": match_warning,
-            }
-        # else: zero or exactly one candidate — handled by the name-match
-        # fallback below, which is unambiguous when there's only one account
-        # for this bank name (single-account case, unchanged).
+            return _result(False, warn=match_warning, cands=postable_paths)
+        # else: zero or exactly one candidate -- handled below.
 
-    if target_id is None and candidates:
+    if target_id is None and len(candidates) == 1:
         target_id, target_name = candidates[0]
-        if norm_number:
+        if norm_number and not chosen_account:
             match_warning = (
                 f"Could not match account number '{account_number}' to any "
                 f"GnuCash account digits; fell back to name match on "
                 f"'{bank_name}' -> '{target_name}'. Verify this is the "
                 f"correct account."
             )
-        elif len(candidates) > 1:
-            match_warning = (
-                f"{len(candidates)} GnuCash accounts match bank name "
-                f"'{bank_name}'; using '{target_name}' by name only — no "
-                f"account number was available to disambiguate."
-            )
+    elif target_id is None and len(candidates) > 1:
+        picked = _decide(candidates)
+        if picked is None:
+            return _ask(
+                f"{len(candidates)} of your accounts match the bank name "
+                f"'{bank_name}' and the statement carries no account number "
+                f"or other evidence that picks one.")
+        target_id, target_name = picked
 
     if not target_id:
-        return {
-            "found": False, "account_name": "", "balance": 0.0,
-            "last_txn_date": None, "match_warning": None,
-        }
+        return _result(False, cands=postable_paths)
 
-    # Sum splits for this account
-    balance = 0.0
-    last_date = None
+    # Balance of the chosen account (already indexed above).
+    entries = splits_by_acc.get(target_id, [])
+    balance = sum(v for _d, v in entries)
+    last_date = max((d for d, _v in entries if d), default=None)
 
-    for trn in root.findall(f'.//{_NS["gnc"]}transaction'):
-        date_el = trn.find(f'{_NS["trn"]}date-posted/{_NS["ts"]}date')
-        trn_date = date_el.text[:10] if date_el is not None else None
+    return _result(True, target_name, round(balance, 2), last_date,
+                   match_warning, match_note, cands=postable_paths)
 
-        for sp in trn.findall(f'{_NS["trn"]}splits/{_NS["trn"]}split'):
-            sp_acc = sp.findtext(f'{_NS["split"]}account', '')
-            if sp_acc == target_id:
-                val_str = sp.findtext(f'{_NS["split"]}value', '0/1')
-                # GnuCash stores values as "num/denom" e.g. "150000/100"
-                parts = val_str.split('/')
-                if len(parts) == 2:
-                    try:
-                        balance += int(parts[0]) / int(parts[1])
-                    except (ValueError, ZeroDivisionError):
-                        pass
-                if trn_date:
-                    if last_date is None or trn_date > last_date:
-                        last_date = trn_date
 
-    return {
-        "found": True,
-        "account_name": target_name,
-        "balance": round(balance, 2),
-        "last_txn_date": last_date,
-        "match_warning": match_warning,
-    }
+def postable_bank_accounts(gnucash_file: str, bank_name: str) -> list[str]:
+    """Full paths (no "Root Account:" prefix) of YOUR postable accounts at
+    ``bank_name``: the choices offered by the import tab's Bank account
+    dropdown (IMP-08). Hidden/placeholder accounts are never listed."""
+    if not gnucash_file or not bank_name or not Path(str(gnucash_file)).is_file():
+        return []
+    try:
+        res = _get_gnucash_account_balance(gnucash_file, bank_name)
+    except Exception:  # noqa: BLE001 - a picker must never raise
+        return []
+    return list(res.get("candidates") or [])
 
 
 def _reconcile_opening_balance(
@@ -418,6 +580,7 @@ def _reconcile_opening_balance(
     gnucash_file: str,
     bank_name: str,
     account_number: str | None = None,
+    *, chosen_account: str | None = None,
 ) -> dict:
     """
     Reconcile the canonical CSV's opening balance against GnuCash ledger.
@@ -450,7 +613,26 @@ def _reconcile_opening_balance(
             "match_warning": None,
         }
 
-    gc = _get_gnucash_account_balance(gnucash_file, bank_name, account_number)
+    ev = _statement_evidence(canonical_rows)
+    gc = _get_gnucash_account_balance(
+        gnucash_file, bank_name, account_number,
+        opening_balance=ev.get("opening_balance"), start_date=ev.get("start_date"),
+        narrations=ev.get("narrations"), chosen_account=chosen_account,
+    )
+    if gc.get("ambiguous") or gc.get("refused"):
+        # IMP-08: stop and ask -- never continue on a guessed account.
+        return {
+            "ok": False,
+            "stop": True,
+            "message": gc.get("match_warning") or "Bank account could not be chosen.",
+            "rows_skipped": 0,
+            "filtered_rows": canonical_rows,
+            "gnucash_balance": 0.0,
+            "statement_opening": 0.0,
+            "account_found": False,
+            "match_warning": None,
+            "candidates": gc.get("candidates", []),
+        }
     if not gc["found"]:
         log.warning(
             "Could not find %s account in GnuCash — skipping opening balance check",
@@ -482,6 +664,7 @@ def _reconcile_opening_balance(
     stmt_opening = oc["opening_balance"]
 
     diff = abs(gc_balance - stmt_opening)
+    _mw = " ".join(x for x in (gc.get("match_warning"), gc.get("match_note")) if x) or None
 
     if diff <= 0.02:
         # Perfect match — no duplicates, no gap
@@ -496,7 +679,7 @@ def _reconcile_opening_balance(
             "gnucash_balance": gc_balance,
             "statement_opening": stmt_opening,
             "account_found": True,
-            "match_warning": gc.get("match_warning"),
+            "match_warning": _mw,
         }
 
     # Scenario A check: are there rows in the statement dated on or before
@@ -543,7 +726,7 @@ def _reconcile_opening_balance(
                     "gnucash_balance": gc_balance,
                     "statement_opening": new_oc["opening_balance"],
                     "account_found": True,
-                    "match_warning": gc.get("match_warning"),
+                    "match_warning": _mw,
                 }
 
     # Scenario B or C — gap we can't resolve
@@ -561,7 +744,7 @@ def _reconcile_opening_balance(
         "gnucash_balance": gc_balance,
         "statement_opening": stmt_opening,
         "account_found": True,
-        "match_warning": gc.get("match_warning"),
+        "match_warning": _mw,
     }
 
 
@@ -882,6 +1065,7 @@ def run(
     config_path: str = None,
     model_override: str = None,
     pdf_password: str = None,
+    bank_account: str = None,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -898,6 +1082,10 @@ def run(
         pdf_password:    Optional statement password, forwarded to skill_hdfc
                          for password-protected HDFC PDFs (for HDFC often the
                          Cust ID). Never logged.
+        bank_account:    Optional full path of YOUR account at this bank, used
+                         when several match the bank name and the statement
+                         does not say which (IMP-08). Refused when hidden,
+                         placeholder, not at this bank, or not in the book.
 
     Returns:
         Human-readable summary string for the UI.
@@ -1060,7 +1248,26 @@ def run(
         # accounts at the same bank.
         stmt_sidecar = _read_sidecar(canonical_path)
         stmt_account_number = stmt_sidecar.get("account_number") if stmt_sidecar else None
-        recon = _reconcile_opening_balance(canonical_rows, gnucash_file, bank, stmt_account_number)
+        bank_account = (bank_account or "").strip() or None
+        # Same evidence for both picks below (before any duplicate rows are
+        # trimmed), so the two resolutions can never land on different accounts.
+        _ev2 = _statement_evidence(canonical_rows)
+        recon = _reconcile_opening_balance(
+            canonical_rows, gnucash_file, bank, stmt_account_number,
+            chosen_account=bank_account)
+        if recon.get("stop"):
+            # IMP-08: several postable accounts and no evidence (or a refused
+            # choice). No output file is written; the user picks and re-runs.
+            cands = recon.get("candidates") or []
+            listing = chr(10).join(f"- `{c}`" for c in cands)
+            nl2 = chr(10) * 2
+            return (
+                f"**Which {bank} account is this statement for?**{nl2}"
+                f"{recon['message']}{nl2}"
+                + (f"Postable accounts:{chr(10)}{listing}{nl2}" if listing else "")
+                + "Nothing was written. Pick the account in **Bank account** "
+                  "and run again."
+            )
         if recon.get("match_warning"):
             log_lines.append(f"⚠ Account match: {recon['match_warning']}")
 
@@ -1104,7 +1311,11 @@ def run(
         # to the wrong ledger. Any ambiguity here is already surfaced via
         # recon['match_warning'] above (same bank/account_number/file inputs
         # → same resolution), so it is not re-logged a second time.
-        gc_info = _get_gnucash_account_balance(gnucash_file, bank, stmt_account_number)
+        gc_info = _get_gnucash_account_balance(
+            gnucash_file, bank, stmt_account_number,
+            opening_balance=_ev2.get("opening_balance"),
+            start_date=_ev2.get("start_date"),
+            narrations=_ev2.get("narrations"), chosen_account=bank_account)
         account_filter_path = gc_info["account_name"] if gc_info["found"] else None
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
