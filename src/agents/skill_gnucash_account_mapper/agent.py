@@ -16,7 +16,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError as _HTTPError
 
 import yaml
@@ -1109,6 +1109,7 @@ def _history_token_match(
     model: Dict[str, Dict[str, int]],
     own_bank_accounts: Optional[set] = None,
     source_account: Optional[str] = None,
+    own_evidence: Optional[Callable[[str], bool]] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
@@ -1119,7 +1120,15 @@ def _history_token_match(
     never restricted to accounts this description's tokens happened to reach
     (see `_self_transfer_candidates`). `source_account`: the account this row
     is itself being imported for, excluded from candidates so a self-transfer
-    is never "matched" back onto its own source."""
+    is never "matched" back onto its own source.
+
+    `own_evidence` (MAP-13): callable(desc) -> bool, True when the narration
+    carries own-transfer evidence derived from THIS book (the 'xfer to self'
+    marker, an own-history name/VPA token, an own account number). The IFSC
+    literal-code fallback fires only when it says True: a third party's bank
+    code must not route a row onto the owner's own account at that bank.
+    run() always supplies it; None (direct callers/unit tests of the
+    matcher) leaves the fallback ungated."""
     tokens_all = set(_tokenize_history(desc))
     if not tokens_all:
         return None
@@ -1135,6 +1144,8 @@ def _history_token_match(
         # may still name the bank; route by the bank word in the owner's own
         # postable account names.
         return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account)
+    if own_evidence is not None and not own_evidence(desc):
+        return None   # MAP-13: no own-transfer evidence -> abstain, never route
     plain_tokens = tokens_all - routing_tokens
     candidates = _self_transfer_candidates(plain_tokens, model, own_bank_accounts)
     if not candidates:
@@ -2889,6 +2900,13 @@ def run(
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
         history_model = _build_history_token_model(historical_pairs_for_llm)
+        # MAP-13: own-transfer evidence for the IFSC fallback, from this book's
+        # history (same vocabulary as the MAP-14 gate on the AI pass).
+        _hist_own_targets = _own_target_accounts(own_bank_accounts, all_account_paths)
+        _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
+
+        def _hist_own_evidence(_d: str) -> bool:
+            return _has_own_transfer_evidence(_d, _hist_own_vocab, _hist_own_targets)
         # The self-transfer/IFSC fallback below is offered the FULL set of
         # own bank accounts as candidates, never restricted to the ones a
         # description's tokens happened to reach. Excludes nothing here --
@@ -2903,6 +2921,7 @@ def run(
                 history_model,
                 own_bank_accounts=own_bank_accounts,
                 source_account=gnucash_bank_account,
+                own_evidence=_hist_own_evidence,
             )
             if match and match.get('tie'):
                 # MAP-16: a tie between own accounts is never guessed.
