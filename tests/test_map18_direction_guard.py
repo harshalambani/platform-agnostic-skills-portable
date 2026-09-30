@@ -1,6 +1,6 @@
 """
 MAP-18 -- MAP-12's direction rule applied to the keyword/smart/weak pass.
-A clash leaves the row unmapped, keeps it away from the AI pass, and puts it
+A clash (Income on an outflow, Expenses on an inflow -- MAP-12's rule only) leaves the row unmapped, keeps it away from the AI pass, and puts it
 in Suspense with a visible reason. Same-direction matches are unchanged.
 """
 from __future__ import annotations
@@ -63,9 +63,19 @@ def test_same_direction_keyword_match_is_unchanged(tmp_path, monkeypatch):
 def test_clash_helper_rules():
     assert m._direction_clash("Income:X", 0, 5)
     assert m._direction_clash("Expenses:X", 5, 0)
-    assert m._direction_clash("Liabilities:X", 5, 0)      # inflow to a liability
+    assert not m._direction_clash("Liabilities:X", 5, 0)  # NOT a clash: MAP-12 rule only
+    assert not m._direction_clash("Equity:X", 5, 0)
     assert not m._direction_clash("Liabilities:X", 0, 5)  # repayment allowed
     assert not m._direction_clash("Income:X", 5, 0)
     assert not m._direction_clash("Expenses:X", 0, 5)
     assert not m._direction_clash("Income:X", 5, 5)       # ambiguous row
     assert not m._direction_clash("", 0, 5)
+
+
+def test_inflow_to_liabilities_by_keyword_is_not_sent_to_suspense(tmp_path, monkeypatch):
+    """NEGATIVE: the guard is MAP-12's Income/Expenses rule only; money in to a
+    Liabilities account through a keyword match maps as it did before MAP-18."""
+    r = _run(tmp_path, monkeypatch, "100.00", "", "Liabilities:Loans:Family Loan")
+    assert r["Account"].endswith("Family Loan")
+    assert r["Confidence"] == "smart"
+    assert "Direction clash" not in r["MatchReason"]

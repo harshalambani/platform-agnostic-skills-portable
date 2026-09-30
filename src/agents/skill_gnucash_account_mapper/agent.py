@@ -933,21 +933,12 @@ def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float)
 
 
 def _direction_clash(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
-    """MAP-18: True if a keyword/smart/weak guess must be REJECTED because the
-    account's top-level type contradicts the row's cash-flow direction.
-    Reuses MAP-12's rules: `_direction_mismatch` (Income on an outflow,
-    Expenses on an inflow) plus, for a pure inflow, any top-level type outside
-    `_plausible_direction_prefixes` (so a deposit never lands on Liabilities or
-    Equity through a keyword). An outflow to Liabilities (repayment) is allowed.
-    Rows with both or neither amount are never clashes."""
-    if not account:
-        return False
-    if _direction_mismatch(account, deposit_amt, withdrawal_amt):
-        return True
-    if deposit_amt > 0 and withdrawal_amt == 0:
-        top = _strip_root(account).split(":", 1)[0]
-        return top not in _plausible_direction_prefixes(deposit_amt, withdrawal_amt)
-    return False
+    """MAP-18: True if a keyword/smart/weak guess must be REJECTED. This is
+    exactly MAP-12's rule and nothing wider: money out landing on Income, or
+    money in landing on Expenses (`_direction_mismatch`). Money in to
+    Liabilities or Equity is NOT a clash. Rows with both or neither amount
+    are never clashes. Kept as a pass-through so the call site names its intent."""
+    return _direction_mismatch(account, deposit_amt, withdrawal_amt)
 
 
 def _plausible_direction_prefixes(deposit_amt: float, withdrawal_amt: float) -> Tuple[str, ...]:
