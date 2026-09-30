@@ -1433,8 +1433,8 @@ def _retry_with_focused_prompt(
     try:
         reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
                           api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
-    except _LLMRateLimited:
-        return None   # MAP-19: a rate-limited retry is simply no answer
+    except (_LLMRateLimited, _PacingStopped):
+        return None   # MAP-19 / MAP-20: a rate-limited or paced-out retry is simply no answer
     if reply:
         _emit_mapper_progress(f"  -> (retry matched)")
     return reply
@@ -1509,6 +1509,12 @@ def _llm_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+try:
+    from agents.llm_pacing import PacingStopped as _PacingStopped  # noqa: E402
+except ImportError:  # CLI / bare-import usage
+    from llm_pacing import PacingStopped as _PacingStopped  # type: ignore  # noqa: E402
+
+
 class _LLMGuard:
     """MAP-19: wraps every AI call of one pass. Honours 429 Retry-After with a
     capped wait, counts consecutive failures, and watches the invalid-answer
@@ -1535,6 +1541,9 @@ class _LLMGuard:
             try:
                 reply = _llm_chat(provider, base_url, model, system, user,
                                   api_key=api_key, timeout=timeout)
+            except _PacingStopped as e:
+                self._stop(str(e))
+                return None
             except _LLMRateLimited as e:
                 self.consecutive_failures += 1
                 rate_limited += 1
@@ -1658,6 +1667,40 @@ def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_inf
     )
 
 
+def _register_pacing(cfg: dict) -> None:
+    """MAP-20: register this endpoint's pacing (min gap / daily cap) with the
+    shared pacer that `_llm_chat` and base_agent.load_model both wait on."""
+    try:
+        from agents import llm_pacing  # noqa: PLC0415
+    except ImportError:
+        import llm_pacing  # noqa: PLC0415
+    llm_pacing.configure_from_legacy(cfg)
+
+
+def _announce_pacing(provider: str, base_url: str, rows: int) -> None:
+    """MAP-20: when pacing is on, say up front how long the AI pass will take."""
+    try:
+        from agents import llm_pacing  # noqa: PLC0415
+        pacer = llm_pacing.pacer_for(provider, base_url)
+    except ImportError:
+        return
+    if pacer is None or not pacer.enabled:
+        return
+    # +1 for the warm-up call; each row makes at least one call.
+    finish = pacer.estimate_finish(rows + 1)
+    parts = []
+    if pacer.min_gap > 0:
+        parts.append(f"one AI call every {pacer.min_gap:.0f}s")
+    if pacer.daily_cap:
+        parts.append(f"at most {pacer.daily_cap} calls a day ({pacer.calls_today()} used today)")
+    note = "AI pacing on: " + ", ".join(parts)
+    if finish is not None:
+        note += (f"; {rows} rows will take about {(finish - pacer._clock()) / 60:.0f} min, "
+                 f"expected finish {llm_pacing._fmt_clock(finish)}. Press Stop to keep "
+                 f"what is mapped so far (the rest goes to Suspense).")
+    _emit_mapper_progress(note)
+
+
 def _resolve_llm_endpoint_config(
     config_path: str, model_override: str = None
 ) -> Tuple[str, str, str, Optional[str], float]:
@@ -1686,6 +1729,7 @@ def _resolve_llm_endpoint_config(
     base_url = (ep.get("base_url") or "").rstrip("/")
     if not base_url:
         raise ValueError(f"No base_url configured for provider '{provider}' in {config_path}.")
+    _register_pacing(cfg)
     model = model_override or ep.get("default_model")
     if not model:
         raise ValueError(f"No model configured for provider '{provider}' in {config_path}.")
@@ -1797,11 +1841,21 @@ def _llm_chat(
     unrecognised provider fails loud instead of silently falling back to
     the Ollama protocol against whatever base_url happens to be configured.
     """
+    if provider not in ("ollama", "openai_compatible"):
+        raise ValueError(f"Unknown LLM provider {provider!r} -- no chat dispatch available.")
+    # MAP-20: wait for this endpoint's slot on the shared pacer (no-op when
+    # pacing is off). Raises PacingStopped (Stop / daily cap), which
+    # _LLMGuard.ask turns into a stopped pass.
+    try:
+        from agents import llm_pacing  # noqa: PLC0415
+        _pacer = llm_pacing.pacer_for(provider, base_url)
+    except ImportError:
+        _pacer = None
+    if _pacer is not None:
+        _pacer.acquire()
     if provider == "ollama":
         return _ollama_chat(base_url, model, system, user, timeout=timeout)
-    if provider == "openai_compatible":
-        return _openai_compatible_chat(base_url, model, system, user, api_key=api_key, timeout=timeout)
-    raise ValueError(f"Unknown LLM provider {provider!r} -- no chat dispatch available.")
+    return _openai_compatible_chat(base_url, model, system, user, api_key=api_key, timeout=timeout)
 
 
 _MIN_PARTIAL_MATCH_LEN = 4
@@ -2111,6 +2165,7 @@ def llm_fallback_mapping(
     # ── Warm up the model (cold start loads weights into VRAM) ───────────
     _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
     guard = _LLMGuard(model)
+    _announce_pacing(provider, base_url, total)
     warmup_reply = guard.ask(
         provider, base_url, model,
         "Reply OK.", "ping",
