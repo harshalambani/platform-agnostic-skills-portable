@@ -742,6 +742,86 @@ _DIRECTION_FLAG_MARKER = "check direction"  # substring, matched case-sensitivel
                                              # embedded in a MatchReason
 
 
+# ---------------------------------------------------------------------------
+# IMP-09: the shared final target guard (hidden / placeholder are never a
+# target) and the advisory "looks dormant" marker.
+# ---------------------------------------------------------------------------
+
+_BLOCKED_PREFIX = "blocked: "          # MatchReason prefix on a blocked row
+_DORMANT_MARKER = "looks dormant"       # substring Review turns into a highlight
+
+
+def _row_fy_start_year(date_text: str):
+    """Indian-FY start year for a canonical-CSV date (ISO or DD/MM/YYYY)."""
+    t = (date_text or "").strip()
+    if not t:
+        return None
+    from agents.gnucash_accounts import fy_start_year_of  # noqa: PLC0415
+    if len(t) >= 10 and t[4] in "-/" and t[:4].isdigit():
+        return fy_start_year_of(t[:10].replace("/", "-"))
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", t)
+    if m:
+        return fy_start_year_of(f"{m.group(3)}-{int(m.group(2)):02d}-01")
+    return None
+
+
+def _blocked_history_reason(description, blocked_pairs, guard):
+    """Why a row that ended in Suspense is there because its only history
+    target is hidden/placeholder. Informational only (never a target)."""
+    row_toks = set(_tokenize_history(description or ''))
+    row_norm = ' '.join((description or '').lower().split())
+    for m in blocked_pairs:
+        pd = m.get('description', '')
+        ptoks = set(_tokenize_history(pd))
+        if (row_norm and ' '.join((pd or '').lower().split()) == row_norm) or (ptoks and (ptoks <= row_toks or len(ptoks & row_toks) >= 2)):
+            why = guard.blocked_target_reason(m['account'])
+            if why:
+                return f"{why} (history pointed at: {m['account']})"
+    return ''
+
+
+def _apply_target_guard(rows, guard, blocked_log=None, counts=None):
+    """Final guard: run over the mapped rows as the LAST step of a pass.
+
+    * A row whose Account is blocked (hidden / placeholder / under a hidden
+      ancestor) is reset to unresolved (Account '', Confidence 'none') so the
+      next pass may still find a VALID target; the reason is remembered in
+      ``blocked_log`` (row index -> reason). Nothing is written to any rules
+      file -- a saved rule or learned history pointing at a hidden account is
+      simply skipped at apply time.
+    * A row whose Account merely LOOKS dormant stays mapped and gets an
+      advisory marker in MatchReason (Review highlights it).
+
+    Returns the number of rows reset.
+    """
+    if guard is None or not getattr(guard, "known", False):
+        return 0
+    reset = 0
+    for i, row in enumerate(rows):
+        acct = (row.get('Account') or '').strip()
+        conf = row.get('Confidence') or 'none'
+        if not acct or conf in ('none', 'suspense'):
+            continue
+        why = guard.blocked_target_reason(acct)
+        if why:
+            if blocked_log is not None:
+                blocked_log[i] = f"{why} (was: {acct}; {row.get('MatchReason', '')})"
+            if counts is not None:
+                counts[conf] = counts.get(conf, 0) - 1
+                counts['none'] = counts.get('none', 0) + 1
+            row['Account'] = ''
+            row['Confidence'] = 'none'
+            row['MatchReason'] = ''
+            reset += 1
+            continue
+        fy = _row_fy_start_year(row.get('Date', ''))
+        dorm = guard.dormant_reason(acct, fy)
+        reason = row.get('MatchReason') or ''
+        if dorm and _DORMANT_MARKER not in reason:
+            row['MatchReason'] = f"{reason} [{_DORMANT_MARKER}: {dorm}]".strip()
+    return reset
+
+
 def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
     """True if `account`'s top-level type looks structurally backwards for
     this row's cash-flow direction. FLAG ONLY -- callers must never use this
@@ -2168,25 +2248,28 @@ def run(
             if m.get('account'):
                 all_account_paths.add(m['account'])
 
-    # Drop "special type" accounts (placeholder / hidden / etc.) from the
-    # candidate set. History can only contain postable accounts, so this mainly
-    # removes an account that was posted to and LATER hidden — GnuCash would
-    # reject a new posting to it. Placeholders can't appear in history at all.
+    # IMP-09: ONE guard, built once from the book. Only Hidden and Placeholder
+    # (Hidden inherited from any ancestor) block a target. Tax-related /
+    # auto-interest / opening-balance accounts are NOT blocked here.
+    guard = None
     try:
-        from agents.gnucash_accounts import read_special_paths  # noqa: PLC0415
-        special_paths = read_special_paths(gnucash_file)
-        if special_paths:
+        from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
+        guard = TargetGuard.from_book(gnucash_file)
+        if guard.known:
             before = len(all_account_paths)
             all_account_paths = {
-                p for p in all_account_paths if _strip_root(p) not in special_paths
+                p for p in all_account_paths if not guard.is_blocked(p)
             }
             dropped = before - len(all_account_paths)
             if dropped:
                 _emit_mapper_progress(
-                    f"excluded {dropped} placeholder/hidden account(s) from candidates"
+                    f"excluded {dropped} hidden/placeholder account(s) from candidates"
                 )
+        else:
+            guard = None
     except Exception as e:  # noqa: BLE001 — never let flag-filtering break mapping
-        _emit_mapper_progress(f"special-account filter skipped: {e}")
+        guard = None
+        _emit_mapper_progress(f"target guard unavailable: {e}")
 
     # Save historical mappings for LLM few-shot context
     historical_pairs_for_llm: List[Dict] = []
@@ -2207,6 +2290,22 @@ def run(
         for bank_maps in extractor_output.get('mappings', {}).values():
             historical_pairs_for_llm.extend(bank_maps)
         _emit_mapper_progress(f"extracted {mapping_count} pairs (all banks)")
+
+    # IMP-09: history pairs whose TARGET is hidden/placeholder can never be
+    # offered. Only those pairs are dropped -- transactions that merely READ
+    # from a hidden account (e.g. a retired bank) still train the matcher for
+    # their other targets.
+    blocked_pairs: List[Dict] = []
+    if guard is not None:
+        blocked_pairs = [
+            m for m in historical_pairs_for_llm
+            if m.get('account') and guard.is_blocked(m['account'])
+        ]
+        historical_pairs_for_llm = [
+            m for m in historical_pairs_for_llm
+            if not (m.get('account') and guard.is_blocked(m['account']))
+        ]
+        mapping_count = len(historical_pairs_for_llm) if bank_key else mapping_count
 
     # Step 1.5: Migrate legacy _account_overrides.yaml if present
     migrated = migrate_legacy_overrides(gnucash_file, config_path)
@@ -2263,6 +2362,23 @@ def run(
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 
+    # IMP-09: rules / saved-rule / override pass may point at a hidden or
+    # placeholder account. Reset those rows to unresolved (rules file is NOT
+    # touched) so later passes can find a valid target; remember why.
+    blocked_log: Dict[int, str] = {}
+    if guard is not None:
+        with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
+            _g_rows = list(csv.DictReader(f))
+        if _g_rows and _apply_target_guard(_g_rows, guard, blocked_log, result['confidence_counts']):
+            with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
+                w = csv.DictWriter(f, fieldnames=list(_g_rows[0].keys()))
+                w.writeheader()
+                w.writerows(_g_rows)
+            _emit_mapper_progress(
+                f"target guard: {len(blocked_log)} rule/override match(es) pointed at a "
+                f"hidden or placeholder account and were skipped"
+            )
+
     # Clean up temp rules file
     try:
         rules_tmp.unlink()
@@ -2286,6 +2402,7 @@ def run(
     # the history pass itself ran.
     own_bank_accounts = {
         _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
+        if not (guard is not None and guard.is_blocked(a))
     }
     history_mapped_count = 0
     if historical_pairs_for_llm:
@@ -2470,6 +2587,15 @@ def run(
     else:
         _emit_mapper_progress("all rows matched by rules — no fallback needed")
 
+    # --- IMP-09 final guard: the LAST step before output for every pass
+    # (rules, history, keyword/smart, own-transfer, saved rule, LLM). Nothing
+    # above may emit a hidden/placeholder target; anything that did is reset
+    # here and the reason is carried to Suspense below.
+    if guard is not None:
+        _late = _apply_target_guard(mapped_rows, guard, blocked_log, result['confidence_counts'])
+        if _late:
+            _emit_mapper_progress(f"target guard: {_late} late match(es) reset (hidden/placeholder target)")
+
     # --- Step 4.9: IFSC-contradiction guard (RED FLAG fix, requirement #4) ---
     # Once the dedicated self-transfer/IFSC route (Step 3.6) has abstained on
     # an IFSC-bearing row, nothing downstream -- smart pattern, weak
@@ -2508,13 +2634,20 @@ def run(
     # Find a Suspense account in the tree, or use a sensible default.
     suspense_acct = _find_suspense_account(account_list)
     suspense_count = 0
-    for row in mapped_rows:
+    for _ri, row in enumerate(mapped_rows):
         acct = row.get('Account', '')
         conf = row.get('Confidence', 'none')
         if not acct or conf == 'none':
             row['Account'] = suspense_acct
             row['Confidence'] = 'suspense'
-            row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
+            if _ri in blocked_log:
+                row['MatchReason'] = f"{_BLOCKED_PREFIX}{blocked_log[_ri]}"
+            elif guard is not None and blocked_pairs and _blocked_history_reason(
+                    row.get('Description', ''), blocked_pairs, guard):
+                row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
+                    row.get('Description', ''), blocked_pairs, guard)
+            else:
+                row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
             suspense_count += 1
     if suspense_count > 0:
         result['confidence_counts']['none'] -= suspense_count

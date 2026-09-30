@@ -194,7 +194,22 @@ def load_accounts(gnucash_path: Union[str, Path]) -> list[GncAccount]:
 def postable_accounts(accounts: Iterable[GncAccount]) -> list[GncAccount]:
     """The subset of ``accounts`` that are valid posting targets: not the root,
     and not carrying any special-type flag."""
-    return [a for a in accounts if not a.is_root and not a.is_special]
+    accounts = list(accounts)
+    by_id = {a.id: a for a in accounts}
+
+    def _under_hidden(a: GncAccount) -> bool:
+        # IMP-09 ancestor rule: an account under a hidden parent is not
+        # postable either (a placeholder parent, by contrast, is fine).
+        cur, seen = by_id.get(a.parent_id), set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if "hidden" in cur.special_flags:
+                return True
+            cur = by_id.get(cur.parent_id)
+        return False
+
+    return [a for a in accounts
+            if not a.is_root and not a.is_special and not _under_hidden(a)]
 
 
 def _strip_root(path: str) -> str:
@@ -212,3 +227,153 @@ def read_special_paths(gnucash_path: Union[str, Path]) -> set[str]:
     special-type flag and must NOT be offered as a posting target. Useful for
     subtracting from a candidate set learned elsewhere (e.g. from history)."""
     return {a.path for a in load_accounts(gnucash_path) if a.is_special and a.path}
+
+
+# ---------------------------------------------------------------------------
+# IMP-09: the shared final "never a target" guard
+# ---------------------------------------------------------------------------
+# Only the Hidden and Placeholder flags are a hard block. ``is_special`` also
+# covers tax-related / auto-interest-transfer / opening-balance, which are NOT
+# a block (those accounts may legitimately receive postings). Hidden is
+# inherited: an account under a hidden ancestor is blocked. A Placeholder
+# parent does NOT block its children (GnuCash only forbids posting to the
+# placeholder itself).
+BLOCKING_FLAGS = ("hidden", "placeholder")
+
+# The MatchReason prefix a blocked mapping carries into Review.
+BLOCKED_PREFIX = "blocked: "
+
+
+def _fy_start_year(date_text: str) -> Union[int, None]:
+    """Indian FY (Apr-Mar) start year for a 'YYYY-MM-DD...' date string."""
+    try:
+        y, m = int(date_text[0:4]), int(date_text[5:7])
+    except (ValueError, IndexError):
+        return None
+    return y if m >= 4 else y - 1
+
+
+def fy_start_year_of(iso_date: str) -> Union[int, None]:
+    """Public helper: FY start year for an ISO-ish date (first 10 chars used)."""
+    return _fy_start_year((iso_date or "").strip())
+
+
+def read_account_activity(gnucash_path: Union[str, Path]):
+    """Return ``(fy_years, balance)`` per account id, read from the book's
+    transactions: the set of FY start years in which the account has a split,
+    and the net balance (as a Fraction) over all time. ``({}, {})`` if the
+    book cannot be read. Hidden accounts are included (nothing is dropped)."""
+    from fractions import Fraction
+    root = _read_root(gnucash_path)
+    if root is None:
+        return {}, {}
+    years: dict[str, set] = {}
+    bal: dict[str, "Fraction"] = {}
+    for trn in root.iter(f"{{{_GNC}}}transaction"):
+        posted = None
+        splits = []
+        for ch in trn:
+            nm = _local(ch.tag)
+            if nm == "date-posted":
+                for d in ch:
+                    if _local(d.tag) == "date":
+                        posted = (d.text or "").strip()
+            elif nm == "splits":
+                splits = [s for s in ch if _local(s.tag) == "split"]
+        fy = _fy_start_year(posted or "")
+        for sp in splits:
+            acct = val = None
+            for f in sp:
+                n = _local(f.tag)
+                if n == "account":
+                    acct = (f.text or "").strip()
+                elif n == "value":
+                    val = (f.text or "").strip()
+            if not acct:
+                continue
+            if fy is not None:
+                years.setdefault(acct, set()).add(fy)
+            try:
+                bal[acct] = bal.get(acct, Fraction(0)) + Fraction(val or "0")
+            except (ValueError, ZeroDivisionError):
+                pass
+    return years, bal
+
+
+class TargetGuard:
+    """Built ONCE per run from the book; the LAST step before output for every
+    skill that emits a posting target asks it ``blocked_target_reason(path)``.
+
+    ``dormant_reason(path, fy)`` is advisory only: an account that merely LOOKS
+    dormant (no splits in the statement FY or the prior FY, zero balance) is
+    still mapped -- callers highlight it, they never send it to Suspense.
+    """
+
+    def __init__(self, accounts: Iterable[GncAccount],
+                 fy_years: Union[dict, None] = None,
+                 balances: Union[dict, None] = None):
+        accs = [a for a in accounts if not a.is_root]
+        self._by_path = {a.path: a for a in accs if a.path}
+        self._by_id = {a.id: a for a in accs}
+        self._all_by_id = {a.id: a for a in accounts}
+        self._years = fy_years or {}
+        self._bal = balances or {}
+        self._cache: dict[str, Union[str, None]] = {}
+
+    @classmethod
+    def from_book(cls, gnucash_path: Union[str, Path]) -> "TargetGuard":
+        accs = load_accounts(gnucash_path)
+        years, bal = read_account_activity(gnucash_path)
+        return cls(accs, years, bal)
+
+    @property
+    def known(self) -> bool:
+        return bool(self._by_path)
+
+    def has_path(self, path: str) -> bool:
+        return _strip_root(path or "") in self._by_path
+
+    def blocked_target_reason(self, path: str) -> Union[str, None]:
+        """Why ``path`` may not receive a posting, or None if it may (also
+        None for a path the book does not know -- the guard never invents a
+        block)."""
+        key = _strip_root((path or "").strip())
+        if key in self._cache:
+            return self._cache[key]
+        acc = self._by_path.get(key)
+        reason = None
+        if acc is not None:
+            if "hidden" in acc.special_flags:
+                reason = "target is hidden in the book"
+            elif "placeholder" in acc.special_flags:
+                reason = "target is a placeholder account in the book"
+            else:
+                seen = set()
+                cur = self._all_by_id.get(acc.parent_id)
+                while cur is not None and cur.id not in seen:
+                    seen.add(cur.id)
+                    if "hidden" in cur.special_flags:
+                        reason = (f"target's parent '{cur.name}' "
+                                  "is hidden in the book")
+                        break
+                    cur = self._all_by_id.get(cur.parent_id)
+        self._cache[key] = reason
+        return reason
+
+    def is_blocked(self, path: str) -> bool:
+        return self.blocked_target_reason(path) is not None
+
+    def dormant_reason(self, path: str, fy_start_year: Union[int, None]):
+        """Advisory: no splits in FY ``fy_start_year`` or the prior FY and a
+        zero balance. None when active, unknown, or the FY is unknown."""
+        if fy_start_year is None:
+            return None
+        acc = self._by_path.get(_strip_root((path or "").strip()))
+        if acc is None:
+            return None
+        yrs = self._years.get(acc.id, set())
+        if fy_start_year in yrs or (fy_start_year - 1) in yrs:
+            return None
+        if self._bal.get(acc.id, 0) != 0:
+            return None
+        return "no activity in this or the prior financial year, zero balance"

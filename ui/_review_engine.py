@@ -265,6 +265,7 @@ _CSS = r"""
 #%%APP%%-app .badge.green  { background: #14532d; color: #86efac; }
 #%%APP%%-app .badge.blue   { background: #1e3a8a; color: #bfdbfe; }
 #%%APP%%-app .badge.grey   { background: #374151; color: #d1d5db; }
+#%%APP%%-app .badge.violet { background: #4c1d95; color: #ddd6fe; }
 #%%APP%%-app .t-red    { color: #f87171; font-weight: 600; }
 #%%APP%%-app .t-amber  { color: #fbbf24; font-weight: 600; }
 #%%APP%%-app .t-green  { color: #4ade80; }

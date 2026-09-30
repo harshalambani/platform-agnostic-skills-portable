@@ -139,8 +139,16 @@ def _row_presentation(row: dict, contra: dict | None) -> None:
     rowclass = ""
     note = ""
 
+    reason = (row.get("MatchReason") or "")
     if confidence == "suspense":
         badges[TARGET_COL] = {"text": "SUSPENSE", "cls": "red"}
+        if reason.startswith("blocked: "):
+            # IMP-09: the target the matcher wanted is hidden/placeholder.
+            badges[TARGET_COL]["title"] = reason
+    elif "looks dormant" in reason:
+        # IMP-09: advisory only -- still mapped. Violet is deliberately not
+        # one of the match-type band colours.
+        badges[TARGET_COL] = {"text": "DORMANT?", "cls": "violet", "title": reason}
 
     if contra:
         tags.append("contra")

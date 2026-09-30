@@ -307,6 +307,17 @@ def _get_gnucash_account_balance(
         for aid, info in acc_map.items()
         if bank_lower in _full_path(aid).lower() and info["type"] in ("BANK", "ASSET")
     ]
+    # IMP-09: a hidden / placeholder account (or one under a hidden parent) is
+    # never a candidate, so it can never be picked even when first in book
+    # order.
+    try:
+        from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
+        _guard = TargetGuard.from_book(gnucash_file)
+        if _guard.known:
+            candidates = [(aid, full) for aid, full in candidates
+                          if not _guard.is_blocked(full)]
+    except Exception:  # noqa: BLE001 - the guard must never break the pick
+        pass
 
     target_id = None
     target_name = ""
