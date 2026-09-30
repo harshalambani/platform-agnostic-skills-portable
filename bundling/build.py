@@ -370,7 +370,7 @@ def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
     if dest.exists():
         _rmtree(dest)
     shutil.copytree(src_dir, dest)
-    log.ok(f"frozen build copied to {dest.relative_to(PROJECT_ROOT)}")
+    log.ok(f"frozen build copied to {os.path.relpath(dest, PROJECT_ROOT)}")
     return dest
 
 
@@ -387,8 +387,31 @@ def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
         _rmtree(dest)
     shutil.copytree(src, dest)
     count = sum(1 for _ in dest.rglob("*") if _.is_file())
-    log.info(f"  {label}: {count} files copied to {dest.relative_to(PROJECT_ROOT)}")
+    log.info(f"  {label}: {count} files copied to {os.path.relpath(dest, PROJECT_ROOT)}")
     return count
+
+
+def verify_tesseract_bundle(dest: Path) -> list[str]:
+    """Return the problems with a STAGED Tesseract tree (empty list = fine).
+
+    HSB-01: v3.10.0 and v3.11.0 shipped a Tesseract without tessdata/configs/,
+    because vendor/ was never regenerated after refresh_binaries.py was fixed.
+    Without configs/tsv, `tesseract <img> <out> tsv` warns "Can't open tsv",
+    exits 0 and writes a .txt -- HSBC OCR dies. This checks what actually
+    ships (the staged output), not the script that is supposed to produce it.
+    """
+    problems: list[str] = []
+    if not (dest / "tesseract.exe").is_file():
+        problems.append(f"{dest / 'tesseract.exe'} is missing")
+    if not (dest / "tessdata" / "eng.traineddata").is_file():
+        problems.append(f"{dest / 'tessdata' / 'eng.traineddata'} is missing")
+    tsv = dest / "tessdata" / "configs" / "tsv"
+    if not tsv.is_file() or tsv.stat().st_size == 0:
+        problems.append(
+            f"{tsv} is missing or empty -- OCR to TSV would silently write .txt "
+            "(run: python bundling\refresh_binaries.py --target tesseract)"
+        )
+    return problems
 
 
 def step5_native_binaries(log: _Log) -> None:
@@ -396,8 +419,12 @@ def step5_native_binaries(log: _Log) -> None:
     src = PROJECT_ROOT / "vendor" / "tesseract"
     dest = STAGING / "App" / "PASkills" / "tesseract"
     n = _copy_vendor_subtree(src, dest, "tesseract", log)
-    if n:
-        log.ok(f"tesseract bundled ({n} files)")
+    problems = verify_tesseract_bundle(dest)
+    if problems:
+        for p in problems:
+            log.err(f"tesseract bundle check FAILED: {p}")
+        sys.exit(2)
+    log.ok(f"tesseract bundled ({n} files; tessdata/configs/tsv present)")
 
 
 def step6_poppler(log: _Log) -> None:
