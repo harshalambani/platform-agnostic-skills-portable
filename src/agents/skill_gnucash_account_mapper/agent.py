@@ -2389,6 +2389,36 @@ def _build_confidence_report(
     return "\n".join(report_lines)
 
 
+_BREAKDOWN_SHORT_LABELS: List[Tuple[str, str]] = [
+    ('high', 'High'), ('medium', 'Medium'), ('low', 'Low'), ('weak', 'Weak'),
+    ('smart', 'Smart'), ('history', 'History'), ('llm', 'LLM'),
+    ('override', 'Override'), ('suspense', 'Suspense'), ('none', 'No match'),
+]
+
+
+def _confidence_breakdown_lines(counts: Dict[str, int], total: int,
+                                stopped: int = 0) -> List[str]:
+    """UI-07: one line per band, ALWAYS including Suspense and No match, and
+    (MAP-19) a separate line for the Suspense rows left unattempted because
+    the AI pass stopped. Any band not in the fixed list is still shown, so the
+    listed counts always add up to the rows written."""
+    pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
+    counts = dict(counts)
+    stopped = max(0, min(stopped, counts.get('suspense', 0)))
+    counts['suspense'] = counts.get('suspense', 0) - stopped
+    lines = []
+    known = set()
+    for key, label in _BREAKDOWN_SHORT_LABELS:
+        known.add(key)
+        n = counts.get(key, 0)
+        lines.append(f"- {label}: {n} ({pct(n)})")
+        if key == 'suspense':
+            lines.append(f"- Suspense, {_LLM_STOPPED_MARKER}: {stopped} ({pct(stopped)})")
+    for key in sorted(k for k in counts if k not in known):
+        lines.append(f"- {key}: {counts[key]} ({pct(counts[key])})")
+    return lines
+
+
 def _rewrite_confidence_report_from_csv(mapped_csv_path: str, report_path: str) -> Dict[str, int]:
     """Rebuild the confidence report FROM the final mapped CSV on disk.
 
@@ -3173,7 +3203,6 @@ def run(
 
     counts = result['confidence_counts']
     total = result['total_rows']
-    pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
     llm_stopped_final = sum(
         1 for r in mapped_rows
         if r.get('Confidence') == 'suspense' and _LLM_STOPPED_MARKER in (r.get('MatchReason') or ''))
@@ -3199,13 +3228,9 @@ def run(
         f"Mapped **{total} rows** using **{rule_count} rules** "
         f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{extra}\n\n"
         f"{ai_stop_note}"
+        f"{ai_stop_note}\n"
         f"**Confidence breakdown:**\n"
-        f"- High: {counts.get('high', 0)} ({pct(counts.get('high', 0))})\n"
-        f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
-        f"- Weak: {counts.get('weak', 0)} ({pct(counts.get('weak', 0))})\n"
-        f"- Smart: {counts.get('smart', 0)} ({pct(counts.get('smart', 0))})\n"
-        f"- History: {counts.get('history', 0)} ({pct(counts.get('history', 0))})\n"
-        f"- LLM: {counts.get('llm', 0)} ({pct(counts.get('llm', 0))})\n"
+        + "\n".join(_confidence_breakdown_lines(counts, total, llm_stopped_final)) + "\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
         f"- `{report_path.name}` — confidence report (review Low/No-match rows)\n"
         f"- `{persistent_rules_path(gnucash_file, config_path).name}` — persistent mapping rules (alongside .gnucash)"
