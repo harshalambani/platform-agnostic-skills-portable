@@ -163,3 +163,37 @@ def read_sidecar(canonical_path: str | Path) -> dict | None:
         except Exception as e:
             log.warning("Could not read sidecar summary: %s", e)
     return None
+
+
+def is_balance_carrier(rows: list[dict], idx: int) -> bool:
+    """HSB-04: True for a row that only CARRIES the opening balance.
+
+    Some statements (HSBC "BALANCE BROUGHT FORWARD") open with a row that has a
+    balance but no money movement. The bank extractors keep it on purpose -- the
+    opening figure and the running-balance check are derived from it -- but it
+    must not reach the GnuCash import as a zero-amount transaction.
+
+    Detected STRUCTURALLY, never by its wording: it is the first row of the
+    statement, it moves no money (Deposit and Withdrawal both blank or zero) and
+    it carries a Balance. A zero-amount row anywhere else (e.g. a charge
+    reversal), or a row whose text merely contains "BALANCE", is a real
+    transaction record and is kept.
+    """
+    if idx != 0 or not rows:
+        return False
+    row = rows[0]
+    if balance_utils._safe_float(row.get("Deposit")) or balance_utils._safe_float(row.get("Withdrawal")):
+        return False
+    return str(row.get("Balance") if row.get("Balance") is not None else "").strip() != ""
+
+
+def split_balance_carriers(rows: list[dict]) -> tuple[list[dict], list[int]]:
+    """Return (rows without balance-carrier rows, indices that were dropped).
+
+    Call this only AFTER the balance check / opening-balance reconciliation has
+    used the rows; it never mutates its input.
+    """
+    dropped = [i for i in range(len(rows)) if is_balance_carrier(rows, i)]
+    if not dropped:
+        return list(rows), []
+    return [r for i, r in enumerate(rows) if i not in set(dropped)], dropped
