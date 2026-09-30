@@ -1068,7 +1068,10 @@ def _history_token_match(
 
     routing_tokens = {t for t in tokens_all if t.startswith('ifsc:')}
     if not routing_tokens:
-        return None
+        # MAP-16: no IFSC. An explicit own-transfer row ("xfer to self ...")
+        # may still name the bank; route by the bank word in the owner's own
+        # postable account names.
+        return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account)
     plain_tokens = tokens_all - routing_tokens
     candidates = _self_transfer_candidates(plain_tokens, model, own_bank_accounts)
     if not candidates:
@@ -1079,6 +1082,44 @@ def _history_token_match(
     if not candidates:
         return None
     return _literal_bank_code_match(routing_tokens, candidates, model=model, plain_tokens=plain_tokens)
+
+
+def _bank_name_self_transfer(
+    desc: str,
+    tokens_all: set,
+    own_bank_accounts: Optional[set],
+    source_account: Optional[str],
+) -> Optional[Dict]:
+    """MAP-16: 'xfer to self <bank>' with no IFSC.
+
+    Only for rows that say they are own transfers (the 'xfer to self' marker).
+    The bank word must be one of the owner's own account-name tokens and must
+    NOT be present in every own account's name (so 'bank' never routes). Own
+    accounts come from `own_bank_accounts`, which run() has already passed
+    through the IMP-09 guard, so a hidden/placeholder account is never a
+    candidate. Exactly one account carries the word -> route to it. Two or
+    more (two HSBC accounts) -> a tie: NOT auto-resolved, the row is returned
+    with an empty account and the tied candidates so it goes to Review.
+    """
+    if not own_bank_accounts or not _SELF_MARKER_RE.search((desc or '').lower()):
+        return None
+    norm_source = _strip_root(source_account) if source_account else None
+    accts = [_strip_root(a) for a in own_bank_accounts]
+    per_acct = {a: _own_bank_name_tokens({a}) for a in accts}
+    everywhere = set.intersection(*per_acct.values()) if per_acct else set()
+    words = {t for t in tokens_all
+             if not t.startswith('ifsc:')} & (set().union(*per_acct.values()) - everywhere)
+    if not words:
+        return None
+    hits = sorted(a for a, toks in per_acct.items()
+                  if (toks & words) and a != norm_source)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return {"account": "", "tie": hits, "confidence": "none",
+                "reason": "Own transfer names a bank with more than one account of yours"}
+    return {"account": hits[0], "confidence": "history",
+            "reason": f"Own-transfer bank-name match ({', '.join(sorted(words))})"}
 
 
 def _ifsc_contradiction(
@@ -2538,6 +2579,7 @@ def run(
         if not (guard is not None and guard.is_blocked(a))
     }
     history_mapped_count = 0
+    self_tie: Dict[int, List[str]] = {}   # MAP-16: row index -> tied own accounts
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -2546,7 +2588,7 @@ def run(
         # own bank accounts as candidates, never restricted to the ones a
         # description's tokens happened to reach. Excludes nothing here --
         # the source account itself is excluded per-call via source_account.
-        for row in mapped_rows:
+        for _hi, row in enumerate(mapped_rows):
             conf = row.get('Confidence') or 'none'
             if conf in ('high', 'override'):
                 continue
@@ -2557,6 +2599,10 @@ def run(
                 own_bank_accounts=own_bank_accounts,
                 source_account=gnucash_bank_account,
             )
+            if match and match.get('tie'):
+                # MAP-16: a tie between own accounts is never guessed.
+                self_tie[_hi] = match['tie']
+                continue
             if match and match.get('account'):
                 row['Account'] = _strip_root(match['account'])
                 row['Confidence'] = 'history'
@@ -2606,6 +2652,8 @@ def run(
             acct = row.get('Account', '')
             if conf != 'none' and acct:
                 continue
+            if i in self_tie:
+                continue   # MAP-16: tied own accounts go to Review, not a guess
             desc = row.get('Description') or row.get('Narration') or ''
             withdrawal = row.get('Withdrawal', '')
             deposit = row.get('Deposit', '')
@@ -2664,6 +2712,8 @@ def run(
             desc = row.get('Description') or row.get('Narration') or ''
             acct = row.get('Account', '')
             conf = row.get('Confidence', 'none')
+            if (i - 1) in self_tie:
+                continue   # MAP-16
             if (conf in ('none', 'weak') or not acct) and conf not in ('smart', 'override'):
                 still_unmatched.append({
                     'row': i,
@@ -2793,6 +2843,12 @@ def run(
                     row.get('Description', ''), blocked_pairs, guard):
                 row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
                     row.get('Description', ''), blocked_pairs, guard)
+            elif _ri in self_tie:
+                row['MatchReason'] = (
+                    "Suspense - own transfer names a bank where you have "
+                    f"{len(self_tie[_ri])} accounts ("
+                    + "; ".join(a.rsplit(':', 1)[-1] for a in self_tie[_ri])
+                    + "); review and pick one")
             elif _ri in llm_withheld:
                 row['MatchReason'] = (
                     "Suspense — the AI suggested your own account "
