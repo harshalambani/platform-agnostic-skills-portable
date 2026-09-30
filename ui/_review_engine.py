@@ -121,6 +121,13 @@ class ReviewSpec:
     # byte-for-byte unchanged. See itr_mapping_review.py for the first
     # consumer (row-level "delete this mapping entry").
     allow_delete: bool = False
+    # UI-04. When set (e.g. "Confidence"), assigning a row makes its
+    # target-column badge and its leading status tag follow the row's new value
+    # of this column: the badge on TARGET (SUSPENSE / DORMANT?) described the OLD
+    # target and is dropped, and _tags[0] becomes the lower-cased new value so
+    # the "Filter:" dropdown agrees with the row. Default "" keeps every other
+    # screen unchanged.
+    status_col: str = ""
 
     @property
     def payload_box_id(self) -> str:
@@ -348,6 +355,7 @@ _BODY = r"""
   const MATCH_ON   = %%MATCH_ON_JSON%%;
   const CONTEXT    = %%CONTEXT_JSON%%;
   const PAYLOAD_VAR = %%PAYLOAD_VAR_JSON%%;
+  const STATUS_COL = %%STATUS_COL_JSON%%;
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -413,6 +421,12 @@ _BODY = r"""
       if (!predicate(r)) return;
       r[TARGET] = chosen;
       for (const k in alsoSet) r[k] = alsoSet[k];
+      if (STATUS_COL) {
+        // UI-04: the badge described the old target -- drop it; keep the tags in step.
+        if (r._badges && r._badges[TARGET]) delete r._badges[TARGET];
+        const st = cellText(r, STATUS_COL).toLowerCase();
+        if (st && Array.isArray(r._tags) && r._tags.length) r._tags[0] = st;
+      }
       r._changed = true;
       n++;
     });
@@ -668,6 +682,7 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%MATCH_ON_JSON%%", js_json(spec.apply_matching_on)),
         ("%%CONTEXT_JSON%%", js_json(spec.context)),
         ("%%PAYLOAD_VAR_JSON%%", js_json(spec.payload_var)),
+        ("%%STATUS_COL_JSON%%", js_json(spec.status_col)),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)

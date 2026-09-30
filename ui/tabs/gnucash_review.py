@@ -243,6 +243,7 @@ def _spec(
         also_set={"Confidence": "override", "MatchReason": "User override (review)"},
         also_set_matching={"Confidence": "override", "MatchReason": "User override (batch match)"},
         context={"csv_path": csv_path, "gnucash_file": gnucash_path},
+        status_col="Confidence",  # UI-04: an assigned row loses its stale badge
     )
 
 
