@@ -129,7 +129,8 @@ def test_no_account_number_falls_back_to_name_match_no_warning_for_single_candid
     assert result["match_warning"] is None
 
 
-def test_no_account_number_multiple_candidates_warns(tmp_path):
+def test_no_account_number_multiple_candidates_stops_and_asks(tmp_path):
+    # IMP-08: was "warn and use the first" -- now it must NOT pick one.
     accounts = [
         _account_xml("Root Account", "root", "ROOT", None),
         _account_xml("Assets", "asset", "ASSET", "root"),
@@ -139,9 +140,11 @@ def test_no_account_number_multiple_candidates_warns(tmp_path):
     book = _write_book(tmp_path, accounts)
 
     result = _get_gnucash_account_balance(book, "BoB")
-    assert result["found"] is True
-    assert result["match_warning"] is not None
+    assert result["found"] is False
+    assert result["ambiguous"] is True
+    assert result["account_name"] == ""
     assert "no account number" in result["match_warning"].lower()
+    assert len(result["candidates"]) == 2
 
 
 def test_account_not_found_still_reports_match_warning_key(tmp_path):

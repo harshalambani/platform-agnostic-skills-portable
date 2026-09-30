@@ -577,6 +577,13 @@ HISTORY_MAX_TOKEN_SPREAD = 2            # a token seen with more than this many
 # high, and a word used mostly for something else does not.
 HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION = 0.6
 
+# MAP-15: shortest plain token that may count as history evidence, and the
+# share of the book's distinct accounts a token may touch before it is treated
+# as too common to identify anything (derived from the book, not a word list).
+HISTORY_MIN_TOKEN_LEN = 3
+HISTORY_MAX_ACCOUNT_SHARE = 0.5
+HISTORY_MIN_ACCOUNTS_FOR_SHARE = 4
+
 _VPA_TOKEN_RE = re.compile(r'[a-z0-9.\-_]{2,}@[a-z0-9.\-]{2,}')
 # IFSC format is a national standard (4 letters, literal '0', 6 alphanumerics)
 # -- not a bank-specific lookup table. Kept whole as a token, and its first 4
@@ -599,7 +606,10 @@ def _tokenize_history(text: str) -> List[str]:
         tokens.append(m.group(0))
         tokens.append(f"ifsc:{m.group(1)}")
     remaining = _IFSC_TOKEN_RE.sub(' ', remaining)
-    tokens.extend(t for t in re.split(r'[^a-z0-9]+', remaining) if t)
+    # MAP-15: a 1-2 character fragment ('to', 'a', 'sb') is not history
+    # evidence -- it is shared by far too many unrelated rows.
+    tokens.extend(t for t in re.split(r'[^a-z0-9]+', remaining)
+                  if len(t) >= HISTORY_MIN_TOKEN_LEN)
     return tokens
 
 
@@ -615,6 +625,33 @@ def _build_history_token_model(historical_mappings: List[Dict]) -> Dict[str, Dic
             bucket = model.setdefault(tok, {})
             bucket[acct] = bucket.get(acct, 0) + freq
     return model
+
+
+_MODEL_ACCT_COUNT_CACHE: Dict[tuple, int] = {}
+
+
+def _model_account_count(model: Dict[str, Dict[str, int]]) -> int:
+    """Distinct accounts the history model has ever seen (cached per model)."""
+    key = (id(model), len(model))
+    n = _MODEL_ACCT_COUNT_CACHE.get(key)
+    if n is None:
+        if len(_MODEL_ACCT_COUNT_CACHE) > 8:
+            _MODEL_ACCT_COUNT_CACHE.clear()
+        n = len({a for b in model.values() for a in b})
+        _MODEL_ACCT_COUNT_CACHE[key] = n
+    return n
+
+
+def _own_bank_name_tokens(own_bank_accounts: Optional[set]) -> set:
+    """Tokens that appear in the owner's own bank-account names ('hdfc',
+    'bank'): naming a bank is not evidence of WHICH account, so these never
+    drive a history match on their own. Derived from the book."""
+    out: set = set()
+    for a in own_bank_accounts or ():
+        leaf = _strip_root(a).rsplit(':', 1)[-1]
+        out.update(t for t in re.split(r'[^a-z0-9]+', leaf.lower())
+                   if len(t) >= HISTORY_MIN_TOKEN_LEN and not t.isdigit())
+    return out
 
 
 def _history_bayes_raw(
@@ -634,10 +671,14 @@ def _history_bayes_raw(
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
 
+    n_accounts = _model_account_count(model)
     for tok in tokens:
         acct_counts = model.get(tok)
         if not acct_counts:
             continue  # never seen in history -- contributes nothing
+        if (n_accounts >= HISTORY_MIN_ACCOUNTS_FOR_SHARE
+                and len(acct_counts) / n_accounts > HISTORY_MAX_ACCOUNT_SHARE):
+            continue  # MAP-15: touches most of the book -- identifies nothing
         total = sum(acct_counts.values())
         spread = len(acct_counts)
         for acct, cnt in acct_counts.items():
@@ -740,6 +781,86 @@ def _is_book_asset_account(acct: str) -> bool:
 _DIRECTION_FLAG_MARKER = "check direction"  # substring, matched case-sensitively
                                              # wherever this exact marker is
                                              # embedded in a MatchReason
+
+
+# ---------------------------------------------------------------------------
+# IMP-09: the shared final target guard (hidden / placeholder are never a
+# target) and the advisory "looks dormant" marker.
+# ---------------------------------------------------------------------------
+
+_BLOCKED_PREFIX = "blocked: "          # MatchReason prefix on a blocked row
+_DORMANT_MARKER = "looks dormant"       # substring Review turns into a highlight
+
+
+def _row_fy_start_year(date_text: str):
+    """Indian-FY start year for a canonical-CSV date (ISO or DD/MM/YYYY)."""
+    t = (date_text or "").strip()
+    if not t:
+        return None
+    from agents.gnucash_accounts import fy_start_year_of  # noqa: PLC0415
+    if len(t) >= 10 and t[4] in "-/" and t[:4].isdigit():
+        return fy_start_year_of(t[:10].replace("/", "-"))
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", t)
+    if m:
+        return fy_start_year_of(f"{m.group(3)}-{int(m.group(2)):02d}-01")
+    return None
+
+
+def _blocked_history_reason(description, blocked_pairs, guard):
+    """Why a row that ended in Suspense is there because its only history
+    target is hidden/placeholder. Informational only (never a target)."""
+    row_toks = set(_tokenize_history(description or ''))
+    row_norm = ' '.join((description or '').lower().split())
+    for m in blocked_pairs:
+        pd = m.get('description', '')
+        ptoks = set(_tokenize_history(pd))
+        if (row_norm and ' '.join((pd or '').lower().split()) == row_norm) or (ptoks and (ptoks <= row_toks or len(ptoks & row_toks) >= 2)):
+            why = guard.blocked_target_reason(m['account'])
+            if why:
+                return f"{why} (history pointed at: {m['account']})"
+    return ''
+
+
+def _apply_target_guard(rows, guard, blocked_log=None, counts=None):
+    """Final guard: run over the mapped rows as the LAST step of a pass.
+
+    * A row whose Account is blocked (hidden / placeholder / under a hidden
+      ancestor) is reset to unresolved (Account '', Confidence 'none') so the
+      next pass may still find a VALID target; the reason is remembered in
+      ``blocked_log`` (row index -> reason). Nothing is written to any rules
+      file -- a saved rule or learned history pointing at a hidden account is
+      simply skipped at apply time.
+    * A row whose Account merely LOOKS dormant stays mapped and gets an
+      advisory marker in MatchReason (Review highlights it).
+
+    Returns the number of rows reset.
+    """
+    if guard is None or not getattr(guard, "known", False):
+        return 0
+    reset = 0
+    for i, row in enumerate(rows):
+        acct = (row.get('Account') or '').strip()
+        conf = row.get('Confidence') or 'none'
+        if not acct or conf in ('none', 'suspense'):
+            continue
+        why = guard.blocked_target_reason(acct)
+        if why:
+            if blocked_log is not None:
+                blocked_log[i] = f"{why} (was: {acct}; {row.get('MatchReason', '')})"
+            if counts is not None:
+                counts[conf] = counts.get(conf, 0) - 1
+                counts['none'] = counts.get('none', 0) + 1
+            row['Account'] = ''
+            row['Confidence'] = 'none'
+            row['MatchReason'] = ''
+            reset += 1
+            continue
+        fy = _row_fy_start_year(row.get('Date', ''))
+        dorm = guard.dormant_reason(acct, fy)
+        reason = row.get('MatchReason') or ''
+        if dorm and _DORMANT_MARKER not in reason:
+            row['MatchReason'] = f"{reason} [{_DORMANT_MARKER}: {dorm}]".strip()
+    return reset
 
 
 def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
@@ -940,13 +1061,17 @@ def _history_token_match(
     if not tokens_all:
         return None
 
-    match = _history_bayes_score(tokens_all, model)
+    bank_names = _own_bank_name_tokens(own_bank_accounts)
+    match = _history_bayes_score(tokens_all - bank_names, model)
     if match:
         return match
 
     routing_tokens = {t for t in tokens_all if t.startswith('ifsc:')}
     if not routing_tokens:
-        return None
+        # MAP-16: no IFSC. An explicit own-transfer row ("xfer to self ...")
+        # may still name the bank; route by the bank word in the owner's own
+        # postable account names.
+        return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account)
     plain_tokens = tokens_all - routing_tokens
     candidates = _self_transfer_candidates(plain_tokens, model, own_bank_accounts)
     if not candidates:
@@ -957,6 +1082,44 @@ def _history_token_match(
     if not candidates:
         return None
     return _literal_bank_code_match(routing_tokens, candidates, model=model, plain_tokens=plain_tokens)
+
+
+def _bank_name_self_transfer(
+    desc: str,
+    tokens_all: set,
+    own_bank_accounts: Optional[set],
+    source_account: Optional[str],
+) -> Optional[Dict]:
+    """MAP-16: 'xfer to self <bank>' with no IFSC.
+
+    Only for rows that say they are own transfers (the 'xfer to self' marker).
+    The bank word must be one of the owner's own account-name tokens and must
+    NOT be present in every own account's name (so 'bank' never routes). Own
+    accounts come from `own_bank_accounts`, which run() has already passed
+    through the IMP-09 guard, so a hidden/placeholder account is never a
+    candidate. Exactly one account carries the word -> route to it. Two or
+    more (two HSBC accounts) -> a tie: NOT auto-resolved, the row is returned
+    with an empty account and the tied candidates so it goes to Review.
+    """
+    if not own_bank_accounts or not _SELF_MARKER_RE.search((desc or '').lower()):
+        return None
+    norm_source = _strip_root(source_account) if source_account else None
+    accts = [_strip_root(a) for a in own_bank_accounts]
+    per_acct = {a: _own_bank_name_tokens({a}) for a in accts}
+    everywhere = set.intersection(*per_acct.values()) if per_acct else set()
+    words = {t for t in tokens_all
+             if not t.startswith('ifsc:')} & (set().union(*per_acct.values()) - everywhere)
+    if not words:
+        return None
+    hits = sorted(a for a, toks in per_acct.items()
+                  if (toks & words) and a != norm_source)
+    if not hits:
+        return None
+    if len(hits) > 1:
+        return {"account": "", "tie": hits, "confidence": "none",
+                "reason": "Own transfer names a bank with more than one account of yours"}
+    return {"account": hits[0], "confidence": "history",
+            "reason": f"Own-transfer bank-name match ({', '.join(sorted(words))})"}
 
 
 def _ifsc_contradiction(
@@ -1007,6 +1170,97 @@ def _ifsc_contradiction(
         if any(code in norm_other.lower() for code in codes):
             return True  # some OTHER own account visibly claims this code
     return False
+
+
+# ---------------------------------------------------------------------------
+# MAP-14: the LLM fallback may not book a row to the owner's OWN bank / FD
+# account on a hunch. A third-party UPI payment is not a transfer to yourself
+# just because the model likes a bank account. The evidence is derived from
+# the book's own history (no hand-coded lists), plus the literal "xfer to
+# self" marker the bank statements themselves carry.
+# ---------------------------------------------------------------------------
+
+_SELF_MARKER_RE = re.compile(
+    r'\b(?:xfer|transfer|trf|trfr)\s+to\s+self\b|\bself\s+(?:xfer|transfer|trf)\b'
+    r'|\bown\s+account\b')
+_OWN_VOCAB_MAX_DOC_FRACTION = 0.25   # a token in >25% of all rows is a channel word
+_OWN_VOCAB_MIN_ROWS_FOR_DOCFREQ = 8
+_OWN_VOCAB_MIN_OWN_SUPPORT = 2       # seen on >=2 own-account rows
+_OWN_VOCAB_MIN_OWN_FRACTION = 0.9    # and almost only ever on own-account rows
+_OWN_VOCAB_MIN_LEN = 3
+
+
+def _own_target_accounts(own_bank_accounts: Optional[set], all_accounts) -> set:
+    """Own bank accounts (BANK type) plus the Assets accounts that sit in the
+    same parent branch as one of them (where FD accounts live). Purely
+    structural: derived from the book's tree, not from any name list."""
+    own = {_strip_root(a) for a in (own_bank_accounts or ())}
+    parents = {a.rsplit(':', 1)[0] for a in own if ':' in a}
+    out = set(own)
+    for a in all_accounts or ():
+        s = _strip_root(a)
+        if _is_book_asset_account(s) and ':' in s and s.rsplit(':', 1)[0] in parents:
+            out.add(s)
+    return out
+
+
+def _build_own_transfer_vocab(historical_pairs: List[Dict], own_targets: set) -> set:
+    """Tokens that, in THIS book's history, almost only ever appear on rows
+    that went to one of the owner's own accounts (the owner's own VPA or name
+    tokens). Distinctiveness is measured from the book: a token present in a
+    large share of all rows (a channel word) never qualifies."""
+    if not historical_pairs or not own_targets:
+        return set()
+    rows = len(historical_pairs)
+    doc: Dict[str, int] = {}
+    own_n: Dict[str, int] = {}
+    for m in historical_pairs:
+        acct = _strip_root(m.get('account') or '')
+        w = m.get('frequency', 1) or 1
+        is_own = acct in own_targets
+        for tok in set(_tokenize_history(m.get('description', ''))):
+            doc[tok] = doc.get(tok, 0) + w
+            if is_own:
+                own_n[tok] = own_n.get(tok, 0) + w
+    total_w = sum((m.get('frequency', 1) or 1) for m in historical_pairs)
+    vocab = set()
+    for tok, n_own in own_n.items():
+        if len(tok) < _OWN_VOCAB_MIN_LEN or tok.isdigit() or tok.startswith('ifsc:'):
+            continue
+        if re.fullmatch(r'[a-z]{4}0[a-z0-9]{6}', tok):
+            continue  # a whole IFSC is a bank branch, not the owner
+        if n_own < _OWN_VOCAB_MIN_OWN_SUPPORT:
+            continue
+        if n_own / doc[tok] < _OWN_VOCAB_MIN_OWN_FRACTION:
+            continue
+        if rows >= _OWN_VOCAB_MIN_ROWS_FOR_DOCFREQ and doc[tok] / total_w > _OWN_VOCAB_MAX_DOC_FRACTION:
+            continue
+        vocab.add(tok)
+    return vocab
+
+
+def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set) -> bool:
+    """True only if `desc` carries positive evidence of a transfer between the
+    owner's own accounts: the 'xfer to self' marker, an own-history VPA/name
+    token, or a (non-year) digit run that is one of the own accounts' numbers."""
+    low = (desc or '').lower()
+    if _SELF_MARKER_RE.search(low):
+        return True
+    if own_vocab and (set(_tokenize_history(desc)) & own_vocab):
+        return True
+    runs = {r for r in re.findall(r'\d{4,}', low) if not re.fullmatch(r'(19|20)\d{2}', r)}
+    if runs:
+        for acct in own_targets:
+            for own_run in re.findall(r'\d{4,}', acct):
+                if own_run in runs:
+                    return True
+    return False
+
+
+def _llm_reason(reason: str) -> str:
+    """Prefix once. The LLM path's own reasons already start 'LLM:'."""
+    r = (reason or '').strip()
+    return r if r.lower().startswith('llm:') else f"LLM: {r}"
 
 
 # ---------------------------------------------------------------------------
@@ -2168,25 +2422,28 @@ def run(
             if m.get('account'):
                 all_account_paths.add(m['account'])
 
-    # Drop "special type" accounts (placeholder / hidden / etc.) from the
-    # candidate set. History can only contain postable accounts, so this mainly
-    # removes an account that was posted to and LATER hidden — GnuCash would
-    # reject a new posting to it. Placeholders can't appear in history at all.
+    # IMP-09: ONE guard, built once from the book. Only Hidden and Placeholder
+    # (Hidden inherited from any ancestor) block a target. Tax-related /
+    # auto-interest / opening-balance accounts are NOT blocked here.
+    guard = None
     try:
-        from agents.gnucash_accounts import read_special_paths  # noqa: PLC0415
-        special_paths = read_special_paths(gnucash_file)
-        if special_paths:
+        from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
+        guard = TargetGuard.from_book(gnucash_file)
+        if guard.known:
             before = len(all_account_paths)
             all_account_paths = {
-                p for p in all_account_paths if _strip_root(p) not in special_paths
+                p for p in all_account_paths if not guard.is_blocked(p)
             }
             dropped = before - len(all_account_paths)
             if dropped:
                 _emit_mapper_progress(
-                    f"excluded {dropped} placeholder/hidden account(s) from candidates"
+                    f"excluded {dropped} hidden/placeholder account(s) from candidates"
                 )
+        else:
+            guard = None
     except Exception as e:  # noqa: BLE001 — never let flag-filtering break mapping
-        _emit_mapper_progress(f"special-account filter skipped: {e}")
+        guard = None
+        _emit_mapper_progress(f"target guard unavailable: {e}")
 
     # Save historical mappings for LLM few-shot context
     historical_pairs_for_llm: List[Dict] = []
@@ -2207,6 +2464,22 @@ def run(
         for bank_maps in extractor_output.get('mappings', {}).values():
             historical_pairs_for_llm.extend(bank_maps)
         _emit_mapper_progress(f"extracted {mapping_count} pairs (all banks)")
+
+    # IMP-09: history pairs whose TARGET is hidden/placeholder can never be
+    # offered. Only those pairs are dropped -- transactions that merely READ
+    # from a hidden account (e.g. a retired bank) still train the matcher for
+    # their other targets.
+    blocked_pairs: List[Dict] = []
+    if guard is not None:
+        blocked_pairs = [
+            m for m in historical_pairs_for_llm
+            if m.get('account') and guard.is_blocked(m['account'])
+        ]
+        historical_pairs_for_llm = [
+            m for m in historical_pairs_for_llm
+            if not (m.get('account') and guard.is_blocked(m['account']))
+        ]
+        mapping_count = len(historical_pairs_for_llm) if bank_key else mapping_count
 
     # Step 1.5: Migrate legacy _account_overrides.yaml if present
     migrated = migrate_legacy_overrides(gnucash_file, config_path)
@@ -2263,6 +2536,23 @@ def run(
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 
+    # IMP-09: rules / saved-rule / override pass may point at a hidden or
+    # placeholder account. Reset those rows to unresolved (rules file is NOT
+    # touched) so later passes can find a valid target; remember why.
+    blocked_log: Dict[int, str] = {}
+    if guard is not None:
+        with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
+            _g_rows = list(csv.DictReader(f))
+        if _g_rows and _apply_target_guard(_g_rows, guard, blocked_log, result['confidence_counts']):
+            with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
+                w = csv.DictWriter(f, fieldnames=list(_g_rows[0].keys()))
+                w.writeheader()
+                w.writerows(_g_rows)
+            _emit_mapper_progress(
+                f"target guard: {len(blocked_log)} rule/override match(es) pointed at a "
+                f"hidden or placeholder account and were skipped"
+            )
+
     # Clean up temp rules file
     try:
         rules_tmp.unlink()
@@ -2286,8 +2576,10 @@ def run(
     # the history pass itself ran.
     own_bank_accounts = {
         _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
+        if not (guard is not None and guard.is_blocked(a))
     }
     history_mapped_count = 0
+    self_tie: Dict[int, List[str]] = {}   # MAP-16: row index -> tied own accounts
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -2296,7 +2588,7 @@ def run(
         # own bank accounts as candidates, never restricted to the ones a
         # description's tokens happened to reach. Excludes nothing here --
         # the source account itself is excluded per-call via source_account.
-        for row in mapped_rows:
+        for _hi, row in enumerate(mapped_rows):
             conf = row.get('Confidence') or 'none'
             if conf in ('high', 'override'):
                 continue
@@ -2307,6 +2599,10 @@ def run(
                 own_bank_accounts=own_bank_accounts,
                 source_account=gnucash_bank_account,
             )
+            if match and match.get('tie'):
+                # MAP-16: a tie between own accounts is never guessed.
+                self_tie[_hi] = match['tie']
+                continue
             if match and match.get('account'):
                 row['Account'] = _strip_root(match['account'])
                 row['Confidence'] = 'history'
@@ -2339,6 +2635,7 @@ def run(
     smart_mapped_count = 0
     weak_mapped_count = 0
     llm_mapped_count = 0
+    llm_withheld: Dict[int, str] = {}   # MAP-14: row index -> own account the LLM proposed
 
     # Re-read the mapped CSV and build the full account list unconditionally —
     # both mapped_rows and account_list are needed below by the Step 5
@@ -2355,6 +2652,8 @@ def run(
             acct = row.get('Account', '')
             if conf != 'none' and acct:
                 continue
+            if i in self_tie:
+                continue   # MAP-16: tied own accounts go to Review, not a guess
             desc = row.get('Description') or row.get('Narration') or ''
             withdrawal = row.get('Withdrawal', '')
             deposit = row.get('Deposit', '')
@@ -2413,6 +2712,8 @@ def run(
             desc = row.get('Description') or row.get('Narration') or ''
             acct = row.get('Account', '')
             conf = row.get('Confidence', 'none')
+            if (i - 1) in self_tie:
+                continue   # MAP-16
             if (conf in ('none', 'weak') or not acct) and conf not in ('smart', 'override'):
                 still_unmatched.append({
                     'row': i,
@@ -2437,13 +2738,26 @@ def run(
             if llm_results:
                 llm_from_none = 0
                 llm_from_weak = 0
+                _own_targets = _own_target_accounts(
+                    own_bank_accounts,
+                    set(all_account_paths) | {
+                        v.get('account') for v in llm_results.values() if v.get('account')})
+                _own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _own_targets)
                 for i, row in enumerate(mapped_rows):
                     row_num = i + 1
                     if row_num in llm_results and llm_results[row_num].get('account'):
                         orig_conf = still_unmatched_orig_conf.get(row_num, 'none')
-                        row['Account'] = _strip_root(llm_results[row_num]['account'])
+                        _llm_acct = _strip_root(llm_results[row_num]['account'])
+                        # MAP-14: an own bank/FD account needs own-transfer
+                        # evidence; otherwise the row is left for Suspense.
+                        if _llm_acct in _own_targets and not _has_own_transfer_evidence(
+                                row.get('Description') or row.get('Narration') or '',
+                                _own_vocab, _own_targets):
+                            llm_withheld[i] = _llm_acct
+                            continue
+                        row['Account'] = _llm_acct
                         row['Confidence'] = 'llm'
-                        row['MatchReason'] = f"LLM: {llm_results[row_num]['reason']}"
+                        row['MatchReason'] = _llm_reason(llm_results[row_num]['reason'])
                         llm_mapped_count += 1
                         if orig_conf == 'weak':
                             llm_from_weak += 1
@@ -2469,6 +2783,15 @@ def run(
             )
     else:
         _emit_mapper_progress("all rows matched by rules — no fallback needed")
+
+    # --- IMP-09 final guard: the LAST step before output for every pass
+    # (rules, history, keyword/smart, own-transfer, saved rule, LLM). Nothing
+    # above may emit a hidden/placeholder target; anything that did is reset
+    # here and the reason is carried to Suspense below.
+    if guard is not None:
+        _late = _apply_target_guard(mapped_rows, guard, blocked_log, result['confidence_counts'])
+        if _late:
+            _emit_mapper_progress(f"target guard: {_late} late match(es) reset (hidden/placeholder target)")
 
     # --- Step 4.9: IFSC-contradiction guard (RED FLAG fix, requirement #4) ---
     # Once the dedicated self-transfer/IFSC route (Step 3.6) has abstained on
@@ -2508,13 +2831,31 @@ def run(
     # Find a Suspense account in the tree, or use a sensible default.
     suspense_acct = _find_suspense_account(account_list)
     suspense_count = 0
-    for row in mapped_rows:
+    for _ri, row in enumerate(mapped_rows):
         acct = row.get('Account', '')
         conf = row.get('Confidence', 'none')
         if not acct or conf == 'none':
             row['Account'] = suspense_acct
             row['Confidence'] = 'suspense'
-            row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
+            if _ri in blocked_log:
+                row['MatchReason'] = f"{_BLOCKED_PREFIX}{blocked_log[_ri]}"
+            elif guard is not None and blocked_pairs and _blocked_history_reason(
+                    row.get('Description', ''), blocked_pairs, guard):
+                row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
+                    row.get('Description', ''), blocked_pairs, guard)
+            elif _ri in self_tie:
+                row['MatchReason'] = (
+                    "Suspense - own transfer names a bank where you have "
+                    f"{len(self_tie[_ri])} accounts ("
+                    + "; ".join(a.rsplit(':', 1)[-1] for a in self_tie[_ri])
+                    + "); review and pick one")
+            elif _ri in llm_withheld:
+                row['MatchReason'] = (
+                    "Suspense — the AI suggested your own account "
+                    f"'{llm_withheld[_ri]}' but nothing in the narration shows a "
+                    "transfer to yourself; review and reassign")
+            else:
+                row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
             suspense_count += 1
     if suspense_count > 0:
         result['confidence_counts']['none'] -= suspense_count

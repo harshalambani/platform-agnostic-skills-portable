@@ -7,6 +7,11 @@ vendor/** filter=lfs diff=lfs merge=lfs -text
 *.dll     filter=lfs diff=lfs merge=lfs -text
 *.traineddata filter=lfs diff=lfs merge=lfs -text
 
+# tessdata/configs/ is required RUNTIME CONFIG (tesseract ... tsv reads configs/tsv),
+# not a binary: tiny LF text files, committed as plain text so they can never turn
+# into LFS pointers. Must come after the vendor/** rule so it wins (HSB-01).
+vendor/tesseract/tessdata/configs/** -filter -diff -merge text eol=lf
+
 # Normalise text files to LF in the repo, but keep CRLF in the working tree on Windows
 *           text=auto
 *.py        text eol=lf

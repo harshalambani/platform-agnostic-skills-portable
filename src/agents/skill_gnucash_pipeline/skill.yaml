@@ -51,6 +51,16 @@ inputs:
     label: "PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)"
     required: false
 
+  # IMP-08: only needed when several of YOUR accounts match the bank name and
+  # the statement does not say which. Choices come from the book + bank above
+  # and list postable accounts only (never hidden / placeholder).
+  - name: "bank_account"
+    type: "select"
+    label: "Bank account (optional -- only if several of your accounts are at this bank and the statement does not say which)"
+    options_from: "bank_accounts"
+    depends_on: ["gnucash_file", "bank"]
+    required: false
+
 run_args:
   bank: "{inputs.bank}"
   statement_files: "{inputs.statement_files}"
@@ -59,6 +69,7 @@ run_args:
   config_path: "{config_path}"
   model_override: "{model_override}"
   pdf_password: "{inputs.pdf_password}"
+  bank_account: "{inputs.bank_account}"
 
 output:
   extension: ".csv"
@@ -99,6 +110,10 @@ help:
       tooltip: "Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity."
       accepts: "One of the entities defined in entities.yaml, via dropdown."
       gotchas: "UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found."
+    - name: "bank_account"
+      tooltip: "Which of your accounts at this bank the statement is for. Leave blank unless the run stops and asks."
+      accepts: "One of the postable accounts at the chosen bank, listed from your book."
+      gotchas: "Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing."
     - name: "pdf_password"
       tooltip: "Only used for HDFC when the statement PDF itself is password-protected."
       accepts: "The statement's open password — for HDFC this is often the Cust ID."

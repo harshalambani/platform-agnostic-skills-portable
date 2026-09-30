@@ -226,6 +226,9 @@ class Account:
     leaf: str
     type: str
     special: bool = False  # placeholder/hidden/etc. — not a valid post target
+    # IMP-09: the hard block. ONLY hidden (own or inherited from any ancestor)
+    # and placeholder (own only). tax-related / opening-balance are NOT blocked.
+    blocked: bool = False
 
 
 @dataclass
@@ -665,6 +668,31 @@ def _account_is_special(acc_el: ET.Element, ns: dict) -> bool:
     return False
 
 
+# IMP-09: self-contained mirror of agents.gnucash_accounts.BLOCKING_FLAGS (this
+# script cannot import `agents` in a frozen child). tests/test_gnucash_accounts.py
+# pins the two and checks that both guards agree on the same book.
+BLOCKING_FLAGS = ("hidden", "placeholder")
+
+
+def _account_flag_set(acc_el: ET.Element, ns: dict) -> frozenset:
+    """Which BLOCKING_FLAGS are set on a <gnc:account> element."""
+    slots = acc_el.find("act:slots", ns)
+    out = set()
+    if slots is None:
+        return frozenset()
+    for slot in list(slots):
+        key = value = ""
+        for child in slot:
+            local = child.tag.rsplit("}", 1)[-1]
+            if local == "key":
+                key = (child.text or "").strip()
+            elif local == "value":
+                value = (child.text or "").strip()
+        if key in BLOCKING_FLAGS and value.lower() in _SPECIAL_TRUE_VALUES:
+            out.add(key)
+    return frozenset(out)
+
+
 def load_accounts(gnucash_path: Path) -> list[Account]:
     raw = gnucash_path.read_bytes()
     data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
@@ -672,6 +700,7 @@ def load_accounts(gnucash_path: Path) -> list[Account]:
     ns = {"gnc": "http://www.gnucash.org/XML/gnc",
           "act": "http://www.gnucash.org/XML/act"}
     by_id = {}
+    block_flags: dict = {}
     for a in root.iter("{http://www.gnucash.org/XML/gnc}account"):
         name = a.find("act:name", ns).text
         aid = a.find("act:id", ns).text
@@ -679,6 +708,7 @@ def load_accounts(gnucash_path: Path) -> list[Account]:
         par = a.find("act:parent", ns)
         by_id[aid] = (name, par.text if par is not None else None, typ,
                       _account_is_special(a, ns))
+        block_flags[aid] = _account_flag_set(a, ns)
 
     def full_path(aid):
         parts = []
@@ -697,8 +727,15 @@ def load_accounts(gnucash_path: Path) -> list[Account]:
             parts = parts[1:]
         if not parts:
             continue
+        blocked = "hidden" in block_flags.get(aid, ()) or "placeholder" in block_flags.get(aid, ())
+        anc, seen = _p, set()
+        while not blocked and anc and anc in by_id and anc not in seen:
+            seen.add(anc)
+            if "hidden" in block_flags.get(anc, ()):
+                blocked = True
+            anc = by_id[anc][1]
         accounts.append(Account(path=":".join(parts), leaf=parts[-1], type=typ,
-                                special=special))
+                                special=special, blocked=blocked))
     return accounts
 
 
@@ -741,7 +778,7 @@ def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
     deductor account like 'Interest on BOB - FD', not the generic one)."""
     best: Optional[Account] = None
     for a in accounts:
-        if a.special:
+        if a.blocked:
             continue  # placeholder/hidden — not a valid post target
         if a.type != "INCOME" or "interest" not in a.path.lower():
             continue
@@ -770,7 +807,7 @@ def find_tcs_account(accounts: list[Account]) -> Optional[str]:
     exist, and never a placeholder."""
     best: Optional[Account] = None
     for a in accounts:
-        if a.special:
+        if a.blocked:
             continue
         if "TCS" not in _tokens(a.leaf):
             continue
@@ -783,7 +820,7 @@ def find_drawings_account(accounts: list[Account]) -> Optional[str]:
     """Locate the Drawings account — the default TCS contra."""
     best: Optional[Account] = None
     for a in accounts:
-        if a.special:
+        if a.blocked:
             continue
         if "DRAWINGS" not in _tokens(a.leaf):
             continue
@@ -801,7 +838,7 @@ def _candidates_for(category: str, accounts: list[Account],
     credit on the same account."""
     out = []
     for a in accounts:
-        if a.special:
+        if a.blocked:
             continue  # placeholder/hidden — never a credit candidate
         if a.type != "INCOME":
             continue

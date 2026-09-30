@@ -298,5 +298,5 @@ def test_unseen_vpa_stays_unmatched():
 def test_history_matcher_functions_exist_and_are_callable():
     assert callable(agent._history_token_match)
     assert callable(agent._build_history_token_model)
-    model = agent._build_history_token_model([_mk("x", EXPENSE_ACCOUNT, 5), _mk("x", EXPENSE_ACCOUNT, 5)])
-    assert agent._history_token_match("x", model) is not None
+    model = agent._build_history_token_model([_mk("payee", EXPENSE_ACCOUNT, 5), _mk("payee", EXPENSE_ACCOUNT, 5)])
+    assert agent._history_token_match("payee", model) is not None

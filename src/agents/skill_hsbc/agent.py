@@ -23,6 +23,7 @@ from agents.bank_common import normalize as _normalize
 from agents.bank_common import password as _password
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check
+from agents.skill_hsbc.acct_number import digits_only, find_account_number
 
 log = logging.getLogger(__name__)
 
@@ -242,6 +243,34 @@ def _read_enriched_rows(input_xlsx: str) -> list[dict]:
     return rows
 
 
+def _read_account_number(input_xlsx: str) -> Optional[str]:
+    """IMP-08: the account number from the enriched workbook's Summary sheet
+    ("Account Number" row) or, failing that, a labelled line in the first rows
+    of the transaction sheet. Digits only, or None -- never guessed."""
+    try:
+        import openpyxl  # noqa: PLC0415
+
+        wb = openpyxl.load_workbook(input_xlsx, read_only=True, data_only=True)
+        try:
+            if "Summary" in wb.sheetnames:
+                for row in wb["Summary"].iter_rows(values_only=True):
+                    if row and str(row[0] or "").strip().lower() == "account number":
+                        d = digits_only(str(row[1] or ""))
+                        if len(d) >= 6:
+                            return d
+            first = wb[wb.sheetnames[0]]
+            head = []
+            for i, row in enumerate(first.iter_rows(values_only=True)):
+                if i >= 12:
+                    break
+                head.append(" ".join(str(c) for c in row if c is not None))
+            return find_account_number(head)
+        finally:
+            wb.close()
+    except Exception:  # noqa: BLE001 - a missing number is safe, a crash is not
+        return None
+
+
 def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Path:
     """Run OCR -> parse -> enrich -> xlsx over ``pdf_paths`` in a fresh scratch
     dir and return the built enriched workbook's path.
@@ -364,7 +393,7 @@ class HSBCSkill:
         dates = [r["Date"] for r in rows if r.get("Date")]
         meta = BankStatementMeta(
             bank_key=BANK_KEY,
-            account_number=None,
+            account_number=_read_account_number(str(enriched_xlsx)),
             period_from=min(dates) if dates else None,
             period_to=max(dates) if dates else None,
             source_format="pw-pdf" if password else "pdf",

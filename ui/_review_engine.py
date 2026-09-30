@@ -54,8 +54,9 @@ META_ROWCLASS = "_rowclass"
 META_BADGES = "_badges"
 META_LOCKED = "_locked"
 META_NOTE = "_note"
+META_BAND = "_band"   # optional: one match-type band class, kept apart from _rowclass
 
-_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE)
+_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE, META_BAND)
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,12 @@ class Column:
     sortable: bool = True
     sort: SortType = "text"
     order: tuple[str, ...] = ()
+    # UI-06. When set, the cell is editable (double-click). The user's text is
+    # stored under THIS row key, never over `key`: the value in `key` stays the
+    # original, so sorting, filtering, "apply to matching" and anything keyed on
+    # the original text keep working. What the save handler does with the edit
+    # is the consumer's business.
+    edit_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -121,6 +128,18 @@ class ReviewSpec:
     # byte-for-byte unchanged. See itr_mapping_review.py for the first
     # consumer (row-level "delete this mapping entry").
     allow_delete: bool = False
+    # UI-04. When set (e.g. "Confidence"), assigning a row makes its
+    # target-column badge and its leading status tag follow the row's new value
+    # of this column: the badge on TARGET (SUSPENSE / DORMANT?) described the OLD
+    # target and is dropped, and _tags[0] becomes the lower-cased new value so
+    # the "Filter:" dropdown agrees with the row. Default "" keeps every other
+    # screen unchanged.
+    status_col: str = ""
+    # UI-05. {lower-cased status value: CSS class}. With status_col set, an
+    # assign swaps the row's class from this table (e.g. "accent-orange" ->
+    # "accent-blue") so the coloured band follows the row's new match type.
+    # A value with no entry gets no class. Empty (default) = untouched.
+    status_classes: dict[str, str] = field(default_factory=dict)
 
     @property
     def payload_box_id(self) -> str:
@@ -248,6 +267,15 @@ _CSS = r"""
 #%%APP%%-app tbody tr.accent-red    td:first-child { border-left: 3px solid #f87171; }
 #%%APP%%-app tbody tr.accent-amber  td:first-child { border-left: 3px solid #fbbf24; }
 #%%APP%%-app tbody tr.accent-green  td:first-child { border-left: 3px solid #4ade80; }
+#%%APP%%-app tbody tr.accent-blue   td:first-child { border-left: 3px solid #60a5fa; }
+#%%APP%%-app tbody tr.accent-orange td:first-child { border-left: 3px solid #fb923c; }
+#%%APP%%-app .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #bbb; margin: 4px 0 8px; }
+#%%APP%%-app .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
+#%%APP%%-app .legend .sw.blue   { background: #60a5fa; }
+#%%APP%%-app .legend .sw.green  { background: #4ade80; }
+#%%APP%%-app .legend .sw.amber  { background: #fbbf24; }
+#%%APP%%-app .legend .sw.orange { background: #fb923c; }
+#%%APP%%-app .legend .sw.red    { background: #f87171; }
 #%%APP%%-app tbody tr.tone-amber  { background: #3a2a1d; }
 #%%APP%%-app tbody tr.tone-amber:hover { background: #4a3626; }
 #%%APP%%-app tbody tr.tone-green  { background: #16281d; }
@@ -265,6 +293,7 @@ _CSS = r"""
 #%%APP%%-app .badge.green  { background: #14532d; color: #86efac; }
 #%%APP%%-app .badge.blue   { background: #1e3a8a; color: #bfdbfe; }
 #%%APP%%-app .badge.grey   { background: #374151; color: #d1d5db; }
+#%%APP%%-app .badge.violet { background: #4c1d95; color: #ddd6fe; }
 #%%APP%%-app .t-red    { color: #f87171; font-weight: 600; }
 #%%APP%%-app .t-amber  { color: #fbbf24; font-weight: 600; }
 #%%APP%%-app .t-green  { color: #4ade80; }
@@ -347,6 +376,8 @@ _BODY = r"""
   const MATCH_ON   = %%MATCH_ON_JSON%%;
   const CONTEXT    = %%CONTEXT_JSON%%;
   const PAYLOAD_VAR = %%PAYLOAD_VAR_JSON%%;
+  const STATUS_COL = %%STATUS_COL_JSON%%;
+  const STATUS_CLASSES = %%STATUS_CLASSES_JSON%%;
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -412,6 +443,13 @@ _BODY = r"""
       if (!predicate(r)) return;
       r[TARGET] = chosen;
       for (const k in alsoSet) r[k] = alsoSet[k];
+      if (STATUS_COL) {
+        // UI-04: the badge described the old target -- drop it; keep the tags in step.
+        if (r._badges && r._badges[TARGET]) delete r._badges[TARGET];
+        const st = cellText(r, STATUS_COL).toLowerCase();
+        if (st && Array.isArray(r._tags) && r._tags.length) r._tags[0] = st;
+        if (Object.keys(STATUS_CLASSES).length) r._band = STATUS_CLASSES[st] || '';
+      }
       r._changed = true;
       n++;
     });
@@ -543,6 +581,7 @@ _BODY = r"""
     filtered.forEach(r => {
       const tr = document.createElement('tr');
       if (r._rowclass) r._rowclass.split(/\s+/).forEach(c => c && tr.classList.add(c));
+      if (r._band) tr.classList.add(r._band);
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
       if (r._deleted) tr.classList.add('row-deleted');
@@ -552,7 +591,10 @@ _BODY = r"""
 
       COLS.forEach(c => {
         const td = document.createElement('td');
-        const val = cellText(r, c.key);
+        const orig = cellText(r, c.key);
+        const editedTxt = c.edit_key ? cellText(r, c.edit_key).trim() : '';
+        const isEdited = !!editedTxt && editedTxt !== orig.trim();
+        const val = isEdited ? editedTxt : orig;
         const badge = (r._badges || {})[c.key];
         let html = '';
         if (badge) {
@@ -567,7 +609,14 @@ _BODY = r"""
         } else {
           td.title = badge && badge.title ? badge.title : val;
         }
+        if (isEdited) {
+          html += '<span class="changed-marker">&#9998;</span>';
+          td.title = 'Edited. Original: ' + orig;
+        }
         td.innerHTML = html;
+        if (c.edit_key && !r._locked && !r._deleted) {
+          td.ondblclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); beginEdit(r, c, td, val, orig); };
+        }
         tr.appendChild(td);
       });
 
@@ -577,16 +626,55 @@ _BODY = r"""
 
     const changed = rows.filter(r => r._changed && !r._deleted).length;
     const deleted = rows.filter(r => r._deleted).length;
+    const editCols = COLS.filter(c => c.edit_key);
+    const edited = editCols.length
+      ? rows.filter(r => editCols.some(c => {
+          const t = cellText(r, c.edit_key).trim();
+          return t && t !== cellText(r, c.key).trim();
+        })).length
+      : 0;
     $('stats').textContent =
       filtered.length + '/' + rows.length + ' rows' +
       (selected.size ? ' | ' + selected.size + ' selected' : '') +
       (changed ? ' | ' + changed + ' changed' : '') +
+      (edited ? ' | ' + edited + ' edited' : '') +
       (deleted ? ' | ' + deleted + ' deleted' : '');
 
     if (activeFilterCol) {
       const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
       if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
     }
+  }
+
+  // ── Inline edit (opt-in via Column.edit_key). The text goes into
+  //    r[c.edit_key]; r[c.key] (the original) is never touched. A blank or
+  //    unchanged entry clears the edit. The value is set via the .value
+  //    property, never innerHTML.
+  function beginEdit(r, c, td, current, orig) {
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.value = current;
+    inp.style.width = '100%';
+    let done = false;
+    const finish = (commit) => {
+      if (done) return;
+      done = true;
+      if (commit) {
+        const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
+        r[c.edit_key] = (v && v !== orig.trim()) ? v : '';
+        syncPayload();
+      }
+      renderTable();
+    };
+    inp.onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); };
+    inp.onkeydown = (e) => {
+      if (e.key === 'Enter') { if (e.preventDefault) e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { finish(false); }
+    };
+    inp.onblur = () => finish(true);
+    td.innerHTML = '';
+    td.appendChild(inp);
+    inp.focus();
   }
 
   function handleRowClick(idx, e) {
@@ -667,6 +755,8 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%MATCH_ON_JSON%%", js_json(spec.apply_matching_on)),
         ("%%CONTEXT_JSON%%", js_json(spec.context)),
         ("%%PAYLOAD_VAR_JSON%%", js_json(spec.payload_var)),
+        ("%%STATUS_COL_JSON%%", js_json(spec.status_col)),
+        ("%%STATUS_CLASSES_JSON%%", js_json(spec.status_classes)),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)
@@ -678,6 +768,7 @@ def _col_dict(c: Column) -> dict:
     return {
         "key": c.key, "label": c.label, "sortable": c.sortable,
         "sort": c.sort, "order": [o.lower() for o in c.order],
+        "edit_key": c.edit_key,
     }
 
 

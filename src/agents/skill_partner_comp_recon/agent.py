@@ -236,9 +236,12 @@ def _validate_accounts_against_book(accounts: dict, gnucash_path: str) -> list[s
     gnucash_accounts.read_postable_paths()/read_special_paths()/
     load_accounts() -- never opens a write handle, never touches a
     .gnucash.LOG/backup file."""
-    postable = gnucash_accounts.read_postable_paths(gnucash_path)
-    special = gnucash_accounts.read_special_paths(gnucash_path)
+    # IMP-09: the shared guard -- ONLY hidden (own or inherited) and
+    # placeholder block a configured account. A tax-related account is a
+    # valid posting target again.
+    guard = gnucash_accounts.TargetGuard.from_book(gnucash_path)
     all_accounts = gnucash_accounts.load_accounts(gnucash_path)
+    known = {a.path for a in all_accounts if a.path}
     by_leaf: dict[str, list[str]] = {}
     for acc in all_accounts:
         if acc.path:
@@ -246,10 +249,11 @@ def _validate_accounts_against_book(accounts: dict, gnucash_path: str) -> list[s
 
     errors = []
     for key, path in accounts.items():
-        if path in postable:
+        blocked = guard.blocked_target_reason(path)
+        if path in known and not blocked:
             continue
-        if path in special:
-            reason = "is a placeholder/hidden account and cannot be a posting target"
+        if blocked:
+            reason = f"is a placeholder/hidden account and cannot be a posting target ({blocked})"
         else:
             reason = "does not exist in the supplied GnuCash book"
         leaf = path.rsplit(":", 1)[-1] if ":" in path else path

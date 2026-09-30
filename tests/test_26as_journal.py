@@ -275,7 +275,7 @@ def test_agent_md_excludes_ambiguous_from_llm_fallback():
 
 def test_placeholder_parent_excluded_from_candidates():
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
         m.Account("Income:Interest Income:Interest on HDFC - FD",
                   "Interest on HDFC - FD", "INCOME"),
     ]
@@ -288,7 +288,7 @@ def test_placeholder_only_interest_account_routes_to_suspense():
     """If the ONLY category-A account is the placeholder parent, the deductor
     must go to Suspense — never post directly to the placeholder."""
     accts = [m.Account("Income:Interest Income", "Interest Income", "INCOME",
-                       special=True)]
+                       special=True, blocked=True)]
     acct, conf, basis, cands, tied = m.match_credit_account("HDFC BANK LIMITED", "A", accts)
     assert acct is None and conf == "Suspense"
     assert cands == []
@@ -299,7 +299,7 @@ def test_hidden_account_never_matched():
     """A hidden (retired) account must not be offered even if the name matches."""
     accts = [
         m.Account("Income:Interest Income:Interest on Old Bank",
-                  "Interest on Old Bank", "INCOME", special=True),
+                  "Interest on Old Bank", "INCOME", special=True, blocked=True),
         m.Account("Income:Interest Income:Interest on HDFC - FD",
                   "Interest on HDFC - FD", "INCOME"),
     ]
@@ -312,7 +312,7 @@ def test_special_account_not_taken_as_generic_fd():
     """A placeholder/hidden FD account must not be picked as the generic FD
     debit account either."""
     def acc(p, special=False):
-        return m.Account(p, p.split(":")[-1], "INCOME", special=special)
+        return m.Account(p, p.split(":")[-1], "INCOME", special=special, blocked=special)
     accts = [
         acc("Income:Interest Income:Interest on FD", special=True),   # placeholder
         acc("Income:Interest Income:Interest on Fixed Deposit"),      # real generic
@@ -325,7 +325,7 @@ def test_build_journals_places_placeholder_only_deductor_on_suspense():
     """End-to-end at the journal level: a deductor whose category has only a
     placeholder account lands its credit split on Suspense and is flagged."""
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]
@@ -932,7 +932,7 @@ def test_override_on_suspense_row_stays_needs_review_fl1_2():
     override is a model pick, not a human-verified match."""
     d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0)
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]
@@ -1001,7 +1001,7 @@ def test_learning_applied_when_no_override_income_domain():
     needs_review cleared."""
     d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="AAAA00000A")
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]
@@ -1054,7 +1054,7 @@ def test_learning_falls_back_to_name_when_no_tan():
     """A blank/invalid TAN falls back to a name-keyed learning."""
     d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="")
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]
