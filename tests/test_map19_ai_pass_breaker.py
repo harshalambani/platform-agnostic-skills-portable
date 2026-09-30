@@ -241,3 +241,20 @@ def test_run_summary_states_why_and_stopped_rows_are_suspense(tmp_path, monkeypa
     assert len(got) == N + 5
     assert all(r["Confidence"] == "suspense" for r in got)
     assert sum("AI pass stopped" in r["MatchReason"] for r in got) >= 5
+
+
+def test_ai_pass_stopped_note_appears_exactly_once(tmp_path, monkeypatch):
+    """NEGATIVE: the note must not be duplicated in the run summary."""
+    monkeypatch.setattr(m, "_llm_sleep", lambda s: None)
+    monkeypatch.setattr(m, "_resolve_llm_endpoint_config",
+                        lambda c, mo=None: ("ollama", "http://stub.invalid", MODEL, None, 0.0))
+    monkeypatch.setattr(m, "_llm_chat", lambda *a, **k: "OK" if a[4] == "ping" else None)
+    txns = [fx.txn_xml("CAFE ALPHA ORDER", "2025-06-10", [(fx.HDFC1, -10000), ("groc", 10000)])]
+    book = fx.write_book(tmp_path / "b.gnucash", fx.standard_accounts(), txns)
+    monkeypatch.chdir(tmp_path)
+    rows = [("2025-08-01", f"ZZ MISC {i}", "", "100.00") for i in range(1, N + 6)]
+    csv_in = fx.canonical_csv(tmp_path / "in.csv", rows)
+    summary = m.run(book, csv_in, str(tmp_path / "out.csv"), config_path="fake.yaml",
+                    bank_name="HDFC", gnucash_bank_account=fx.P_HDFC1)
+    assert summary.count("**AI pass stopped:**") == 1   # the note; the breakdown row is a separate count line
+    assert "\n\n**Confidence breakdown:**" in summary

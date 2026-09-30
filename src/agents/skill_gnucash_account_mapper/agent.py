@@ -3211,15 +3211,14 @@ def run(
     extra = (" + " + ", ".join(extra_notes)) if extra_notes else ""
     ai_stop_note = ""
     if llm_stop_reason:
-        ai_stop_note = (f"\n**AI pass stopped:** {llm_stop_reason}. "
+        ai_stop_note = (f"**AI pass stopped:** {llm_stop_reason}. "
                         f"What was already mapped is kept; the remaining {llm_stopped_final} "
-                        f"row(s) are in Suspense.\n")
+                        f"row(s) are in Suspense.\n\n")
 
     return (
         f"Mapped **{total} rows** using **{rule_count} rules** "
         f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{extra}\n\n"
         f"{ai_stop_note}"
-        f"{ai_stop_note}\n"
         f"**Confidence breakdown:**\n"
         + "\n".join(_confidence_breakdown_lines(counts, total, llm_stopped_final)) + "\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"
