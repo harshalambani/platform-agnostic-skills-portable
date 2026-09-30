@@ -17,6 +17,7 @@ import sys
 import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+from urllib.error import HTTPError as _HTTPError
 
 import yaml
 
@@ -1438,8 +1439,11 @@ def _retry_with_focused_prompt(
         f"Account:"
     )
 
-    reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
-                       api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
+    try:
+        reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
+                          api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
+    except _LLMRateLimited:
+        return None   # MAP-19: a rate-limited retry is simply no answer
     if reply:
         _emit_mapper_progress(f"  -> (retry matched)")
     return reply
@@ -1462,6 +1466,119 @@ _LLM_WARMUP_TIMEOUT  = 180     # first call loads model into VRAM — needs long
 # ---------------------------------------------------------------------------
 LLM_SHORTLIST_SIZE = 8   # max candidate accounts shown per row
 LLM_MAX_RETRIES = 1      # one retry after an invalid/unparseable answer, then suspense
+
+# MAP-19: stop the AI pass when the provider or model keeps failing, instead of
+# grinding through every remaining row. No model-name list: the model is judged
+# only by what it actually answers.
+LLM_MAX_CONSECUTIVE_FAILURES = 5    # N: consecutive failed calls (no reply, or HTTP 429) before the pass stops
+LLM_BACKOFF_BASE_SECONDS = 2.0      # 429 without Retry-After: 2, 4, 8, ... seconds
+LLM_BACKOFF_CAP_SECONDS = 30.0      # a wait (Retry-After or backoff) is never longer than this
+LLM_VALIDITY_WINDOW_K = 20          # K: the first K rows' first answers are checked for validity
+LLM_INVALID_RATE_STOP = 0.8         # stop if MORE than this share of those K answers is invalid
+
+# Filled by llm_fallback_mapping for the caller (kept off the signature so the
+# function stays call-compatible): stopped, reason, unattempted_rows.
+_LLM_RUN_STATUS: Dict = {}
+
+_LLM_STOPPED_MARKER = "AI pass stopped"   # in MatchReason of rows the stopped pass never reached
+
+
+class _LLMRateLimited(Exception):
+    """The provider answered HTTP 429. `retry_after` is the seconds the server
+    asked for (None if it sent no usable Retry-After)."""
+
+    def __init__(self, retry_after: Optional[float] = None):
+        super().__init__("HTTP 429 rate limited")
+        self.retry_after = retry_after
+
+
+def _parse_retry_after(value) -> Optional[float]:
+    """Retry-After is either delta-seconds or an HTTP date. None if unusable."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    try:
+        secs = float(text)
+        return secs if secs >= 0 else None
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime  # noqa: PLC0415
+        from datetime import datetime, timezone  # noqa: PLC0415
+        when = parsedate_to_datetime(text)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _llm_sleep(seconds: float) -> None:
+    import time  # noqa: PLC0415
+    time.sleep(seconds)
+
+
+class _LLMGuard:
+    """MAP-19: wraps every AI call of one pass. Honours 429 Retry-After with a
+    capped wait, counts consecutive failures, and watches the invalid-answer
+    rate over the first K answers. Once `stopped` is set no further call is
+    made and `reason` says why."""
+
+    def __init__(self, model: str):
+        self.model = model
+        self.consecutive_failures = 0
+        self.answers = 0
+        self.invalid = 0
+        self.stopped = False
+        self.reason = ""
+
+    def _stop(self, reason: str) -> None:
+        self.stopped = True
+        self.reason = reason
+        _emit_mapper_progress(f"WARNING: AI pass stopped - {reason}")
+
+    def ask(self, provider, base_url, model, system, user, api_key=None, timeout=None):
+        """Returns the reply, or None on failure / when the pass has stopped."""
+        rate_limited = 0
+        while not self.stopped:
+            try:
+                reply = _llm_chat(provider, base_url, model, system, user,
+                                  api_key=api_key, timeout=timeout)
+            except _LLMRateLimited as e:
+                self.consecutive_failures += 1
+                rate_limited += 1
+                if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
+                    self._stop(f"the provider kept refusing calls (HTTP 429 rate limit, "
+                               f"{self.consecutive_failures} failed calls in a row)")
+                    return None
+                wait = e.retry_after if e.retry_after is not None else                     LLM_BACKOFF_BASE_SECONDS * (2 ** (rate_limited - 1))
+                wait = min(max(wait, 0.0), LLM_BACKOFF_CAP_SECONDS)
+                _emit_mapper_progress(f"  rate limited (HTTP 429), waiting {wait:.0f}s")
+                _llm_sleep(wait)
+                continue
+            if reply is None:
+                self.consecutive_failures += 1
+                if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
+                    self._stop(f"the provider kept failing ({self.consecutive_failures} "
+                               f"calls in a row without a reply)")
+                return None
+            self.consecutive_failures = 0
+            return reply
+        return None
+
+    def record_first_answer(self, invalid: bool) -> None:
+        """Feed the first-attempt validity of one row; checked once, at K."""
+        if self.stopped or self.answers >= LLM_VALIDITY_WINDOW_K:
+            return
+        self.answers += 1
+        self.invalid += 1 if invalid else 0
+        if self.answers == LLM_VALIDITY_WINDOW_K:
+            rate = self.invalid / self.answers
+            if rate > LLM_INVALID_RATE_STOP:
+                self._stop(f"model '{self.model}' gave invalid answers to "
+                           f"{self.invalid} of its first {self.answers} rows "
+                           f"({rate:.0%}, limit {LLM_INVALID_RATE_STOP:.0%}); "
+                           f"try a different model")
 
 _SHORTLIST_ANSWER_RE = re.compile(r'^[0-9]+$')
 
@@ -1610,6 +1727,11 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
         with _req.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
             return (body.get("message") or {}).get("content", "")
+    except _HTTPError as e:
+        if e.code == 429:
+            raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
+        _emit_mapper_progress(f"  Ollama error: {e}")
+        return None
     except Exception as e:  # noqa: BLE001
         _emit_mapper_progress(f"  Ollama error: {e}")
         return None
@@ -1659,6 +1781,11 @@ def _openai_compatible_chat(
             if not choices:
                 return ""
             return (choices[0].get("message") or {}).get("content", "")
+    except _HTTPError as e:
+        if e.code == 429:
+            raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
+        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        return None
     except Exception as e:  # noqa: BLE001
         _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
         return None
@@ -1971,6 +2098,7 @@ def llm_fallback_mapping(
     historical GnuCash patterns by account, turning classification into
     pattern matching rather than cold reasoning.
     """
+    _LLM_RUN_STATUS.clear()
     if not unmatched_rows or not config_path:
         return {}
 
@@ -1991,7 +2119,8 @@ def llm_fallback_mapping(
 
     # ── Warm up the model (cold start loads weights into VRAM) ───────────
     _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
-    warmup_reply = _llm_chat(
+    guard = _LLMGuard(model)
+    warmup_reply = guard.ask(
         provider, base_url, model,
         "Reply OK.", "ping",
         api_key=api_key,
@@ -1999,6 +2128,11 @@ def llm_fallback_mapping(
     )
     if warmup_reply is None:
         _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
+        _LLM_RUN_STATUS.update({
+            'stopped': True,
+            'reason': guard.reason or "the AI model did not answer the warm-up call",
+            'unattempted_rows': [r["row"] for r in unmatched_rows],
+        })
         return {}
     _emit_mapper_progress("LLM warm-up OK — model loaded")
 
@@ -2015,6 +2149,13 @@ def llm_fallback_mapping(
     result: Dict[int, Dict] = {}
 
     for i, row in enumerate(unmatched_rows, 1):
+        if guard.stopped:
+            _LLM_RUN_STATUS.update({
+                'stopped': True, 'reason': guard.reason,
+                'unattempted_rows': [r["row"] for r in unmatched_rows[i - 1:]
+                                     if r["row"] not in result],
+            })
+            break
         # Check for cancellation between rows
         try:
             from ui._runner import is_cancelled
@@ -2054,15 +2195,21 @@ def llm_fallback_mapping(
                 continue
 
             user_prompt = _format_shortlist_prompt(shortlist, desc, amt_info)
-            reply = _llm_chat(provider, base_url, model, _LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt,
+            reply = guard.ask(provider, base_url, model, _LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt,
                               api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
+            if reply is None:
+                # MAP-19: a call that got no reply is a provider failure, not
+                # an invalid answer -- it feeds the consecutive-failure rule.
+                _emit_mapper_progress("  -> no reply, leaving unmatched")
+                continue
             status, matched_acct = _parse_shortlist_answer(reply, shortlist) if reply else ("invalid", None)
+            guard.record_first_answer(status == "invalid")
 
             attempts = 0
-            while status == "invalid" and attempts < LLM_MAX_RETRIES:
+            while status == "invalid" and attempts < LLM_MAX_RETRIES and not guard.stopped:
                 attempts += 1
                 _emit_mapper_progress(f"  -> invalid answer, retrying ({attempts}/{LLM_MAX_RETRIES})…")
-                reply = _llm_chat(provider, base_url, model, _LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt,
+                reply = guard.ask(provider, base_url, model, _LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt,
                                   api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
                 status, matched_acct = _parse_shortlist_answer(reply, shortlist) if reply else ("invalid", None)
 
@@ -2095,10 +2242,13 @@ def llm_fallback_mapping(
             f"Account:"
         )
 
-        reply = _llm_chat(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
+        reply = guard.ask(provider, base_url, model, _LLM_SYSTEM_PROMPT, user_prompt,
                           api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
 
+        if reply is None:
+            continue
         if not reply:
+            guard.record_first_answer(True)
             continue
 
         first_line = reply.strip().split("\n")[0].strip()
@@ -2116,11 +2266,18 @@ def llm_fallback_mapping(
         # "Acme Industries Ltd.") is not lost before Tier 0 ever sees it.
         matched_acct = _validate_llm_answer(first_line, account_set)
 
+        guard.record_first_answer(not matched_acct)
         if matched_acct:
             _emit_mapper_progress(f"  -> {matched_acct}")
             result[row_num] = {"account": matched_acct, "reason": "LLM: matched"}
         else:
             _emit_mapper_progress(f"  -> unknown: {answer!r}")
+
+    if guard.stopped and not _LLM_RUN_STATUS.get('stopped'):
+        _LLM_RUN_STATUS.update({
+            'stopped': True, 'reason': guard.reason,
+            'unattempted_rows': [r["row"] for r in unmatched_rows if r["row"] not in result],
+        })
 
     matched = sum(1 for v in result.values() if v.get("account"))
     _emit_mapper_progress(f"LLM fallback complete: {matched}/{total} rows mapped")
@@ -2709,6 +2866,8 @@ def run(
     llm_mapped_count = 0
     direction_clash_log: Dict[int, str] = {}   # MAP-18: row index -> Suspense reason
     direction_clash_count = 0
+    llm_stopped_rows: set = set()       # MAP-19: row index the stopped AI pass never reached
+    llm_stop_reason = ""
     llm_withheld: Dict[int, str] = {}   # MAP-14: row index -> own account the LLM proposed
 
     # Re-read the mapped CSV and build the full account list unconditionally —
@@ -2814,6 +2973,7 @@ def run(
 
         if still_unmatched and config_path:
             _emit_mapper_progress(f"LLM fallback for {len(still_unmatched)} remaining rows")
+            _LLM_RUN_STATUS.clear()
             llm_results = llm_fallback_mapping(
                 unmatched_rows=still_unmatched,
                 account_tree=account_list,
@@ -2822,6 +2982,13 @@ def run(
                 model_override=model_override,
                 historical_mappings=historical_pairs_for_llm,
             )
+            if _LLM_RUN_STATUS.get('stopped'):
+                # MAP-19: rows the stopped pass never reached. Only rows that
+                # are still unresolved end in Suspense; a weak keyword guess
+                # already on the row is kept.
+                llm_stop_reason = _LLM_RUN_STATUS.get('reason', 'the AI pass stopped')
+                for _rn in _LLM_RUN_STATUS.get('unattempted_rows', []):
+                    llm_stopped_rows.add(_rn - 1)
             if llm_results:
                 llm_from_none = 0
                 llm_from_weak = 0
@@ -2938,6 +3105,10 @@ def run(
                     + "); review and pick one")
             elif _ri in direction_clash_log:
                 row['MatchReason'] = direction_clash_log[_ri]
+            elif _ri in llm_stopped_rows:
+                row['MatchReason'] = (
+                    f"Suspense - {_LLM_STOPPED_MARKER}: {llm_stop_reason}; "
+                    "review and reassign")
             elif _ri in llm_withheld:
                 row['MatchReason'] = (
                     "Suspense — the AI suggested your own account "
@@ -3003,6 +3174,9 @@ def run(
     counts = result['confidence_counts']
     total = result['total_rows']
     pct = lambda n: f"{100 * n // total if total else 0}%"  # noqa: E731
+    llm_stopped_final = sum(
+        1 for r in mapped_rows
+        if r.get('Confidence') == 'suspense' and _LLM_STOPPED_MARKER in (r.get('MatchReason') or ''))
 
     bank_note = f" ({bank_key} only)" if bank_key else ""
     extra_notes = []
@@ -3015,10 +3189,16 @@ def run(
     if llm_mapped_count:
         extra_notes.append(f"LLM mapped {llm_mapped_count}")
     extra = (" + " + ", ".join(extra_notes)) if extra_notes else ""
+    ai_stop_note = ""
+    if llm_stop_reason:
+        ai_stop_note = (f"\n**AI pass stopped:** {llm_stop_reason}. "
+                        f"What was already mapped is kept; the remaining {llm_stopped_final} "
+                        f"row(s) are in Suspense.\n")
 
     return (
         f"Mapped **{total} rows** using **{rule_count} rules** "
         f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{extra}\n\n"
+        f"{ai_stop_note}"
         f"**Confidence breakdown:**\n"
         f"- High: {counts.get('high', 0)} ({pct(counts.get('high', 0))})\n"
         f"- Low: {counts.get('low', 0)} ({pct(counts.get('low', 0))})\n"
