@@ -1264,17 +1264,53 @@ _OWN_VOCAB_MIN_OWN_FRACTION = 0.9    # and almost only ever on own-account rows
 _OWN_VOCAB_MIN_LEN = 3
 
 
-def _own_target_accounts(own_bank_accounts: Optional[set], all_accounts) -> set:
+def _own_target_accounts(own_bank_accounts: Optional[set], all_accounts,
+                         historical_pairs: Optional[List[Dict]] = None) -> set:
     """Own bank accounts (BANK type) plus the Assets accounts that sit in the
     same parent branch as one of them (where FD accounts live). Purely
-    structural: derived from the book's tree, not from any name list."""
+    structural: derived from the book's tree, not from any name list.
+
+    MAP-21: an FD is often ASSET-typed and lives in its OWN folder, outside
+    the bank accounts' branch. When `historical_pairs` is given, an Assets
+    account outside that branch is ALSO an own target if THIS book's history
+    shows it is fed by own transfers: at least _OWN_VOCAB_MIN_OWN_SUPPORT of
+    its history rows, and at least _OWN_VOCAB_MIN_OWN_FRACTION of all its
+    rows, carry own-transfer evidence (marker, own account number, or a token
+    the BANK-side history shows is the owner's -- see _build_own_transfer_vocab).
+    A mutual-fund, share or loan-to-family account has no such history, so it
+    is NOT swept into the guard just for being an asset."""
     own = {_strip_root(a) for a in (own_bank_accounts or ())}
     parents = {a.rsplit(':', 1)[0] for a in own if ':' in a}
     out = set(own)
+    candidates = set()
     for a in all_accounts or ():
         s = _strip_root(a)
-        if _is_book_asset_account(s) and ':' in s and s.rsplit(':', 1)[0] in parents:
+        if not _is_book_asset_account(s):
+            continue
+        if ':' in s and s.rsplit(':', 1)[0] in parents:
             out.add(s)
+        else:
+            candidates.add(s)
+    if historical_pairs and out and candidates:
+        # Stage 1: the owner's vocabulary from the BANK side, measured against
+        # everything EXCEPT rows that went to the not-yet-classified Assets
+        # accounts (an FD fed by the owner would otherwise dilute its own name).
+        stage1 = _build_own_transfer_vocab(
+            [h for h in historical_pairs
+             if _strip_root(h.get('account') or '') not in candidates], out)
+        total: Dict[str, int] = {}
+        hits: Dict[str, int] = {}
+        for h in historical_pairs:
+            acct = _strip_root(h.get('account') or '')
+            if acct not in candidates:
+                continue
+            w = h.get('frequency', 1) or 1
+            total[acct] = total.get(acct, 0) + w
+            if _has_own_transfer_evidence(h.get('description', ''), stage1, out):
+                hits[acct] = hits.get(acct, 0) + w
+        for acct, n in hits.items():
+            if n >= _OWN_VOCAB_MIN_OWN_SUPPORT and n / total[acct] >= _OWN_VOCAB_MIN_OWN_FRACTION:
+                out.add(acct)
     return out
 
 
@@ -2902,7 +2938,8 @@ def run(
         history_model = _build_history_token_model(historical_pairs_for_llm)
         # MAP-13: own-transfer evidence for the IFSC fallback, from this book's
         # history (same vocabulary as the MAP-14 gate on the AI pass).
-        _hist_own_targets = _own_target_accounts(own_bank_accounts, all_account_paths)
+        _hist_own_targets = _own_target_accounts(
+            own_bank_accounts, all_account_paths, historical_pairs_for_llm)
         _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
 
         def _hist_own_evidence(_d: str) -> bool:
@@ -3090,7 +3127,8 @@ def run(
                 _own_targets = _own_target_accounts(
                     own_bank_accounts,
                     set(all_account_paths) | {
-                        v.get('account') for v in llm_results.values() if v.get('account')})
+                        v.get('account') for v in llm_results.values() if v.get('account')},
+                    historical_pairs_for_llm)
                 _own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _own_targets)
                 for i, row in enumerate(mapped_rows):
                     row_num = i + 1
