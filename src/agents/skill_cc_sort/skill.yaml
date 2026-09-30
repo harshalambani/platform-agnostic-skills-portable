@@ -47,7 +47,7 @@ help:
     Runs fully offline.
   when_to_use: >
     Use this as the first step when you have a pile of statement emails and PDFs
-    from several cards. Once sorted, run "CC Transactions" on the decrypted
+    from several cards. Once sorted, run "Credit Card — Transactions" on the decrypted
     folder to extract the actual transactions.
   inputs:
     - name: "input_folder"
@@ -68,11 +68,11 @@ help:
       - name: "YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)"
         tooltip: >
           Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to
-          feed into CC Transactions — alongside copies sorted by issuer. Use the
+          feed into Credit Card — Transactions — alongside copies sorted by issuer. Use the
           "Open output folder" button to browse it.
   tips: >
     This step never reads transaction amounts; it only unlocks and organises.
-    The folder it produces is the exact input the CC Transactions skill expects.
+    The folder it produces is the exact input the Credit Card — Transactions skill expects.
   troubleshooting:
     - problem: "A PDF stays locked / is skipped."
       fix: "Enter its password in the password box (comma-separate multiple) and re-run."

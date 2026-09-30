@@ -7,7 +7,7 @@ Takes a messy folder of credit-card statements and organises it: it pulls PDF at
 
 ## When to use it
 
-Use this as the first step when you have a pile of statement emails and PDFs from several cards. Once sorted, run "CC Transactions" on the decrypted folder to extract the actual transactions.
+Use this as the first step when you have a pile of statement emails and PDFs from several cards. Once sorted, run "Credit Card — Transactions" on the decrypted folder to extract the actual transactions.
 
 ## Inputs
 
@@ -34,11 +34,11 @@ Data/outputs/YYYY-MM-DD-HHMMSS-CC-Sort/
 
 Files produced:
 
-- **`YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)`** — Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into CC Transactions — alongside copies sorted by issuer. Use the "Open output folder" button to browse it.
+- **`YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)`** — Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into Credit Card — Transactions — alongside copies sorted by issuer. Use the "Open output folder" button to browse it.
 
 ## Tips
 
-This step never reads transaction amounts; it only unlocks and organises. The folder it produces is the exact input the CC Transactions skill expects.
+This step never reads transaction amounts; it only unlocks and organises. The folder it produces is the exact input the Credit Card — Transactions skill expects.
 
 ## Troubleshooting
 

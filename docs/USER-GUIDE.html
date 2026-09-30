@@ -159,7 +159,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_26as" class="skill">
 <h2>Convert <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X). The two parts that carry your tax credits are laid out in full as sortable tables with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The remaining parts get their column headers so the workbook is predictable. Note that a modern 26AS carries NO advance tax or self-assessment tax — those were dropped from Part C in AY 2023-24 and now live only in the AIS. Runs fully offline.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run &quot;26AS Journal&quot; on the workbook this produces. Do not use it for AIS or TIS — those are different documents.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run &quot;Convert to GnuCash&quot; (GnuCash &gt; 26AS &gt; Convert to GnuCash) on the workbook this produces. Do not use it for AIS or TIS — those are different documents.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Form 26AS PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Form 26AS PDF, exactly as downloaded from TRACES. ⚠️ Must be the genuine 26AS (PAN like ABCDE1234F, parts labelled PART-I to PART-X). AIS / TIS PDFs have a different layout and will not parse here.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — a single TRACES-issued 26AS.</span></li>
 </ul>
@@ -207,7 +207,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </section>
 <section id="skill_26as_journal" class="skill">
 <h2>Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books. For an entity with a Partner Comp Recon book configured, s.194T (partnership) TDS is left out of the CSV — that TDS is already booked month-by-month by the Partner Comp Recon journal — and the summary instead shows a read-only reconciliation of the 26AS s.194T figures against what that journal has actually posted (MATCH / OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.</p>
+<p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books. For an entity with a Partner Compensation Reconciliation book configured, s.194T (partnership) TDS is left out of the CSV — that TDS is already booked month-by-month by the Partner Compensation Reconciliation journal — and the summary instead shows a read-only reconciliation of the 26AS s.194T figures against what that journal has actually posted (MATCH / OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.</p>
 <p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>26AS workbook (Convert output)</b> <em>(required)</em> <span class="pa-tip" data-tip="The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs. ⚠️ Run 26AS Convert first; the picker only shows workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-26AS.xlsx.</span></li>
@@ -227,11 +227,11 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals.csv</code><span class="pa-tip" data-tip="One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.">ℹ️</span> — One balanced journal transaction per TDS entry (every transaction&#x27;s amounts sum to zero), debiting the TDS receivable / asset account and crediting the income account, ready for GnuCash CSV import.</li>
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-tds-journals-partI.csv</code><span class="pa-tip" data-tip="Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Review screen, so it can never go stale.">ℹ️</span> — Only written when the 26AS has 15G/15H (Part II) entries: the same journal with every 15G/15H transaction dropped whole. Import this instead of the full journal if you post 15G/15H entries by hand in GnuCash yourself, so the Interest-on-FD reclassification is not double-booked. Regenerated on every save from the Review screen, so it can never go stale.</li>
 </ul>
-<h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again. If the s.194T reconciliation reports OPEN, run &quot;Partner Comp Recon&quot; first, then re-run this skill — the expected order is bank, then Partner Comp Recon, then this skill.</p>
+<h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again. If the s.194T reconciliation reports OPEN, run &quot;Partner Compensation Reconciliation&quot; (GnuCash &gt; Partner) first, then re-run this skill — the expected order is bank, then Partner Compensation Reconciliation, then this skill.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
 <tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
-<tr><td>s.194T reconciliation shows OPEN or VARIANCE.</td><td>OPEN means the Partner Comp Recon journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal&#x27;s postings for those months before importing.</td></tr>
+<tr><td>s.194T reconciliation shows OPEN or VARIANCE.</td><td>OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal&#x27;s postings for those months before importing.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_gnucash_pipeline" class="skill">
@@ -324,7 +324,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <section id="skill_cc_sort" class="skill">
 <h2>Credit Card — Sort PDFs <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Takes a messy folder of credit-card statements and organises it: it pulls PDF attachments out of Outlook .msg emails, decrypts password-protected PDFs (via qpdf), and sorts everything by bank/issuer into a clean folder tree. Runs fully offline.</p>
-<p class="whenuse"><b>When to use it.</b> Use this as the first step when you have a pile of statement emails and PDFs from several cards. Once sorted, run &quot;CC Transactions&quot; on the decrypted folder to extract the actual transactions.</p>
+<p class="whenuse"><b>When to use it.</b> Use this as the first step when you have a pile of statement emails and PDFs from several cards. Once sorted, run &quot;Credit Card — Transactions&quot; on the decrypted folder to extract the actual transactions.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Input folder (MSG files and/or PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing your .msg emails and/or statement PDFs (subfolders are fine). ⚠️ Point at the folder itself, not an individual file.">ℹ️</span><br><span class="fmt">accepts: A folder of .msg and/or .pdf files.</span></li>
 <li><b>PDF password(s), comma-separated (or leave blank for auto-detect)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Password(s) for protected PDFs. Leave blank to auto-try common patterns. ⚠️ If decryption fails, supply the exact password here; auto-detect only covers common formats.">ℹ️</span><br><span class="fmt">accepts: Text — one password, or several comma-separated. Optional.</span></li>
@@ -338,9 +338,9 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <p>Written to <code>Data/outputs/</code>:</p>
 <pre>Data/outputs/YYYY-MM-DD-HHMMSS-CC-Sort/</pre>
 <ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)</code><span class="pa-tip" data-tip="Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into CC Transactions — alongside copies sorted by issuer. Use the &quot;Open output folder&quot; button to browse it.">ℹ️</span> — Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into CC Transactions — alongside copies sorted by issuer. Use the &quot;Open output folder&quot; button to browse it.</li>
+<li><code>YYYY-MM-DD-HHMMSS-CC-Sort/  (a folder)</code><span class="pa-tip" data-tip="Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into Credit Card — Transactions — alongside copies sorted by issuer. Use the &quot;Open output folder&quot; button to browse it.">ℹ️</span> — Contains Decrypted_PDFs_Correct/ — the unlocked, de-duplicated PDFs to feed into Credit Card — Transactions — alongside copies sorted by issuer. Use the &quot;Open output folder&quot; button to browse it.</li>
 </ul>
-<h3>Tips</h3><p>This step never reads transaction amounts; it only unlocks and organises. The folder it produces is the exact input the CC Transactions skill expects.</p>
+<h3>Tips</h3><p>This step never reads transaction amounts; it only unlocks and organises. The folder it produces is the exact input the Credit Card — Transactions skill expects.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>A PDF stays locked / is skipped.</td><td>Enter its password in the password box (comma-separate multiple) and re-run.</td></tr>
 <tr><td>Source-mode run fails on decryption.</td><td>qpdf must be on PATH in source mode; the frozen build bundles it.</td></tr>
@@ -348,13 +348,13 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </section>
 <section id="skill_cc_transactions" class="skill">
 <h2>Credit Card — Transactions <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Reads the organised credit-card PDFs from the CC Sort step and extracts every transaction table into one consolidated Excel workbook — one row per transaction across all cards. Runs fully offline.</p>
-<p class="whenuse"><b>When to use it.</b> Use this as the second step, right after &quot;CC Sort&quot;. It expects the decrypted, sorted folder that CC Sort produced, not raw statement files.</p>
+<p class="overview">Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every transaction table into one consolidated Excel workbook — one row per transaction across all cards. Runs fully offline.</p>
+<p class="whenuse"><b>When to use it.</b> Use this as the second step, right after &quot;Credit Card — Sort PDFs&quot;. It expects the decrypted, sorted folder that Credit Card — Sort PDFs produced, not raw statement files.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>Organized PDFs folder (Decrypted_PDFs_Correct/ from CC Sort)</b> <em>(required)</em> <span class="pa-tip" data-tip="The Decrypted_PDFs_Correct/ folder created by CC Sort. ⚠️ Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder.">ℹ️</span><br><span class="fmt">accepts: A folder of decrypted statement PDFs.</span></li>
+<li><b>Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs. ⚠️ Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder.">ℹ️</span><br><span class="fmt">accepts: A folder of decrypted statement PDFs.</span></li>
 </ul>
 <h3>How to run</h3><ol>
-<li>Run CC Sort first if you have not already.</li>
+<li>Run Credit Card — Sort PDFs first if you have not already.</li>
 <li>Select the Decrypted_PDFs_Correct/ folder.</li>
 <li>Click Run and download the Excel.</li>
 </ol>
@@ -366,7 +366,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </ul>
 <h3>Tips</h3><p>Because the PDFs are already grouped by issuer, the consolidated sheet keeps cards together — handy for per-card filtering in Excel.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Few or no transactions extracted.</td><td>You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from CC Sort.</td></tr>
+<tr><td>Few or no transactions extracted.</td><td>You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_summarize" class="skill">

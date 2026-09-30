@@ -7,7 +7,7 @@ Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Exc
 
 ## When to use it
 
-Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run "26AS Journal" on the workbook this produces. Do not use it for AIS or TIS — those are different documents.
+Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run "Convert to GnuCash" (GnuCash > 26AS > Convert to GnuCash) on the workbook this produces. Do not use it for AIS or TIS — those are different documents.
 
 ## Inputs
 
