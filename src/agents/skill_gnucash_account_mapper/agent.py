@@ -878,6 +878,24 @@ def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float)
     return False
 
 
+def _direction_clash(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
+    """MAP-18: True if a keyword/smart/weak guess must be REJECTED because the
+    account's top-level type contradicts the row's cash-flow direction.
+    Reuses MAP-12's rules: `_direction_mismatch` (Income on an outflow,
+    Expenses on an inflow) plus, for a pure inflow, any top-level type outside
+    `_plausible_direction_prefixes` (so a deposit never lands on Liabilities or
+    Equity through a keyword). An outflow to Liabilities (repayment) is allowed.
+    Rows with both or neither amount are never clashes."""
+    if not account:
+        return False
+    if _direction_mismatch(account, deposit_amt, withdrawal_amt):
+        return True
+    if deposit_amt > 0 and withdrawal_amt == 0:
+        top = _strip_root(account).split(":", 1)[0]
+        return top not in _plausible_direction_prefixes(deposit_amt, withdrawal_amt)
+    return False
+
+
 def _plausible_direction_prefixes(deposit_amt: float, withdrawal_amt: float) -> Tuple[str, ...]:
     """Account top-level types considered structurally plausible for a row's
     cash-flow direction, used only to TOP UP a thin history-ranked shortlist
@@ -2635,6 +2653,8 @@ def run(
     smart_mapped_count = 0
     weak_mapped_count = 0
     llm_mapped_count = 0
+    direction_clash_log: Dict[int, str] = {}   # MAP-18: row index -> Suspense reason
+    direction_clash_count = 0
     llm_withheld: Dict[int, str] = {}   # MAP-14: row index -> own account the LLM proposed
 
     # Re-read the mapped CSV and build the full account list unconditionally —
@@ -2660,6 +2680,17 @@ def run(
             match = smart_pattern_match(desc, account_list, withdrawal, deposit)
             if match is None and historical_pairs_for_llm:
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
+            if match is not None and match.get('account') and _direction_clash(
+                    match['account'], _safe_float(deposit), _safe_float(withdrawal)):
+                # MAP-18: same direction rule as MAP-12, now a REJECTION for
+                # the keyword/smart/weak guess. The row stays unmapped, is kept
+                # away from the AI pass, and lands in Suspense with this reason.
+                direction_clash_log[i] = (
+                    f"Direction clash: keyword match to '{_strip_root(match['account'])}' "
+                    f"rejected ({'money in' if _safe_float(deposit) > 0 else 'money out'} "
+                    f"contradicts the account type); review and reassign")
+                direction_clash_count += 1
+                match = None
             if match is not None:
                 # MAP-08: _historical_prefix_match's keyword fallback carries
                 # its own confidence='weak' — a scored-but-unscored-against-
@@ -2714,6 +2745,8 @@ def run(
             conf = row.get('Confidence', 'none')
             if (i - 1) in self_tie:
                 continue   # MAP-16
+            if (i - 1) in direction_clash_log:
+                continue   # MAP-18: rejected on direction, stays in Suspense
             if (conf in ('none', 'weak') or not acct) and conf not in ('smart', 'override'):
                 still_unmatched.append({
                     'row': i,
@@ -2849,6 +2882,8 @@ def run(
                     f"{len(self_tie[_ri])} accounts ("
                     + "; ".join(a.rsplit(':', 1)[-1] for a in self_tie[_ri])
                     + "); review and pick one")
+            elif _ri in direction_clash_log:
+                row['MatchReason'] = direction_clash_log[_ri]
             elif _ri in llm_withheld:
                 row['MatchReason'] = (
                     "Suspense — the AI suggested your own account "
