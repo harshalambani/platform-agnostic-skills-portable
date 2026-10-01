@@ -85,6 +85,8 @@ class Pacer:
         self._emit = emit
         self._lock = threading.Lock()
         self._next_slot = 0.0      # earliest epoch the next call may start
+        self._last_start = 0.0     # slot of the last call that actually started (0 = unknown)
+        self._waiting = 0          # calls in this process currently waiting for a slot
         self._day = ""
         self._count = 0
         self._loaded = False
@@ -96,8 +98,27 @@ class Pacer:
 
     def update(self, min_gap: float, daily_cap: int) -> None:
         with self._lock:
+            old_gap = self.min_gap
             self.min_gap = max(0.0, float(min_gap or 0))
             self.daily_cap = max(0, int(daily_cap or 0))
+            # MAP-25: a LOWERED gap must not leave a pending slot that was
+            # computed under the old, longer gap. Cap it at the last call that
+            # really started plus the new gap. A raised gap changes nothing
+            # (no call may start before the old slot). Skipped while a call in
+            # this process is still waiting on its reserved slot, and when the
+            # last start is unknown (older state file).
+            if self.min_gap < old_gap and not self._waiting:
+                self._load()
+                self._cap_pending_slot()
+
+    def _cap_pending_slot(self) -> None:
+        """MAP-25 (under the lock, state loaded): the gap is now shorter than the
+        one the pending slot was computed under -> cap it at last start + gap."""
+        if self._last_start > 0 and self._next_slot > self._clock():
+            capped = self._last_start + self.min_gap
+            if capped < self._next_slot:
+                self._next_slot = capped
+                self._save()
 
     # -- persistence ----------------------------------------------------
     def _path(self) -> Path:
@@ -112,8 +133,13 @@ class Pacer:
             self._day = str(data.get("day", ""))
             self._count = int(data.get("count", 0))
             self._next_slot = float(data.get("next_slot", 0.0))
+            self._last_start = float(data.get("last_start", 0.0))
+            saved_gap = float(data.get("gap", 0.0))
         except Exception:  # noqa: BLE001 - missing / corrupt state = fresh state
-            pass
+            return
+        # A previous run left a slot computed under a longer gap than today's.
+        if self.min_gap < saved_gap and not self._waiting:
+            self._cap_pending_slot()
 
     def _save(self) -> None:
         try:
@@ -123,7 +149,9 @@ class Pacer:
             except Exception:  # noqa: BLE001
                 allstate = {}
             allstate[self.key] = {"day": self._day, "count": self._count,
-                                  "next_slot": self._next_slot}
+                                  "next_slot": self._next_slot,
+                                  "last_start": self._last_start,
+                                  "gap": self.min_gap}
             p.parent.mkdir(parents=True, exist_ok=True)
             tmp = p.with_name(p.name + ".tmp")
             tmp.write_text(json.dumps(allstate), encoding="utf-8")
@@ -156,6 +184,8 @@ class Pacer:
         self._count += 1
         slot = max(now, self._next_slot)
         self._next_slot = slot + self.min_gap
+        if slot <= now:
+            self._last_start = slot          # starts immediately
         self._save()
         return slot
 
@@ -168,9 +198,12 @@ class Pacer:
             raise PacingCancelled("Stopped by user before the next AI call.")
         with self._lock:
             slot = self._reserve(self._clock())
+            reserved_next = self._next_slot
         wait = slot - self._clock()
         if wait <= 0:
             return
+        with self._lock:
+            self._waiting += 1
         if wait > 1.0:
             self._emit(f"next AI call at {_fmt_clock(slot)} (in {wait:.0f}s) "
                        f"- gap {self.min_gap:.0f}s between calls on {self.key}")
@@ -178,11 +211,19 @@ class Pacer:
         while True:
             if self._cancel():
                 with self._lock:            # the call never happened: hand back its count
+                    self._waiting = max(0, self._waiting - 1)
                     self._count = max(0, self._count - 1)
+                    # MAP-25: ...and its slot. Only if nobody reserved after us.
+                    if self._next_slot == reserved_next:
+                        self._next_slot = slot
                     self._save()
                 raise PacingCancelled("Stopped by user while waiting for the next AI call.")
             remaining = slot - self._clock()
             if remaining <= 0:
+                with self._lock:
+                    self._waiting = max(0, self._waiting - 1)
+                    self._last_start = max(self._last_start, slot)
+                    self._save()
                 return
             if self._clock() - last_remind >= _REMIND_SECONDS:
                 last_remind = self._clock()
