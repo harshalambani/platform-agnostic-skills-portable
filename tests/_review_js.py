@@ -23,7 +23,7 @@ def have_node() -> bool:
 _FAKE_DOM = r"""
 function mkEl(tag) {
   const e = {
-    tag, children: [], dataset: {}, style: {}, value: '', title: '',
+    tag, tagName: String(tag).toUpperCase(), children: [], dataset: {}, style: {}, value: '', title: '',
     className: '', textContent: '', _h: '', onclick: null,
     classList: {
       _s: new Set(),
@@ -31,8 +31,26 @@ function mkEl(tag) {
       contains(c) { return this._s.has(c); },
     },
     appendChild(c) { this.children.push(c); return c; },
-    querySelectorAll() { return []; }, querySelector() { return null; },
-    addEventListener() {}, closest() { return null; }, focus() {},
+    querySelectorAll() { return []; },
+    // only the one selector the engine uses to find a filter box
+    querySelector(sel) {
+      const m = /\.filter-row input\[data-col="(.*)"\]/.exec(sel);
+      if (!m) return null;
+      for (const row of this.children) {
+        if (row.className !== 'filter-row') continue;
+        for (const td of row.children)
+          for (const i of td.children) if (i.dataset.col === m[1]) return i;
+      }
+      return null;
+    },
+    contains(x) {
+      if (x === this) return true;
+      return this.children.some(c => c.contains && c.contains(x));
+    },
+    addEventListener() {}, closest() { return null; },
+    focus() { document.activeElement = this; },
+    blur() { if (document.activeElement === this) document.activeElement = null; },
+    setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; },
   };
   Object.defineProperty(e, 'innerHTML', {
     get() { return this._h; },
@@ -45,6 +63,7 @@ globalThis.document = {
   getElementById(id) { return _els[id] || (_els[id] = mkEl('div')); },
   createElement(t) { return mkEl(t); },
   addEventListener() {}, querySelectorAll() { return []; },
+  activeElement: null,
 };
 globalThis.window = globalThis;
 globalThis.alert = function () {};
@@ -69,6 +88,20 @@ function select(app, idx) {
 }
 function applySel(app) { $id(app + '-apply-sel').onclick(); }
 function setStatus(app, v) { $id(app + '-status').onchange({ target: { value: v } }); }
+function filterBox(app, col) {
+  return $id(app + '-thead').querySelector('.filter-row input[data-col="' + col + '"]');
+}
+// the user types `text` into a filter box: it has focus, value changes, oninput fires
+function typeIn(app, col, text) {
+  const i = filterBox(app, col);
+  i.focus(); i.value = text; i.selectionStart = i.selectionEnd = text.length; i.oninput();
+}
+// the user clicks somewhere that is not a filter box (focus leaves it)
+function clickAway() { document.activeElement = null; }
+function focusedCol() {
+  const a = document.activeElement;
+  return a && a.dataset && a.dataset.col ? a.dataset.col : null;
+}
 function payload(varName) { return JSON.parse(globalThis[varName]); }
 """
 

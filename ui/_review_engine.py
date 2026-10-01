@@ -230,8 +230,13 @@ _CSS = r"""
 #%%APP%%-app .stats { font-size: 11px; color: #999; padding: 4px 0; }
 
 #%%APP%%-app table { width: 100%; border-collapse: collapse; table-layout: auto; }
+/* UI-08: the title row and the filter row stick together as ONE block (sticky on
+   thead, opaque, above the body rows) so the filters never scroll away. */
+#%%APP%%-app thead {
+  position: sticky; top: 0; z-index: 3; background: #1a1a1a;
+  box-shadow: 0 2px 0 #444;
+}
 #%%APP%%-app thead th {
-  position: sticky; top: 0; z-index: 2;
   background: #1e1e1e; color: #ccc; border-bottom: 2px solid #444;
   padding: 6px 8px; text-align: left; font-size: 12px;
   cursor: pointer; user-select: none; white-space: nowrap;
@@ -396,7 +401,6 @@ _BODY = r"""
   let lastClickIdx = null;
   let statusFilter = '';
   let colFilters = {};
-  let activeFilterCol = null;
   let sortCol = %%DEFAULT_SORT_JSON%%;
   let sortAsc = true;
 
@@ -520,6 +524,15 @@ _BODY = r"""
     const thead = $('thead');
     const tbody = $('tbody');
 
+    // UI-08: give focus back to a filter box ONLY if one had it when this render
+    // began (i.e. the user is typing in it). No sticky marker: a row click, Apply
+    // or a sort after typing never pulls the cursor back into a filter.
+    const ae = document.activeElement;
+    let refocus = null;
+    if (ae && ae.tagName === 'INPUT' && thead.contains(ae) && ae.dataset && ae.dataset.col) {
+      refocus = { col: ae.dataset.col, s: ae.selectionStart, e: ae.selectionEnd };
+    }
+
     thead.innerHTML = '<tr>' + COLS.map(c =>
       '<th data-col="' + esc(c.key) + '">' + esc(c.label) +
       (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
@@ -543,7 +556,7 @@ _BODY = r"""
       inp.placeholder = '⌕';
       inp.dataset.col = c.key;
       inp.value = colFilters[c.key] || '';
-      inp.oninput = () => { colFilters[c.key] = inp.value; activeFilterCol = c.key; renderTable(); };
+      inp.oninput = () => { colFilters[c.key] = inp.value; renderTable(); };
       inp.onclick = (e) => e.stopPropagation();
       td.appendChild(inp);
       fRow.appendChild(td);
@@ -640,9 +653,13 @@ _BODY = r"""
       (edited ? ' | ' + edited + ' edited' : '') +
       (deleted ? ' | ' + deleted + ' deleted' : '');
 
-    if (activeFilterCol) {
-      const inp = thead.querySelector('.filter-row input[data-col="' + activeFilterCol + '"]');
-      if (inp) { inp.focus(); inp.selectionStart = inp.selectionEnd = inp.value.length; }
+    if (refocus) {
+      const inp = thead.querySelector('.filter-row input[data-col="' + refocus.col + '"]');
+      if (inp) {
+        inp.focus();
+        try { inp.setSelectionRange(refocus.s, refocus.e); }
+        catch (err) { inp.selectionStart = inp.selectionEnd = inp.value.length; }
+      }
     }
   }
 
