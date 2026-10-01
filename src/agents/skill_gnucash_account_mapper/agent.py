@@ -1826,6 +1826,34 @@ def _resolve_llm_endpoint_config(
     return provider, base_url, model, api_key, temperature
 
 
+# MAP-24: the reply cap. 120 tokens was too small for a model that reasons
+# before it answers (e.g. gpt-oss): the cap ran out before the answer. 300 leaves
+# a reasoning model room (with reasoning_effort "low" it needs well under 150)
+# while staying modest for a free tier (Groq free gpt-oss-120b: 8K tokens/minute,
+# 30 requests/minute). It is a ceiling, not a spend: a clean reply is one digit.
+LLM_REPLY_MAX_TOKENS = 300
+
+
+class _Reply(str):
+    """The message CONTENT of an AI reply (never a reasoning field), plus why
+    the model stopped (`finish_reason`: "stop", "length", ... or None when the
+    server did not say). A str subclass so every existing caller, and the
+    None-on-failure contract, is unchanged."""
+    finish_reason: Optional[str] = None
+
+    def __new__(cls, text: str, finish_reason: Optional[str] = None):
+        obj = super().__new__(cls, text)
+        obj.finish_reason = finish_reason
+        return obj
+
+
+def _wants_reasoning_effort(model: str) -> bool:
+    """Only gpt-oss models are sent `reasoning_effort` (Groq documents it for
+    GPT-OSS 20B/120B only). Never sent to any other model: an unrecognised field
+    can 400 on other OpenAI-compatible servers."""
+    return "gpt-oss" in (model or "").lower()
+
+
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
     """Call Ollama's /api/chat directly. Returns the assistant reply or None."""
     from urllib import request as _req
@@ -1837,7 +1865,7 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
             {"role": "user", "content": user},
         ],
         "stream": False,
-        "options": {"temperature": 0.0, "num_predict": 120},
+        "options": {"temperature": 0.0, "num_predict": LLM_REPLY_MAX_TOKENS},
     }).encode("utf-8")
 
     req = _req.Request(
@@ -1849,7 +1877,9 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
     try:
         with _req.urlopen(req, timeout=timeout) as resp:
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
-            return (body.get("message") or {}).get("content", "")
+            # Only message CONTENT counts; a "thinking" field is never the answer.
+            return _Reply((body.get("message") or {}).get("content") or "",
+                          body.get("done_reason"))
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
@@ -1876,16 +1906,19 @@ def _openai_compatible_chat(
     """
     from urllib import request as _req
 
-    payload = json.dumps({
+    body_out = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "temperature": 0.0,
-        "max_tokens": 120,
+        "max_tokens": LLM_REPLY_MAX_TOKENS,
         "stream": False,
-    }).encode("utf-8")
+    }
+    if _wants_reasoning_effort(model):
+        body_out["reasoning_effort"] = "low"
+    payload = json.dumps(body_out).encode("utf-8")
 
     headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
     if api_key:
@@ -1902,8 +1935,10 @@ def _openai_compatible_chat(
             body = json.loads(resp.read().decode("utf-8", errors="replace"))
             choices = body.get("choices") or []
             if not choices:
-                return ""
-            return (choices[0].get("message") or {}).get("content", "")
+                return _Reply("")
+            # Only message CONTENT counts; a "reasoning" field is never the answer.
+            return _Reply((choices[0].get("message") or {}).get("content") or "",
+                          choices[0].get("finish_reason"))
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
@@ -2216,6 +2251,23 @@ def _parse_shortlist_answer(reply: str, shortlist: List[str]) -> Tuple[str, Opti
     return "invalid", None
 
 
+def _parse_reply_with_cause(reply, shortlist: List[str]) -> Tuple[str, Optional[str], str]:
+    """MAP-24: `_parse_shortlist_answer` plus WHY an answer was unusable.
+
+    Returns (status, account, cause). cause is "" for matched/skip, else one of
+    "empty" (no content), "cut off" (the model hit the reply cap, finish_reason
+    "length"), "unparseable" (text that is not a list number). A reply cut off
+    by the cap is never parsed: a truncated answer cannot be trusted."""
+    finish = getattr(reply, "finish_reason", None)
+    text = (reply or "")
+    if finish == "length":
+        return "invalid", None, "cut off"
+    if not text.strip():
+        return "invalid", None, "empty"
+    status, acct = _parse_shortlist_answer(text, shortlist)
+    return status, acct, ("unparseable" if status == "invalid" else "")
+
+
 def llm_fallback_mapping(
     unmatched_rows: List[Dict],
     account_tree: List[str],
@@ -2281,6 +2333,8 @@ def llm_fallback_mapping(
     history_model = _build_history_token_model(historical_mappings) if historical_mappings else {}
 
     result: Dict[int, Dict] = {}
+    # MAP-24: how each row's final answer turned out (after the retry).
+    answer_counts = {"ok": 0, "skip": 0, "empty": 0, "cut off": 0, "unparseable": 0}
 
     for i, row in enumerate(unmatched_rows, 1):
         if guard.stopped:
@@ -2336,7 +2390,7 @@ def llm_fallback_mapping(
                 # an invalid answer -- it feeds the consecutive-failure rule.
                 _emit_mapper_progress("  -> no reply, leaving unmatched")
                 continue
-            status, matched_acct = _parse_shortlist_answer(reply, shortlist) if reply else ("invalid", None)
+            status, matched_acct, cause = _parse_reply_with_cause(reply, shortlist)
             guard.record_first_answer(status == "invalid")
 
             attempts = 0
@@ -2345,8 +2399,14 @@ def llm_fallback_mapping(
                 _emit_mapper_progress(f"  -> invalid answer, retrying ({attempts}/{LLM_MAX_RETRIES})…")
                 reply = guard.ask(provider, base_url, model, _LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt,
                                   api_key=api_key, timeout=_LLM_TIMEOUT_SECONDS)
-                status, matched_acct = _parse_shortlist_answer(reply, shortlist) if reply else ("invalid", None)
+                status, matched_acct, cause = _parse_reply_with_cause(reply, shortlist)
 
+            if status == "matched":
+                answer_counts["ok"] += 1
+            elif status == "skip":
+                answer_counts["skip"] += 1
+            else:
+                answer_counts[cause] += 1
             if status == "matched" and matched_acct:
                 reason = "LLM: matched"
                 if _direction_mismatch(matched_acct, deposit_amt, withdrawal_amt):
@@ -2357,7 +2417,7 @@ def llm_fallback_mapping(
                 _emit_mapper_progress(f"  -> SKIP")
                 result[row_num] = {"account": "", "reason": "LLM: skip"}
             else:
-                _emit_mapper_progress(f"  -> invalid answer after retry, leaving unmatched")
+                _emit_mapper_progress(f"  -> invalid answer after retry ({cause}), leaving unmatched")
             continue
 
         # No historical mappings — flat account-tree fallback, unchanged
@@ -2413,6 +2473,9 @@ def llm_fallback_mapping(
             'unattempted_rows': [r["row"] for r in unmatched_rows if r["row"] not in result],
         })
 
+    if historical_mappings and any(answer_counts.values()):
+        _emit_mapper_progress(
+            "AI answers: " + ", ".join(f"{n} {k}" for k, n in answer_counts.items()))
     matched = sum(1 for v in result.values() if v.get("account"))
     _emit_mapper_progress(f"LLM fallback complete: {matched}/{total} rows mapped")
     return result
