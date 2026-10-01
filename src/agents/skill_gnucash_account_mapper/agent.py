@@ -227,6 +227,9 @@ def _fuzzy_match_dividend(company_fragment: str, account_tree: List[str]) -> Opt
     return other_shares  # default for unrecognized dividend companies
 
 
+_SMART_SELF_CHEQUE_REASON = "Self cheque / cash withdrawal"
+
+
 def smart_pattern_match(
     description: str,
     account_tree: List[str],
@@ -393,7 +396,7 @@ def smart_pattern_match(
     if re.search(r'SELF[\s/]*(?:\d+[\s\-]*)?(?:\-\s*)?CHQ\s*PAID', desc_upper):
         for acct in account_tree:
             if acct.endswith(":Cash") or (":Cash and Bank:Cash" in acct):
-                return {"account": acct, "reason": "Self cheque / cash withdrawal"}
+                return {"account": acct, "reason": _SMART_SELF_CHEQUE_REASON}
 
     # 17. Cheque book charges
     if re.search(r'CH(EQUE|Q)\s*B(OO)?K\s*CH(RG|GS|ARGE)', desc_upper):
@@ -3066,6 +3069,17 @@ def run(
             withdrawal = row.get('Withdrawal', '')
             deposit = row.get('Deposit', '')
             match = smart_pattern_match(desc, account_list, withdrawal, deposit)
+            if (match is not None and match.get('account')
+                    and match.get('reason') != _SMART_SELF_CHEQUE_REASON
+                    and not _gate_own_target(
+                        desc, match['account'], _hist_own_vocab, _hist_own_targets)):
+                # MAP-23: a keyword rule (insurance, loan, bond, ...) can name a
+                # leaf word that an own bank/FD account also carries. The smart
+                # pass is now behind the same own-transfer gate as every other
+                # pass: refuse it, and the row goes on to the prefix pass, the
+                # AI pass or Suspense. (A SELF cheque is its own evidence: the
+                # narration says it is the owner's cash.)
+                match = None
             if match is None and historical_pairs_for_llm:
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
                 if match is not None and not _gate_own_target(
