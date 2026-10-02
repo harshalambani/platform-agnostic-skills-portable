@@ -102,6 +102,26 @@ function focusedCol() {
   const a = document.activeElement;
   return a && a.dataset && a.dataset.col ? a.dataset.col : null;
 }
+function filterCols(app) {
+  const row = $id(app + '-thead').children.find(r => r.className === 'filter-row');
+  return row.children.map(td => td.children[0].dataset.col);
+}
+// the X button inside a filter box's cell, or null (it only exists while the box has text)
+function filterX(app, col) {
+  const row = $id(app + '-thead').children.find(r => r.className === 'filter-row');
+  for (const td of row.children)
+    for (const b of td.children) if (b.dataset.clear === col) return b;
+  return null;
+}
+// the stats-line "N filters - Clear all" link
+function clearAllLink(app) { return $id(app + '-clear-all'); }
+function theadHtml(app) { return $id(app + '-thead')._h; }
+function pressEsc(app, col) {
+  const ev = { key: 'Escape', stopped: false, prevented: false,
+    stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+  filterBox(app, col).onkeydown(ev);
+  return ev;
+}
 function payload(varName) { return JSON.parse(globalThis[varName]); }
 """
 

@@ -299,6 +299,22 @@ _CSS = r"""
   background: #111; color: #ccc;
 }
 #%%APP%%-app thead .filter-row input:focus { border-color: #2563eb; outline: none; }
+/* UI-10: a filter box with text is marked (lighter blue border + tinted fill, so it
+   differs from the focus state, which is the darker blue border alone), carries an X
+   to empty it, and its column header gets a small mark. */
+#%%APP%%-app thead .filter-row td { position: relative; }
+#%%APP%%-app thead .filter-row input.has-text {
+  border-color: #60a5fa; background: #14233d; color: #e0e0e0; padding-right: 20px;
+}
+#%%APP%%-app thead .filter-row input.has-text:focus { border-color: #2563eb; }
+#%%APP%%-app thead .filter-row .f-clear {
+  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; padding: 0; line-height: 12px; font-size: 13px;
+  border: none; border-radius: 50%; background: transparent; color: #999; cursor: pointer;
+}
+#%%APP%%-app thead .filter-row .f-clear:hover { background: #333; color: #fff; }
+#%%APP%%-app thead th .filter-mark { margin-left: 4px; font-size: 11px; color: #60a5fa; }
+#%%APP%%-app .stats .clear-all { margin-left: 8px; color: #60a5fa; cursor: pointer; text-decoration: underline; }
 #%%APP%%-app thead .filter-row input::placeholder { color: #555; }
 
 #%%APP%%-app tbody tr {
@@ -382,6 +398,7 @@ _BODY = r"""
     %%STATUS_FILTER_HTML%%
     <span class="spacer"></span>
     <span class="stats" id="%%APP%%-stats"></span>
+    <a href="#" class="stats clear-all" id="%%APP%%-clear-all" style="display:none"></a>
   </div>
 
   <div class="toolbar">
@@ -439,6 +456,7 @@ _BODY = r"""
   let lastClickIdx = null;
   let statusFilter = '';
   let colFilters = {};
+  let focusAfter = null;   // UI-10: filter box to focus after the next render (X / Clear all)
   let sortCol = %%DEFAULT_SORT_JSON%%;
   let sortAsc = true;
 
@@ -557,6 +575,21 @@ _BODY = r"""
   }
   syncPayload();
 
+  // UI-10: empty the given column filter boxes and re-render. Only colFilters
+  // changes: the "Filter:" dropdown, the selection and pending changes are left alone.
+  // Focus lands in the (first) emptied box, never the grid or the page top.
+  function clearFilters(cols) {
+    cols.forEach(k => { colFilters[k] = ''; });
+    focusAfter = cols[0];
+    renderTable();
+  }
+  const clearAll = $('clear-all');
+  if (clearAll) clearAll.onclick = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const cols = Object.keys(colFilters).filter(k => colFilters[k]);
+    if (cols.length) clearFilters(cols);
+  };
+
   // ── Rendering ──
   function renderTable() {
     const thead = $('thead');
@@ -570,9 +603,12 @@ _BODY = r"""
     if (ae && ae.tagName === 'INPUT' && thead.contains(ae) && ae.dataset && ae.dataset.col) {
       refocus = { col: ae.dataset.col, s: ae.selectionStart, e: ae.selectionEnd };
     }
+    if (focusAfter) { refocus = { col: focusAfter, s: 0, e: 0 }; focusAfter = null; }
 
     thead.innerHTML = '<tr>' + COLS.map(c =>
-      '<th data-col="' + esc(c.key) + '">' + esc(c.label) +
+      '<th data-col="' + esc(c.key) + '"' + (colFilters[c.key] ? ' class="filtered"' : '') + '>' +
+      esc(c.label) +
+      (colFilters[c.key] ? '<span class="filter-mark" title="Filtered">⌕</span>' : '') +
       (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
       '</th>').join('') + '</tr>';
     thead.querySelectorAll('th').forEach(th => {
@@ -596,7 +632,26 @@ _BODY = r"""
       inp.value = colFilters[c.key] || '';
       inp.oninput = () => { colFilters[c.key] = inp.value; renderTable(); };
       inp.onclick = (e) => e.stopPropagation();
+      // UI-10: Esc empties THIS box only and goes no further (no other handler sees it).
+      inp.onkeydown = (e) => {
+        if (e.key !== 'Escape') return;
+        if (e.stopPropagation) e.stopPropagation();
+        if (!inp.value) return;
+        if (e.preventDefault) e.preventDefault();
+        clearFilters([c.key]);
+      };
+      if (inp.value) inp.className = 'has-text';
       td.appendChild(inp);
+      if (inp.value) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'f-clear';
+        x.title = 'Clear this filter';
+        x.textContent = '×';
+        x.dataset.clear = c.key;
+        x.onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); clearFilters([c.key]); };
+        td.appendChild(x);
+      }
       fRow.appendChild(td);
     });
     thead.appendChild(fRow);
@@ -690,6 +745,11 @@ _BODY = r"""
       (changed ? ' | ' + changed + ' changed' : '') +
       (edited ? ' | ' + edited + ' edited' : '') +
       (deleted ? ' | ' + deleted + ' deleted' : '');
+    if (clearAll) {
+      const nf = Object.keys(colFilters).filter(k => colFilters[k]).length;
+      clearAll.style.display = nf ? '' : 'none';
+      clearAll.textContent = nf ? nf + (nf === 1 ? ' filter' : ' filters') + ' · Clear all' : '';
+    }
 
     if (refocus) {
       const inp = thead.querySelector('.filter-row input[data-col="' + refocus.col + '"]');
