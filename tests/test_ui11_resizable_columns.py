@@ -200,7 +200,7 @@ def test_keys_are_namespaced_by_the_app_id_in_the_template():
 
 # ---- 3. one test per screen -----------------------------------------------------------
 
-def _assert_screen_has_resizing(html, app_id):
+    assert "%%APP%%" not in html                       # no unsubstituted placeholder (plain substring, no regex)
     assert re.findall(r"%%[A-Z_]*%%", html) == []
     assert "col-resizer" in html                       # handle CSS + markup in the init code
     assert 'id="%s-reset-widths"' % app_id in html
@@ -255,10 +255,13 @@ def test_itr_mapping_review_screen_has_resize_handles_and_reset(tmp_path):
         html = m._load_review_data("SYN-IND")
     _assert_screen_has_resizing(html, m.APP_ID)
     # the tag glossary is a reference panel, not a review grid: it must NOT be given handles
-    tail = html[html.find("glossary"):]
-    start = tail.find("<table")
-    if start != -1:
-        assert "col-resizer" not in tail[start:tail.find("</table>", start)]
+    g = html.find("glossary")
+    assert g != -1
+    start = html.find("<table", g)
+    assert start != -1
+    end = html.find("</table>", start)
+    assert end != -1
+    assert "col-resizer" not in html[start:end]
 
 
 # ---- 4. real mouse, real browser -------------------------------------------------------
