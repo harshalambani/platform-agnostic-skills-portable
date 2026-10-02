@@ -420,6 +420,15 @@ def _narration_pick(pool: list[tuple[str, str]], narrations: list[str]) -> str |
     return next(iter(votes)) if len(votes) == 1 else None
 
 
+def _balance_before(entries, start_date: str | None) -> float:
+    """IMP-12: the book balance of ``entries`` ((iso_date, value) splits) dated
+    STRICTLY BEFORE ``start_date`` (the statement's first date). With no
+    start_date there is no "before": the all-dates balance. The ONE place this
+    rule lives -- the evidence picker, the opening-balance comparison and the
+    opening-gap explanation all use it."""
+    return sum(v for d, v in entries if not start_date or (d and d < start_date))
+
+
 def _get_gnucash_account_balance(
     gnucash_file: str, bank_name: str, account_number: str | None = None,
     *, opening_balance: float | None = None, start_date: str | None = None,
@@ -459,7 +468,8 @@ def _get_gnucash_account_balance(
         {
             "found": bool,
             "account_name": str,
-            "balance": float,
+            "balance": float,              # ALL dates (the closing check's base)
+            "balance_before_start": float, # splits dated before start_date (IMP-12)
             "last_txn_date": str or None,  # YYYY-MM-DD
             "match_warning": str or None,
             "match_note": str or None,     # how an evidence pick was made
@@ -537,9 +547,13 @@ def _get_gnucash_account_balance(
         _guard = None
 
     def _result(found, name="", balance=0.0, last=None, warn=None, note=None,
-                ambiguous=False, refused=False, cands=None):
+                ambiguous=False, refused=False, cands=None, opening=None):
         return {
             "found": found, "account_name": name, "balance": balance,
+            # IMP-12: the book balance strictly before the statement's first date
+            # (== balance when no start_date was given). The OPENING comparison
+            # uses this; the closing check keeps the all-dates "balance".
+            "balance_before_start": balance if opening is None else opening,
             "last_txn_date": last,
             "match_warning": (f"{warn} {fallback_warning}".strip() if warn and fallback_warning
                               else (warn or fallback_warning)),
@@ -612,8 +626,7 @@ def _get_gnucash_account_balance(
         bal_hits = []
         if opening_balance is not None:
             for aid, full in pool:
-                bal = sum(v for d, v in splits_by_acc.get(aid, [])
-                          if not start_date or (d and d < start_date))
+                bal = _balance_before(splits_by_acc.get(aid, []), start_date)
                 if abs(bal - opening_balance) <= 0.02:
                     bal_hits.append((aid, full))
         n_id = _narration_pick(pool, narrations or [])
@@ -689,7 +702,8 @@ def _get_gnucash_account_balance(
     last_date = max((d for d, _v in entries if d), default=None)
 
     return _result(True, target_name, round(balance, 2), last_date,
-                   match_warning, match_note, cands=postable_paths)
+                   match_warning, match_note, cands=postable_paths,
+                   opening=round(_balance_before(entries, start_date), 2))
 
 
 def postable_bank_accounts(gnucash_file: str, bank_name: str) -> list[str]:
@@ -728,7 +742,8 @@ def _reconcile_opening_balance(
             "message": str,
             "rows_skipped": int,           # scenario A duplicates removed
             "filtered_rows": list[dict],   # rows after removing duplicates
-            "gnucash_balance": float,
+            "gnucash_balance": float,      # ALL dates: the closing check's base
+            "gnucash_opening_balance": float,  # strictly before the first date (IMP-12)
             "statement_opening": float,
         }
     """
@@ -787,13 +802,18 @@ def _reconcile_opening_balance(
         }
 
     gc_balance = gc["balance"]
+    # IMP-12: the statement's OPENING is a balance at its first date, so it is
+    # compared with the book as of just before that date -- not the all-dates
+    # balance, which already includes in-period entries (e.g. other-bank
+    # transfers IMP-11 sets aside) and would raise a false opening gap.
+    gc_open = gc.get("balance_before_start", gc_balance)
     gc_last_date = gc["last_txn_date"]
 
     # Derive statement opening balance
     oc = extract_opening_closing(canonical_rows)
     stmt_opening = oc["opening_balance"]
 
-    diff = abs(gc_balance - stmt_opening)
+    diff = abs(gc_open - stmt_opening)
     _mw = " ".join(x for x in (gc.get("match_warning"), gc.get("match_note")) if x) or None
 
     if diff <= 0.02:
@@ -802,11 +822,12 @@ def _reconcile_opening_balance(
             "ok": True,
             "message": (
                 f"Opening balance matches GnuCash: "
-                f"GnuCash={gc_balance:.2f}, Statement={stmt_opening:.2f}"
+                f"GnuCash={gc_open:.2f}, Statement={stmt_opening:.2f}"
             ),
             "rows_skipped": 0,
             "filtered_rows": canonical_rows,
             "gnucash_balance": gc_balance,
+            "gnucash_opening_balance": gc_open,
             "statement_opening": stmt_opening,
             "account_found": True,
             "match_warning": _mw,
@@ -854,6 +875,7 @@ def _reconcile_opening_balance(
                     "rows_skipped": skipped,
                     "filtered_rows": filtered,
                     "gnucash_balance": gc_balance,
+                    "gnucash_opening_balance": gc_balance,   # rows up to the book's last date were skipped
                     "statement_opening": new_oc["opening_balance"],
                     "account_found": True,
                     "match_warning": _mw,
@@ -864,7 +886,7 @@ def _reconcile_opening_balance(
         "ok": False,
         "message": (
             f"OPENING BALANCE MISMATCH: GnuCash ({gc['account_name']}) "
-            f"shows {gc_balance:.2f} but statement opens at {stmt_opening:.2f} "
+            f"shows {gc_open:.2f} before the statement's first date but statement opens at {stmt_opening:.2f} "
             f"(diff={diff:.2f}).\n"
             f"Possible causes: (B) prior statement entries were omitted, "
             f"or (C) there's a data error. Please investigate manually."
@@ -872,6 +894,7 @@ def _reconcile_opening_balance(
         "rows_skipped": 0,
         "filtered_rows": canonical_rows,
         "gnucash_balance": gc_balance,
+        "gnucash_opening_balance": gc_open,
         "statement_opening": stmt_opening,
         "account_found": True,
         "match_warning": _mw,
@@ -1440,10 +1463,12 @@ def run(
         if recon["ok"]:
             log_lines.append(f"**Balance check** — {recon['message']}")
         else:
-            unresolved_opening_gap = abs(recon["gnucash_balance"] - recon["statement_opening"])
+            unresolved_opening_gap = abs(
+                recon.get("gnucash_opening_balance", recon["gnucash_balance"])
+                - recon["statement_opening"])
             log_lines.append(
                 f"**Balance check** — ⚠ Opening balance gap detected "
-                f"(GnuCash={recon['gnucash_balance']:.2f}, "
+                f"(GnuCash before the statement={recon.get('gnucash_opening_balance', recon['gnucash_balance']):.2f}, "
                 f"statement={recon['statement_opening']:.2f}, diff={unresolved_opening_gap:.2f}). "
                 f"Dedup below will attempt to reconcile overlapping transactions; "
                 f"if it doesn't, this gap carries into the final verdict."

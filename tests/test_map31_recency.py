@@ -288,3 +288,104 @@ def test_extractor_adds_dates_and_keeps_frequency_and_last_date():
     assert entry["dates"] == ["2023-11-05", "2024-01-05", "2024-03-05"]
     assert len(entry["dates"]) == entry["frequency"]
     assert set(entry) == {"description", "account", "frequency", "last_date", "dates"}   # additive only
+
+
+# ------------------------------------------------ owner decision: never today
+
+import datetime as _dtmod  # noqa: E402
+import pytest  # noqa: E402
+
+
+def _freeze_today(monkeypatch, year):
+    real = _dtmod.date
+
+    class _Fake(real):
+        @classmethod
+        def today(cls):
+            return real(year, 1, 1)
+
+    monkeypatch.setattr(_dtmod, "date", _Fake)
+
+
+def _snapshot(tmp_path):
+    hist = [_hist(DESC, ACCT_A, _dates(date(2019, 1, 1), 30)),
+            _hist(DESC, ACCT_B, _dates(date(2025, 3, 1), 4))]
+    match, _ = _match(hist, STMT)
+    row = _rules_run(tmp_path, {"HSBC": [_rule(conf="high", last="2013-05-01", freq=50)]}, "2025-06-01")
+    ext = {"mappings": {"HSBC": [{"description": "UPI/ZZCAFE/zz@bank 1", "account": "Expenses:Dining",
+                                  "frequency": 8, "last_date": "2014-11-01"}]}}
+    gen_rule = gen.generate_rules(ext, min_freq=1, reference_date="2026-03-01")["HSBC"][0]
+    return (match, row["Confidence"], row["MatchReason"], gen_rule["confidence"], gen_rule["reason"])
+
+
+def test_results_are_identical_whatever_today_is(tmp_path, monkeypatch):
+    base = _snapshot(tmp_path)
+    for year in (2040, 2001):
+        _freeze_today(monkeypatch, year)
+        assert _snapshot(tmp_path) == base, year           # NEGATIVE: today never leaks in
+
+
+def test_statement_without_dates_has_no_reference_not_today(tmp_path):
+    cpath = tmp_path / "nodates.csv"
+    cpath.write_text("Date,Description,Deposit,Withdrawal\nnot-a-date,ZZ,,5\n", encoding="utf-8")
+    assert m._statement_end(str(cpath)) is None
+    assert m._statement_end(str(tmp_path / "missing.csv")) is None
+    assert m._period_end([{"Date": ""}, {"Date": "??"}]) is None
+
+
+def test_reference_falls_back_to_the_books_newest_transaction():
+    ext = {"mappings": {"HSBC": [
+        {"description": "a", "account": ACCT_A, "frequency": 2, "last_date": "2014-03-01",
+         "dates": ["2013-01-01", "2014-03-01"]},
+        {"description": "b", "account": ACCT_B, "frequency": 1, "last_date": "2015-02-10"}]}}
+    assert recency.newest_history_date(ext) == date(2015, 2, 10)
+    assert recency.newest_history_date({"mappings": {}}) is None
+    assert recency.newest_history_date(None) is None
+
+
+def test_generator_without_a_reference_uses_the_history_not_today(monkeypatch):
+    _freeze_today(monkeypatch, 2040)
+    ext = {"mappings": {"HSBC": [{
+        "description": "UPI/ZZCAFE/zz@bank 1", "account": "Expenses:Dining",
+        "frequency": 8, "last_date": "2014-11-01"}]}}
+    rule = gen.generate_rules(ext, min_freq=1)["HSBC"][0]
+    assert rule["confidence"] == "high"                    # NEGATIVE: not aged against 2040
+    assert "old rule" not in rule["reason"]
+    assert gen.recency_weight("2014-11-01") == 1.0         # no reference at all -> no decay
+    assert gen._reference(None) is None
+
+
+def test_mapping_with_unreadable_statement_dates_ages_from_the_newest_rule(tmp_path, monkeypatch):
+    _freeze_today(monkeypatch, 2040)
+    rules = {"HSBC": [_rule(conf="high", last="2014-11-01", freq=6)]}
+    row = _rules_run(tmp_path, rules, "not-a-date")
+    assert row["Confidence"] == "high"                     # NEGATIVE: not 'low' because of 2040
+    assert "old rule" not in row["MatchReason"]
+
+
+def test_no_dates_anywhere_means_no_decay(tmp_path, monkeypatch):
+    _freeze_today(monkeypatch, 2040)
+    r = _rule(conf="high", last="", freq=5)
+    r.pop("last_date")
+    row = _rules_run(tmp_path, {"HSBC": [r]}, "not-a-date")
+    assert row["Confidence"] == "high"
+    assert m._age_rule(r, None) is r                       # no reference: rule untouched
+
+
+def test_two_bookings_12_to_20_months_back_are_not_old():
+    hist = [_hist(DESC, ACCT_A, ["2024-06-01", "2024-09-20"])]    # ~19 and ~16 months before STMT
+    match, _ = _match(hist, STMT)
+    assert match is not None and match["confidence"] == "history"
+    assert "only old history" not in match["reason"]       # NEGATIVE: small decayed support is not "old"
+    assert "-> low" not in match["reason"]
+
+
+def test_newest_booking_over_five_years_back_is_still_only_old_history():
+    hist = [_hist(DESC, ACCT_A, ["2020-03-01", "2020-06-01", "2020-07-01"])]  # 5.5+ years
+    match, _ = _match(hist, STMT)
+    assert match is not None and match["confidence"] == "low"
+    assert "only old history" in match["reason"] and "last 2020" in match["reason"]
+
+
+def test_history_weight_constant_that_was_removed_is_gone():
+    assert not hasattr(recency, "HISTORY_MIN_WEIGHTED_SUPPORT")

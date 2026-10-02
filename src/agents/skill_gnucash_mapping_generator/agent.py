@@ -13,18 +13,32 @@ except ImportError:                    # pragma: no cover
     from recency import decay_weight, parse_date, rule_confidence
 
 
-def _reference(reference_date):
-    from datetime import date
-    return parse_date(reference_date) or date.today()
+def _reference(reference_date, mappings=None):
+    """The date recency is measured from: the caller's (the statement's last
+    row), else the newest transaction in the history given. NEVER today; None
+    means no decay at all."""
+    ref = parse_date(reference_date)
+    if ref is not None:
+        return ref
+    if mappings:
+        try:
+            from agents.recency import newest_history_date  # noqa: PLC0415
+        except ImportError:                # pragma: no cover
+            from recency import newest_history_date  # noqa: PLC0415
+        return newest_history_date({"mappings": mappings})
+    return None
 
 
 def recency_weight(last_date_str: str, reference_date=None) -> float:
     """MAP-31: exponential decay (half-life about 2 years) measured from the
-    STATEMENT date (``reference_date``; today only when none is given)."""
+    STATEMENT date (``reference_date``; the history's newest date when none is given; never today)."""
     last = parse_date(last_date_str)
     if last is None:
         return 0.2
-    return decay_weight((_reference(reference_date) - last).days)
+    ref = _reference(reference_date)
+    if ref is None:
+        return 1.0            # no reference date: no decay (never today)
+    return decay_weight((ref - last).days)
 
 def confidence_score(frequency: int, last_date: str, reference_date=None) -> float:
     """Compute confidence: frequency x recency_weight."""
@@ -96,9 +110,9 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3,
                         Default 3 for cross-bank; use 1 when filtering to
                         the importing bank (every historical txn is relevant).
         reference_date: MAP-31 -- the statement date recency is measured from
-                        (today only when omitted).
+                        (newest history date when omitted; never today).
     """
-    ref = _reference(reference_date)
+    ref = _reference(reference_date, extractor_json.get('mappings'))
     rules = {
         '_global': [],
         'ICICI': [],
@@ -173,7 +187,10 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3,
             # MAP-31(d): the label comes from frequency x decayed recency, then is
             # capped by the age of the last booking (a 2012 rule with 50 hits is
             # not 'high'). Unparseable last_date -> the score alone decides.
-            confidence_level, _score, _old = rule_confidence(frequency, last_date, ref)
+            if ref is None:
+                confidence_level, _score, _old = None, None, None   # no decay, no age caps
+            else:
+                confidence_level, _score, _old = rule_confidence(frequency, last_date, ref)
             if confidence_level is None:
                 confidence_level = 'high' if conf > 0.8 else 'medium' if conf > 0.5 else 'low'
 

@@ -16,8 +16,7 @@ from typing import Optional
 HALF_LIFE_DAYS = 365          # a booking this old counts half (see note: 4 recent must beat 30 old)
 RULE_HIGH_MAX_YEARS = 2       # a rule needs a last_date this recent to be 'high'
 RULE_MEDIUM_MAX_YEARS = 5     # up to here a rule caps at 'medium'; older is 'low'
-HISTORY_MIN_WEIGHTED_SUPPORT = 1.0   # below this decayed support, history is "old"
-HISTORY_OLD_YEARS = 5         # newest supporting booking older than this is "old"
+HISTORY_OLD_YEARS = 5         # newest supporting booking older than this (before the reference) is "old"
 
 _DATE_FORMATS = ("%Y-%m-%d", "%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%d/%m/%y", "%d-%m-%y")
 
@@ -109,3 +108,18 @@ def rule_confidence(frequency, last_date, reference: date):
 def min_level(a: str, b: str) -> str:
     """The weaker of two labels (never promotes)."""
     return a if _LEVEL_RANK.get(a, 99) >= _LEVEL_RANK.get(b, 99) else b
+
+
+def newest_history_date(extractor_output) -> Optional[date]:
+    """The newest transaction date in the book history being used (extractor
+    output: {"mappings": {bank: [ {last_date, dates}, ...]}}). This is the
+    fallback reference when the statement has no parseable date. It is NEVER
+    today: with no dates at all the answer is None and callers apply no decay."""
+    best = None
+    for rows in ((extractor_output or {}).get("mappings") or {}).values():
+        for m in rows or []:
+            for raw in list(m.get("dates") or []) + [m.get("last_date")]:
+                d = parse_date(raw)
+                if d is not None and (best is None or d > best):
+                    best = d
+    return best

@@ -877,11 +877,12 @@ def _history_bayes_score(
         if raw_best is not None and raw_best[0] and raw_best[0][0][1] != best_acct:
             reason += "; recent bookings outweigh older ones"
         if newest is not None:
-            from agents.recency import (  # noqa: PLC0415
-                HISTORY_MIN_WEIGHTED_SUPPORT, HISTORY_OLD_YEARS, parse_date, years_before)
+            from agents.recency import HISTORY_OLD_YEARS, years_before  # noqa: PLC0415
             ref = getattr(model, 'reference', None)
-            old = (wsup < HISTORY_MIN_WEIGHTED_SUPPORT
-                   or (ref is not None and newest < years_before(ref, HISTORY_OLD_YEARS)))
+            # owner decision: "old" is judged by AGE alone (newest supporting
+            # booking vs the latest transaction), never by how small the decayed
+            # support is.
+            old = ref is not None and newest < years_before(ref, HISTORY_OLD_YEARS)
             if old:
                 n = int(support.get(best_acct, 0))
                 reason += f"; only old history ({n} txns, last {newest.year}) -> low"
@@ -3105,6 +3106,58 @@ def find_drawings_account(account_paths) -> Optional[str]:
     return next(iter(hits)) if len(hits) == 1 else None
 
 
+# ---- built-in "ATM cash -> Cash" rule (money out only) ---------------------------------
+# One list, one comment per bank. Only forms the repo's own parsers or fixtures show;
+# HDFC / SBM forms are deliberately NOT guessed.
+_CASH_WITHDRAWAL_PATTERNS = (
+    # HSBC: "ATM CASH W/D ..." (and the unslashed "W D" spelling)
+    ("HSBC", re.compile(r'^ATM\s+CASH\s+W\s*/?\s*D\b', re.IGNORECASE)),
+    # ICICI: "CASH WDL/..." as the ICICI parser emits it, and the raw
+    # "CAM/<code>/CASH WDL/..." form
+    ("ICICI", re.compile(r'^(?:CAM/[^/]*/)?CASH\s+WDL\b', re.IGNORECASE)),
+    # BoB: "ATM CASH WDL" (the BoB parser fixture)
+    ("BoB", re.compile(r'^ATM\s+CASH\s+WDL\b', re.IGNORECASE)),
+)
+_CASH_RULE_REASON = "built-in: ATM cash withdrawal -> {account}"
+_CASH_RULE_NO_TARGET = ("Suspense - ATM cash withdrawal, but the built-in cash rule did not fire: "
+                        "{why}; review and reassign")
+
+
+def _is_cash_withdrawal(description: str, deposit_amt: float, withdrawal_amt: float) -> bool:
+    """Money OUT only, and only the listed narration forms. ATM *transfer*
+    fees, cash-back credits and reversals (money in) never qualify."""
+    if not (withdrawal_amt > 0 and deposit_amt == 0):
+        return False
+    d = (description or '').strip()
+    return any(rx.search(d) for _bank, rx in _CASH_WITHDRAWAL_PATTERNS)
+
+
+def find_cash_account(accounts) -> Tuple[Optional[str], str]:
+    """The single postable account of GnuCash type CASH: not hidden (itself or
+    through an ancestor), not a placeholder. (path, '') or (None, why) when there
+    are none or several -- never guessed between."""
+    accs = [a for a in (accounts or ()) if not getattr(a, 'is_root', False)]
+    try:
+        from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
+        guard = TargetGuard(accs)
+    except Exception:  # noqa: BLE001
+        guard = None
+    ok = []
+    for a in accs:
+        if str(getattr(a, 'type', '')).upper() != 'CASH':
+            continue
+        if guard is not None and guard.blocked_target_reason(a.path):
+            continue
+        if 'hidden' in a.special_flags or 'placeholder' in a.special_flags:
+            continue
+        ok.append(a.path)
+    if len(ok) == 1:
+        return _strip_root(ok[0]), ''
+    if not ok:
+        return None, "no usable CASH account in the book"
+    return None, f"{len(ok)} CASH accounts in the book, will not guess between them"
+
+
 _RULE_DATE_FORMATS = ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d-%b-%Y', '%d %b %Y',
                       '%d/%m/%y', '%d-%b-%y', '%Y/%m/%d')
 
@@ -3121,20 +3174,20 @@ def _parse_any_date(text: str):
 
 
 def _period_end(canonical_rows: List[Dict]):
-    """The statement period's last date (max row date); today if none parse."""
-    from datetime import date as _date  # noqa: PLC0415
+    """The statement period's last date (max row date); None if none parse.
+    NEVER today (MAP-31): a missing reference means the caller falls back to the
+    book's newest transaction, or applies no decay at all."""
     dates = [d for d in (_parse_any_date(r.get('Date', '')) for r in canonical_rows) if d]
-    return max(dates) if dates else _date.today()
+    return max(dates) if dates else None
 
 
 def _statement_end(canonical_csv: str):
-    """MAP-31: the last row date of the canonical CSV (today if none parse)."""
+    """MAP-31: the last row date of the canonical CSV (None if none parse)."""
     try:
         with open(canonical_csv, 'r', encoding='utf-8', errors='replace') as f:
             return _period_end(list(csv.DictReader(f)))
     except OSError:
-        from datetime import date as _date  # noqa: PLC0415
-        return _date.today()
+        return None
 
 
 def _age_rule(rule: Dict, period_end) -> Dict:
@@ -3146,6 +3199,8 @@ def _age_rule(rule: Dict, period_end) -> Dict:
     wins) and never touches the rules file: a copy is returned. A rule without a
     parseable last_date is left alone."""
     from agents.recency import min_level, rule_confidence  # noqa: PLC0415
+    if period_end is None:
+        return rule        # no reference date at all: no decay, never today
     stored = rule.get('confidence', 'medium')
     if stored in ('none',):
         return rule
@@ -3176,6 +3231,7 @@ def map_accounts(
     bank_key: Optional[str] = None,
     owner_tokens: Optional[set] = None,
     cashback_account: Optional[str] = None,
+    reference_date=None,
 ) -> Dict:
     """
     Apply mapping rules to canonical CSV.
@@ -3226,7 +3282,15 @@ def map_accounts(
 
     # MAP-31(d): recompute each rule's confidence from frequency x recency,
     # measured from the statement (subsumes the MAP-28(a) 10-year cap).
-    period_end = _period_end(canonical_rows)
+    from agents.recency import parse_date as _pd  # noqa: PLC0415
+    period_end = _period_end(canonical_rows) or _pd(reference_date)
+    if period_end is None:
+        # No parseable statement date: the newest saved-rule date stands in for
+        # "the latest transaction". Never today.
+        _lasts = [d for d in (_pd(r.get('last_date')) for r in all_rules) if d]
+        period_end = max(_lasts) if _lasts else None
+    if period_end is None:
+        print("[mapper] recency skipped: no statement or history dates (no decay applied)")
     all_rules = [_age_rule(r, period_end) for r in all_rules]
 
     confidence_order = {'high': 0, 'medium': 1, 'low': 2, 'none': 3}
@@ -3395,6 +3459,14 @@ def run(
     # that split is treated as the definitive source.
     extractor_output = parse_gnucash_file(gnucash_file, gnucash_bank_account=gnucash_bank_account)
 
+    # MAP-31: the reference is the statement's last row; with none parseable it
+    # is the newest transaction in this book's history. NEVER today.
+    if _stmt_ref is None:
+        from agents.recency import newest_history_date  # noqa: PLC0415
+        _stmt_ref = newest_history_date(extractor_output)
+    if _stmt_ref is None:
+        _emit_mapper_progress("recency skipped: no statement or history dates (no decay applied)")
+
     # Collect ALL account paths (all banks) before filtering — needed for LLM fallback
     all_account_paths = set()
     for bank_maps in extractor_output.get('mappings', {}).values():
@@ -3544,7 +3616,8 @@ def run(
     _cashback_acct = find_drawings_account(all_account_paths)
     result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path),
                           overrides=overrides, bank_key=bank_key,
-                          owner_tokens=_owner_tokens, cashback_account=_cashback_acct)
+                          owner_tokens=_owner_tokens, cashback_account=_cashback_acct,
+                          reference_date=_stmt_ref)
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 
@@ -3674,6 +3747,45 @@ def run(
     with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
         mapped_rows = list(csv.DictReader(f))
     account_list = sorted(all_account_paths)
+
+    # --- Step 4.0: built-in "ATM cash -> Cash" rule (medium) ---
+    # Fires ONLY where nothing better than LOW matched: a medium/high saved rule or
+    # a history match already settled the row and wins; an aged-to-low old rule
+    # loses to this. Money out only; the single non-hidden, non-placeholder CASH
+    # account is the target, otherwise the row stays Suspense and says why.
+    cash_rule_log: Dict[int, str] = {}
+    _cash_target: Optional[str] = None
+    _cash_checked = False
+    for _ci, row in enumerate(mapped_rows):
+        if (row.get('Confidence') or 'none') not in ('none', 'low'):
+            continue
+        if _is_cashback_reason(row.get('MatchReason', '')) or _ci in self_tie:
+            continue
+        _cd = row.get('Description') or row.get('Narration') or ''
+        _cdep = _safe_float(row.get('Deposit', ''))
+        _cwd = _safe_float(row.get('Withdrawal', ''))
+        if not _is_cash_withdrawal(_cd, _cdep, _cwd):
+            continue
+        if not _cash_checked:
+            _cash_checked = True
+            try:
+                from agents.gnucash_accounts import load_accounts  # noqa: PLC0415
+                _cash_target, _cash_why = find_cash_account(load_accounts(gnucash_file))
+            except Exception as e:  # noqa: BLE001
+                _cash_target, _cash_why = None, f"the book's accounts could not be read ({e})"
+        if not _cash_target:
+            cash_rule_log[_ci] = _CASH_RULE_NO_TARGET.format(why=_cash_why)
+            continue
+        if _direction_clash(_cash_target, _cdep, _cwd):
+            continue   # MAP-18 (cannot happen for an asset target; kept as the stated guard)
+        _prev = row.get('Confidence') or 'none'
+        row['Account'] = _cash_target
+        row['Confidence'] = 'medium'
+        row['MatchReason'] = _CASH_RULE_REASON.format(account=_cash_target)
+        _cc = result['confidence_counts']
+        if _cc.get(_prev, 0) > 0:
+            _cc[_prev] -= 1
+        _cc['medium'] = _cc.get('medium', 0) + 1
 
     if unmatched_count > 0:
         # --- Step 4a: Smart pattern pass (deterministic, no LLM) ---
@@ -4007,6 +4119,8 @@ def run(
                 row['MatchReason'] = own_contradicted[_ri]
             elif _ri in direction_clash_log:
                 row['MatchReason'] = direction_clash_log[_ri]
+            elif _ri in cash_rule_log:
+                row['MatchReason'] = cash_rule_log[_ri]
             elif _ri in llm_stopped_rows:
                 row['MatchReason'] = (
                     f"Suspense - {_LLM_STOPPED_MARKER}: {llm_stop_reason}; "
