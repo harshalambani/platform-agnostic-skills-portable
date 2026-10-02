@@ -703,17 +703,57 @@ def _tokenize_history(text: str) -> List[str]:
     return tokens
 
 
-def _build_history_token_model(historical_mappings: List[Dict]) -> Dict[str, Dict[str, int]]:
-    """token -> {account: distinct-historical-transaction-count}."""
-    model: Dict[str, Dict[str, int]] = {}
+class _HistoryModel(dict):
+    """token -> {account: weight}. MAP-31: the weight is the DECAYED count (a
+    booking contributes w(age) instead of 1); ``raw`` keeps the plain counts
+    (the support threshold stays on these) and ``newest`` the latest booking
+    date per token/account. A plain dict (a legacy / hand-built model) has
+    neither and behaves exactly as before."""
+    raw: Dict[str, Dict[str, float]]
+    newest: Dict[str, Dict[str, object]]
+    reference: object = None
+
+
+def _build_history_token_model(historical_mappings: List[Dict],
+                               reference_date=None) -> Dict[str, Dict[str, float]]:
+    """token -> {account: decayed-historical-transaction-weight}.
+
+    MAP-31: when a mapping carries per-occurrence ``dates`` (the extractor's
+    additive field) each occurrence weighs 0.5 ** (age / half-life), age
+    measured from ``reference_date`` (the statement being imported; dates after
+    it weigh 1.0). A mapping without ``dates`` -- legacy extractor output, a
+    saved fixture -- weighs its ``frequency``, exactly as before."""
+    from agents.recency import parse_date, weight_at  # noqa: PLC0415
+    ref = parse_date(reference_date) if reference_date is not None else None
+    model = _HistoryModel()
+    model.raw = {}
+    model.newest = {}
+    model.reference = ref
     for m in historical_mappings:
         acct = m.get('account')
         if not acct:
             continue
         freq = m.get('frequency', 1)
+        dates = m.get('dates')
+        newest = None
+        if dates and ref is not None:
+            parsed = [d for d in (parse_date(x) for x in dates) if d is not None]
+            if parsed:
+                weight = sum(weight_at(d, ref) for d in parsed)
+                newest = max(parsed)
+            else:
+                weight = freq
+        else:
+            weight = freq
         for tok in set(_tokenize_history(m.get('description', ''))):
             bucket = model.setdefault(tok, {})
-            bucket[acct] = bucket.get(acct, 0) + freq
+            bucket[acct] = bucket.get(acct, 0) + weight
+            rb = model.raw.setdefault(tok, {})
+            rb[acct] = rb.get(acct, 0) + freq
+            if newest is not None:
+                nb = model.newest.setdefault(tok, {})
+                if acct not in nb or newest > nb[acct]:
+                    nb[acct] = newest
     return model
 
 
@@ -762,6 +802,7 @@ def _history_bayes_raw(
     discriminating: Dict[str, set] = {}
 
     n_accounts = _model_account_count(model)
+    raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
     for tok in tokens:
         acct_counts = model.get(tok)
         if not acct_counts:
@@ -782,7 +823,7 @@ def _history_bayes_raw(
             # "distinct transactions" floor below. The largest per-token
             # count is the right lower-bound estimate of how many distinct
             # historical transactions actually back this account.
-            support[acct] = max(support.get(acct, 0), cnt)
+            support[acct] = max(support.get(acct, 0), (raw_model.get(tok) or {}).get(acct, cnt))
             if spread <= HISTORY_MAX_TOKEN_SPREAD:
                 discriminating.setdefault(acct, set()).add(tok)
 
@@ -827,11 +868,45 @@ def _history_bayes_score(
         return None
 
     tokens_used = ', '.join(sorted(discriminating[best_acct])) or 'combined evidence'
+    reason = f"History match ({tokens_used})"
+    confidence = "history"
+    if getattr(model, 'newest', None):
+        # MAP-31: say so when recency changed the answer or capped it.
+        wsup, newest = _history_recency_info(tokens, model, best_acct)
+        raw_best = _history_bayes_raw(tokens, model.raw)
+        if raw_best is not None and raw_best[0] and raw_best[0][0][1] != best_acct:
+            reason += "; recent bookings outweigh older ones"
+        if newest is not None:
+            from agents.recency import (  # noqa: PLC0415
+                HISTORY_MIN_WEIGHTED_SUPPORT, HISTORY_OLD_YEARS, parse_date, years_before)
+            ref = getattr(model, 'reference', None)
+            old = (wsup < HISTORY_MIN_WEIGHTED_SUPPORT
+                   or (ref is not None and newest < years_before(ref, HISTORY_OLD_YEARS)))
+            if old:
+                n = int(support.get(best_acct, 0))
+                reason += f"; only old history ({n} txns, last {newest.year}) -> low"
+                confidence = "low"
     return {
         "account": best_acct,
-        "reason": f"History match ({tokens_used})",
-        "confidence": "history",
+        "reason": reason,
+        "confidence": confidence,
     }
+
+
+def _history_recency_info(tokens: set, model, acct: str):
+    """(decayed support, newest booking date) behind ``acct`` for these tokens;
+    the same per-token MAX rule as the raw support (one booking is not counted
+    once per token)."""
+    wsup = 0.0
+    newest = None
+    for tok in tokens:
+        w = (model.get(tok) or {}).get(acct)
+        if w is not None and w > wsup:
+            wsup = w
+        n = (model.newest.get(tok) or {}).get(acct)
+        if n is not None and (newest is None or n > newest):
+            newest = n
+    return wsup, newest
 
 
 def _history_shortlist_accounts(
@@ -1047,8 +1122,9 @@ def _self_transfer_candidates(
     total_mass = 0
     asset_mass = 0
     tokens_with_evidence = 0
+    _counts = getattr(model, 'raw', None) or model   # MAP-31: a shape test, not recency
     for tok in plain_tokens:
-        acct_counts = model.get(tok)
+        acct_counts = _counts.get(tok)
         if not acct_counts:
             continue
         tokens_with_evidence += 1
@@ -1176,11 +1252,14 @@ def _literal_bank_code_match(
         # compare on `_strip_root`-normalized names on both sides instead of
         # relying on a literal key match.
         evidence = {}
+        # MAP-31: RAW counts -- "tied on actual evidence" must not be broken by
+        # a one-day age difference between two equally evidenced accounts.
+        _raw_counts = getattr(model, 'raw', None) or model
         for acct in hits:
             norm_acct = _strip_root(acct)
             best = 0
             for tok in plain_tokens:
-                for bkey, cnt in model.get(tok, {}).items():
+                for bkey, cnt in _raw_counts.get(tok, {}).items():
                     if _strip_root(bkey) == norm_acct:
                         best = max(best, cnt)
             evidence[acct] = best
@@ -2589,6 +2668,7 @@ def llm_fallback_mapping(
     config_path: str,
     model_override: str = None,
     historical_mappings: List[Dict] = None,
+    reference_date=None,
 ) -> Dict[int, Dict]:
     """
     Use the LLM to classify rows one at a time via direct Ollama API.
@@ -2644,7 +2724,7 @@ def llm_fallback_mapping(
         account_set = set(account_tree)
 
     # MAP-12: built once, reused for every row's numbered shortlist.
-    history_model = _build_history_token_model(historical_mappings) if historical_mappings else {}
+    history_model = _build_history_token_model(historical_mappings, reference_date) if historical_mappings else {}
 
     result: Dict[int, Dict] = {}
     # MAP-24: how each row's final answer turned out (after the retry).
@@ -2989,7 +3069,6 @@ def _rewrite_confidence_report_from_csv(mapped_csv_path: str, report_path: str) 
 # ---------------------------------------------------------------------------
 
 GLOBAL_RULES_KEY = '_global'
-STALE_RULE_YEARS = 10
 
 # MAP-30: a credit whose narration says card cash back / cashback.
 _CASHBACK_RE = re.compile(r'\bcash\s*back\b|\bcashback\b', re.IGNORECASE)
@@ -3048,22 +3127,43 @@ def _period_end(canonical_rows: List[Dict]):
     return max(dates) if dates else _date.today()
 
 
-def _age_rule(rule: Dict, period_end) -> Dict:
-    """MAP-28(a): a rule last seen more than STALE_RULE_YEARS before the
-    statement period cannot be high or medium. Returns a copy (the rules file
-    is never touched); a rule with no parseable last_date is left alone."""
-    last = _parse_any_date(str(rule.get('last_date') or ''))
-    if last is None or rule.get('confidence', 'medium') in ('low', 'none'):
-        return rule
+def _statement_end(canonical_csv: str):
+    """MAP-31: the last row date of the canonical CSV (today if none parse)."""
     try:
-        cutoff = period_end.replace(year=period_end.year - STALE_RULE_YEARS)
-    except ValueError:   # 29 Feb
-        cutoff = period_end.replace(year=period_end.year - STALE_RULE_YEARS, day=28)
-    if last >= cutoff:
+        with open(canonical_csv, 'r', encoding='utf-8', errors='replace') as f:
+            return _period_end(list(csv.DictReader(f)))
+    except OSError:
+        from datetime import date as _date  # noqa: PLC0415
+        return _date.today()
+
+
+def _age_rule(rule: Dict, period_end) -> Dict:
+    """MAP-31(d) (subsumes MAP-28a): recompute a saved rule's confidence AT MAP
+    TIME from frequency x decay(age of its last_date), the age measured from the
+    statement (``period_end``). Only a last_date within ~2 years can be 'high',
+    within ~5 years at most 'medium', older is 'low' ("old rule, last seen
+    YYYY"). It never promotes (the weaker of the stored and recomputed label
+    wins) and never touches the rules file: a copy is returned. A rule without a
+    parseable last_date is left alone."""
+    from agents.recency import min_level, rule_confidence  # noqa: PLC0415
+    stored = rule.get('confidence', 'medium')
+    if stored in ('none',):
         return rule
+    level, score, note = rule_confidence(
+        # no frequency recorded (a hand-written rule): only the age caps apply
+        rule['frequency'] if rule.get('frequency') is not None else 1e9,
+        str(rule.get('last_date') or ''), period_end)
+    if level is None:
+        return rule
+    final = min_level(stored, level)
     aged = dict(rule)
-    aged['confidence'] = 'low'
-    aged['reason'] = f"old rule, last seen {last.year} ({rule.get('reason', 'rule match')})"
+    aged['score'] = score          # the decayed score, used to rank within a label
+    if final != stored:
+        aged['confidence'] = final
+        if note and final == level:
+            aged['reason'] = f"{note} ({rule.get('reason', 'rule match')})"
+        else:
+            aged['reason'] = f"{rule.get('reason', 'rule match')} [recency -> {final}]"
     return aged
 
 
@@ -3124,13 +3224,15 @@ def map_accounts(
     if skipped_other_bank:
         print(f"[mapper] Ignored {skipped_other_bank} rules from other banks (bank={bank_key})")
 
-    # MAP-28(a): a rule not seen for 10+ years before this statement caps at low.
+    # MAP-31(d): recompute each rule's confidence from frequency x recency,
+    # measured from the statement (subsumes the MAP-28(a) 10-year cap).
     period_end = _period_end(canonical_rows)
     all_rules = [_age_rule(r, period_end) for r in all_rules]
 
     confidence_order = {'high': 0, 'medium': 1, 'low': 2, 'none': 3}
     all_rules.sort(key=lambda r: (
         confidence_order.get(r.get('confidence', 'low'), 99),
+        -(r.get('score') if isinstance(r.get('score'), (int, float)) else r.get('frequency', 0)),
         -r.get('frequency', 0),
     ))
 
@@ -3279,6 +3381,9 @@ def run(
     # Resolve bank key for filtering
     bank_key = _BANK_KEY_MAP.get(bank_name) if bank_name else None
 
+    # MAP-31: every recency calculation is measured from THIS statement.
+    _stmt_ref = _statement_end(canonical_csv)
+
     # Step 1: Extract historical mappings from .gnucash
     _emit_mapper_progress(f"extracting history from {Path(gnucash_file).name}")
     # RED FLAG fix: thread the caller's known bank account through to the
@@ -3363,7 +3468,14 @@ def run(
 
     # Step 2: Generate rules from extractor output + merge into persistent YAML
     _emit_mapper_progress(f"generating rules (bank={bank_key or 'all'})")
-    rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3)
+    _gen_kwargs = {}
+    try:
+        import inspect  # noqa: PLC0415
+        if 'reference_date' in inspect.signature(generate_rules).parameters:
+            _gen_kwargs['reference_date'] = _stmt_ref   # MAP-31: age from the statement
+    except (TypeError, ValueError):
+        pass
+    rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3, **_gen_kwargs)
     all_rules: List[dict] = []
     for bank_rules in rules_by_bank.values():
         all_rules.extend(bank_rules)
@@ -3482,7 +3594,7 @@ def run(
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
-        history_model = _build_history_token_model(historical_pairs_for_llm)
+        history_model = _build_history_token_model(historical_pairs_for_llm, _stmt_ref)
         # MAP-13: own-transfer evidence for the IFSC fallback, from this book's
         # history (same vocabulary as the MAP-14 gate on the AI pass).
         _hist_own_evidence = _own_ev
@@ -3513,7 +3625,9 @@ def run(
                 continue
             if match and match.get('account'):
                 row['Account'] = _strip_root(match['account'])
-                row['Confidence'] = 'history'
+                # MAP-31: only-old history still matches, but at 'low'.
+                _hconf = 'low' if match.get('confidence') == 'low' else 'history'
+                row['Confidence'] = _hconf
                 reason = f"History: {match['reason']}"
                 # MAP-12: direction check is cheap here (amounts are already
                 # on the row) -- flags only, never changes the account.
@@ -3522,16 +3636,21 @@ def run(
                 if _direction_mismatch(match['account'], d_amt, w_amt):
                     reason += f" [{_DIRECTION_FLAG_MARKER}]"
                 row['MatchReason'] = reason
-                history_mapped_count += 1
+                if _hconf == 'history':
+                    history_mapped_count += 1
+                else:
+                    result['confidence_counts']['low'] = result['confidence_counts'].get('low', 0) + 1
                 if result['confidence_counts'].get(conf, 0) > 0:
                     result['confidence_counts'][conf] -= 1
                 _emit_mapper_progress(
                     f"  {desc[:35]} -> {match['account'].rsplit(':', 1)[-1]} (history)"
                 )
 
-        if history_mapped_count:
-            result['confidence_counts']['history'] = history_mapped_count
-            _emit_mapper_progress(f"history pass: {history_mapped_count} rows matched")
+        _hist_low_count = sum(1 for _r in mapped_rows if str(_r.get('MatchReason', '')).startswith('History:') and _r.get('Confidence') == 'low')
+        if history_mapped_count or _hist_low_count:
+            if history_mapped_count:
+                result['confidence_counts']['history'] = history_mapped_count
+            _emit_mapper_progress(f"history pass: {history_mapped_count + _hist_low_count} rows matched")
             raw_keys = list(mapped_rows[0].keys())
             with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
                 writer = csv.DictWriter(f, fieldnames=raw_keys)
@@ -3674,6 +3793,14 @@ def run(
             elif acct and conf in ('high', 'medium', 'smart', 'history', 'override'):
                 example_mappings.append({'description': desc, 'account': acct})
 
+        # MAP-31: only passed when the callee takes it (older stand-ins do not).
+        _llm_ref_kw = {'reference_date': _stmt_ref}
+        try:
+            import inspect as _insp  # noqa: PLC0415
+            if 'reference_date' not in _insp.signature(llm_fallback_mapping).parameters:
+                _llm_ref_kw = {}
+        except (TypeError, ValueError):
+            _llm_ref_kw = {}
         if still_unmatched and config_path:
             _emit_mapper_progress(f"LLM fallback for {len(still_unmatched)} remaining rows")
             _LLM_RUN_STATUS.clear()
@@ -3684,6 +3811,7 @@ def run(
                 config_path=config_path,
                 model_override=model_override,
                 historical_mappings=historical_pairs_for_llm,
+                **_llm_ref_kw,
             )
             if _LLM_RUN_STATUS.get('stopped'):
                 # MAP-19: rows the stopped pass never reached. Only rows that

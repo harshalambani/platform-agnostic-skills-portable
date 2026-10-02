@@ -7,24 +7,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-def recency_weight(last_date_str: str) -> float:
-    """Score based on how recent the mapping is."""
-    try:
-        from datetime import datetime
-        last_date = datetime.strptime(last_date_str, '%Y-%m-%d')
-        days_ago = (datetime.now() - last_date).days
-        if days_ago <= 365:
-            return 1.0
-        elif days_ago <= 730:
-            return 0.5
-        else:
-            return 0.2
-    except (ValueError, TypeError):
-        return 0.2
+try:                                   # packaged (agents.*) or flat sys.path import
+    from agents.recency import decay_weight, parse_date, rule_confidence
+except ImportError:                    # pragma: no cover
+    from recency import decay_weight, parse_date, rule_confidence
 
-def confidence_score(frequency: int, last_date: str) -> float:
-    """Compute confidence: frequency × recency_weight."""
-    return frequency * recency_weight(last_date)
+
+def _reference(reference_date):
+    from datetime import date
+    return parse_date(reference_date) or date.today()
+
+
+def recency_weight(last_date_str: str, reference_date=None) -> float:
+    """MAP-31: exponential decay (half-life about 2 years) measured from the
+    STATEMENT date (``reference_date``; today only when none is given)."""
+    last = parse_date(last_date_str)
+    if last is None:
+        return 0.2
+    return decay_weight((_reference(reference_date) - last).days)
+
+def confidence_score(frequency: int, last_date: str, reference_date=None) -> float:
+    """Compute confidence: frequency x recency_weight."""
+    return frequency * recency_weight(last_date, reference_date)
 
 def extract_upi_key(description: str) -> Optional[str]:
     """Extract UPI pattern: UPI/MERCHANT/VPA."""
@@ -82,7 +86,8 @@ def _is_safe_pattern(pattern: str) -> bool:
         return False
     return True
 
-def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[str, List[Dict]]:
+def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3,
+                   reference_date=None) -> Dict[str, List[Dict]]:
     """Generate rules from extractor JSON.
 
     Args:
@@ -90,7 +95,10 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
         min_freq:       Minimum occurrence frequency to generate a rule.
                         Default 3 for cross-bank; use 1 when filtering to
                         the importing bank (every historical txn is relevant).
+        reference_date: MAP-31 -- the statement date recency is measured from
+                        (today only when omitted).
     """
+    ref = _reference(reference_date)
     rules = {
         '_global': [],
         'ICICI': [],
@@ -111,14 +119,14 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
             last_date = m.get('last_date', '')
             if freq < min_freq:
                 continue
-            conf = confidence_score(freq, last_date)
+            conf = confidence_score(freq, last_date, ref)
             # For single-occurrence matches (min_freq=1), accept any positive score
             if min_freq >= 3 and conf <= 0.5:
                 continue
             filtered.append(m)
 
         filtered.sort(
-            key=lambda x: confidence_score(x.get('frequency', 0), x.get('last_date', '')),
+            key=lambda x: confidence_score(x.get('frequency', 0), x.get('last_date', ''), ref),
             reverse=True
         )
 
@@ -127,7 +135,7 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
             account = mapping.get('account', '')
             frequency = mapping.get('frequency', 0)
             last_date = mapping.get('last_date', '')
-            conf = confidence_score(frequency, last_date)
+            conf = confidence_score(frequency, last_date, ref)
 
             # Generalisation is attempted for every candidate regardless of
             # confidence -- confidence only decides the rule's WEIGHT
@@ -162,12 +170,12 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
                 # fire again. Drop the rule instead of emitting a dead one.
                 continue
 
-            if conf > 0.8:
-                confidence_level = 'high'
-            elif conf > 0.5:
-                confidence_level = 'medium'
-            else:
-                confidence_level = 'low'
+            # MAP-31(d): the label comes from frequency x decayed recency, then is
+            # capped by the age of the last booking (a 2012 rule with 50 hits is
+            # not 'high'). Unparseable last_date -> the score alone decides.
+            confidence_level, _score, _old = rule_confidence(frequency, last_date, ref)
+            if confidence_level is None:
+                confidence_level = 'high' if conf > 0.8 else 'medium' if conf > 0.5 else 'low'
 
             rule = {
                 'patterns': patterns,
@@ -176,7 +184,7 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3) -> Dict[st
                 'frequency': frequency,
                 'last_date': last_date,
                 'score': conf,
-                'reason': f"{frequency} occurrences, last {last_date}",
+                'reason': (_old or f"{frequency} occurrences, last {last_date}"),
                 'bank': bank
             }
 

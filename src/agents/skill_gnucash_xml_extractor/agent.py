@@ -355,13 +355,15 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
         for m in mappings:
             key = (m['description'], m['account'])
             if key not in desc_to_accs:
-                desc_to_accs[key] = {'description': m['description'], 'account': m['account'], 'frequency': 0, 'last_date': m['date']}
+                desc_to_accs[key] = {'description': m['description'], 'account': m['account'], 'frequency': 0, 'last_date': m['date'], 'dates': []}
             desc_to_accs[key]['frequency'] += 1
+            desc_to_accs[key]['dates'].append(m['date'])   # MAP-31: additive; frequency/last_date unchanged
             desc_to_accs[key]['last_date'] = max(desc_to_accs[key]['last_date'], m['date'])
 
         result = []
         for (desc, acc), data in desc_to_accs.items():
-            result.append({'description': desc, 'account': acc, 'frequency': data['frequency'], 'last_date': data['last_date']})
+            result.append({'description': desc, 'account': acc, 'frequency': data['frequency'], 'last_date': data['last_date'],
+                           'dates': sorted(data['dates'])})
         return sorted(result, key=lambda x: x['frequency'], reverse=True)
 
     aggregated = {bank: aggregate(mappings) if mappings else [] for bank, mappings in mappings_by_bank.items()}

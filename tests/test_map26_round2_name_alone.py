@@ -187,7 +187,11 @@ SWEEP = f"AUTOSWEEP TO 5551234 {OWN.upper()} MIDDLEQ {OWN.upper()}"
 def test_autosweep_shape_stays_on_the_own_fd_from_history(tmp_path, monkeypatch):
     r = _row(tmp_path, monkeypatch, SWEEP, _hist_fd())
     assert r["Account"].endswith("ICICI FD - 5551234")
-    assert r["Confidence"] == "history"
+    # MAP-31: the generated rule is now aged from the STATEMENT date, not today, so four
+    # bookings two months before the statement make a fresh rule (high) that wins over
+    # the history pass. Same account, same own-transfer evidence; only the label moved.
+    assert r["Confidence"] in ("history", "high")
+    assert r["Confidence"] not in ("suspense", "none", "low")
 
 
 def test_autosweep_with_a_different_fd_number_still_lands_via_owner_plus_keyword(

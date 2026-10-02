@@ -84,7 +84,7 @@ def test_old_rule_never_shows_high_or_medium(tmp_path):
 
 
 def test_recent_rule_keeps_its_confidence(tmp_path):
-    rules = {"HSBC": [_rule("zzcafe", "Expenses:Dining", conf="high", last="2020-03-04")]}
+    rules = {"HSBC": [_rule("zzcafe", "Expenses:Dining", conf="high", last="2025-03-04")]}
     got = _apply(tmp_path, rules, [("2025-06-01", "ZZCAFE BILL", "", "100")], bank_key="HSBC")
     assert got[0]["Confidence"] == "high"
     assert "old rule" not in got[0]["MatchReason"]
