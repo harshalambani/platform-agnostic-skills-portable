@@ -102,6 +102,18 @@ def load_mapping_yaml(yaml_path: str) -> dict:
 
 
 _REGEX_META = set("\\^$.*+?{}[]()|")
+_WORDLIKE_LITERAL_RE = re.compile(r'[A-Za-z0-9]+(?:\s+[A-Za-z0-9]+)*')
+
+
+def _owner_token_regex(owner_tokens):
+    """MAP-26(e): one regex that blanks the owner's identity tokens out of a
+    lowercase narration (whole tokens only), or None when there are none."""
+    toks = sorted({t.lower() for t in (owner_tokens or ()) if t and not t.startswith('ifsc:')},
+                  key=len, reverse=True)
+    if not toks:
+        return None
+    return re.compile(r'(?<![a-z0-9@.])(?:' + '|'.join(re.escape(t) for t in toks)
+                      + r')(?![a-z0-9@])')
 
 
 class CompiledRules:
@@ -116,9 +128,12 @@ class CompiledRules:
     semantics are identical to the old scan.
     """
 
-    def __init__(self, rules: List[dict]):
+    def __init__(self, rules: List[dict], owner_tokens: Optional[set] = None):
         self.rules = rules
         self._entries: List[tuple] = []
+        # MAP-26(e): the owner's own identity tokens. A rule never fires when
+        # its pattern is satisfied ONLY by them.
+        self._owner_re = _owner_token_regex(owner_tokens)
         for rule in rules or []:
             for pattern in rule.get('patterns', []):
                 lit = pattern
@@ -127,6 +142,14 @@ class CompiledRules:
                 if lit.endswith('.*') and not lit.endswith('\\.*'):
                     lit = lit[:-2]
                 if lit and not (set(lit) & _REGEX_META):
+                    if _WORDLIKE_LITERAL_RE.fullmatch(lit.strip()):
+                        # MAP-28(b): a word / phrase literal matches on word
+                        # boundaries -- "lic" must not hit inside "epilicious".
+                        words = [re.escape(w) for w in lit.split()]
+                        rx = re.compile(r'(?<![a-z0-9])' + r'\s+'.join(words) + r'(?![a-z0-9])',
+                                        re.IGNORECASE)
+                        self._entries.append(('re', rx, pattern, rule))
+                        continue
                     self._entries.append(('lit', lit.lower(), pattern, rule))
                     continue
                 try:
@@ -137,16 +160,26 @@ class CompiledRules:
     def __bool__(self) -> bool:
         return bool(self._entries)
 
+    @staticmethod
+    def _hit(kind, obj, text: str, low: str) -> bool:
+        if kind == 're':
+            return obj.search(text) is not None
+        return obj in low
+
     def match(self, description: str) -> Tuple[Optional[str], str, Optional[str], str]:
         low = description.lower()
+        stripped = None
+        if self._owner_re is not None:
+            stripped = self._owner_re.sub(' ', low)
         for kind, obj, pattern, rule in self._entries:
-            if kind == 're':
-                hit = obj.search(description) is not None
-            else:
-                hit = obj in low
-            if hit:
-                return (rule.get('account', ''), rule.get('confidence', 'medium'),
-                        pattern, rule.get('reason', f'Pattern matched: {pattern}'))
+            if not self._hit(kind, obj, description, low):
+                continue
+            if stripped is not None and stripped != low and not self._hit(kind, obj, stripped, stripped):
+                # MAP-26(e): only the owner's own name satisfied this pattern --
+                # a rule built on a relative's tokens must abstain.
+                continue
+            return (rule.get('account', ''), rule.get('confidence', 'medium'),
+                    pattern, rule.get('reason', f'Pattern matched: {pattern}'))
         return None, 'none', None, 'No pattern match'
 
 
@@ -1030,6 +1063,64 @@ def _self_transfer_candidates(
     return set(own_bank_accounts)
 
 
+# MAP-29: an ACCOUNT number in a narration -- not any digit run (a reference
+# number is not one). Three shapes: the digits right after an IFSC
+# ("HDFC0xxxxxx/<acct>"), the digits after an "a/c" / "account" label, and a
+# masked form ("XXXX1234", "xx1234", "*1234"). Full or masked trailing 4+ digits.
+_ACCT_NO_AFTER_IFSC_RE = re.compile(
+    r'\b[a-z]{4}0[a-z0-9]{6}\s*[/:\-]\s*([x*]*\d{4,})', re.IGNORECASE)
+_ACCT_NO_LABELLED_RE = re.compile(
+    r'(?:\ba/c|\bacct?\b|\baccount)\s*(?:no\.?|number|#)?\s*[:\-]?\s*([x*]*\d{4,})', re.IGNORECASE)
+_ACCT_NO_MASKED_RE = re.compile(r'(?<![a-z0-9])[x*]{2,}[-\s]?(\d{4,})(?![0-9])', re.IGNORECASE)
+
+
+def _narration_account_numbers(desc: str) -> List[str]:
+    """MAP-29: the digit parts of every account number the narration carries
+    (4+ digits; masked prefixes stripped). Empty when it names none."""
+    out: List[str] = []
+    for rx in (_ACCT_NO_AFTER_IFSC_RE, _ACCT_NO_LABELLED_RE, _ACCT_NO_MASKED_RE):
+        for m in rx.finditer(desc or ''):
+            digits = re.sub(r'\D', '', m.group(1))
+            if len(digits) >= 4 and not re.fullmatch(r'(19|20)\d{2}', digits) and digits not in out:
+                out.append(digits)
+    return out
+
+
+def _own_accounts_for_numbers(numbers: List[str], own_bank_accounts: Optional[set]) -> set:
+    """MAP-29: the own accounts whose number (a digit run in the account name)
+    equals, or ends with, a narration account number (the masked/partial form
+    is compared on its trailing digits)."""
+    hits = set()
+    for acct in own_bank_accounts or ():
+        runs = re.findall(r'\d{4,}', _strip_root(acct))
+        for n in numbers:
+            if any(r == n or r.endswith(n) or n.endswith(r) for r in runs):
+                hits.add(_strip_root(acct))
+    return hits
+
+
+def _account_number_verdict(desc: str, own_bank_accounts: Optional[set],
+                            source_account: Optional[str]) -> Optional[Dict]:
+    """MAP-29: None when the narration carries no account number (caller
+    behaves as before). Otherwise {'match': <None | match dict>}: a number that
+    matches none of the owner's accounts is somebody else's account at the same
+    bank -> abstain (match None); one that matches an own account routes there;
+    two own accounts -> a tie for Review."""
+    nos = _narration_account_numbers(desc)
+    if not nos:
+        return None
+    hits = _own_accounts_for_numbers(nos, own_bank_accounts)
+    if source_account:
+        hits = {a for a in hits if a != _strip_root(source_account)}
+    if not hits:
+        return {'match': None}
+    if len(hits) > 1:
+        return {'match': {"account": "", "tie": sorted(hits), "confidence": "none",
+                          "reason": "Own account number matches more than one account of yours"}}
+    return {'match': {"account": next(iter(hits)), "confidence": "history",
+                      "reason": "Bank-code match (own account number)"}}
+
+
 def _literal_bank_code_match(
     routing_tokens: set,
     candidates: set,
@@ -1193,6 +1284,7 @@ def _history_token_match(
     own_evidence: Optional[Callable[[str], bool]] = None,
     own_targets: Optional[set] = None,
     own_target_evidence: Optional[Callable[[str, str], bool]] = None,
+    owner_tokens: Optional[set] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
@@ -1227,7 +1319,27 @@ def _history_token_match(
 
     bank_names = _own_bank_name_tokens(own_bank_accounts)
     match = _history_bayes_score(tokens_all - bank_names, model)
+    if match and owner_tokens:
+        # MAP-26(e): a history win onto a NON-own account (rent, a relative's
+        # expense...) that only the owner's own identity tokens produced is the
+        # owner's name, not evidence. Re-score without them; abstain if nothing
+        # else supports an account.
+        _t0 = own_targets if own_targets is not None else {
+            _strip_root(a) for a in (own_bank_accounts or ())}
+        if _strip_root(match.get('account') or '') not in _t0:
+            match = _history_bayes_score(tokens_all - bank_names - owner_tokens, model)
     if match:
+        # MAP-29: a history win onto an own account is overruled by an account
+        # number in the narration that contradicts it (a non-own number, or a
+        # different own account's number).
+        _t29 = own_targets if own_targets is not None else {
+            _strip_root(a) for a in (own_bank_accounts or ())}
+        if _strip_root(match.get('account') or '') in _t29:
+            _nv = _account_number_verdict(desc, own_bank_accounts, source_account)
+            if _nv is not None:
+                m29 = _nv['match']
+                if m29 is None or _strip_root(m29.get('account') or '') != _strip_root(match.get('account') or ''):
+                    return m29
         _targets = own_targets if own_targets is not None else {
             _strip_root(a) for a in (own_bank_accounts or ())}
         if (own_evidence is not None
@@ -1266,6 +1378,10 @@ def _history_token_match(
         # postable account names.
         return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account,
                                         own_evidence)
+    # MAP-29: an account number in the narration is stronger than the bank code.
+    _nv = _account_number_verdict(desc, own_bank_accounts, source_account)
+    if _nv is not None:
+        return _nv.get('match')
     if own_evidence is not None and not own_evidence(desc):
         return None   # MAP-13: no own-transfer evidence -> abstain, never route
     plain_tokens = tokens_all - routing_tokens
@@ -2872,15 +2988,106 @@ def _rewrite_confidence_report_from_csv(mapped_csv_path: str, report_path: str) 
 # Core mapping function
 # ---------------------------------------------------------------------------
 
+GLOBAL_RULES_KEY = '_global'
+STALE_RULE_YEARS = 10
+
+# MAP-30: a credit whose narration says card cash back / cashback.
+_CASHBACK_RE = re.compile(r'\bcash\s*back\b|\bcashback\b', re.IGNORECASE)
+_CASHBACK_REASON = "card cash back = reduction in spend"
+_CASHBACK_UNRESOLVED_REASON = (
+    _CASHBACK_REASON + " - no Drawings account found in the book; pick the account "
+    "your card spend goes to")
+
+
+def _is_cashback_reason(reason: str) -> bool:
+    return (reason or '').startswith(_CASHBACK_REASON)
+
+
+def _is_card_cashback_credit(description: str, row: Dict) -> bool:
+    """MAP-30: money IN whose narration says cash back. A debit that merely
+    mentions 'cash back' (e.g. a cash-back-at-till purchase) is not one."""
+    if not _CASHBACK_RE.search(description or ''):
+        return False
+    return _safe_float(row.get('Deposit', '')) > 0 and not _safe_float(row.get('Withdrawal', '')) > 0
+
+
+def _cashback_decision(cashback_account: Optional[str]):
+    """(account, confidence, reason) for a card cash-back credit."""
+    if cashback_account:
+        return _strip_root(cashback_account), 'medium', _CASHBACK_REASON
+    return '', 'none', _CASHBACK_UNRESOLVED_REASON
+
+
+def find_drawings_account(account_paths) -> Optional[str]:
+    """MAP-30: the single postable account whose leaf is 'Drawings'. None when
+    there is none or more than one (never guessed between several)."""
+    hits = {_strip_root(a) for a in (account_paths or ())
+            if re.search(r'\bdrawings?\b', _strip_root(a).rsplit(':', 1)[-1].lower())}
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+_RULE_DATE_FORMATS = ('%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%d-%b-%Y', '%d %b %Y',
+                      '%d/%m/%y', '%d-%b-%y', '%Y/%m/%d')
+
+
+def _parse_any_date(text: str):
+    from datetime import datetime as _dt  # noqa: PLC0415
+    t = (text or '').strip()
+    for fmt in _RULE_DATE_FORMATS:
+        try:
+            return _dt.strptime(t, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _period_end(canonical_rows: List[Dict]):
+    """The statement period's last date (max row date); today if none parse."""
+    from datetime import date as _date  # noqa: PLC0415
+    dates = [d for d in (_parse_any_date(r.get('Date', '')) for r in canonical_rows) if d]
+    return max(dates) if dates else _date.today()
+
+
+def _age_rule(rule: Dict, period_end) -> Dict:
+    """MAP-28(a): a rule last seen more than STALE_RULE_YEARS before the
+    statement period cannot be high or medium. Returns a copy (the rules file
+    is never touched); a rule with no parseable last_date is left alone."""
+    last = _parse_any_date(str(rule.get('last_date') or ''))
+    if last is None or rule.get('confidence', 'medium') in ('low', 'none'):
+        return rule
+    try:
+        cutoff = period_end.replace(year=period_end.year - STALE_RULE_YEARS)
+    except ValueError:   # 29 Feb
+        cutoff = period_end.replace(year=period_end.year - STALE_RULE_YEARS, day=28)
+    if last >= cutoff:
+        return rule
+    aged = dict(rule)
+    aged['confidence'] = 'low'
+    aged['reason'] = f"old rule, last seen {last.year} ({rule.get('reason', 'rule match')})"
+    return aged
+
+
 def map_accounts(
     canonical_csv_path: str,
     mapping_yaml_path: str,
     output_mapped_csv: str,
     output_report: str,
     overrides: Optional[List[Dict]] = None,
+    bank_key: Optional[str] = None,
+    owner_tokens: Optional[set] = None,
+    cashback_account: Optional[str] = None,
 ) -> Dict:
     """
     Apply mapping rules to canonical CSV.
+
+    ``bank_key`` (MAP-28c): when known, ONLY that bank's rule section plus
+    ``_global`` apply -- another bank's rules never fire on this statement.
+    None keeps the old behaviour (every section). User overrides are a separate
+    list, passed in by the caller, and are not bank-scoped.
+    ``owner_tokens`` (MAP-26e): the owner's identity tokens; a rule whose
+    pattern is satisfied only by them abstains.
+    ``cashback_account`` (MAP-30): where a card cash-back credit goes (the
+    resolved Drawings account); None sends such a row to Review.
 
     ``overrides`` (user overrides, highest priority — order-change per the
     27 Sep clarification) are checked FIRST, per row, before the rules pass
@@ -2907,9 +3114,19 @@ def map_accounts(
 
     # Flatten rules from all banks into one sorted list
     all_rules: List[dict] = []
+    skipped_other_bank = 0
     for bank, rules in mapping_rules.items():
         if isinstance(rules, list):
+            if bank_key and bank not in (bank_key, GLOBAL_RULES_KEY):
+                skipped_other_bank += len(rules)   # MAP-28(c): another bank's rules
+                continue
             all_rules.extend(rules)
+    if skipped_other_bank:
+        print(f"[mapper] Ignored {skipped_other_bank} rules from other banks (bank={bank_key})")
+
+    # MAP-28(a): a rule not seen for 10+ years before this statement caps at low.
+    period_end = _period_end(canonical_rows)
+    all_rules = [_age_rule(r, period_end) for r in all_rules]
 
     confidence_order = {'high': 0, 'medium': 1, 'low': 2, 'none': 3}
     all_rules.sort(key=lambda r: (
@@ -2918,7 +3135,7 @@ def map_accounts(
     ))
 
     print(f"[mapper] Loaded {len(all_rules)} rules")
-    compiled_rules = CompiledRules(all_rules)   # MAP-17: compile once, not per row
+    compiled_rules = CompiledRules(all_rules, owner_tokens=owner_tokens)   # MAP-17: compile once, not per row
 
     # Apply mappings
     mapped_rows = []
@@ -2938,6 +3155,10 @@ def map_accounts(
             confidence = 'override'
             pattern = None
             reason = f"Override: {ov_reason}"
+        elif _is_card_cashback_credit(description, row):
+            # MAP-30: deterministic, ahead of the persistent-rules pass.
+            account, confidence, reason = _cashback_decision(cashback_account)
+            pattern = None
         else:
             account, confidence, pattern, reason = match_rule(description, compiled_rules)
 
@@ -3186,7 +3407,32 @@ def run(
     _emit_mapper_progress(f"applying rules to {Path(canonical_csv).name}")
     if overrides:
         _emit_mapper_progress(f"applying {len(overrides)} user overrides (checked before the rules pass)")
-    result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path), overrides=overrides)
+    # RED FLAG fix: the book's own structural BANK-type accounts (from the
+    # extractor, see parse_gnucash_file()'s 'own_bank_accounts' key),
+    # normalized the same way already-stripped row/account values are.
+    # Computed unconditionally (not only when historical_pairs_for_llm is
+    # non-empty) because Step 4.9 below needs it too, regardless of whether
+    # the history pass itself ran.
+    own_bank_accounts = {
+        _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
+        if not (guard is not None and guard.is_blocked(a))
+    }
+    # MAP-22: own-transfer evidence for EVERY pass that can land on an own
+    # account (Bayes ifsc token, weak prefix, Step 4.9, and the MAP-14 AI
+    # gate), derived once from this book's history.
+    _hist_own_targets = _own_target_accounts(
+        own_bank_accounts, all_account_paths, historical_pairs_for_llm)
+    _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
+
+    # MAP-26(e): the owner's identity tokens (the round-3 vocabulary, product
+    # words excluded): a persistent rule or history win driven only by these
+    # abstains.
+    _owner_tokens = {t for t in _hist_own_vocab if not _OWN_PRODUCT_KW_RE.fullmatch(t)}
+    # MAP-30: where a card cash-back credit goes (the single Drawings account).
+    _cashback_acct = find_drawings_account(all_account_paths)
+    result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path),
+                          overrides=overrides, bank_key=bank_key,
+                          owner_tokens=_owner_tokens, cashback_account=_cashback_acct)
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 
@@ -3222,25 +3468,8 @@ def run(
     # smart-pattern / prefix / LLM passes (Step 4) ever see it. Matches are
     # labelled 'history' and are never sent to the LLM (Step 4b below only
     # collects 'none'/'weak' rows).
-    # RED FLAG fix: the book's own structural BANK-type accounts (from the
-    # extractor, see parse_gnucash_file()'s 'own_bank_accounts' key),
-    # normalized the same way already-stripped row/account values are.
-    # Computed unconditionally (not only when historical_pairs_for_llm is
-    # non-empty) because Step 4.9 below needs it too, regardless of whether
-    # the history pass itself ran.
-    own_bank_accounts = {
-        _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
-        if not (guard is not None and guard.is_blocked(a))
-    }
     history_mapped_count = 0
     self_tie: Dict[int, List[str]] = {}   # MAP-16: row index -> tied own accounts
-    # MAP-22: own-transfer evidence for EVERY pass that can land on an own
-    # account (Bayes ifsc token, weak prefix, Step 4.9, and the MAP-14 AI
-    # gate), derived once from this book's history.
-    _hist_own_targets = _own_target_accounts(
-        own_bank_accounts, all_account_paths, historical_pairs_for_llm)
-    _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
-
     def _own_ev(_d: str) -> bool:
         # round 2: the owner's plain name is not evidence on ANY pass
         return _has_own_transfer_evidence(
@@ -3265,6 +3494,8 @@ def run(
             conf = row.get('Confidence') or 'none'
             if conf in ('high', 'override'):
                 continue
+            if _is_cashback_reason(row.get('MatchReason', '')):
+                continue   # MAP-30: settled (or sent to Review) by the cash-back rule
             desc = row.get('Description') or row.get('Narration') or ''
             match = _history_token_match(
                 desc,
@@ -3274,6 +3505,7 @@ def run(
                 own_evidence=_hist_own_evidence,
                 own_targets=_hist_own_targets,
                 own_target_evidence=_own_ev_target,
+                owner_tokens=_owner_tokens,
             )
             if match and match.get('tie'):
                 # MAP-16: a tie between own accounts is never guessed.
@@ -3332,6 +3564,8 @@ def run(
             acct = row.get('Account', '')
             if conf != 'none' and acct:
                 continue
+            if _is_cashback_reason(row.get('MatchReason', '')):
+                continue   # MAP-30
             if i in self_tie:
                 continue   # MAP-16: tied own accounts go to Review, not a guess
             desc = row.get('Description') or row.get('Narration') or ''
@@ -3425,6 +3659,8 @@ def run(
             conf = row.get('Confidence', 'none')
             if (i - 1) in self_tie:
                 continue   # MAP-16
+            if _is_cashback_reason(row.get('MatchReason', '')):
+                continue   # MAP-30: never sent to the AI pass
             if (i - 1) in direction_clash_log:
                 continue   # MAP-18: rejected on direction, stays in Suspense
             if (conf in ('none', 'weak') or not acct) and conf not in ('smart', 'override'):
@@ -3631,6 +3867,8 @@ def run(
                     row.get('Description', ''), blocked_pairs, guard):
                 row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
                     row.get('Description', ''), blocked_pairs, guard)
+            elif _is_cashback_reason(row.get('MatchReason', '')):
+                pass   # MAP-30: keep the specific Review reason
             elif _ri in self_tie:
                 row['MatchReason'] = (
                     "Suspense - own transfer names a bank where you have "

@@ -105,6 +105,9 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                             if split_acc and split_value:
                                 splits_data.append((split_acc, split_value, split_memo))
 
+            # IMP-11: every leg of the transaction, before any account filter,
+            # so a split can say what its OTHER legs are.
+            all_legs = list(splits_data)
             if date_posted and splits_data:
                 # Filter by account if specified. Note: check `account_filter`
                 # (was requested at all), not `target_acc_ids` (matched
@@ -134,11 +137,21 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
 
                             acc_path = accounts[acc_id]['path'] if acc_id in accounts else acc_id
                             desc = ' '.join(p for p in (base_desc, split_memo) if p)
+                            # The other legs (account paths) of this transaction.
+                            _skipped_self = False
+                            others = []
+                            for o_acc, o_val, o_memo in all_legs:
+                                if (not _skipped_self and o_acc == acc_id
+                                        and o_val == amount_str and o_memo == split_memo):
+                                    _skipped_self = True
+                                    continue
+                                others.append(accounts[o_acc]['path'] if o_acc in accounts else o_acc)
                             transactions.append({
                                 'date': txn_date.strftime('%Y-%m-%d'),
                                 'amount': amount,
                                 'account': acc_path,
                                 'description': desc,
+                                'other_accounts': others,
                             })
                     except Exception as e:
                         logger.warning(f"Failed to parse transaction: {e}")
@@ -261,6 +274,132 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
         summary['actions'].append("No balance gaps detected")
 
     return report, summary
+
+
+# ============================================================================
+# IMP-11: own transfers already booked from the OTHER bank's statement
+# ============================================================================
+
+BOOKED_TRANSFER_TOLERANCE_DAYS = 2
+
+
+def _strip_root_path(path: str) -> str:
+    prefix = 'Root Account:'
+    return path[len(prefix):] if path.startswith(prefix) else path
+
+
+def match_booked_own_transfers(
+    csv_rows: List[Dict],
+    scoped_data: Dict,
+    target_bank_account: str,
+    date_tolerance: int = BOOKED_TRANSFER_TOLERANCE_DAYS,
+) -> List[Dict]:
+    """Find statement rows whose own-transfer leg is ALREADY in the target
+    account of the book, dated up to ``date_tolerance`` days off.
+
+    Importing the first bank's statement booked BOTH legs of every transfer
+    between the two banks. The second bank's statement can date the same
+    transfer a day or two differently, so the exact (date, amount) dedup misses
+    it and importing would book it twice. Nothing is dropped here: the caller
+    sets the matched rows aside UNTICKED for the user to confirm.
+
+    ``scoped_data`` is parse_gnucash_for_reconcile(book, account_filter=target)
+    (its splits carry ``other_accounts``). Rules:
+      * same absolute amount and same direction (a statement debit pairs with a
+        book outflow from the target account);
+      * the book split sits in the TARGET account, within +/- tolerance days.
+        It may be dated BEFORE the statement's first row (it is not scoped by
+        the statement period), e.g. across the financial-year boundary;
+      * every other leg of the book transaction is an own BANK account (never
+        an expense / income / liability / cash leg);
+      * ONE-TO-ONE: a book split pairs with at most one statement row and a row
+        with at most one split. Nearest date first; an exact tie is paired in
+        statement order and the reason says so.
+    A same-date (exact) pair consumes its split first. That is the existing
+    dedup's job, so it is not reported here; it is what stops one book leg from
+    also claiming a neighbouring day's row.
+
+    Returns one dict per matched row: row_idx (0-based into csv_rows), amount,
+    book_date, other_account, other_label, days_off, pre_period, tie, reason.
+    """
+    data = scoped_data or {}
+    target_norm = _norm_account_path(target_bank_account)
+    splits = [t for t in data.get('transactions', [])
+              if _norm_account_path(t.get('account', '')) == target_norm]
+    if not csv_rows or not splits:
+        return []
+    bank_paths = {
+        _norm_account_path(acc['path'])
+        for acc in data.get('accounts', {}).values()
+        if 'path' in acc and _is_bank_account(acc)
+        and (acc.get('type') or '').upper() != 'CASH'
+    }
+
+    def own_other(split) -> Optional[str]:
+        others = split.get('other_accounts') or []
+        if not others:
+            return None
+        norm = [_norm_account_path(o) for o in others]
+        if any(n == target_norm or n not in bank_paths for n in norm):
+            return None
+        return others[0]
+
+    row_info = []
+    for r in csv_rows:
+        amt = round(float(r.get('deposit', 0) or 0) - float(r.get('withdrawal', 0) or 0), 2)
+        row_info.append((amt, _parse_date(r.get('date', ''))))
+    first_date = min((d for _a, d in row_info if d), default=None)
+
+    split_info = [(round(t['amount'], 2), _parse_date(t['date']), own_other(t), t)
+                  for t in splits]
+
+    cands = []   # (distance, row_idx, split_idx)
+    for ri, (amt, rd) in enumerate(row_info):
+        if amt == 0 or rd is None:
+            continue
+        for si, (samt, sd, other, _t) in enumerate(split_info):
+            if samt != amt or sd is None:
+                continue
+            dist = abs((sd - rd).days)
+            if dist == 0:
+                cands.append((0, ri, si))
+            elif dist <= date_tolerance and other is not None:
+                cands.append((dist, ri, si))
+    cands.sort(key=lambda c: (c[0], c[1], c[2]))
+
+    used_rows: set = set()
+    used_splits: set = set()
+    out: List[Dict] = []
+    for dist, ri, si in cands:
+        if ri in used_rows or si in used_splits:
+            continue
+        tie = any(d == dist and ((r2 == ri and s2 != si and s2 not in used_splits)
+                                 or (s2 == si and r2 != ri and r2 not in used_rows))
+                  for d, r2, s2 in cands)
+        used_rows.add(ri)
+        used_splits.add(si)
+        if dist == 0:
+            continue
+        amt, _rd = row_info[ri]
+        _a, sd, other, t = split_info[si]
+        label = other.split(':')[-1]
+        reason = (f"Already booked from {label} statement: book entry {t['date']} "
+                  f"with {_strip_root_path(other)} ({dist} day{'s' if dist != 1 else ''} off)")
+        if tie:
+            reason += "; equally close to another entry, paired in statement order"
+        out.append({
+            'row_idx': ri,
+            'amount': amt,
+            'book_date': t['date'],
+            'other_account': _strip_root_path(other),
+            'other_label': label,
+            'days_off': dist,
+            'pre_period': bool(first_date and sd < first_date),
+            'tie': tie,
+            'reason': reason,
+        })
+    out.sort(key=lambda m: m['row_idx'])
+    return out
 
 
 # ============================================================================

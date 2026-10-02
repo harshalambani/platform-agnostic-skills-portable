@@ -50,6 +50,7 @@ from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
     reconcile,
     detect_contra_entries,
+    match_booked_own_transfers,
 )
 
 log = logging.getLogger(__name__)
@@ -206,6 +207,77 @@ def _apply_confirmed_contras(output_path: str, contra_flags: dict) -> int:
             writer.writeheader()
             writer.writerows(rows)
     return remapped
+
+
+BOOKED_SIDECAR_SUFFIX = ".matched.json"
+
+
+def booked_sidecar_path(output_path: str) -> Path:
+    """IMP-11: <stem>.matched.json, next to the mapped CSV."""
+    return Path(output_path).with_suffix(BOOKED_SIDECAR_SUFFIX)
+
+
+def explain_opening_gap(unresolved_gap: float | None, matches: list[dict]) -> list[dict]:
+    """IMP-11: the matched rows that pair with book splits dated BEFORE the
+    statement, when their net equals the opening gap (to 0.02). Returns [] when
+    they do not explain it -- never a partial guess."""
+    if unresolved_gap is None or unresolved_gap <= 0.02:
+        return []
+    pre = [m for m in matches if m.get("pre_period")]
+    if not pre:
+        return []
+    net = sum(float(m["amount"]) for m in pre)
+    return pre if abs(abs(net) - unresolved_gap) <= 0.02 else []
+
+
+def _set_aside_booked_transfers(output_path: str, contra_flags: dict,
+                                matches: list[dict]) -> int:
+    """IMP-11: take rows already booked from the other bank's statement OUT of
+    the importable CSV and park them (with the reason) in <stem>.matched.json.
+
+    Nothing is deleted: the Review tab shows them excluded ("not imported") and
+    the user can re-tick one to import it. They are removed from the CSV so
+    that, even if Review is never opened, they cannot be imported by accident.
+    ``contra_flags`` keys are 0-based row indices into the output CSV; they are
+    shifted past the removed rows (a flag on a removed row travels with it).
+    The sidecar is always (re)written, so a stale one never survives a re-run.
+    """
+    import json as _json
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    by_idx = {int(m["row_idx"]): m for m in matches if 0 <= int(m["row_idx"]) < len(rows)}
+    parked, kept = [], []
+    for i, row in enumerate(rows):
+        m = by_idx.get(i)
+        if m is None:
+            kept.append(row)
+            continue
+        entry = {k: m[k] for k in ("reason", "book_date", "other_account",
+                                   "days_off", "pre_period", "tie") if k in m}
+        entry["row"] = row
+        if i in contra_flags or str(i) in contra_flags:
+            entry["contra"] = contra_flags.get(i, contra_flags.get(str(i)))
+        parked.append(entry)
+    with open(booked_sidecar_path(output_path), "w", encoding="utf-8") as sf:
+        _json.dump(parked, sf, indent=2, default=str)
+    if not parked:
+        return 0
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    gone = {i for i in by_idx}
+    remapped = {}
+    for key, val in list(contra_flags.items()):
+        idx = int(key)
+        if idx in gone:
+            continue
+        remapped[idx - sum(1 for d in gone if d < idx)] = val
+    contra_flags.clear()
+    contra_flags.update(remapped)
+    return len(parked)
 
 
 def _drop_balance_carriers(output_path: str, contra_flags: dict) -> int:
@@ -811,9 +883,16 @@ def final_closing_balance_verdict(
     final_rows: list[dict],
     stmt_closing: float | None,
     unresolved_opening_gap: float | None,
+    explained_opening_rows: list[dict] | None = None,
 ) -> str:
     """
     Compute the final closing-balance verdict message.
+
+    IMP-11: ``explained_opening_rows`` are the matched (set-aside, unticked)
+    rows that pair with book splits dated before the statement. When their net
+    IS the opening gap, the gap is not a mystery: the verdict names them. The
+    closing figure is always computed from ``final_rows`` only, i.e. as if the
+    unticked rows are not imported.
 
     The verdict compares the actual POST-IMPORT GnuCash balance (pre-import
     book balance + net of the rows just imported) against the STATEMENT's own
@@ -838,6 +917,20 @@ def final_closing_balance_verdict(
     post_import_balance = recon["gnucash_balance"] + net_imported
     closing_diff = abs(post_import_balance - stmt_closing)
 
+    if (unresolved_opening_gap is not None and unresolved_opening_gap > 0.02
+            and explained_opening_rows):
+        names = "; ".join(
+            f"{m.get('book_date', '?')} {m.get('other_account', '')}".strip()
+            for m in explained_opening_rows)
+        note = (f"Opening gap {unresolved_opening_gap:.2f} is caused by "
+                f"{len(explained_opening_rows)} statement row(s) already booked "
+                f"before the statement start ({names}); they are left unticked in Review.")
+        if closing_diff <= 0.02:
+            return (f"Closing balance VERIFIED (independent): post-import book="
+                    f"{post_import_balance:.2f} matches statement closing="
+                    f"{stmt_closing:.2f}. {note}")
+        return (f"❌ CLOSING BALANCE MISMATCH: post-import book={post_import_balance:.2f}, "
+                f"statement closing={stmt_closing:.2f} (diff={closing_diff:.2f}). {note}")
     if unresolved_opening_gap is not None and unresolved_opening_gap > 0.02:
         return (
             f"⚠ unreconciled {unresolved_opening_gap:.2f} — opening-balance adjustment or "
@@ -1381,6 +1474,7 @@ def run(
         _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
 
         gnucash_data = None  # unfiltered whole-book parse; contra detection needs it below
+        booked_matches: list[dict] = []  # IMP-11
         try:
             if account_filter_path is None:
                 # Without a resolved account we cannot scope the dedup index
@@ -1435,11 +1529,31 @@ def run(
                 new_count = dedup_summary.get('new', 0)
                 total_duplicates = matched_count + duplicate_count
 
+                # IMP-11: own transfers already booked from the OTHER bank's
+                # statement, dated 1-2 days differently. Matched on the FULL
+                # statement (before the exact dedup drops rows) so an exact pair
+                # consumes its book split first; book splits dated before the
+                # statement start are included.
+                try:
+                    _raw_matches = match_booked_own_transfers(
+                        reconcile_rows, gnucash_data_scoped, account_filter_path)
+                except Exception as e:  # never let the new check break the import
+                    log.warning(f"Booked-transfer check failed: {e}")
+                    _raw_matches = []
+
                 # Filter to keep only "New" rows
                 new_rows = [
                     canonical_rows[i] for i, r in enumerate(report)
                     if r.get('status') == 'New'
                 ]
+
+                _new_pos, _n = {}, 0
+                for _i, _r in enumerate(report):
+                    if _r.get('status') == 'New':
+                        _new_pos[_i] = _n
+                        _n += 1
+                booked_matches = [dict(m, row_idx=_new_pos[m["row_idx"]])
+                                  for m in _raw_matches if m["row_idx"] in _new_pos]
 
                 # Edge case: all rows are duplicates
                 if total_duplicates > 0 and new_count == 0:
@@ -1498,6 +1612,16 @@ def run(
                 f"detection and the opening-balance check are skipped. To enable them, "
                 f"add or rename a bank-typed account in your `.gnucash` that matches "
                 f"'{bank}' (e.g. `Assets:…:Cash and Bank:{bank} - <account-number>`)."
+            )
+
+        if booked_matches:
+            _pre = sum(1 for m in booked_matches if m.get("pre_period"))
+            log_lines.append(
+                f"⚠️ Already booked — {len(booked_matches)} statement row(s) are own "
+                f"transfers whose other leg is already in the book (dated 1-2 days "
+                f"differently{f', {_pre} before the statement start' if _pre else ''}). "
+                f"They are left UNTICKED (not imported) in **Banks > Review**; "
+                f"re-tick one there to import it anyway."
             )
 
         # ── Contra detection (cross-bank transfer matching) ──────────────────
@@ -1572,6 +1696,17 @@ def run(
                 log.warning(f"Could not apply confirmed contras: {e}")
                 log_lines.append(f"⚠️ Contra remap skipped — {e}")
 
+        # IMP-11: park the already-booked rows (unticked) before anything shifts.
+        try:
+            _parked = _set_aside_booked_transfers(output_path, contra_flags, booked_matches)
+            if _parked:
+                log_lines.append(
+                    f"Already-booked rows set aside unticked: {_parked} "
+                    f"(see Banks > Review)")
+        except Exception as e:
+            log.warning(f"Could not set aside booked transfers: {e}")
+            log_lines.append(f"⚠️ Already-booked rows not set aside — {e}")
+
         # HSB-04: the opening-balance carrier row (e.g. HSBC "BALANCE BROUGHT
         # FORWARD") has done its job -- balance check, opening reconciliation,
         # dedup and contra detection all read it above. Drop it now so it does
@@ -1605,7 +1740,9 @@ def run(
             stmt_closing = sidecar.get("closing_balance") if sidecar else None
             log_lines.append(
                 "**Final check** — "
-                + final_closing_balance_verdict(recon, final_rows, stmt_closing, unresolved_opening_gap)
+                + final_closing_balance_verdict(
+                    recon, final_rows, stmt_closing, unresolved_opening_gap,
+                    explain_opening_gap(unresolved_opening_gap, booked_matches))
             )
         except Exception as e:
             log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
