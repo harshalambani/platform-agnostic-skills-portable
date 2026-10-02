@@ -212,7 +212,9 @@ def _html(tmp_path, csv_rows):
 _JS_EDIT = """
   const tr = $id(APP + '-tbody').children[0];
   const di = tr.children.findIndex(td => td.innerHTML.indexOf(%s) >= 0);
-  tr.children[di].ondblclick({stopPropagation(){}});
+  // UI-06: a real double-click (click, click, dblclick on the node under the pointer),
+  // not a direct ondblclick() call -- that call is what hid the real-browser bug.
+  realDblClick(APP, 0, 'Description');
   const inp = tr.children[di].children[0];
   inp.value = %s;
   inp.onkeydown({key: 'Enter', preventDefault(){}});
