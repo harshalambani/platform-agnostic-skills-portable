@@ -158,7 +158,8 @@ def test_unrelated_account_same_date_amount_does_not_dedupe_statement_row(tmp_pa
     assert out_path.is_file(), f"pipeline did not produce an output CSV:\n{result}"
     rows = _read_output_rows(out_path)
     dates = [r.get("Date") for r in rows]
-    deposits = [r.get("Deposit") for r in rows]
+    from agents.canonical_io import row_deposit   # MAP-27: any accepted header spelling
+    deposits = [row_deposit(r) for r in rows]
     assert "2025-04-01" in dates, (
         f"the NEFT salary-credit row (2025-04-01, 50000.00) was dropped as a "
         f"duplicate of an unrelated Expense posting -- dedup is not scoped to "
