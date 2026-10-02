@@ -67,7 +67,9 @@ def test_once_seen_old_upi_transaction_still_gets_generalised_pattern():
     )
     extractor_json = _extractor_json("ICICI", [old_data])
 
-    rules = mapgen.generate_rules(extractor_json, min_freq=1)
+    # MAP-31: age is measured from the statement date, never from today, so the
+    # test names the statement it is imported on (4+ years after the booking).
+    rules = mapgen.generate_rules(extractor_json, min_freq=1, reference_date="2026-03-01")
     icici_rules = rules["ICICI"]
     assert len(icici_rules) == 1
     rule = icici_rules[0]

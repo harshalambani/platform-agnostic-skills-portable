@@ -128,6 +128,12 @@ class ReviewSpec:
     # byte-for-byte unchanged. See itr_mapping_review.py for the first
     # consumer (row-level "delete this mapping entry").
     allow_delete: bool = False
+    # IMP-11. When True, renders "Don't import selected" / "Import selected"
+    # toolbar buttons. Rows flagged `_excluded` (by the loader) start struck
+    # through and are NOT in the payload's `all_rows`; they travel in
+    # `excluded` instead, so the default outcome for them is "not imported" and
+    # the user opts one back in. Default False renders nothing extra.
+    allow_exclude: bool = False
     # UI-04. When set (e.g. "Confidence"), assigning a row makes its
     # target-column badge and its leading status tag follow the row's new value
     # of this column: the badge on TARGET (SUSPENSE / DORMANT?) described the OLD
@@ -340,6 +346,7 @@ _CSS = r"""
 #%%APP%%-app tbody tr.selected:hover { background: #254a73; }
 #%%APP%%-app tbody tr.locked { opacity: 0.75; cursor: not-allowed; }
 #%%APP%%-app tbody tr.row-deleted td { text-decoration: line-through; opacity: 0.55; }
+/*%%EXCLUDE_CSS%%*/
 #%%APP%%-app tbody td {
   padding: 5px 8px; font-size: 12px; max-width: 420px; border-bottom: 1px solid #262626;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd;
@@ -439,7 +446,7 @@ _BODY = r"""
     </div>
     <button id="%%APP%%-apply-sel" class="primary" title="Apply to selected rows">Apply to selected</button>
     %%APPLY_MATCH_HTML%%
-    %%DELETE_BTN_HTML%%
+    %%DELETE_BTN_HTML%%%%EXCLUDE_BTN_HTML%%
     <span class="spacer"></span>
   </div>
 
@@ -584,7 +591,7 @@ _BODY = r"""
     };
   }
 
-  // ── JS → Python bridge. gr.State has no DOM node, so the save handler
+%%EXCLUDE_JS%%  // ── JS → Python bridge. gr.State has no DOM node, so the save handler
   //    reads this global via its js= parameter at click time.
   function syncPayload() {
     const changes = rows.filter(r => r._changed).map(r => {
@@ -598,11 +605,11 @@ _BODY = r"""
     window[PAYLOAD_VAR] = JSON.stringify({
       context: CONTEXT,
       changes: changes,
-      all_rows: rows.map(r => {
+      all_rows: rows%%EXCL_FILTER%%.map(r => {
         const out = {};
         for (const k in r) if (k.charAt(0) !== '_') out[k] = r[k];
         return out;
-      }),
+      }),%%EXCL_FIELDS%%
     });
   }
   syncPayload();
@@ -878,7 +885,7 @@ _BODY = r"""
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
       if (r._deleted) tr.classList.add('row-deleted');
-      tr.dataset.idx = r._idx;
+%%EXCL_ROW_JS%%      tr.dataset.idx = r._idx;
       if (r._deleted) tr.title = 'Marked for deletion';
       else if (r._note) tr.title = r._note;
 
@@ -1014,6 +1021,25 @@ _BODY = r"""
 """
 
 
+_EXCLUDE_JS = """
+  // ── IMP-11: Don't import / Import selected (opt-in via spec.allow_exclude) ──
+  let exclDirty = false;
+  function setExcluded(flag) {
+    if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
+    rows.forEach(r => {
+      if (r._locked || !selected.has(r._idx)) return;
+      if (!!r._excluded !== flag) { r._excluded = flag; exclDirty = true; }
+    });
+    syncPayload();
+    renderTable();
+  }
+  const exclBtn = $('exclude-sel');
+  if (exclBtn) exclBtn.onclick = () => setExcluded(true);
+  const inclBtn = $('include-sel');
+  if (inclBtn) inclBtn.onclick = () => setExcluded(false);
+"""
+
+
 def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
     """Render a complete, self-contained review widget for `rows`.
 
@@ -1048,6 +1074,34 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         if spec.allow_delete else ""
     )
 
+    if spec.allow_exclude:
+        exclude_btn_html = (
+            f'<button id="{spec.app_id}-exclude-sel" '
+            f'title="Leave the selected rows out of the import">Don\'t import selected</button>'
+            f'<button id="{spec.app_id}-include-sel" '
+            f'title="Put the selected rows back into the import">Import selected</button>'
+        )
+        exclude_css = (
+            f" #{spec.app_id}-app tbody tr.row-excluded td "
+            f"{{ text-decoration: line-through; opacity: 0.6; }}"
+        )
+        exclude_js = _EXCLUDE_JS
+        excl_filter = ".filter(r => !r._excluded)"
+        excl_fields = (
+            "\n      excluded: rows.filter(r => r._excluded).map(r => {"
+            "\n        const out = {};"
+            "\n        for (const k in r) if (k.charAt(0) !== '_') out[k] = r[k];"
+            "\n        return out;"
+            "\n      }),\n      excluded_dirty: exclDirty"
+        )
+        excl_row_js = (
+            "      if (r._excluded) { tr.classList.add('row-excluded'); "
+            "if (!r._deleted) tr.title = (r._note || 'Not imported') + ' (not imported; select and click Import selected to include)'; }\n"
+        )
+    else:
+        exclude_btn_html = exclude_css = exclude_js = excl_filter = ""
+        excl_fields = excl_row_js = ""
+
     default_sort = spec.default_sort or (spec.columns[0].key if spec.columns else "")
 
     html = _CSS + _BODY
@@ -1055,6 +1109,12 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%STATUS_FILTER_HTML%%", status_html),
         ("%%APPLY_MATCH_HTML%%", apply_match_html),
         ("%%DELETE_BTN_HTML%%", delete_btn_html),
+        ("%%EXCLUDE_BTN_HTML%%", exclude_btn_html),
+        ("/*%%EXCLUDE_CSS%%*/\n", exclude_css + "\n" if exclude_css else ""),
+        ("%%EXCLUDE_JS%%", exclude_js),
+        ("%%EXCL_FILTER%%", excl_filter),
+        ("%%EXCL_FIELDS%%", excl_fields),
+        ("%%EXCL_ROW_JS%%", excl_row_js),
         ("%%EXTRA_PANEL%%", spec.extra_panel_html),
         ("%%PICKER_LABEL%%", _attr(spec.picker_label)),
         ("%%PICKER_PLACEHOLDER%%", _attr(spec.picker_placeholder)),
@@ -1113,8 +1173,12 @@ def parse_payload(raw: str) -> dict:
         raise ValueError(f"could not parse review payload: {e}") from e
     if not isinstance(data, dict):
         raise ValueError("review payload was not a JSON object")
-    return {
+    out = {
         "context": data.get("context") or {},
         "changes": data.get("changes") or [],
         "all_rows": data.get("all_rows") or [],
     }
+    if "excluded" in data:  # IMP-11: only screens with allow_exclude send it
+        out["excluded"] = data.get("excluded") or []
+        out["excluded_dirty"] = bool(data.get("excluded_dirty"))
+    return out

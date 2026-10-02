@@ -50,6 +50,7 @@ from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
     reconcile,
     detect_contra_entries,
+    match_booked_own_transfers,
 )
 
 log = logging.getLogger(__name__)
@@ -208,6 +209,77 @@ def _apply_confirmed_contras(output_path: str, contra_flags: dict) -> int:
     return remapped
 
 
+BOOKED_SIDECAR_SUFFIX = ".matched.json"
+
+
+def booked_sidecar_path(output_path: str) -> Path:
+    """IMP-11: <stem>.matched.json, next to the mapped CSV."""
+    return Path(output_path).with_suffix(BOOKED_SIDECAR_SUFFIX)
+
+
+def explain_opening_gap(unresolved_gap: float | None, matches: list[dict]) -> list[dict]:
+    """IMP-11: the matched rows that pair with book splits dated BEFORE the
+    statement, when their net equals the opening gap (to 0.02). Returns [] when
+    they do not explain it -- never a partial guess."""
+    if unresolved_gap is None or unresolved_gap <= 0.02:
+        return []
+    pre = [m for m in matches if m.get("pre_period")]
+    if not pre:
+        return []
+    net = sum(float(m["amount"]) for m in pre)
+    return pre if abs(abs(net) - unresolved_gap) <= 0.02 else []
+
+
+def _set_aside_booked_transfers(output_path: str, contra_flags: dict,
+                                matches: list[dict]) -> int:
+    """IMP-11: take rows already booked from the other bank's statement OUT of
+    the importable CSV and park them (with the reason) in <stem>.matched.json.
+
+    Nothing is deleted: the Review tab shows them excluded ("not imported") and
+    the user can re-tick one to import it. They are removed from the CSV so
+    that, even if Review is never opened, they cannot be imported by accident.
+    ``contra_flags`` keys are 0-based row indices into the output CSV; they are
+    shifted past the removed rows (a flag on a removed row travels with it).
+    The sidecar is always (re)written, so a stale one never survives a re-run.
+    """
+    import json as _json
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames
+        rows = list(reader)
+    by_idx = {int(m["row_idx"]): m for m in matches if 0 <= int(m["row_idx"]) < len(rows)}
+    parked, kept = [], []
+    for i, row in enumerate(rows):
+        m = by_idx.get(i)
+        if m is None:
+            kept.append(row)
+            continue
+        entry = {k: m[k] for k in ("reason", "book_date", "other_account",
+                                   "days_off", "pre_period", "tie") if k in m}
+        entry["row"] = row
+        if i in contra_flags or str(i) in contra_flags:
+            entry["contra"] = contra_flags.get(i, contra_flags.get(str(i)))
+        parked.append(entry)
+    with open(booked_sidecar_path(output_path), "w", encoding="utf-8") as sf:
+        _json.dump(parked, sf, indent=2, default=str)
+    if not parked:
+        return 0
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(kept)
+    gone = {i for i in by_idx}
+    remapped = {}
+    for key, val in list(contra_flags.items()):
+        idx = int(key)
+        if idx in gone:
+            continue
+        remapped[idx - sum(1 for d in gone if d < idx)] = val
+    contra_flags.clear()
+    contra_flags.update(remapped)
+    return len(parked)
+
+
 def _drop_balance_carriers(output_path: str, contra_flags: dict) -> int:
     """HSB-04: remove balance-carrier rows from the mapped CSV.
 
@@ -348,6 +420,15 @@ def _narration_pick(pool: list[tuple[str, str]], narrations: list[str]) -> str |
     return next(iter(votes)) if len(votes) == 1 else None
 
 
+def _balance_before(entries, start_date: str | None) -> float:
+    """IMP-12: the book balance of ``entries`` ((iso_date, value) splits) dated
+    STRICTLY BEFORE ``start_date`` (the statement's first date). With no
+    start_date there is no "before": the all-dates balance. The ONE place this
+    rule lives -- the evidence picker, the opening-balance comparison and the
+    opening-gap explanation all use it."""
+    return sum(v for d, v in entries if not start_date or (d and d < start_date))
+
+
 def _get_gnucash_account_balance(
     gnucash_file: str, bank_name: str, account_number: str | None = None,
     *, opening_balance: float | None = None, start_date: str | None = None,
@@ -387,7 +468,8 @@ def _get_gnucash_account_balance(
         {
             "found": bool,
             "account_name": str,
-            "balance": float,
+            "balance": float,              # ALL dates (the closing check's base)
+            "balance_before_start": float, # splits dated before start_date (IMP-12)
             "last_txn_date": str or None,  # YYYY-MM-DD
             "match_warning": str or None,
             "match_note": str or None,     # how an evidence pick was made
@@ -465,9 +547,13 @@ def _get_gnucash_account_balance(
         _guard = None
 
     def _result(found, name="", balance=0.0, last=None, warn=None, note=None,
-                ambiguous=False, refused=False, cands=None):
+                ambiguous=False, refused=False, cands=None, opening=None):
         return {
             "found": found, "account_name": name, "balance": balance,
+            # IMP-12: the book balance strictly before the statement's first date
+            # (== balance when no start_date was given). The OPENING comparison
+            # uses this; the closing check keeps the all-dates "balance".
+            "balance_before_start": balance if opening is None else opening,
             "last_txn_date": last,
             "match_warning": (f"{warn} {fallback_warning}".strip() if warn and fallback_warning
                               else (warn or fallback_warning)),
@@ -540,8 +626,7 @@ def _get_gnucash_account_balance(
         bal_hits = []
         if opening_balance is not None:
             for aid, full in pool:
-                bal = sum(v for d, v in splits_by_acc.get(aid, [])
-                          if not start_date or (d and d < start_date))
+                bal = _balance_before(splits_by_acc.get(aid, []), start_date)
                 if abs(bal - opening_balance) <= 0.02:
                     bal_hits.append((aid, full))
         n_id = _narration_pick(pool, narrations or [])
@@ -617,7 +702,8 @@ def _get_gnucash_account_balance(
     last_date = max((d for d, _v in entries if d), default=None)
 
     return _result(True, target_name, round(balance, 2), last_date,
-                   match_warning, match_note, cands=postable_paths)
+                   match_warning, match_note, cands=postable_paths,
+                   opening=round(_balance_before(entries, start_date), 2))
 
 
 def postable_bank_accounts(gnucash_file: str, bank_name: str) -> list[str]:
@@ -656,7 +742,8 @@ def _reconcile_opening_balance(
             "message": str,
             "rows_skipped": int,           # scenario A duplicates removed
             "filtered_rows": list[dict],   # rows after removing duplicates
-            "gnucash_balance": float,
+            "gnucash_balance": float,      # ALL dates: the closing check's base
+            "gnucash_opening_balance": float,  # strictly before the first date (IMP-12)
             "statement_opening": float,
         }
     """
@@ -715,13 +802,18 @@ def _reconcile_opening_balance(
         }
 
     gc_balance = gc["balance"]
+    # IMP-12: the statement's OPENING is a balance at its first date, so it is
+    # compared with the book as of just before that date -- not the all-dates
+    # balance, which already includes in-period entries (e.g. other-bank
+    # transfers IMP-11 sets aside) and would raise a false opening gap.
+    gc_open = gc.get("balance_before_start", gc_balance)
     gc_last_date = gc["last_txn_date"]
 
     # Derive statement opening balance
     oc = extract_opening_closing(canonical_rows)
     stmt_opening = oc["opening_balance"]
 
-    diff = abs(gc_balance - stmt_opening)
+    diff = abs(gc_open - stmt_opening)
     _mw = " ".join(x for x in (gc.get("match_warning"), gc.get("match_note")) if x) or None
 
     if diff <= 0.02:
@@ -730,11 +822,12 @@ def _reconcile_opening_balance(
             "ok": True,
             "message": (
                 f"Opening balance matches GnuCash: "
-                f"GnuCash={gc_balance:.2f}, Statement={stmt_opening:.2f}"
+                f"GnuCash={gc_open:.2f}, Statement={stmt_opening:.2f}"
             ),
             "rows_skipped": 0,
             "filtered_rows": canonical_rows,
             "gnucash_balance": gc_balance,
+            "gnucash_opening_balance": gc_open,
             "statement_opening": stmt_opening,
             "account_found": True,
             "match_warning": _mw,
@@ -782,6 +875,7 @@ def _reconcile_opening_balance(
                     "rows_skipped": skipped,
                     "filtered_rows": filtered,
                     "gnucash_balance": gc_balance,
+                    "gnucash_opening_balance": gc_balance,   # rows up to the book's last date were skipped
                     "statement_opening": new_oc["opening_balance"],
                     "account_found": True,
                     "match_warning": _mw,
@@ -792,7 +886,7 @@ def _reconcile_opening_balance(
         "ok": False,
         "message": (
             f"OPENING BALANCE MISMATCH: GnuCash ({gc['account_name']}) "
-            f"shows {gc_balance:.2f} but statement opens at {stmt_opening:.2f} "
+            f"shows {gc_open:.2f} before the statement's first date but statement opens at {stmt_opening:.2f} "
             f"(diff={diff:.2f}).\n"
             f"Possible causes: (B) prior statement entries were omitted, "
             f"or (C) there's a data error. Please investigate manually."
@@ -800,6 +894,7 @@ def _reconcile_opening_balance(
         "rows_skipped": 0,
         "filtered_rows": canonical_rows,
         "gnucash_balance": gc_balance,
+        "gnucash_opening_balance": gc_open,
         "statement_opening": stmt_opening,
         "account_found": True,
         "match_warning": _mw,
@@ -811,9 +906,16 @@ def final_closing_balance_verdict(
     final_rows: list[dict],
     stmt_closing: float | None,
     unresolved_opening_gap: float | None,
+    explained_opening_rows: list[dict] | None = None,
 ) -> str:
     """
     Compute the final closing-balance verdict message.
+
+    IMP-11: ``explained_opening_rows`` are the matched (set-aside, unticked)
+    rows that pair with book splits dated before the statement. When their net
+    IS the opening gap, the gap is not a mystery: the verdict names them. The
+    closing figure is always computed from ``final_rows`` only, i.e. as if the
+    unticked rows are not imported.
 
     The verdict compares the actual POST-IMPORT GnuCash balance (pre-import
     book balance + net of the rows just imported) against the STATEMENT's own
@@ -838,6 +940,20 @@ def final_closing_balance_verdict(
     post_import_balance = recon["gnucash_balance"] + net_imported
     closing_diff = abs(post_import_balance - stmt_closing)
 
+    if (unresolved_opening_gap is not None and unresolved_opening_gap > 0.02
+            and explained_opening_rows):
+        names = "; ".join(
+            f"{m.get('book_date', '?')} {m.get('other_account', '')}".strip()
+            for m in explained_opening_rows)
+        note = (f"Opening gap {unresolved_opening_gap:.2f} is caused by "
+                f"{len(explained_opening_rows)} statement row(s) already booked "
+                f"before the statement start ({names}); they are left unticked in Review.")
+        if closing_diff <= 0.02:
+            return (f"Closing balance VERIFIED (independent): post-import book="
+                    f"{post_import_balance:.2f} matches statement closing="
+                    f"{stmt_closing:.2f}. {note}")
+        return (f"❌ CLOSING BALANCE MISMATCH: post-import book={post_import_balance:.2f}, "
+                f"statement closing={stmt_closing:.2f} (diff={closing_diff:.2f}). {note}")
     if unresolved_opening_gap is not None and unresolved_opening_gap > 0.02:
         return (
             f"⚠ unreconciled {unresolved_opening_gap:.2f} — opening-balance adjustment or "
@@ -1347,10 +1463,12 @@ def run(
         if recon["ok"]:
             log_lines.append(f"**Balance check** — {recon['message']}")
         else:
-            unresolved_opening_gap = abs(recon["gnucash_balance"] - recon["statement_opening"])
+            unresolved_opening_gap = abs(
+                recon.get("gnucash_opening_balance", recon["gnucash_balance"])
+                - recon["statement_opening"])
             log_lines.append(
                 f"**Balance check** — ⚠ Opening balance gap detected "
-                f"(GnuCash={recon['gnucash_balance']:.2f}, "
+                f"(GnuCash before the statement={recon.get('gnucash_opening_balance', recon['gnucash_balance']):.2f}, "
                 f"statement={recon['statement_opening']:.2f}, diff={unresolved_opening_gap:.2f}). "
                 f"Dedup below will attempt to reconcile overlapping transactions; "
                 f"if it doesn't, this gap carries into the final verdict."
@@ -1381,6 +1499,7 @@ def run(
         _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
 
         gnucash_data = None  # unfiltered whole-book parse; contra detection needs it below
+        booked_matches: list[dict] = []  # IMP-11
         try:
             if account_filter_path is None:
                 # Without a resolved account we cannot scope the dedup index
@@ -1435,11 +1554,31 @@ def run(
                 new_count = dedup_summary.get('new', 0)
                 total_duplicates = matched_count + duplicate_count
 
+                # IMP-11: own transfers already booked from the OTHER bank's
+                # statement, dated 1-2 days differently. Matched on the FULL
+                # statement (before the exact dedup drops rows) so an exact pair
+                # consumes its book split first; book splits dated before the
+                # statement start are included.
+                try:
+                    _raw_matches = match_booked_own_transfers(
+                        reconcile_rows, gnucash_data_scoped, account_filter_path)
+                except Exception as e:  # never let the new check break the import
+                    log.warning(f"Booked-transfer check failed: {e}")
+                    _raw_matches = []
+
                 # Filter to keep only "New" rows
                 new_rows = [
                     canonical_rows[i] for i, r in enumerate(report)
                     if r.get('status') == 'New'
                 ]
+
+                _new_pos, _n = {}, 0
+                for _i, _r in enumerate(report):
+                    if _r.get('status') == 'New':
+                        _new_pos[_i] = _n
+                        _n += 1
+                booked_matches = [dict(m, row_idx=_new_pos[m["row_idx"]])
+                                  for m in _raw_matches if m["row_idx"] in _new_pos]
 
                 # Edge case: all rows are duplicates
                 if total_duplicates > 0 and new_count == 0:
@@ -1498,6 +1637,16 @@ def run(
                 f"detection and the opening-balance check are skipped. To enable them, "
                 f"add or rename a bank-typed account in your `.gnucash` that matches "
                 f"'{bank}' (e.g. `Assets:…:Cash and Bank:{bank} - <account-number>`)."
+            )
+
+        if booked_matches:
+            _pre = sum(1 for m in booked_matches if m.get("pre_period"))
+            log_lines.append(
+                f"⚠️ Already booked — {len(booked_matches)} statement row(s) are own "
+                f"transfers whose other leg is already in the book (dated 1-2 days "
+                f"differently{f', {_pre} before the statement start' if _pre else ''}). "
+                f"They are left UNTICKED (not imported) in **Banks > Review**; "
+                f"re-tick one there to import it anyway."
             )
 
         # ── Contra detection (cross-bank transfer matching) ──────────────────
@@ -1572,6 +1721,17 @@ def run(
                 log.warning(f"Could not apply confirmed contras: {e}")
                 log_lines.append(f"⚠️ Contra remap skipped — {e}")
 
+        # IMP-11: park the already-booked rows (unticked) before anything shifts.
+        try:
+            _parked = _set_aside_booked_transfers(output_path, contra_flags, booked_matches)
+            if _parked:
+                log_lines.append(
+                    f"Already-booked rows set aside unticked: {_parked} "
+                    f"(see Banks > Review)")
+        except Exception as e:
+            log.warning(f"Could not set aside booked transfers: {e}")
+            log_lines.append(f"⚠️ Already-booked rows not set aside — {e}")
+
         # HSB-04: the opening-balance carrier row (e.g. HSBC "BALANCE BROUGHT
         # FORWARD") has done its job -- balance check, opening reconciliation,
         # dedup and contra detection all read it above. Drop it now so it does
@@ -1605,7 +1765,9 @@ def run(
             stmt_closing = sidecar.get("closing_balance") if sidecar else None
             log_lines.append(
                 "**Final check** — "
-                + final_closing_balance_verdict(recon, final_rows, stmt_closing, unresolved_opening_gap)
+                + final_closing_balance_verdict(
+                    recon, final_rows, stmt_closing, unresolved_opening_gap,
+                    explain_opening_gap(unresolved_opening_gap, booked_matches))
             )
         except Exception as e:
             log_lines.append(f"**Final check** — Could not verify closing balance: {e}")

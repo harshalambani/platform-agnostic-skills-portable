@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 import shutil
 from pathlib import Path
@@ -150,6 +151,63 @@ def _load_contra_sidecar(csv_p: Path) -> dict:
         return {str(k): v for k, v in raw.items()}
     except Exception:
         return {}
+
+
+BOOKED_SUFFIX = ".matched.json"
+
+
+def _load_booked_sidecar(csv_p: Path) -> list[dict]:
+    """IMP-11: rows the pipeline set aside because they are own transfers
+    already booked from the other bank's statement (`<stem>.matched.json`).
+    Missing or unreadable -> []."""
+    path = csv_p.with_suffix(BOOKED_SUFFIX)
+    if not path.is_file():
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as bf:
+            raw = json.load(bf)
+        return [e for e in raw if isinstance(e, dict) and isinstance(e.get("row"), dict)]
+    except Exception:
+        return []
+
+
+def _booked_row(entry: dict) -> dict:
+    """A set-aside row as the review grid shows it: struck through, unticked
+    (`_excluded`), with the matching book entry as its Reason."""
+    row = dict(entry["row"])
+    reason = entry.get("reason") or str(row.get("MatchReason") or "")
+    row["MatchReason"] = reason
+    row["_excluded"] = True
+    return row
+
+
+def _booked_presentation(row: dict, contra: dict | None) -> None:
+    _row_presentation(row, contra)
+    row["_tags"] = list(row.get("_tags") or []) + ["booked"]
+    row["_rowclass"] = "tone-amber"
+    badges = dict(row.get("_badges") or {})
+    badges["Date"] = {"text": "BOOKED", "cls": "amber"}
+    row["_badges"] = badges
+    row["_note"] = row.get("MatchReason") or "Already booked"
+
+
+def _write_booked_sidecar(csv_p: Path, excluded: list[dict], old: list[dict]) -> None:
+    """Rewrite the sidecar with the rows still excluded after a save, so a
+    reload neither loses them nor duplicates a re-ticked one."""
+    def key(r: dict) -> tuple:
+        return tuple(str(r.get(k, "")) for k in
+                     ("Date", "Description", "Deposit", "Withdrawal",
+                      "Amount Negated (Deposit)", "Amount (Withdrawal)"))
+    by_key = {key(e["row"]): e for e in old}
+    out = []
+    for row in excluded:
+        prev = by_key.get(key(row), {})
+        entry = {k: v for k, v in prev.items() if k not in ("row", "reason")}
+        entry["reason"] = str(row.get("MatchReason") or prev.get("reason") or "")
+        entry["row"] = row
+        out.append(entry)
+    with open(csv_p.with_suffix(BOOKED_SUFFIX), "w", encoding="utf-8") as bf:
+        json.dump(out, bf, indent=2, default=str)
 
 
 def _row_presentation(row: dict, contra: dict | None) -> None:
@@ -357,6 +415,7 @@ def _spec(
             ("medium", "Medium"),
             ("high", "High"),
             ("contra", "Contra"),
+            ("booked", "Already booked"),
         ],
         status_label="Filter:",
         default_sort="Confidence",
@@ -368,6 +427,7 @@ def _spec(
         status_col="Confidence",  # UI-04: an assigned row loses its stale badge
         status_classes=_band_classes(),  # UI-05: ...and its band follows the new type
         extra_panel_html=_legend_html(),
+        allow_exclude=True,  # IMP-11: already-booked rows start unticked
     )
 
 
@@ -387,7 +447,8 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
     with open(csv_p, "r", encoding="utf-8", errors="replace") as f:
         rows = list(csv.DictReader(f))
 
-    if not rows:
+    booked = _load_booked_sidecar(csv_p)
+    if not rows and not booked:
         return "<p>CSV is empty — no rows to review.</p>"
 
     accounts = _extract_account_tree(str(gc_p))
@@ -398,6 +459,10 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
     for i, row in enumerate(rows):
         _restore_description_edit(row)
         _row_presentation(row, contra_flags.get(str(i)))
+    for entry in booked:
+        brow = _booked_row(entry)
+        _booked_presentation(brow, entry.get("contra"))
+        rows.append(brow)
 
     # Fallback column keys for older CSVs.
     # MAP-27: the shared helper accepts the new "Amount Negated (Deposit)" /
@@ -443,7 +508,8 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     # the ORIGINAL narration (Description is never overwritten in the payload).
     all_rows, n_desc_edits = _apply_description_edits(all_rows)
 
-    if not changes and not n_desc_edits:
+    excluded_dirty = bool(payload.get("excluded_dirty"))
+    if not changes and not n_desc_edits and not excluded_dirty:
         return "No changes to save.", gr.update(interactive=False, value=None)
 
     # ── Save overrides YAML ──
@@ -497,6 +563,16 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
 
     # ── Re-export CSV ──
     download_path: str | None = None
+    excluded_rows = payload.get("excluded") or []
+    if excluded_dirty and csv_path and not all_rows:
+        # Every row is now excluded: keep the header, import nothing.
+        try:
+            with open(csv_path, "r", encoding="utf-8", errors="replace", newline="") as rf:
+                hdr = csv.DictReader(rf).fieldnames or []
+            with open(csv_path, "w", newline="", encoding="utf-8") as wf:
+                csv.DictWriter(wf, fieldnames=list(hdr)).writeheader()
+        except Exception as e:
+            logging.getLogger(__name__).warning("could not blank %s: %s", csv_path, e)
     if all_rows and csv_path:
         try:
             csv_p = Path(csv_path)
@@ -542,6 +618,15 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
             export_msg = f"Warning: could not re-export CSV — {e}"
     else:
         export_msg = "CSV not re-exported (no row data)"
+
+    if excluded_dirty and csv_path:
+        # IMP-11: persist which already-booked rows are still excluded.
+        try:
+            csv_p = Path(csv_path)
+            _write_booked_sidecar(csv_p, excluded_rows, _load_booked_sidecar(csv_p))
+            export_msg += f"; {len(excluded_rows)} row(s) left out of the import (not imported)"
+        except Exception as e:
+            export_msg += f"; Warning: could not record excluded rows - {e}"
 
     msg = f"✅ **Saved**\n\n{override_msg}\n\n{export_msg}"
     if download_path:
