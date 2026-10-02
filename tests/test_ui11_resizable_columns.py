@@ -19,7 +19,6 @@ import asyncio
 import csv
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
@@ -199,9 +198,8 @@ def test_keys_are_namespaced_by_the_app_id_in_the_template():
 
 
 # ---- 3. one test per screen -----------------------------------------------------------
-
-    assert "%%APP%%" not in html                       # no unsubstituted placeholder (plain substring, no regex)
-    assert re.findall(r"%%[A-Z_]*%%", html) == []
+def _assert_screen_has_resizing(html, app_id):
+    assert "%%" not in html                            # no unsubstituted placeholder (plain substring, no regex)
     assert "col-resizer" in html                       # handle CSS + markup in the init code
     assert 'id="%s-reset-widths"' % app_id in html
     assert "Reset widths" in html
