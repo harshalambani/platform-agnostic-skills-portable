@@ -1192,6 +1192,7 @@ def _history_token_match(
     source_account: Optional[str] = None,
     own_evidence: Optional[Callable[[str], bool]] = None,
     own_targets: Optional[set] = None,
+    own_target_evidence: Optional[Callable[[str, str], bool]] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
@@ -1239,7 +1240,8 @@ def _history_token_match(
                 match = None   # still an own target, still no evidence
         if (match and own_evidence is not None
                 and _strip_root(match.get('account') or '') in _targets
-                and not own_evidence(desc)):
+                and not (own_target_evidence(desc, match.get('account') or '')
+                         if own_target_evidence is not None else own_evidence(desc))):
             # MAP-26 round 2: a history win onto an own bank/FD needs own-transfer
             # evidence; the owner's plain name (the tokens that drove the score)
             # is not evidence. Abstain; the row goes on to Suspense / Review.
@@ -1512,10 +1514,31 @@ _OWN_PRODUCT_KW_RE = re.compile(
     r'|premat\w*|maturity|closure)\b')
 
 
+_OWN_FD_STRONG_KW_RE = re.compile(
+    r'\b(?:auto\s*sweep\w*|sweep\w*|premat\w*|maturity|closure)\b')
+_CASH_WDL_RE = re.compile(
+    r'\b(?:cash\s*wdl|atm\s*wdl|cash\s+withdrawal|atw|nwd)\b')
+_FD_TARGET_RE = re.compile(
+    r'fixed\s+deposit|\bfd\b|term\s+deposit|\bf\.d\.')
+_CASH_TARGET_RE = re.compile(r'^(?:cash|cash in hand|petty cash|wallet)$')
+
+
+def _is_fd_target(account: str) -> bool:
+    """MAP-26 round 3: a deposit-type own account (under a Fixed Deposits folder or
+    named like an FD)."""
+    return bool(_FD_TARGET_RE.search((account or '').lower()))
+
+
+def _is_cash_target(account: str) -> bool:
+    """MAP-26 round 3: the own cash-in-hand account (last path segment)."""
+    return bool(_CASH_TARGET_RE.match(_strip_root(account or '').rsplit(':', 1)[-1].strip().lower()))
+
+
 def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
                                own_bank_accounts: Optional[set] = None,
                                source_account: Optional[str] = None,
-                               name_alone: bool = True) -> bool:
+                               name_alone: bool = True,
+                               target: Optional[str] = None) -> bool:
     """True only if `desc` carries positive evidence of a transfer between the
     owner's own accounts: the 'xfer to self' marker (full or field-truncated),
     an own VPA/handle, an owner-identity token TOGETHER WITH a bank word naming
@@ -1532,6 +1555,16 @@ def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
     low = (desc or '').lower()
     if _SELF_MARKER_RE.search(low):
         return True
+    _fd_t = bool(target) and _is_fd_target(target)
+    if target and own_bank_accounts is not None:
+        # MAP-26 round 3: evidence is judged against the TARGET's type. A sweep /
+        # closure keyword by itself is evidence for an FD target, a cash-withdrawal
+        # keyword by itself for the own Cash account; neither says anything about
+        # an own savings/current account.
+        if _fd_t and _OWN_FD_STRONG_KW_RE.search(low):
+            return True
+        if _is_cash_target(target) and _CASH_WDL_RE.search(low):
+            return True
     own_toks = (set(_tokenize_history(desc)) & own_vocab) if own_vocab else set()
     if own_toks and own_bank_accounts is not None and not name_alone:
         # a product word learned into the vocabulary from the sweep/FD rows
@@ -1542,8 +1575,8 @@ def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
             return True
         if any(_is_handle_token(t) for t in own_toks):
             return True
-        if _OWN_PRODUCT_KW_RE.search(low):
-            return True   # owner token + sweep / FD / closure keyword
+        if _fd_t and _OWN_PRODUCT_KW_RE.search(low):
+            return True   # owner token + sweep / FD / closure keyword, FD targets only
         if _narration_bank_carriers(desc, own_bank_accounts, source_account,
                                     include_ifsc=True)[1]:
             return True
@@ -1569,7 +1602,8 @@ def _gate_own_target(desc: str, account: str, own_vocab: set, own_targets: set,
     if not account or _strip_root(account) not in own_targets:
         return True
     return _has_own_transfer_evidence(desc, own_vocab, own_targets,
-                                      own_bank_accounts, source_account, name_alone)
+                                      own_bank_accounts, source_account, name_alone,
+                                      target=account)
 
 
 def _llm_reason(reason: str) -> str:
@@ -3212,6 +3246,10 @@ def run(
         return _has_own_transfer_evidence(
             _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
             name_alone=False)
+    def _own_ev_target(_d: str, _t: str) -> bool:
+        return _has_own_transfer_evidence(
+            _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+            name_alone=False, target=_t)
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -3235,6 +3273,7 @@ def run(
                 source_account=gnucash_bank_account,
                 own_evidence=_hist_own_evidence,
                 own_targets=_hist_own_targets,
+                own_target_evidence=_own_ev_target,
             )
             if match and match.get('tie'):
                 # MAP-16: a tie between own accounts is never guessed.
