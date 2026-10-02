@@ -339,6 +339,16 @@ _CSS = r"""
 #%%APP%%-app tbody tr.tone-amber.selected,
 #%%APP%%-app tbody tr.tone-green.selected { background: #1e3a5f; }
 /*%%TINT_OFF_CSS%%*/
+/* UI-09: a selected row is a REVERSE highlight -- light cells, dark text, a light
+   top/bottom edge -- so it reads at a glance over every tint (including the blue
+   override rows) and does not rely on hue. Declared after the tint, equal or
+   higher specificity, so it always wins. */
+#%%APP%%-app tbody tr.selected td {
+  background-color: #dbe7ff; background-image: none; color: #0b1220;
+  box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff;
+}
+#%%APP%%-app tbody tr.selected:hover td { background-color: #c3d6ff; }
+#%%APP%%-app tbody tr.selected td:first-child { box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff, inset 5px 0 0 #1e3a8a; }
 
 /* Badge + confidence colours — bright on dark, WCAG AA at 12px. */
 #%%APP%%-app .badge {
@@ -457,6 +467,8 @@ _BODY = r"""
   let statusFilter = '';
   let colFilters = {};
   let focusAfter = null;   // UI-10: filter box to focus after the next render (X / Clear all)
+  let shownCount = 0;      // rows in the current view (for the stats line)
+  let editing = false;     // UI-06: an inline edit box is open
   let sortCol = %%DEFAULT_SORT_JSON%%;
   let sortAsc = true;
 
@@ -590,6 +602,26 @@ _BODY = r"""
     if (cols.length) clearFilters(cols);
   };
 
+  // The rows-counter line. Also called after an in-place selection change, so a
+  // plain click never has to rebuild the table (UI-06).
+  function updateStats() {
+    const changed = rows.filter(r => r._changed && !r._deleted).length;
+    const deleted = rows.filter(r => r._deleted).length;
+    const editCols = COLS.filter(c => c.edit_key);
+    const edited = editCols.length
+      ? rows.filter(r => editCols.some(c => {
+          const t = cellText(r, c.edit_key).trim();
+          return t && t !== cellText(r, c.key).trim();
+        })).length
+      : 0;
+    $('stats').textContent =
+      shownCount + '/' + rows.length + ' rows' +
+      (selected.size ? ' | ' + selected.size + ' selected' : '') +
+      (changed ? ' | ' + changed + ' changed' : '') +
+      (edited ? ' | ' + edited + ' edited' : '') +
+      (deleted ? ' | ' + deleted + ' deleted' : '');
+  }
+
   // ── Rendering ──
   function renderTable() {
     const thead = $('thead');
@@ -720,9 +752,6 @@ _BODY = r"""
           td.title = 'Edited. Original: ' + orig;
         }
         td.innerHTML = html;
-        if (c.edit_key && !r._locked && !r._deleted) {
-          td.ondblclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); beginEdit(r, c, td, val, orig); };
-        }
         tr.appendChild(td);
       });
 
@@ -730,21 +759,8 @@ _BODY = r"""
       tbody.appendChild(tr);
     });
 
-    const changed = rows.filter(r => r._changed && !r._deleted).length;
-    const deleted = rows.filter(r => r._deleted).length;
-    const editCols = COLS.filter(c => c.edit_key);
-    const edited = editCols.length
-      ? rows.filter(r => editCols.some(c => {
-          const t = cellText(r, c.edit_key).trim();
-          return t && t !== cellText(r, c.key).trim();
-        })).length
-      : 0;
-    $('stats').textContent =
-      filtered.length + '/' + rows.length + ' rows' +
-      (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '') +
-      (edited ? ' | ' + edited + ' edited' : '') +
-      (deleted ? ' | ' + deleted + ' deleted' : '');
+    shownCount = filtered.length;
+    updateStats();
     if (clearAll) {
       const nf = Object.keys(colFilters).filter(k => colFilters[k]).length;
       clearAll.style.display = nf ? '' : 'none';
@@ -766,6 +782,7 @@ _BODY = r"""
   //    unchanged entry clears the edit. The value is set via the .value
   //    property, never innerHTML.
   function beginEdit(r, c, td, current, orig) {
+    editing = true;
     const inp = document.createElement('input');
     inp.type = 'text';
     inp.value = current;
@@ -774,6 +791,7 @@ _BODY = r"""
     const finish = (commit) => {
       if (done) return;
       done = true;
+      editing = false;
       if (commit) {
         const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
         r[c.edit_key] = (v && v !== orig.trim()) ? v : '';
@@ -792,9 +810,33 @@ _BODY = r"""
     inp.focus();
   }
 
+  // UI-06: ONE delegated dblclick listener on the tbody, which is never rebuilt,
+  // so a real double-click (whose second click must land on the SAME node the
+  // first one did) reaches it. Row and column come from data / position, not
+  // from closures over td nodes.
+  $('tbody').addEventListener('dblclick', (e) => {
+    if (editing) return;
+    const t = e && e.target;
+    if (!t || !t.closest) return;
+    if (t.tagName === 'INPUT') return;
+    const td = t.closest('td');
+    const tr = td && td.parentNode;
+    if (!td || !tr || tr.dataset.idx === undefined) return;
+    const c = COLS[Array.prototype.indexOf.call(tr.children, td)];
+    const r = rows.find(x => String(x._idx) === String(tr.dataset.idx));
+    if (!c || !c.edit_key || !r || r._locked || r._deleted) return;
+    const orig = cellText(r, c.key);
+    const editedTxt = cellText(r, c.edit_key).trim();
+    const val = (editedTxt && editedTxt !== orig.trim()) ? editedTxt : orig;
+    beginEdit(r, c, td, val, orig);
+  });
+
+  // A click changes the selection IN PLACE (toggle the 'selected' class on the
+  // existing rows, refresh the counter). It must not rebuild tbody: that
+  // replaces every td and Chromium then drops the dblclick of a double-click.
   function handleRowClick(idx, e) {
     if (e.shiftKey && lastClickIdx !== null) {
-      const all = [...document.querySelectorAll('#' + APP + '-tbody tr')].map(tr => parseInt(tr.dataset.idx));
+      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx));
       const a = all.indexOf(lastClickIdx), b = all.indexOf(idx);
       if (a >= 0 && b >= 0) for (let i = Math.min(a,b); i <= Math.max(a,b); i++) selected.add(all[i]);
     } else if (e.ctrlKey || e.metaKey) {
@@ -803,7 +845,11 @@ _BODY = r"""
       selected.clear(); selected.add(idx);
     }
     lastClickIdx = idx;
-    renderTable();
+    Array.prototype.forEach.call($('tbody').children, tr => {
+      if (selected.has(parseInt(tr.dataset.idx))) tr.classList.add('selected');
+      else tr.classList.remove('selected');
+    });
+    updateStats();
   }
 
   renderTable();
