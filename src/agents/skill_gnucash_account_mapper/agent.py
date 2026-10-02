@@ -1107,6 +1107,84 @@ def _literal_bank_code_match(
     }
 
 
+def _own_bank_words(own_bank_accounts: Optional[set]):
+    """MAP-26: (words, per_acct). `words` = the bank words that tell the owner's
+    own bank accounts APART: a token in some own account's name but not in EVERY
+    own account's name (so 'bank' never counts). `per_acct` maps each own account
+    to its name tokens. The SOURCE account is excluded from the carriers by the
+    callers (a narration naming the bank being imported never routes to it)."""
+    own = {_strip_root(a) for a in (own_bank_accounts or ())}
+    per_acct = {a: _own_bank_name_tokens({a}) for a in own}
+    if not per_acct:
+        return set(), per_acct
+    everywhere = set.intersection(*per_acct.values())
+    return set().union(*per_acct.values()) - everywhere, per_acct
+
+
+def _narration_bank_carriers(desc: str, own_bank_accounts: Optional[set],
+                             source_account: Optional[str] = None,
+                             include_ifsc: bool = False):
+    """MAP-26: (words, carriers) -- the own-account bank words this narration
+    names, and the (non-source) own accounts that carry any of them."""
+    vocab, per_acct = _own_bank_words(own_bank_accounts)
+    if not vocab:
+        return set(), set()
+    toks = {t for t in _tokenize_history(desc) if not t.startswith('ifsc:')}
+    if include_ifsc:   # the bank code of an IFSC names a bank too (evidence only)
+        toks |= {t[len('ifsc:'):] for t in _tokenize_history(desc) if t.startswith('ifsc:')}
+    words = toks & vocab
+    if not words:
+        return set(), set()
+    norm_source = _strip_root(source_account) if source_account else None
+    carriers = {a for a, t in per_acct.items() if (t & words) and a != norm_source}
+    return words, carriers   # carriers may be empty: the word names only the SOURCE bank
+
+
+def _own_bank_word_verdict(
+    desc: str,
+    account: str,
+    own_bank_accounts: Optional[set],
+    source_account: Optional[str] = None,
+    own_evidence: Optional[Callable[[str], bool]] = None,
+) -> Optional[Dict]:
+    """MAP-26 bank-name contradiction guard, for ANY pass that landed on an own
+    BANK account (never run on override rows -- the caller skips them).
+
+    The narration names a bank word that some own account carries, but the
+    chosen own account is not one of the accounts carrying it: the guess is
+    contradicted (a history/Bayes win driven by the owner's name tokens, which
+    cannot say WHICH of the owner's accounts, must never beat the bank word).
+      * chosen account IS among the carriers -> None (leave it alone).
+      * contradicted but no own-transfer evidence (rule d) -> {'revert': True}
+        so Suspense claims the row.
+      * contradicted + evidence: exactly one carrier -> route there; two or
+        more -> {'tie': [...]} (MAP-16 behaviour: to Review, never guessed).
+    `own_evidence` None (direct callers) falls back to the literal self marker."""
+    if not account or not own_bank_accounts:
+        return None
+    own = {_strip_root(a) for a in own_bank_accounts}
+    norm = _strip_root(account)
+    if norm not in own:
+        return None
+    words, carriers = _narration_bank_carriers(desc, own, source_account)
+    if not words or norm in carriers:
+        return None
+    if not carriers:
+        # the narration names only the bank being imported: no own account to
+        # route to, and the chosen one is not that bank -- abstain (Suspense)
+        return {"revert": True, "words": sorted(words)}
+    has_ev = (own_evidence(desc) if own_evidence is not None
+              else bool(_SELF_MARKER_RE.search((desc or '').lower())))
+    if not has_ev:
+        return {"revert": True, "words": sorted(words)}
+    hits = sorted(carriers)
+    if len(hits) > 1:
+        return {"account": "", "tie": hits, "confidence": "none",
+                "reason": "Own transfer names a bank with more than one account of yours"}
+    return {"account": hits[0], "confidence": "history",
+            "reason": f"Own-transfer bank-name match ({', '.join(sorted(words))})"}
+
+
 def _history_token_match(
     desc: str,
     model: Dict[str, Dict[str, int]],
@@ -1114,6 +1192,7 @@ def _history_token_match(
     source_account: Optional[str] = None,
     own_evidence: Optional[Callable[[str], bool]] = None,
     own_targets: Optional[set] = None,
+    own_target_evidence: Optional[Callable[[str, str], bool]] = None,
 ) -> Optional[Dict]:
     """Full MAP-11 history match: Bayesian combination first, then (only for
     a description whose ordinary tokens are shaped like a self-transfer) a
@@ -1159,15 +1238,34 @@ def _history_token_match(
             match = _history_bayes_score(no_ifsc - bank_names, model)
             if match and _strip_root(match.get('account') or '') in _targets:
                 match = None   # still an own target, still no evidence
+        if (match and own_evidence is not None
+                and _strip_root(match.get('account') or '') in _targets
+                and not (own_target_evidence(desc, match.get('account') or '')
+                         if own_target_evidence is not None else own_evidence(desc))):
+            # MAP-26 round 2: a history win onto an own bank/FD needs own-transfer
+            # evidence; the owner's plain name (the tokens that drove the score)
+            # is not evidence. Abstain; the row goes on to Suspense / Review.
+            match = None
         if match:
-            return match
+            # MAP-26: the Bayes pass strips the bank words (they are not evidence
+            # of WHICH account), so owner-name tokens alone can pull a row onto
+            # the wrong own bank. The bank word in the narration has the last say.
+            verdict = _own_bank_word_verdict(
+                desc, match.get('account') or '', own_bank_accounts, source_account, own_evidence)
+            if verdict is None:
+                return match
+            if verdict.get('revert'):
+                match = None   # contradicted, no own-transfer evidence: abstain
+            else:
+                return verdict
 
     routing_tokens = {t for t in tokens_all if t.startswith('ifsc:')}
     if not routing_tokens:
         # MAP-16: no IFSC. An explicit own-transfer row ("xfer to self ...")
         # may still name the bank; route by the bank word in the owner's own
         # postable account names.
-        return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account)
+        return _bank_name_self_transfer(desc, tokens_all, own_bank_accounts, source_account,
+                                        own_evidence)
     if own_evidence is not None and not own_evidence(desc):
         return None   # MAP-13: no own-transfer evidence -> abstain, never route
     plain_tokens = tokens_all - routing_tokens
@@ -1187,6 +1285,7 @@ def _bank_name_self_transfer(
     tokens_all: set,
     own_bank_accounts: Optional[set],
     source_account: Optional[str],
+    own_evidence: Optional[Callable[[str], bool]] = None,
 ) -> Optional[Dict]:
     """MAP-16: 'xfer to self <bank>' with no IFSC.
 
@@ -1199,8 +1298,13 @@ def _bank_name_self_transfer(
     more (two HSBC accounts) -> a tie: NOT auto-resolved, the row is returned
     with an empty account and the tied candidates so it goes to Review.
     """
-    if not own_bank_accounts or not _SELF_MARKER_RE.search((desc or '').lower()):
+    if not own_bank_accounts:
         return None
+    if not _SELF_MARKER_RE.search((desc or '').lower()):
+        # MAP-26: no marker, but the owner's identity token TOGETHER WITH a bank
+        # word naming an own account is also own-transfer evidence (rule d).
+        if own_evidence is None or not own_evidence(desc):
+            return None
     norm_source = _strip_root(source_account) if source_account else None
     accts = [_strip_root(a) for a in own_bank_accounts]
     per_acct = {a: _own_bank_name_tokens({a}) for a in accts}
@@ -1285,7 +1389,11 @@ def _ifsc_contradiction(
 
 _SELF_MARKER_RE = re.compile(
     r'\b(?:xfer|transfer|trf|trfr)\s+to\s+self\b|\bself\s+(?:xfer|transfer|trf)\b'
-    r'|\bown\s+account\b')
+    r'|\bown\s+account\b'
+    # MAP-26: some banks cut the field ("xfer to se/HDFC BANK"). "to s", "to se" and
+    # "to sel" are the marker ONLY when the field ends there ("/" or end of text);
+    # "transfer to sanjay/..." is a payee, not a self marker.
+    r'|\b(?:xfer|transfer|trf|trfr)\s+to\s+(?:s|se|sel)(?=\s*(?:/|$))')
 _OWN_VOCAB_MAX_DOC_FRACTION = 0.25   # a token in >25% of all rows is a channel word
 _OWN_VOCAB_MIN_ROWS_FOR_DOCFREQ = 8
 _OWN_VOCAB_MIN_OWN_SUPPORT = 2       # seen on >=2 own-account rows
@@ -1378,15 +1486,100 @@ def _build_own_transfer_vocab(historical_pairs: List[Dict], own_targets: set) ->
     return vocab
 
 
-def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set) -> bool:
+def _names_owner_as_beneficiary(desc: str, own_vocab: set) -> bool:
+    """MAP-26: the narration reads '... to <owner-identity token>' -- the owner
+    is the BENEFICIARY of a payment from somebody else (e.g. an insurer payout).
+    Used to void a name-only history win onto an own account. Deliberately narrow:
+    a narration that merely carries the owner's name (MAP-21/22 fixtures) is not
+    touched by this guard."""
+    low = (desc or '').lower()
+    for v in own_vocab or ():
+        if v and re.search(r'\bto\s+' + re.escape(v) + r'(?![a-z0-9])', low):
+            return True
+    return False
+
+
+def _is_handle_token(tok: str) -> bool:
+    """MAP-26: an owner-vocabulary token that is a HANDLE (a VPA with '@', or a
+    token carrying a digit) rather than a plain name. A handle identifies the
+    owner's own account on its own; a plain name does not."""
+    return '@' in tok or any(ch.isdigit() for ch in tok)
+
+
+# MAP-26 (round 2): a product keyword that only an own deposit/sweep leg carries.
+# With an owner-identity token it is own-transfer evidence ("AUTOSWEEP TO <fd no>
+# <OWNER ...>", "FD BOOKING <OWNER>"); without one it is not ("FD BOOKING <VENDOR>").
+_OWN_PRODUCT_KW_RE = re.compile(
+    r'\b(?:auto\s*sweep\w*|sweep\w*|fd|f\.d\.|fixed\s+deposit|term\s+deposit'
+    r'|premat\w*|maturity|closure)\b')
+
+
+_OWN_FD_STRONG_KW_RE = re.compile(
+    r'\b(?:auto\s*sweep\w*|sweep\w*|premat\w*|maturity|closure)\b')
+_CASH_WDL_RE = re.compile(
+    r'\b(?:cash\s*wdl|atm\s*wdl|cash\s+withdrawal|atw|nwd)\b')
+_FD_TARGET_RE = re.compile(
+    r'fixed\s+deposit|\bfd\b|term\s+deposit|\bf\.d\.')
+_CASH_TARGET_RE = re.compile(r'^(?:cash|cash in hand|petty cash|wallet)$')
+
+
+def _is_fd_target(account: str) -> bool:
+    """MAP-26 round 3: a deposit-type own account (under a Fixed Deposits folder or
+    named like an FD)."""
+    return bool(_FD_TARGET_RE.search((account or '').lower()))
+
+
+def _is_cash_target(account: str) -> bool:
+    """MAP-26 round 3: the own cash-in-hand account (last path segment)."""
+    return bool(_CASH_TARGET_RE.match(_strip_root(account or '').rsplit(':', 1)[-1].strip().lower()))
+
+
+def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
+                               own_bank_accounts: Optional[set] = None,
+                               source_account: Optional[str] = None,
+                               name_alone: bool = True,
+                               target: Optional[str] = None) -> bool:
     """True only if `desc` carries positive evidence of a transfer between the
-    owner's own accounts: the 'xfer to self' marker, an own-history VPA/name
-    token, or a (non-year) digit run that is one of the own accounts' numbers."""
+    owner's own accounts: the 'xfer to self' marker (full or field-truncated),
+    an own VPA/handle, an owner-identity token TOGETHER WITH a bank word naming
+    one of the owner's own accounts, or a (non-year) digit run that is one of
+    the own accounts' numbers.
+
+    MAP-26 (rule d): the owner's plain NAME alone is NOT evidence -- "<INSURER>
+    to <OWNER NAME>" is a payout, not an own transfer. `name_alone=False` (the AI
+    gate) applies that rule; the history / keyword / prefix passes keep
+    `name_alone=True` because MAP-21/22 fixtures rely on an owner-name-only
+    narration still landing there (see the MAP-26 report). `own_bank_accounts`
+    None (FD discovery from history, legacy direct callers) also keeps the old
+    behaviour where any own-vocab token counts."""
     low = (desc or '').lower()
     if _SELF_MARKER_RE.search(low):
         return True
-    if own_vocab and (set(_tokenize_history(desc)) & own_vocab):
-        return True
+    _fd_t = bool(target) and _is_fd_target(target)
+    if target and own_bank_accounts is not None:
+        # MAP-26 round 3: evidence is judged against the TARGET's type. A sweep /
+        # closure keyword by itself is evidence for an FD target, a cash-withdrawal
+        # keyword by itself for the own Cash account; neither says anything about
+        # an own savings/current account.
+        if _fd_t and _OWN_FD_STRONG_KW_RE.search(low):
+            return True
+        if _is_cash_target(target) and _CASH_WDL_RE.search(low):
+            return True
+    own_toks = (set(_tokenize_history(desc)) & own_vocab) if own_vocab else set()
+    if own_toks and own_bank_accounts is not None and not name_alone:
+        # a product word learned into the vocabulary from the sweep/FD rows
+        # ('autosweep') is not an owner-identity token
+        own_toks = {t for t in own_toks if not _OWN_PRODUCT_KW_RE.fullmatch(t)}
+    if own_toks:
+        if own_bank_accounts is None or name_alone:
+            return True
+        if any(_is_handle_token(t) for t in own_toks):
+            return True
+        if _fd_t and _OWN_PRODUCT_KW_RE.search(low):
+            return True   # owner token + sweep / FD / closure keyword, FD targets only
+        if _narration_bank_carriers(desc, own_bank_accounts, source_account,
+                                    include_ifsc=True)[1]:
+            return True
     runs = {r for r in re.findall(r'\d{4,}', low) if not re.fullmatch(r'(19|20)\d{2}', r)}
     if runs:
         for acct in own_targets:
@@ -1396,7 +1589,10 @@ def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set) -> b
     return False
 
 
-def _gate_own_target(desc: str, account: str, own_vocab: set, own_targets: set) -> bool:
+def _gate_own_target(desc: str, account: str, own_vocab: set, own_targets: set,
+                     own_bank_accounts: Optional[set] = None,
+                     source_account: Optional[str] = None,
+                     name_alone: bool = True) -> bool:
     """MAP-22: the ONE gate every pass that can land a row on the owner's own
     account goes through. True = the row may take `account`: it is not an own
     target at all (bank, FD, ...), or the narration carries own-transfer
@@ -1405,7 +1601,9 @@ def _gate_own_target(desc: str, account: str, own_vocab: set, own_targets: set) 
     different own account."""
     if not account or _strip_root(account) not in own_targets:
         return True
-    return _has_own_transfer_evidence(desc, own_vocab, own_targets)
+    return _has_own_transfer_evidence(desc, own_vocab, own_targets,
+                                      own_bank_accounts, source_account, name_alone,
+                                      target=account)
 
 
 def _llm_reason(reason: str) -> str:
@@ -3044,7 +3242,14 @@ def run(
     _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
 
     def _own_ev(_d: str) -> bool:
-        return _has_own_transfer_evidence(_d, _hist_own_vocab, _hist_own_targets)
+        # round 2: the owner's plain name is not evidence on ANY pass
+        return _has_own_transfer_evidence(
+            _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+            name_alone=False)
+    def _own_ev_target(_d: str, _t: str) -> bool:
+        return _has_own_transfer_evidence(
+            _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+            name_alone=False, target=_t)
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -3068,6 +3273,7 @@ def run(
                 source_account=gnucash_bank_account,
                 own_evidence=_hist_own_evidence,
                 own_targets=_hist_own_targets,
+                own_target_evidence=_own_ev_target,
             )
             if match and match.get('tie'):
                 # MAP-16: a tie between own accounts is never guessed.
@@ -3135,7 +3341,8 @@ def run(
             if (match is not None and match.get('account')
                     and match.get('reason') != _SMART_SELF_CHEQUE_REASON
                     and not _gate_own_target(
-                        desc, match['account'], _hist_own_vocab, _hist_own_targets)):
+                        desc, match['account'], _hist_own_vocab, _hist_own_targets,
+                        own_bank_accounts, gnucash_bank_account, name_alone=False)):
                 # MAP-23: a keyword rule (insurance, loan, bond, ...) can name a
                 # leaf word that an own bank/FD account also carries. The smart
                 # pass is now behind the same own-transfer gate as every other
@@ -3147,7 +3354,8 @@ def run(
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
                 if match is not None and not _gate_own_target(
                         desc, match.get('account') or '', _hist_own_vocab,
-                        _hist_own_targets):
+                        _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+                        name_alone=False):
                     # MAP-22: a shared prefix with past own-account rows is not
                     # own-transfer evidence. Drop the guess; the AI pass / Suspense
                     # take the row.
@@ -3266,7 +3474,9 @@ def run(
                         # evidence; otherwise the row is left for Suspense.
                         if not _gate_own_target(
                                 row.get('Description') or row.get('Narration') or '',
-                                _llm_acct, _own_vocab, _own_targets):
+                                _llm_acct, _own_vocab, _own_targets,
+                                own_bank_accounts, gnucash_bank_account,
+                                name_alone=False):
                             llm_withheld[i] = _llm_acct
                             continue
                         row['Account'] = _llm_acct
@@ -3342,6 +3552,69 @@ def run(
             f"(bank code in description contradicted the resolved own-bank account)"
         )
 
+    # --- Step 4.95: own-bank contradiction guard (MAP-26, RED FLAG fix) ---
+    # The LAST word on every pass (rules, history, smart, weak, AI) that landed a
+    # row on one of the owner's own BANK accounts. If the narration names a bank
+    # word that some own account carries and the chosen account is not one of
+    # them, the guess is contradicted: reroute to the single account carrying the
+    # word, tie several to Review, or revert to Suspense when the narration has no
+    # own-transfer evidence. User overrides are never touched. A history win onto
+    # an own BANK account for "<payer> to <OWNER NAME>" with no evidence beyond
+    # the name is reverted too (insurer payout).
+    own_contradicted: Dict[int, str] = {}
+    own_rerouted = 0
+    own_reverted = 0
+    for _gi, row in enumerate(mapped_rows):
+        conf = row.get('Confidence', 'none')
+        acct = row.get('Account', '')
+        if not acct or conf in ('override', 'none', 'suspense'):
+            continue
+        _gdesc = row.get('Description') or row.get('Narration') or ''
+        verdict = _own_bank_word_verdict(
+            _gdesc, acct, own_bank_accounts, gnucash_bank_account, _own_ev)
+        if (verdict is None and conf == 'history'
+                and _strip_root(acct) in own_bank_accounts
+                and _names_owner_as_beneficiary(_gdesc, _hist_own_vocab)
+                and not _has_own_transfer_evidence(
+                    _gdesc, _hist_own_vocab, _hist_own_targets, own_bank_accounts,
+                    gnucash_bank_account, name_alone=False)):
+            # rule (d): "<payer> to <OWNER NAME>" is a third party paying the
+            # owner (insurer payout), not a transfer between own accounts; the
+            # owner's plain name alone is not evidence of one
+            verdict = {"revert": True, "words": []}
+        if verdict is None:
+            continue
+        counts = result['confidence_counts']
+        if verdict.get('revert'):
+            own_contradicted[_gi] = (
+                f"Suspense - the {conf} match '{_strip_root(acct).rsplit(':', 1)[-1]}' is one of "
+                "your own accounts but the narration does not show a transfer to "
+                "yourself (or names a different bank of yours); review and reassign")
+            counts[conf] = counts.get(conf, 0) - 1
+            counts['none'] = counts.get('none', 0) + 1
+            row['Account'] = ''
+            row['Confidence'] = 'none'
+            own_reverted += 1
+        elif verdict.get('tie'):
+            self_tie[_gi] = verdict['tie']
+            counts[conf] = counts.get(conf, 0) - 1
+            counts['none'] = counts.get('none', 0) + 1
+            row['Account'] = ''
+            row['Confidence'] = 'none'
+            own_reverted += 1
+        else:
+            counts[conf] = counts.get(conf, 0) - 1
+            counts['history'] = counts.get('history', 0) + 1
+            row['Account'] = _strip_root(verdict['account'])
+            row['Confidence'] = 'history'
+            row['MatchReason'] = (
+                f"History: {verdict['reason']} (was: {_strip_root(acct).rsplit(':', 1)[-1]})")
+            own_rerouted += 1
+    if own_rerouted or own_reverted:
+        _emit_mapper_progress(
+            f"own-bank guard: {own_rerouted} row(s) rerouted by the bank named in the "
+            f"narration, {own_reverted} sent to review")
+
     # --- Step 5: Suspense pass — assign remaining unmapped rows ---
     # Find a Suspense account in the tree, or use a sensible default.
     suspense_acct = _find_suspense_account(account_list)
@@ -3364,6 +3637,8 @@ def run(
                     f"{len(self_tie[_ri])} accounts ("
                     + "; ".join(a.rsplit(':', 1)[-1] for a in self_tie[_ri])
                     + "); review and pick one")
+            elif _ri in own_contradicted:
+                row['MatchReason'] = own_contradicted[_ri]
             elif _ri in direction_clash_log:
                 row['MatchReason'] = direction_clash_log[_ri]
             elif _ri in llm_stopped_rows:

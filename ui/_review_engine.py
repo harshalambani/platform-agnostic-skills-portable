@@ -202,6 +202,53 @@ def payload_box_css(elem_id: str) -> str:
 # CSS — one copy, namespaced by app_id at build time.
 # ---------------------------------------------------------------------------
 
+# UI-09: ONE source of truth for the match-type accent colours. They drive the
+# 3px first-cell stripe, the whole-row tint and the legend swatches, so the
+# three can never drift apart.
+ACCENT_COLOURS = {
+    "red": "#f87171",
+    "amber": "#fbbf24",
+    "green": "#4ade80",
+    "blue": "#60a5fa",
+    "orange": "#fb923c",
+}
+ACCENT_TINT_ALPHA = 0.18
+
+
+def _rgb(hex_colour: str) -> str:
+    h = hex_colour.lstrip("#")
+    return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
+
+
+def _accent_css() -> str:
+    """Row accents (set via _rowclass / _band): the first-cell stripe stays; every
+    cell also gets an overlay of the accent at ACCENT_TINT_ALPHA. It is a
+    background-IMAGE so the row's own background (zebra) shows through."""
+    out = ["/* Row accents: stripe + whole-row tint (UI-09). */"]
+    for name, hx in ACCENT_COLOURS.items():
+        rgba = f"rgba({_rgb(hx)},{ACCENT_TINT_ALPHA})"
+        out.append(f"#%%APP%%-app tbody tr.accent-{name} td:first-child {{ border-left: 3px solid {hx}; }}")
+        out.append(f"#%%APP%%-app tbody tr.accent-{name} td {{ background-image: linear-gradient({rgba}, {rgba}); }}")
+    out.append("#%%APP%%-app .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #bbb; margin: 4px 0 8px; }")
+    out.append("#%%APP%%-app .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }")
+    for name, hx in ACCENT_COLOURS.items():
+        out.append(f"#%%APP%%-app .legend .sw.{name} {{ background: {hx}; }}")
+    return "\n".join(out)
+
+
+def _tint_off_css() -> str:
+    """Declared AFTER the accent rules (same specificity, later wins): a selected
+    row keeps its solid reverse colours, and a contra row's tone is its one
+    background (the stripe still marks the match type). A plain HOVER does NOT
+    drop the tint: it keeps its match-type hue plus a non-fill cue (see _CSS)."""
+    return "\n".join([
+        "/* UI-09: the tint never competes with selected / a contra tone. */",
+        "#%%APP%%-app tbody tr.selected td,",
+        "#%%APP%%-app tbody tr.tone-amber td,",
+        "#%%APP%%-app tbody tr.tone-green td { background-image: none; }",
+    ])
+
+
 _CSS = r"""
 <style>
 #%%APP%%-app {
@@ -229,7 +276,9 @@ _CSS = r"""
 #%%APP%%-app .toolbar .spacer { flex: 1; }
 #%%APP%%-app .stats { font-size: 11px; color: #999; padding: 4px 0; }
 
-#%%APP%%-app table { width: 100%; border-collapse: collapse; table-layout: auto; }
+#%%APP%%-app table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: auto; }
+/* UI-08b: SEPARATE (not collapsed) borders: a scrolled row's border and 3px accent
+   stripe are painted inside its own cell, so they never bleed through the sticky header. */
 /* UI-08: the title row and the filter row stick together as ONE block (sticky on
    thead, opaque, above the body rows) so the filters never scroll away. */
 #%%APP%%-app thead {
@@ -242,6 +291,18 @@ _CSS = r"""
   cursor: pointer; user-select: none; white-space: nowrap;
 }
 #%%APP%%-app thead th:hover { background: #2a2a2a; }
+/* UI-11: drag the right edge of a header to resize that column. The grab zone is
+   6px wide; a header that no longer fits its text clips it with an ellipsis. */
+#%%APP%%-app thead th { position: relative; overflow: hidden; text-overflow: ellipsis; }
+#%%APP%%-app thead th .col-resizer {
+  position: absolute; top: 0; right: 0; width: 6px; height: 100%;
+  cursor: col-resize; z-index: 2; user-select: none; touch-action: none;
+}
+#%%APP%%-app thead th .col-resizer:hover,
+#%%APP%%-app thead th .col-resizer.dragging { background: rgba(96,165,250,0.55); }
+#%%APP%%-app table.resized { table-layout: fixed; width: auto; max-width: none; }
+#%%APP%%-app table.resized tbody td { max-width: none; }
+#%%APP%%-app .stats .reset-widths { margin-left: 8px; color: #60a5fa; cursor: pointer; text-decoration: underline; }
 #%%APP%%-app thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
 #%%APP%%-app thead .filter-row td {
   padding: 3px 4px; background: #1a1a1a; border-bottom: 1px solid #444;
@@ -252,10 +313,26 @@ _CSS = r"""
   background: #111; color: #ccc;
 }
 #%%APP%%-app thead .filter-row input:focus { border-color: #2563eb; outline: none; }
+/* UI-10: a filter box with text is marked (lighter blue border + tinted fill, so it
+   differs from the focus state, which is the darker blue border alone), carries an X
+   to empty it, and its column header gets a small mark. */
+#%%APP%%-app thead .filter-row td { position: relative; }
+#%%APP%%-app thead .filter-row input.has-text {
+  border-color: #60a5fa; background: #14233d; color: #e0e0e0; padding-right: 20px;
+}
+#%%APP%%-app thead .filter-row input.has-text:focus { border-color: #2563eb; }
+#%%APP%%-app thead .filter-row .f-clear {
+  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  width: 14px; height: 14px; padding: 0; line-height: 12px; font-size: 13px;
+  border: none; border-radius: 50%; background: transparent; color: #999; cursor: pointer;
+}
+#%%APP%%-app thead .filter-row .f-clear:hover { background: #333; color: #fff; }
+#%%APP%%-app thead th .filter-mark { margin-left: 4px; font-size: 11px; color: #60a5fa; }
+#%%APP%%-app .stats .clear-all { margin-left: 8px; color: #60a5fa; cursor: pointer; text-decoration: underline; }
 #%%APP%%-app thead .filter-row input::placeholder { color: #555; }
 
 #%%APP%%-app tbody tr {
-  border-bottom: 1px solid #262626; cursor: pointer; transition: background 0.1s;
+  cursor: pointer; transition: background 0.1s;
 }
 #%%APP%%-app tbody tr:nth-child(even) { background: #111; }
 #%%APP%%-app tbody tr:hover { background: #1a2744; }
@@ -264,29 +341,31 @@ _CSS = r"""
 #%%APP%%-app tbody tr.locked { opacity: 0.75; cursor: not-allowed; }
 #%%APP%%-app tbody tr.row-deleted td { text-decoration: line-through; opacity: 0.55; }
 #%%APP%%-app tbody td {
-  padding: 5px 8px; font-size: 12px; max-width: 420px;
+  padding: 5px 8px; font-size: 12px; max-width: 420px; border-bottom: 1px solid #262626;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd;
 }
 
-/* Row accents — set via _rowclass from the loader. */
-#%%APP%%-app tbody tr.accent-red    td:first-child { border-left: 3px solid #f87171; }
-#%%APP%%-app tbody tr.accent-amber  td:first-child { border-left: 3px solid #fbbf24; }
-#%%APP%%-app tbody tr.accent-green  td:first-child { border-left: 3px solid #4ade80; }
-#%%APP%%-app tbody tr.accent-blue   td:first-child { border-left: 3px solid #60a5fa; }
-#%%APP%%-app tbody tr.accent-orange td:first-child { border-left: 3px solid #fb923c; }
-#%%APP%%-app .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #bbb; margin: 4px 0 8px; }
-#%%APP%%-app .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
-#%%APP%%-app .legend .sw.blue   { background: #60a5fa; }
-#%%APP%%-app .legend .sw.green  { background: #4ade80; }
-#%%APP%%-app .legend .sw.amber  { background: #fbbf24; }
-#%%APP%%-app .legend .sw.orange { background: #fb923c; }
-#%%APP%%-app .legend .sw.red    { background: #f87171; }
+/*%%ACCENT_CSS%%*/
 #%%APP%%-app tbody tr.tone-amber  { background: #3a2a1d; }
 #%%APP%%-app tbody tr.tone-amber:hover { background: #4a3626; }
 #%%APP%%-app tbody tr.tone-green  { background: #16281d; }
 #%%APP%%-app tbody tr.tone-green:hover { background: #1e3a2a; }
 #%%APP%%-app tbody tr.tone-amber.selected,
 #%%APP%%-app tbody tr.tone-green.selected { background: #1e3a5f; }
+/*%%TINT_OFF_CSS%%*/
+/* UI-09: hover keeps the row's accent tint (so it never reads as another match
+   type) and adds a NON-fill cue: a light inset line above and below every cell. */
+#%%APP%%-app tbody tr:hover td { box-shadow: inset 0 1px 0 #9db4d9, inset 0 -1px 0 #9db4d9; }
+/* UI-09: a selected row is a REVERSE highlight -- light cells, dark text, a light
+   top/bottom edge -- so it reads at a glance over every tint (including the blue
+   override rows) and does not rely on hue. Declared after the tint, equal or
+   higher specificity, so it always wins. */
+#%%APP%%-app tbody tr.selected td {
+  background-color: #dbe7ff; background-image: none; color: #0b1220;
+  box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff;
+}
+#%%APP%%-app tbody tr.selected:hover td { background-color: #c3d6ff; }
+#%%APP%%-app tbody tr.selected td:first-child { box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff, inset 5px 0 0 #1e3a8a; }
 
 /* Badge + confidence colours — bright on dark, WCAG AA at 12px. */
 #%%APP%%-app .badge {
@@ -328,10 +407,12 @@ _CSS = r"""
 #%%APP%%-app .picker-dropdown .picker-item .p-primary { font-weight: 600; color: #fff; }
 #%%APP%%-app .picker-dropdown .picker-item .p-secondary { color: #888; font-size: 11px; }
 #%%APP%%-app .scroll-wrapper {
-  max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px;
+  max-height: 65vh; overflow-y: auto; overflow-x: auto; border: 1px solid #333; border-radius: 4px;
 }
 </style>
 """
+_CSS = _CSS.replace("/*%%ACCENT_CSS%%*/", _accent_css()).replace(
+    "/*%%TINT_OFF_CSS%%*/", _tint_off_css())
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +425,9 @@ _BODY = r"""
     %%STATUS_FILTER_HTML%%
     <span class="spacer"></span>
     <span class="stats" id="%%APP%%-stats"></span>
+    <a href="#" class="stats reset-widths" id="%%APP%%-reset-widths"
+       title="Forget the column widths you dragged on this screen">Reset widths</a>
+    <a href="#" class="stats clear-all" id="%%APP%%-clear-all" style="display:none"></a>
   </div>
 
   <div class="toolbar">
@@ -362,7 +446,8 @@ _BODY = r"""
   %%EXTRA_PANEL%%
 
   <div class="scroll-wrapper">
-    <table>
+    <table id="%%APP%%-table">
+      <colgroup id="%%APP%%-cols"></colgroup>
       <thead id="%%APP%%-thead"><tr></tr></thead>
       <tbody id="%%APP%%-tbody"></tbody>
     </table>
@@ -401,6 +486,9 @@ _BODY = r"""
   let lastClickIdx = null;
   let statusFilter = '';
   let colFilters = {};
+  let focusAfter = null;   // UI-10: filter box to focus after the next render (X / Clear all)
+  let shownCount = 0;      // rows in the current view (for the stats line)
+  let editing = false;     // UI-06: an inline edit box is open
   let sortCol = %%DEFAULT_SORT_JSON%%;
   let sortAsc = true;
 
@@ -519,6 +607,171 @@ _BODY = r"""
   }
   syncPayload();
 
+  // UI-10: empty the given column filter boxes and re-render. Only colFilters
+  // changes: the "Filter:" dropdown, the selection and pending changes are left alone.
+  // Focus lands in the (first) emptied box, never the grid or the page top.
+  function clearFilters(cols) {
+    cols.forEach(k => { colFilters[k] = ''; });
+    focusAfter = cols[0];
+    renderTable();
+  }
+  const clearAll = $('clear-all');
+  if (clearAll) clearAll.onclick = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const cols = Object.keys(colFilters).filter(k => colFilters[k]);
+    if (cols.length) clearFilters(cols);
+  };
+
+  // The rows-counter line. Also called after an in-place selection change, so a
+  // plain click never has to rebuild the table (UI-06).
+  function updateStats() {
+    const changed = rows.filter(r => r._changed && !r._deleted).length;
+    const deleted = rows.filter(r => r._deleted).length;
+    const editCols = COLS.filter(c => c.edit_key);
+    const edited = editCols.length
+      ? rows.filter(r => editCols.some(c => {
+          const t = cellText(r, c.edit_key).trim();
+          return t && t !== cellText(r, c.key).trim();
+        })).length
+      : 0;
+    $('stats').textContent =
+      shownCount + '/' + rows.length + ' rows' +
+      (selected.size ? ' | ' + selected.size + ' selected' : '') +
+      (changed ? ' | ' + changed + ' changed' : '') +
+      (edited ? ' | ' + edited + ' edited' : '') +
+      (deleted ? ' | ' + deleted + ' deleted' : '');
+  }
+
+  // ── UI-11: resizable columns ──
+  // Widths live in colW {column key: px}, are remembered per screen (APP) in
+  // localStorage (try/catch: when storage is unavailable they still hold for the
+  // session) and are applied through a <colgroup>, so a re-render, sort or filter
+  // never loses them. Once any width is set the table is fixed-layout and as wide
+  // as its columns; the wrapper scrolls sideways instead of squeezing the others.
+  const MIN_COL_W = 40;
+  const W_KEY = 'pask.colw.' + APP;
+  let colW = {};
+  let suppressClick = false;
+  let drag = null;
+  function loadWidths() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(W_KEY);
+      const o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === 'object') {
+        COLS.forEach(c => {
+          const v = Number(o[c.key]);
+          if (isFinite(v) && v >= MIN_COL_W) colW[c.key] = Math.round(v);
+        });
+      }
+    } catch (err) { /* storage unavailable: session-only */ }
+  }
+  function saveWidths() {
+    try {
+      if (!window.localStorage) return;
+      if (Object.keys(colW).length) window.localStorage.setItem(W_KEY, JSON.stringify(colW));
+      else window.localStorage.removeItem(W_KEY);
+    } catch (err) { /* storage unavailable: session-only */ }
+  }
+  function applyWidths() {
+    const cols = $('cols'), tbl = $('table');
+    if (!cols || !tbl) return;
+    if (!Object.keys(colW).length) {
+      cols.innerHTML = '';
+      if (tbl.classList) tbl.classList.remove('resized');
+      tbl.style.width = '';
+      return;
+    }
+    let total = 0;
+    cols.innerHTML = COLS.map(c => {
+      const w = colW[c.key] || 160; total += w;
+      return '<col style="width:' + w + 'px">';
+    }).join('');
+    if (tbl.classList) tbl.classList.add('resized');
+    tbl.style.width = total + 'px';
+  }
+  function thWidth(th) {
+    if (!th) return 0;
+    if (th.getBoundingClientRect) { const w = th.getBoundingClientRect().width; if (w) return Math.round(w); }
+    return th.offsetWidth || 0;
+  }
+  // freeze every column at its current width (first resize): the others must not move
+  function snapshotWidths() {
+    if (Object.keys(colW).length) return;
+    const ths = $('thead').querySelectorAll('th');
+    COLS.forEach((c, i) => { colW[c.key] = Math.max(MIN_COL_W, thWidth(ths[i]) || 160); });
+  }
+  // the width a column needs to show its longest cell (and its header) unclipped
+  function fitWidth(key) {
+    const i = COLS.findIndex(c => c.key === key);
+    const app = document.getElementById(APP + '-app');
+    const m = document.createElement('span');
+    m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0;font-size:12px;';
+    app.appendChild(m);
+    let best = 0;
+    const measure = (html) => { m.innerHTML = html; best = Math.max(best, m.offsetWidth || 0); };
+    $('tbody').querySelectorAll('tr').forEach(tr => {
+      const td = tr.children[i];
+      if (td) measure(td.innerHTML);
+    });
+    const th = $('thead').querySelectorAll('th')[i];
+    if (th) measure(th.textContent);
+    app.removeChild(m);
+    return Math.max(MIN_COL_W, Math.min(1200, Math.ceil(best) + 20));
+  }
+  function onDragMove(e) {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 1) return;
+    if (!drag.moved) { drag.moved = true; snapshotWidths(); drag.w0 = colW[drag.key] || drag.w0; }
+    colW[drag.key] = Math.max(MIN_COL_W, Math.round(drag.w0 + dx));
+    applyWidths();
+  }
+  function onDragEnd() {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+    if (!drag) return;
+    if (drag.handle && drag.handle.classList) drag.handle.classList.remove('dragging');
+    if (drag.moved) {
+      saveWidths();
+      suppressClick = true;                 // the click that ends a drag must not sort
+      setTimeout(() => { suppressClick = false; }, 0);
+    }
+    drag = null;
+  }
+  const theadEl = $('thead');
+  theadEl.addEventListener('mousedown', (e) => {
+    const h = e && e.target;
+    if (!h || !h.classList || !h.classList.contains('col-resizer')) return;
+    // no default action: no text selection, and a filter box keeps its focus
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    const key = h.dataset.col;
+    drag = { key, x: e.clientX, moved: false, handle: h,
+             w0: colW[key] || thWidth(h.parentNode) || 160 };
+    if (h.classList.add) h.classList.add('dragging');
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragEnd);
+  });
+  theadEl.addEventListener('dblclick', (e) => {
+    const h = e && e.target;
+    if (!h || !h.classList || !h.classList.contains('col-resizer')) return;
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    snapshotWidths();
+    colW[h.dataset.col] = fitWidth(h.dataset.col);
+    applyWidths();
+    saveWidths();
+  });
+  const resetBtn = $('reset-widths');
+  if (resetBtn) resetBtn.onclick = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    colW = {};
+    saveWidths();
+    applyWidths();
+  };
+  loadWidths();
+  applyWidths();
+
   // ── Rendering ──
   function renderTable() {
     const thead = $('thead');
@@ -532,13 +785,21 @@ _BODY = r"""
     if (ae && ae.tagName === 'INPUT' && thead.contains(ae) && ae.dataset && ae.dataset.col) {
       refocus = { col: ae.dataset.col, s: ae.selectionStart, e: ae.selectionEnd };
     }
+    if (focusAfter) { refocus = { col: focusAfter, s: 0, e: 0 }; focusAfter = null; }
 
     thead.innerHTML = '<tr>' + COLS.map(c =>
-      '<th data-col="' + esc(c.key) + '">' + esc(c.label) +
+      '<th data-col="' + esc(c.key) + '"' + (colFilters[c.key] ? ' class="filtered"' : '') + '>' +
+      esc(c.label) +
+      (colFilters[c.key] ? '<span class="filter-mark" title="Filtered">⌕</span>' : '') +
       (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
+      '<span class="col-resizer" data-col="' + esc(c.key) + '" title="Drag to resize, double-click to fit"></span>' +
       '</th>').join('') + '</tr>';
     thead.querySelectorAll('th').forEach(th => {
-      th.onclick = () => {
+      th.title = th.textContent;
+      th.onclick = (e) => {
+        // UI-11: a click that ends a column drag (or lands on the handle) is not a sort
+        if (suppressClick || (e && e.target && e.target.classList &&
+                              e.target.classList.contains('col-resizer'))) return;
         const col = th.dataset.col;
         const spec = COLS.find(c => c.key === col);
         if (!spec || !spec.sortable) return;
@@ -558,7 +819,26 @@ _BODY = r"""
       inp.value = colFilters[c.key] || '';
       inp.oninput = () => { colFilters[c.key] = inp.value; renderTable(); };
       inp.onclick = (e) => e.stopPropagation();
+      // UI-10: Esc empties THIS box only and goes no further (no other handler sees it).
+      inp.onkeydown = (e) => {
+        if (e.key !== 'Escape') return;
+        if (e.stopPropagation) e.stopPropagation();
+        if (!inp.value) return;
+        if (e.preventDefault) e.preventDefault();
+        clearFilters([c.key]);
+      };
+      if (inp.value) inp.className = 'has-text';
       td.appendChild(inp);
+      if (inp.value) {
+        const x = document.createElement('button');
+        x.type = 'button';
+        x.className = 'f-clear';
+        x.title = 'Clear this filter';
+        x.textContent = '×';
+        x.dataset.clear = c.key;
+        x.onclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); clearFilters([c.key]); };
+        td.appendChild(x);
+      }
       fRow.appendChild(td);
     });
     thead.appendChild(fRow);
@@ -627,9 +907,6 @@ _BODY = r"""
           td.title = 'Edited. Original: ' + orig;
         }
         td.innerHTML = html;
-        if (c.edit_key && !r._locked && !r._deleted) {
-          td.ondblclick = (e) => { if (e && e.stopPropagation) e.stopPropagation(); beginEdit(r, c, td, val, orig); };
-        }
         tr.appendChild(td);
       });
 
@@ -637,21 +914,13 @@ _BODY = r"""
       tbody.appendChild(tr);
     });
 
-    const changed = rows.filter(r => r._changed && !r._deleted).length;
-    const deleted = rows.filter(r => r._deleted).length;
-    const editCols = COLS.filter(c => c.edit_key);
-    const edited = editCols.length
-      ? rows.filter(r => editCols.some(c => {
-          const t = cellText(r, c.edit_key).trim();
-          return t && t !== cellText(r, c.key).trim();
-        })).length
-      : 0;
-    $('stats').textContent =
-      filtered.length + '/' + rows.length + ' rows' +
-      (selected.size ? ' | ' + selected.size + ' selected' : '') +
-      (changed ? ' | ' + changed + ' changed' : '') +
-      (edited ? ' | ' + edited + ' edited' : '') +
-      (deleted ? ' | ' + deleted + ' deleted' : '');
+    shownCount = filtered.length;
+    updateStats();
+    if (clearAll) {
+      const nf = Object.keys(colFilters).filter(k => colFilters[k]).length;
+      clearAll.style.display = nf ? '' : 'none';
+      clearAll.textContent = nf ? nf + (nf === 1 ? ' filter' : ' filters') + ' · Clear all' : '';
+    }
 
     if (refocus) {
       const inp = thead.querySelector('.filter-row input[data-col="' + refocus.col + '"]');
@@ -668,6 +937,7 @@ _BODY = r"""
   //    unchanged entry clears the edit. The value is set via the .value
   //    property, never innerHTML.
   function beginEdit(r, c, td, current, orig) {
+    editing = true;
     const inp = document.createElement('input');
     inp.type = 'text';
     inp.value = current;
@@ -676,6 +946,7 @@ _BODY = r"""
     const finish = (commit) => {
       if (done) return;
       done = true;
+      editing = false;
       if (commit) {
         const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
         r[c.edit_key] = (v && v !== orig.trim()) ? v : '';
@@ -694,9 +965,33 @@ _BODY = r"""
     inp.focus();
   }
 
+  // UI-06: ONE delegated dblclick listener on the tbody, which is never rebuilt,
+  // so a real double-click (whose second click must land on the SAME node the
+  // first one did) reaches it. Row and column come from data / position, not
+  // from closures over td nodes.
+  $('tbody').addEventListener('dblclick', (e) => {
+    if (editing) return;
+    const t = e && e.target;
+    if (!t || !t.closest) return;
+    if (t.tagName === 'INPUT') return;
+    const td = t.closest('td');
+    const tr = td && td.parentNode;
+    if (!td || !tr || tr.dataset.idx === undefined) return;
+    const c = COLS[Array.prototype.indexOf.call(tr.children, td)];
+    const r = rows.find(x => String(x._idx) === String(tr.dataset.idx));
+    if (!c || !c.edit_key || !r || r._locked || r._deleted) return;
+    const orig = cellText(r, c.key);
+    const editedTxt = cellText(r, c.edit_key).trim();
+    const val = (editedTxt && editedTxt !== orig.trim()) ? editedTxt : orig;
+    beginEdit(r, c, td, val, orig);
+  });
+
+  // A click changes the selection IN PLACE (toggle the 'selected' class on the
+  // existing rows, refresh the counter). It must not rebuild tbody: that
+  // replaces every td and Chromium then drops the dblclick of a double-click.
   function handleRowClick(idx, e) {
     if (e.shiftKey && lastClickIdx !== null) {
-      const all = [...document.querySelectorAll('#' + APP + '-tbody tr')].map(tr => parseInt(tr.dataset.idx));
+      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx));
       const a = all.indexOf(lastClickIdx), b = all.indexOf(idx);
       if (a >= 0 && b >= 0) for (let i = Math.min(a,b); i <= Math.max(a,b); i++) selected.add(all[i]);
     } else if (e.ctrlKey || e.metaKey) {
@@ -705,7 +1000,11 @@ _BODY = r"""
       selected.clear(); selected.add(idx);
     }
     lastClickIdx = idx;
-    renderTable();
+    Array.prototype.forEach.call($('tbody').children, tr => {
+      if (selected.has(parseInt(tr.dataset.idx))) tr.classList.add('selected');
+      else tr.classList.remove('selected');
+    });
+    updateStats();
   }
 
   renderTable();

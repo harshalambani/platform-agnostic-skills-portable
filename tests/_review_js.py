@@ -24,13 +24,13 @@ _FAKE_DOM = r"""
 function mkEl(tag) {
   const e = {
     tag, tagName: String(tag).toUpperCase(), children: [], dataset: {}, style: {}, value: '', title: '',
-    className: '', textContent: '', _h: '', onclick: null,
+    className: '', textContent: '', _h: '', onclick: null, parentNode: null, _l: {},
     classList: {
       _s: new Set(),
       add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); },
       contains(c) { return this._s.has(c); },
     },
-    appendChild(c) { this.children.push(c); return c; },
+    appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
     querySelectorAll() { return []; },
     // only the one selector the engine uses to find a filter box
     querySelector(sel) {
@@ -47,14 +47,19 @@ function mkEl(tag) {
       if (x === this) return true;
       return this.children.some(c => c.contains && c.contains(x));
     },
-    addEventListener() {}, closest() { return null; },
+    addEventListener(t, f) { (this._l[t] = this._l[t] || []).push(f); },
+    // tag selectors only ('td', 'tr') -- all the engine needs
+    closest(sel) {
+      for (let n = this; n; n = n.parentNode) if (n.tag === sel) return n;
+      return null;
+    },
     focus() { document.activeElement = this; },
     blur() { if (document.activeElement === this) document.activeElement = null; },
     setSelectionRange(a, b) { this.selectionStart = a; this.selectionEnd = b; },
   };
   Object.defineProperty(e, 'innerHTML', {
     get() { return this._h; },
-    set(v) { this._h = v; this.children = []; },
+    set(v) { this._h = v; this.children.forEach(c => { c.parentNode = null; }); this.children = []; },
   });
   return e;
 }
@@ -62,10 +67,20 @@ const _els = {};
 globalThis.document = {
   getElementById(id) { return _els[id] || (_els[id] = mkEl('div')); },
   createElement(t) { return mkEl(t); },
-  addEventListener() {}, querySelectorAll() { return []; },
+  _l: {},
+  addEventListener(t, f) { (this._l[t] = this._l[t] || []).push(f); },
+  removeEventListener(t, f) { this._l[t] = (this._l[t] || []).filter(x => x !== f); },
+  querySelectorAll() { return []; },
   activeElement: null,
 };
 globalThis.window = globalThis;
+// UI-11: an in-memory localStorage shared by every app built in one scenario
+globalThis.__store = {};
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(__store, k) ? __store[k] : null; },
+  setItem(k, v) { __store[k] = String(v); },
+  removeItem(k) { delete __store[k]; },
+} });
 globalThis.alert = function () {};
 globalThis.confirm = function () { return true; };
 const $id = (id) => document.getElementById(id);
@@ -102,11 +117,67 @@ function focusedCol() {
   const a = document.activeElement;
   return a && a.dataset && a.dataset.col ? a.dataset.col : null;
 }
+function filterCols(app) {
+  const row = $id(app + '-thead').children.find(r => r.className === 'filter-row');
+  return row.children.map(td => td.children[0].dataset.col);
+}
+// the X button inside a filter box's cell, or null (it only exists while the box has text)
+function filterX(app, col) {
+  const row = $id(app + '-thead').children.find(r => r.className === 'filter-row');
+  for (const td of row.children)
+    for (const b of td.children) if (b.dataset.clear === col) return b;
+  return null;
+}
+// the stats-line "N filters - Clear all" link
+function clearAllLink(app) { return $id(app + '-clear-all'); }
+function theadHtml(app) { return $id(app + '-thead')._h; }
+function pressEsc(app, col) {
+  const ev = { key: 'Escape', stopped: false, prevented: false,
+    stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } };
+  filterBox(app, col).onkeydown(ev);
+  return ev;
+}
+// ---- real-event layer (UI-06). Events bubble target -> root, run on<type> and
+// addEventListener handlers, and honour stopPropagation.
+function dispatch(target, type, init) {
+  const ev = Object.assign({ type, target, stopped: false, prevented: false,
+    shiftKey: false, ctrlKey: false, metaKey: false, detail: 1,
+    stopPropagation() { this.stopped = true; }, preventDefault() { this.prevented = true; } }, init || {});
+  for (let n = target; n && !ev.stopped; n = n.parentNode) {
+    if (typeof n['on' + type] === 'function') n['on' + type](ev);
+    for (const f of (n._l[type] || [])) { if (ev.stopped) break; f(ev); }
+  }
+  return ev;
+}
+function colIdx(app, key) {
+  const keys = [...theadHtml(app).matchAll(/<th data-col="([^"]*)"/g)].map(m => m[1]);
+  return keys.indexOf(key);
+}
+// the td under the pointer for row idx / column key, in the CURRENT tbody
+function cellAt(app, idx, key) {
+  const tr = $id(app + '-tbody').children.find(t => Number(t.dataset.idx) === idx);
+  return tr ? tr.children[colIdx(app, key)] : null;
+}
+function click(app, idx, key, mods) { return dispatch(cellAt(app, idx, key), 'click', mods); }
+// A real browser double-click: click, then (pointer has not moved) click again on
+// whatever node is NOW under it, then dblclick. Like Chromium, the dblclick is
+// dropped when the node under the pointer is not the node the first click hit
+// (i.e. the first click rebuilt the row).
+function realDblClick(app, idx, key, mods) {
+  const first = cellAt(app, idx, key);
+  dispatch(first, 'click', Object.assign({ detail: 1 }, mods || {}));
+  const second = cellAt(app, idx, key);
+  if (second !== first) return { fired: false, replaced: true };
+  dispatch(second, 'click', Object.assign({ detail: 2 }, mods || {}));
+  dispatch(second, 'dblclick', Object.assign({ detail: 2 }, mods || {}));
+  return { fired: true, replaced: false };
+}
+function inputsIn(td) { return td ? td.children.filter(c => c.tag === 'input') : []; }
 function payload(varName) { return JSON.parse(globalThis[varName]); }
 """
 
 
-def run_js(html: str, app: str, scenario: str, tmp_path: Path):
+def run_js(html: str, app: str, scenario: str, tmp_path: Path, pre: str = ""):
     """Run the engine's init code against the fake DOM, then `scenario` (JS
     source that may call view/pick/select/applySel/setStatus/payload and must
     `return` a JSON-able value). Returns the parsed result."""
@@ -117,6 +188,7 @@ def run_js(html: str, app: str, scenario: str, tmp_path: Path):
     src = (
         _FAKE_DOM
         + "\nconst APP = %s;\n" % json.dumps(app)
+        + pre + chr(10)
         + "eval(%s);\n" % json.dumps(m.group(1))
         + "const __out = (function(){\n" + scenario + "\n})();\n"
         + "console.log(JSON.stringify(__out));\n"
