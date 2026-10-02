@@ -1237,6 +1237,13 @@ def _history_token_match(
             match = _history_bayes_score(no_ifsc - bank_names, model)
             if match and _strip_root(match.get('account') or '') in _targets:
                 match = None   # still an own target, still no evidence
+        if (match and own_evidence is not None
+                and _strip_root(match.get('account') or '') in _targets
+                and not own_evidence(desc)):
+            # MAP-26 round 2: a history win onto an own bank/FD needs own-transfer
+            # evidence; the owner's plain name (the tokens that drove the score)
+            # is not evidence. Abstain; the row goes on to Suspense / Review.
+            match = None
         if match:
             # MAP-26: the Bayes pass strips the bank words (they are not evidence
             # of WHICH account), so owner-name tokens alone can pull a row onto
@@ -1497,6 +1504,14 @@ def _is_handle_token(tok: str) -> bool:
     return '@' in tok or any(ch.isdigit() for ch in tok)
 
 
+# MAP-26 (round 2): a product keyword that only an own deposit/sweep leg carries.
+# With an owner-identity token it is own-transfer evidence ("AUTOSWEEP TO <fd no>
+# <OWNER ...>", "FD BOOKING <OWNER>"); without one it is not ("FD BOOKING <VENDOR>").
+_OWN_PRODUCT_KW_RE = re.compile(
+    r'\b(?:auto\s*sweep\w*|sweep\w*|fd|f\.d\.|fixed\s+deposit|term\s+deposit'
+    r'|premat\w*|maturity|closure)\b')
+
+
 def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
                                own_bank_accounts: Optional[set] = None,
                                source_account: Optional[str] = None,
@@ -1518,11 +1533,17 @@ def _has_own_transfer_evidence(desc: str, own_vocab: set, own_targets: set,
     if _SELF_MARKER_RE.search(low):
         return True
     own_toks = (set(_tokenize_history(desc)) & own_vocab) if own_vocab else set()
+    if own_toks and own_bank_accounts is not None and not name_alone:
+        # a product word learned into the vocabulary from the sweep/FD rows
+        # ('autosweep') is not an owner-identity token
+        own_toks = {t for t in own_toks if not _OWN_PRODUCT_KW_RE.fullmatch(t)}
     if own_toks:
         if own_bank_accounts is None or name_alone:
             return True
         if any(_is_handle_token(t) for t in own_toks):
             return True
+        if _OWN_PRODUCT_KW_RE.search(low):
+            return True   # owner token + sweep / FD / closure keyword
         if _narration_bank_carriers(desc, own_bank_accounts, source_account,
                                     include_ifsc=True)[1]:
             return True
@@ -3187,8 +3208,10 @@ def run(
     _hist_own_vocab = _build_own_transfer_vocab(historical_pairs_for_llm, _hist_own_targets)
 
     def _own_ev(_d: str) -> bool:
+        # round 2: the owner's plain name is not evidence on ANY pass
         return _has_own_transfer_evidence(
-            _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account)
+            _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+            name_alone=False)
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -3280,7 +3303,7 @@ def run(
                     and match.get('reason') != _SMART_SELF_CHEQUE_REASON
                     and not _gate_own_target(
                         desc, match['account'], _hist_own_vocab, _hist_own_targets,
-                        own_bank_accounts, gnucash_bank_account)):
+                        own_bank_accounts, gnucash_bank_account, name_alone=False)):
                 # MAP-23: a keyword rule (insurance, loan, bond, ...) can name a
                 # leaf word that an own bank/FD account also carries. The smart
                 # pass is now behind the same own-transfer gate as every other
@@ -3292,7 +3315,8 @@ def run(
                 match = _historical_prefix_match(desc, historical_pairs_for_llm)
                 if match is not None and not _gate_own_target(
                         desc, match.get('account') or '', _hist_own_vocab,
-                        _hist_own_targets, own_bank_accounts, gnucash_bank_account):
+                        _hist_own_targets, own_bank_accounts, gnucash_bank_account,
+                        name_alone=False):
                     # MAP-22: a shared prefix with past own-account rows is not
                     # own-transfer evidence. Drop the guess; the AI pass / Suspense
                     # take the row.

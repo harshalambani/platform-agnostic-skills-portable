@@ -130,10 +130,16 @@ def test_weak_prefix_pass_does_not_book_a_third_party_to_an_own_bank(tmp_path, m
 
 
 def test_weak_prefix_pass_still_lands_with_own_evidence(tmp_path, monkeypatch):
-    """POSITIVE: the same prefix, plus the owner's own vocabulary."""
+    """POSITIVE: the same prefix, plus real own-transfer evidence (the self marker).
+    MAP-26 round 2: this fixture used to add only the owner's NAME and expect a
+    landing -- the owner's plain name alone is not evidence on any pass, so the
+    name-only row is now asserted to stay OFF the own bank (negative half)."""
     monkeypatch.chdir(tmp_path)
-    r = _run(tmp_path, f"MISC ADJUSTMENT ENTRY 7654321 {OWN_NAME}", _prefix_history())
+    r = _run(tmp_path, f"MISC ADJUSTMENT ENTRY 7654321 XFER TO SELF {OWN_NAME}", _prefix_history())
     assert r["Account"] == fx.P_HDFC2
+    r2 = _run(tmp_path, f"MISC ADJUSTMENT ENTRY 7654321 {OWN_NAME}", _prefix_history(), name="n")
+    assert r2["Account"] != fx.P_HDFC2                  # NEGATIVE: name alone
+    assert r2["Confidence"] in ("suspense", "none")
 
 
 def test_weak_prefix_refusal_falls_to_the_ai_and_the_ai_is_gated_too(tmp_path, monkeypatch):
