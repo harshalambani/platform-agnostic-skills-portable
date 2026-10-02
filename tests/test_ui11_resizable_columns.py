@@ -255,8 +255,10 @@ def test_itr_mapping_review_screen_has_resize_handles_and_reset(tmp_path):
         html = m._load_review_data("SYN-IND")
     _assert_screen_has_resizing(html, m.APP_ID)
     # the tag glossary is a reference panel, not a review grid: it must NOT be given handles
-    gl = re.search(r"<table[^>]*>.*?</table>", html[html.find("glossary"):], re.S)
-    assert gl is None or "col-resizer" not in gl.group(0)
+    tail = html[html.find("glossary"):]
+    start = tail.find("<table")
+    if start != -1:
+        assert "col-resizer" not in tail[start:tail.find("</table>", start)]
 
 
 # ---- 4. real mouse, real browser -------------------------------------------------------
