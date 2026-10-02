@@ -202,6 +202,53 @@ def payload_box_css(elem_id: str) -> str:
 # CSS — one copy, namespaced by app_id at build time.
 # ---------------------------------------------------------------------------
 
+# UI-09: ONE source of truth for the match-type accent colours. They drive the
+# 3px first-cell stripe, the whole-row tint and the legend swatches, so the
+# three can never drift apart.
+ACCENT_COLOURS = {
+    "red": "#f87171",
+    "amber": "#fbbf24",
+    "green": "#4ade80",
+    "blue": "#60a5fa",
+    "orange": "#fb923c",
+}
+ACCENT_TINT_ALPHA = 0.18
+
+
+def _rgb(hex_colour: str) -> str:
+    h = hex_colour.lstrip("#")
+    return f"{int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)}"
+
+
+def _accent_css() -> str:
+    """Row accents (set via _rowclass / _band): the first-cell stripe stays; every
+    cell also gets an overlay of the accent at ACCENT_TINT_ALPHA. It is a
+    background-IMAGE so the row's own background (zebra) shows through."""
+    out = ["/* Row accents: stripe + whole-row tint (UI-09). */"]
+    for name, hx in ACCENT_COLOURS.items():
+        rgba = f"rgba({_rgb(hx)},{ACCENT_TINT_ALPHA})"
+        out.append(f"#%%APP%%-app tbody tr.accent-{name} td:first-child {{ border-left: 3px solid {hx}; }}")
+        out.append(f"#%%APP%%-app tbody tr.accent-{name} td {{ background-image: linear-gradient({rgba}, {rgba}); }}")
+    out.append("#%%APP%%-app .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #bbb; margin: 4px 0 8px; }")
+    out.append("#%%APP%%-app .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }")
+    for name, hx in ACCENT_COLOURS.items():
+        out.append(f"#%%APP%%-app .legend .sw.{name} {{ background: {hx}; }}")
+    return "\n".join(out)
+
+
+def _tint_off_css() -> str:
+    """Declared AFTER the accent rules (same specificity, later wins): hover and
+    selected keep their solid colours, and a contra row's tone is its one
+    background (the stripe still marks the match type)."""
+    return "\n".join([
+        "/* UI-09: the tint never competes with hover / selected / a contra tone. */",
+        "#%%APP%%-app tbody tr:hover td,",
+        "#%%APP%%-app tbody tr.selected td,",
+        "#%%APP%%-app tbody tr.tone-amber td,",
+        "#%%APP%%-app tbody tr.tone-green td { background-image: none; }",
+    ])
+
+
 _CSS = r"""
 <style>
 #%%APP%%-app {
@@ -268,25 +315,14 @@ _CSS = r"""
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd;
 }
 
-/* Row accents — set via _rowclass from the loader. */
-#%%APP%%-app tbody tr.accent-red    td:first-child { border-left: 3px solid #f87171; }
-#%%APP%%-app tbody tr.accent-amber  td:first-child { border-left: 3px solid #fbbf24; }
-#%%APP%%-app tbody tr.accent-green  td:first-child { border-left: 3px solid #4ade80; }
-#%%APP%%-app tbody tr.accent-blue   td:first-child { border-left: 3px solid #60a5fa; }
-#%%APP%%-app tbody tr.accent-orange td:first-child { border-left: 3px solid #fb923c; }
-#%%APP%%-app .legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px; color: #bbb; margin: 4px 0 8px; }
-#%%APP%%-app .legend .sw { display: inline-block; width: 10px; height: 10px; margin-right: 4px; vertical-align: middle; }
-#%%APP%%-app .legend .sw.blue   { background: #60a5fa; }
-#%%APP%%-app .legend .sw.green  { background: #4ade80; }
-#%%APP%%-app .legend .sw.amber  { background: #fbbf24; }
-#%%APP%%-app .legend .sw.orange { background: #fb923c; }
-#%%APP%%-app .legend .sw.red    { background: #f87171; }
+/*%%ACCENT_CSS%%*/
 #%%APP%%-app tbody tr.tone-amber  { background: #3a2a1d; }
 #%%APP%%-app tbody tr.tone-amber:hover { background: #4a3626; }
 #%%APP%%-app tbody tr.tone-green  { background: #16281d; }
 #%%APP%%-app tbody tr.tone-green:hover { background: #1e3a2a; }
 #%%APP%%-app tbody tr.tone-amber.selected,
 #%%APP%%-app tbody tr.tone-green.selected { background: #1e3a5f; }
+/*%%TINT_OFF_CSS%%*/
 
 /* Badge + confidence colours — bright on dark, WCAG AA at 12px. */
 #%%APP%%-app .badge {
@@ -332,6 +368,8 @@ _CSS = r"""
 }
 </style>
 """
+_CSS = _CSS.replace("/*%%ACCENT_CSS%%*/", _accent_css()).replace(
+    "/*%%TINT_OFF_CSS%%*/", _tint_off_css())
 
 
 # ---------------------------------------------------------------------------
