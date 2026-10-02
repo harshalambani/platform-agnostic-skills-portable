@@ -72,10 +72,11 @@ def test_tint_is_an_overlay_so_the_zebra_is_not_wiped():
         assert "background-color" not in body
 
 
-@pytest.mark.parametrize("state", ["#x-app tbody tr:hover td", "#x-app tbody tr.selected td"])
-def test_hover_and_selected_are_not_overridden_by_the_tint(state):
-    """NEGATIVE: hover/selected drop the overlay AND are declared after the accent
-    rules at equal specificity, so they win."""
+@pytest.mark.parametrize("state", ["#x-app tbody tr.selected td"])
+def test_selected_is_not_overridden_by_the_tint(state):
+    """NEGATIVE: selected drops the overlay AND is declared after the accent
+    rules at equal specificity, so it wins. (Plain hover no longer drops the tint:
+    see test_ui09_hover_and_header_bleed.)"""
     rules = list(_rule_for(state))
     assert rules and "background-image: none" in rules[0][1]
     assert _index_of(state) > _index_of("#x-app tbody tr.accent-orange td")

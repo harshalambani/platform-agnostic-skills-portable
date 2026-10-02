@@ -237,12 +237,12 @@ def _accent_css() -> str:
 
 
 def _tint_off_css() -> str:
-    """Declared AFTER the accent rules (same specificity, later wins): hover and
-    selected keep their solid colours, and a contra row's tone is its one
-    background (the stripe still marks the match type)."""
+    """Declared AFTER the accent rules (same specificity, later wins): a selected
+    row keeps its solid reverse colours, and a contra row's tone is its one
+    background (the stripe still marks the match type). A plain HOVER does NOT
+    drop the tint: it keeps its match-type hue plus a non-fill cue (see _CSS)."""
     return "\n".join([
-        "/* UI-09: the tint never competes with hover / selected / a contra tone. */",
-        "#%%APP%%-app tbody tr:hover td,",
+        "/* UI-09: the tint never competes with selected / a contra tone. */",
         "#%%APP%%-app tbody tr.selected td,",
         "#%%APP%%-app tbody tr.tone-amber td,",
         "#%%APP%%-app tbody tr.tone-green td { background-image: none; }",
@@ -276,7 +276,9 @@ _CSS = r"""
 #%%APP%%-app .toolbar .spacer { flex: 1; }
 #%%APP%%-app .stats { font-size: 11px; color: #999; padding: 4px 0; }
 
-#%%APP%%-app table { width: 100%; border-collapse: collapse; table-layout: auto; }
+#%%APP%%-app table { width: 100%; border-collapse: separate; border-spacing: 0; table-layout: auto; }
+/* UI-08b: SEPARATE (not collapsed) borders: a scrolled row's border and 3px accent
+   stripe are painted inside its own cell, so they never bleed through the sticky header. */
 /* UI-08: the title row and the filter row stick together as ONE block (sticky on
    thead, opaque, above the body rows) so the filters never scroll away. */
 #%%APP%%-app thead {
@@ -318,7 +320,7 @@ _CSS = r"""
 #%%APP%%-app thead .filter-row input::placeholder { color: #555; }
 
 #%%APP%%-app tbody tr {
-  border-bottom: 1px solid #262626; cursor: pointer; transition: background 0.1s;
+  cursor: pointer; transition: background 0.1s;
 }
 #%%APP%%-app tbody tr:nth-child(even) { background: #111; }
 #%%APP%%-app tbody tr:hover { background: #1a2744; }
@@ -327,7 +329,7 @@ _CSS = r"""
 #%%APP%%-app tbody tr.locked { opacity: 0.75; cursor: not-allowed; }
 #%%APP%%-app tbody tr.row-deleted td { text-decoration: line-through; opacity: 0.55; }
 #%%APP%%-app tbody td {
-  padding: 5px 8px; font-size: 12px; max-width: 420px;
+  padding: 5px 8px; font-size: 12px; max-width: 420px; border-bottom: 1px solid #262626;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd;
 }
 
@@ -339,6 +341,9 @@ _CSS = r"""
 #%%APP%%-app tbody tr.tone-amber.selected,
 #%%APP%%-app tbody tr.tone-green.selected { background: #1e3a5f; }
 /*%%TINT_OFF_CSS%%*/
+/* UI-09: hover keeps the row's accent tint (so it never reads as another match
+   type) and adds a NON-fill cue: a light inset line above and below every cell. */
+#%%APP%%-app tbody tr:hover td { box-shadow: inset 0 1px 0 #9db4d9, inset 0 -1px 0 #9db4d9; }
 /* UI-09: a selected row is a REVERSE highlight -- light cells, dark text, a light
    top/bottom edge -- so it reads at a glance over every tint (including the blue
    override rows) and does not rely on hue. Declared after the tint, equal or
