@@ -291,6 +291,18 @@ _CSS = r"""
   cursor: pointer; user-select: none; white-space: nowrap;
 }
 #%%APP%%-app thead th:hover { background: #2a2a2a; }
+/* UI-11: drag the right edge of a header to resize that column. The grab zone is
+   6px wide; a header that no longer fits its text clips it with an ellipsis. */
+#%%APP%%-app thead th { position: relative; overflow: hidden; text-overflow: ellipsis; }
+#%%APP%%-app thead th .col-resizer {
+  position: absolute; top: 0; right: 0; width: 6px; height: 100%;
+  cursor: col-resize; z-index: 2; user-select: none; touch-action: none;
+}
+#%%APP%%-app thead th .col-resizer:hover,
+#%%APP%%-app thead th .col-resizer.dragging { background: rgba(96,165,250,0.55); }
+#%%APP%%-app table.resized { table-layout: fixed; width: auto; max-width: none; }
+#%%APP%%-app table.resized tbody td { max-width: none; }
+#%%APP%%-app .stats .reset-widths { margin-left: 8px; color: #60a5fa; cursor: pointer; text-decoration: underline; }
 #%%APP%%-app thead th .sort-arrow { margin-left: 4px; font-size: 10px; }
 #%%APP%%-app thead .filter-row td {
   padding: 3px 4px; background: #1a1a1a; border-bottom: 1px solid #444;
@@ -395,7 +407,7 @@ _CSS = r"""
 #%%APP%%-app .picker-dropdown .picker-item .p-primary { font-weight: 600; color: #fff; }
 #%%APP%%-app .picker-dropdown .picker-item .p-secondary { color: #888; font-size: 11px; }
 #%%APP%%-app .scroll-wrapper {
-  max-height: 65vh; overflow-y: auto; border: 1px solid #333; border-radius: 4px;
+  max-height: 65vh; overflow-y: auto; overflow-x: auto; border: 1px solid #333; border-radius: 4px;
 }
 </style>
 """
@@ -413,6 +425,8 @@ _BODY = r"""
     %%STATUS_FILTER_HTML%%
     <span class="spacer"></span>
     <span class="stats" id="%%APP%%-stats"></span>
+    <a href="#" class="stats reset-widths" id="%%APP%%-reset-widths"
+       title="Forget the column widths you dragged on this screen">Reset widths</a>
     <a href="#" class="stats clear-all" id="%%APP%%-clear-all" style="display:none"></a>
   </div>
 
@@ -432,7 +446,8 @@ _BODY = r"""
   %%EXTRA_PANEL%%
 
   <div class="scroll-wrapper">
-    <table>
+    <table id="%%APP%%-table">
+      <colgroup id="%%APP%%-cols"></colgroup>
       <thead id="%%APP%%-thead"><tr></tr></thead>
       <tbody id="%%APP%%-tbody"></tbody>
     </table>
@@ -627,6 +642,136 @@ _BODY = r"""
       (deleted ? ' | ' + deleted + ' deleted' : '');
   }
 
+  // ── UI-11: resizable columns ──
+  // Widths live in colW {column key: px}, are remembered per screen (APP) in
+  // localStorage (try/catch: when storage is unavailable they still hold for the
+  // session) and are applied through a <colgroup>, so a re-render, sort or filter
+  // never loses them. Once any width is set the table is fixed-layout and as wide
+  // as its columns; the wrapper scrolls sideways instead of squeezing the others.
+  const MIN_COL_W = 40;
+  const W_KEY = 'pask.colw.' + APP;
+  let colW = {};
+  let suppressClick = false;
+  let drag = null;
+  function loadWidths() {
+    try {
+      const raw = window.localStorage && window.localStorage.getItem(W_KEY);
+      const o = raw ? JSON.parse(raw) : null;
+      if (o && typeof o === 'object') {
+        COLS.forEach(c => {
+          const v = Number(o[c.key]);
+          if (isFinite(v) && v >= MIN_COL_W) colW[c.key] = Math.round(v);
+        });
+      }
+    } catch (err) { /* storage unavailable: session-only */ }
+  }
+  function saveWidths() {
+    try {
+      if (!window.localStorage) return;
+      if (Object.keys(colW).length) window.localStorage.setItem(W_KEY, JSON.stringify(colW));
+      else window.localStorage.removeItem(W_KEY);
+    } catch (err) { /* storage unavailable: session-only */ }
+  }
+  function applyWidths() {
+    const cols = $('cols'), tbl = $('table');
+    if (!cols || !tbl) return;
+    if (!Object.keys(colW).length) {
+      cols.innerHTML = '';
+      if (tbl.classList) tbl.classList.remove('resized');
+      tbl.style.width = '';
+      return;
+    }
+    let total = 0;
+    cols.innerHTML = COLS.map(c => {
+      const w = colW[c.key] || 160; total += w;
+      return '<col style="width:' + w + 'px">';
+    }).join('');
+    if (tbl.classList) tbl.classList.add('resized');
+    tbl.style.width = total + 'px';
+  }
+  function thWidth(th) {
+    if (!th) return 0;
+    if (th.getBoundingClientRect) { const w = th.getBoundingClientRect().width; if (w) return Math.round(w); }
+    return th.offsetWidth || 0;
+  }
+  // freeze every column at its current width (first resize): the others must not move
+  function snapshotWidths() {
+    if (Object.keys(colW).length) return;
+    const ths = $('thead').querySelectorAll('th');
+    COLS.forEach((c, i) => { colW[c.key] = Math.max(MIN_COL_W, thWidth(ths[i]) || 160); });
+  }
+  // the width a column needs to show its longest cell (and its header) unclipped
+  function fitWidth(key) {
+    const i = COLS.findIndex(c => c.key === key);
+    const app = document.getElementById(APP + '-app');
+    const m = document.createElement('span');
+    m.style.cssText = 'position:absolute;visibility:hidden;white-space:nowrap;left:-9999px;top:0;font-size:12px;';
+    app.appendChild(m);
+    let best = 0;
+    const measure = (html) => { m.innerHTML = html; best = Math.max(best, m.offsetWidth || 0); };
+    $('tbody').querySelectorAll('tr').forEach(tr => {
+      const td = tr.children[i];
+      if (td) measure(td.innerHTML);
+    });
+    const th = $('thead').querySelectorAll('th')[i];
+    if (th) measure(th.textContent);
+    app.removeChild(m);
+    return Math.max(MIN_COL_W, Math.min(1200, Math.ceil(best) + 20));
+  }
+  function onDragMove(e) {
+    if (!drag) return;
+    const dx = e.clientX - drag.x;
+    if (!drag.moved && Math.abs(dx) < 1) return;
+    if (!drag.moved) { drag.moved = true; snapshotWidths(); drag.w0 = colW[drag.key] || drag.w0; }
+    colW[drag.key] = Math.max(MIN_COL_W, Math.round(drag.w0 + dx));
+    applyWidths();
+  }
+  function onDragEnd() {
+    document.removeEventListener('mousemove', onDragMove);
+    document.removeEventListener('mouseup', onDragEnd);
+    if (!drag) return;
+    if (drag.handle && drag.handle.classList) drag.handle.classList.remove('dragging');
+    if (drag.moved) {
+      saveWidths();
+      suppressClick = true;                 // the click that ends a drag must not sort
+      setTimeout(() => { suppressClick = false; }, 0);
+    }
+    drag = null;
+  }
+  const theadEl = $('thead');
+  theadEl.addEventListener('mousedown', (e) => {
+    const h = e && e.target;
+    if (!h || !h.classList || !h.classList.contains('col-resizer')) return;
+    // no default action: no text selection, and a filter box keeps its focus
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    const key = h.dataset.col;
+    drag = { key, x: e.clientX, moved: false, handle: h,
+             w0: colW[key] || thWidth(h.parentNode) || 160 };
+    if (h.classList.add) h.classList.add('dragging');
+    document.addEventListener('mousemove', onDragMove);
+    document.addEventListener('mouseup', onDragEnd);
+  });
+  theadEl.addEventListener('dblclick', (e) => {
+    const h = e && e.target;
+    if (!h || !h.classList || !h.classList.contains('col-resizer')) return;
+    if (e.preventDefault) e.preventDefault();
+    if (e.stopPropagation) e.stopPropagation();
+    snapshotWidths();
+    colW[h.dataset.col] = fitWidth(h.dataset.col);
+    applyWidths();
+    saveWidths();
+  });
+  const resetBtn = $('reset-widths');
+  if (resetBtn) resetBtn.onclick = (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    colW = {};
+    saveWidths();
+    applyWidths();
+  };
+  loadWidths();
+  applyWidths();
+
   // ── Rendering ──
   function renderTable() {
     const thead = $('thead');
@@ -647,9 +792,14 @@ _BODY = r"""
       esc(c.label) +
       (colFilters[c.key] ? '<span class="filter-mark" title="Filtered">⌕</span>' : '') +
       (c.key === sortCol ? '<span class="sort-arrow">' + (sortAsc ? '▲' : '▼') + '</span>' : '') +
+      '<span class="col-resizer" data-col="' + esc(c.key) + '" title="Drag to resize, double-click to fit"></span>' +
       '</th>').join('') + '</tr>';
     thead.querySelectorAll('th').forEach(th => {
-      th.onclick = () => {
+      th.title = th.textContent;
+      th.onclick = (e) => {
+        // UI-11: a click that ends a column drag (or lands on the handle) is not a sort
+        if (suppressClick || (e && e.target && e.target.classList &&
+                              e.target.classList.contains('col-resizer'))) return;
         const col = th.dataset.col;
         const spec = COLS.find(c => c.key === col);
         if (!spec || !spec.sortable) return;

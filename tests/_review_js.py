@@ -67,10 +67,20 @@ const _els = {};
 globalThis.document = {
   getElementById(id) { return _els[id] || (_els[id] = mkEl('div')); },
   createElement(t) { return mkEl(t); },
-  addEventListener() {}, querySelectorAll() { return []; },
+  _l: {},
+  addEventListener(t, f) { (this._l[t] = this._l[t] || []).push(f); },
+  removeEventListener(t, f) { this._l[t] = (this._l[t] || []).filter(x => x !== f); },
+  querySelectorAll() { return []; },
   activeElement: null,
 };
 globalThis.window = globalThis;
+// UI-11: an in-memory localStorage shared by every app built in one scenario
+globalThis.__store = {};
+Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: {
+  getItem(k) { return Object.prototype.hasOwnProperty.call(__store, k) ? __store[k] : null; },
+  setItem(k, v) { __store[k] = String(v); },
+  removeItem(k) { delete __store[k]; },
+} });
 globalThis.alert = function () {};
 globalThis.confirm = function () { return true; };
 const $id = (id) => document.getElementById(id);
@@ -167,7 +177,7 @@ function payload(varName) { return JSON.parse(globalThis[varName]); }
 """
 
 
-def run_js(html: str, app: str, scenario: str, tmp_path: Path):
+def run_js(html: str, app: str, scenario: str, tmp_path: Path, pre: str = ""):
     """Run the engine's init code against the fake DOM, then `scenario` (JS
     source that may call view/pick/select/applySel/setStatus/payload and must
     `return` a JSON-able value). Returns the parsed result."""
@@ -178,6 +188,7 @@ def run_js(html: str, app: str, scenario: str, tmp_path: Path):
     src = (
         _FAKE_DOM
         + "\nconst APP = %s;\n" % json.dumps(app)
+        + pre + chr(10)
         + "eval(%s);\n" % json.dumps(m.group(1))
         + "const __out = (function(){\n" + scenario + "\n})();\n"
         + "console.log(JSON.stringify(__out));\n"
