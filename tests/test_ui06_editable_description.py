@@ -99,12 +99,13 @@ def test_unedited_export_is_byte_identical_to_pre_ui06(tmp_path):
     rows = [_row(), _row(desc="OTHER")]
     # what the pre-UI-06 writer produced for the same rows
     import io
-    from agents.canonical_io import order_import_ready_headers
+    from agents.canonical_io import import_ready_rows, order_import_ready_headers
+    rows_w = import_ready_rows(rows)    # MAP-27: the writer's self-describing amount headers
     buf = io.StringIO(newline="")
-    w = csv.DictWriter(buf, fieldnames=order_import_ready_headers(rows[0].keys()),
+    w = csv.DictWriter(buf, fieldnames=order_import_ready_headers(rows_w[0].keys()),
                        extrasaction="ignore")
     w.writeheader()
-    w.writerows(rows)
+    w.writerows(rows_w)
     change = [{"_idx": 0, "Description": ORIG, "Account": "Expenses:Rent", "_orig": "Y"}]
     _msg, _rows, raw = _save(tmp_path, rows, change)
     assert raw == buf.getvalue().encode("utf-8")

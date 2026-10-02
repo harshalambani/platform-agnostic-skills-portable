@@ -40,6 +40,8 @@ from agents.banks import discover as discover_banks, load_bank_skill
 from agents.skill_gnucash_xml_extractor.agent import _is_structural_bank_account
 from agents.canonical_io import (
     read_sidecar as _ci_read_sidecar,
+    row_deposit,
+    row_withdrawal,
     split_balance_carriers,
     write_canonical_csv,
     write_sidecar,
@@ -830,7 +832,7 @@ def final_closing_balance_verdict(
         return "⚠ No independent statement closing balance available; nothing to verify the book against."
 
     net_imported = sum(
-        _safe_float(r.get("Deposit", 0)) - _safe_float(r.get("Withdrawal", 0))
+        _safe_float(row_deposit(r) or 0) - _safe_float(row_withdrawal(r) or 0)
         for r in final_rows
     )
     post_import_balance = recon["gnucash_balance"] + net_imported

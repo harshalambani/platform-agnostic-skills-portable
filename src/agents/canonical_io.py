@@ -59,6 +59,19 @@ IMPORT_READY_FIELDS: tuple[str, ...] = (
     "MatchReason",
 )
 
+# MAP-27: the self-describing amount headers, their aliases and the single-place
+# lookups live in amount_headers (re-exported here for the existing importers).
+from agents.amount_headers import (  # noqa: E402,F401
+    DEPOSIT_HEADER_ALIASES, IMPORT_DEPOSIT_HEADER, IMPORT_WITHDRAWAL_HEADER,
+    WITHDRAWAL_HEADER_ALIASES, find_deposit_key, find_withdrawal_key,
+    import_ready_row, import_ready_rows, row_deposit, row_withdrawal)
+
+IMPORT_READY_HEADERS: tuple[str, ...] = tuple(
+    IMPORT_DEPOSIT_HEADER if f == "Deposit"
+    else IMPORT_WITHDRAWAL_HEADER if f == "Withdrawal" else f
+    for f in IMPORT_READY_FIELDS)
+
+
 # Suffix of the per-statement summary sidecar written next to a canonical CSV.
 SIDECAR_SUFFIX = ".csv_summary.json"
 
@@ -75,9 +88,24 @@ def order_import_ready_headers(present_keys) -> list[str]:
     """
     present = list(present_keys)
     present_set = set(present)
-    ordered = [f for f in IMPORT_READY_FIELDS if f in present_set]
-    known = set(IMPORT_READY_FIELDS)
-    extras = [k for k in present if k not in known]
+    # MAP-27: an amount header in ANY accepted spelling fills its schema slot.
+    slot_of = {k: "Deposit" for k in DEPOSIT_HEADER_ALIASES}
+    slot_of.update({k: "Withdrawal" for k in WITHDRAWAL_HEADER_ALIASES})
+    ordered: list[str] = []
+    for f in IMPORT_READY_FIELDS:
+        if f == "Deposit":
+            k = find_deposit_key(present_set)
+        elif f == "Withdrawal":
+            k = find_withdrawal_key(present_set)
+        else:
+            k = f if f in present_set else None
+        if k:
+            ordered.append(k)
+    placed = set(ordered)
+    extras = [k for k in present if k not in placed and k not in slot_of
+              and k not in IMPORT_READY_FIELDS]
+    # an older spelling that lost its slot to a newer one is kept, never dropped
+    extras += [k for k in present if k in slot_of and k not in placed]
     return ordered + extras
 
 
@@ -182,7 +210,7 @@ def is_balance_carrier(rows: list[dict], idx: int) -> bool:
     if idx != 0 or not rows:
         return False
     row = rows[0]
-    if balance_utils._safe_float(row.get("Deposit")) or balance_utils._safe_float(row.get("Withdrawal")):
+    if balance_utils._safe_float(row_deposit(row)) or balance_utils._safe_float(row_withdrawal(row)):
         return False
     return str(row.get("Balance") if row.get("Balance") is not None else "").strip() != ""
 

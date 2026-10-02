@@ -32,7 +32,7 @@ for _p in (ROOT, ROOT / "src", ROOT / "ui"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from agents.canonical_io import CANONICAL_FIELDS, IMPORT_READY_FIELDS  # noqa: E402
+from agents.canonical_io import CANONICAL_FIELDS, IMPORT_READY_FIELDS, IMPORT_READY_HEADERS  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +137,10 @@ def test_review_save_reorders_transfer_account_after_account(tmp_path):
     csv_p = _save(tmp_path, _rows_transfer_account_last())
     with open(csv_p, encoding="utf-8") as f:
         header = next(csv.reader(f))
-    # Re-saved layout matches the shared import-ready schema exactly, so
-    # Transfer Account is back at position 5 (after Account), not last.
-    assert header == list(IMPORT_READY_FIELDS)
+    # Re-saved layout matches the shared import-ready schema exactly (MAP-27: with
+    # the self-describing amount headers), so Transfer Account is back at
+    # position 5 (after Account), not last.
+    assert header == list(IMPORT_READY_HEADERS)
     assert header.index("Transfer Account") == header.index("Account") + 1
 
 
@@ -154,5 +155,5 @@ def test_review_save_keeps_blank_transfer_account_column(tmp_path):
         reader = csv.DictReader(f)
         header = reader.fieldnames
         data = next(reader)
-    assert header == list(IMPORT_READY_FIELDS)          # column present
+    assert header == list(IMPORT_READY_HEADERS)         # column present
     assert data["Transfer Account"] == ""               # value blank, not dropped

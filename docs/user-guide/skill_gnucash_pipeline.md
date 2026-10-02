@@ -52,7 +52,30 @@ Files produced:
 
 ## Tips
 
-Account mapping learns from your existing GnuCash history, so the more you have categorised before, the better the auto-mapping. Review a few rows after import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export over a password-protected PDF when you have the choice — extraction is equally deterministic either way, but if HDFC ever hands you a PDF whose text layer is garbled (rare, seen on some re-downloaded statements), the skill auto-detects it and falls back to OCR, which is typically ~90%+ accurate rather than exact; re-check the running/closing balance in that case.
+Account mapping learns from your existing GnuCash history, so the more you
+have categorised before, the better the auto-mapping. Review a few rows after
+import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export
+over a password-protected PDF when you have the choice — extraction is
+equally deterministic either way, but if HDFC ever hands you a PDF whose
+text layer is garbled (rare, seen on some re-downloaded statements), the
+skill auto-detects it and falls back to OCR, which is typically ~90%+
+accurate rather than exact; re-check the running/closing balance in that
+case.
+
+**Importing into GnuCash.** In File > Import > Import Transactions from CSV,
+map the columns of the `_GnuCash_import_ready.csv` like this:
+
+- Date -> Date; Transaction ID -> Number; Description -> Description.
+- Account -> Account; Transfer Account -> Transfer Account.
+- "Amount Negated (Deposit)" -> Amount (Negated); "Amount (Withdrawal)" -> Amount.
+- Balance, Currency, Confidence and MatchReason -> None.
+
+Why the deposit column is negated: the Account column is the CATEGORY the
+transaction is booked against (income or expense), not your bank, so a deposit
+must be imported as a negated amount for the bank to go up. Use the Amount and
+Amount (Negated) column types, not "Transfer Amount" - GnuCash 5's importer
+needs an Amount column. Save the mapping as a preset in the importer so the
+next import is one click.
 
 ## Troubleshooting
 

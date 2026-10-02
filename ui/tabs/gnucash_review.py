@@ -400,8 +400,11 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
         _row_presentation(row, contra_flags.get(str(i)))
 
     # Fallback column keys for older CSVs.
-    deposit_key = "Deposit - Amount Negated" if "Deposit - Amount Negated" in rows[0] else "Deposit"
-    withdrawal_key = "Withdrawal - Amount" if "Withdrawal - Amount" in rows[0] else "Withdrawal"
+    # MAP-27: the shared helper accepts the new "Amount Negated (Deposit)" /
+    # "Amount (Withdrawal)" pair, the 1092991 pair and the plain names.
+    from agents.canonical_io import find_deposit_key, find_withdrawal_key
+    deposit_key = find_deposit_key(rows[0]) or "Deposit"
+    withdrawal_key = find_withdrawal_key(rows[0]) or "Withdrawal"
 
     picker_items = [PickerItem(value=a, primary=a) for a in accounts]
     spec = _spec(picker_items, str(csv_p), str(gc_p), deposit_key, withdrawal_key)
@@ -503,7 +506,10 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
             # back to preserving the original header + appending new keys if the
             # shared schema helper can't be imported.
             try:
-                from agents.canonical_io import order_import_ready_headers
+                from agents.canonical_io import import_ready_rows, order_import_ready_headers
+                # MAP-27: a re-save writes the self-describing amount headers
+                # whichever spelling the loaded file used (values do not move).
+                all_rows = import_ready_rows(all_rows)
                 headers = order_import_ready_headers(_export_headers(all_rows))
             except Exception:
                 try:

@@ -3662,8 +3662,9 @@ def run(
     # GnuCash CSV import column mapping (from the user's perspective):
     #   Account                    = the category/split account (e.g. Income:Bank Interest)
     #   Transfer Account           = the bank account (e.g. Assets:…:HDFC Bank - …)
-    #   Deposit                    = deposit amount
-    #   Withdrawal                 = withdrawal amount
+    #   Amount Negated (Deposit)   = deposit amount  (MAP-27: imported as Amount (Negated),
+    #                                 because Account is the category, not the bank)
+    #   Amount (Withdrawal)        = withdrawal amount (imported as Amount)
     # "Account" already holds the category from mapping — just add the rest.
     #
     # Transfer Account is ALWAYS emitted so the output shape is invariant: when
@@ -3685,7 +3686,12 @@ def run(
     # --- Always rewrite CSV (Root Account prefix was stripped) ---
     # Order via the shared import-ready schema so this write and the
     # Review-Mappings re-save produce byte-identical column layouts.
-    from agents.canonical_io import order_import_ready_headers  # noqa: PLC0415
+    from agents.canonical_io import (  # noqa: PLC0415
+        import_ready_rows, order_import_ready_headers)
+    # MAP-27: the GnuCash-import-ready file (and only it) carries the
+    # self-describing amount headers "Amount Negated (Deposit)" / "Amount
+    # (Withdrawal)". A rename in place: the values do not move.
+    mapped_rows = import_ready_rows(mapped_rows)
     headers_out = order_import_ready_headers(mapped_rows[0].keys())
     with open(str(out_path), 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=headers_out, extrasaction='ignore')
