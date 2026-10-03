@@ -91,7 +91,7 @@ def test_staged_name_strips_directory_parts():
 def test_stage_copy_lands_inside_staging(tmp_path):
     src = tmp_path / "s.csv"; src.write_text(CSV)
     staging = tmp_path / "stage"
-    got = sp.stage_copy(src, staging)
+    got = sp.stage_copy(src, staging, folders=[tmp_path])
     assert got.parent == staging.resolve() and got.read_text() == CSV
 
 
@@ -196,6 +196,15 @@ def test_stage_copy_destination_is_checked_before_any_copy(tmp_path):           
     class Odd:
         name = "a/../../escape.csv"
         def __fspath__(self): return str(src)
-    got = sp.stage_copy(Odd(), staging)
+    got = sp.stage_copy(Odd(), staging, folders=[tmp_path])
     assert got.parent == staging.resolve()
     assert not (tmp_path / "escape.csv").exists()
+
+
+def test_stage_copy_refuses_a_source_outside_known_folders(tmp_path):              # NEGATIVE
+    src = tmp_path / "s.csv"; src.write_text(CSV)
+    other = tmp_path / "elsewhere"; other.mkdir()
+    staging = tmp_path / "stage"
+    with pytest.raises(sp.UnsafePathError, match="outside"):
+        sp.stage_copy(src, staging, folders=[other])
+    assert not any(staging.iterdir())

@@ -102,12 +102,25 @@ def safe_staged_name(name: str) -> str:
     return bare
 
 
-def stage_copy(src: Path, staging: Path) -> Path:
-    """Copy `src` into `staging`; the copy is verified to sit directly in it."""
+def stage_copy(src: Path, staging: Path, folders: Iterable[Path] | None = None) -> Path:
+    """Copy `src` into `staging`. Both ends are checked as normalised strings
+    before the copy: the source must sit inside a known folder, the copy
+    directly inside the staging folder."""
+    src_s = _norm(os.fspath(src))
+    roots = []
+    for f in (folders if folders is not None else known_folders()):
+        try:
+            roots.append(_norm(f))
+        except (OSError, RuntimeError, ValueError):
+            continue
     staging_s = os.path.realpath(str(staging))
     os.makedirs(staging_s, exist_ok=True)
     dest = os.path.realpath(os.path.join(staging_s, safe_staged_name(src.name)))
-    if dest.startswith(staging_s.rstrip(os.sep) + os.sep) and os.path.dirname(dest) == staging_s:
-        shutil.copy2(os.fspath(src), dest)
-        return Path(dest)
-    raise UnsafePathError("The download copy would land outside the staging folder.")
+    if not (dest.startswith(staging_s.rstrip(os.sep) + os.sep)
+            and os.path.dirname(dest) == staging_s):
+        raise UnsafePathError("The download copy would land outside the staging folder.")
+    for root in roots:
+        if src_s.startswith(root.rstrip(os.sep) + os.sep):
+            shutil.copy2(src_s, dest)
+            return Path(dest)
+    raise UnsafePathError("The source file is outside the folders this tab may read from.")
