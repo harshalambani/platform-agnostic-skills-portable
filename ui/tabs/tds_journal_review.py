@@ -36,13 +36,14 @@ for why a stale hand-filtered copy was the original bug.
 from __future__ import annotations
 
 import csv
-import shutil
+from html import escape as html_escape
 from pathlib import Path
 
 import gradio as gr
 
 from ui import _config as _config_mod
 from ui import _filedialog
+from ui import _safe_paths
 from ui.tabs import _entity_book
 from ui._review_engine import (
     Column,
@@ -210,9 +211,12 @@ def _load_review_data(review_path: str, gnucash_path: str) -> str:
     if not review_path:
         return "<p>Select a review CSV, then click Load.</p>"
 
-    review_p = Path(review_path)
-    if not review_p.is_file():
-        return f"<p>Review CSV not found: {review_p.name}</p>"
+    # SEC-19: resolve + refuse non-files, wrong types and paths outside the
+    # known folders before anything is opened.
+    try:
+        review_p = _safe_paths.resolve_input_file(review_path, (".csv",))
+    except _safe_paths.UnsafePathError as e:
+        return f"<p>{html_escape(str(e))}</p>"
 
     rows = _load_review_rows(str(review_p))
     if not rows:
@@ -523,11 +527,11 @@ def _write_csv_rows(path: Path, headers: list[str], rows: list[dict]) -> None:
 def _stage_for_download(path: Path) -> str | None:
     """Copy `path` into the download staging dir and return the staged path,
     or None (with the caller responsible for reporting the failure)."""
-    staging = _config_mod.download_staging_dir()
-    staging.mkdir(parents=True, exist_ok=True)
-    staged = staging / path.name
-    shutil.copy2(path, staged)
-    return str(staged.resolve())
+    # SEC-19: source must be a regular .csv inside a known folder; the copy
+    # is verified to land directly in the staging folder.
+    src = _safe_paths.resolve_input_file(path, (".csv",))
+    staged = _safe_paths.stage_copy(src, _config_mod.download_staging_dir())
+    return str(staged)
 
 
 def _import_tds_learnings():

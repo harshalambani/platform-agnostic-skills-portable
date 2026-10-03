@@ -21,16 +21,17 @@ the engine's design rule — no bespoke JS for this screen anymore.
 from __future__ import annotations
 
 import csv
+from html import escape as html_escape
 import json
 import logging
 import re
-import shutil
 from pathlib import Path
 
 import gradio as gr
 
 from ui import _config as _config_mod
 from ui import _filedialog
+from ui import _safe_paths
 from ui.tabs import _entity_book
 from ui._review_engine import (
     Column,
@@ -436,11 +437,14 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
     if not csv_path or not gnucash_path:
         return "<p>Select both a mapped CSV and a GnuCash file, then click Load.</p>"
 
-    csv_p = Path(csv_path)
+    # SEC-19: resolve + refuse non-files, wrong types and paths outside the
+    # known folders before anything is opened.
+    try:
+        csv_p = _safe_paths.resolve_input_file(csv_path, (".csv",))
+    except _safe_paths.UnsafePathError as e:
+        return f"<p>{html_escape(str(e))}</p>"
     gc_p = Path(gnucash_path)
 
-    if not csv_p.is_file():
-        return f"<p>CSV not found: {csv_p.name}</p>"
     if not gc_p.is_file():
         return f"<p>GnuCash file not found: {gc_p.name}</p>"
 
@@ -503,6 +507,13 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     all_rows = payload["all_rows"]
     gnucash_file = context.get("gnucash_file", "")
     csv_path = context.get("csv_path", "")
+    if csv_path:
+        # SEC-19: the context rides in the page payload, so it is client input:
+        # never write to a path the loader would have refused.
+        try:
+            csv_path = str(_safe_paths.resolve_input_file(csv_path, (".csv",)))
+        except _safe_paths.UnsafePathError as e:
+            return (f"Save refused: {e}", gr.update(interactive=False, value=None))
 
     # UI-06: description edits are export-only; overrides above are learned from
     # the ORIGINAL narration (Description is never overwritten in the payload).
@@ -607,11 +618,8 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
                 export_msg += f"; {n_desc_edits} description(s) reworded (original kept in Notes)"
             # Copy to download staging dir so Gradio's file server can serve it
             try:
-                staging = _config_mod.download_staging_dir()
-                staging.mkdir(parents=True, exist_ok=True)
-                staged = staging / csv_p.name
-                shutil.copy2(csv_p, staged)
-                download_path = str(staged.resolve())
+                staged = _safe_paths.stage_copy(csv_p, _config_mod.download_staging_dir())
+                download_path = str(staged)
             except Exception:
                 download_path = str(csv_p)
         except Exception as e:
