@@ -2938,7 +2938,7 @@ def test_text_helper_escapes_a_leading_equals_sign():
     assert writer._text(1234) == 1234
 
 
-_FORMULA_START = re.compile(r"^[A-Za-z_$(+-]")
+_FORMULA_START = re.compile(r"^[A-Za-z_$('+-]")
 
 
 def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
@@ -2955,6 +2955,7 @@ def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
     with zipfile.ZipFile(out_path) as zf:
         sheet_names = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
         assert sheet_names
+        n_formulas = 0
         for name in sheet_names:
             xml_bytes = zf.read(name)
             root = ET.fromstring(xml_bytes)
@@ -2962,11 +2963,14 @@ def test_saved_workbook_has_no_accidental_formula_cells(tmp_path):
                 if f_el.tag.endswith("}f") or f_el.tag == "f":
                     formula_text = (f_el.text or "").strip()
                     assert formula_text, f"empty formula element in {name}"
+                    n_formulas += 1
                     assert _FORMULA_START.match(formula_text), (
                         f"suspicious formula in {name}: {formula_text!r} -- "
                         "does not look like a genuine formula; check for a "
                         "label that started with '=' and was not escaped"
                     )
+        # H35-09: the guard used to pass trivially because NO formula was live
+        assert n_formulas > 0
 
 
 # ---------------------------------------------------------------------------
