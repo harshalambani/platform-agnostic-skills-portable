@@ -13,6 +13,7 @@ tree (`data_root_dir()`) plus the configured outputs folder (`output_dir()`).
 """
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Iterable
@@ -48,41 +49,49 @@ def known_folders() -> list[Path]:
     return out
 
 
-def _inside(path: Path, folder: Path) -> bool:
-    try:
-        path.relative_to(folder)
-        return True
-    except ValueError:
-        return False
+def _norm(p) -> str:
+    """Absolute, symlink-free, case-normalised string form of a path."""
+    return os.path.normcase(os.path.realpath(str(p)))
 
 
 def resolve_input_file(path, extensions: Iterable[str],
                        folders: Iterable[Path] | None = None) -> Path:
     """Resolve `path`; return it only if it is an existing regular file, has
-    one of `extensions`, and lies inside a known folder. Else UnsafePathError."""
+    one of `extensions`, and lies inside a known folder. Else UnsafePathError.
+
+    The containment test is written as a plain string-prefix check on the
+    normalised path, with every file-system use inside the guarded branch --
+    the form CodeQL's py/path-injection query recognises as a sanitiser."""
     exts = tuple(e.lower() for e in extensions)
     raw = str(path or "").strip()
     if not raw or "\x00" in raw:
         raise UnsafePathError("No file path given.")
+    name = raw.replace("\\", "/").rsplit("/", 1)[-1] or raw     # display only
     try:
-        p = Path(raw).resolve()
+        norm = _norm(raw)
     except (OSError, RuntimeError, ValueError):
         raise UnsafePathError("That path could not be resolved.") from None
-    name = p.name
-    if p.suffix.lower() not in exts:
+    if os.path.splitext(norm)[1].lower() not in exts:
+        ext = os.path.splitext(norm)[1]
         raise UnsafePathError(
-            f"{name}: expected a {' / '.join(exts)} file, not a {p.suffix or 'extension-less'} file.")
-    allowed = [Path(f).resolve() for f in (folders if folders is not None else known_folders())]
-    if not any(_inside(p, f) for f in allowed):
-        raise UnsafePathError(
-            f"{name} is outside the folders this tab may read from. Move it into the "
-            f"Data or outputs folder (or list its folder under "
-            f"'{KNOWN_FOLDERS_SETTING}' in the portable config).")
-    if not p.exists():
-        raise UnsafePathError(f"File not found: {name}")
-    if not p.is_file():
-        raise UnsafePathError(f"{name} is not a regular file.")
-    return p
+            f"{name}: expected a {' / '.join(exts)} file, not a {ext or 'extension-less'} file.")
+    roots = []
+    for f in (folders if folders is not None else known_folders()):
+        try:
+            roots.append(_norm(f))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    for root in roots:
+        if norm.startswith(root.rstrip(os.sep) + os.sep):
+            if not os.path.exists(norm):
+                raise UnsafePathError(f"File not found: {name}")
+            if not os.path.isfile(norm):
+                raise UnsafePathError(f"{name} is not a regular file.")
+            return Path(norm)
+    raise UnsafePathError(
+        f"{name} is outside the folders this tab may read from. Move it into the "
+        f"Data or outputs folder (or list its folder under "
+        f"'{KNOWN_FOLDERS_SETTING}' in the portable config).")
 
 
 def safe_staged_name(name: str) -> str:
@@ -95,10 +104,10 @@ def safe_staged_name(name: str) -> str:
 
 def stage_copy(src: Path, staging: Path) -> Path:
     """Copy `src` into `staging`; the copy is verified to sit directly in it."""
-    staging = Path(staging).resolve()
-    staging.mkdir(parents=True, exist_ok=True)
-    dest = (staging / safe_staged_name(src.name)).resolve()
-    if dest.parent != staging:
-        raise UnsafePathError("The download copy would land outside the staging folder.")
-    shutil.copy2(src, dest)
-    return dest
+    staging_s = os.path.realpath(str(staging))
+    os.makedirs(staging_s, exist_ok=True)
+    dest = os.path.realpath(os.path.join(staging_s, safe_staged_name(src.name)))
+    if dest.startswith(staging_s.rstrip(os.sep) + os.sep) and os.path.dirname(dest) == staging_s:
+        shutil.copy2(os.fspath(src), dest)
+        return Path(dest)
+    raise UnsafePathError("The download copy would land outside the staging folder.")

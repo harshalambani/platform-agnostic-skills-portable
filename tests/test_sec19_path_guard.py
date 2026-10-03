@@ -175,3 +175,27 @@ def test_tds_staged_copy_never_leaves_staging_for_odd_names(folders, tmp_path, m
     got = sp.stage_copy(Odd(), stage)
     assert got.parent == stage.resolve() and got.name == "escape.csv"
     assert not (tmp_path / "escape.csv").exists()
+
+
+def test_sibling_folder_with_the_same_prefix_is_refused(tmp_path, monkeypatch):   # NEGATIVE
+    data = tmp_path / "Data"
+    sibling = tmp_path / "Data2"
+    data.mkdir(); sibling.mkdir()
+    monkeypatch.setattr(sp, "known_folders", lambda: [data.resolve()])
+    _csv(data, "ok.csv")
+    _csv(sibling, "no.csv")
+    assert sp.resolve_input_file(data / "ok.csv", (".csv",)).name.lower() == "ok.csv"
+    with pytest.raises(sp.UnsafePathError, match="outside"):
+        sp.resolve_input_file(sibling / "no.csv", (".csv",))
+
+
+def test_stage_copy_destination_is_checked_before_any_copy(tmp_path):            # NEGATIVE
+    src = tmp_path / "s.csv"; src.write_text(CSV)
+    staging = tmp_path / "stage"
+
+    class Odd:
+        name = "a/../../escape.csv"
+        def __fspath__(self): return str(src)
+    got = sp.stage_copy(Odd(), staging)
+    assert got.parent == staging.resolve()
+    assert not (tmp_path / "escape.csv").exists()
