@@ -132,6 +132,9 @@ SYN-IND-NR:
     bf_losses: []
     clubbing_notes: []
   # MAP-34 / MAP-35 (GnuCash mapper). Optional; absent == mapper behaves as before.
+  # Editable on the Entities tab (blank removes the key). Money IN reaches a drawings
+  # account only via a History match or the reimbursement rule; hidden/placeholder
+  # or not-in-book paths are ignored.
   # drawings_accounts:  # money IN to these is not a direction clash; an employer
   #   - "Equity:Drawings"  # reimbursement credit goes here when exactly one is listed
   # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)

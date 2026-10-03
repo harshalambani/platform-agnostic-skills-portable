@@ -1107,7 +1107,8 @@ def _account_kind(account: str, types: Optional[Dict[str, str]] = None) -> str:
 
 
 def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float,
-                        types: Optional[Dict[str, str]] = None) -> bool:
+                        types: Optional[Dict[str, str]] = None,
+                        allow_drawings: bool = False) -> bool:
     """True if `account`'s TYPE looks backwards for this row's cash-flow
     direction: money out to an INCOME account, or money in to an EXPENSE
     account. Nothing else (asset, bank, cash, liability, credit, equity) ever
@@ -1119,8 +1120,10 @@ def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float,
         return True
     if deposit_amt > 0 and withdrawal_amt == 0 and kind == "EXPENSE":
         # MAP-34: money in to a CONFIGURED drawings account is a reduction of
-        # drawings, not a backwards guess (same stance as MAP-30 cash back).
-        if _strip_root(account) in _DRAWINGS_ACCOUNTS:
+        # drawings, not a backwards guess -- but ONLY for a History match
+        # (allow_drawings=True). Keyword, smart, weak and AI guesses still clash,
+        # and the reimbursement rule bypasses this check entirely.
+        if allow_drawings and _strip_root(account) in _DRAWINGS_ACCOUNTS:
             return False
         return True
     return False
@@ -3896,7 +3899,7 @@ def run(
                 # on the row) -- flags only, never changes the account.
                 d_amt = _safe_float(row.get('Deposit', ''))
                 w_amt = _safe_float(row.get('Withdrawal', ''))
-                if _direction_mismatch(match['account'], d_amt, w_amt):
+                if _direction_mismatch(match['account'], d_amt, w_amt, allow_drawings=True):
                     reason += f" [{_DIRECTION_FLAG_MARKER}]"
                 row['MatchReason'] = reason
                 if _hconf == 'history':

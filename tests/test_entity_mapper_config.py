@@ -136,3 +136,56 @@ def test_skill_yaml_passes_entity_without_letting_it_name_the_output():
     assert sk["run_args"]["entities_path"] == "{data_root}/itr/entities.yaml"
     names = [i["name"] for i in sk["inputs"]]
     assert names.index("bank") < names.index("entity") < names.index("gnucash_file")
+
+
+# --------------------------------- Entities tab fields for the mapper settings
+
+def _modify_with(data_root, drawings, card):
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        return ui_mod._save_entity(
+            "SYN-IND", "SYN-IND", "Synthetic Individual", "AAAAA0000A", "Individual", "Resident",
+            "1990-01-01", "", "", "", "", "", "", "new", "", False, "", "", "",
+            drawings_accounts_text=drawings, card_spend_default_account=card)
+
+
+OTHER_HIDDEN = {k: v for k, v in HIDDEN.items()
+                if k not in ("drawings_accounts", "card_spend_default_account")}
+
+
+def test_form_loads_the_two_fields(tmp_path):
+    data_root, p = _seed(tmp_path, dict(HIDDEN, drawings_accounts=["Equity:Drawings", "Equity:D2"]))
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        ents = ui_mod._load_entities()
+    form = ui_mod._entity_to_form("SYN-IND", ents)
+    assert form[-2] == "Equity:Drawings\nEquity:D2" and form[-1] == "Equity:Drawings"
+    blank = ui_mod._entity_to_form("", ents)
+    assert blank[-2] == "" and blank[-1] == "" and len(blank) == len(form)
+
+
+def test_saving_the_two_fields_keeps_partner_and_foreign_dividend_keys(tmp_path):
+    data_root, p = _seed(tmp_path, OTHER_HIDDEN)
+    assert "Saved" in _modify_with(data_root, "Equity:Drawings\n  Equity:Second \n\n", " Equity:Card ")
+    got = yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-IND"]
+    assert got["drawings_accounts"] == ["Equity:Drawings", "Equity:Second"]
+    assert got["card_spend_default_account"] == "Equity:Card"
+    for k, v in OTHER_HIDDEN.items():
+        assert got[k] == v, k
+
+
+def test_saving_without_the_two_fields_keeps_them(tmp_path):                  # NEGATIVE (vice versa)
+    data_root, p = _seed(tmp_path, HIDDEN)
+    assert "Saved" in _modify_with(data_root, None, None)
+    got = yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-IND"]
+    for k, v in HIDDEN.items():
+        assert got[k] == v, k
+
+
+def test_empty_fields_remove_the_keys_and_leave_the_rest(tmp_path):           # NEGATIVE
+    data_root, p = _seed(tmp_path, HIDDEN)
+    assert "Saved" in _modify_with(data_root, "  \n", "")
+    got = yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-IND"]
+    assert "drawings_accounts" not in got and "card_spend_default_account" not in got
+    for k, v in OTHER_HIDDEN.items():
+        assert got[k] == v, k
+    other = yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-OTHER"]
+    assert other["drawings_accounts"] == ["Equity:Drawings"]                  # other entity untouched

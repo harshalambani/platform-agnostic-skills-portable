@@ -59,19 +59,36 @@ def test_money_out_with_the_marker_is_never_a_reimbursement():                # 
 
 # ----------------------------------------------------- direction exemption
 
-def test_money_in_to_a_configured_drawings_account_is_not_a_clash():
+def test_money_in_to_configured_drawings_is_exempt_only_for_history():
     m._DRAWINGS_ACCOUNTS.add(DRAW)
-    assert m._direction_clash(DRAW, 100.0, 0.0, {DRAW: "EXPENSE"}) is False
-    assert m._direction_clash("Root Account:" + DRAW, 100.0, 0.0, {DRAW: "EXPENSE"}) is False
+    t = {DRAW: "EXPENSE"}
+    assert m._direction_mismatch(DRAW, 100.0, 0.0, t, allow_drawings=True) is False
+    assert m._direction_mismatch("Root Account:" + DRAW, 100.0, 0.0, t, allow_drawings=True) is False
+
+
+def test_keyword_smart_weak_and_ai_guesses_still_clash_on_drawings():        # NEGATIVE
+    m._DRAWINGS_ACCOUNTS.add(DRAW)
+    t = {DRAW: "EXPENSE"}
+    # keyword / smart / weak call _direction_clash; AI calls _direction_mismatch
+    assert m._direction_clash(DRAW, 100.0, 0.0, t) is True
+    assert m._direction_clash("Root Account:" + DRAW, 100.0, 0.0, t) is True
+    assert m._direction_mismatch(DRAW, 100.0, 0.0, t) is True
+
+
+def test_money_out_to_drawings_behaves_as_before():                          # no change
+    m._DRAWINGS_ACCOUNTS.add(DRAW)
+    t = {DRAW: "EXPENSE"}
+    for allow in (False, True):
+        assert m._direction_mismatch(DRAW, 0.0, 100.0, t, allow_drawings=allow) is False
 
 
 def test_an_account_not_in_the_list_gets_no_exemption():                      # NEGATIVE
     m._DRAWINGS_ACCOUNTS.add(DRAW)
     types = {DRAW: "EXPENSE", WELFARE: "EXPENSE"}
-    assert m._direction_clash(WELFARE, 100.0, 0.0, types) is True
+    assert m._direction_mismatch(WELFARE, 100.0, 0.0, types, allow_drawings=True) is True
     # nothing configured: the old behaviour for Drawings itself
     m._DRAWINGS_ACCOUNTS.clear()
-    assert m._direction_clash(DRAW, 100.0, 0.0, types) is True
+    assert m._direction_mismatch(DRAW, 100.0, 0.0, types, allow_drawings=True) is True
 
 
 def test_the_exemption_never_relaxes_money_out_to_income():                   # NEGATIVE
@@ -156,3 +173,32 @@ def test_a_configured_path_not_in_the_book_is_ignored(tmp_path):              # 
                drawings_accounts=["Equity:No Such Drawings"])
     assert got[0]["Account"] != "Equity:No Such Drawings"
     assert not got[0]["MatchReason"].startswith("employer reimbursement")
+
+
+# ------------------------------------------- weak guesses never reach Drawings
+
+def test_history_match_of_money_in_to_drawings_is_kept(tmp_path):
+    narr = "TRANSFER FROM SYNTHPAL | REFUND"
+    hist = [(f"2025-0{i}-05", narr, 20000, "draw", True) for i in range(1, 7)]
+    got = _run(tmp_path, _book(tmp_path, hist), [("2026-01-10", narr, "900", "")],
+               drawings_accounts=[DRAW])
+    assert got[0]["Account"] == DRAW
+    assert got[0]["MatchReason"].startswith("History")
+
+
+def test_keyword_or_weak_guess_of_money_in_to_drawings_goes_to_suspense(tmp_path):   # NEGATIVE
+    rows = [("2026-01-10", "DRAWINGS SYNTH CREDIT", "900", ""),
+            ("2026-01-11", "REV-UPI/SYNTHPAL/DRAWINGS", "900", "")]
+    got = _run(tmp_path, _book(tmp_path), rows, drawings_accounts=[DRAW])
+    for r in got:
+        assert r["Account"] != DRAW, r
+
+
+def test_hidden_or_placeholder_configured_drawings_is_never_a_target(tmp_path):   # NEGATIVE
+    extra = [fx.account_xml("hdraw", "Hidden Drawings", "EXPENSE", "exp", ["hidden"]),
+             fx.account_xml("pdraw", "Placeholder Drawings", "EXPENSE", "exp", ["placeholder"])]
+    book = fx.write_book(tmp_path / "b2.gnucash", fx.standard_accounts() + extra, [])
+    for acct in ("Expenses:Hidden Drawings", "Expenses:Placeholder Drawings"):
+        got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[acct])
+        assert got[0]["Account"] != acct
+        assert not got[0]["MatchReason"].startswith("employer reimbursement")
