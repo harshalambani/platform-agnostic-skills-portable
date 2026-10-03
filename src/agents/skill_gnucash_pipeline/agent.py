@@ -1294,6 +1294,28 @@ def _load_entity_profile(entity, entities_path):
     return profile, None
 
 
+class _PasswordRuleError(ValueError):
+    pass
+
+
+def _derive_bank_password(bank_info, profile):
+    """BNK-05: (password, rule_summary) for a bank that declares a
+    `password_rule` module next to its skill, else ("", ""). Raises
+    _PasswordRuleError when the rule applies but the record lacks a field."""
+    import importlib  # noqa: PLC0415
+    modname = f"{bank_info.package}.password_rule"
+    try:
+        rule = importlib.import_module(modname)
+    except ModuleNotFoundError as e:
+        if e.name == modname:
+            return "", ""          # this bank declares no rule
+        raise
+    try:
+        return rule.derive_password(profile), rule.RULE_SUMMARY
+    except ValueError as e:
+        raise _PasswordRuleError(str(e)) from None
+
+
 def run(
     bank: str,
     statement_files: str,
@@ -1408,6 +1430,22 @@ def run(
 
             _emit_progress(1, f"{bank}: extracting statement to canonical CSV")
             log_lines.append(f"**Step 1** — {bank}: extracting statement to canonical CSV")
+            _derived = ""
+            if not (pdf_password or "").strip() and entity_profile is not None:
+                # BNK-05: empty box + a bank that declares a rule -> derive.
+                # A typed password never reaches here, so it always wins.
+                try:
+                    _pw, _derived = _derive_bank_password(bank_info, entity_profile)
+                except _PasswordRuleError as e:
+                    return f"## {bank} → password error\n\n❌ {e}"
+                if _pw:
+                    pdf_password = _pw
+                    del _pw
+                if _derived:
+                    # The rule is named, the password never is.
+                    log_lines.append(
+                        f"Statement password derived from the Entities record "
+                        f"({_derived}).")
             try:
                 skill = load_bank_skill(bank_info)
                 bank_result = skill.parse(bank_input, password=pdf_password)
@@ -1435,9 +1473,14 @@ def run(
                         log_lines.append(f"⚠ {w}")
             except Exception as e:
                 log.error("%s extraction failed: %s", bank, e, exc_info=True)
+                _hint = (
+                    "\n\nThe password was derived from the Entities record "
+                    f"({_derived}) and did not open the file -- type the "
+                    "statement password in the password box instead."
+                ) if _derived else ""
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```"
+                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```{_hint}"
                 )
 
         elif bank == "Other Bank (CSV)":
