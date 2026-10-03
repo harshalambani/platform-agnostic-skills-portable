@@ -715,6 +715,7 @@ HISTORY_GENERIC_TOKENS = frozenset({
     # very common Indian first names
     'amit', 'rahul', 'rajesh', 'suresh', 'ramesh', 'sanjay', 'anil', 'vijay',
     'priya', 'pooja', 'neha', 'sunita', 'kumar', 'singh', 'sharma', 'mohan',
+    'sons',
 })
 
 
@@ -815,13 +816,7 @@ def _history_bayes_raw(
     log_np: Dict[str, float] = {}
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
-    # MAP-33: a match whose every shared token is generic is no match. One real
-    # shared token is enough, and then the score is exactly what it always was
-    # (generic tokens still contribute to it).
-    shared = {t for t in tokens if model.get(t)}
-    if shared and all(t in HISTORY_GENERIC_TOKENS for t in shared):
-        return None
-
+    contributing: Dict[str, set] = {}
     n_accounts = _model_account_count(model)
     raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
     for tok in tokens:
@@ -837,6 +832,7 @@ def _history_bayes_raw(
             p = min(max(cnt / total, 1e-6), 1 - 1e-6)
             log_p[acct] = log_p.get(acct, 0.0) + math.log(p)
             log_np[acct] = log_np.get(acct, 0.0) + math.log(1 - p)
+            contributing.setdefault(acct, set()).add(tok)
             # MAX, not sum: a single historical transaction contributes the
             # same frequency to every one of its own tokens, so summing
             # across tokens would double- (or triple-, ...) count the same
@@ -851,8 +847,21 @@ def _history_bayes_raw(
     if not log_p:
         return None
 
+    # MAP-33: the gate is PER ACCOUNT. An account whose supporting tokens are all
+    # generic (the tokens MatchReason would print, `discriminating`, or every
+    # token that contributed to it) is not a candidate at all -- dropped, not
+    # zeroed. An account with one real supporting token keeps main's exact score.
+    def _generic_only(acct):
+        contrib = contributing.get(acct, set())
+        disc = discriminating.get(acct, set())
+        return (contrib and contrib <= HISTORY_GENERIC_TOKENS) or                (disc and disc <= HISTORY_GENERIC_TOKENS)
+
+    candidates = [a for a in log_p if not _generic_only(a)]
+    if not candidates:
+        return None
+
     scored = []
-    for acct in log_p:
+    for acct in candidates:
         score = 1.0 / (1.0 + math.exp(log_np[acct] - log_p[acct]))
         scored.append((score, acct))
     scored.sort(key=lambda t: (-t[0], t[1]))

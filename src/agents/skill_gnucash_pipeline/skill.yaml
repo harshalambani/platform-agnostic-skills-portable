@@ -48,7 +48,7 @@ inputs:
 
   - name: "pdf_password"
     type: "password"
-    label: "PDF password (HDFC only — if the statement PDF is password-protected, for HDFC often the Cust ID)"
+    label: "Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)"
     required: false
 
   # IMP-08: only needed when several of YOUR accounts match the bank name and
@@ -115,9 +115,9 @@ help:
       accepts: "One of the postable accounts at the chosen bank, listed from your book."
       gotchas: "Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing."
     - name: "pdf_password"
-      tooltip: "Only used for HDFC when the statement PDF itself is password-protected."
-      accepts: "The statement's open password — for HDFC this is often the Cust ID."
-      gotchas: "Ignored for all other banks and for non-PDF HDFC inputs. Never logged or included in output."
+      tooltip: "Used for an HDFC PDF or an SBM xlsx that is itself password-protected."
+      accepts: "The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password."
+      gotchas: "Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output."
   steps:
     - "Pick the entity (optional) — this fills in the GnuCash book for you."
     - "Choose the bank."

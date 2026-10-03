@@ -131,3 +131,88 @@ def test_all_generic_shared_tokens_are_no_match_even_with_unknown_extras():
 def test_first_name_only_is_still_no_match():
     assert m._history_bayes_score({"rahul"}, _model()) is None
     assert m._history_bayes_score({"rahul", "amit"}, _model()) is None
+
+
+# ---- MAP-33 (per-account gate): an account supported only by generic tokens
+# ---- is not a candidate, however many OTHER real tokens the narration has ----
+
+def _acct_model():
+    return m._build_history_token_model([
+        {"description": "PVT LTD HOLDINGS", "account": "Equity:Drawings", "frequency": 5},
+        {"description": "INDIA POST FEE", "account": "Expenses:Charges", "frequency": 5},
+        {"description": "OMEGA FOODS PRIVATE", "account": "Expenses:Meals", "frequency": 5},
+        {"description": "SMITH AND SONS", "account": "Expenses:Repairs", "frequency": 5},
+        {"description": "ASHA KUMAR", "account": "Expenses:Gifts", "frequency": 5},
+        {"description": "INTEREST PAID TILL MAR", "account": "Income:Interest", "frequency": 5},
+        {"description": "ZED STORES LIMITED", "account": "Expenses:Shopping", "frequency": 5},
+    ])
+
+
+def _accounts_in(toks, model):
+    raw = m._history_bayes_raw(toks, model)
+    return None if raw is None else {a for _s, a in raw[0]}
+
+
+def test_mixed_narration_generic_only_account_is_not_a_candidate():
+    """Real token 'india' is known for Charges; Drawings is linked ONLY by
+    pvt/ltd. Drawings must not be a candidate (and must not win)."""
+    model = _acct_model()
+    toks = {"india", "pvt", "ltd"}
+    got = _accounts_in(toks, model)
+    assert got is not None and "Equity:Drawings" not in got
+    r = m._history_bayes_score(toks, model)
+    assert r is None or r["account"] != "Equity:Drawings"
+
+
+def test_travel_co_pvt_only_links_to_winning_account_is_no_match():
+    model = _acct_model()
+    toks = {"travco", "india", "pvt", "l"}
+    r = m._history_bayes_score({"travco", "pvt", "ltd"}, model)
+    assert r is None
+    assert _accounts_in({"travco", "pvt", "ltd"}, model) is None
+    assert "Equity:Drawings" not in (_accounts_in(toks, model) or set())
+
+
+def test_surname_and_sons_is_no_match():
+    assert m._history_bayes_score({"jones", "and", "sons"}, _acct_model()) is None
+    assert _accounts_in({"jones", "and", "sons"}, _acct_model()) is None
+
+
+def test_name_kumar_is_no_match():
+    assert m._history_bayes_score({"ravi", "kumar"}, _acct_model()) is None
+
+
+def test_interest_paid_till_mar_is_not_a_history_match():
+    model = _acct_model()
+    assert "Income:Interest" not in (_accounts_in({"till", "mar", "unseenword"}, model) or set())
+    assert m._history_bayes_score({"till", "mar"}, model) is None
+
+
+def test_brand_online_limited_still_matches_on_brand():
+    model = m._build_history_token_model([
+        {"description": "ZED STORES LIMITED", "account": "Expenses:Shopping", "frequency": 5},
+        {"description": "OTHER THING", "account": "Expenses:Misc", "frequency": 5},
+    ])
+    r = m._history_bayes_score({"zed", "stores", "online", "limited"}, model)
+    assert r is not None and r["account"] == "Expenses:Shopping"
+
+
+def test_reverse_real_token_account_keeps_mains_exact_score():
+    """An account with a real supporting token is scored exactly as main:
+    prod(p)/(prod(p)+prod(1-p)) over EVERY contributing token, generic included."""
+    import math
+    model = m._build_history_token_model([
+        {"description": "ZETA TOURS LIMITED", "account": "Expenses:Travel Fares", "frequency": 4},
+        {"description": "OTHER SHOP LIMITED", "account": "Expenses:Misc", "frequency": 1},
+    ])
+    toks = {"zeta", "tours", "limited"}
+    scored = m._history_bayes_raw(toks, model)[0]
+    top = dict((a, s) for s, a in scored)["Expenses:Travel Fares"]
+    lp = ln = 0.0
+    for t in toks:
+        b = model[t]
+        p = b["Expenses:Travel Fares"] / sum(b.values())
+        p = min(max(p, 1e-6), 1 - 1e-6)
+        lp += math.log(p)
+        ln += math.log(1 - p)
+    assert abs(top - 1.0 / (1.0 + math.exp(ln - lp))) < 1e-12
