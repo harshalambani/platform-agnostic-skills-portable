@@ -17,21 +17,21 @@ mode: "agent"
 entry_point: "agent:run"
 
 inputs:
-  # Entity leads the form: picking someone here fills in the GnuCash book
-  # below, so it belongs before the field it answers for. Safe to declare
-  # first because it is UI-only (absent from run_args) and ui/tabs/_generic.py
-  # only lets inputs the skill actually consumes name the output file.
-  - name: "entity"
-    type: "select"
-    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
-    options_from: "itr_entities"
-    required: false
-
   - name: "bank"
     type: "select"
     label: "Bank"
     required: true
     options_from: "banks"
+
+  # The entity sits right after `bank` and before the book it fills in. It is
+  # consumed (MAP-34/35 and BNK-05 read its profile), so it must NOT be the
+  # first consumed input -- `bank` leads, and names the output file (pinned by
+  # tests/test_entity_book_wiring.py).
+  - name: "entity"
+    type: "select"
+    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: false
 
   - name: "statement_files"
     type: "files"
@@ -70,6 +70,8 @@ run_args:
   model_override: "{model_override}"
   pdf_password: "{inputs.pdf_password}"
   bank_account: "{inputs.bank_account}"
+  entity: "{inputs.entity}"
+  entities_path: "{data_root}/itr/entities.yaml"
 
 output:
   extension: ".csv"

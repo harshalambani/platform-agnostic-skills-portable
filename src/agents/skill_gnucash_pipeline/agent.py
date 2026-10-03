@@ -1270,6 +1270,52 @@ def _normalise_to_canonical(
             writer.writerow(out_row)
 
 
+_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
+
+
+def _load_entity_profile(entity, entities_path):
+    """(profile, error). No entity picked -> (None, None): the entity is
+    optional and nothing entity-driven applies. An entity picked but not
+    resolvable is an error, never a silent fallback to 'no config'."""
+    entity = (entity or "").strip()
+    if not entity:
+        return None, None
+    if str(_ITR_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(_ITR_SCRIPTS))
+    try:
+        import configs  # noqa: PLC0415
+        entities = configs.load_entities(entities_path)
+    except Exception as e:  # noqa: BLE001
+        return None, (f"entities.yaml could not be read ({type(e).__name__}) -- "
+                      f"fix it or clear the Entity field. Nothing was run.")
+    profile = entities.get(entity)
+    if profile is None:
+        return None, f"Entity '{entity}' is not in entities.yaml -- pick another or clear the field."
+    return profile, None
+
+
+class _PasswordRuleError(ValueError):
+    pass
+
+
+def _derive_bank_password(bank_info, profile):
+    """BNK-05: (password, rule_summary) for a bank that declares a
+    `password_rule` module next to its skill, else ("", ""). Raises
+    _PasswordRuleError when the rule applies but the record lacks a field."""
+    import importlib  # noqa: PLC0415
+    modname = f"{bank_info.package}.password_rule"
+    try:
+        rule = importlib.import_module(modname)
+    except ModuleNotFoundError as e:
+        if e.name == modname:
+            return "", ""          # this bank declares no rule
+        raise
+    try:
+        return rule.derive_password(profile), rule.RULE_SUMMARY
+    except ValueError as e:
+        raise _PasswordRuleError(str(e)) from None
+
+
 def run(
     bank: str,
     statement_files: str,
@@ -1279,6 +1325,8 @@ def run(
     model_override: str = None,
     pdf_password: str = None,
     bank_account: str = None,
+    entity: str = None,
+    entities_path: str = None,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -1300,6 +1348,13 @@ def run(
                          does not say which (IMP-08). Refused when hidden,
                          placeholder, not at this bank, or not in the book.
 
+        entity:          Optional entities.yaml key. Supplies the entity's configured
+                         Drawings accounts and card-spend default (MAP-34/35) and,
+                         for a bank that declares a password rule, the statement
+                         password when the box is empty (BNK-05).
+        entities_path:   Path to entities.yaml (the `{data_root}/itr/entities.yaml`
+                         token).
+
     Returns:
         Human-readable summary string for the UI.
     """
@@ -1318,6 +1373,10 @@ def run(
         )
 
     log_lines = []
+
+    entity_profile, entity_err = _load_entity_profile(entity, entities_path)
+    if entity_err:
+        return f"## {bank} → entity error\n\n❌ {entity_err}"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -1371,6 +1430,22 @@ def run(
 
             _emit_progress(1, f"{bank}: extracting statement to canonical CSV")
             log_lines.append(f"**Step 1** — {bank}: extracting statement to canonical CSV")
+            _derived = ""
+            if not (pdf_password or "").strip() and entity_profile is not None:
+                # BNK-05: empty box + a bank that declares a rule -> derive.
+                # A typed password never reaches here, so it always wins.
+                try:
+                    _pw, _derived = _derive_bank_password(bank_info, entity_profile)
+                except _PasswordRuleError as e:
+                    return f"## {bank} → password error\n\n❌ {e}"
+                if _pw:
+                    pdf_password = _pw
+                    del _pw
+                if _derived:
+                    # The rule is named, the password never is.
+                    log_lines.append(
+                        f"Statement password derived from the Entities record "
+                        f"({_derived}).")
             try:
                 skill = load_bank_skill(bank_info)
                 bank_result = skill.parse(bank_input, password=pdf_password)
@@ -1398,9 +1473,14 @@ def run(
                         log_lines.append(f"⚠ {w}")
             except Exception as e:
                 log.error("%s extraction failed: %s", bank, e, exc_info=True)
+                _hint = (
+                    "\n\nThe password was derived from the Entities record "
+                    f"({_derived}) and did not open the file -- type the "
+                    "statement password in the password box instead."
+                ) if _derived else ""
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```"
+                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```{_hint}"
                 )
 
         elif bank == "Other Bank (CSV)":
@@ -1731,6 +1811,8 @@ def run(
             model_override=model_override,
             bank_name=bank,
             gnucash_bank_account=gnucash_bank_account,
+            drawings_accounts=list(getattr(entity_profile, "drawings_accounts", None) or []),
+            card_default_account=(getattr(entity_profile, "card_spend_default_account", "") or None),
         )
         try:
             log_lines.append(_step3_result_line(output_path))

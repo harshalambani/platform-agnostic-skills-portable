@@ -16,6 +16,8 @@ Covers what test_contra_review.py doesn't:
 """
 from __future__ import annotations
 
+import pytest
+
 import csv
 import json
 import re
@@ -27,6 +29,14 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ui"))
 
 from ui.tabs import gnucash_review as gr_review  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _allow_tmp_as_known_folder(tmp_path, monkeypatch):
+    """SEC-19: these tests keep their files under tmp_path, so make that a
+    known folder (the refusal itself is tested in test_sec19_path_guard.py)."""
+    from ui import _safe_paths
+    monkeypatch.setattr(_safe_paths, "known_folders", lambda: [tmp_path.resolve()])
 
 
 _HEADER = "Date,Description,Account,Deposit,Withdrawal,Balance,Confidence,MatchReason\n"

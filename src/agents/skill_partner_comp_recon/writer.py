@@ -49,6 +49,17 @@ label in this module is routed through `_text()`, which inserts a leading
 space in front of a literal leading "=" so it is stored as ordinary text.
 tests/test_skill_partner_comp_recon.py validates the saved workbook's raw
 XML to guard against a regression of this exact defect.
+
+H35-09 -- inputs plus live formulas. Every figure the engine extracted from a
+source document is written ONCE, with its source, on the two input sheets
+("Inputs - monthly", "Inputs - other") or on Drivers. Every other numeric
+cell on Monthly grid, Payroll stream, One-offs, Cohorts, Capital, Interest on
+capital and CTC check is a live formula off those cells, so editing an input
+recomputes the workbook. The verdict sheets (Reconciliation, Exceptions, Open
+items, Posted check, Bank match) are unchanged: verdicts, the loud block and
+the journals stay in Python. Formulas are written through the `_F` marker,
+which `_text()` passes through untouched -- before H35-09 `_text()` turned
+every "="-leading string into plain text, so no "formula" was ever live.
 """
 from __future__ import annotations
 
@@ -56,7 +67,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .engine import Report
+from .engine import Report, fy_end_date
 from .gnucash_tieout import _candidate_label as _format_bank_candidate
 
 FONT_NAME = "Arial"
@@ -71,10 +82,18 @@ N = '#,##0;(#,##0);"-"'
 P = '0.0000%'
 
 
+class _F(str):
+    """Marker for a deliberate Excel formula (H35-09). Everything else that
+    starts with "=" is still treated as a label and neutralised."""
+
+
 def _text(value):
     """Route every label/string through here. A literal leading '=' would
     otherwise be stored by openpyxl as a formula (the '=' trap -- see this
-    module's docstring); insert a leading space to keep it plain text."""
+    module's docstring); insert a leading space to keep it plain text.
+    A string wrapped in `_F` is a real formula and passes through."""
+    if isinstance(value, _F):
+        return str(value)
     if isinstance(value, str) and value.startswith("="):
         return " " + value
     return value
@@ -226,20 +245,75 @@ _MONTHLY_LINE_LABELS = [
 ]
 
 
+_INPUTS_MONTHLY = "Inputs - monthly"
+_INPUTS_OTHER = "Inputs - other"
+
+# (attr, label, source) -- the figures extracted per month. Sources are named
+# at document level; the mapper's own precedence rules decide which document
+# wins for a given month.
+_MONTHLY_INPUTS = [
+    ("remuneration", "Remuneration", "Monthly payout advice (L1) / payslip"),
+    ("share_of_profit_gross", "Share of profit (gross)",
+     "Payment schedule (L4), else payout advice"),
+    ("additional_share_of_profit", "Additional share of profit (one-off, net)",
+     "Payment schedule (L4) arrears / payout advice one-off line"),
+    ("firms_tax_sop", "Firm's tax on share of profit", "Payment schedule (L4)"),
+    ("firms_tax_other", "Firm's tax on other (PLMI) drawdown", "Payment schedule (L4)"),
+    ("tds", "TDS", "Monthly payout advice (L1) / payslip"),
+    ("capital_transferred", "Capital transferred",
+     "Payment schedule (L4); sign as parsed (a deduction is negative)"),
+    ("total_paid", "Total paid", "Monthly payout advice (L1) / payslip net"),
+    ("interest_on_capital", "Interest on capital paid",
+     "Payment schedule (L4) / payslip"),
+    ("medical_topup", "Medical top-up", "Payment schedule (L4) / payslip"),
+    ("prior_cohort_drawdown", "Prior-cohort drawdown", "Payment schedule (L4)"),
+]
+_MONTHLY_INPUT_ROW = {attr: r for r, (attr, _l, _s) in enumerate(_MONTHLY_INPUTS, start=2)}
+
+
+def _q(sheet):
+    return "'" + sheet + "'"
+
+
+def _write_inputs_monthly_sheet(wb, report: Report):
+    ws = wb.create_sheet(_INPUTS_MONTHLY)
+    months = [m.month for m in report.monthly]
+    src_col = 2 + len(months)
+    _write_header(ws, 1, ["Line item (input)"] + months + ["Source"])
+    for r, (attr, label, source) in enumerate(_MONTHLY_INPUTS, start=2):
+        _set(ws, r, 1, label, bold=True)
+        for c, m in enumerate(report.monthly, start=2):
+            _set(ws, r, c, getattr(m, attr), fill=TF, number_format=N)
+        _set(ws, r, src_col, source, wrap=True)
+    _autosize(ws, src_col)
+
+
 def _write_monthly_grid_sheet(wb, report: Report):
     ws = wb.create_sheet("Monthly grid")
     months = [m.month for m in report.monthly]
     _write_header(ws, 1, ["Line item"] + months + ["Total"])
+    first_col = get_column_letter(2)
+    last_col = get_column_letter(1 + len(report.monthly))
+    total_col = 2 + len(report.monthly)
+    grid_row = {attr: r for r, (attr, _l) in enumerate(_MONTHLY_LINE_LABELS, start=2)}
     for r, (attr, label) in enumerate(_MONTHLY_LINE_LABELS, start=2):
         _set(ws, r, 1, label, bold=True)
-        for c, m in enumerate(report.monthly, start=2):
-            _set(ws, r, c, getattr(m, attr), number_format=N)
-        first_col = get_column_letter(2)
-        last_col = get_column_letter(1 + len(report.monthly))
-        total_col = 2 + len(report.monthly)
-        _set(ws, r, total_col, f"=SUM({first_col}{r}:{last_col}{r})",
+        for c in range(2, 2 + len(report.monthly)):
+            col = get_column_letter(c)
+            if attr == "misc":
+                # the governing identity, live: never read off the advice
+                f = (f"={col}{grid_row['total_paid']}-{col}{grid_row['remuneration']}"
+                     f"-{col}{grid_row['share_of_profit_gross']}"
+                     f"-{col}{grid_row['additional_share_of_profit']}")
+            else:
+                f = f"={_q(_INPUTS_MONTHLY)}!{col}{_MONTHLY_INPUT_ROW[attr]}"
+            _set(ws, r, c, _F(f), number_format=N)
+        _set(ws, r, total_col, _F(f"=SUM({first_col}{r}:{last_col}{r})"),
              fill=TF, number_format=N, bold=True)
     _autosize(ws, 2 + len(report.monthly))
+    return {"row": grid_row, "total_col": get_column_letter(total_col),
+            "month_col": {m.month: get_column_letter(c)
+                          for c, m in enumerate(report.monthly, start=2)}}
 
 
 # ---------------------------------------------------------------------------
@@ -263,26 +337,131 @@ def _write_payroll_sheet(wb, report: Report):
     _set(ws, total_row, 1, "Total", bold=True)
     for col in (2, 3, 4):
         letter = get_column_letter(col)
-        _set(ws, total_row, col, f"=SUM({letter}2:{letter}{total_row - 1})",
+        _set(ws, total_row, col, _F(f"=SUM({letter}2:{letter}{total_row - 1})"),
              fill=TF, number_format=N, bold=True)
     _autosize(ws, len(headers))
+
+
+# ---------------------------------------------------------------------------
+# Inputs - other (H35-09): the extracted figures that are not per-month --
+# cohort instalments, the interest basis and the CTC-structuring total.
+# ---------------------------------------------------------------------------
+
+def _write_inputs_other_sheet(wb, report: Report):
+    """Returns the cell refs the computed sheets point at."""
+    ws = wb.create_sheet(_INPUTS_OTHER)
+    refs = {"cohort_rows": [], "interest_from": [], "rate": None, "fy_end": None,
+            "ctc_structuring": None}
+    row = 1
+    _set(ws, row, 1, "Incentive cohort instalments (as extracted)", fill=SF, bold=True)
+    row += 1
+    _write_header(ws, row, ["Award FY", "Payment date", "Gross", "Firm's tax",
+                            "Capital deducted", "Net", "Source"])
+    row += 1
+    for inst in report.cohort_instalments:
+        _set(ws, row, 1, inst.award_fy)
+        _set(ws, row, 2, inst.payment_date, number_format="yyyy-mm-dd")
+        for col, val in ((3, inst.gross), (4, inst.firms_tax), (5, inst.capital), (6, inst.net)):
+            _set(ws, row, col, val, fill=TF, number_format=N)
+        _set(ws, row, 7, "Payment schedule (L4) incentive cohort ledger")
+        refs["cohort_rows"].append(row)
+        row += 1
+    if not report.cohort_instalments:
+        _set(ws, row, 1, "No incentive cohorts in this run's input.")
+        row += 1
+    row += 1
+
+    sched = report.capital_interest_schedule
+    _set(ws, row, 1, "Interest on capital basis", fill=SF, bold=True)
+    row += 1
+    if sched is not None:
+        _set(ws, row, 1, "Rate applied (p.a.)", bold=True)
+        if sched.rate is not None:
+            _set(ws, row, 2, sched.rate, fill=TF, number_format=P)
+            refs["rate"] = f"B{row}"
+        else:
+            _set(ws, row, 2, "-- not supplied --", fill=TF)
+        _set(ws, row, 3, "Run input / skill default (drivers.capital_interest_rate)")
+        row += 1
+        try:
+            fy_end = fy_end_date(report.financial_year)
+        except (ValueError, IndexError):
+            fy_end = None
+        _set(ws, row, 1, "Financial year close", bold=True)
+        if fy_end is not None:
+            _set(ws, row, 2, fy_end, fill=TF, number_format="yyyy-mm-dd")
+            refs["fy_end"] = f"B{row}"
+        else:
+            _set(ws, row, 2, "-- not computed --", fill=TF)
+        _set(ws, row, 3, "Derived from the financial year label")
+        row += 1
+        _write_header(ws, row, ["Tranche month", "Interest-from date", "Override?", "Source"])
+        row += 1
+        for r in sched.rows:
+            _set(ws, row, 1, r.month)
+            _set(ws, row, 2, r.interest_from_date, fill=TF, number_format="yyyy-mm-dd")
+            _set(ws, row, 3, "Override" if r.interest_from_date_is_override else "Default")
+            _set(ws, row, 4, "Run override" if r.interest_from_date_is_override
+                 else "First day of the tranche's payslip month")
+            refs["interest_from"].append(row)
+            row += 1
+        if not sched.rows:
+            _set(ws, row, 1, "No capital tranches (capital_transferred) this FY.")
+            row += 1
+        row += 1
+    else:
+        _set(ws, row, 1, "Not computed for this run.")
+        row += 2
+
+    ctc = report.ctc_check
+    _set(ws, row, 1, "CTC structuring", fill=SF, bold=True)
+    row += 1
+    _set(ws, row, 1, "CTC structuring (total)", bold=True)
+    if ctc is not None and ctc.ctc_structuring_total is not None:
+        _set(ws, row, 2, ctc.ctc_structuring_total, fill=TF, number_format=N)
+        refs["ctc_structuring"] = f"B{row}"
+    else:
+        _set(ws, row, 2, "-- not supplied --", fill=TF)
+    _set(ws, row, 3, "Payment schedule (L4) CTC-structuring block")
+    _autosize(ws, 7)
+    return refs
 
 
 # ---------------------------------------------------------------------------
 # 5. One-offs
 # ---------------------------------------------------------------------------
 
-def _write_one_offs_sheet(wb, report: Report):
+def _write_one_offs_sheet(wb, report: Report, driver_refs: dict, grid: dict):
     ws = wb.create_sheet("One-offs")
     headers = ["Net (as shown on advice)", "Firm's tax rate used", "Gross (derived)",
                "Roundness (distance to nearest Rs 1,00,000)", "Status"]
     _write_header(ws, 1, headers)
     row = 2
-    for o in report.one_offs:
-        _set(ws, row, 1, o.net, number_format=N)
-        _set(ws, row, 2, o.firms_tax_rate, number_format=P)
-        _set(ws, row, 3, o.gross, number_format=N)
-        _set(ws, row, 4, o.roundness, number_format=N)
+    # One OneOffResult is built per month whose additional share of profit is
+    # non-zero, in month order -- pair them back so the net is a live link to
+    # that month's input. If the pairing cannot be proven the net stays a
+    # leaf value (never a wrong link).
+    addl_months = [m for m in report.monthly if m.additional_share_of_profit]
+    paired = (len(addl_months) == len(report.one_offs)
+              and all(abs(m.additional_share_of_profit - o.net) < 0.005
+                      for m, o in zip(addl_months, report.one_offs)))
+    rate_ref = driver_refs.get("Firm's tax rate")
+    for idx, o in enumerate(report.one_offs):
+        if paired:
+            col = grid["month_col"][addl_months[idx].month]
+            net_cell = _F(f"='Monthly grid'!{col}{grid['row']['additional_share_of_profit']}")
+        else:
+            net_cell = o.net
+        _set(ws, row, 1, net_cell, number_format=N)
+        if o.firms_tax_rate is not None and rate_ref:
+            _set(ws, row, 2, _F(f"=Drivers!{rate_ref}"), number_format=P)
+            _set(ws, row, 3, _F(f"=A{row}/(1-B{row})"), number_format=N)
+            _set(ws, row, 4, _F(f"=ABS(C{row}-ROUND(C{row}/100000,0)*100000)"),
+                 number_format=N)
+        else:
+            _set(ws, row, 2, o.firms_tax_rate, number_format=P)
+            _set(ws, row, 3, o.gross, number_format=N)
+            _set(ws, row, 4, o.roundness, number_format=N)
         fill = OK if o.status == "CONFIRMED" else (TF if o.status == CANNOT_RECONCILE_LABEL else BAD)
         _set(ws, row, 5, o.status, fill=fill, bold=True)
         row += 1
@@ -298,22 +477,23 @@ CANNOT_RECONCILE_LABEL = "CANNOT RECONCILE"
 # 6. Cohorts
 # ---------------------------------------------------------------------------
 
-def _write_cohorts_sheet(wb, report: Report):
+def _write_cohorts_sheet(wb, report: Report, other: dict):
     ws = wb.create_sheet("Cohorts")
     headers = ["Award FY", "Payment date", "Instalment FY", "Membership (this reporting FY)",
                "Gross", "Firm's tax", "Capital deducted", "Net"]
     _write_header(ws, 1, headers)
     row = 2
-    for inst in report.cohort_instalments:
+    for inst, src_row in zip(report.cohort_instalments, other["cohort_rows"]):
         _set(ws, row, 1, inst.award_fy)
         _set(ws, row, 2, inst.payment_date.isoformat())
         _set(ws, row, 3, inst.instalment_fy)
         fill = SF if inst.membership == "reporting" else TF
         _set(ws, row, 4, inst.label, fill=fill)
-        _set(ws, row, 5, inst.gross, number_format=N)
-        _set(ws, row, 6, inst.firms_tax, number_format=N)
-        _set(ws, row, 7, inst.capital, number_format=N)
-        _set(ws, row, 8, inst.net, number_format=N)
+        for col, val, src_col in ((5, inst.gross, "C"), (6, inst.firms_tax, "D"),
+                                  (7, inst.capital, "E"), (8, inst.net, "F")):
+            # a figure the source did not carry stays blank, never a linked 0
+            cell = None if val is None else _F(f"={_q(_INPUTS_OTHER)}!{src_col}{src_row}")
+            _set(ws, row, col, cell, number_format=N)
         row += 1
     if row == 2:
         _set(ws, row, 1, "No incentive cohorts in this run's input.")
@@ -336,7 +516,7 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
     if report.capital_rule.status == "OK" and all((tc_ref, ma_ref, mt_ref, rate_ref)):
         formula = f"=Drivers!{tc_ref}*(Drivers!{ma_ref}/Drivers!{mt_ref})*Drivers!{rate_ref}"
         _set(ws, row, 1, "Required cumulative capital")
-        _set(ws, row, 2, formula, fill=TF, number_format=N, bold=True)
+        _set(ws, row, 2, _F(formula), fill=TF, number_format=N, bold=True)
     else:
         _set(ws, row, 1, "Required cumulative capital")
         _set(ws, row, 2, report.capital_rule.reason or CANNOT_RECONCILE_LABEL, fill=TF)
@@ -400,7 +580,7 @@ def _write_capital_sheet(wb, report: Report, driver_refs: dict):
 # engine.compute_capital_interest_schedule()).
 # ---------------------------------------------------------------------------
 
-def _write_interest_on_capital_sheet(wb, report: Report):
+def _write_interest_on_capital_sheet(wb, report: Report, grid: dict, other: dict):
     ws = wb.create_sheet("Interest on capital")
     schedule = report.capital_interest_schedule
     row = 1
@@ -426,7 +606,8 @@ def _write_interest_on_capital_sheet(wb, report: Report):
         row += 2
     else:
         _set(ws, row, 1, "Rate applied (p.a.)", bold=True)
-        _set(ws, row, 2, schedule.rate, fill=TF, number_format=P)
+        _set(ws, row, 2, _F(f"={_q(_INPUTS_OTHER)}!{other['rate']}"), fill=TF, number_format=P)
+        rate_cell = f"$B${row}"
         row += 2
 
     headers = ["Month", "Principal (added to capital)", "Interest-from date",
@@ -436,20 +617,43 @@ def _write_interest_on_capital_sheet(wb, report: Report):
     if not schedule.rows:
         _set(ws, row, 1, "No capital tranches (capital_transferred) this FY.")
         row += 1
-    for r in schedule.rows:
+    first_row = row
+    live = schedule.rate is not None and other["fy_end"] is not None
+    for r, src_row in zip(schedule.rows, other["interest_from"]):
         _set(ws, row, 1, r.month)
-        _set(ws, row, 2, r.principal, number_format=N)
-        _set(ws, row, 3, r.interest_from_date.isoformat())
+        gcol = grid["month_col"].get(r.month)
+        if gcol:
+            _set(ws, row, 2, _F(f"=-'Monthly grid'!{gcol}{grid['row']['capital_transferred']}"),
+                 number_format=N)
+        else:
+            _set(ws, row, 2, r.principal, number_format=N)
+        _set(ws, row, 3, _F(f"={_q(_INPUTS_OTHER)}!B{src_row}"), number_format="yyyy-mm-dd")
         _set(ws, row, 4, "Override" if r.interest_from_date_is_override else "Default")
-        _set(ws, row, 5, r.days if r.days is not None else "-- not computed --")
-        _set(ws, row, 6, r.interest if r.interest is not None else "-- not supplied (rate) --",
-             number_format=N)
+        if other["fy_end"] is not None:
+            _set(ws, row, 5, _F(f"=MAX(0,{_q(_INPUTS_OTHER)}!${other['fy_end'][0]}"
+                                f"${other['fy_end'][1:]}-C{row})"))
+        else:
+            _set(ws, row, 5, "-- not computed --")
+        if live:
+            _set(ws, row, 6, _F(f"=ROUND(B{row}*{rate_cell}*E{row}/365,2)"), number_format=N)
+        else:
+            _set(ws, row, 6, "-- not supplied (rate) --", number_format=N)
         row += 1
+    last_row = row - 1
     row += 1
     _set(ws, row, 1, "Total computed interest", bold=True)
-    _set(ws, row, 2,
-         "-- not supplied --" if schedule.total_interest is None else schedule.total_interest,
-         fill=TF, number_format=N, bold=True)
+    if live and schedule.rows:
+        _set(ws, row, 2, _F(f"=ROUND(SUM(F{first_row}:F{last_row}),2)"),
+             fill=TF, number_format=N, bold=True)
+    elif live:
+        # no tranches: the total is the sum of nothing, over the blank cell
+        # beside the "No capital tranches" note
+        _set(ws, row, 2, _F(f"=ROUND(SUM(F{first_row - 1}:F{first_row - 1}),2)"),
+             fill=TF, number_format=N, bold=True)
+    else:
+        _set(ws, row, 2,
+             "-- not supplied --" if schedule.total_interest is None else schedule.total_interest,
+             fill=TF, number_format=N, bold=True)
     _autosize(ws, len(headers))
 
 
@@ -458,7 +662,7 @@ def _write_interest_on_capital_sheet(wb, report: Report):
 # Purely informational: no journal/posted-check impact.
 # ---------------------------------------------------------------------------
 
-def _write_ctc_check_sheet(wb, report: Report):
+def _write_ctc_check_sheet(wb, report: Report, driver_refs: dict, grid: dict, other: dict):
     ws = wb.create_sheet("CTC check")
     ctc = report.ctc_check
     row = 1
@@ -480,17 +684,24 @@ def _write_ctc_check_sheet(wb, report: Report):
         _autosize(ws, 2)
         return
 
-    rows = [
-        ("Target Compensation", ctc.target_compensation),
-        ("Remuneration (total)", ctc.remuneration_total),
-        ("Gross share of profit (total)", ctc.gross_sop_total),
-        ("CTC structuring (total)", ctc.ctc_structuring_total),
-        ("Arrears (additional share of profit, total)", ctc.arrears_total),
-        ("Cash pool actually paid", ctc.cash_pool),
-        ("Gap (Target Compensation - cash pool)", ctc.gap),
-        ("Firm's tax on pool (with arrears in scope)", ctc.firms_tax_on_pool),
+    gr, tc = grid["row"], grid["total_col"]
+    tc_ref = driver_refs.get("Target compensation")
+    first = row
+    spec = [
+        ("Target Compensation", _F(f"=Drivers!{tc_ref}") if tc_ref else ctc.target_compensation),
+        ("Remuneration (total)", _F(f"='Monthly grid'!{tc}{gr['remuneration']}")),
+        ("Gross share of profit (total)", _F(f"='Monthly grid'!{tc}{gr['share_of_profit_gross']}")),
+        ("CTC structuring (total)",
+         _F(f"={_q(_INPUTS_OTHER)}!{other['ctc_structuring']}") if other["ctc_structuring"]
+         else ctc.ctc_structuring_total),
+        ("Arrears (additional share of profit, total)",
+         _F(f"='Monthly grid'!{tc}{gr['additional_share_of_profit']}")),
+        ("Cash pool actually paid", _F(f"=ROUND(B{first + 1}+B{first + 2}+B{first + 3}+B{first + 4},2)")),
+        ("Gap (Target Compensation - cash pool)", _F(f"=ROUND(B{first}-B{first + 5},2)")),
+        ("Firm's tax on pool (with arrears in scope)",
+         _F(f"='Monthly grid'!{tc}{gr['firms_tax_sop']}+'Monthly grid'!{tc}{gr['firms_tax_other']}")),
     ]
-    for label, value in rows:
+    for label, value in spec:
         _set(ws, row, 1, label)
         _set(ws, row, 2, "-- not supplied --" if value is None else value, number_format=N)
         row += 1
@@ -705,13 +916,15 @@ def write_report_workbook(report: Report, out_path: str, posted_check=None, bank
     wb.remove(wb.active)
     _write_logic_sheet(wb, report)
     driver_refs = _write_drivers_sheet(wb, report)
-    _write_monthly_grid_sheet(wb, report)
+    _write_inputs_monthly_sheet(wb, report)
+    other = _write_inputs_other_sheet(wb, report)
+    grid = _write_monthly_grid_sheet(wb, report)
     _write_payroll_sheet(wb, report)
-    _write_one_offs_sheet(wb, report)
-    _write_cohorts_sheet(wb, report)
+    _write_one_offs_sheet(wb, report, driver_refs, grid)
+    _write_cohorts_sheet(wb, report, other)
     _write_capital_sheet(wb, report, driver_refs)
-    _write_interest_on_capital_sheet(wb, report)
-    _write_ctc_check_sheet(wb, report)
+    _write_interest_on_capital_sheet(wb, report, grid, other)
+    _write_ctc_check_sheet(wb, report, driver_refs, grid, other)
     _write_reconciliation_sheet(wb, report)
     _write_exceptions_sheet(wb, report)
     _write_open_items_sheet(wb, report)
