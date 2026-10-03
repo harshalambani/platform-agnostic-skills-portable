@@ -467,6 +467,13 @@ def _is_bank_account(acc: Dict) -> bool:
     return 'cash and bank' in (acc.get('path') or '').lower()
 
 
+# PIPE-09: narration wording that says "this is my own transfer" -- only used
+# to break ties between rows competing for one counterpart transaction.
+_OWN_TRANSFER_NARRATION_RE = re.compile(
+    r'\b(?:xfer|transfer|trf|trfr)\s+to\s+self\b|\bself\s+(?:xfer|transfer|trf)\b'
+    r'|\bown\s+account\b|\bIFT\b', re.IGNORECASE)
+
+
 def detect_contra_entries(
     csv_rows: List[Dict],
     gnucash_data: Dict,
@@ -544,75 +551,68 @@ def detect_contra_entries(
             amt = round(txn['amount'], 2)
             gc_by_date_amt[(txn['date'], amt)].append(txn)
 
-    contras = []
-
+    # PIPE-09: ONE-TO-ONE. A counterpart transaction is claimed by at most one
+    # statement row. Gather every (row, counterpart) candidate inside the date
+    # tolerance, rank them, and assign greedily: a reference match first (the
+    # strongest evidence), then the SAME date, then the nearest date, then
+    # narration evidence of an own-account transfer, then statement line order.
+    # A row that loses its counterpart is simply not flagged against it.
+    pairs = []
     for idx, row in enumerate(csv_rows):
         deposit = float(row.get('Deposit', 0) or 0)
         withdrawal = float(row.get('Withdrawal', 0) or 0)
         csv_amount = deposit - withdrawal  # +ve = deposit, -ve = withdrawal
         if csv_amount == 0:
             continue
-
-        # We're looking for the OPPOSITE sign in another account
-        # CSV deposit (+10000) → look for GnuCash withdrawal (-10000) in other bank
-        contra_amount = round(-csv_amount, 2)
+        contra_amount = round(-csv_amount, 2)   # opposite sign in the other bank
         csv_date = _parse_date(row.get('Date', ''))
         if not csv_date:
             continue
-
-        csv_refs = _extract_transfer_refs(row.get('Description', ''))
-
-        best_match = None
-        best_confidence = None
-
-        # Search within date tolerance
+        desc = row.get('Description', '') or ''
+        csv_refs = _extract_transfer_refs(desc)
+        own_ev = 0 if _OWN_TRANSFER_NARRATION_RE.search(desc) else 1
         for day_offset in range(0, date_tolerance + 1):
             for delta in ([timedelta(days=0)] if day_offset == 0
                           else [timedelta(days=day_offset), timedelta(days=-day_offset)]):
                 check_date = (csv_date + delta).strftime('%Y-%m-%d')
-                key = (check_date, contra_amount)
-                candidates = gc_by_date_amt.get(key, [])
+                for ci, cand in enumerate(gc_by_date_amt.get((check_date, contra_amount), [])):
+                    high = bool(csv_refs and (csv_refs & _extract_transfer_refs(
+                        cand.get('description', ''))))
+                    pairs.append(((0 if high else 1, day_offset, own_ev, idx,
+                                   check_date, ci), idx, cand, high, csv_amount))
 
-                for cand in candidates:
-                    # Check if ref numbers match (high confidence)
-                    if csv_refs:
-                        cand_refs = _extract_transfer_refs(
-                            cand.get('description', '')
-                        )
-                        if csv_refs & cand_refs:
-                            best_match = cand
-                            best_confidence = "high"
-                            break
+    pairs.sort(key=lambda t: t[0])
+    claimed_rows: set = set()
+    claimed_txns: set = set()
+    found = {}
+    for _key, idx, cand, high, csv_amount in pairs:
+        if idx in claimed_rows or id(cand) in claimed_txns:
+            continue
+        claimed_rows.add(idx)
+        claimed_txns.add(id(cand))
+        found[idx] = (cand, "high" if high else "medium", csv_amount)
 
-                    # Amount + date match (medium confidence)
-                    if best_match is None:
-                        best_match = cand
-                        best_confidence = "medium"
-
-                if best_confidence == "high":
-                    break
-            if best_confidence == "high":
-                break
-
-        if best_match:
-            direction = "from" if csv_amount > 0 else "to"
-            # high (reference/cheque match) => confirmed, safe to auto-book as a
-            # bank-to-bank transfer. medium (amount+date only) => possible, a
-            # hint the user reviews; it never overrides the mapper's account.
-            status = "confirmed" if best_confidence == "high" else "possible"
-            verb = "Transfer" if status == "confirmed" else "Possible transfer"
-            contras.append({
-                "row_idx": idx,
-                "contra_account": best_match['account'],
-                "contra_amount": best_match['amount'],
-                "contra_date": best_match['date'],
-                "confidence": best_confidence,
-                "status": status,
-                "reason": (
-                    f"{verb} {direction} {best_match['account'].split(':')[-1]} "
-                    f"({best_match['date']}, ₹{abs(best_match['amount']):,.2f})"
-                ),
-            })
+    contras = []
+    for idx in sorted(found):
+        best_match, best_confidence, csv_amount = found[idx]
+        direction = "from" if csv_amount > 0 else "to"
+        # high (reference/cheque match) => confirmed, safe to auto-book as a
+        # bank-to-bank transfer. medium (amount+date only) => possible, a
+        # hint the user reviews; it never overrides the mapper's account.
+        status = "confirmed" if best_confidence == "high" else "possible"
+        verb = "Transfer" if status == "confirmed" else "Possible transfer"
+        contras.append({
+            "row_idx": idx,
+            "contra_account": best_match['account'],
+            "contra_amount": best_match['amount'],
+            "contra_date": best_match['date'],
+            "confidence": best_confidence,
+            "status": status,
+            "reason": (
+                f"{verb} {direction} {best_match['account'].split(':')[-1]} "
+                f"({best_match['date']}, ₹{abs(best_match['amount']):,.2f})"
+            ),
+        })
 
     return contras
 

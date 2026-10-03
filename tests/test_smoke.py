@@ -107,6 +107,7 @@ def test_registry_discovers_all_skills():
     assert "ITR Workbook" in names
     # 5th bank onboarding (P4)
     assert "Kotak" in names
+    assert "SBM" in names
     # v3.x dev-time skill: scaffolds new skill packages (exposed as a
     # top-level tab, category "dev")
     assert "Skill Scaffold" in names
@@ -122,7 +123,7 @@ def test_registry_discovers_all_skills():
     # against Advisory, bank, 26AS and the return (structured YAML/JSON
     # input this build; PDF parsers under parsers/ are Stage 2 placeholders)
     assert "partner_comp_recon" in names
-    assert len(skills) == 26
+    assert len(skills) == 27
 
 
 def test_registry_get_by_name():

@@ -68,9 +68,9 @@ def test_supported_banks_is_dedicated_plus_csv():
     assert SUPPORTED_BANKS == DEDICATED_BANKS + CSV_BANKS
 
 
-def test_all_five_discovered_banks_pass_the_guard():
+def test_all_six_discovered_banks_pass_the_guard():
     discovered_names = [b.display_name for b in banks.discover()]
-    assert len(discovered_names) == 5
+    assert len(discovered_names) == 6
     for name in discovered_names:
         assert name in SUPPORTED_BANKS
 

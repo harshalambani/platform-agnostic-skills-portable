@@ -185,7 +185,7 @@ def test_discover_skips_non_bank_manifests():
 
 def test_all_discovered_banks_parse_signature_matches_contract():
     found = banks.discover()
-    assert len(found) == 5, f"expected 5 banks, discovered {len(found)}: {found}"
+    assert len(found) == 6, f"expected 6 banks, discovered {len(found)}: {found}"
     for info in found:
         skill = banks.load_bank_skill(info)
         sig = inspect.signature(skill.parse)
