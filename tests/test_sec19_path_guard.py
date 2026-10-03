@@ -208,3 +208,22 @@ def test_stage_copy_refuses_a_source_outside_known_folders(tmp_path):           
     with pytest.raises(sp.UnsafePathError, match="outside"):
         sp.stage_copy(src, staging, folders=[other])
     assert not any(staging.iterdir())
+
+
+def test_stage_copy_refuses_unregistered_and_dotdot_sources(tmp_path):            # NEGATIVE
+    known = tmp_path / "known"; known.mkdir()
+    secret = tmp_path / "secret.csv"; secret.write_text(CSV)
+    staging = tmp_path / "stage"
+    with pytest.raises(sp.UnsafePathError):
+        sp.stage_copy(secret, staging, folders=[known])
+    escaping = known / ".." / "secret.csv"
+    with pytest.raises(sp.UnsafePathError):
+        sp.stage_copy(escaping, staging, folders=[known])
+    assert not any(staging.iterdir())
+
+
+def test_stage_copy_copies_a_source_inside_a_known_folder(tmp_path):
+    known = tmp_path / "known"; known.mkdir()
+    ok = known / "ok.csv"; ok.write_text(CSV)
+    got = sp.stage_copy(ok, tmp_path / "stage", folders=[known])
+    assert got.read_text() == CSV and got.name == "ok.csv"

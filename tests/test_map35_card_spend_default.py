@@ -121,3 +121,71 @@ def test_confidence_counts_stay_consistent(tmp_path):
     with open(out, newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert [r["Confidence"] for r in rows] == ["low", "suspense"]
+
+
+# ------------------------------------------------- HSBC ELECTRO narration shape
+
+ELEC = "SYNTH SHOP PVT | 14JAN26 ELECTRO 18:22:05"
+ELEC_NFS = "NFS | 03FEB26 ELECTRO 10:11:12"
+ELEC_CASHNET = "CASHNET | 03FEB26 ELECTRO 10:11:12"
+
+
+def test_electro_shape_is_a_card_spend_on_money_out():
+    assert m._is_card_spend(ELEC, {"Deposit": "", "Withdrawal": "100"})
+    assert m._is_card_spend(ELEC.lower(), {"Deposit": "", "Withdrawal": "100"})
+
+
+def test_electro_atm_merchants_are_not_card_spends():                        # NEGATIVE
+    out = {"Deposit": "", "Withdrawal": "100"}
+    assert not m._is_card_spend(ELEC_NFS, out)
+    assert not m._is_card_spend(ELEC_CASHNET, out)
+
+
+def test_electro_money_in_is_never_a_card_spend():                           # NEGATIVE
+    assert not m._is_card_spend(ELEC, {"Deposit": "100", "Withdrawal": ""})
+
+
+def test_electro_unmatched_goes_to_default_at_low(tmp_path):
+    got = _run(tmp_path, _book(tmp_path), [("2026-01-14", ELEC, "", "900")],
+               card_default_account=DRAW)
+    assert got[0]["Account"] == DRAW
+    assert got[0]["Confidence"] == "low"
+    assert got[0]["MatchReason"].startswith(REASON)
+
+
+def test_electro_nfs_and_cashnet_stay_in_suspense(tmp_path):                 # NEGATIVE
+    got = _run(tmp_path, _book(tmp_path), [("2026-02-03", ELEC_NFS, "", "900"),
+                                           ("2026-02-04", ELEC_CASHNET, "", "900")],
+               card_default_account=DRAW)
+    for r in got:
+        assert "Suspense" in r["Account"], r
+        assert r["Confidence"] == "suspense"
+
+
+def test_electro_money_in_never_takes_default(tmp_path):                     # NEGATIVE
+    got = _run(tmp_path, _book(tmp_path), [("2026-01-14", ELEC, "900", "")],
+               card_default_account=DRAW)
+    assert got[0]["Account"] != DRAW
+    assert not got[0]["MatchReason"].startswith(REASON)
+
+
+def test_electro_upi_still_excluded(tmp_path):                               # NEGATIVE
+    got = _run(tmp_path, _book(tmp_path),
+               [("2026-01-14", "UPI/123/SYNTH | 14JAN26 ELECTRO 18:22:05", "", "900")],
+               card_default_account=DRAW)
+    assert "Suspense" in got[0]["Account"]
+
+
+def test_electro_with_history_match_keeps_it(tmp_path):                      # NEGATIVE
+    d = "SYNTH GROCER | 14JAN26 ELECTRO 18:22:05"
+    hist = [(f"2025-0{i}-05", d, 50000, "groc") for i in range(1, 7)]
+    got = _run(tmp_path, _book(tmp_path, hist), [("2026-01-20", d, "", "900")],
+               card_default_account=DRAW)
+    assert got[0]["Account"] == "Expenses:Groceries"
+    assert not got[0]["MatchReason"].startswith(REASON)
+
+
+def test_electro_without_default_configured_goes_to_suspense(tmp_path):      # NEGATIVE
+    got = _run(tmp_path, _book(tmp_path), [("2026-01-14", ELEC, "", "900")])
+    assert "Suspense" in got[0]["Account"]
+    assert got[0]["Confidence"] == "suspense"

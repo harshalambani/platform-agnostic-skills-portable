@@ -113,9 +113,9 @@ def stage_copy(src: Path, staging: Path, folders: Iterable[Path] | None = None) 
             roots.append(_norm(f))
         except (OSError, RuntimeError, ValueError):
             continue
-    staging_s = os.path.realpath(str(staging))
+    staging_s = _norm(staging)
     os.makedirs(staging_s, exist_ok=True)
-    dest = os.path.realpath(os.path.join(staging_s, safe_staged_name(src.name)))
+    dest = _norm(os.path.join(staging_s, safe_staged_name(src.name)))
     if not (dest.startswith(staging_s.rstrip(os.sep) + os.sep)
             and os.path.dirname(dest) == staging_s):
         raise UnsafePathError("The download copy would land outside the staging folder.")

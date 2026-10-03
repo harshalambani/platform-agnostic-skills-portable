@@ -3209,9 +3209,13 @@ def _is_employer_reimbursement_credit(description: str, row: Dict) -> bool:
 # a card spend, and an ATM / cash withdrawal on a debit card is cash, not a spend.
 _CARD_SPEND_RE = re.compile(
     r'\bPOS\b|\bE-?COM\b|\bECOMM?\b|\b(?:DEBIT|CREDIT)\s*CARD\b|'
-    r'\bCARD\s*(?:PURCHASE|TXN|TRANSACTION|SPEND|PAYMENT)\b', re.IGNORECASE)
+    r'\bCARD\s*(?:PURCHASE|TXN|TRANSACTION|SPEND|PAYMENT)\b|'
+    # HSBC debit-card shape: '<MERCHANT> | 14JAN26 ELECTRO 18:22:05'
+    r'\|\s*\d{2}[A-Z]{3}\d{2}\s+ELECTRO\s+\d{2}:\d{2}:\d{2}', re.IGNORECASE)
 _CARD_SPEND_EXCLUDE_RE = re.compile(
-    r'\bUPI\b|\bATM\b|\bCASH\s*(?:WDL|WITHDRAWAL)\b', re.IGNORECASE)
+    r'\bUPI\b|\bATM\b|\bCASH\s*(?:WDL|WITHDRAWAL)\b|'
+    # ELECTRO-shape ATM cash: merchant NFS / CASHNET before the '|'
+    r'^\s*(?:NFS|CASHNET)\b\s*\|', re.IGNORECASE)
 _CARD_DEFAULT_REASON = "default for card spends"
 
 
