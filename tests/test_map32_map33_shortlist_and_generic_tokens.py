@@ -90,3 +90,44 @@ def test_real_payee_token_still_matches():
 def test_generic_constant_is_small_and_lowercase():
     assert {"paytm", "using", "dec", "pvt", "ltd", "travel"} <= m.HISTORY_GENERIC_TOKENS
     assert all(t == t.lower() for t in m.HISTORY_GENERIC_TOKENS)
+
+
+# ---- MAP-33 follow-up: generic tokens only gate, they never lower a score ----
+
+def _mixed_model():
+    return m._build_history_token_model([
+        {"description": "ZETA TOURS LIMITED", "account": "Expenses:Travel Fares", "frequency": 4},
+        {"description": "OMEGA FOODS PRIVATE", "account": "Expenses:Meals", "frequency": 4},
+        {"description": "OTHER SHOP LIMITED", "account": "Expenses:Misc", "frequency": 1},
+    ])
+
+
+def test_mixed_generic_and_real_token_keeps_unstripped_score():
+    model = _mixed_model()
+    toks = {"zeta", "tours", "limited"}
+    got = m._history_bayes_score(toks, model)
+    assert got is not None and got["account"] == "Expenses:Travel Fares"
+    # the score is what main computes: generic 'limited' is still counted
+    raw_all = m._history_bayes_raw(toks, model)
+    raw_real = m._history_bayes_raw({"zeta", "tours"}, model)
+    assert raw_all is not None and raw_real is not None
+    assert raw_all[0][0][1] == "Expenses:Travel Fares"
+    assert raw_all[0][0][0] != raw_real[0][0][0]     # 'limited' still contributes
+
+
+def test_mixed_foods_private_still_matches():
+    got = m._history_bayes_score({"omega", "foods", "private"}, _mixed_model())
+    assert got is not None and got["account"] == "Expenses:Meals"
+
+
+def test_all_generic_shared_tokens_are_no_match_even_with_unknown_extras():
+    model = _model()
+    for toks in ({"pvt", "ltd"}, {"month", "dec"}, {"paytm", "using"},
+                 {"pvt", "ltd", "neverseenword"}):
+        assert m._history_bayes_score(toks, model) is None
+        assert m._history_bayes_raw(toks, model) is None
+
+
+def test_first_name_only_is_still_no_match():
+    assert m._history_bayes_score({"rahul"}, _model()) is None
+    assert m._history_bayes_score({"rahul", "amit"}, _model()) is None

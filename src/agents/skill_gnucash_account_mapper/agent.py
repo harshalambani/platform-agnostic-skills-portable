@@ -815,8 +815,12 @@ def _history_bayes_raw(
     log_np: Dict[str, float] = {}
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
-    # MAP-33: generic words are not evidence; if nothing else is left, no match.
-    tokens = {t for t in tokens if t not in HISTORY_GENERIC_TOKENS}
+    # MAP-33: a match whose every shared token is generic is no match. One real
+    # shared token is enough, and then the score is exactly what it always was
+    # (generic tokens still contribute to it).
+    shared = {t for t in tokens if model.get(t)}
+    if shared and all(t in HISTORY_GENERIC_TOKENS for t in shared):
+        return None
 
     n_accounts = _model_account_count(model)
     raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
@@ -1585,6 +1589,19 @@ def _bank_name_self_transfer(
                 "reason": "Own transfer names a bank with more than one account of yours"}
     return {"account": hits[0], "confidence": "history",
             "reason": f"Own-transfer bank-name match ({', '.join(sorted(words))})"}
+
+
+def _ifsc_revert_reason(desc: str, account: str,
+                        own_bank_accounts: Optional[set]) -> str:
+    """PIPE-09: a short, narration-free reason for an IFSC revert -- only the
+    4-letter bank code(s) and which of the two rules fired."""
+    codes = sorted({t[len('ifsc:'):] for t in set(_tokenize_history(desc))
+                    if t.startswith('ifsc:')})
+    label = ','.join(c.upper() for c in codes) or '?'
+    leaf = _strip_root(account).lower()
+    if any(c in leaf for c in codes):
+        return f"bank code {label} is on the guessed own account but nothing shows an own transfer"
+    return f"bank code {label} belongs to a different own account than the guess"
 
 
 def _ifsc_contradiction(
@@ -2760,7 +2777,8 @@ def llm_fallback_mapping(
     total = len(unmatched_rows)
     hist_count = len(historical_mappings) if historical_mappings else 0
     _emit_mapper_progress(
-        f"LLM fallback: {total} rows, {hist_count} historical examples, "
+        f"LLM fallback: {total} still-unmatched row(s) (not the whole statement), "
+        f"{hist_count} distinct past description-to-account pairs as examples, "
         f"provider={provider}, model={model}"
     )
 
@@ -4079,7 +4097,8 @@ def run(
     # pass claims it instead of shipping a provably wrong own-bank guess.
     contradiction_count = 0
     reverted_from: Dict[str, int] = {}
-    for row in mapped_rows:
+    reverted_detail: List[str] = []
+    for _row_no, row in enumerate(mapped_rows, 1):
         conf = row.get('Confidence', 'none')
         if conf not in ('smart', 'weak', 'llm'):
             continue
@@ -4087,6 +4106,8 @@ def run(
         acct = row.get('Account', '')
         if _ifsc_contradiction(desc, acct, own_bank_accounts, _own_ev):
             reverted_from[conf] = reverted_from.get(conf, 0) + 1
+            reverted_detail.append(
+                f"row {_row_no}: {_ifsc_revert_reason(desc, acct, own_bank_accounts)}")
             row['MatchReason'] = (
                 f"Reverted — IFSC in description contradicts, or is not backed by "
                 f"own-transfer evidence for, the resolved own-bank "
@@ -4103,6 +4124,9 @@ def run(
             f"IFSC-contradiction guard: {contradiction_count} row(s) reverted to unresolved "
             f"(bank code in description contradicted the resolved own-bank account)"
         )
+        # PIPE-09: name the rows (statement row number + reason; no narration).
+        for _line in reverted_detail:
+            _emit_mapper_progress(f"IFSC-contradiction guard reverted {_line}")
 
     # --- Step 4.95: own-bank contradiction guard (MAP-26, RED FLAG fix) ---
     # The LAST word on every pass (rules, history, smart, weak, AI) that landed a
@@ -4292,10 +4316,15 @@ def run(
                         f"What was already mapped is kept; the remaining {llm_stopped_final} "
                         f"row(s) are in Suspense.\n\n")
 
+    ifsc_note = ""
+    if reverted_detail:
+        ifsc_note = ("**IFSC check reverted " + str(len(reverted_detail)) + " row(s) to Suspense:**" + "\n"
+                     + "\n".join(f"- {d}" for d in reverted_detail) + "\n\n")
     return (
         f"Mapped **{total} rows** using **{rule_count} rules** "
-        f"(derived from {mapping_count} historical transactions{bank_note} in .gnucash).{extra}\n\n"
+        f"(derived from {mapping_count} distinct description-to-account pairs{bank_note} in the .gnucash history).{extra}\n\n"
         f"{ai_stop_note}"
+        f"{ifsc_note}"
         f"**Confidence breakdown:**\n"
         + "\n".join(_confidence_breakdown_lines(counts, total, llm_stopped_final)) + "\n"
         f"- `{out_path.name}` — mapped CSV, ready for GnuCash import\n"

@@ -312,6 +312,45 @@ def _drop_balance_carriers(output_path: str, contra_flags: dict) -> int:
     return len(dropped)
 
 
+def _contra_log_line(contra_flags: dict) -> str:
+    """PIPE-09: the run-log line for the contra check, computed from the SAME
+    dict that is written to <stem>.contra.json, so the two can never disagree."""
+    n = len(contra_flags)
+    if not n:
+        return "Contra check -- no cross-bank transfers in the final output"
+    confirmed = sum(1 for c in contra_flags.values()
+                    if (c or {}).get("confidence") == "high")
+    possible = n - confirmed
+    parts = []
+    if confirmed:
+        parts.append(f"{confirmed} confirmed (account set to bank)")
+    if possible:
+        parts.append(f"{possible} possible transfer")
+    return (f"Contra check -- {n} cross-bank transfer(s) flagged in contra.json "
+            f"({', '.join(parts)}). Review in the **Banks > Review** tab.")
+
+
+def _write_contra_sidecar(output_path: str, contra_flags: dict) -> None:
+    """Write <stem>.contra.json from ``contra_flags``. An empty dict overwrites
+    a stale sidecar from an earlier run (only if one exists)."""
+    import json as _json
+    sidecar = Path(output_path).with_suffix('.contra.json')
+    if not contra_flags and not sidecar.exists():
+        return
+    with open(sidecar, 'w', encoding='utf-8') as cf:
+        _json.dump(contra_flags, cf, indent=2, default=str)
+
+
+def _step3_result_line(output_path: str) -> str:
+    """PIPE-09: the Step 3 result, counted from the mapped CSV itself."""
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    suspense = sum(1 for r in rows if (r.get("Confidence") or "").lower() == "suspense")
+    unmapped = sum(1 for r in rows if not (r.get("Account") or "").strip())
+    return (f"Step 3 result -- {len(rows)} statement row(s) mapped "
+            f"({suspense} to Suspense, {unmapped} with no account)")
+
+
 # Banks with dedicated extraction skills — registry-driven (agents.banks
 # discover()) rather than a hardcoded literal, so onboarding a new bank
 # (adding its skill.yaml `bank: true` manifest) automatically extends both
@@ -1254,7 +1293,7 @@ def run(
         config_path:     Passed through to sub-skills and LLM calls.
         model_override:  Passed through to sub-skills and LLM calls.
         pdf_password:    Optional statement password, forwarded to skill_hdfc
-                         for password-protected HDFC PDFs (for HDFC often the
+                         for password-protected HDFC PDFs and the SBM encrypted xlsx (for HDFC often the
                          Cust ID). Never logged.
         bank_account:    Optional full path of YOUR account at this bank, used
                          when several match the bank name and the statement
@@ -1307,6 +1346,8 @@ def run(
                 bank_input = _resolve_single_file(bank_input, (".xls", ".xlsx"))
             elif bank == "HDFC":
                 bank_input = _resolve_single_file(bank_input, (".csv", ".xls", ".xlsx", ".pdf"))
+            elif bank == "SBM":
+                bank_input = _resolve_single_file(bank_input, (".xlsx",))
             elif bank == "HSBC":
                 # A directory may hold PDFs (OCR path) or a single already-
                 # enriched workbook (fast path); a single file is passed
@@ -1651,29 +1692,19 @@ def run(
 
         # ── Contra detection (cross-bank transfer matching) ──────────────────
         contra_flags: dict[int, dict] = {}  # row_idx → contra info
+        contra_ran = False
         try:
             if gnucash_bank_account and gnucash_data:
+                contra_ran = True
                 contras = detect_contra_entries(
                     canonical_rows, gnucash_data, gnucash_bank_account
                 )
                 if contras:
                     for c in contras:
                         contra_flags[c["row_idx"]] = c
-                    confirmed = sum(1 for c in contras if c["confidence"] == "high")
-                    possible = len(contras) - confirmed
-                    parts = []
-                    if confirmed:
-                        parts.append(f"{confirmed} confirmed (account set to bank)")
-                    if possible:
-                        parts.append(f"{possible} possible")
-                    log_lines.append(
-                        f"Contra check — {len(contras)} cross-bank "
-                        f"transfer(s) detected ({', '.join(parts)}). "
-                        f"Review in the **Banks > Review** tab."
-                    )
+                    # PIPE-09: the count line is logged AFTER the sidecar is
+                    # written (set-aside / carrier removal can still change it).
                     _emit_progress(4, f"{bank}: {len(contras)} contra(s) flagged")
-                else:
-                    log_lines.append("Contra check — no cross-bank transfers detected")
         except Exception as e:
             log.warning(f"Contra detection failed: {e}")
             log_lines.append(f"⚠️ Contra check skipped — {e}")
@@ -1701,6 +1732,10 @@ def run(
             bank_name=bank,
             gnucash_bank_account=gnucash_bank_account,
         )
+        try:
+            log_lines.append(_step3_result_line(output_path))
+        except Exception as e:
+            log_lines.append(f"Step 3 result -- could not read the mapped CSV: {e}")
 
         # ── Apply confirmed contras to the mapped output ────────────────────
         # For confirmed (high-confidence, reference-matched) transfers, book the
@@ -1748,14 +1783,13 @@ def run(
             log_lines.append(f"⚠️ Balance-carrier row not removed — {e}")
 
         # Write contra flags sidecar (if any) alongside the output CSV
-        if contra_flags:
-            contra_sidecar = Path(output_path).with_suffix('.contra.json')
-            try:
-                import json as _json
-                with open(contra_sidecar, 'w', encoding='utf-8') as cf:
-                    _json.dump(contra_flags, cf, indent=2, default=str)
-            except Exception as e:
-                log.warning(f"Could not write contra sidecar: {e}")
+        try:
+            _write_contra_sidecar(output_path, contra_flags)
+        except Exception as e:
+            log.warning(f"Could not write contra sidecar: {e}")
+            log_lines.append(f"⚠️ Contra sidecar not written — {e}")
+        if contra_ran:
+            log_lines.append(_contra_log_line(contra_flags))
 
         _emit_progress(6, f"{bank}: final balance verification")
         try:
@@ -1764,13 +1798,14 @@ def run(
             sidecar = _read_sidecar(canonical_path)
             stmt_closing = sidecar.get("closing_balance") if sidecar else None
             log_lines.append(
-                "**Final check** — "
+                "**Step 6 result** — final balance check: "
                 + final_closing_balance_verdict(
                     recon, final_rows, stmt_closing, unresolved_opening_gap,
                     explain_opening_gap(unresolved_opening_gap, booked_matches))
             )
         except Exception as e:
-            log_lines.append(f"**Final check** — Could not verify closing balance: {e}")
+            log_lines.append(
+                f"**Step 6 result** — final balance check: Could not verify closing balance: {e}")
 
     # Color-code each log line: green = OK, amber = warning, red = error
     _WARN_KEYS = ("mismatch", "gap detected", "skipped", "⚠", "warning")
