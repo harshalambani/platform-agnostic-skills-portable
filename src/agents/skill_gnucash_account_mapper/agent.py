@@ -703,6 +703,21 @@ def _tokenize_history(text: str) -> List[str]:
     return tokens
 
 
+# MAP-33: words that say nothing about WHO was paid. A history match made only
+# of these (a 1-rupee row matched on "paytm" + "using", or on a common first
+# name alone) is no match. Kept deliberately small; the first names are a short
+# list of very common Indian given names, not the owner's family.
+HISTORY_GENERIC_TOKENS = frozenset({
+    'pvt', 'ltd', 'limited', 'private', 'and', 'month', 'months', 'year',
+    'years', 'travel', 'paytm', 'using', 'till',
+    'jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'sept',
+    'oct', 'nov', 'dec',
+    # very common Indian first names
+    'amit', 'rahul', 'rajesh', 'suresh', 'ramesh', 'sanjay', 'anil', 'vijay',
+    'priya', 'pooja', 'neha', 'sunita', 'kumar', 'singh', 'sharma', 'mohan',
+})
+
+
 class _HistoryModel(dict):
     """token -> {account: weight}. MAP-31: the weight is the DECAYED count (a
     booking contributes w(age) instead of 1); ``raw`` keeps the plain counts
@@ -800,6 +815,8 @@ def _history_bayes_raw(
     log_np: Dict[str, float] = {}
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
+    # MAP-33: generic words are not evidence; if nothing else is left, no match.
+    tokens = {t for t in tokens if t not in HISTORY_GENERIC_TOKENS}
 
     n_accounts = _model_account_count(model)
     raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
@@ -1029,40 +1046,81 @@ def _apply_target_guard(rows, guard, blocked_log=None, counts=None):
     return reset
 
 
-def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
-    """True if `account`'s top-level type looks structurally backwards for
-    this row's cash-flow direction. FLAG ONLY -- callers must never use this
-    to change, reject, or suppress the account; it only ever adds a visible
-    marker for a human to glance at."""
+# MAP-18: the direction rule judges the account's GnuCash TYPE, not its path.
+# run() fills this once per run from the book (path without the 'Root Account:'
+# prefix -> type); helpers also take an explicit ``types`` for direct callers.
+_ACCOUNT_TYPES: Dict[str, str] = {}
+# MAP-32: run() installs its own-transfer-evidence test here for the AI
+# shortlist (a one-slot list so the call signature of llm_fallback_mapping
+# stays unchanged); None -> only the explicit 'xfer to self' marker counts.
+_OWN_EVIDENCE_FN: List[Optional[Callable[[str], bool]]] = [None]
+
+_INCOME_ROOTS = ("Income",)
+_EXPENSE_ROOTS = ("Expense", "Expenses")
+_ASSET_FAMILY_TYPES = frozenset({"ASSET", "STOCK", "MUTUAL", "RECEIVABLE"})
+_OWN_CASH_TYPES = frozenset({"BANK", "CASH"})
+
+
+def _set_account_types(accounts) -> None:
+    """Install the path -> type lookup for this run (once, from the book)."""
+    _ACCOUNT_TYPES.clear()
+    for a in accounts or ():
+        path = _strip_root(getattr(a, 'path', '') or '')
+        if path:
+            _ACCOUNT_TYPES[path] = (getattr(a, 'type', '') or '').upper()
+
+
+def _account_kind(account: str, types: Optional[Dict[str, str]] = None) -> str:
+    """'INCOME' / 'EXPENSE' / other GnuCash type for `account`; if the book does
+    not know the path, fall back to the top-level name (Income; Expense or
+    Expenses; Assets), else ''."""
+    path = _strip_root(account or '')
+    t = (types if types is not None else _ACCOUNT_TYPES).get(path)
+    if t:
+        return t
+    top = path.split(":", 1)[0]
+    if top in _INCOME_ROOTS:
+        return "INCOME"
+    if top in _EXPENSE_ROOTS:
+        return "EXPENSE"
+    if top == "Assets":
+        return "ASSET"
+    return ""
+
+
+def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float,
+                        types: Optional[Dict[str, str]] = None) -> bool:
+    """True if `account`'s TYPE looks backwards for this row's cash-flow
+    direction: money out to an INCOME account, or money in to an EXPENSE
+    account. Nothing else (asset, bank, cash, liability, credit, equity) ever
+    clashes. FLAG ONLY for the history / AI passes -- they never reject."""
     if not account:
         return False
-    top = _strip_root(account).split(":", 1)[0]
-    if withdrawal_amt > 0 and deposit_amt == 0 and top == "Income":
+    kind = _account_kind(account, types)
+    if withdrawal_amt > 0 and deposit_amt == 0 and kind == "INCOME":
         return True
-    if deposit_amt > 0 and withdrawal_amt == 0 and top == "Expenses":
+    if deposit_amt > 0 and withdrawal_amt == 0 and kind == "EXPENSE":
         return True
     return False
 
 
-def _direction_clash(account: str, deposit_amt: float, withdrawal_amt: float) -> bool:
-    """MAP-18: True if a keyword/smart/weak guess must be REJECTED. This is
-    exactly MAP-12's rule and nothing wider: money out landing on Income, or
-    money in landing on Expenses (`_direction_mismatch`). Money in to
-    Liabilities or Equity is NOT a clash. Rows with both or neither amount
-    are never clashes. Kept as a pass-through so the call site names its intent."""
-    return _direction_mismatch(account, deposit_amt, withdrawal_amt)
+def _direction_clash(account: str, deposit_amt: float, withdrawal_amt: float,
+                     types: Optional[Dict[str, str]] = None) -> bool:
+    """MAP-18: True if a keyword/smart/weak guess (or the cash rule) must be
+    REJECTED: the same type rule as `_direction_mismatch`. Kept as a
+    pass-through so the call site names its intent."""
+    return _direction_mismatch(account, deposit_amt, withdrawal_amt, types)
 
 
-def _plausible_direction_prefixes(deposit_amt: float, withdrawal_amt: float) -> Tuple[str, ...]:
-    """Account top-level types considered structurally plausible for a row's
-    cash-flow direction, used only to TOP UP a thin history-ranked shortlist
-    (never to drop a history-ranked candidate, and never to reject a final
-    answer -- that's `_direction_mismatch`'s job, and it only flags)."""
+def _plausible_direction_kinds(deposit_amt: float, withdrawal_amt: float) -> frozenset:
+    """MAP-32: account kinds plausible for a row's direction, used only to TOP
+    UP a thin history-ranked shortlist: money out -> EXPENSE + asset family;
+    money in -> INCOME + asset family."""
     if deposit_amt > 0 and withdrawal_amt == 0:
-        return ("Income", "Assets")
+        return frozenset({"INCOME"}) | _ASSET_FAMILY_TYPES
     if withdrawal_amt > 0 and deposit_amt == 0:
-        return ("Expenses", "Assets")
-    return ("Income", "Expenses", "Assets")
+        return frozenset({"EXPENSE"}) | _ASSET_FAMILY_TYPES
+    return frozenset({"INCOME", "EXPENSE"}) | _ASSET_FAMILY_TYPES
 
 
 def _build_llm_shortlist(
@@ -1072,20 +1130,29 @@ def _build_llm_shortlist(
     history_model: Dict[str, Dict[str, int]],
     account_set: set,
     limit: int,
+    types: Optional[Dict[str, str]] = None,
+    own_evidence: Optional[Callable[[str], bool]] = None,
 ) -> List[str]:
     """Build the numbered candidate list shown to the LLM (MAP-12): the
     top-N accounts by MAP-11's own history evidence for this description,
-    topped up (if there's still room) with accounts of a plausible type for
-    the row's deposit/withdrawal direction. Order is deterministic:
-    history-ranked entries first, then the top-up sorted by name.
+    topped up (if there's still room) with accounts of a plausible TYPE for
+    the row's direction (MAP-32). The owner's own BANK / CASH accounts are
+    offered only when the narration looks like a self-transfer. Order is
+    deterministic: history-ranked entries first, then the top-up sorted by name.
     """
     shortlist = _history_shortlist_accounts(desc, history_model, limit)
     if len(shortlist) < limit:
         seen = set(shortlist)
-        prefixes = _plausible_direction_prefixes(deposit_amt, withdrawal_amt)
+        kinds = _plausible_direction_kinds(deposit_amt, withdrawal_amt)
+        own_evidence = own_evidence or _OWN_EVIDENCE_FN[0]
+        if own_evidence is not None:
+            self_xfer = bool(own_evidence(desc))
+        else:
+            self_xfer = bool(_SELF_MARKER_RE.search((desc or '').lower()))
+        pool = kinds | (_OWN_CASH_TYPES if self_xfer else frozenset())
         topup = sorted(
             a for a in account_set
-            if a not in seen and _strip_root(a).split(":", 1)[0] in prefixes
+            if a not in seen and _account_kind(a, types) in pool
         )
         for a in topup:
             if len(shortlist) >= limit:
@@ -3601,6 +3668,15 @@ def run(
         _strip_root(a) for a in extractor_output.get('own_bank_accounts', [])
         if not (guard is not None and guard.is_blocked(a))
     }
+    # MAP-18/32: read the book's account TYPES once for the whole run (the
+    # direction rule, the AI shortlist and the cash rule all use this list).
+    try:
+        from agents.gnucash_accounts import load_accounts as _load_accts  # noqa: PLC0415
+        _run_accounts = list(_load_accts(gnucash_file))
+        _run_accounts_err = None
+    except Exception as e:  # noqa: BLE001
+        _run_accounts, _run_accounts_err = [], str(e)
+    _set_account_types(_run_accounts)
     # MAP-22: own-transfer evidence for EVERY pass that can land on an own
     # account (Bayes ifsc token, weak prefix, Step 4.9, and the MAP-14 AI
     # gate), derived once from this book's history.
@@ -3664,6 +3740,7 @@ def run(
         return _has_own_transfer_evidence(
             _d, _hist_own_vocab, _hist_own_targets, own_bank_accounts, gnucash_bank_account,
             name_alone=False, target=_t)
+    _OWN_EVIDENCE_FN[0] = _own_ev
     if historical_pairs_for_llm:
         with open(str(out_path), 'r', encoding='utf-8', errors='replace') as f:
             mapped_rows = list(csv.DictReader(f))
@@ -3768,11 +3845,10 @@ def run(
             continue
         if not _cash_checked:
             _cash_checked = True
-            try:
-                from agents.gnucash_accounts import load_accounts  # noqa: PLC0415
-                _cash_target, _cash_why = find_cash_account(load_accounts(gnucash_file))
-            except Exception as e:  # noqa: BLE001
-                _cash_target, _cash_why = None, f"the book's accounts could not be read ({e})"
+            if _run_accounts_err is not None:
+                _cash_target, _cash_why = None, f"the book's accounts could not be read ({_run_accounts_err})"
+            else:
+                _cash_target, _cash_why = find_cash_account(_run_accounts)
         if not _cash_target:
             cash_rule_log[_ci] = _CASH_RULE_NO_TARGET.format(why=_cash_why)
             continue
