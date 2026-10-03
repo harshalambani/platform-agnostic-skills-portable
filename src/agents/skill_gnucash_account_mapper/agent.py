@@ -1067,6 +1067,11 @@ _ACCOUNT_TYPES: Dict[str, str] = {}
 # shortlist (a one-slot list so the call signature of llm_fallback_mapping
 # stays unchanged); None -> only the explicit 'xfer to self' marker counts.
 _OWN_EVIDENCE_FN: List[Optional[Callable[[str], bool]]] = [None]
+# MAP-34: the entity's configured Drawings accounts (paths, no root prefix),
+# installed by run() from entities.yaml and narrowed to postable accounts that
+# exist in the book. NAMED in config, never found by path. Money IN to one of
+# them is not a direction clash. Empty == no exemption (the old behaviour).
+_DRAWINGS_ACCOUNTS: set = set()
 
 _INCOME_ROOTS = ("Income",)
 _EXPENSE_ROOTS = ("Expense", "Expenses")
@@ -1113,6 +1118,10 @@ def _direction_mismatch(account: str, deposit_amt: float, withdrawal_amt: float,
     if withdrawal_amt > 0 and deposit_amt == 0 and kind == "INCOME":
         return True
     if deposit_amt > 0 and withdrawal_amt == 0 and kind == "EXPENSE":
+        # MAP-34: money in to a CONFIGURED drawings account is a reduction of
+        # drawings, not a backwards guess (same stance as MAP-30 cash back).
+        if _strip_root(account) in _DRAWINGS_ACCOUNTS:
+            return False
         return True
     return False
 
@@ -3177,6 +3186,50 @@ def _is_cashback_reason(reason: str) -> bool:
     return (reason or '').startswith(_CASHBACK_REASON)
 
 
+# MAP-34: an employer NEFT credit that reimburses the owner's spend. The marker
+# is the bank's own reference tag on the narration ("NEFT FROM <employer> ...
+# KOMH"). A salary transfer ("TRANSFER FROM <acct> ... SOF NRE") carries
+# neither NEFT nor the marker, so it never matches. Generic: no employer name.
+_REIMBURSEMENT_MARKERS = ("KOMH",)
+_REIMBURSEMENT_RE = re.compile(
+    r'\bNEFT\b.{0,12}?\bFROM\b.*\b(?:' + '|'.join(map(re.escape, _REIMBURSEMENT_MARKERS)) + r')\b',
+    re.IGNORECASE | re.DOTALL)
+_REIMBURSEMENT_REASON = "employer reimbursement = drawings"
+
+
+def _is_employer_reimbursement_credit(description: str, row: Dict) -> bool:
+    """MAP-34: money IN (never out) narrated as an employer NEFT with the
+    reimbursement marker."""
+    if not _REIMBURSEMENT_RE.search(description or ''):
+        return False
+    return _safe_float(row.get('Deposit', '')) > 0 and not _safe_float(row.get('Withdrawal', '')) > 0
+
+
+# MAP-35: card spends. Debit/credit card, POS or e-commerce wording. UPI is NOT
+# a card spend, and an ATM / cash withdrawal on a debit card is cash, not a spend.
+_CARD_SPEND_RE = re.compile(
+    r'\bPOS\b|\bE-?COM\b|\bECOMM?\b|\b(?:DEBIT|CREDIT)\s*CARD\b|'
+    r'\bCARD\s*(?:PURCHASE|TXN|TRANSACTION|SPEND|PAYMENT)\b', re.IGNORECASE)
+_CARD_SPEND_EXCLUDE_RE = re.compile(
+    r'\bUPI\b|\bATM\b|\bCASH\s*(?:WDL|WITHDRAWAL)\b', re.IGNORECASE)
+_CARD_DEFAULT_REASON = "default for card spends"
+
+
+def _is_card_spend(description: str, row: Dict) -> bool:
+    """MAP-35: money OUT whose narration is card / POS / e-commerce wording."""
+    d = description or ''
+    if not _CARD_SPEND_RE.search(d) or _CARD_SPEND_EXCLUDE_RE.search(d):
+        return False
+    return _safe_float(row.get('Withdrawal', '')) > 0 and not _safe_float(row.get('Deposit', '')) > 0
+
+
+def _is_fixed_rule_reason(reason: str) -> bool:
+    """Rows settled by a deterministic fixed rule (MAP-30 cash back, MAP-34
+    reimbursement): later passes leave them alone."""
+    r = reason or ''
+    return r.startswith(_CASHBACK_REASON) or r.startswith(_REIMBURSEMENT_REASON)
+
+
 def _is_card_cashback_credit(description: str, row: Dict) -> bool:
     """MAP-30: money IN whose narration says cash back. A debit that merely
     mentions 'cash back' (e.g. a cash-back-at-till purchase) is not one."""
@@ -3325,6 +3378,7 @@ def map_accounts(
     bank_key: Optional[str] = None,
     owner_tokens: Optional[set] = None,
     cashback_account: Optional[str] = None,
+    reimbursement_account: Optional[str] = None,
     reference_date=None,
 ) -> Dict:
     """
@@ -3338,6 +3392,9 @@ def map_accounts(
     pattern is satisfied only by them abstains.
     ``cashback_account`` (MAP-30): where a card cash-back credit goes (the
     resolved Drawings account); None sends such a row to Review.
+    ``reimbursement_account`` (MAP-34): where an employer reimbursement credit
+    goes (the entity's single configured Drawings account); None leaves such a
+    row to the normal passes, exactly as before.
 
     ``overrides`` (user overrides, highest priority — order-change per the
     27 Sep clarification) are checked FIRST, per row, before the rules pass
@@ -3419,6 +3476,11 @@ def map_accounts(
             # MAP-30: deterministic, ahead of the persistent-rules pass.
             account, confidence, reason = _cashback_decision(cashback_account)
             pattern = None
+        elif reimbursement_account and _is_employer_reimbursement_credit(description, row):
+            # MAP-34: deterministic, same stage as the cash-back rule.
+            account, confidence, reason = (
+                _strip_root(reimbursement_account), 'medium', _REIMBURSEMENT_REASON)
+            pattern = None
         else:
             account, confidence, pattern, reason = match_rule(description, compiled_rules)
 
@@ -3494,6 +3556,8 @@ def run(
     model_override: str = None,
     bank_name: str = None,
     gnucash_bank_account: str = None,
+    drawings_accounts: Optional[List[str]] = None,
+    card_default_account: Optional[str] = None,
 ) -> str:
     """
     Run the full account-mapping pipeline from the PA Skills UI.
@@ -3509,6 +3573,11 @@ def run(
         output_path:         Path for the mapped output CSV.
         config_path:         Unused (no LLM required).
         model_override:      Unused (no LLM required).
+        drawings_accounts:   MAP-34: the entity's configured Drawings account paths
+                             (money in to one is not a direction clash; a lone one
+                             also takes employer reimbursement credits).
+        card_default_account: MAP-35: account for card spends nothing else matched
+                             (low confidence) instead of Suspense. None -> Suspense.
         bank_name:           Pipeline bank label (e.g. "Bank of Baroda"). When set,
                              rules are generated ONLY from that bank's historical
                              transactions — not from other banks.
@@ -3717,10 +3786,23 @@ def run(
     _owner_tokens = {t for t in _hist_own_vocab if not _OWN_PRODUCT_KW_RE.fullmatch(t)}
     # MAP-30: where a card cash-back credit goes (the single Drawings account).
     _cashback_acct = find_drawings_account(all_account_paths)
+    # MAP-34 / MAP-35: configured accounts, narrowed to postable accounts that
+    # exist in the book (all_account_paths already excludes hidden/placeholder).
+    def _configured_ok(path: str) -> bool:
+        # In the book AND not hidden/placeholder (IMP-09). With no readable
+        # book the path cannot be verified, so it is not used.
+        return bool(guard is not None and guard.has_path(path) and not guard.is_blocked(path))
+    _DRAWINGS_ACCOUNTS.clear()
+    _DRAWINGS_ACCOUNTS.update(
+        d for d in (_strip_root(x) for x in (drawings_accounts or ())) if d and _configured_ok(d))
+    _reimb_acct = next(iter(_DRAWINGS_ACCOUNTS)) if len(_DRAWINGS_ACCOUNTS) == 1 else None
+    _card_default = _strip_root(card_default_account or '')
+    if not (_card_default and _configured_ok(_card_default)):
+        _card_default = ''
     result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path),
                           overrides=overrides, bank_key=bank_key,
                           owner_tokens=_owner_tokens, cashback_account=_cashback_acct,
-                          reference_date=_stmt_ref)
+                          reimbursement_account=_reimb_acct, reference_date=_stmt_ref)
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 
@@ -3783,7 +3865,7 @@ def run(
             conf = row.get('Confidence') or 'none'
             if conf in ('high', 'override'):
                 continue
-            if _is_cashback_reason(row.get('MatchReason', '')):
+            if _is_fixed_rule_reason(row.get('MatchReason', '')):
                 continue   # MAP-30: settled (or sent to Review) by the cash-back rule
             desc = row.get('Description') or row.get('Narration') or ''
             match = _history_token_match(
@@ -3863,7 +3945,7 @@ def run(
     for _ci, row in enumerate(mapped_rows):
         if (row.get('Confidence') or 'none') not in ('none', 'low'):
             continue
-        if _is_cashback_reason(row.get('MatchReason', '')) or _ci in self_tie:
+        if _is_fixed_rule_reason(row.get('MatchReason', '')) or _ci in self_tie:
             continue
         _cd = row.get('Description') or row.get('Narration') or ''
         _cdep = _safe_float(row.get('Deposit', ''))
@@ -3898,7 +3980,7 @@ def run(
             acct = row.get('Account', '')
             if conf != 'none' and acct:
                 continue
-            if _is_cashback_reason(row.get('MatchReason', '')):
+            if _is_fixed_rule_reason(row.get('MatchReason', '')):
                 continue   # MAP-30
             if i in self_tie:
                 continue   # MAP-16: tied own accounts go to Review, not a guess
@@ -3993,7 +4075,7 @@ def run(
             conf = row.get('Confidence', 'none')
             if (i - 1) in self_tie:
                 continue   # MAP-16
-            if _is_cashback_reason(row.get('MatchReason', '')):
+            if _is_fixed_rule_reason(row.get('MatchReason', '')):
                 continue   # MAP-30: never sent to the AI pass
             if (i - 1) in direction_clash_log:
                 continue   # MAP-18: rejected on direction, stays in Suspense
@@ -4204,6 +4286,7 @@ def run(
     # Find a Suspense account in the tree, or use a sensible default.
     suspense_acct = _find_suspense_account(account_list)
     suspense_count = 0
+    card_default_count = 0
     for _ri, row in enumerate(mapped_rows):
         acct = row.get('Account', '')
         conf = row.get('Confidence', 'none')
@@ -4216,7 +4299,7 @@ def run(
                     row.get('Description', ''), blocked_pairs, guard):
                 row['MatchReason'] = f"{_BLOCKED_PREFIX}" + _blocked_history_reason(
                     row.get('Description', ''), blocked_pairs, guard)
-            elif _is_cashback_reason(row.get('MatchReason', '')):
+            elif _is_fixed_rule_reason(row.get('MatchReason', '')):
                 pass   # MAP-30: keep the specific Review reason
             elif _ri in self_tie:
                 row['MatchReason'] = (
@@ -4239,9 +4322,22 @@ def run(
                     "Suspense — the AI suggested your own account "
                     f"'{llm_withheld[_ri]}' but nothing in the narration shows a "
                     "transfer to yourself; review and reassign")
+            elif _card_default and _is_card_spend(
+                    row.get('Description') or row.get('Narration') or '', row):
+                # MAP-35: a card spend nothing else matched goes to the
+                # entity's configured default, flagged for review, not Suspense.
+                row['Account'] = _card_default
+                row['Confidence'] = 'low'
+                row['MatchReason'] = _CARD_DEFAULT_REASON
+                result['confidence_counts']['none'] -= 1
+                result['confidence_counts']['low'] = result['confidence_counts'].get('low', 0) + 1
+                card_default_count += 1
+                continue
             else:
                 row['MatchReason'] = 'Suspense — review and reassign in GnuCash'
             suspense_count += 1
+    if card_default_count:
+        _emit_mapper_progress(f"card-spend default: {card_default_count} row(s) -> {_card_default}")
     if suspense_count > 0:
         result['confidence_counts']['none'] -= suspense_count
         result['confidence_counts']['suspense'] = suspense_count

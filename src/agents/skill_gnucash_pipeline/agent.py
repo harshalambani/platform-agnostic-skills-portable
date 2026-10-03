@@ -1270,6 +1270,30 @@ def _normalise_to_canonical(
             writer.writerow(out_row)
 
 
+_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
+
+
+def _load_entity_profile(entity, entities_path):
+    """(profile, error). No entity picked -> (None, None): the entity is
+    optional and nothing entity-driven applies. An entity picked but not
+    resolvable is an error, never a silent fallback to 'no config'."""
+    entity = (entity or "").strip()
+    if not entity:
+        return None, None
+    if str(_ITR_SCRIPTS) not in sys.path:
+        sys.path.insert(0, str(_ITR_SCRIPTS))
+    try:
+        import configs  # noqa: PLC0415
+        entities = configs.load_entities(entities_path)
+    except Exception as e:  # noqa: BLE001
+        return None, (f"entities.yaml could not be read ({type(e).__name__}) -- "
+                      f"fix it or clear the Entity field. Nothing was run.")
+    profile = entities.get(entity)
+    if profile is None:
+        return None, f"Entity '{entity}' is not in entities.yaml -- pick another or clear the field."
+    return profile, None
+
+
 def run(
     bank: str,
     statement_files: str,
@@ -1279,6 +1303,8 @@ def run(
     model_override: str = None,
     pdf_password: str = None,
     bank_account: str = None,
+    entity: str = None,
+    entities_path: str = None,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -1300,6 +1326,13 @@ def run(
                          does not say which (IMP-08). Refused when hidden,
                          placeholder, not at this bank, or not in the book.
 
+        entity:          Optional entities.yaml key. Supplies the entity's configured
+                         Drawings accounts and card-spend default (MAP-34/35) and,
+                         for a bank that declares a password rule, the statement
+                         password when the box is empty (BNK-05).
+        entities_path:   Path to entities.yaml (the `{data_root}/itr/entities.yaml`
+                         token).
+
     Returns:
         Human-readable summary string for the UI.
     """
@@ -1318,6 +1351,10 @@ def run(
         )
 
     log_lines = []
+
+    entity_profile, entity_err = _load_entity_profile(entity, entities_path)
+    if entity_err:
+        return f"## {bank} → entity error\n\n❌ {entity_err}"
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -1731,6 +1768,8 @@ def run(
             model_override=model_override,
             bank_name=bank,
             gnucash_bank_account=gnucash_bank_account,
+            drawings_accounts=list(getattr(entity_profile, "drawings_accounts", None) or []),
+            card_default_account=(getattr(entity_profile, "card_spend_default_account", "") or None),
         )
         try:
             log_lines.append(_step3_result_line(output_path))

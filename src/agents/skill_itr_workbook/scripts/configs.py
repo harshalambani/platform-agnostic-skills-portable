@@ -151,6 +151,15 @@ class EntityProfile:
                                          # means the skill cannot emit a journal for this entity
                                          # at all -- it fails loud naming the entity and listing
                                          # the required keys rather than guessing account paths.
+    drawings_accounts: list[str] = field(default_factory=list)  # MAP-34: GnuCash
+                                         # account paths (no "Root Account:" prefix) that are this
+                                         # entity's Drawings. Named here, never found by path. Money
+                                         # IN to one of them is not a direction clash, and an employer
+                                         # reimbursement credit goes to it when exactly one is listed.
+                                         # Empty (default) == no exemption, mapper behaves as before.
+    card_spend_default_account: str = ""  # MAP-35: account path a card spend that nothing else
+                                         # matched is booked to (low confidence), instead of
+                                         # Suspense. Empty (default) == Suspense, as before.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -191,6 +200,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             foreign_dividends_in_book_by_ay=fields_.get("foreign_dividends_in_book_by_ay") or {},
             extra_items=fields_.get("extra_items") or {},
             partner_comp_accounts=fields_.get("partner_comp_accounts") or {},
+            drawings_accounts=[str(x).strip() for x in (fields_.get("drawings_accounts") or []) if str(x).strip()],
+            card_spend_default_account=str(fields_.get("card_spend_default_account") or "").strip(),
         )
     return entities
 
@@ -269,6 +280,10 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["extra_items"] = dict(e.extra_items)
     if e.partner_comp_accounts:
         d["partner_comp_accounts"] = dict(e.partner_comp_accounts)
+    if e.drawings_accounts:
+        d["drawings_accounts"] = list(e.drawings_accounts)
+    if e.card_spend_default_account:
+        d["card_spend_default_account"] = e.card_spend_default_account
     return d
 
 

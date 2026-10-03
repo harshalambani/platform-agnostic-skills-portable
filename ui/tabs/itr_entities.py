@@ -64,6 +64,7 @@ Cascade + integrity (the hard part):
 """
 from __future__ import annotations
 
+import copy
 import datetime
 import re
 import shutil
@@ -333,6 +334,14 @@ def _move_with_rollback(pairs: list[tuple[Path, Path]]) -> None:
 # Save (Add / Modify / Rename).
 # ---------------------------------------------------------------------------
 
+# EntityProfile fields with no widget on this tab: a save must preserve them.
+_FORM_HIDDEN_FIELDS = (
+    "partner_comp_accounts", "foreign_dividends_in_book",
+    "foreign_dividends_in_book_by_ay", "drawings_accounts",
+    "card_spend_default_account",
+)
+
+
 def _save_entity(
     orig_key: str, new_key: str, name: str, pan: str, status: str, residency: str,
     dob: str, doi: str, address: str, father_name: str, aadhaar: str,
@@ -446,6 +455,13 @@ def _save_entity(
         audit_case_basis=audit_case_basis,
         extra_items=extra_items,
     )
+    # Fields this form does not expose are carried over from the stored
+    # profile, never dropped (a save used to silently erase partner_comp_accounts,
+    # foreign_dividends_in_book*, drawings_accounts, card_spend_default_account).
+    prior = entities.get(orig_key) if orig_key else None
+    if prior is not None:
+        for _f in _FORM_HIDDEN_FIELDS:
+            setattr(new_profile, _f, copy.deepcopy(getattr(prior, _f)))
 
     entities[new_key] = new_profile
     if is_rename:
