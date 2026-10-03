@@ -64,6 +64,7 @@ Cascade + integrity (the hard part):
 """
 from __future__ import annotations
 
+import copy
 import datetime
 import re
 import shutil
@@ -226,6 +227,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
             "", "", "new", "", False, "", _AUDIT_BASIS_BLANK, "", "", "",
+            "", "",
         )
     return (
         e.key, e.name, e.pan, e.status, e.residency,
@@ -236,6 +238,8 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         _format_list_lines((e.extra_items or {}).get("bf_losses") or []),
         _format_list_lines((e.extra_items or {}).get("clubbing_notes") or []),
         _format_kv_lines(e.books),
+        _format_list_lines(getattr(e, "drawings_accounts", None) or []),
+        getattr(e, "card_spend_default_account", "") or "",
     )
 
 
@@ -333,6 +337,16 @@ def _move_with_rollback(pairs: list[tuple[Path, Path]]) -> None:
 # Save (Add / Modify / Rename).
 # ---------------------------------------------------------------------------
 
+# EntityProfile fields with no widget on this tab: a save must preserve them.
+_FORM_HIDDEN_FIELDS = (
+    "partner_comp_accounts", "foreign_dividends_in_book",
+    "foreign_dividends_in_book_by_ay",
+)
+# MAP-34 / MAP-35: editable on this tab. A save that passes None for them (an
+# older caller) preserves the stored value; a string (even empty) replaces it.
+_FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account")
+
+
 def _save_entity(
     orig_key: str, new_key: str, name: str, pan: str, status: str, residency: str,
     dob: str, doi: str, address: str, father_name: str, aadhaar: str,
@@ -343,6 +357,8 @@ def _save_entity(
     # Trailing + defaulted deliberately: every existing caller passes this
     # function's arguments positionally, and the basis is optional metadata.
     audit_case_basis: str = "",
+    drawings_accounts_text: str | None = None,
+    card_spend_default_account: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -446,6 +462,21 @@ def _save_entity(
         audit_case_basis=audit_case_basis,
         extra_items=extra_items,
     )
+    # Fields this form does not expose are carried over from the stored
+    # profile, never dropped (a save used to silently erase partner_comp_accounts,
+    # foreign_dividends_in_book*, drawings_accounts, card_spend_default_account).
+    prior = entities.get(orig_key) if orig_key else None
+    if prior is not None:
+        for _f in _FORM_HIDDEN_FIELDS:
+            setattr(new_profile, _f, copy.deepcopy(getattr(prior, _f)))
+        if drawings_accounts_text is None:
+            new_profile.drawings_accounts = copy.deepcopy(prior.drawings_accounts)
+        if card_spend_default_account is None:
+            new_profile.card_spend_default_account = prior.card_spend_default_account
+    if drawings_accounts_text is not None:
+        new_profile.drawings_accounts = _parse_list_lines(drawings_accounts_text)
+    if card_spend_default_account is not None:
+        new_profile.card_spend_default_account = (card_spend_default_account or "").strip()
 
     entities[new_key] = new_profile
     if is_rename:
@@ -801,6 +832,21 @@ def render(container_tab=None) -> None:
                      "'partner_of_audited_firm' = working partner of a firm liable to "
                      "audit, who is not an audit case himself. Blank reads as s.44AB.",
             )
+            drawings_accounts_box = gr.Textbox(
+                label="Drawings accounts (GnuCash mapper; one account path per line)",
+                placeholder="Equity:Drawings",
+                lines=2, interactive=True,
+                info="Money IN lands here only via a History match or the employer "
+                     "reimbursement rule (and the rule only when exactly one is listed). "
+                     "A path that is not in the book, or is hidden/placeholder, is ignored. "
+                     "Blank = unconfigured.",
+            )
+            card_default_box = gr.Textbox(
+                label="Card-spend default account (GnuCash mapper; one account path)",
+                placeholder="Equity:Drawings",
+                lines=1, interactive=True,
+                info="Card spends nothing else matched go here at low confidence. Blank = Suspense.",
+            )
             bf_losses_box = gr.Textbox(
                 label="B/f losses (one per line)", lines=3, interactive=True,
             )
@@ -825,6 +871,7 @@ def render(container_tab=None) -> None:
         audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
         bf_losses_box, clubbing_notes_box,
         books_box,
+        drawings_accounts_box, card_default_box,
     ]
 
     books_browse_btn.click(
@@ -860,7 +907,7 @@ def render(container_tab=None) -> None:
         father_name, aadhaar, business_subtree, workbook_match, default_regime, regime_by_ay_text,
         audit_case, audit_case_by_ay_text, audit_case_basis,
         bf_losses_text, clubbing_notes_text,
-        books_text,
+        books_text, drawings_accounts_text, card_spend_default_account,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -869,6 +916,8 @@ def render(container_tab=None) -> None:
             bf_losses_text, clubbing_notes_text,
             books_text,
             audit_case_basis=audit_case_basis,
+            drawings_accounts_text=drawings_accounts_text,
+            card_spend_default_account=card_spend_default_account,
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -881,7 +930,7 @@ def render(container_tab=None) -> None:
                 business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
                 audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
                 bf_losses_box, clubbing_notes_box,
-                books_box],
+                books_box, drawings_accounts_box, card_default_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )
 

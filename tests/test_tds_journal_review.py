@@ -16,11 +16,21 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "ui"))
 
 from ui.tabs import tds_journal_review as tjr  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _allow_tmp_as_known_folder(tmp_path, monkeypatch):
+    """SEC-19: these tests keep their files under tmp_path, so make that a
+    known folder (the refusal itself is tested in test_sec19_path_guard.py)."""
+    from ui import _safe_paths
+    monkeypatch.setattr(_safe_paths, "known_folders", lambda: [tmp_path.resolve()])
 
 
 # ---------------------------------------------------------------------------

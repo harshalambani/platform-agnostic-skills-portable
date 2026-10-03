@@ -1,0 +1,218 @@
+{
+ "Reconciliation": [
+  [
+   "Category",
+   "Sources",
+   "Status",
+   "Note"
+  ],
+  [
+   "Total cash received (monthly payouts) vs Bank",
+   "Computed (monthly payouts) = 7,857,920.00; Bank statement = 7,857,920.00",
+   "NOT CHECKED YET",
+   "NOT CHECKED YET (bank credits are matched in H35-05). Computed (monthly payouts): 7857920; Bank statement: 7857920. See H35-05 (partner-side fuzzy match of payouts to bank credits)."
+  ],
+  [
+   "Exempt share of profit (s.10(2A)) vs the filed return",
+   "L5 Statement (Profit Share for the Year) = 6,000,000.00; Return = 6,000,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "Closing capital: statement vs Advisory's opening balance for the next FY",
+   "LLP Statement (L5) = 1,000,000.00; Advisory (opening balance, 1 Apr next FY) = 1,000,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "Closing capital: statement vs the filed return",
+   "LLP Statement (L5) = 1,000,000.00; Return = 1,000,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "Closing capital: statement vs opening balance + this FY's payslip capital deductions (roll-forward)",
+   "LLP Statement (L5) = 1,000,000.00; Opening + this FY's payslip capital deductions = 1,000,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "Closing capital: rule vs Advisory (informational -- both are forward-looking projections, not the statement's own date)",
+   "Rule (Drivers) = 1,000,000.00; Advisory = 1,000,000.00",
+   "INFORMATIONAL",
+   null
+  ],
+  [
+   "L5 tie-out: current-account closing balance",
+   "LLP Statement (L5) = 440,000.00; Booked (monthly) = 440,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "L5 tie-out: remuneration for the year",
+   "LLP Statement (L5) = 3,600,000.00; Booked (monthly) = 3,600,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "L5 tie-out: interest on capital",
+   "LLP Statement (L5) = 12,000.00; Booked (monthly) = 12,000.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference)."
+  ],
+  [
+   "Interest on capital: computed (schedule, this FY's payslip capital movements only) vs LLP Statement",
+   "Computed (interest schedule) = not supplied; LLP Statement (L5) = 12,000.00",
+   "INFORMATIONAL",
+   "INFORMATIONAL -- this schedule's basis (rate, day-count, interest-from date) is not established against the LLP Statement's own method; the statement figure is independently checked by the 'L5 tie-out: interest on capital' row above. This row only models KPMG's own computation method and is never a disagreement with the statement, however large the gap. CANNOT RECONCILE -- capital interest rate not supplied for FY2025-26"
+  ],
+  [
+   "s.194T TDS on interest on capital",
+   "Computed (schedule TDS - payslip TDS, interest months) = not supplied; Expected (s.194T rate x statement interest) = not supplied; Externally reported = not supplied",
+   "CANNOT RECONCILE",
+   "CANNOT RECONCILE -- interest on capital was paid in 2025-04 but the payment schedule's tds_on_rem_ioc and/or the payslip's own tds figure is not supplied for that month; the interest-only TDS cannot be isolated (never assumed to be 0)."
+  ],
+  [
+   "TDS credit: computed (monthly remuneration TDS) vs Form 26AS",
+   "Computed (monthly TDS) = 360,000.00; Form 26AS = 360,000.00",
+   "AGREE",
+   null
+  ],
+  [
+   "Current-account drawings: statement vs (net monthly payouts + TDS + other payslip deductions - gross interest on capital)",
+   "LLP Statement (L5) Drawings (magnitude, as cash drawn) = 8,213,920.00; Net monthly payouts + TDS + other deductions - gross interest on capital = 8,213,920.00",
+   "AGREE",
+   "All supplied sources agree with the LLP Statement of Account (the reference). Build-up: net monthly payouts 7,857,920.00 + TDS withheld 360,000.00 + other payslip deductions (medical top-up) 8,000.00 - gross interest on capital 12,000.00 = 8,213,920.00."
+  ],
+  [
+   "Firm's tax on share of profit is absent from Form 26AS",
+   "Firm's tax total = -2,446,080.00; Form 26AS total credit = 360,000.00",
+   "AGREE",
+   "No conflation detected."
+  ],
+  [
+   "Incentive instalments: award-year Advisory vs payment schedule",
+   "Award-year Advisory (schedule_instalments) = 2,000,000.00; Payment-schedule cohort ledger = 2,000,000.00",
+   "INFORMATIONAL",
+   "INFORMATIONAL (superseded by the D1 drawings-vs-payouts identity check, H35-04) -- "
+  ],
+  [
+   "CTC walk-down: Target Compensation vs cash pool (remuneration + gross share of profit + CTC structuring + arrears) -- informational",
+   "Target Compensation = 10,000,000.00; Cash pool actually paid = not supplied",
+   "INFORMATIONAL",
+   "CANNOT RECONCILE -- cash pool cannot be computed; not supplied: CTC structuring total (not supplied)."
+  ]
+ ],
+ "Exceptions": [
+  [
+   "Category",
+   "Status",
+   "Detail"
+  ],
+  [
+   "s.194T TDS on interest on capital",
+   "CANNOT RECONCILE",
+   "CANNOT RECONCILE -- interest on capital was paid in 2025-04 but the payment schedule's tds_on_rem_ioc and/or the payslip's own tds figure is not supplied for that month; the interest-only TDS cannot be isolated (never assumed to be 0)."
+  ],
+  [
+   "Capital -- mid-year rate change",
+   "RATE CHANGE SUSPECTED",
+   "RATE CHANGE SUSPECTED -- instalment capital-deducted figures within this cohort are not equal. Implied old rate 0.5000, implied new rate 0.4000. Re-read this year's Compensation Advisory -- it will have been reissued mid-year at the new rate."
+  ]
+ ],
+ "Open items": [
+  [
+   "Item",
+   "Why it is open",
+   "What would close it"
+  ],
+  [
+   "s.194T TDS on interest on capital",
+   "CANNOT RECONCILE -- interest on capital was paid in 2025-04 but the payment schedule's tds_on_rem_ioc and/or the payslip's own tds figure is not supplied for that month; the interest-only TDS cannot be isolated (never assumed to be 0).",
+   "Supply the missing source figure for this financial year."
+  ]
+ ],
+ "Logic": [
+  [
+   "Partner Compensation Reconciliation -- Logic"
+  ],
+  [
+   "Financial year: 2025-26"
+  ],
+  [
+   null
+  ],
+  [
+   "The seven legs (each an independent source; see Reconciliation):"
+  ],
+  [
+   "1. Year-end position -- Compensation Advisory + LLP capital/current account statement."
+  ],
+  [
+   "2. Incentive schedule -- the firm's payment-schedule PDF (per-month grid)."
+  ],
+  [
+   "3. Monthly payouts -- 12 monthly payout advices, plus payslips for any payroll months."
+  ],
+  [
+   "4. Capital contribution -- derived by rule, cross-checked to the Advisory's stated closing."
+  ],
+  [
+   "5. Bank -- the partner's bank statement credits."
+  ],
+  [
+   "6. One-offs -- special incentive / ex-gratia, appearing on a single month's advice."
+  ],
+  [
+   "7. The return -- filed ITR + computation + Form 26AS + Form 16."
+  ],
+  [
+   null
+  ],
+  [
+   "Governing identity (derived every month, never read off the advice):"
+  ],
+  [
+   "misc = total_paid - remuneration - share_of_profit_gross - additional_share_of_profit"
+  ],
+  [
+   null
+  ],
+  [
+   "A one-off ('Additional Share of Profit') is shown net of the firm's tax; it is"
+  ],
+  [
+   "grossed up as gross = net / (1 - firms_tax_rate), then checked for roundness"
+  ],
+  [
+   "(distance to the nearest Rs 100,000) -- a one-off is always awarded round."
+  ],
+  [
+   null
+  ],
+  [
+   "Capital rule: required_cumulative_capital = target_compensation *"
+  ],
+  [
+   "(months_achieved / months_total) * capital_rate. Deducted only when an"
+  ],
+  [
+   "instalment is actually paid, never when awarded."
+  ],
+  [
+   null
+  ],
+  [
+   "Non-goals: no tax computation, no .gnucash writes, no ITR workbook injection."
+  ],
+  [
+   "No rate, percentage or period is ever a constant -- every one is read from the"
+  ],
+  [
+   "Drivers sheet / this run's input, and a missing one produces an explicit"
+  ],
+  [
+   "CANNOT RECONCILE row rather than a default or a guess."
+  ]
+ ]
+}
