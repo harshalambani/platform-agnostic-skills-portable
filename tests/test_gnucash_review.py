@@ -211,7 +211,12 @@ def test_save_changes_never_persists_suspense_account_as_override(tmp_path, monk
 
     status, download_update = gr_review._save_changes(payload)
 
-    assert "No new overrides needed" in status
+    # UI-12 (deliberate change): the old catch-all "No new overrides needed (all
+    # patterns already saved)" was untrue here -- this row was never "already
+    # saved", it was a Suspense target. The message now states the real reason.
+    assert "No new overrides needed" not in status
+    assert "Account changes received: 1" in status
+    assert "Suspense" in status and "never learned" in status
 
     from agents.skill_gnucash_account_mapper.persistent_rules import load_overrides
     overrides = load_overrides(gnucash_file, config_path=str(gr_review._config_mod.PORTABLE_CONFIG_PATH))

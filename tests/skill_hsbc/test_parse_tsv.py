@@ -141,3 +141,74 @@ def test_check_statement_continuity_delegates_to_shared_helper():
     groups = [StatementGroup(name, [], start, end) for name, start, end in periods]
 
     assert parse_tsv.check_statement_continuity(periods) == consolidate(groups).warnings
+
+
+# ---------------------------------------------------------------------------
+# BNK-06: narration split across a page break must survive
+# ---------------------------------------------------------------------------
+
+_DEP, _WD, _BAL = 1527, 1879, 2254
+
+
+def _page(tmp_path, name, lines):
+    """lines: list of (text_words, money) ; money = [(text, right_x)]."""
+    rows = []
+    top = 100
+    ln = 0
+    for words, money in lines:
+        ln += 1
+        top += 40
+        x = 100
+        for i, w in enumerate(words.split()):
+            rows.append([5, 1, ln, 1, 1, i + 1, x, top, 60, 20, 95, w])
+            x += 70
+        for j, (txt, right) in enumerate(money):
+            rows.append([5, 1, ln, 1, 1, 100 + j, right - 80, top, 80, 20, 95, txt])
+    p = tmp_path / f"{name}.tsv"
+    _write_tsv(p, rows)
+    return p
+
+
+def _split_pages(tmp_path):
+    p1 = _page(tmp_path, "p1", [
+        ("Details of your accounts", []),
+        ("Balance Brought Forward", [("1,000.00", _BAL)]),
+        ("01Apr2025 UPI PAYMENT TO", []),
+        ("Balance Carried Forward", [("1,000.00", _BAL)]),
+    ])
+    p2 = _page(tmp_path, "p2", [
+        ("Balance Brought Forward", [("1,000.00", _BAL)]),
+        ("RAMESH STORES REFX", [("200.00", _WD), ("800.00", _BAL)]),
+        ("02Apr2025 SALARY CREDIT", [("500.00", _DEP), ("1,300.00", _BAL)]),
+    ])
+    return [p1, p2]
+
+
+def test_bnk06_split_narration_is_joined_across_page_break(tmp_path):
+    tx = parse_tsv.extract_transactions_multi_page(
+        _split_pages(tmp_path), _DEP, _WD, _BAL)
+    rows = [t for t in tx if t["type"] == "transaction"]
+    assert rows[0]["desc"] == "UPI PAYMENT TO | RAMESH STORES REFX"
+    assert rows[0]["withdrawal"] == 200.0
+
+
+def test_bnk06_forward_rows_never_emitted_or_leaked(tmp_path):
+    tx = parse_tsv.extract_transactions_multi_page(
+        _split_pages(tmp_path), _DEP, _WD, _BAL)
+    # exactly one brought_forward row (opening), none for Carried Forward
+    assert [t["type"] for t in tx].count("brought_forward") == 1
+    for t in tx:
+        d = t["desc"].lower()
+        if t["type"] == "transaction":
+            assert "forward" not in d and "carried" not in d and "brought" not in d
+    # narration not duplicated
+    assert tx[1]["desc"].count("UPI PAYMENT TO") == 1
+
+
+def test_bnk06_unsplit_transaction_unchanged_and_recon_passes(tmp_path):
+    tx = parse_tsv.extract_transactions_multi_page(
+        _split_pages(tmp_path), _DEP, _WD, _BAL)
+    rows = [t for t in tx if t["type"] == "transaction"]
+    assert rows[1]["desc"] == "SALARY CREDIT"
+    assert parse_tsv.recon_check(tx) == []
+    assert tx[0]["balance"] == 1000.0 and tx[-1]["balance"] == 1300.0

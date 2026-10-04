@@ -341,6 +341,81 @@ def _write_contra_sidecar(output_path: str, contra_flags: dict) -> None:
         _json.dump(contra_flags, cf, indent=2, default=str)
 
 
+# IMP-14: words in an entity's name that are not part of a person's name.
+_NAME_STOPWORDS = {"huf", "hindu", "undivided", "family", "and", "of", "the",
+                   "mr", "mrs", "ms", "shri", "smt", "dr", "late", "sons", "co"}
+ADVISORY_SUFFIX = ".advisory.json"
+OWN_TRANSFER_ADVISORY_KIND = "own_transfer_other_side_missing"
+
+
+def _holder_name_tokens(name: str) -> list[str]:
+    """IMP-14: the entity's name as lowercase alphabetic words (initials and
+    honorifics dropped). Comes from entity config, never hardcoded."""
+    words = re.findall(r"[a-z]+", (name or "").lower())
+    return [w for w in words if len(w) >= 2 and w not in _NAME_STOPWORDS]
+
+
+def _narration_has_holder_name(desc: str, tokens: list[str]) -> bool:
+    """True when the narration carries the holder's FIRST and LAST name as
+    whole words. A single-word name is too weak to call (returns False): a
+    relative sharing only the surname, or only the given name, never matches."""
+    if len(tokens) < 2:
+        return False
+    words = set(re.findall(r"[a-z]+", (desc or "").lower()))
+    return tokens[0] in words and tokens[-1] in words
+
+
+def _own_name_out_advisories(output_path: str, contra_flags: dict,
+                             holder_name: str) -> dict:
+    """IMP-14: ADVISORY only. Money-OUT rows whose narration carries the
+    holder's own name and whose other side was not found in the book (no
+    contra flag). Returns {row_index: {kind, reason}}; NEVER touches the CSV,
+    never re-maps a row, never looks at money-IN rows."""
+    tokens = _holder_name_tokens(holder_name)
+    if len(tokens) < 2:
+        return {}
+    from agents.amount_headers import find_withdrawal_key, find_deposit_key  # noqa: PLC0415
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        return {}
+
+    def _amt(row, key):
+        if not key:
+            return 0.0
+        try:
+            return float(str(row.get(key) or "0").replace(",", "") or 0)
+        except ValueError:
+            return 0.0
+
+    wkey = find_withdrawal_key(list(rows[0].keys()))
+    dkey = find_deposit_key(list(rows[0].keys()))
+    flagged = {str(k) for k in (contra_flags or {})}
+    out = {}
+    for i, row in enumerate(rows):
+        if str(i) in flagged:
+            continue          # other side found: today's behaviour
+        if abs(_amt(row, wkey)) == 0 or abs(_amt(row, dkey)) > 0:  # deposit may be negated
+            continue          # money OUT only
+        if not _narration_has_holder_name(row.get("Description", ""), tokens):
+            continue
+        out[i] = {
+            "kind": OWN_TRANSFER_ADVISORY_KIND,
+            "reason": "Possible own transfer, other side not found in the book",
+        }
+    return out
+
+
+def _write_advisory_sidecar(output_path: str, advisories: dict) -> None:
+    """Write <stem>.advisory.json. An empty dict overwrites a stale sidecar
+    from an earlier run (only if one exists)."""
+    sidecar = Path(output_path).with_suffix(ADVISORY_SUFFIX)
+    if not advisories and not sidecar.exists():
+        return
+    with open(sidecar, "w", encoding="utf-8") as af:
+        json.dump(advisories, af, indent=2)
+
+
 def _step3_result_line(output_path: str) -> str:
     """PIPE-09: the Step 3 result, counted from the mapped CSV itself."""
     with open(output_path, "r", encoding="utf-8", newline="") as f:
@@ -1872,6 +1947,21 @@ def run(
             log_lines.append(f"⚠️ Contra sidecar not written — {e}")
         if contra_ran:
             log_lines.append(_contra_log_line(contra_flags))
+
+        # IMP-14: advisory badge for own-name payments OUT whose other side is
+        # not in the book yet. Never re-maps a row; written to its own sidecar.
+        try:
+            _adv = _own_name_out_advisories(
+                output_path, contra_flags,
+                getattr(entity_profile, "name", "") or "")
+            _write_advisory_sidecar(output_path, _adv)
+            if _adv:
+                log_lines.append(
+                    f"Advisory -- {len(_adv)} payment(s) out carry the holder's own "
+                    f"name and have no other side in the book (possible own "
+                    f"transfer); shown in **Banks > Review**, accounts unchanged.")
+        except Exception as e:
+            log.warning(f"Own-name advisory skipped: {e}")
 
         _emit_progress(6, f"{bank}: final balance verification")
         try:

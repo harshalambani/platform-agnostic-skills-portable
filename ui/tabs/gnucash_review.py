@@ -21,6 +21,7 @@ the engine's design rule — no bespoke JS for this screen anymore.
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 from html import escape as html_escape
 import json
 import logging
@@ -154,6 +155,24 @@ def _load_contra_sidecar(csv_p: Path) -> dict:
         return {}
 
 
+ADVISORY_SUFFIX = ".advisory.json"
+
+
+def _load_advisory_sidecar(csv_p: Path) -> dict:
+    """IMP-14: `<stem>.advisory.json` -- advisory-only row hints (own-name
+    payment OUT whose other side is not in the book). Keys are stringified row
+    indices. Missing or unreadable -> {}. Never changes a row's account."""
+    path = csv_p.with_suffix(ADVISORY_SUFFIX)
+    if not path.is_file():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as af:
+            raw = json.load(af)
+        return {str(k): v for k, v in raw.items() if isinstance(v, dict)}
+    except Exception:
+        return {}
+
+
 BOOKED_SUFFIX = ".matched.json"
 
 
@@ -211,7 +230,8 @@ def _write_booked_sidecar(csv_p: Path, excluded: list[dict], old: list[dict]) ->
         json.dump(out, bf, indent=2, default=str)
 
 
-def _row_presentation(row: dict, contra: dict | None) -> None:
+def _row_presentation(row: dict, contra: dict | None,
+                      advisory: dict | None = None) -> None:
     """Fill in the engine's _tags / _rowclass / _badges / _note keys in place.
 
     - _tags always carries the row's confidence tier (drives the "Filter:"
@@ -253,6 +273,14 @@ def _row_presentation(row: dict, contra: dict | None) -> None:
             "cls": "green" if status == "confirmed" else "amber",
         }
         note = contra.get("reason") or "Possible contra"
+
+    elif advisory:
+        # IMP-14: advisory only -- the row keeps its account; a contra flag
+        # (other side found) always wins over this hint.
+        tags.append("ownxfer")
+        badges["Date"] = {"text": "OWN?", "cls": "violet",
+                          "title": advisory.get("reason") or ""}
+        note = advisory.get("reason") or "Possible own transfer, other side not found"
 
     band = match_band(confidence)
     # UI-05: the band rides in its own key so _rowclass keeps meaning "tone" only.
@@ -416,6 +444,7 @@ def _spec(
             ("medium", "Medium"),
             ("high", "High"),
             ("contra", "Contra"),
+            ("ownxfer", "Own transfer?"),
             ("booked", "Already booked"),
         ],
         status_label="Filter:",
@@ -460,9 +489,10 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
         accounts = sorted({r.get(TARGET_COL, "") for r in rows if r.get(TARGET_COL)})
 
     contra_flags = _load_contra_sidecar(csv_p)
+    advisory_flags = _load_advisory_sidecar(csv_p)
     for i, row in enumerate(rows):
         _restore_description_edit(row)
-        _row_presentation(row, contra_flags.get(str(i)))
+        _row_presentation(row, contra_flags.get(str(i)), advisory_flags.get(str(i)))
     for entry in booked:
         brow = _booked_row(entry)
         _booked_presentation(brow, entry.get("contra"))
@@ -483,6 +513,131 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
 # ---------------------------------------------------------------------------
 # Save logic
 # ---------------------------------------------------------------------------
+
+def _override_accounting(stats: dict) -> str:
+    """UI-12(b): the truth about what a save did with the account changes it
+    received -- received / learned / not learned, by reason."""
+    learned = stats["learned"] + stats["updated"]
+    skipped = []
+    if stats["suspense"]:
+        skipped.append(f"{stats['suspense']} to a Suspense account (never learned, by design)")
+    if stats["empty"]:
+        skipped.append(f"{stats['empty']} with an empty narration or no account chosen")
+    if stats["same"]:
+        skipped.append(f"{stats['same']} already saved to the same account")
+    not_learned = stats["suspense"] + stats["empty"] + stats["same"]
+    line = (f"Account changes received: {stats['received']}; learned: {learned}"
+            f" ({stats['learned']} new, {stats['updated']} updated to a different account);"
+            f" not learned: {not_learned}")
+    if skipped:
+        line += " (" + "; ".join(skipped) + ")"
+    return line
+
+
+def _learn_overrides(changes: list[dict], existing: list[dict]) -> tuple[list[dict], dict]:
+    """UI-12(b)/(c): fold the review's account changes into the override rules.
+
+    Pure: `existing` is not mutated. Dedupe is by pattern. A same-pattern,
+    same-account repeat is not duplicated; a same-pattern, different-account
+    correction UPDATES that rule's account (a rule that carries several
+    patterns has just this pattern split off into a new rule, so its other
+    patterns keep their account). Suspense is never learned. Returns
+    (all_rules, stats) with stats keys: received, learned, updated, same,
+    suspense, empty.
+    """
+    rules = [dict(r, patterns=list(r.get("patterns") or
+                                   ([r["pattern"]] if r.get("pattern") else [])))
+             for r in existing]
+    stats = {"received": len(changes), "learned": 0, "updated": 0,
+             "same": 0, "suspense": 0, "empty": 0}
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    def _find(pattern: str):
+        for r in rules:
+            if pattern in r["patterns"]:
+                return r
+        return None
+
+    for ch in changes:
+        desc = ch.get("Description", "")
+        account = ch.get(TARGET_COL, "")
+        if not desc or not account:
+            stats["empty"] += 1
+            continue
+        # Never save overrides that map to Suspense -- those are unresolved rows.
+        if "Suspense" in account:
+            stats["suspense"] += 1
+            continue
+        # Generalize pattern -- strip trailing refs/dates for broader matching.
+        pattern = _generalize_pattern(desc)
+        if not pattern:
+            stats["empty"] += 1
+            continue
+        hit = _find(pattern)
+        if hit is None:
+            rules.append({"pattern": pattern, "patterns": [pattern], "account": account})
+            stats["learned"] += 1
+        elif hit.get("account") == account:
+            stats["same"] += 1
+        elif len(hit["patterns"]) == 1:
+            hit["account"] = account
+            hit["added"] = today
+            stats["updated"] += 1
+        else:
+            hit["patterns"].remove(pattern)
+            rules.append({"pattern": pattern, "patterns": [pattern], "account": account})
+            stats["updated"] += 1
+    return rules, stats
+
+
+_LOAD_LABEL = "Load for Review"
+_RESET_LABEL = "Reset"
+_RESET_CONFIRM_LABEL = "Discard changes and Reset"
+_CONFIRM_BAR = (
+    "**Unsaved changes.** {what} would discard your account overrides, exclusions "
+    "and description edits. Click **{what}** again to discard them, or click "
+    "**Save & Export** first."
+)
+DIRTY_VAR = PAYLOAD_VAR + "Dirty"
+_ARM_VAR = PAYLOAD_VAR + "Armed"
+
+
+def _guard_js(action: str) -> str:
+    """UI-12: page-side js for a Load / Reset click. First click while the
+    review has unsaved work arms the action and sends 'confirm'; any later click
+    (or a click with nothing unsaved) sends 'go' and drops the work flag. Load
+    passes (csv, book, mode), Reset passes (mode)."""
+    inputs = "(csv, gc, g)" if action == "load" else "(g)"
+    ret = "[csv, gc, mode]" if action == "load" else "mode"
+    clear = f"window.{PAYLOAD_VAR} = '';" if action == "reset" else ""
+    return (
+        f"{inputs} => {{ let mode = 'go'; "
+        f"if (window.{DIRTY_VAR} && window.{_ARM_VAR} !== '{action}') "
+        f"{{ window.{_ARM_VAR} = '{action}'; mode = 'confirm'; }} "
+        f"else {{ window.{_ARM_VAR} = ''; "
+        f"if (window.{DIRTY_VAR}) {{ window.{DIRTY_VAR} = false; }} {clear} }} "
+        f"return {ret}; }}"
+    )
+
+
+def _load_guarded(csv_file, gnucash_file, mode=""):
+    """Load handler with the UI-12 discard guard. `mode` is 'confirm' on the
+    first click over unsaved work (nothing is loaded; the confirm bar shows),
+    anything else loads as before."""
+    if mode == "confirm":
+        return (
+            gr.update(),
+            _CONFIRM_BAR.format(what="Load for Review"),
+            gr.update(value="Discard changes and Load"),
+            gr.update(value=_RESET_LABEL),
+        )
+    return (
+        _load_review_data(csv_file, gnucash_file),
+        "",
+        gr.update(value=_LOAD_LABEL),
+        gr.update(value=_RESET_LABEL),
+    )
+
 
 def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
     """Process save from the review UI — write overrides + re-export CSV.
@@ -541,33 +696,24 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
 
         _cfg_path = str(_config_mod.PORTABLE_CONFIG_PATH)
         existing = load_overrides(gnucash_file, config_path=_cfg_path)
-        existing_patterns: set[str] = set()
-        for o in existing:
-            for p in o.get("patterns", []):
-                existing_patterns.add(p)
+        all_overrides, stats = _learn_overrides(changes, existing)
+        wrote = bool(stats["learned"] or stats["updated"])
 
-        new_overrides = []
-        for ch in changes:
-            desc = ch.get("Description", "")
-            account = ch.get(TARGET_COL, "")
-            if not desc or not account:
-                continue
-            # Never save overrides that map to Suspense — those are unresolved rows.
-            if "Suspense" in account:
-                continue
-            # Generalize pattern — strip trailing refs/dates for broader matching.
-            pattern = _generalize_pattern(desc)
-            if pattern not in existing_patterns:
-                new_overrides.append({"pattern": pattern, "account": account})
-                existing_patterns.add(pattern)
-
-        if new_overrides:
-            all_overrides = existing + new_overrides
+        if wrote:
             save_overrides_batch(gnucash_file, all_overrides, config_path=_cfg_path)
             _rp = rules_path(gnucash_file, config_path=_cfg_path)
-            override_msg = f"Saved {len(new_overrides)} new override(s) ({len(all_overrides)} total) → {_rp}"
+            override_msg = (
+                f"Saved {stats['learned']} new override(s) "
+                f"({len(all_overrides)} total) → {_rp}"
+            )
+            if stats["updated"]:
+                override_msg += (
+                    f"; {stats['updated']} existing rule(s) updated to a different account"
+                )
         else:
-            override_msg = "No new overrides needed (all patterns already saved)"
+            override_msg = "No override rules were written"
+        if changes:
+            override_msg += "\n\n" + _override_accounting(stats)
 
     except Exception as e:
         override_msg = f"Warning: could not save overrides — {e}"
@@ -615,7 +761,14 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
                 writer.writerows(all_rows)
             export_msg = f"CSV re-exported: {csv_p.name} ({len(all_rows)} rows)"
             if n_desc_edits:
-                export_msg += f"; {n_desc_edits} description(s) reworded (original kept in Notes)"
+                n_kept = sum(1 for r in all_rows if (r.get(NOTES_KEY) or "").strip()
+                             and (r.get(ORIG_KEY) or "").strip())
+                n_empty_orig = n_desc_edits - sum(1 for r in all_rows if (r.get(ORIG_KEY) or "").strip())
+                export_msg += f"; {n_desc_edits} description(s) reworded"
+                if n_kept:
+                    export_msg += f" (original kept in Notes for {n_kept})"
+                if n_empty_orig:
+                    export_msg += f" ({n_empty_orig} had no original description to keep)"
             # Copy to download staging dir so Gradio's file server can serve it
             try:
                 staged = _safe_paths.stage_copy(csv_p, _config_mod.download_staging_dir())
@@ -788,22 +941,47 @@ def render(container_tab=None) -> None:
         elem_id=f"{APP_ID}-payload-box",
     )
 
+    # UI-12: Load and Reset ask before discarding unsaved work. A second click
+    # confirms. The page-side js reads the engine's dirty flag and passes
+    # "confirm" (first click while dirty) or "go" to the handler through a
+    # CSS-hidden carrier box -- an in-page confirm bar, never window.confirm.
+    gr.HTML(payload_box_css(f"{APP_ID}-guard-box"))
+    _guard_box = gr.Textbox(
+        value="", show_label=False, container=False, lines=1,
+        elem_id=f"{APP_ID}-guard-box",
+    )
+    guard_md = gr.Markdown("")
+
     load_btn.click(
-        fn=_load_review_data,
-        inputs=[csv_dropdown, gnucash_file],
-        outputs=review_html,
+        fn=_load_guarded,
+        inputs=[csv_dropdown, gnucash_file, _guard_box],
+        outputs=[review_html, guard_md, load_btn, reset_btn],
+        js=_guard_js("load"),
     )
     save_btn.click(
         fn=_save_changes,
         inputs=[_payload_box],
         outputs=[save_result, download_file],
         js=f"(x) => window.{PAYLOAD_VAR} || ''",
+    ).then(
+        fn=None,
+        inputs=[save_result],
+        outputs=[guard_md],
+        js=(f"(m) => {{ if (String(m || '').indexOf('**Saved**') >= 0) "
+            f"window.{DIRTY_VAR} = false; return ''; }}"),
     )
 
     # ── Reset: clear the loaded review + logs, reset pickers to defaults.
     # Leaves output files (CSVs, contra sidecars) on disk untouched. Also
     # clears the pending-save payload so a stale edit set can't be re-saved.
-    def _handle_reset_review():
+    def _handle_reset_review(mode=""):
+        if mode == "confirm":
+            return (
+                gr.update(), gr.update(), gr.update(), gr.update(),
+                gr.update(), gr.update(), gr.update(), gr.update(),
+                _CONFIRM_BAR.format(what="Reset"),
+                gr.update(value=_LOAD_LABEL), gr.update(value=_RESET_CONFIRM_LABEL),
+            )
         choices = _scan_import_ready_csvs()
         return (
             gr.update(choices=choices, value=(choices[0][1] if choices else None)),
@@ -814,12 +992,14 @@ def render(container_tab=None) -> None:
             "",                                                       # save_result
             gr.update(interactive=False, value=None),                 # download_file
             "",                                                       # _payload_box
+            "",                                                       # guard_md
+            gr.update(value=_LOAD_LABEL), gr.update(value=_RESET_LABEL),
         )
 
     reset_btn.click(
         fn=_handle_reset_review,
-        inputs=[],
+        inputs=[_guard_box],
         outputs=[csv_dropdown, gnucash_file, entity_dd, book_status_md, review_html,
-                 save_result, download_file, _payload_box],
-        js=f"() => {{ window.{PAYLOAD_VAR} = ''; }}",
+                 save_result, download_file, _payload_box, guard_md, load_btn, reset_btn],
+        js=_guard_js("reset"),
     )

@@ -61,6 +61,13 @@ hiddenimports = [
     "langchain_core.tools",
     # MSG parser dependency (local import inside _parse_msg).
     "extract_msg",
+    # Lazy imports inside skill agents (BNK-07). agents/ is excluded from
+    # Analysis, so a package imported only from agents/*.py is invisible to
+    # PyInstaller unless declared here. tests/test_spec_declares_skill_packages.py
+    # fails if any skill.yaml python_packages entry is missing from this spec.
+    "msoffcrypto",       # skill_sbm, skill_mf_cas (password-protected .xlsx)
+    "olefile",           # msoffcrypto runtime dependency
+    "xlrd",              # skill_hdfc / ICICI BIFF .xls reader
     # Native window (v2, #40). ui/webui.py imports these LAZILY (inside
     # _run_native_window / _native_window_available), so PyInstaller's static
     # analysis never sees them and their bundled hooks (collect the WebView2
@@ -89,6 +96,13 @@ try:
     hiddenimports += collect_submodules("webview")
 except Exception as _e:
     print(f"[paskills.spec] collect_submodules('webview') skipped: {_e}")
+
+# msoffcrypto picks its decryptor (ecma376_agile, ecma376_standard, rc4...) by
+# submodule at runtime; take them all so none is dropped from the PYZ.
+try:
+    hiddenimports += collect_submodules("msoffcrypto")
+except Exception as _e:
+    print(f"[paskills.spec] collect_submodules('msoffcrypto') skipped: {_e}")
 
 for _pkg in (
     "gradio",

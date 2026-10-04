@@ -528,6 +528,28 @@ def detect_contra_entries(
     # paths keep it — normalise both sides so the target is actually excluded.
     target_norm = _norm_account_path(target_bank_account)
 
+    # IMP-13: own BANK accounts (CASH excluded, as in match_booked_own_transfers).
+    own_bank_norm = {
+        _norm_account_path(acc['path'])
+        for acc in gnucash_data.get('accounts', {}).values()
+        if 'path' in acc and _is_bank_account(acc)
+        and (acc.get('type') or '').upper() != 'CASH'
+    }
+
+    def _is_complete_own_transfer(txn: Dict) -> bool:
+        """True when the book entry is ALREADY a transfer between two own bank
+        accounts, neither of them the importing bank: its account is an own
+        bank (checked by the caller) and every other leg is too. Such an entry
+        cannot be the counterpart of this statement's row, so flagging it is a
+        false POSSIBLE. No recorded other legs => unknown => not skipped."""
+        others = txn.get('other_accounts') or []
+        if not others:
+            return False
+        if _norm_account_path(txn.get('account', '')) not in own_bank_norm:
+            return False
+        norm = [_norm_account_path(o) for o in others]
+        return all(n in own_bank_norm and n != target_norm for n in norm)
+
     other_txns = []
     for txn in gnucash_data['transactions']:
         acct = txn.get('account', '')
@@ -536,6 +558,9 @@ def detect_contra_entries(
             continue
         # Only real bank accounts can be the other side of a transfer
         if acct not in bank_paths:
+            continue
+        # IMP-13: already a complete own transfer between two other banks
+        if _is_complete_own_transfer(txn):
             continue
         other_txns.append(txn)
 
