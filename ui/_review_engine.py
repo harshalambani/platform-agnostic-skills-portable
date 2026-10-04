@@ -552,6 +552,7 @@ _BODY = r"""
       r._changed = true;
       n++;
     });
+    if (n > 0) markDirty();
     syncPayload();
     renderTable();
     return n;
@@ -586,6 +587,7 @@ _BODY = r"""
         r._deleted = true;
         r._changed = true;
       });
+      markDirty();
       syncPayload();
       renderTable();
     };
@@ -593,6 +595,27 @@ _BODY = r"""
 
 %%EXCLUDE_JS%%  // ── JS → Python bridge. gr.State has no DOM node, so the save handler
   //    reads this global via its js= parameter at click time.
+  // UI-12: unsaved-work flag, published on window[PAYLOAD_VAR + 'Dirty'] so the
+  // page's Load / Reset buttons can ask before throwing the edits away. Set only
+  // by a real user edit (assign / Remove / inline description edit / exclude
+  // toggle) -- never by syncPayload() itself, which also runs once at init.
+  // Cleared by the host after a successful save.
+  const DIRTY_VAR = PAYLOAD_VAR + 'Dirty';
+  window[DIRTY_VAR] = false;
+  function markDirty() { window[DIRTY_VAR] = true; }
+  if (typeof window.addEventListener === 'function' && !window[DIRTY_VAR + 'Guard']) {
+    // Best effort: a browser tab shows its native "leave site?" prompt. An
+    // embedded webview may suppress it, in which case the Load / Reset
+    // confirmation is the protection.
+    window[DIRTY_VAR + 'Guard'] = true;
+    window.addEventListener('beforeunload', (e) => {
+      if (!window[DIRTY_VAR]) return;
+      e.preventDefault();
+      e.returnValue = '';
+      return '';
+    });
+  }
+
   function syncPayload() {
     const changes = rows.filter(r => r._changed).map(r => {
       const out = { _idx: r._idx, _orig: r._orig, _deleted: !!r._deleted };
@@ -956,7 +979,9 @@ _BODY = r"""
       editing = false;
       if (commit) {
         const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
+        const before = r[c.edit_key] || '';
         r[c.edit_key] = (v && v !== orig.trim()) ? v : '';
+        if ((r[c.edit_key] || '') !== before) markDirty();
         syncPayload();
       }
       renderTable();
@@ -1028,7 +1053,7 @@ _EXCLUDE_JS = """
     if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
     rows.forEach(r => {
       if (r._locked || !selected.has(r._idx)) return;
-      if (!!r._excluded !== flag) { r._excluded = flag; exclDirty = true; }
+      if (!!r._excluded !== flag) { r._excluded = flag; exclDirty = true; markDirty(); }
     });
     syncPayload();
     renderTable();

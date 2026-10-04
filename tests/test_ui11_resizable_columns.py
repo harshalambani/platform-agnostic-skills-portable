@@ -450,7 +450,10 @@ def _page(tmp):
 def browser_run():
     if not _have_stack():
         pytest.skip("no headless Edge/Chrome or aiohttp")
-    with tempfile.TemporaryDirectory() as tmp:
+    # ignore_cleanup_errors: headless Chrome's helper processes can still be
+    # flushing into the profile dir when the parent exits (ENOTEMPTY on Linux);
+    # a leftover temp profile must not fail the test run.
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -474,6 +477,10 @@ def browser_run():
             proc.terminate()
             try:
                 proc.wait(timeout=10)
+            except Exception:
+                pass
+            try:
+                proc.kill()  # reap any straggler before the profile dir is removed
             except Exception:
                 pass
 

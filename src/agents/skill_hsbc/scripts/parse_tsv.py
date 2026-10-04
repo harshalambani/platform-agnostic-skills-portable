@@ -248,13 +248,16 @@ def extract_transactions_multi_page(tsv_paths, dep_right, wd_right, bal_right):
             ]):
                 continue
 
-            # "Balance Carried Forward" marks the end of a page; discard any
-            # pending description so it doesn't bleed into the next tx.
+            # "Balance Carried Forward" marks the end of a page. HSBC prints a
+            # transaction's narration lines BEFORE its amount line, so a page
+            # break can fall between them: keep pending_desc_lines (BNK-06) so
+            # the narration joins the amount line on the next page. The
+            # Carried/Brought Forward rows themselves are never emitted and
+            # their text is never added to a narration.
             _nospace = low.replace(' ', '')
             if ('carriedforward' in _nospace or 'cartiedforward' in _nospace
                     or 'cariedforward' in _nospace
                     or ('balance' in low and 'carried' in low and 'forward' in low)):
-                pending_desc_lines = []
                 continue
 
             money_words = [w for w in L['words'] if is_money_token(w['text'])]
@@ -267,7 +270,7 @@ def extract_transactions_multi_page(tsv_paths, dep_right, wd_right, bal_right):
 
             # Record the opening balance exactly once per statement.
             if 'balance brought forward' in low or 'balance broughtforward' in low:
-                pending_desc_lines = []
+                # pending_desc_lines deliberately kept (BNK-06).
                 if money_words and not brought_fwd_recorded:
                     transactions.append({
                         'type': 'brought_forward',
