@@ -12,6 +12,7 @@ may be skipped only when its twin is in THIS bank's own account.
 from __future__ import annotations
 
 import csv
+import os
 import fnmatch
 import gzip
 import hashlib
@@ -131,7 +132,7 @@ def _gate(tmp_path, book_txns, stmt_rows, import_rows):
     lines, blocked = pipe._run_closing_gate(
         output_path=str(out), stmt_rows=_stmt(stmt_rows), scoped_data=scoped,
         filter_path="Root Account:" + HSBC, bank_account=HSBC)
-    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(out))
+    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(out), root=out.parent)
     return lines, blocked, doc, out
 
 
@@ -322,7 +323,7 @@ def test_f_post_import_reports_missing_rows_exactly(tmp_path):
     mapped = list(csv.DictReader(open(_import_csv(
         tmp_path, [("2025-04-06", "ATM WDL", -5000.0, CASH)]), encoding="utf-8")))
     outp = tmp_path / "missing.csv"
-    n = bg.write_missing_rows(res["missing"], HSBC, mapped, {}, outp)
+    n = bg.write_missing_rows(res["missing"], HSBC, mapped, {}, outp, root=tmp_path)
     assert n == 1
     rows = list(csv.DictReader(open(outp, encoding="utf-8")))
     assert list(rows[0].keys()) == list(IMPORT_READY_HEADERS)
@@ -404,7 +405,7 @@ def test_g_row_without_bank_or_category_is_reported_never_guessed(tmp_path):
     out, problems = bg.to_bank_base_rows(rows)
     assert out == [] and len(problems) == 2
     dst = tmp_path / "x_bank_base.csv"
-    n, probs = bg.write_bank_base_csv(rows, dst)
+    n, probs = bg.write_bank_base_csv(rows, dst, root=tmp_path)
     assert n == 0 and probs
     assert list(csv.DictReader(open(dst, encoding="utf-8"))) == []
 
@@ -471,3 +472,72 @@ def test_review_export_without_gate_record_keeps_the_old_behaviour(tmp_path):
     p = _import_csv(tmp_path, [("2025-04-05", "CARD", -500.0, CARD)])
     rows = list(csv.DictReader(open(p, encoding="utf-8")))
     assert rv._gate_on_export(p, rows) == (None, "", None)
+
+
+# ---------------------------------------------------------------------------
+# path confinement (CodeQL py/path-injection): nothing outside the outputs
+# folder is written or read, and a .gnucash outside the known folders is refused
+# ---------------------------------------------------------------------------
+
+def test_bank_base_destination_outside_outputs_folder_is_refused_nothing_written(tmp_path):
+    outputs = tmp_path / "outputs"
+    other = tmp_path / "elsewhere"
+    outputs.mkdir()
+    other.mkdir()
+    dst = other / "x_bank_base.csv"
+    with pytest.raises(bg.UnsafeOutputPath):
+        bg.write_bank_base_csv([], dst, root=outputs)
+    assert not dst.exists()
+
+
+def test_sidecar_destination_outside_outputs_folder_is_refused_nothing_written(tmp_path):
+    outputs = tmp_path / "outputs"
+    other = tmp_path / "elsewhere"
+    outputs.mkdir()
+    other.mkdir()
+    dst = other / "x.gate.json"
+    with pytest.raises(bg.UnsafeOutputPath):
+        bg.write_gate_sidecar(dst, root=outputs, bank_account=HSBC, book_filter_path="",
+                              points=[], twins=[], book_opening=0.0, intended={},
+                              skip_reasons={}, result={})
+    assert not dst.exists()
+
+
+def test_traversal_in_the_name_is_refused(tmp_path):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    sneaky = str(outputs) + "/../escaped_bank_base.csv"
+    with pytest.raises(bg.UnsafeOutputPath):
+        bg.write_bank_base_csv([], sneaky, root=outputs)
+    assert not (tmp_path / "escaped_bank_base.csv").exists()
+    with pytest.raises(bg.UnsafeOutputPath):
+        bg.write_missing_rows([], HSBC, [], {}, str(outputs) + os.sep + ".." + os.sep + "m.csv", root=outputs)
+    assert not (tmp_path / "m.csv").exists()
+
+
+def test_sidecar_outside_outputs_folder_is_not_read(tmp_path):
+    outputs = tmp_path / "outputs"
+    other = tmp_path / "elsewhere"
+    outputs.mkdir()
+    other.mkdir()
+    (other / "x.gate.json").write_text('{"points": []}', encoding="utf-8")
+    assert bg.read_gate_sidecar(other / "x.gate.json", root=outputs) is None
+    assert bg.read_gate_sidecar(other / "x.gate.json", root=other) == {"points": []}
+
+
+def test_check_after_import_refuses_gnucash_outside_known_folders(tmp_path, monkeypatch):
+    from ui.tabs import gnucash_review as rv
+    from ui import _safe_paths
+    known = tmp_path / "known"
+    known.mkdir()
+    monkeypatch.setattr(_safe_paths, "known_folders", lambda: [known])
+    csv_p = known / "s_GnuCash_import_ready.csv"
+    csv_p.write_text("Date\n", encoding="utf-8")
+    outside = tmp_path / "outside.gnucash"
+    outside.write_bytes(b"x")
+    calls = []
+    import agents.skill_gnucash_reconciler.agent as rec
+    monkeypatch.setattr(rec, "parse_gnucash_for_reconcile",
+                        lambda *a, **k: calls.append(a) or {})
+    msg, dl = rv._check_after_import(str(csv_p), str(outside))
+    assert "refused" in msg.lower() and calls == []

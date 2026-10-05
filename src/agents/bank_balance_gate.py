@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from collections import Counter, defaultdict
 from datetime import date
 from pathlib import Path
@@ -46,6 +47,26 @@ GATE_SUFFIX = ".gate.json"
 # Bank-as-base orientation: the amount columns swap meaning.
 BANK_BASE_DEPOSIT_HEADER = "Amount (Deposit)"
 BANK_BASE_WITHDRAWAL_HEADER = "Amount Negated (Withdrawal)"
+
+
+class UnsafeOutputPath(ValueError):
+    """A gate file path fell outside the folder it must stay in."""
+
+
+def _confine(path, root) -> str:
+    """Return the normalised ``path`` only if it lies directly inside ``root``
+    (the folder of the already-validated import file). Anything else -- another
+    folder, a ``..`` traversal, a NUL byte -- raises and nothing is touched.
+    Written as a plain string-prefix test on the real path (the form CodeQL's
+    py/path-injection query recognises as a sanitiser)."""
+    raw, base = str(path or ""), str(root or "")
+    if not raw or not base or "\x00" in raw or "\x00" in base:
+        raise UnsafeOutputPath("No usable path given.")
+    norm = os.path.normcase(os.path.realpath(os.path.abspath(raw)))
+    top = os.path.normcase(os.path.realpath(os.path.abspath(base)))
+    if os.path.dirname(norm) == top and norm.startswith(top.rstrip(os.sep) + os.sep):
+        return norm
+    raise UnsafeOutputPath(f"{os.path.basename(raw) or raw}: outside the outputs folder; refused.")
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +372,7 @@ def post_import_check(points: list[dict], splits, tolerance: float = TOLERANCE,
 
 
 def write_missing_rows(missing: list[dict], bank_account: str, mapped_rows: list[dict],
-                       intended: dict, out_path) -> int:
+                       intended: dict, out_path, *, root) -> int:
     """Write the rows absent from this bank's account in the import_ready layout
     (Account = category, Transfer Account = bank). The category comes from the
     mapped import-ready rows (matched by date + amount, one-to-one), then from
@@ -383,7 +404,8 @@ def write_missing_rows(missing: list[dict], bank_account: str, mapped_rows: list
             else "Missing from the book; no account known - assign one in Review before import",
         }
         out_rows.append(row)
-    with open(out_path, "w", newline="", encoding="utf-8") as f:
+    safe = _confine(out_path, root)
+    with open(safe, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=headers)
         w.writeheader()
         w.writerows(out_rows)
@@ -446,14 +468,15 @@ def to_bank_base_rows(rows: list[dict]) -> tuple[list[dict], list[str]]:
     return out, problems
 
 
-def write_bank_base_csv(import_ready_rows: list[dict], dst_path, *, blocked: bool = False):
+def write_bank_base_csv(import_ready_rows: list[dict], dst_path, *, root, blocked: bool = False):
     """Write the bank-base file. ``blocked`` (the gate failed) writes the header
     only, so a stale file from an earlier run can never be imported by mistake.
     Returns (rows_written, problems)."""
     rows, problems = ([], []) if blocked else to_bank_base_rows(import_ready_rows)
     if problems:
         rows = []
-    with open(dst_path, "w", newline="", encoding="utf-8") as f:
+    safe = _confine(dst_path, root)
+    with open(safe, "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=BANK_BASE_HEADERS)
         w.writeheader()
         w.writerows(rows)
@@ -464,22 +487,27 @@ def write_bank_base_csv(import_ready_rows: list[dict], dst_path, *, blocked: boo
 # sidecar + re-evaluation (used by the pipeline and the Review tab)
 # ---------------------------------------------------------------------------
 
-def write_gate_sidecar(path, *, bank_account: str, book_filter_path: str,
+def write_gate_sidecar(path, *, root, bank_account: str, book_filter_path: str,
                        points, twins, book_opening, intended, skip_reasons,
                        result) -> None:
     doc = {"bank_account": bank_account, "book_filter_path": book_filter_path,
            "points": points, "twins": twins, "book_opening": book_opening,
            "intended": intended, "skip_reasons": skip_reasons, "result": result}
-    with open(path, "w", encoding="utf-8") as f:
+    safe = _confine(path, root)
+    with open(safe, "w", encoding="utf-8") as f:
         json.dump(doc, f, indent=2, default=str)
 
 
-def read_gate_sidecar(path) -> dict | None:
-    p = Path(path)
-    if not p.is_file():
+def read_gate_sidecar(path, *, root) -> dict | None:
+    try:
+        safe = _confine(path, root)
+    except UnsafeOutputPath:
+        return None
+    if not os.path.isfile(safe):
         return None
     try:
-        doc = json.loads(p.read_text(encoding="utf-8"))
+        with open(safe, "r", encoding="utf-8") as f:
+            doc = json.loads(f.read())
     except (OSError, ValueError):
         return None
     return doc if isinstance(doc, dict) and "points" in doc else None

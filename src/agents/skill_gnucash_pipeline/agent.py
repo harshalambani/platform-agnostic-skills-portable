@@ -23,6 +23,7 @@ import csv
 import gzip
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
@@ -358,7 +359,7 @@ def _run_closing_gate(*, output_path: str, stmt_rows: list[dict], scoped_data,
     res = _bg.evaluate_gate(points, twins, flags, extras, book_open,
                             skip_reasons=reasons, intended=intended)
     _bg.write_gate_sidecar(
-        _bg.gate_sidecar_path(output_path), bank_account=bank_account,
+        _bg.gate_sidecar_path(output_path), root=os.path.dirname(os.path.abspath(output_path)), bank_account=bank_account,
         book_filter_path=filter_path, points=points, twins=twins,
         book_opening=book_open, intended=intended, skip_reasons=reasons, result=res)
 
@@ -388,7 +389,7 @@ def _run_closing_gate(*, output_path: str, stmt_rows: list[dict], scoped_data,
             f"{r['amount']:.2f} -- {r['reason']} (twin dated {r['twin_date']}).")
 
     dst = _bg.bank_base_name(output_path)
-    n, problems = _bg.write_bank_base_csv(final_rows, dst, blocked=blocked)
+    n, problems = _bg.write_bank_base_csv(final_rows, dst, root=os.path.dirname(os.path.abspath(output_path)), blocked=blocked)
     if blocked:
         pass
     elif problems:
@@ -2073,7 +2074,8 @@ def run(
                 f"❌ Closing-balance gate could not run ({e}). The bank-base import "
                 f"file was NOT released; do not import until this is checked.")
             try:
-                _bg.write_bank_base_csv([], _bg.bank_base_name(output_path), blocked=True)
+                _bg.write_bank_base_csv([], _bg.bank_base_name(output_path),
+                                        root=os.path.dirname(os.path.abspath(output_path)), blocked=True)
             except Exception:
                 pass
 

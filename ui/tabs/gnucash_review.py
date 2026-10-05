@@ -525,17 +525,17 @@ def _gate_on_export(csv_p: Path, rows: list[dict]) -> tuple[str | None, str, str
     older run) nothing is checked and the old export behaviour stays.
     """
     from agents import bank_balance_gate as bg
-    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p))
+    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p), root=csv_p.parent)
     if doc is None:
         return None, "", None
     dst = bg.bank_base_name(csv_p)
     res = bg.reevaluate(doc, rows)
     if res["status"] == "fail":
-        bg.write_bank_base_csv([], dst, blocked=True)
+        bg.write_bank_base_csv([], dst, root=csv_p.parent, blocked=True)
         lines = ["**EXPORT BLOCKED - the book would not end at the statement balance.**", ""]
         lines += [f"- {ln.strip()}" for ln in bg.format_gate_failure(res) if ln.strip()]
         return chr(10).join(lines), "", None
-    n, problems = bg.write_bank_base_csv(rows, dst)
+    n, problems = bg.write_bank_base_csv(rows, dst, root=csv_p.parent)
     if problems:
         return ("**EXPORT BLOCKED - the bank-base file cannot be built.**" + chr(10)
                 + chr(10).join(f"- {x}" for x in problems[:20])), "", None
@@ -562,10 +562,11 @@ def _check_after_import(csv_path: str, gnucash_path: str):
         csv_p = _safe_paths.resolve_input_file(csv_path, (".csv",))
     except _safe_paths.UnsafePathError as e:
         return f"Check refused: {e}", gr.update(interactive=False, value=None)
-    gc_p = Path(gnucash_path)
-    if not gc_p.is_file():
-        return f"GnuCash file not found: {gc_p.name}", gr.update(interactive=False, value=None)
-    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p))
+    try:
+        gc_p = _safe_paths.resolve_input_file(gnucash_path, (".gnucash",))
+    except _safe_paths.UnsafePathError as e:
+        return f"Check refused: {e}", gr.update(interactive=False, value=None)
+    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p), root=csv_p.parent)
     if doc is None:
         return ("No statement record (.gate.json) next to this CSV, so there is nothing to "
                 "compare the book with. Re-run the bank import."), gr.update(interactive=False, value=None)
@@ -588,12 +589,12 @@ def _check_after_import(csv_path: str, gnucash_path: str):
             pass
         out_p = csv_p.with_name(csv_p.stem + "_missing_rows.csv")
         n = bg.write_missing_rows(res["missing"], doc["bank_account"], mapped,
-                                  doc.get("intended") or {}, out_p)
+                                  doc.get("intended") or {}, out_p, root=csv_p.parent)
         base_p = bg.bank_base_name(out_p)
         mrows = []
         with open(out_p, "r", encoding="utf-8", newline="") as f:
             mrows = list(csv.DictReader(f))
-        bg.write_bank_base_csv(mrows, base_p)
+        bg.write_bank_base_csv(mrows, base_p, root=csv_p.parent)
         lines.append("")
         lines.append(f"**{n} row(s) are absent from this bank's account:**")
         for m in res["missing"][:60]:
