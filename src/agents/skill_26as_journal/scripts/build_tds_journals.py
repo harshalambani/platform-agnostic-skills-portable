@@ -1537,7 +1537,11 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
         for j in journals:
             w.writerow([
                 j.sr, j.deductor, j.section_label, j.category, j.credit_account,
-                j.credit_confidence, "yes" if j.credit_account in existing else "NO",
+                j.credit_confidence,
+                # TDS-08: every account the journal posts to must exist -- the
+                # debit side too, not just the credit account.
+                "yes" if all(sp.account in existing for sp in j.splits) and
+                j.credit_account in existing else "NO",
                 "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
                 f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
                 j.credit_basis, "; ".join(j.tied_candidates), j.tan,
@@ -1626,7 +1630,8 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
             "sr": j.sr, "id": journal_id(j), "deductor": j.deductor, "section": j.section_label,
             "category": j.category, "credit_account": j.credit_account,
             "confidence": j.credit_confidence,
-            "account_exists": j.credit_account in existing,
+            "account_exists": (j.credit_account in existing
+                               and all(sp.account in existing for sp in j.splits)),
             "balanced": j.balanced, "needs_review": j.needs_review,
             "candidates": j.candidates, "basis": j.credit_basis,
             "tied_candidates": j.tied_candidates,

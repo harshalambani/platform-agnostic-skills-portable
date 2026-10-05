@@ -413,3 +413,26 @@ def test_tds07_partner_routing_is_unchanged_when_partner_comp_is_configured():
     j = _c_journal(False, partner_comp_configured=True)
     assert j.excluded_from_journal and not j.needs_review     # still booked by the partner journal
     assert "MISSING DEBIT ACCOUNT" not in j.credit_basis
+
+
+def _review_exists(tmp_path, journals, accounts):
+    m.write_review(journals, tmp_path / "r.csv", accounts)
+    return [r["Account Exists"] for r in read_csv(tmp_path / "r.csv")]
+
+
+def test_tds08_a_missing_debit_side_shows_no_even_when_the_credit_account_exists(tmp_path):
+    j = _c_journal(False)
+    assert j.credit_account in {a.path for a in _c_chart(False)}   # credit side is present
+    assert _review_exists(tmp_path, [j], _c_chart(False)) == ["NO"]
+
+
+def test_tds08_a_missing_generic_fd_debit_leg_shows_no(tmp_path):
+    chart_no_fd = [a for a in chart() if a.path != GENERIC_FD]
+    j = m.build_journals([ded(1, "BANK OF BARODA", "194A", 1000.0, 100.0)], chart_no_fd)[0]
+    assert m.ACC_INTEREST_ON_FD in {s.account for s in j.splits}
+    assert _review_exists(tmp_path, [j], chart_no_fd) == ["NO"]
+
+
+def test_tds08_all_accounts_present_still_shows_yes(tmp_path):
+    j = _c_journal(True)
+    assert _review_exists(tmp_path, [j], _c_chart(True)) == ["yes"]   # NEGATIVE: no false NO
