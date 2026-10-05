@@ -334,15 +334,15 @@ def find_passwords(search_folder):
     Find passwords from the input folder. Supports two formats:
 
     Format 1 - Single password: a .txt file whose filename stem is the password.
-        e.g.  HARS2806.txt  ->  password list = ['HARS2806']
+        e.g.  EXAMPLE01.txt  ->  password list = ['EXAMPLE01']
 
     Format 2 - Multiple passwords: a file named 'passwords.txt' with one password
         per line (blank lines and lines starting with # are ignored).
         e.g.  passwords.txt containing:
-                  HARS2806
-                  HAR28061
-                  INABM2806
-                  INABM123
+                  EXAMPLE01
+                  EXAMPLE02
+                  EXAMPLE04
+                  EXAMPLE03
 
     Returns a list of passwords to try, or an empty list if none found.
     """
@@ -642,10 +642,10 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage: python extract_sort_cc_pdfs.py <input_folder> [output_folder] [password] [--extract-msg] [--folder-by-date|--folder-by-sender|--folder-by-subject]")
         print("\nPassword options (pick one):")
-        print("  Single password:    pass as 3rd argument, e.g. HARS2806")
-        print("  Multiple passwords: pass comma-separated, e.g. HARS2806,HAR28061,INABM123")
+        print("  Single password:    pass as 3rd argument, e.g. EXAMPLE01")
+        print("  Multiple passwords: pass comma-separated, e.g. EXAMPLE01,EXAMPLE02,EXAMPLE03")
         print("  From file:          place 'passwords.txt' in input folder, one password per line")
-        print("  Single from file:   place HARS2806.txt in input folder (filename stem = password)")
+        print("  Single from file:   place EXAMPLE01.txt in input folder (filename stem = password)")
         print("\nOptions:")
         print("  --extract-msg         Extract PDFs from MSG files")
         print("  --folder-by-date      Organize extracted PDFs by date (YYYY-MM)")
