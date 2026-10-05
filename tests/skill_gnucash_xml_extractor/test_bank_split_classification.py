@@ -376,7 +376,7 @@ def test_end_to_end_run_sweeps_to_fd_and_self_transfer_to_hsbc_never_sbm_or_hdfc
             }]
         }
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):

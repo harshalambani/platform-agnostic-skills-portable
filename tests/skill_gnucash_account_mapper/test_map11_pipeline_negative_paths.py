@@ -729,7 +729,7 @@ def test_run_end_to_end_routes_hsbc_and_hdfc_self_transfers_never_to_sbm(tmp_pat
         # + the Step 4.9 guard) -- never a rule coincidentally matching.
         return {}
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):
@@ -920,7 +920,7 @@ def _map11_patch_pipeline(monkeypatch, tmp_path):
     def fake_generate_rules(extractor_output, min_freq=1):
         return {}
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):

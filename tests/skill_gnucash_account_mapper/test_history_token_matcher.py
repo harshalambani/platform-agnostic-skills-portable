@@ -100,7 +100,7 @@ def test_sweep_rows_excluded_from_llm_via_run_step_wiring(tmp_path, monkeypatch)
         # real Step 3.6 history pass -- not a rule coincidentally matching.
         return {}
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):

@@ -326,7 +326,7 @@ def test_run_completes_and_reports_correctly_when_rules_resolve_every_row(tmp_pa
     def fake_generate_rules(extractor_output, min_freq=1):
         return _FULL_MATCH_RULES_BY_BANK
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):

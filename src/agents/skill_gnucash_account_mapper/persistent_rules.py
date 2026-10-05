@@ -366,16 +366,54 @@ def _rule_keys(rule: Dict):
     return first, (rule.get("account", ""), frozenset(pats))
 
 
+GLOBAL_KEY = "_global"
+PRUNE_BACKUP_SUFFIX = ".pre-map38.bak"
+
+
+def prune_one_off_rules(rules: Dict[str, List[Dict]], min_freq: int) -> Dict[str, tuple]:
+    """MAP-38: drop stored AUTO rules whose recorded `frequency` is below
+    `min_freq` (the bank learning threshold) from every bank section, in place.
+
+    Never touched: `_overrides`, `_global` (its threshold is separate), any
+    rule with source "user" wherever it sits, and any rule whose frequency is
+    missing or not an integer (unknown means keep).
+    Returns {section: (removed, kept)} for sections where something was removed.
+    """
+    report: Dict[str, tuple] = {}
+    for bank in list(rules):
+        if bank in (OVERRIDES_KEY, GLOBAL_KEY) or not isinstance(rules[bank], list):
+            continue
+        kept, removed = [], 0
+        for r in rules[bank]:
+            f = r.get("frequency") if isinstance(r, dict) else None
+            if (isinstance(r, dict) and r.get("source") != "user"
+                    and isinstance(f, int) and not isinstance(f, bool)
+                    and f < min_freq):
+                removed += 1
+            else:
+                kept.append(r)
+        if removed:
+            rules[bank] = kept
+            report[bank] = (removed, len(kept))
+    return report
+
+
 def merge_auto_rules(
     gnucash_file: str,
     new_rules_by_bank: Dict[str, List[Dict]],
     config_path: str = None,
+    min_bank_freq: int = None,
 ) -> Dict[str, List[Dict]]:
     """Merge freshly generated auto-rules into the persistent file.
 
     - New patterns are added.
     - Existing patterns get their confidence/reason/frequency updated.
     - User overrides (_overrides section) are never touched.
+    - MAP-38: when `min_bank_freq` is given, stored auto-rules below it are
+      pruned after the merge, BEFORE saving and returning, so the caller
+      matches on the pruned set in the same run. The yaml is copied once to
+      `<stem>.pre-map38.bak.yaml` first (never overwritten), and only if
+      something is actually removed.
     - Returns the merged dict (also saved to disk).
     """
     existing = load_rules(gnucash_file, config_path)
@@ -417,6 +455,19 @@ def merge_auto_rules(
             ident_index.setdefault(ident, idx)
 
         existing[bank] = old_rules
+
+    if min_bank_freq is not None:
+        report = prune_one_off_rules(existing, min_bank_freq)
+        if report:
+            rp = rules_path(gnucash_file, config_path)
+            bak = rp.with_name(rp.stem + PRUNE_BACKUP_SUFFIX + rp.suffix)
+            if rp.exists() and not bak.exists():
+                import shutil
+                shutil.copy2(rp, bak)
+            log.info("MAP-38 pruned one-off bank rules (below %d): %s",
+                     min_bank_freq,
+                     "; ".join("section %d: removed %d, kept %d" % (i + 1, r, k)
+                               for i, (r, k) in enumerate(report.values())))
 
     save_rules(gnucash_file, existing, config_path)
     return existing
