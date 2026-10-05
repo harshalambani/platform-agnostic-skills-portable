@@ -1505,6 +1505,11 @@ def write_part_i_split(rows: list[dict], out_path: Path) -> tuple[Optional[str],
     return str(part_i_path), problems
 
 
+def journal_id(j: Journal) -> str:
+    """TDS-05: 'TDSJ2' / '15GJ2' / 'TCSJ2' -- unique across Parts, unlike Sr."""
+    return f"{series_for_category(j.category)}{j.sr}"
+
+
 def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -> None:
     existing = {a.path for a in accounts}
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -1607,7 +1612,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     review_rows = []
     for j in journals:
         review_rows.append({
-            "sr": j.sr, "deductor": j.deductor, "section": j.section_label,
+            "sr": j.sr, "id": journal_id(j), "deductor": j.deductor, "section": j.section_label,
             "category": j.category, "credit_account": j.credit_account,
             "confidence": j.credit_confidence,
             "account_exists": j.credit_account in existing,
@@ -1633,6 +1638,37 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "part_ii_problems": part_ii_problems,
         "s194t_reco": s194t_reco,
     }
+
+
+_OVERRIDE_SERIES = ("TDSJ", "15GJ", "TCSJ")
+_OVERRIDE_KEY_RE = re.compile(r"(TDSJ|15GJ|TCSJ)\D*(?P<sr>\d+)", re.I)
+
+
+def parse_override_key(key) -> Optional[tuple]:
+    """TDS-05: an override key -> (series, sr), or None when it carries no number.
+
+    Sr numbers restart in every Part of the 26AS, so a bare number is
+    ambiguous. A row is identified by its Transaction ID series plus its Sr:
+    'TDSJ2' (Part I), '15GJ2' (Part II), 'TCSJ2' (Part VI). A bare number (or
+    'Sr 2') keeps meaning Part I, as it always did -- it is never applied to
+    Part II or Part VI.
+    """
+    text = str(key)
+    m = _OVERRIDE_KEY_RE.search(text)
+    if m:
+        return m.group(1).upper(), int(m.group("sr"))
+    m = re.search(r"\d+", text)
+    return ("TDSJ", int(m.group(0))) if m else None
+
+
+def split_overrides(raw: dict) -> tuple:
+    """{key -> account} -> (part_i, part_ii, part_vi) maps of {sr -> account}."""
+    out = {"TDSJ": {}, "15GJ": {}, "TCSJ": {}}
+    for k, v in (raw or {}).items():
+        parsed = parse_override_key(k)
+        if parsed and v:
+            out[parsed[0]][parsed[1]] = v
+    return out["TDSJ"], out["15GJ"], out["TCSJ"]
 
 
 def _review_flag(needs_review: bool, confidence: str) -> str:
@@ -1682,12 +1718,13 @@ def main(argv: list[str]) -> int:
         # text (a tool-calling model may echo the display label "Sr 7" rather
         # than "7"): pull the digits out and skip any key with no number so a
         # stray label never crashes the build with int("Sr 7").
-        overrides = {}
-        for k, v in raw.items():
-            m = re.search(r"\d+", str(k))
-            if m:
-                overrides[int(m.group(0))] = v
+        # TDS-05: Sr numbers restart per Part, so keys may carry the series
+        # ('15GJ2'); each override only ever reaches its own Part.
+        overrides, g_overrides, tcs_overrides = split_overrides(raw)
+    else:
+        g_overrides = tcs_overrides = None
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides,
+               tcs_overrides=tcs_overrides, g_overrides=g_overrides,
                partner_comp_configured=partner_comp_configured,
                tds_expense_account=tds_expense_account)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
@@ -1695,7 +1732,7 @@ def main(argv: list[str]) -> int:
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
     for r in stats["rows"]:
         flag = _review_flag(r["needs_review"], r["confidence"])
-        print(f"  Sr{r['sr']:>2} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
+        print(f"  {r['id']:>6} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
               f"-> {r['credit_account']}  ({r['confidence']}){flag}")
         if r["needs_review"] and r.get("tied_candidates"):
             print(f"        tied candidates: {', '.join(r['tied_candidates'])}")

@@ -104,6 +104,13 @@ def _normalize_overrides(overrides) -> "dict | str":
     for k, v in overrides.items():
         if not v:
             continue
+        # TDS-05: Sr numbers restart per Part, so a key may carry its series
+        # ("15GJ2" = Part II Sr 2). Keep the series; a bare number stays bare
+        # and means Part I, exactly as before.
+        m = re.search(r"(TDSJ|15GJ|TCSJ)\D*(\d+)", str(k), re.I)
+        if m:
+            out[m.group(1).upper() + m.group(2)] = v
+            continue
         m = re.search(r"\d+", str(k))
         if m:
             out[m.group(0)] = v
@@ -135,12 +142,19 @@ def _gate_ambiguous_overrides(overrides: dict, output_path: str):
         return overrides, []
 
     with review.open(newline="", encoding="utf-8") as f:
-        rows_by_sr = {(r.get("Sr") or "").strip(): r for r in csv.DictReader(f)}
+        # TDS-05: Sr restarts per Part, so rows are keyed series + Sr
+        # ("TDSJ2", "15GJ2"), never by Sr alone.
+        rows_by_sr = {}
+        for r in csv.DictReader(f):
+            series = _BTJ.series_for_category((r.get("Category") or "").strip())
+            rows_by_sr[series + (r.get("Sr") or "").strip()] = r
 
     accepted: dict[str, str] = {}
     rejections: list[str] = []
     for sr, account in overrides.items():
-        row = rows_by_sr.get(str(sr))
+        bare = str(sr).isdigit()
+        row = rows_by_sr.get(("TDSJ" + str(sr)) if bare else str(sr))
+        label = f"Sr {sr}" if bare else str(sr)
         if row is None or (row.get("Confidence") or "").strip() != "Ambiguous":
             accepted[sr] = account
             continue
@@ -151,7 +165,7 @@ def _gate_ambiguous_overrides(overrides: dict, output_path: str):
         else:
             deductor = (row.get("Deductor") or "?").strip()
             rejections.append(
-                f"Sr {sr} ({deductor}): '{account}' is not one of the tied "
+                f"{label} ({deductor}): '{account}' is not one of the tied "
                 f"candidates ({', '.join(tied) or 'none listed'}); the row "
                 f"keeps its existing account and stays flagged for manual "
                 f"review in the Review tab."

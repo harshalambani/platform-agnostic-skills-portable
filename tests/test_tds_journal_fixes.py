@@ -287,3 +287,85 @@ def test_tds04_final_summary_is_quiet_when_nothing_was_blocked(tmp_path):
     x = write_26as(tmp_path / "x.xlsx", {"Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)]})
     m.run(x, book, tmp_path / "out.csv")
     assert "NOT POSTED" not in tl.final_summary(str(tmp_path / "out.csv"), str(book))   # NEGATIVE
+
+
+# ---- TDS-05: Sr restarts per Part, so overrides are keyed series + Sr ----------------------
+
+_TARGET = "Income:Interest Income:Interest on ICICI Bank - FD"
+
+
+def _two_part_run(tmp_path, overrides):
+    import json
+    specs = STD + [(BOB, "INCOME", ()), (_TARGET, "INCOME", ()),
+                   (m.ACC_INTEREST_ON_FD, "INCOME", ())]
+    book = write_book(tmp_path / "b.gnucash", specs)
+    x = write_26as(tmp_path / "x.xlsx", {
+        "Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)],
+        "Part II": [(1, "BANK OF BARODA", "194A", 5000.0, 0.0)],
+    })
+    ov = tmp_path / "ov.json"
+    ov.write_text(json.dumps(overrides), encoding="utf-8")
+    out = tmp_path / "out.csv"
+    assert m.main(["build", str(x), str(book), str(out), str(ov)]) == 0
+    rows = {}
+    for r in read_csv(tmp_path / "out-review.csv"):
+        rows[m.series_for_category(r["Category"]) + r["Sr"]] = r["Credit Account"]
+    return rows
+
+
+def test_tds05_parse_override_key_reads_series_and_sr():
+    assert m.parse_override_key("15GJ2") == ("15GJ", 2)
+    assert m.parse_override_key("tdsj7") == ("TDSJ", 7)
+    assert m.parse_override_key("TCSJ 3") == ("TCSJ", 3)
+    assert m.parse_override_key("Sr 7") == ("TDSJ", 7)
+    assert m.parse_override_key("7") == ("TDSJ", 7)
+    assert m.parse_override_key("15GJ2") != ("TDSJ", 15)      # NEGATIVE: not read as Sr 15
+    assert m.parse_override_key("no number") is None
+
+
+def test_tds05_split_overrides_sends_each_key_to_its_own_part():
+    a, b, c = m.split_overrides({"3": "x", "15GJ3": "y", "TCSJ3": "z", "junk": "w"})
+    assert (a, b, c) == ({3: "x"}, {3: "y"}, {3: "z"})
+
+
+def test_tds05_a_part_ii_override_does_not_change_the_part_i_row(tmp_path):
+    base = _two_part_run_dir(tmp_path, "a", {})
+    got = _two_part_run_dir(tmp_path, "b", {"15GJ1": _TARGET})
+    assert got["TDSJ1"] == base["TDSJ1"]                      # NEGATIVE: Part I untouched
+    assert got["15GJ1"] == _TARGET
+
+
+def test_tds05_a_bare_number_never_changes_a_part_ii_row(tmp_path):
+    base = _two_part_run_dir(tmp_path, "a", {})
+    got = _two_part_run_dir(tmp_path, "b", {"1": _TARGET})
+    assert got["15GJ1"] == base["15GJ1"]                      # NEGATIVE: Part II untouched
+    assert got["TDSJ1"] == _TARGET                            # bare = Part I, as before
+
+
+def _two_part_run_dir(tmp_path, name, overrides):
+    d = tmp_path / name
+    d.mkdir(exist_ok=True)
+    return _two_part_run(d, overrides)
+
+
+def test_tds05_tools_normalize_keeps_the_series_and_bare_stays_bare():
+    from agents.skill_26as_journal import tools as tl
+    assert tl._normalize_overrides({"15GJ2": "a", "Sr 7": "b", 3: "c", "x": "d"}) == \
+        {"15GJ2": "a", "7": "b", "3": "c"}
+    assert "15" not in tl._normalize_overrides({"15GJ2": "a"})   # NEGATIVE: not Sr 15
+
+
+def test_tds05_gate_matches_review_rows_by_series_not_by_sr_alone(tmp_path):
+    from agents.skill_26as_journal import tools as tl
+    out = tmp_path / "o.csv"
+    (tmp_path / "o-review.csv").write_text(
+        "Sr,Deductor,Category,Confidence,Tied Candidates\n"
+        "1,PART ONE PAYER,A,High,\n"
+        "1,PART TWO PAYER,G,Ambiguous,Acc:One;Acc:Two\n", encoding="utf-8")
+    # a bare "1" is Part I (High, not gated) -- it must NOT be judged against the Part II row
+    assert tl._gate_ambiguous_overrides({"1": "Acc:Other"}, str(out)) == ({"1": "Acc:Other"}, [])
+    # the Part II key IS gated against the Part II row's tied candidates
+    rej = tl._gate_ambiguous_overrides({"15GJ1": "Acc:Other"}, str(out))
+    assert isinstance(rej, str) and rej.startswith("REJECTED") and "15GJ1" in rej
+    ok = tl._gate_ambiguous_overrides({"15GJ1": "Acc:Two"}, str(out))
+    assert ok == ({"15GJ1": "Acc:Two"}, [])
