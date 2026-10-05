@@ -146,6 +146,12 @@ class ReviewSpec:
     # "accent-blue") so the coloured band follows the row's new match type.
     # A value with no entry gets no class. Empty (default) = untouched.
     status_classes: dict[str, str] = field(default_factory=dict)
+    # UI-14. The lower-cased status_col value that means "the user chose this
+    # target" (e.g. "override"). A row in that state drops its tone-* row class
+    # (a contra / advisory flag colour), so the override colour from
+    # status_classes shows instead. The row's badges and tags are untouched, so
+    # a transfer-check badge stays as a reminder. Default "" changes nothing.
+    override_status: str = ""
 
     @property
     def payload_box_id(self) -> str:
@@ -485,6 +491,7 @@ _BODY = r"""
   const PAYLOAD_VAR = %%PAYLOAD_VAR_JSON%%;
   const STATUS_COL = %%STATUS_COL_JSON%%;
   const STATUS_CLASSES = %%STATUS_CLASSES_JSON%%;
+  const OVERRIDE_STATUS = %%OVERRIDE_STATUS_JSON%%;
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -948,7 +955,11 @@ _BODY = r"""
     tbody.innerHTML = '';
     filtered.forEach(r => {
       const tr = document.createElement('tr');
-      if (r._rowclass) r._rowclass.split(/\s+/).forEach(c => c && tr.classList.add(c));
+      // UI-14: an overridden row shows the override colour, not a flag tone.
+      const overridden = !!(OVERRIDE_STATUS && STATUS_COL &&
+        cellText(r, STATUS_COL).trim().toLowerCase() === OVERRIDE_STATUS);
+      if (r._rowclass) r._rowclass.split(/\s+/).forEach(
+        c => c && !(overridden && c.indexOf('tone-') === 0) && tr.classList.add(c));
       if (r._band) tr.classList.add(r._band);
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
@@ -1203,6 +1214,7 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%PAYLOAD_VAR_JSON%%", js_json(spec.payload_var)),
         ("%%STATUS_COL_JSON%%", js_json(spec.status_col)),
         ("%%STATUS_CLASSES_JSON%%", js_json(spec.status_classes)),
+        ("%%OVERRIDE_STATUS_JSON%%", js_json(spec.override_status.strip().lower())),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)

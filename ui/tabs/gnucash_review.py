@@ -456,6 +456,7 @@ def _spec(
         context={"csv_path": csv_path, "gnucash_file": gnucash_path},
         status_col="Confidence",  # UI-04: an assigned row loses its stale badge
         status_classes=_band_classes(),  # UI-05: ...and its band follows the new type
+        override_status="override",  # UI-14: ...and a flag tone gives way to the override colour
         extra_panel_html=_legend_html(),
         allow_exclude=True,  # IMP-11: already-booked rows start unticked
     )
