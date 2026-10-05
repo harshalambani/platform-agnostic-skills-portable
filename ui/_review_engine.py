@@ -400,6 +400,14 @@ _CSS = r"""
   width: 320px; padding: 5px 8px; border: 1px solid #444;
   border-radius: 4px; font-size: 12px; background: #1a1a1a; color: #e0e0e0;
 }
+/* UI-13: an X inside the box (only while it has text), like the filter X. */
+#%%APP%%-app .picker-search.has-text { padding-right: 24px; }
+#%%APP%%-app .picker .picker-clear {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  width: 16px; height: 16px; padding: 0; line-height: 14px; font-size: 14px;
+  border: none; border-radius: 50%; background: transparent; color: #999; cursor: pointer;
+}
+#%%APP%%-app .picker .picker-clear:hover { background: #333; color: #fff; }
 #%%APP%%-app .picker-dropdown {
   position: absolute; top: 100%; left: 0; z-index: 100;
   width: 460px; max-height: 280px; overflow-y: auto;
@@ -442,6 +450,8 @@ _BODY = r"""
     <div class="picker">
       <input type="text" class="picker-search" id="%%APP%%-picker-search"
              placeholder="%%PICKER_PLACEHOLDER%%" autocomplete="off">
+      <button type="button" class="picker-clear" id="%%APP%%-picker-clear"
+              title="Clear (Esc)" style="display:none">&times;</button>
       <div class="picker-dropdown" id="%%APP%%-picker-dropdown"></div>
     </div>
     <button id="%%APP%%-apply-sel" class="primary" title="Apply to selected rows">Apply to selected</button>
@@ -508,7 +518,20 @@ _BODY = r"""
   // ── Searchable picker ──
   const pickSearch = $('picker-search');
   const pickDD = $('picker-dropdown');
+  const pickClear = $('picker-clear');
   let chosen = '';
+
+  // UI-13: the X shows only while the box has text.
+  function syncPickClear() {
+    const has = !!pickSearch.value;
+    if (pickClear) pickClear.style.display = has ? '' : 'none';
+    if (has) pickSearch.classList.add('has-text'); else pickSearch.classList.remove('has-text');
+  }
+  // UI-13: empties the box and the chosen value ONLY. It never assigns, never
+  // touches a row, a filter box or the payload.
+  function clearPicker() {
+    chosen = ''; pickSearch.value = ''; syncPickClear();
+  }
 
   function renderPicker(q) {
     const ql = (q || '').toLowerCase();
@@ -522,14 +545,36 @@ _BODY = r"""
       div.innerHTML = '<span class="p-primary">' + esc(it.primary) + '</span> ' +
                       '<span class="p-secondary">' + esc(it.secondary) + '</span>';
       div.onclick = () => {
-        chosen = it.value; pickSearch.value = it.value; pickDD.classList.remove('open');
+        chosen = it.value; pickSearch.value = it.value; pickDD.classList.remove('open'); syncPickClear();
       };
       pickDD.appendChild(div);
     });
     if (!list.length) pickDD.innerHTML = '<div class="picker-item">No matches.</div>';
   }
   pickSearch.onfocus = () => { renderPicker(pickSearch.value); pickDD.classList.add('open'); };
-  pickSearch.oninput = () => { chosen = ''; renderPicker(pickSearch.value); pickDD.classList.add('open'); };
+  pickSearch.oninput = () => { chosen = ''; syncPickClear(); renderPicker(pickSearch.value); pickDD.classList.add('open'); };
+  // UI-13: Esc closes an open dropdown; with it shut, Esc empties the box and the
+  // chosen value. It goes no further (the filter boxes' own Esc handlers never see it).
+  pickSearch.onkeydown = (e) => {
+    if (e.key !== 'Escape') return;
+    if (e.stopPropagation) e.stopPropagation();
+    if (pickDD.classList.contains('open')) {
+      if (e.preventDefault) e.preventDefault();
+      pickDD.classList.remove('open');
+      return;
+    }
+    if (pickSearch.value || chosen) {
+      if (e.preventDefault) e.preventDefault();
+      clearPicker();
+    }
+  };
+  syncPickClear();
+  if (pickClear) pickClear.onclick = (e) => {
+    if (e && e.stopPropagation) e.stopPropagation();
+    clearPicker();
+    pickSearch.focus();                 // keep the caret in the box ...
+    pickDD.classList.remove('open');    // ... but leave the dropdown shut
+  };
   document.addEventListener('click', (e) => {
     if (!e.target.closest('#' + APP + '-app .picker')) pickDD.classList.remove('open');
   });
