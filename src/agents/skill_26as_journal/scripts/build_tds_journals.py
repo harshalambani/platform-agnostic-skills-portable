@@ -181,7 +181,8 @@ def series_for_category(category: str) -> str:
 # Alias expansion for matching: maps a token found in an ACCOUNT name to the
 # set of tokens it stands for in a DEDUCTOR name (and vice-versa via expansion).
 ALIASES = {
-    "BOB": {"BANK", "BARODA"},
+    # TDS-02: "BANK" is in every bank's name, so it must never be what ties a payer to BoB.
+    "BOB": {"BARODA"},
     "EPF": {"PROVIDENT", "FUND"},
     "PF": {"PROVIDENT", "FUND"},
     "DRL": {"REDDY", "REDDYS", "LABORATORIES"},

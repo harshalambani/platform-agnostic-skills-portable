@@ -92,3 +92,27 @@ def test_tds01_b4d_a_bank_specific_fd_account_is_never_the_generic_one():
     only_specific = [acc(BOB), acc(ICICI)]
     assert m.find_generic_fd_account(only_specific) is None
     assert m.find_generic_fd_account(chart()) not in (BOB, ICICI)
+
+
+# ---- TDS-02: BANK alone never ties a payer to BoB ---------------------------------------
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("payer", ["HDFC BANK LIMITED", "ICICI BANK", "STATE BANK OF INDIA",
+                                   "SOME OTHER BANK LTD", "AXIS BANK"])
+def test_tds02_other_banks_do_not_resolve_to_bob(payer):
+    two = [acc(BOB), acc("Income:Interest Income:Interest on Chola Bond")]
+    acct, conf, _b, _c, _t = m.match_credit_account(payer, "A", two, "")
+    assert acct != BOB                    # NEGATIVE: the word BANK is not a match
+    assert acct is None and conf == "Suspense"
+
+
+def test_tds02_bank_of_baroda_still_resolves_to_bob():
+    acct, _c, _b, _cs, _t = m.match_credit_account(
+        "BANK OF BARODA", "A", [acc(BOB), acc(ICICI)], "")
+    assert acct == BOB
+
+
+def test_tds02_the_alias_table_does_not_carry_the_bare_word_bank():
+    assert "BANK" not in m.ALIASES["BOB"]
