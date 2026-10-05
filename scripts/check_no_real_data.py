@@ -12,6 +12,12 @@ contains a real value:
    (statement passwords, an account number, real transaction references).
    Only the hashes are stored here, so this file does not leak them.
 
+SEC-20 adds a third check on the same walk: an employer / firm name (and a bank
+reference marker) must not reappear in any tracked text file as a whole word,
+case-insensitively. Only hashes are stored, so this file holds neither string.
+Employer markers belong in per-entity config (`reimbursement_markers`), and
+tests use a synthetic firm.
+
 Exit 0 = clean, 1 = something found (file:line and the kind, never the value).
 """
 from __future__ import annotations
@@ -34,6 +40,15 @@ DENYLIST_SHA256 = frozenset({
     "9df9098d95de86bb396fcbac6dbdd6bd74a309bde1a22d6c42b5203210bf134d",
     "d6acb7f0ef759b5d763ae136ba4ea44f8a3b544efd323acd5e4fccba288b6129",
 })
+
+# SEC-20: sha256 of the lower-cased whole word (a 4-letter firm name and a
+# 4-letter bank reference marker). Hashes only, so this file never matches itself.
+EMPLOYER_NAME_SHA256 = frozenset({
+    "344bff8b2788383a072daddf6088c90e6b7b2f026e992a7267ff5094ad6c13eb",
+    "3d8bf2c74d4fba32e752aa536d84008212f477a7c57e02c15e7f0926e050a5bd",
+})
+EMPLOYER_NAME_LENGTHS = frozenset({4})   # only words of these lengths are hashed
+WORD = re.compile(r"\w+")
 
 SHAPES = [
     ("real-password constant with a literal value",
@@ -60,6 +75,10 @@ def scan_text(text: str) -> list[tuple[int, str]]:
             if _digest(tok) in DENYLIST_SHA256 or (
                     tok.startswith("0") and _digest(tok.lstrip("0")) in DENYLIST_SHA256):
                 found.append((n, "a value that was removed under SEC-13/16/17"))
+        for w in WORD.findall(line):
+            if len(w) in EMPLOYER_NAME_LENGTHS and _digest(w) in EMPLOYER_NAME_SHA256:
+                found.append((n, "an employer / firm name removed under SEC-20 "
+                                 "(use per-entity config or a synthetic name)"))
     return found
 
 

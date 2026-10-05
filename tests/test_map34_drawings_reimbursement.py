@@ -26,7 +26,8 @@ WELFARE = "Expenses:Staff Welfare"
 SALARY = "Income:Salary"
 CCP = "Liabilities:Credit Card Payment"
 
-REIMB = "NEFT FROM SYNTHCORP LTD | REF123 | KOMH"
+REIMB = "NEFT FROM SYNTHCORP LTD | REF123 | ZZRB"
+MK = ["ZZRB"]                       # synthetic marker, supplied through config
 SALARY_NARR = "TRANSFER FROM 000111XXXX | SOF NRE | JAN"
 
 
@@ -40,21 +41,21 @@ def _reset_state():
 # ---------------------------------------------------------------- the rule
 
 def test_reimbursement_pattern_matches_money_in_with_the_marker():
-    assert m._is_employer_reimbursement_credit(REIMB, {"Deposit": "500", "Withdrawal": ""})
+    assert m._is_employer_reimbursement_credit(REIMB, {"Deposit": "500", "Withdrawal": ""}, MK)
     assert m._is_employer_reimbursement_credit(
-        "neft from other co pvt ltd komh 77", {"Deposit": "5", "Withdrawal": ""})
+        "neft from other co pvt ltd zzrb 77", {"Deposit": "5", "Withdrawal": ""}, MK)
 
 
 def test_salary_transfer_and_look_alikes_do_not_match():                      # NEGATIVE
     dep = {"Deposit": "500", "Withdrawal": ""}
     for d in (SALARY_NARR, "NEFT FROM SYNTHCORP LTD | SALARY JAN",
-              "NEFT TO SYNTHCORP LTD | KOMH", "UPI/KOMH/123", "KOMH"):
-        assert not m._is_employer_reimbursement_credit(d, dep), d
+              "NEFT TO SYNTHCORP LTD | ZZRB", "UPI/ZZRB/123", "ZZRB"):
+        assert not m._is_employer_reimbursement_credit(d, dep, MK), d
 
 
 def test_money_out_with_the_marker_is_never_a_reimbursement():                # NEGATIVE
-    assert not m._is_employer_reimbursement_credit(REIMB, {"Deposit": "", "Withdrawal": "500"})
-    assert not m._is_employer_reimbursement_credit(REIMB, {"Deposit": "5", "Withdrawal": "5"})
+    assert not m._is_employer_reimbursement_credit(REIMB, {"Deposit": "", "Withdrawal": "500"}, MK)
+    assert not m._is_employer_reimbursement_credit(REIMB, {"Deposit": "5", "Withdrawal": "5"}, MK)
 
 
 # ----------------------------------------------------- direction exemption
@@ -129,7 +130,7 @@ def _salary_history():
 
 def test_reimbursement_credit_lands_on_the_configured_drawings(tmp_path):
     book = _book(tmp_path)
-    got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[DRAW])
+    got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[DRAW], reimbursement_markers=MK)
     assert got[0]["Account"] == DRAW
     assert got[0]["Confidence"] == "medium"
     assert got[0]["MatchReason"].startswith("employer reimbursement = drawings")
@@ -138,7 +139,7 @@ def test_reimbursement_credit_lands_on_the_configured_drawings(tmp_path):
 def test_reimbursement_never_lands_on_credit_card_payment_or_welfare(tmp_path):   # NEGATIVE
     hist = [(f"2025-0{i}-05", "CREDIT CARD PAYMENT SYNTH", 50000, "ccp", False) for i in range(1, 7)]
     book = _book(tmp_path, hist)
-    got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[DRAW])
+    got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[DRAW], reimbursement_markers=MK)
     assert got[0]["Account"] == DRAW
     assert got[0]["Account"] not in (CCP, WELFARE)
 
@@ -147,7 +148,7 @@ def test_salary_transfer_stays_on_salary(tmp_path):                           # 
     book = _book(tmp_path, _salary_history())
     rows = [("2026-01-10", SALARY_NARR.replace("JAN", "M9"), "100000", "")]
     before = _run(tmp_path, book, rows)
-    after = _run(tmp_path, book, rows, drawings_accounts=[DRAW])
+    after = _run(tmp_path, book, rows, drawings_accounts=[DRAW], reimbursement_markers=MK)
     assert before[0]["Account"] == SALARY, before[0]
     assert after[0]["Account"] == SALARY
     assert not after[0]["MatchReason"].startswith("employer reimbursement")
@@ -181,7 +182,7 @@ def test_history_match_of_money_in_to_drawings_is_kept(tmp_path):
     narr = "TRANSFER FROM SYNTHPAL | REFUND"
     hist = [(f"2025-0{i}-05", narr, 20000, "draw", True) for i in range(1, 7)]
     got = _run(tmp_path, _book(tmp_path, hist), [("2026-01-10", narr, "900", "")],
-               drawings_accounts=[DRAW])
+               drawings_accounts=[DRAW], reimbursement_markers=MK)
     assert got[0]["Account"] == DRAW
     assert got[0]["MatchReason"].startswith("History")
 
@@ -189,7 +190,7 @@ def test_history_match_of_money_in_to_drawings_is_kept(tmp_path):
 def test_keyword_or_weak_guess_of_money_in_to_drawings_goes_to_suspense(tmp_path):   # NEGATIVE
     rows = [("2026-01-10", "DRAWINGS SYNTH CREDIT", "900", ""),
             ("2026-01-11", "REV-UPI/SYNTHPAL/DRAWINGS", "900", "")]
-    got = _run(tmp_path, _book(tmp_path), rows, drawings_accounts=[DRAW])
+    got = _run(tmp_path, _book(tmp_path), rows, drawings_accounts=[DRAW], reimbursement_markers=MK)
     for r in got:
         assert r["Account"] != DRAW, r
 
@@ -202,3 +203,82 @@ def test_hidden_or_placeholder_configured_drawings_is_never_a_target(tmp_path): 
         got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")], drawings_accounts=[acct])
         assert got[0]["Account"] != acct
         assert not got[0]["MatchReason"].startswith("employer reimbursement")
+
+
+# ------------------------------------------------- SEC-20: marker from config
+
+DEP = {"Deposit": "500", "Withdrawal": ""}
+
+
+def test_configured_marker_routes_the_credit_to_drawings(tmp_path):
+    book = _book(tmp_path)
+    got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")],
+               drawings_accounts=[DRAW], reimbursement_markers=["ZZRB"])
+    assert got[0]["Account"] == DRAW
+    assert got[0]["MatchReason"].startswith("employer reimbursement = drawings")
+
+
+def test_no_markers_configured_means_no_row_matches(tmp_path):                 # NEGATIVE (a)
+    book = _book(tmp_path)
+    for kw in ({}, {"reimbursement_markers": []}, {"reimbursement_markers": None}):
+        got = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")],
+                   drawings_accounts=[DRAW], **kw)
+        assert "employer reimbursement" not in got[0]["MatchReason"]
+        assert got[0]["Account"] != DRAW
+    assert not m._is_employer_reimbursement_credit(REIMB, DEP)
+    assert not m._is_employer_reimbursement_credit(REIMB, DEP, [])
+
+
+def test_one_entitys_marker_does_not_fire_for_another(tmp_path):                # NEGATIVE (b)
+    book = _book(tmp_path)
+    a = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")],
+             drawings_accounts=[DRAW], reimbursement_markers=["ZZRB"])
+    b = _run(tmp_path, book, [("2026-01-10", REIMB, "1200", "")],
+             drawings_accounts=[DRAW], reimbursement_markers=["OTHERCO"])
+    assert a[0]["Account"] == DRAW
+    assert b[0]["Account"] != DRAW and "employer reimbursement" not in b[0]["MatchReason"]
+
+
+def test_debit_with_the_marker_never_matches_from_config():                    # NEGATIVE (c)
+    assert not m._is_employer_reimbursement_credit(REIMB, {"Deposit": "", "Withdrawal": "9"}, MK)
+
+
+def test_salary_style_credit_never_matches_with_markers_configured():          # NEGATIVE (d)
+    assert not m._is_employer_reimbursement_credit(SALARY_NARR, DEP, MK)
+
+
+def test_marker_inside_a_longer_word_does_not_match():                          # NEGATIVE (e)
+    for d in ("NEFT FROM SYNTHCORP XZZRBX 1", "NEFT FROM A ZZRBS", "NEFT FROM A PREZZRB"):
+        assert not m._is_employer_reimbursement_credit(d, DEP, MK), d
+
+
+def test_blank_marker_entries_do_not_make_everything_match():                  # NEGATIVE (f)
+    for blanks in ([""], ["  "], [None, "", " 	 "], []):
+        assert not m._is_employer_reimbursement_credit(REIMB, DEP, blanks)
+        assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD | 1", DEP, blanks)
+    # a blank next to a real marker neither widens nor breaks it
+    assert m._is_employer_reimbursement_credit(REIMB, DEP, ["", "ZZRB"])
+    assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD | 1", DEP, ["", "ZZRB"])
+
+
+def test_markers_are_regex_escaped():                                           # NEGATIVE
+    assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD ABC", DEP, ["A.C"])
+    assert m._is_employer_reimbursement_credit("NEFT FROM X LTD A.C", DEP, ["A.C"])
+
+
+def test_several_markers_either_routes_and_neither_does_not(tmp_path):
+    mks = ["ZZRB", "A.B+C"]                      # second one carries regex metacharacters
+    dep = {"Deposit": "500", "Withdrawal": ""}
+    assert m._is_employer_reimbursement_credit("NEFT FROM X LTD | ZZRB", dep, mks)
+    assert m._is_employer_reimbursement_credit("NEFT FROM X LTD | A.B+C", dep, mks)
+    # NEGATIVE: neither marker; and the metacharacters are literal, not a pattern
+    assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD | QQQQ", dep, mks)
+    assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD | AXB", dep, mks)
+    assert not m._is_employer_reimbursement_credit("NEFT FROM X LTD | AAB", dep, mks)
+    book = _book(tmp_path)
+    rows = [("2026-01-10", "NEFT FROM X LTD | A.B+C", "100", ""),
+            ("2026-01-11", "NEFT FROM X LTD | ZZRB", "200", ""),
+            ("2026-01-12", "NEFT FROM X LTD | QQQQ", "300", "")]
+    got = _run(tmp_path, book, rows, drawings_accounts=[DRAW], reimbursement_markers=mks)
+    assert got[0]["Account"] == DRAW and got[1]["Account"] == DRAW
+    assert got[2]["Account"] != DRAW

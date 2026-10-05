@@ -10,6 +10,7 @@ Public surface:
 """
 
 import csv
+import functools
 import json
 import math
 import re
@@ -3192,20 +3193,35 @@ def _is_cashback_reason(reason: str) -> bool:
 
 
 # MAP-34: an employer NEFT credit that reimburses the owner's spend. The marker
-# is the bank's own reference tag on the narration ("NEFT FROM <employer> ...
-# KOMH"). A salary transfer ("TRANSFER FROM <acct> ... SOF NRE") carries
-# neither NEFT nor the marker, so it never matches. Generic: no employer name.
-_REIMBURSEMENT_MARKERS = ("KOMH",)
-_REIMBURSEMENT_RE = re.compile(
-    r'\bNEFT\b.{0,12}?\bFROM\b.*\b(?:' + '|'.join(map(re.escape, _REIMBURSEMENT_MARKERS)) + r')\b',
-    re.IGNORECASE | re.DOTALL)
+# is the bank's own reference tag on the narration ("NEFT FROM <payer> ... <tag>").
+# SEC-20: the markers are per-entity config (`reimbursement_markers` in
+# entities.yaml), never hardcoded here. An entity with none configured (the
+# default) never matches this rule. A salary transfer ("TRANSFER FROM <acct> ...
+# SOF NRE") carries neither NEFT nor a marker, so it never matches either.
 _REIMBURSEMENT_REASON = "employer reimbursement = drawings"
 
 
-def _is_employer_reimbursement_credit(description: str, row: Dict) -> bool:
-    """MAP-34: money IN (never out) narrated as an employer NEFT with the
-    reimbursement marker."""
-    if not _REIMBURSEMENT_RE.search(description or ''):
+def _clean_markers(markers) -> tuple:
+    """Config markers as a tuple of stripped, non-blank strings."""
+    return tuple(str(x).strip() for x in (markers or ()) if x is not None and str(x).strip())
+
+
+@functools.lru_cache(maxsize=64)
+def _reimbursement_re(markers: tuple):
+    """Compiled rule for these (already cleaned) markers, or None when there are
+    none. NEFT, FROM within 12 characters, then a marker as a whole word."""
+    if not markers:
+        return None
+    return re.compile(
+        r'\bNEFT\b.{0,12}?\bFROM\b.*\b(?:' + '|'.join(map(re.escape, markers)) + r')\b',
+        re.IGNORECASE | re.DOTALL)
+
+
+def _is_employer_reimbursement_credit(description: str, row: Dict, markers=()) -> bool:
+    """MAP-34: money IN (never out) narrated as an employer NEFT with one of this
+    entity's configured reimbursement markers. No markers -> never matches."""
+    rx = _reimbursement_re(_clean_markers(markers))
+    if rx is None or not rx.search(description or ''):
         return False
     return _safe_float(row.get('Deposit', '')) > 0 and not _safe_float(row.get('Withdrawal', '')) > 0
 
@@ -3389,6 +3405,7 @@ def map_accounts(
     cashback_account: Optional[str] = None,
     reimbursement_account: Optional[str] = None,
     reference_date=None,
+    reimbursement_markers=None,
 ) -> Dict:
     """
     Apply mapping rules to canonical CSV.
@@ -3485,7 +3502,8 @@ def map_accounts(
             # MAP-30: deterministic, ahead of the persistent-rules pass.
             account, confidence, reason = _cashback_decision(cashback_account)
             pattern = None
-        elif reimbursement_account and _is_employer_reimbursement_credit(description, row):
+        elif reimbursement_account and _is_employer_reimbursement_credit(
+                description, row, reimbursement_markers):
             # MAP-34: deterministic, same stage as the cash-back rule.
             account, confidence, reason = (
                 _strip_root(reimbursement_account), 'medium', _REIMBURSEMENT_REASON)
@@ -3567,6 +3585,7 @@ def run(
     gnucash_bank_account: str = None,
     drawings_accounts: Optional[List[str]] = None,
     card_default_account: Optional[str] = None,
+    reimbursement_markers: Optional[List[str]] = None,
 ) -> str:
     """
     Run the full account-mapping pipeline from the PA Skills UI.
@@ -3585,6 +3604,8 @@ def run(
         drawings_accounts:   MAP-34: the entity's configured Drawings account paths
                              (money in to one is not a direction clash; a lone one
                              also takes employer reimbursement credits).
+        reimbursement_markers: SEC-20: this entity's `reimbursement_markers` (whole-word
+                             tags on an employer NEFT credit). Empty = the rule never fires.
         card_default_account: MAP-35: account for card spends nothing else matched
                              (low confidence) instead of Suspense. None -> Suspense.
         bank_name:           Pipeline bank label (e.g. "Bank of Baroda"). When set,
@@ -3812,7 +3833,8 @@ def run(
     result = map_accounts(canonical_csv, str(rules_tmp), str(out_path), str(report_path),
                           overrides=overrides, bank_key=bank_key,
                           owner_tokens=_owner_tokens, cashback_account=_cashback_acct,
-                          reimbursement_account=_reimb_acct, reference_date=_stmt_ref)
+                          reimbursement_account=_reimb_acct, reference_date=_stmt_ref,
+                          reimbursement_markers=_clean_markers(reimbursement_markers))
     if result['confidence_counts'].get('override'):
         _emit_mapper_progress(f"override pass: {result['confidence_counts']['override']} rows matched")
 

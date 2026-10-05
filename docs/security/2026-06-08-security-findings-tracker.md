@@ -183,7 +183,7 @@ Full rescan of all git-tracked files for personal data. Six locations found and 
 | `src/agents/skill_icici/agent.py:372-373` | UPI VPA `johndoe-1`, account `900012345678`, `SBM BANK (INDIA)` | `johndoe-1`, `900012345678`, `EXAMPLE BANK (INDIA)` |
 | `src/agents/skill_gnucash_import/test_transforms.py:80` | `JOHN DOE`, `ACME CONSULTING LLP`, `XYZB0001234` | `JOHN DOE`, `ACME CONSULTING LLP`, `XYZB0001234` |
 | `src/agents/skill_gnucash_account_mapper/AGENT.md` | `MyFinances2425.gnucash`, `ACME CONSULTING LLP` (3 occurrences) | `MyFinances2425.gnucash`, `ACME CONSULTING LLP` |
-| `src/agents/skill_gnucash_reconciler/AGENT.md` | `MyFinances2425.gnucash`, `NEFT-KPMG` | `MyFinances2425.gnucash`, `NEFT-ACME` |
+| `src/agents/skill_gnucash_reconciler/AGENT.md` | `MyFinances2425.gnucash`, `NEFT-EMPLOYER` | `MyFinances2425.gnucash`, `NEFT-ACME` |
 | `src/agents/skill_gnucash_import/AGENT.md` | `ACME CONSULTING LLP`, NEFT ref `KKBKN6...` | `ACME CONSULTING LLP`, `XYZBN6...` |
 | `src/agents/skill_icici/AGENT.md:35` | `MR HARSH...` | `MR JOHN...` |
 

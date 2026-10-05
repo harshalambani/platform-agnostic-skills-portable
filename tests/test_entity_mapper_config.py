@@ -39,6 +39,7 @@ def _seed(tmp_path, extra=None):
 HIDDEN = {
     "drawings_accounts": ["Equity:Drawings"],
     "card_spend_default_account": "Equity:Drawings",
+    "reimbursement_markers": ["ZZRB", "OTHERTAG"],
     "partner_comp_accounts": {"bank": "Assets:Bank"},
     "foreign_dividends_in_book": True,
     "foreign_dividends_in_book_by_ay": {"2026-27": True},
@@ -157,9 +158,9 @@ def test_form_loads_the_two_fields(tmp_path):
     with patch("ui._config.data_root_dir", return_value=data_root):
         ents = ui_mod._load_entities()
     form = ui_mod._entity_to_form("SYN-IND", ents)
-    assert form[-2] == "Equity:Drawings\nEquity:D2" and form[-1] == "Equity:Drawings"
+    assert form[-3] == "Equity:Drawings\nEquity:D2" and form[-2] == "Equity:Drawings"
     blank = ui_mod._entity_to_form("", ents)
-    assert blank[-2] == "" and blank[-1] == "" and len(blank) == len(form)
+    assert blank[-3] == "" and blank[-2] == "" and blank[-1] == "" and len(blank) == len(form)
 
 
 def test_saving_the_two_fields_keeps_partner_and_foreign_dividend_keys(tmp_path):
@@ -189,3 +190,72 @@ def test_empty_fields_remove_the_keys_and_leave_the_rest(tmp_path):           # 
         assert got[k] == v, k
     other = yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-OTHER"]
     assert other["drawings_accounts"] == ["Equity:Drawings"]                  # other entity untouched
+
+
+def _seed2(tmp_path, a_markers=None, b_markers=None):
+    ent = {"name": "Synthetic Individual", "pan": "AAAAA0000A", "status": "Individual",
+           "residency": "Resident", "default_regime": "new"}
+    a, b = dict(ent), dict(ent, name="Synthetic Other", pan="BBBBB1111B")
+    if a_markers is not None:
+        a["reimbursement_markers"] = a_markers
+    if b_markers is not None:
+        b["reimbursement_markers"] = b_markers
+    data_root = tmp_path / "Data"
+    p = data_root / "itr" / "entities.yaml"
+    p.parent.mkdir(parents=True)
+    p.write_text(yaml.safe_dump({"SYN-IND": a, "SYN-OTHER": b}), encoding="utf-8")
+    return data_root, p
+
+
+def _save_markers(data_root, text, key="SYN-IND"):
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        return ui_mod._save_entity(
+            key, key, "Synthetic Individual", "AAAAA0000A", "Individual", "Resident",
+            "1990-01-01", "", "", "", "", "", "", "new", "", False, "", "", "",
+            reimbursement_markers_text=text)
+
+
+def test_reimbursement_markers_round_trip_through_load_and_dump(tmp_path):
+    _, p = _seed2(tmp_path, [" ZZRB ", "", "  ", "OTHERTAG"])
+    ents = configs.load_entities(p)
+    assert ents["SYN-IND"].reimbursement_markers == ["ZZRB", "OTHERTAG"]     # trimmed, blanks dropped
+    again = yaml.safe_load(configs.dump_entities(ents))["SYN-IND"]
+    assert again["reimbursement_markers"] == ["ZZRB", "OTHERTAG"]
+    assert ents["SYN-OTHER"].reimbursement_markers == []                       # NEGATIVE: default empty
+    assert "reimbursement_markers" not in yaml.safe_load(configs.dump_entities(ents))["SYN-OTHER"]
+
+
+def test_ui_save_then_load_round_trips_markers_comma_or_lines(tmp_path):
+    data_root, p = _seed2(tmp_path)
+    assert "Saved" in _save_markers(data_root, " ZZRB , ,TAG2" + chr(10) + "  TAG3  " + chr(10) + chr(10))
+    assert configs.load_entities(p)["SYN-IND"].reimbursement_markers == ["ZZRB", "TAG2", "TAG3"]
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        form = ui_mod._entity_to_form("SYN-IND", ui_mod._load_entities())
+    assert form[-1] == "ZZRB" + chr(10) + "TAG2" + chr(10) + "TAG3"
+
+
+def test_saving_with_the_field_empty_yields_empty_list(tmp_path):              # NEGATIVE
+    data_root, p = _seed2(tmp_path, ["ZZRB"])
+    assert "Saved" in _save_markers(data_root, "  " + chr(10) + " , ")
+    assert configs.load_entities(p)["SYN-IND"].reimbursement_markers == []
+    assert "reimbursement_markers" not in yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-IND"]
+    # a brand-new entity saved with the field empty also gets none (no default)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        ui_mod._save_entity("", "SYN-NEW", "Synthetic New", "CCCCC2222C", "Individual", "Resident",
+                            "1990-01-01", "", "", "", "", "", "", "new", "", False, "", "", "",
+                            reimbursement_markers_text="")
+    assert configs.load_entities(p)["SYN-NEW"].reimbursement_markers == []
+
+
+def test_a_save_that_omits_the_field_keeps_stored_markers(tmp_path):           # NEGATIVE (older caller)
+    data_root, p = _seed2(tmp_path, ["ZZRB"])
+    assert "Saved" in _save_markers(data_root, None)
+    assert configs.load_entities(p)["SYN-IND"].reimbursement_markers == ["ZZRB"]
+
+
+def test_editing_entity_a_markers_never_changes_entity_b(tmp_path):            # NEGATIVE
+    data_root, p = _seed2(tmp_path, ["ZZRB"], ["BTAG"])
+    assert "Saved" in _save_markers(data_root, "NEWTAG")
+    ents = configs.load_entities(p)
+    assert ents["SYN-IND"].reimbursement_markers == ["NEWTAG"]
+    assert ents["SYN-OTHER"].reimbursement_markers == ["BTAG"]

@@ -54,3 +54,17 @@ def test_the_report_never_contains_the_value(monkeypatch, tmp_path):
 def test_the_guard_is_wired_into_ci():
     ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert "scripts/check_no_real_data.py" in ci
+
+
+def test_sec20_word_is_flagged_whole_word_case_insensitive(monkeypatch):
+    word = "Zqxv"
+    monkeypatch.setattr(g, "EMPLOYER_NAME_SHA256", frozenset({hashlib.sha256(word.lower().encode()).hexdigest()}))
+    assert g.scan_text("see ZQXV here\n")
+    assert g.scan_text("see zqxv.\n")
+    assert g.scan_text("see zqxvs here\n") == []          # NEGATIVE: inside a longer word
+    assert g.scan_text("see azqxv here\n") == []          # NEGATIVE
+    assert g.scan_text("nothing here\n") == []            # NEGATIVE
+
+
+def test_sec20_guard_file_does_not_match_itself():
+    assert g.scan_text((ROOT / "scripts" / "check_no_real_data.py").read_text(encoding="utf-8")) == []

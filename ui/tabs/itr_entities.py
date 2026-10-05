@@ -197,6 +197,11 @@ def _format_list_lines(items: list) -> str:
     return "\n".join(str(x) for x in (items or []))
 
 
+def _parse_marker_text(text: str) -> list[str]:
+    """SEC-20: markers typed one per line or comma-separated; trimmed, blanks dropped."""
+    return [t.strip() for t in (text or "").replace(",", chr(10)).splitlines() if t.strip()]
+
+
 def _parse_list_lines(text: str) -> list[str]:
     return [line.strip() for line in (text or "").splitlines() if line.strip()]
 
@@ -227,7 +232,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
             "", "", "new", "", False, "", _AUDIT_BASIS_BLANK, "", "", "",
-            "", "",
+            "", "", "",
         )
     return (
         e.key, e.name, e.pan, e.status, e.residency,
@@ -240,6 +245,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         _format_kv_lines(e.books),
         _format_list_lines(getattr(e, "drawings_accounts", None) or []),
         getattr(e, "card_spend_default_account", "") or "",
+        _format_list_lines(getattr(e, "reimbursement_markers", None) or []),
     )
 
 
@@ -344,7 +350,7 @@ _FORM_HIDDEN_FIELDS = (
 )
 # MAP-34 / MAP-35: editable on this tab. A save that passes None for them (an
 # older caller) preserves the stored value; a string (even empty) replaces it.
-_FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account")
+_FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account", "reimbursement_markers")
 
 
 def _save_entity(
@@ -359,6 +365,7 @@ def _save_entity(
     audit_case_basis: str = "",
     drawings_accounts_text: str | None = None,
     card_spend_default_account: str | None = None,
+    reimbursement_markers_text: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -473,10 +480,14 @@ def _save_entity(
             new_profile.drawings_accounts = copy.deepcopy(prior.drawings_accounts)
         if card_spend_default_account is None:
             new_profile.card_spend_default_account = prior.card_spend_default_account
+        if reimbursement_markers_text is None:
+            new_profile.reimbursement_markers = copy.deepcopy(prior.reimbursement_markers)
     if drawings_accounts_text is not None:
         new_profile.drawings_accounts = _parse_list_lines(drawings_accounts_text)
     if card_spend_default_account is not None:
         new_profile.card_spend_default_account = (card_spend_default_account or "").strip()
+    if reimbursement_markers_text is not None:
+        new_profile.reimbursement_markers = _parse_marker_text(reimbursement_markers_text)
 
     entities[new_key] = new_profile
     if is_rename:
@@ -847,6 +858,14 @@ def render(container_tab=None) -> None:
                 lines=1, interactive=True,
                 info="Card spends nothing else matched go here at low confidence. Blank = Suspense.",
             )
+            reimbursement_markers_box = gr.Textbox(
+                label="Reimbursement markers (GnuCash mapper; one per line or comma-separated)",
+                placeholder="ZZRB",
+                lines=2, interactive=True,
+                info="A NEFT FROM credit whose narration contains one of these whole words is "
+                     "routed to Drawings (needs exactly one Drawings account above). "
+                     "Blank = the rule never fires.",
+            )
             bf_losses_box = gr.Textbox(
                 label="B/f losses (one per line)", lines=3, interactive=True,
             )
@@ -871,7 +890,7 @@ def render(container_tab=None) -> None:
         audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
         bf_losses_box, clubbing_notes_box,
         books_box,
-        drawings_accounts_box, card_default_box,
+        drawings_accounts_box, card_default_box, reimbursement_markers_box,
     ]
 
     books_browse_btn.click(
@@ -908,6 +927,7 @@ def render(container_tab=None) -> None:
         audit_case, audit_case_by_ay_text, audit_case_basis,
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
+        reimbursement_markers_text,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -918,6 +938,7 @@ def render(container_tab=None) -> None:
             audit_case_basis=audit_case_basis,
             drawings_accounts_text=drawings_accounts_text,
             card_spend_default_account=card_spend_default_account,
+            reimbursement_markers_text=reimbursement_markers_text,
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -930,7 +951,7 @@ def render(container_tab=None) -> None:
                 business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
                 audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
                 bf_losses_box, clubbing_notes_box,
-                books_box, drawings_accounts_box, card_default_box],
+                books_box, drawings_accounts_box, card_default_box, reimbursement_markers_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )
 
