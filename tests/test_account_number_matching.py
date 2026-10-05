@@ -7,7 +7,7 @@ substring and took the first hit — silently wrong whenever a book has more
 than one account for the same bank (e.g. two BoB accounts). This verifies
 the fix: when statement metadata carries an account number, it is
 normalised to digits and matched against digits embedded in the GnuCash
-account name (e.g. "BOB - 760001001951"); a name-only match still works as
+account name (e.g. "BOB - 100000000001"); a name-only match still works as
 a fallback but is reported via "match_warning" so it's visible in the run
 log instead of being a silent guess.
 
@@ -69,14 +69,14 @@ def test_two_same_bank_accounts_resolved_by_number(tmp_path):
     accounts = [
         _account_xml("Root Account", "root", "ROOT", None),
         _account_xml("Assets", "asset", "ASSET", "root"),
-        _account_xml("BoB - Savings 760001001951", "bob1", "BANK", "asset"),
-        _account_xml("BoB - Current 760002009988", "bob2", "BANK", "asset"),
+        _account_xml("BoB - Savings 100000000001", "bob1", "BANK", "asset"),
+        _account_xml("BoB - Current 100000000002", "bob2", "BANK", "asset"),
     ]
     book = _write_book(tmp_path, accounts)
 
-    result = _get_gnucash_account_balance(book, "BoB", account_number="760002009988")
+    result = _get_gnucash_account_balance(book, "BoB", account_number="100000000002")
     assert result["found"] is True
-    assert result["account_name"].endswith("BoB - Current 760002009988")
+    assert result["account_name"].endswith("BoB - Current 100000000002")
     assert result["match_warning"] is None
 
 
@@ -87,13 +87,13 @@ def test_number_vs_name_conflict_prefers_number_and_warns_on_fallback(tmp_path):
     accounts = [
         _account_xml("Root Account", "root", "ROOT", None),
         _account_xml("Assets", "asset", "ASSET", "root"),
-        _account_xml("BoB - Savings 760001001951", "bob1", "BANK", "asset"),
+        _account_xml("BoB - Savings 100000000001", "bob1", "BANK", "asset"),
     ]
     book = _write_book(tmp_path, accounts)
 
     result = _get_gnucash_account_balance(book, "BoB", account_number="999999999999")
     assert result["found"] is True
-    assert result["account_name"].endswith("BoB - Savings 760001001951")
+    assert result["account_name"].endswith("BoB - Savings 100000000001")
     assert result["match_warning"] is not None
     assert "999999999999" in result["match_warning"]
 
@@ -105,13 +105,13 @@ def test_matching_number_wins_even_when_name_match_would_pick_a_different_accoun
     accounts = [
         _account_xml("Root Account", "root", "ROOT", None),
         _account_xml("Assets", "asset", "ASSET", "root"),
-        _account_xml("BoB - Old Closed 760000000000", "bob_old", "BANK", "asset"),
-        _account_xml("BoB - Active 760009998877", "bob_active", "BANK", "asset"),
+        _account_xml("BoB - Old Closed 100000000000", "bob_old", "BANK", "asset"),
+        _account_xml("BoB - Active 100000000003", "bob_active", "BANK", "asset"),
     ]
     book = _write_book(tmp_path, accounts)
 
-    result = _get_gnucash_account_balance(book, "BoB", account_number="760009998877")
-    assert result["account_name"].endswith("BoB - Active 760009998877")
+    result = _get_gnucash_account_balance(book, "BoB", account_number="100000000003")
+    assert result["account_name"].endswith("BoB - Active 100000000003")
     assert result["match_warning"] is None
 
 
