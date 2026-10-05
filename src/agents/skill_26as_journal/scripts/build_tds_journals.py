@@ -1103,6 +1103,17 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                 Split(ACC_TDS_PARTNERSHIP, debit=a),
                 Split(credit_acc, credit=a),
             ]
+            if (not partner_comp_configured
+                    and ACC_TDS_PARTNERSHIP not in {x.path for x in accounts}):
+                # TDS-07: the debit account for s.194T TDS is not in the book,
+                # so this row cannot post as it stands. The single-candidate
+                # rule leaves such a row at Medium (no review); force it into
+                # review and say why, whatever the credit-side match was.
+                j.needs_review = True
+                j.credit_basis = (
+                    (j.credit_basis + " -- " if j.credit_basis else "")
+                    + f"MISSING DEBIT ACCOUNT: {ACC_TDS_PARTNERSHIP} is not in "
+                    "the book - create it before importing")
             if partner_comp_configured:
                 j.excluded_from_journal = True
                 j.needs_review = False

@@ -369,3 +369,47 @@ def test_tds05_gate_matches_review_rows_by_series_not_by_sr_alone(tmp_path):
     assert isinstance(rej, str) and rej.startswith("REJECTED") and "15GJ1" in rej
     ok = tl._gate_ambiguous_overrides({"15GJ1": "Acc:Two"}, str(out))
     assert ok == ({"15GJ1": "Acc:Two"}, [])
+
+
+# ---- TDS-07 / TDS-08: a missing debit account forces review and shows NO ---------------------
+
+PARTNER_SRC = "Income:Partnership Income"
+
+
+def _c_chart(with_debit):
+    cs = [acc(PARTNER_SRC), acc("Liabilities:Suspense", "LIABILITY"),
+          acc("Income:Other Partnership")]            # two candidates is not needed; one is enough
+    if with_debit:
+        cs.append(acc(m.ACC_TDS_PARTNERSHIP, "EXPENSE"))
+    return cs
+
+
+def _c_journal(with_debit, **kw):
+    return m.build_journals([ded(1, "ABC AND CO LLP", "194T", 100000.0, 10000.0)],
+                            _c_chart(with_debit), **kw)[0]
+
+
+def test_tds07_194t_row_with_a_missing_debit_account_is_forced_to_review():
+    j = _c_journal(False)
+    assert j.category == "C"
+    assert j.needs_review                                     # never auto-accepted
+    assert "MISSING DEBIT ACCOUNT" in j.credit_basis
+    assert j.balanced
+
+
+def test_tds07_a_learned_credit_account_does_not_clear_the_missing_debit_review():
+    tl = m.tds_learnings
+    key = tl.deductor_key(tl.DOMAIN_INCOME, "", "ABC AND CO LLP")
+    j = _c_journal(False, learnings={key: PARTNER_SRC})
+    assert j.credit_confidence == "Learned" and j.needs_review   # NEGATIVE: not auto-accepted
+
+
+def test_tds07_a_194t_row_whose_debit_account_exists_is_not_forced():
+    j = _c_journal(True)
+    assert "MISSING DEBIT ACCOUNT" not in j.credit_basis      # NEGATIVE: no false alarm
+
+
+def test_tds07_partner_routing_is_unchanged_when_partner_comp_is_configured():
+    j = _c_journal(False, partner_comp_configured=True)
+    assert j.excluded_from_journal and not j.needs_review     # still booked by the partner journal
+    assert "MISSING DEBIT ACCOUNT" not in j.credit_basis
