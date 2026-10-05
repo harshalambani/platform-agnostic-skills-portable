@@ -1001,7 +1001,7 @@ def test_learning_applied_when_no_override_income_domain():
     needs_review cleared."""
     d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="AAAA00000A")
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME"),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]
@@ -1054,7 +1054,7 @@ def test_learning_falls_back_to_name_when_no_tan():
     """A blank/invalid TAN falls back to a name-keyed learning."""
     d = _deductor(1, "SOME OBSCURE PAYER", "194A", 10000.0, 1000.0, tan="")
     accts = [
-        m.Account("Income:Interest Income", "Interest Income", "INCOME", special=True, blocked=True),
+        m.Account("Income:Interest Income", "Interest Income", "INCOME"),
         m.Account("Expense:TDS on Interest", "TDS on Interest", "EXPENSE"),
         m.Account("Liabilities:Suspense", "Suspense", "LIABILITY"),
     ]

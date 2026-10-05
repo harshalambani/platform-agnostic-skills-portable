@@ -144,3 +144,146 @@ def test_tds03_a_bank_specific_fd_account_is_still_not_generic():
 def test_tds03_a_blocked_fd_account_is_still_not_picked():
     assert m.find_generic_fd_account(
         [acc("Income:Interest Income:Interest on Fixed Deposits", blocked=True)]) is None
+
+
+# ---- shared helpers: a tiny synthetic book + 26AS workbook for run()-level tests --------
+
+import csv  # noqa: E402
+
+_NS = ('xmlns:gnc="http://www.gnucash.org/XML/gnc" xmlns:act="http://www.gnucash.org/XML/act" '
+       'xmlns:slot="http://www.gnucash.org/XML/slot"')
+
+
+def write_book(path, specs):
+    """specs: [(full path, type, flags)]; flags is a set of 'placeholder'/'hidden'.
+    Parents are created implicitly (as plain accounts) when not listed."""
+    nodes = {}
+    for full, typ, flags in specs:
+        parts = full.split(":")
+        for i in range(1, len(parts) + 1):
+            p = ":".join(parts[:i])
+            if p not in nodes:
+                nodes[p] = [parts[i - 1], "id%d" % (len(nodes) + 1), "INCOME" if i < len(parts) else typ,
+                            ":".join(parts[:i - 1]) or None, set()]
+        nodes[full][2], nodes[full][4] = typ, set(flags)
+    out = ["<gnc-v2 %s><gnc:book>" % _NS]
+    out.append('<gnc:account><act:name>Root Account</act:name><act:id type="guid">root</act:id>'
+               '<act:type>ROOT</act:type></gnc:account>')
+    for full, (name, aid, typ, parent, flags) in nodes.items():
+        par = nodes[parent][1] if parent else "root"
+        slots = "".join("<slot><slot:key>%s</slot:key><slot:value type=\"string\">true</slot:value></slot>" % f
+                        for f in sorted(flags))
+        out.append('<gnc:account><act:name>%s</act:name><act:id type="guid">%s</act:id>'
+                   '<act:type>%s</act:type><act:parent type="guid">%s</act:parent>%s</gnc:account>'
+                   % (name, aid, typ, par, "<act:slots>%s</act:slots>" % slots if slots else ""))
+    out.append("</gnc:book></gnc-v2>")
+    Path(path).write_text("".join(out), encoding="utf-8")
+    return Path(path)
+
+
+def write_26as(path, parts):
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows in parts.items():
+        ws = wb.create_sheet(title=title)
+        ws.cell(1, 1, f"{title} - Details")
+        ws.cell(2, 1, "Assessee Name: X  |  PAN: AAAAA1111A  |  Financial Year: 2025-26")
+        ws.cell(3, 1, "Sr.No.")
+        for r, (sr, name, section, amt, tax) in enumerate(rows, start=4):
+            ws.cell(r, 1, sr)
+            ws.cell(r, 2, name)
+            ws.cell(r, 4, amt)
+            ws.cell(r, 5, tax)
+            ws.cell(r, 6, tax)
+            ws.cell(r, 8, section)
+    wb.save(path)
+    return Path(path)
+
+
+STD = [("Expense:TDS on Interest", "EXPENSE", ()), ("Expense:TDS on Dividend", "EXPENSE", ()),
+       ("Liabilities:Suspense", "LIABILITY", ())]
+
+
+def read_csv(path):
+    with Path(path).open(newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+# ---- TDS-04: a placeholder/hidden FD account never silently absorbs the gap -------------
+
+def test_tds04_placeholder_canonical_fd_account_is_never_posted_to():
+    placeholder = chart()
+    placeholder = [a for a in placeholder if a.path != GENERIC_FD] + \
+        [acc(m.ACC_INTEREST_ON_FD, blocked=True)]
+    j = m.build_journals([ded(1, "BANK OF BARODA", "194A", 1000.0, 100.0)], placeholder,
+                         )[0]
+    assert m.ACC_INTEREST_ON_FD not in {s.account for s in j.splits}   # NEGATIVE
+    assert j.balanced
+    assert j.needs_review                                              # loud, not silent
+    assert j.blocked_targets == [m.ACC_INTEREST_ON_FD]
+    assert m.BLOCKED_MARK in j.credit_basis
+    assert "Liabilities:Suspense" in {s.account for s in j.splits if s.debit}
+
+
+def test_tds04_hidden_fd_account_is_never_posted_to():
+    accts = [a for a in chart() if a.path != GENERIC_FD] + \
+        [acc("Income:Interest Income:Interest on Fixed Deposit", blocked=True)]
+    j = m.build_journals([ded(1, "BANK OF BARODA", "194A", 1000.0, 100.0)], accts)[0]
+    assert "Income:Interest Income:Interest on Fixed Deposit" not in {s.account for s in j.splits}
+    assert j.balanced
+    # the hidden account is not the canonical name, so the canonical (absent)
+    # account is used and run() lists it under accounts to create (existing behaviour)
+    assert m.ACC_INTEREST_ON_FD in {s.account for s in j.splits}
+
+
+def test_tds04_a_postable_fd_account_is_still_used_and_nothing_is_flagged():
+    j = m.build_journals([ded(1, "BANK OF BARODA", "194A", 1000.0, 100.0)], chart())[0]
+    assert GENERIC_FD in {s.account for s in j.splits}
+    assert j.blocked_targets == [] and m.BLOCKED_MARK not in j.credit_basis   # NEGATIVE
+
+
+def test_tds04_no_journal_of_any_part_posts_to_a_blocked_account():
+    blocked_tds = acc("Expense:TDS on Interest", "EXPENSE", blocked=True)
+    accts = [a for a in chart() if a.path != "Expense:TDS on Interest"] + [blocked_tds]
+    js = m.build_journals([ded(1, "BANK OF BARODA", "194A", 1000.0, 100.0)], accts)
+    js += m.build_15g_journals([ded(1, "ICICI BANK LIMITED", "194A", 1000.0, 100.0)], accts)
+    for j in js:
+        assert "Expense:TDS on Interest" not in {s.account for s in j.splits}
+        assert j.needs_review
+
+
+def test_tds04_run_reports_the_blocked_account_as_missing_and_review_says_so(tmp_path):
+    specs = STD + [("Income:Interest Income:Interest on BOB - FD", "INCOME", ()),
+                   ("Income:Interest Income:Interest on ICICI Bank - FD", "INCOME", ()),
+                   (m.ACC_INTEREST_ON_FD, "INCOME", ("placeholder",))]
+    book = write_book(tmp_path / "b.gnucash", specs)
+    x = write_26as(tmp_path / "x.xlsx", {"Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)]})
+    stats = m.run(x, book, tmp_path / "out.csv")
+    assert m.ACC_INTEREST_ON_FD in stats["missing_accounts"]            # NEGATIVE: was []
+    assert stats["blocked_accounts"] == [m.ACC_INTEREST_ON_FD]
+    assert stats["needs_review"]
+    assert all(r["Account"] != m.ACC_INTEREST_ON_FD for r in read_csv(tmp_path / "out.csv"))
+
+
+def test_tds04_final_summary_names_the_blocked_rows(tmp_path):
+    from agents.skill_26as_journal import tools as tl
+    specs = STD + [("Income:Interest Income:Interest on BOB - FD", "INCOME", ()),
+                   ("Income:Interest Income:Interest on ICICI Bank - FD", "INCOME", ()),
+                   (m.ACC_INTEREST_ON_FD, "INCOME", ("placeholder",))]
+    book = write_book(tmp_path / "b.gnucash", specs)
+    x = write_26as(tmp_path / "x.xlsx", {"Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)]})
+    m.run(x, book, tmp_path / "out.csv")
+    text = tl.final_summary(str(tmp_path / "out.csv"), str(book))
+    assert "NOT POSTED" in text and "BANK OF BARODA" in text
+
+
+def test_tds04_final_summary_is_quiet_when_nothing_was_blocked(tmp_path):
+    from agents.skill_26as_journal import tools as tl
+    specs = STD + [("Income:Interest Income:Interest on BOB - FD", "INCOME", ()),
+                   ("Income:Interest Income:Interest on ICICI Bank - FD", "INCOME", ()),
+                   (GENERIC_FD, "INCOME", ())]
+    book = write_book(tmp_path / "b.gnucash", specs)
+    x = write_26as(tmp_path / "x.xlsx", {"Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)]})
+    m.run(x, book, tmp_path / "out.csv")
+    assert "NOT POSTED" not in tl.final_summary(str(tmp_path / "out.csv"), str(book))   # NEGATIVE

@@ -285,6 +285,9 @@ class Journal:
     needs_review: bool = False
     excluded_from_journal: bool = False  # Category C, partner-comp already books it
     tan: str = ""  # deductor/collector TAN, carried through for the review CSV/tab
+    # TDS-04: placeholder/hidden accounts this journal would have posted to
+    # and was NOT allowed to (the leg was moved to Suspense instead).
+    blocked_targets: list = field(default_factory=list)
 
     @property
     def total_debit(self) -> float:
@@ -958,6 +961,40 @@ def categorize(sections: tuple) -> tuple[Optional[str], str]:
     return None, label  # unknown or mixed -> needs review
 
 
+BLOCKED_MARK = "BLOCKED ACCOUNT"
+
+
+def enforce_postable(journals: list[Journal], accounts: list[Account]) -> list[Journal]:
+    """TDS-04: a placeholder or hidden account is NEVER a posting target.
+
+    Any split that names one is moved to Suspense, the journal is forced to
+    review, and the account is recorded in Journal.blocked_targets so the
+    caller reports it loudly as an account to create / unhide. Without this a
+    chart that only carries the canonical 'Interest on FD' as a placeholder
+    let the FD leg post there, and nothing was flagged.
+    """
+    blocked = {a.path for a in accounts if a.blocked}
+    if not blocked:
+        return journals
+    for j in journals:
+        for sp in j.splits:
+            if sp.account in blocked:
+                if sp.account not in j.blocked_targets:
+                    j.blocked_targets.append(sp.account)
+                sp.account = ACC_SUSPENSE
+        if j.blocked_targets:
+            j.needs_review = True
+            if j.credit_account in blocked:
+                j.credit_account = ACC_SUSPENSE
+                j.credit_confidence = "Suspense"
+            note = (f"{BLOCKED_MARK}: {', '.join(j.blocked_targets)} is a placeholder/hidden "
+                    "account and cannot be posted to - that leg is on Suspense; "
+                    "create or unhide a postable account")
+            if note not in (j.credit_basis or ""):
+                j.credit_basis = ((j.credit_basis + " -- ") if j.credit_basis else "") + note
+    return journals
+
+
 def build_journals(deductors: list[Deductor], accounts: list[Account],
                    overrides: Optional[dict] = None,
                    partner_comp_configured: bool = False,
@@ -1082,7 +1119,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                     "double-books this TDS and overstates remuneration."
                 )
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
@@ -1170,7 +1207,7 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
                 Split(credit_acc, credit=c),
             ]
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 def is_tcs_section(sections: tuple) -> bool:
@@ -1263,7 +1300,7 @@ def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
         j.credit_account = cr
         j.splits = [Split(dr, debit=tax), Split(cr, credit=tax)]
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 # -------------------- output --------------------
@@ -1561,6 +1598,11 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     # Payments'). Surface them explicitly so nothing imports silently wrong.
     missing = sorted({s.account for j in journals if not j.excluded_from_journal
                       for s in j.splits if s.account not in existing})
+    # TDS-04: placeholder/hidden accounts that were refused as posting targets
+    # are reported with the missing ones -- the user must create/unhide one.
+    blocked_accounts = sorted({b for j in journals if not j.excluded_from_journal
+                               for b in j.blocked_targets})
+    missing = sorted(set(missing) | set(blocked_accounts))
 
     review_rows = []
     for j in journals:
@@ -1583,6 +1625,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "balanced_all": all(j.balanced for j in journals),
         "needs_review": [r for r in review_rows if r["needs_review"]],
         "missing_accounts": missing,
+        "blocked_accounts": blocked_accounts,
         "rows": review_rows,
         "output": str(out_path),
         "review": str(review_path),
@@ -1667,6 +1710,11 @@ def main(argv: list[str]) -> int:
         if amb_n:
             parts.append(f"{amb_n} Ambiguous (tied candidates — tag manually in Review tab)")
         print(f"\n{len(stats['needs_review'])} deductor(s) need review ({', '.join(parts)}).")
+    if stats["blocked_accounts"]:
+        print("\n*** NOT POSTED - placeholder/hidden account(s); that leg is on Suspense "
+              "and the row is flagged for review:")
+        for acc in stats["blocked_accounts"]:
+            print(f"  - {acc}")
     if stats["missing_accounts"]:
         print("\nAccounts to CREATE in GnuCash before import:")
         for acc in stats["missing_accounts"]:

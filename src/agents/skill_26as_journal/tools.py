@@ -259,6 +259,14 @@ def final_summary(output_path: str, gnucash_path: str = "",
                 susp_line += " — " + ", ".join(
                     (r.get("Deductor") or "?").strip() for r in suspense)
             lines.append(susp_line)
+            # TDS-04: a leg refused because its account is a placeholder/hidden
+            # one. Loud, because the import would otherwise look complete.
+            blocked_rows = [r for r in rows if "BLOCKED ACCOUNT" in (r.get("Basis") or "")]
+            if blocked_rows:
+                lines.append(
+                    "- *** NOT POSTED to a placeholder/hidden account (that leg is on "
+                    "Suspense; create or unhide a postable account): "
+                    + ", ".join((r.get("Deductor") or "?").strip() for r in blocked_rows))
 
     existing = _existing_account_paths(gnucash_path) if gnucash_path else None
     if existing is not None and out.is_file():
