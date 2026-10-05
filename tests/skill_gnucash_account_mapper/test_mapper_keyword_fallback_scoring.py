@@ -443,7 +443,7 @@ def test_weak_rows_reconsidered_by_llm_replace_and_keep_with_correct_counts(tmp_
     def fake_generate_rules(extractor_output, min_freq=1):
         return {}  # rules pass matches nothing -- every row starts 'none'
 
-    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None):
+    def fake_merge_auto_rules(gnucash_file, rules_by_bank, config_path=None, min_bank_freq=None):
         return rules_by_bank
 
     def fake_load_overrides(gnucash_file, config_path=None):

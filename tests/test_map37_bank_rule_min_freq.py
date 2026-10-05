@@ -148,16 +148,8 @@ def test_run_twice_seen_gets_a_rule_once_seen_never_does(tmp_path, monkeypatch):
     assert by[DESC_ONCE]["Confidence"] in ("weak", "history", "none", "suspense")
 
 
-def test_existing_yaml_rule_for_a_once_seen_description_is_not_removed(tmp_path, monkeypatch):
-    existing = {"HDFC": [{"patterns": ["UPI/ZZONCE/.*"], "account": ONCE_ACCT,
-                          "confidence": "high", "source": "auto", "frequency": 1,
-                          "last_date": "2026-01-10"}]}
-    _, mapped, saved = _run_pipeline(
-        tmp_path, monkeypatch, [(DESC_ONCE, ONCE_ACCT, 1)], [DESC_ONCE],
-        existing_yaml=existing)
-    pats = [p for r in saved["HDFC"] for p in r["patterns"]]
-    assert "UPI/ZZONCE/.*" in pats                              # NEGATIVE: not pruned
-    assert _acct(mapped[0]) == ONCE_ACCT                        # and it still applies
+# MAP-38 superseded the old stored-one-off-rule-is-kept test: stored bank rules
+# below the threshold are now pruned (tests/test_map38_prune_one_off_rules.py).
 
 
 def test_override_still_wins_over_a_rule(tmp_path, monkeypatch):

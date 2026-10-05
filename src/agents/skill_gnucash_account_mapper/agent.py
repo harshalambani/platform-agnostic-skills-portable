@@ -3727,7 +3727,8 @@ def run(
     _emit_mapper_progress(f"generated {rule_count} new rules")
 
     # Merge into single persistent YAML alongside .gnucash file
-    merged = merge_auto_rules(gnucash_file, rules_by_bank, config_path)
+    merged = merge_auto_rules(gnucash_file, rules_by_bank, config_path,
+                              min_bank_freq=BANK_RULE_MIN_FREQ)  # MAP-38
     merged_total = sum(len(v) for v in merged.values())
     _emit_mapper_progress(f"persistent rules: {merged_total} total (in {persistent_rules_path(gnucash_file, config_path).name})")
 
