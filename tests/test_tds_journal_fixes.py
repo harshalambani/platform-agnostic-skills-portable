@@ -116,3 +116,31 @@ def test_tds02_bank_of_baroda_still_resolves_to_bob():
 
 def test_tds02_the_alias_table_does_not_carry_the_bare_word_bank():
     assert "BANK" not in m.ALIASES["BOB"]
+
+
+# ---- TDS-03: the generic FD account is recognised under its real names ------------------
+
+@pytest.mark.parametrize("leaf", ["Interest on Fixed Deposits", "Interest on FDs",
+                                  "Term Deposit", "Deposits", "Interest on Term Deposits",
+                                  "Interest on Fixed Deposit", "Interest on FD", "FD Interest"])
+def test_tds03_fd_account_name_variants_are_recognised(leaf):
+    path = "Income:Interest Income:" + leaf
+    got = m.find_generic_fd_account([acc(path), acc(BOB)])
+    assert got == path
+
+
+@pytest.mark.parametrize("leaf", ["Interest on Savings", "Interest from Savings Account",
+                                  "Interest on Bonds", "Interest on Recurring Deposit",
+                                  "Interest on Income Tax Refund"])
+def test_tds03_a_non_fd_interest_account_is_not_picked(leaf):
+    path = "Income:Interest Income:" + leaf
+    assert m.find_generic_fd_account([acc(path), acc(BOB)]) is None   # NEGATIVE
+
+
+def test_tds03_a_bank_specific_fd_account_is_still_not_generic():
+    assert m.find_generic_fd_account([acc("Income:Interest Income:Interest on HDFC Fixed Deposits")]) is None
+
+
+def test_tds03_a_blocked_fd_account_is_still_not_picked():
+    assert m.find_generic_fd_account(
+        [acc("Income:Interest Income:Interest on Fixed Deposits", blocked=True)]) is None

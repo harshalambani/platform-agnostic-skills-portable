@@ -765,7 +765,7 @@ def _acronym(tokens: list[str]) -> str:
 # bank/entity name). Used to tell the generic 'Interest on FD' account apart
 # from deductor-specific ones like 'Interest on BOB - FD'.
 FD_NOISE = {"INTEREST", "ON", "FROM", "INCOME", "RECEIVED", "EARNED", "OTHER",
-            "THE", "A", "OF", "FD", "FIXED", "DEPOSIT", "DEPOSITS"}
+            "THE", "A", "OF", "FD", "FDS", "FIXED", "TERM", "DEPOSIT", "DEPOSITS"}
 
 
 def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
@@ -785,7 +785,10 @@ def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
             continue
         toks = _tokens(a.leaf)
         tokset = set(toks)
-        has_fd = ("FD" in tokset) or ({"FIXED", "DEPOSIT"} <= tokset)
+        # TDS-03: also 'Interest on FDs', 'Fixed Deposits', 'Term Deposit(s)'
+        # and a bare 'Deposits'. A savings / other interest account carries
+        # none of these tokens, so it is still never taken as the FD account.
+        has_fd = bool(tokset & {"FD", "FDS", "DEPOSIT", "DEPOSITS"})
         if not has_fd:
             continue
         entity = {t for t in toks if t not in FD_NOISE and len(t) > 1}
