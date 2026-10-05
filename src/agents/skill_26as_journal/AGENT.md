@@ -59,7 +59,9 @@ Your job is only the optional fallback:
    candidate accounts. If exactly one clearly fits the deductor name, call:
    `apply_overrides(overrides={"<Sr.No>": "<full account path>"})`
    - `overrides` is the ONLY argument and is an OBJECT (not a string). Keys are
-     the flagged Sr numbers as strings; values are full account paths from that
+     the flagged rows as strings: Sr numbers restart in every Part, so use the
+     row id the build prints (TDSJ2 = Part I Sr 2, 15GJ2 = Part II Sr 2,
+     TCSJ2 = Part VI Sr 2); a bare number means Part I only; values are full account paths from that
      deductor's candidate list.
    - Include ONLY flagged Sr numbers that are REVIEW, never AMBIGUOUS. Never
      change a High/Medium match.

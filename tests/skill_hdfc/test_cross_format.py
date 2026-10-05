@@ -15,6 +15,7 @@ Covers, all offline / synthetic-only:
 from __future__ import annotations
 
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ import hdfc_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_hdfc import agent  # noqa: E402
 
 REAL_SAMPLES_DIR = ROOT / "Data" / "local_bank_samples"
-REAL_PDF_PASSWORD = "9017470"
+REAL_PDF_PASSWORD = os.environ.get("PASK_LOCAL_PDF_PASSWORD", "")  # SEC-13: never committed
 
 
 def _read_canonical(path: Path) -> list[dict]:
@@ -125,7 +126,7 @@ def test_text_layer_usable_accepts_normal_statement_text():
     text = (
         "Statement of account\n"
         "Date  Narration  Chq./Ref.No.  Value Dt  Withdrawal Amt.  Deposit Amt.  Closing Balance\n"
-        "01/04/25 NEFT SALARY CREDIT 0000102716301847 01/04/25 146.00 635,512.16\n"
+        "01/04/25 NEFT SALARY CREDIT 0000100000000001 01/04/25 146.00 635,512.16\n"
     )
     assert agent._text_layer_usable(text) is True
 
@@ -162,6 +163,8 @@ def test_real_password_pdf_matches_real_xls():
     xls_candidates = sorted(REAL_SAMPLES_DIR.glob("*.xls"))
     if not xls_candidates:
         pytest.skip(f"no *.xls sample found in {REAL_SAMPLES_DIR} -- local-only smoke test")
+    if not REAL_PDF_PASSWORD:
+        pytest.skip("PASK_LOCAL_PDF_PASSWORD not set -- local-only smoke test")
     import tempfile
 
     pdf_path = REAL_SAMPLES_DIR / "Bank stmnt FY26.pdf"

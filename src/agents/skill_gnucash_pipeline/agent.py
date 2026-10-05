@@ -555,7 +555,7 @@ def _get_gnucash_account_balance(
     (case-insensitive) under Assets. When ``account_number`` is supplied
     (from statement metadata), it is normalised to digits and matched
     against digits embedded in each candidate's account name (e.g.
-    "BOB - 760001001951") — this disambiguates multiple accounts at the
+    "BOB - 100000000001") — this disambiguates multiple accounts at the
     same bank and is preferred over a bare name match.
 
     If no account number is given, or there is at most one same-bank-name

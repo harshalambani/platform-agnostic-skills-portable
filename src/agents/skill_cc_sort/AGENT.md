@@ -38,13 +38,13 @@ The script supports multiple passwords - it tries each one per PDF until decrypt
 Different banks use different password formats, so multiple passwords are common.
 
 Options for providing passwords (in priority order):
-1. Comma-separated via the password argument: "HARS2806,HAR28061,INABM123,INABM2806"
+1. Comma-separated via the password argument: "EXAMPLE01,EXAMPLE02,EXAMPLE03,EXAMPLE04"
 2. Auto-detect from a file named 'passwords.txt' in the input folder - one password per line:
-     HARS2806
-     HAR28061
-     INABM123
-     INABM2806
-3. Auto-detect from a .txt filename stem (single password only): HARS2806.txt -> HARS2806
+     EXAMPLE01
+     EXAMPLE02
+     EXAMPLE03
+     EXAMPLE04
+3. Auto-detect from a .txt filename stem (single password only): EXAMPLE01.txt -> EXAMPLE01
 
 If the user has multiple passwords, always prefer option 2 (passwords.txt file) for convenience.
 Tell the user to create passwords.txt in the input folder if they have not done so.

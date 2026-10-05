@@ -43,6 +43,8 @@ def _strip_root(account_path: str) -> str:
 
 
 _SUSPENSE_DEFAULT = "Liabilities:Suspense"
+# MAP-37: a bank-specific rule is learned from history only if the description was booked at least this often (a one-off payee is not a pattern).
+BANK_RULE_MIN_FREQ = 2
 
 
 def _find_suspense_account(account_tree: List[str]) -> str:
@@ -3717,7 +3719,7 @@ def run(
             _gen_kwargs['reference_date'] = _stmt_ref   # MAP-31: age from the statement
     except (TypeError, ValueError):
         pass
-    rules_by_bank = generate_rules(extractor_output, min_freq=1 if bank_key else 3, **_gen_kwargs)
+    rules_by_bank = generate_rules(extractor_output, min_freq=BANK_RULE_MIN_FREQ if bank_key else 3, **_gen_kwargs)
     all_rules: List[dict] = []
     for bank_rules in rules_by_bank.values():
         all_rules.extend(bank_rules)

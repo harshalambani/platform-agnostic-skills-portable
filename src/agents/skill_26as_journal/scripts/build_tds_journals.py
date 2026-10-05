@@ -181,7 +181,8 @@ def series_for_category(category: str) -> str:
 # Alias expansion for matching: maps a token found in an ACCOUNT name to the
 # set of tokens it stands for in a DEDUCTOR name (and vice-versa via expansion).
 ALIASES = {
-    "BOB": {"BANK", "BARODA"},
+    # TDS-02: "BANK" is in every bank's name, so it must never be what ties a payer to BoB.
+    "BOB": {"BARODA"},
     "EPF": {"PROVIDENT", "FUND"},
     "PF": {"PROVIDENT", "FUND"},
     "DRL": {"REDDY", "REDDYS", "LABORATORIES"},
@@ -284,6 +285,9 @@ class Journal:
     needs_review: bool = False
     excluded_from_journal: bool = False  # Category C, partner-comp already books it
     tan: str = ""  # deductor/collector TAN, carried through for the review CSV/tab
+    # TDS-04: placeholder/hidden accounts this journal would have posted to
+    # and was NOT allowed to (the leg was moved to Suspense instead).
+    blocked_targets: list = field(default_factory=list)
 
     @property
     def total_debit(self) -> float:
@@ -764,7 +768,7 @@ def _acronym(tokens: list[str]) -> str:
 # bank/entity name). Used to tell the generic 'Interest on FD' account apart
 # from deductor-specific ones like 'Interest on BOB - FD'.
 FD_NOISE = {"INTEREST", "ON", "FROM", "INCOME", "RECEIVED", "EARNED", "OTHER",
-            "THE", "A", "OF", "FD", "FIXED", "DEPOSIT", "DEPOSITS"}
+            "THE", "A", "OF", "FD", "FDS", "FIXED", "TERM", "DEPOSIT", "DEPOSITS"}
 
 
 def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
@@ -784,7 +788,10 @@ def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
             continue
         toks = _tokens(a.leaf)
         tokset = set(toks)
-        has_fd = ("FD" in tokset) or ({"FIXED", "DEPOSIT"} <= tokset)
+        # TDS-03: also 'Interest on FDs', 'Fixed Deposits', 'Term Deposit(s)'
+        # and a bare 'Deposits'. A savings / other interest account carries
+        # none of these tokens, so it is still never taken as the FD account.
+        has_fd = bool(tokset & {"FD", "FDS", "DEPOSIT", "DEPOSITS"})
         if not has_fd:
             continue
         entity = {t for t in toks if t not in FD_NOISE and len(t) > 1}
@@ -954,6 +961,40 @@ def categorize(sections: tuple) -> tuple[Optional[str], str]:
     return None, label  # unknown or mixed -> needs review
 
 
+BLOCKED_MARK = "BLOCKED ACCOUNT"
+
+
+def enforce_postable(journals: list[Journal], accounts: list[Account]) -> list[Journal]:
+    """TDS-04: a placeholder or hidden account is NEVER a posting target.
+
+    Any split that names one is moved to Suspense, the journal is forced to
+    review, and the account is recorded in Journal.blocked_targets so the
+    caller reports it loudly as an account to create / unhide. Without this a
+    chart that only carries the canonical 'Interest on FD' as a placeholder
+    let the FD leg post there, and nothing was flagged.
+    """
+    blocked = {a.path for a in accounts if a.blocked}
+    if not blocked:
+        return journals
+    for j in journals:
+        for sp in j.splits:
+            if sp.account in blocked:
+                if sp.account not in j.blocked_targets:
+                    j.blocked_targets.append(sp.account)
+                sp.account = ACC_SUSPENSE
+        if j.blocked_targets:
+            j.needs_review = True
+            if j.credit_account in blocked:
+                j.credit_account = ACC_SUSPENSE
+                j.credit_confidence = "Suspense"
+            note = (f"{BLOCKED_MARK}: {', '.join(j.blocked_targets)} is a placeholder/hidden "
+                    "account and cannot be posted to - that leg is on Suspense; "
+                    "create or unhide a postable account")
+            if note not in (j.credit_basis or ""):
+                j.credit_basis = ((j.credit_basis + " -- ") if j.credit_basis else "") + note
+    return journals
+
+
 def build_journals(deductors: list[Deductor], accounts: list[Account],
                    overrides: Optional[dict] = None,
                    partner_comp_configured: bool = False,
@@ -1062,6 +1103,17 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                 Split(ACC_TDS_PARTNERSHIP, debit=a),
                 Split(credit_acc, credit=a),
             ]
+            if (not partner_comp_configured
+                    and ACC_TDS_PARTNERSHIP not in {x.path for x in accounts}):
+                # TDS-07: the debit account for s.194T TDS is not in the book,
+                # so this row cannot post as it stands. The single-candidate
+                # rule leaves such a row at Medium (no review); force it into
+                # review and say why, whatever the credit-side match was.
+                j.needs_review = True
+                j.credit_basis = (
+                    (j.credit_basis + " -- " if j.credit_basis else "")
+                    + f"MISSING DEBIT ACCOUNT: {ACC_TDS_PARTNERSHIP} is not in "
+                    "the book - create it before importing")
             if partner_comp_configured:
                 j.excluded_from_journal = True
                 j.needs_review = False
@@ -1078,7 +1130,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
                     "double-books this TDS and overstates remuneration."
                 )
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
@@ -1166,7 +1218,7 @@ def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
                 Split(credit_acc, credit=c),
             ]
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 def is_tcs_section(sections: tuple) -> bool:
@@ -1259,7 +1311,7 @@ def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
         j.credit_account = cr
         j.splits = [Split(dr, debit=tax), Split(cr, credit=tax)]
         journals.append(j)
-    return journals
+    return enforce_postable(journals, accounts)
 
 
 # -------------------- output --------------------
@@ -1464,6 +1516,11 @@ def write_part_i_split(rows: list[dict], out_path: Path) -> tuple[Optional[str],
     return str(part_i_path), problems
 
 
+def journal_id(j: Journal) -> str:
+    """TDS-05: 'TDSJ2' / '15GJ2' / 'TCSJ2' -- unique across Parts, unlike Sr."""
+    return f"{series_for_category(j.category)}{j.sr}"
+
+
 def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -> None:
     existing = {a.path for a in accounts}
     with path.open("w", newline="", encoding="utf-8") as f:
@@ -1480,7 +1537,11 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
         for j in journals:
             w.writerow([
                 j.sr, j.deductor, j.section_label, j.category, j.credit_account,
-                j.credit_confidence, "yes" if j.credit_account in existing else "NO",
+                j.credit_confidence,
+                # TDS-08: every account the journal posts to must exist -- the
+                # debit side too, not just the credit account.
+                "yes" if all(sp.account in existing for sp in j.splits) and
+                j.credit_account in existing else "NO",
                 "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
                 f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
                 j.credit_basis, "; ".join(j.tied_candidates), j.tan,
@@ -1557,14 +1618,20 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     # Payments'). Surface them explicitly so nothing imports silently wrong.
     missing = sorted({s.account for j in journals if not j.excluded_from_journal
                       for s in j.splits if s.account not in existing})
+    # TDS-04: placeholder/hidden accounts that were refused as posting targets
+    # are reported with the missing ones -- the user must create/unhide one.
+    blocked_accounts = sorted({b for j in journals if not j.excluded_from_journal
+                               for b in j.blocked_targets})
+    missing = sorted(set(missing) | set(blocked_accounts))
 
     review_rows = []
     for j in journals:
         review_rows.append({
-            "sr": j.sr, "deductor": j.deductor, "section": j.section_label,
+            "sr": j.sr, "id": journal_id(j), "deductor": j.deductor, "section": j.section_label,
             "category": j.category, "credit_account": j.credit_account,
             "confidence": j.credit_confidence,
-            "account_exists": j.credit_account in existing,
+            "account_exists": (j.credit_account in existing
+                               and all(sp.account in existing for sp in j.splits)),
             "balanced": j.balanced, "needs_review": j.needs_review,
             "candidates": j.candidates, "basis": j.credit_basis,
             "tied_candidates": j.tied_candidates,
@@ -1579,6 +1646,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "balanced_all": all(j.balanced for j in journals),
         "needs_review": [r for r in review_rows if r["needs_review"]],
         "missing_accounts": missing,
+        "blocked_accounts": blocked_accounts,
         "rows": review_rows,
         "output": str(out_path),
         "review": str(review_path),
@@ -1586,6 +1654,37 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "part_ii_problems": part_ii_problems,
         "s194t_reco": s194t_reco,
     }
+
+
+_OVERRIDE_SERIES = ("TDSJ", "15GJ", "TCSJ")
+_OVERRIDE_KEY_RE = re.compile(r"(TDSJ|15GJ|TCSJ)\D*(?P<sr>\d+)", re.I)
+
+
+def parse_override_key(key) -> Optional[tuple]:
+    """TDS-05: an override key -> (series, sr), or None when it carries no number.
+
+    Sr numbers restart in every Part of the 26AS, so a bare number is
+    ambiguous. A row is identified by its Transaction ID series plus its Sr:
+    'TDSJ2' (Part I), '15GJ2' (Part II), 'TCSJ2' (Part VI). A bare number (or
+    'Sr 2') keeps meaning Part I, as it always did -- it is never applied to
+    Part II or Part VI.
+    """
+    text = str(key)
+    m = _OVERRIDE_KEY_RE.search(text)
+    if m:
+        return m.group(1).upper(), int(m.group("sr"))
+    m = re.search(r"\d+", text)
+    return ("TDSJ", int(m.group(0))) if m else None
+
+
+def split_overrides(raw: dict) -> tuple:
+    """{key -> account} -> (part_i, part_ii, part_vi) maps of {sr -> account}."""
+    out = {"TDSJ": {}, "15GJ": {}, "TCSJ": {}}
+    for k, v in (raw or {}).items():
+        parsed = parse_override_key(k)
+        if parsed and v:
+            out[parsed[0]][parsed[1]] = v
+    return out["TDSJ"], out["15GJ"], out["TCSJ"]
 
 
 def _review_flag(needs_review: bool, confidence: str) -> str:
@@ -1635,12 +1734,13 @@ def main(argv: list[str]) -> int:
         # text (a tool-calling model may echo the display label "Sr 7" rather
         # than "7"): pull the digits out and skip any key with no number so a
         # stray label never crashes the build with int("Sr 7").
-        overrides = {}
-        for k, v in raw.items():
-            m = re.search(r"\d+", str(k))
-            if m:
-                overrides[int(m.group(0))] = v
+        # TDS-05: Sr numbers restart per Part, so keys may carry the series
+        # ('15GJ2'); each override only ever reaches its own Part.
+        overrides, g_overrides, tcs_overrides = split_overrides(raw)
+    else:
+        g_overrides = tcs_overrides = None
     stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides,
+               tcs_overrides=tcs_overrides, g_overrides=g_overrides,
                partner_comp_configured=partner_comp_configured,
                tds_expense_account=tds_expense_account)
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
@@ -1648,7 +1748,7 @@ def main(argv: list[str]) -> int:
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
     for r in stats["rows"]:
         flag = _review_flag(r["needs_review"], r["confidence"])
-        print(f"  Sr{r['sr']:>2} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
+        print(f"  {r['id']:>6} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
               f"-> {r['credit_account']}  ({r['confidence']}){flag}")
         if r["needs_review"] and r.get("tied_candidates"):
             print(f"        tied candidates: {', '.join(r['tied_candidates'])}")
@@ -1663,6 +1763,11 @@ def main(argv: list[str]) -> int:
         if amb_n:
             parts.append(f"{amb_n} Ambiguous (tied candidates — tag manually in Review tab)")
         print(f"\n{len(stats['needs_review'])} deductor(s) need review ({', '.join(parts)}).")
+    if stats["blocked_accounts"]:
+        print("\n*** NOT POSTED - placeholder/hidden account(s); that leg is on Suspense "
+              "and the row is flagged for review:")
+        for acc in stats["blocked_accounts"]:
+            print(f"  - {acc}")
     if stats["missing_accounts"]:
         print("\nAccounts to CREATE in GnuCash before import:")
         for acc in stats["missing_accounts"]:

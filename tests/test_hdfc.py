@@ -147,7 +147,7 @@ def test_resolve_ambiguous_amounts_uses_running_balance_direction():
 
 def test_footer_regex_does_not_match_upi_hdfcbank_vpa_transaction_line():
     line = ("06/04/25 UPI-BLINKIT-BLINKIT.PAYU@HDFCBANK-HDFC0M "
-            "0000102716301847 06/04/25 146.00 635,512.16")
+            "0000100000000001 06/04/25 146.00 635,500.00")
     # The footer regex DOES match this line's "HDFCBANK" substring in
     # isolation -- that's expected and fine, since the parser only trusts
     # the footer/skip regexes when the line does NOT already look like a
@@ -166,9 +166,9 @@ def test_pdfplumber_parser_extracts_transaction_with_hdfcbank_in_narration(tmp_p
     lines = [
         "Statement of account",
         "Date  Narration  Chq./Ref.No.  Value Dt  Withdrawal Amt.  Deposit Amt.  Closing Balance",
-        "06/04/25 UPI-BLINKIT-BLINKIT.PAYU@HDFCBANK-HDFC0M 0000102716301847 06/04/25 146.00 635,512.16",
-        "ERUPI-102716301847-UPIINTENT",
-        "07/04/25 ACH D- BD-AXIS MF-TXZS34497634 0000006952566647 07/04/25 2,500.00 633,012.16",
+        "06/04/25 UPI-BLINKIT-BLINKIT.PAYU@HDFCBANK-HDFC0M 0000100000000001 06/04/25 146.00 635,500.00",
+        "ERUPI-100000000001-UPIINTENT",
+        "07/04/25 ACH D- BD-SAMPLE MF-TXAB12345678 0000100000000002 07/04/25 2,500.00 633,000.00",
     ]
     y = 800
     for line in lines:
@@ -187,7 +187,7 @@ def test_pdfplumber_parser_extracts_transaction_with_hdfcbank_in_narration(tmp_p
     transactions, _summary, usable = _parse_pdf_pdfplumber(str(pdf_path))
     assert usable
     refs = [t["Transaction ID"] for t in transactions]
-    assert "102716301847" in refs, (
+    assert "100000000001" in refs, (
         "transaction with '@HDFCBANK' in its narration must not be dropped"
     )
 
@@ -223,15 +223,15 @@ def test_ocr_tail_re_tolerates_missing_pipe_before_value_date():
     number and the value date -- sometimes a real pipe, sometimes just
     whitespace. Both must parse to the same transaction."""
     current = {"date": "01/04/25"}
-    text_with_pipe = "01/04/25 |UPI-MITTAL SHRENIK 0000102407936986| 01/04/25 8,000.00 700,111.94"
-    text_without_pipe = "01/04/25 |UPI-MITTAL SHRENIK 0000102407936986 01/04/25 8,000.00 700,111.94"
+    text_with_pipe = "01/04/25 |UPI-SAMPLE PAYEE 0000100000000003| 01/04/25 8,000.00 700,000.00"
+    text_without_pipe = "01/04/25 |UPI-SAMPLE PAYEE 0000100000000003 01/04/25 8,000.00 700,000.00"
 
     for text in (text_with_pipe, text_without_pipe):
         m_tail = _TAIL_RE.search(text)
         assert m_tail is not None, text
         txn = _build_pdf_txn(current, text, m_tail)
         assert txn["Date"] == "2025-04-01"
-        assert txn["Transaction ID"] == "102407936986"  # leading zeros stripped
+        assert txn["Transaction ID"] == "100000000003"  # leading zeros stripped
 
 
 def test_ocr_two_number_line_is_flagged_ambiguous_and_resolved():
@@ -239,7 +239,7 @@ def test_ocr_two_number_line_is_flagged_ambiguous_and_resolved():
     rather than 3 (withdrawal, deposit, balance) -- same ambiguity as the
     pdfplumber path, resolved the same way via running-balance direction."""
     current = {"date": "01/04/25"}
-    text = "01/04/25 |UPI-MITTAL SHRENIK 0000102407936986 01/04/25 8,000.00 700,111.94"
+    text = "01/04/25 |UPI-SAMPLE PAYEE 0000100000000003 01/04/25 8,000.00 700,000.00"
     m_tail = _TAIL_RE.search(text)
     assert m_tail is not None
     txn = _build_pdf_txn(current, text, m_tail)
@@ -248,6 +248,6 @@ def test_ocr_two_number_line_is_flagged_ambiguous_and_resolved():
     assert "_ambiguous_amount" in txn
 
     transactions = [txn]
-    _resolve_ambiguous_amounts(transactions, opening_balance=708111.94)
+    _resolve_ambiguous_amounts(transactions, opening_balance=708000.00)
     assert transactions[0]["Withdrawal"] == "8000.00"  # balance fell -> withdrawal
     assert transactions[0]["Deposit"] == ""

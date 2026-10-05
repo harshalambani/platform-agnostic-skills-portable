@@ -235,6 +235,11 @@ jobs:
             *) echo "::error::pytest could not complete the run (exit ${rc}) -- collection error, internal error, or bad invocation. This is NOT a test failure: the suite did not run."; exit 1 ;;
           esac
 
+      # SEC-13/16/17: no real credentials or account data in tracked files.
+      # Hash denylist + shape check; the script holds no real value.
+      - name: No real credentials or account data
+        run: python scripts/check_no_real_data.py
+
       # No tolerance here at all. These two files import cleanly with the deps
       # installed above, so any non-zero exit is a real security regression.
       - name: Security static checks

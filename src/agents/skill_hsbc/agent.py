@@ -12,6 +12,7 @@ row's fidelity is ``"ocr-approx"``, never ``"exact"``.
 from __future__ import annotations
 
 import logging
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -62,6 +63,7 @@ def run(
         model_override: Unused (ditto).
     """
     src = Path(pdf_dir)
+    stage_dir: Optional[Path] = None
 
     if not src.exists():
         raise ValueError(f"Path not found: {pdf_dir}")
@@ -99,17 +101,24 @@ def run(
             raise ValueError(f"No PDF statements found in: {src}")
         # pdf_dir already points at a directory of PDFs; pass it through.
 
-    result = subprocess.run(
-        [
-            sys.executable, str(_PIPELINE),
-            "--pdf-dir", pdf_dir,
-            "--work-dir", work_dir,
-            "--out", output_path,
-            "--title", title,
-        ],
-        capture_output=True,
-        text=True,
-    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, str(_PIPELINE),
+                "--pdf-dir", pdf_dir,
+                "--work-dir", work_dir,
+                "--out", output_path,
+                "--title", title,
+            ],
+            capture_output=True,
+            text=True,
+        )
+    finally:
+        # BNK-08: the staged copy of the single PDF is only an input to the
+        # subprocess above. Remove it whether the run passed, failed or raised;
+        # the outputs live in work_dir / output_path, never in the stage dir.
+        if stage_dir is not None:
+            shutil.rmtree(stage_dir, ignore_errors=True)
     if result.returncode != 0:
         raise RuntimeError(
             "HSBC pipeline failed:\n"

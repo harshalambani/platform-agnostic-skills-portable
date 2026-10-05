@@ -48,13 +48,21 @@ import agents.skill_hsbc.agent as hsbc_agent  # noqa: E402
 from agents.skill_hsbc.agent import run as hsbc_run  # noqa: E402
 
 
+_STAGED: dict[str, list[str]] = {}
+
+
 def _mock_subprocess(monkeypatch, returncode=0, stdout="Pipeline complete.", stderr=""):
     """Replace subprocess.run with a recorder; returns the list of recorded
     cmd argument lists (one per call)."""
     calls: list[list[str]] = []
+    # BNK-08: the staged folder is removed when run() ends, so what it held is
+    # captured at call time, while the subprocess would be reading it.
+    _STAGED.clear()
 
     def fake_run(cmd, **kwargs):
         calls.append(list(cmd))
+        d = Path(_pdf_dir_arg(list(cmd)))
+        _STAGED[str(d)] = sorted(p.name for p in d.iterdir()) if d.is_dir() else []
         return MagicMock(returncode=returncode, stdout=stdout, stderr=stderr)
 
     monkeypatch.setattr(hsbc_agent.subprocess, "run", fake_run)
@@ -79,7 +87,7 @@ def test_single_pdf_is_staged_and_passed_as_its_own_directory(monkeypatch, tmp_p
 
     assert len(calls) == 1
     staged_dir = Path(_pdf_dir_arg(calls[0]))
-    assert [p.name for p in staged_dir.iterdir()] == ["statement.pdf"]
+    assert _STAGED[str(staged_dir)] == ["statement.pdf"]
 
 
 def test_directory_of_pdfs_passed_through_unchanged(monkeypatch, tmp_path):
@@ -113,7 +121,7 @@ def test_single_pdf_never_sweeps_in_sibling_pdfs(monkeypatch, tmp_path):
 
     assert len(calls) == 1
     staged_dir = Path(_pdf_dir_arg(calls[0]))
-    assert sorted(p.name for p in staged_dir.iterdir()) == ["target.pdf"]
+    assert _STAGED[str(staged_dir)] == ["target.pdf"]
 
 
 def test_enriched_workbook_is_rejected_with_convert_to_gnucash_pointer(monkeypatch, tmp_path):
