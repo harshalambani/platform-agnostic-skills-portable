@@ -283,7 +283,32 @@ transaction is booked against (income or expense), not your bank, so a deposit
 must be imported as a negated amount for the bank to go up. Use the Amount and
 Amount (Negated) column types, not &quot;Transfer Amount&quot; - GnuCash 5&#x27;s importer
 needs an Amount column. Save the mapping as a preset in the importer so the
-next import is one click.</p>
+next import is one click.
+
+**Closing-balance gate and the bank-base file (BNK-09).** Before anything is
+released the pipeline checks that the book would end at the statement closing
+balance (and at every month end). A statement row may be left out as &quot;already
+booked&quot; only when its twin is in THIS bank&#x27;s own account, same amount, within
+2 days; a same-amount entry in a shared account (Cash, Drawings, Credit Card
+Payment) booked from another bank never counts. If the gate fails, the import is
+BLOCKED and every explaining row is listed (date, description, amount, intended
+account, reason). Timing differences of 1-2 days that net to zero are shown for
+information and do not block.
+
+Import the file ending `_GnuCash_import_bank_base.csv`, not the `_import_ready`
+file. In it the BANK is the base Account and the category is the Transfer
+Account, so GnuCash&#x27;s duplicate check compares each row against this bank only.
+Create a second importer preset for it:
+
+- Date -&gt; Date; Transaction ID -&gt; Number; Description -&gt; Description.
+- Account -&gt; Account; Transfer Account -&gt; Transfer Account.
+- &quot;Amount (Deposit)&quot; -&gt; Amount; &quot;Amount Negated (Withdrawal)&quot; -&gt; Amount (Negated).
+- Balance, Currency, Confidence and MatchReason -&gt; None.
+
+On the Review tab, &quot;Check book after import (read-only)&quot; compares the bank&#x27;s
+daily book balance with the statement&#x27;s running balance, names the first day
+they drift apart and the closing difference, and writes a `_missing_rows` CSV of
+only the rows absent from this bank&#x27;s account. It never writes to the book.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>

@@ -160,6 +160,31 @@ help:
     needs an Amount column. Save the mapping as a preset in the importer so the
     next import is one click.
 
+    **Closing-balance gate and the bank-base file (BNK-09).** Before anything is
+    released the pipeline checks that the book would end at the statement closing
+    balance (and at every month end). A statement row may be left out as "already
+    booked" only when its twin is in THIS bank's own account, same amount, within
+    2 days; a same-amount entry in a shared account (Cash, Drawings, Credit Card
+    Payment) booked from another bank never counts. If the gate fails, the import is
+    BLOCKED and every explaining row is listed (date, description, amount, intended
+    account, reason). Timing differences of 1-2 days that net to zero are shown for
+    information and do not block.
+
+    Import the file ending `_GnuCash_import_bank_base.csv`, not the `_import_ready`
+    file. In it the BANK is the base Account and the category is the Transfer
+    Account, so GnuCash's duplicate check compares each row against this bank only.
+    Create a second importer preset for it:
+
+    - Date -> Date; Transaction ID -> Number; Description -> Description.
+    - Account -> Account; Transfer Account -> Transfer Account.
+    - "Amount (Deposit)" -> Amount; "Amount Negated (Withdrawal)" -> Amount (Negated).
+    - Balance, Currency, Confidence and MatchReason -> None.
+
+    On the Review tab, "Check book after import (read-only)" compares the bank's
+    daily book balance with the statement's running balance, names the first day
+    they drift apart and the closing difference, and writes a `_missing_rows` CSV of
+    only the rows absent from this bank's account. It never writes to the book.
+
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
       fix: "Mapping (and 'Other Bank' normalisation) uses an LLM. Start Ollama or set an endpoint in Settings."

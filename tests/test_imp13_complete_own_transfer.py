@@ -58,8 +58,14 @@ def test_candidate_whose_other_leg_is_the_importing_bank_still_flagged():
     assert len(res) == 1 and res[0]["status"] == "possible"
 
 
-def test_candidate_whose_other_leg_is_not_an_own_account_still_flagged():
-    res = detect_contra_entries([_wd()], _gd(_cand(BOB, [FOOD])), TARGET)
+def test_candidate_whose_other_leg_is_a_category_is_no_longer_flagged():
+    # BNK-09: an entry booked against a category (not this bank) is somebody
+    # else's spend, never the other leg of this bank's row.
+    assert detect_contra_entries([_wd()], _gd(_cand(BOB, [FOOD])), TARGET) == []
+
+
+def test_candidate_whose_other_leg_is_this_bank_is_flagged():
+    res = detect_contra_entries([_wd()], _gd(_cand(BOB, [TARGET])), TARGET)
     assert len(res) == 1
 
 
@@ -74,14 +80,14 @@ def test_candidate_with_unknown_other_legs_still_flagged():
 
 
 def test_skipping_one_candidate_leaves_a_genuine_one_flagged():
-    gd = _gd(_cand(BOB, [SBM]), _cand(SBM, [FOOD]))
+    gd = _gd(_cand(BOB, [SBM]), _cand(SBM, [TARGET]))
     res = detect_contra_entries([_wd()], gd, TARGET)
     assert len(res) == 1 and res[0]["contra_account"] == SBM
 
 
 def test_pipe09_one_to_one_unchanged():
     rows = [_wd(desc="A"), _wd(desc="B"), _wd(desc="C")]
-    res = detect_contra_entries(rows, _gd(_cand(BOB, [FOOD])), TARGET)
+    res = detect_contra_entries(rows, _gd(_cand(BOB, [TARGET])), TARGET)
     assert len(res) == 1
 
 

@@ -512,6 +512,104 @@ def _load_review_data(csv_path: str, gnucash_path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# BNK-09: closing-balance gate on export + read-only check after import
+# ---------------------------------------------------------------------------
+
+def _gate_on_export(csv_p: Path, rows: list[dict]) -> tuple[str | None, str, str | None]:
+    """Re-run the closing-balance gate for the rows the user is about to export.
+
+    Returns (blocked_markdown, note, bank_base_path). ``blocked_markdown`` is
+    set when the export must not be released (the gate failed, or the
+    safe-orientation file cannot be built); the bank-base file is then written
+    header-only so a stale one cannot be imported. With no gate sidecar (an
+    older run) nothing is checked and the old export behaviour stays.
+    """
+    from agents import bank_balance_gate as bg
+    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p))
+    if doc is None:
+        return None, "", None
+    dst = bg.bank_base_name(csv_p)
+    res = bg.reevaluate(doc, rows)
+    if res["status"] == "fail":
+        bg.write_bank_base_csv([], dst, blocked=True)
+        lines = ["**EXPORT BLOCKED - the book would not end at the statement balance.**", ""]
+        lines += [f"- {ln.strip()}" for ln in bg.format_gate_failure(res) if ln.strip()]
+        return chr(10).join(lines), "", None
+    n, problems = bg.write_bank_base_csv(rows, dst)
+    if problems:
+        return ("**EXPORT BLOCKED - the bank-base file cannot be built.**" + chr(10)
+                + chr(10).join(f"- {x}" for x in problems[:20])), "", None
+    note = f"; bank-base import file written: {dst.name} ({n} rows)"
+    if res["status"] == "unverified":
+        note += f" (gate unverified: {res['message']})"
+    risks = res.get("double_booking_risk") or []
+    if risks:
+        note += (f"; RED FLAG: {len(risks)} imported row(s) already have a same-amount entry "
+                 f"in this bank's account (possible double booking)")
+    return None, note, str(dst)
+
+
+def _check_after_import(csv_path: str, gnucash_path: str):
+    """Read-only: compare this bank's daily book balance with the statement's
+    running balance, name the first day they drift apart and the closing
+    difference, and write a missing-rows CSV (only rows absent from this bank's
+    account). Never writes to the book."""
+    from agents import bank_balance_gate as bg
+    from agents.skill_gnucash_reconciler.agent import parse_gnucash_for_reconcile
+    if not csv_path or not gnucash_path:
+        return "Select a mapped CSV and a GnuCash book first.", gr.update(interactive=False, value=None)
+    try:
+        csv_p = _safe_paths.resolve_input_file(csv_path, (".csv",))
+    except _safe_paths.UnsafePathError as e:
+        return f"Check refused: {e}", gr.update(interactive=False, value=None)
+    gc_p = Path(gnucash_path)
+    if not gc_p.is_file():
+        return f"GnuCash file not found: {gc_p.name}", gr.update(interactive=False, value=None)
+    doc = bg.read_gate_sidecar(bg.gate_sidecar_path(csv_p))
+    if doc is None:
+        return ("No statement record (.gate.json) next to this CSV, so there is nothing to "
+                "compare the book with. Re-run the bank import."), gr.update(interactive=False, value=None)
+    try:
+        book = parse_gnucash_for_reconcile(str(gc_p), account_filter=doc["book_filter_path"])
+        res = bg.post_import_check(doc["points"], bg.own_splits(book, doc["book_filter_path"]))
+    except Exception as e:
+        return f"Check failed: {e}", gr.update(interactive=False, value=None)
+    lines = [("**Book matches the statement.**" if res["status"] == "clean"
+              else "**Book and statement differ.**"), "", res["message"]]
+    if res["opening_offset"]:
+        lines.append(f"- Opening difference carried from before the statement: {res['opening_offset']:.2f} (pre-existing, excluded from the drift).")
+    download = gr.update(interactive=False, value=None)
+    if res["missing"]:
+        mapped = []
+        try:
+            with open(csv_p, "r", encoding="utf-8", errors="replace", newline="") as f:
+                mapped = list(csv.DictReader(f))
+        except OSError:
+            pass
+        out_p = csv_p.with_name(csv_p.stem + "_missing_rows.csv")
+        n = bg.write_missing_rows(res["missing"], doc["bank_account"], mapped,
+                                  doc.get("intended") or {}, out_p)
+        base_p = bg.bank_base_name(out_p)
+        mrows = []
+        with open(out_p, "r", encoding="utf-8", newline="") as f:
+            mrows = list(csv.DictReader(f))
+        bg.write_bank_base_csv(mrows, base_p)
+        lines.append("")
+        lines.append(f"**{n} row(s) are absent from this bank's account:**")
+        for m in res["missing"][:60]:
+            lines.append(f"- {m['date']} | {m['description'][:60]} | {m['amount']:.2f}")
+        lines.append("")
+        lines.append(f"Written: `{out_p.name}` (same layout as the import file) and `{base_p.name}` "
+                     f"(bank as the base account - import this one).")
+        try:
+            download = gr.update(value=str(_safe_paths.stage_copy(base_p, _config_mod.download_staging_dir())),
+                                 interactive=True)
+        except Exception:
+            download = gr.update(value=str(base_p), interactive=True)
+    return chr(10).join(lines), download
+
+
+# ---------------------------------------------------------------------------
 # Save logic
 # ---------------------------------------------------------------------------
 
@@ -770,12 +868,20 @@ def _save_changes(changes_json: str) -> tuple[str, "gr.update"]:
                     export_msg += f" (original kept in Notes for {n_kept})"
                 if n_empty_orig:
                     export_msg += f" ({n_empty_orig} had no original description to keep)"
+            # BNK-09: the closing-balance gate decides whether this export may be
+            # released, and what is released is the bank-as-base file.
+            gate_block, gate_note, bank_base = _gate_on_export(csv_p, all_rows)
+            if gate_block:
+                return (gate_block + chr(10) * 2 + override_msg,
+                        gr.update(interactive=False, value=None))
+            export_msg += gate_note
+            release_p = Path(bank_base) if bank_base else csv_p
             # Copy to download staging dir so Gradio's file server can serve it
             try:
-                staged = _safe_paths.stage_copy(csv_p, _config_mod.download_staging_dir())
+                staged = _safe_paths.stage_copy(release_p, _config_mod.download_staging_dir())
                 download_path = str(staged)
             except Exception:
-                download_path = str(csv_p)
+                download_path = str(release_p)
         except Exception as e:
             export_msg = f"Warning: could not re-export CSV — {e}"
     else:
@@ -927,6 +1033,12 @@ def render(container_tab=None) -> None:
         save_btn = gr.Button("Save & Export", variant="primary")
         reset_btn = gr.Button("Reset", variant="secondary")
     save_result = gr.Markdown("")
+    check_btn = gr.Button("Check book after import (read-only)", variant="secondary")
+    check_result = gr.Markdown("")
+    check_download = gr.DownloadButton(
+        label="Download missing rows (bank as base)", visible=True, interactive=False,
+        variant="secondary",
+    )
     # Created visible=True/interactive=False rather than visible=False:
     # Gradio 6's frontend does not reliably reveal a DownloadButton that
     # starts hidden and is later toggled to visible=True. Toggling
@@ -940,6 +1052,12 @@ def render(container_tab=None) -> None:
     _payload_box = gr.Textbox(
         value="", show_label=False, container=False, lines=1,
         elem_id=f"{APP_ID}-payload-box",
+    )
+
+    check_btn.click(
+        fn=_check_after_import,
+        inputs=[csv_dropdown, gnucash_file],
+        outputs=[check_result, check_download],
     )
 
     # UI-12: Load and Reset ask before discarding unsaved work. A second click
