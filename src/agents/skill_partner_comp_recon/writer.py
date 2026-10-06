@@ -593,8 +593,8 @@ def _write_interest_on_capital_sheet(wb, report: Report, grid: dict, other: dict
     # day-count, interest-from date) is not established against the LLP
     # Statement's own method. The statement figure is independently checked
     # by the "L5 tie-out: interest on capital" reconciliation row instead;
-    # this sheet only models one possible (KPMG's) computation method.
-    _set(ws, row, 1, "INFORMATIONAL -- models one possible (KPMG's) computation "
+    # this sheet only models one possible (the firm's) computation method.
+    _set(ws, row, 1, "INFORMATIONAL -- models one possible (the firm's) computation "
                       "method; not the check on the LLP Statement's own figure "
                       "(see the L5 tie-out row on the Reconciliation sheet)",
          fill=TF, bold=True)

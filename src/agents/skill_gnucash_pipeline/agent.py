@@ -1982,6 +1982,7 @@ def run(
             gnucash_bank_account=gnucash_bank_account,
             drawings_accounts=list(getattr(entity_profile, "drawings_accounts", None) or []),
             card_default_account=(getattr(entity_profile, "card_spend_default_account", "") or None),
+            reimbursement_markers=list(getattr(entity_profile, "reimbursement_markers", None) or []),
         )
         try:
             log_lines.append(_step3_result_line(output_path))

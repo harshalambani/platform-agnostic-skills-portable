@@ -137,4 +137,6 @@ SYN-IND-NR:
   # or not-in-book paths are ignored.
   # drawings_accounts:  # money IN to these is not a direction clash; an employer
   #   - "Equity:Drawings"  # reimbursement credit goes here when exactly one is listed
+  # reimbursement_markers:  # SEC-20: whole-word tags on an employer NEFT credit that reimburses the
+  #   - "ABCD"              # owner (MAP-34). Per entity; empty/absent = the rule never fires.
   # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)

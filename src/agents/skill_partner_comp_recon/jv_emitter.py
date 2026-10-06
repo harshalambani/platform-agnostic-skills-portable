@@ -34,9 +34,9 @@ module's docstring + JOURNAL_HEADERS are the ground truth this restates):
   h. Transaction ID is unique per transaction AND unique across financial
      years -- an FY-prefixed series, itself prefixed with a short firm
      token derived from report.firm_name (its first whitespace-separated
-     word, stripped to alphanumerics and upper-cased), e.g. "KPMG-2526-M01"
-     for the first monthly payout of FY 2025-26 with firm_name "KPMG India
-     Services LLP", "KPMG-2526-RECT" for that year's opening
+     word, stripped to alphanumerics and upper-cased), e.g. "SYNTHCORP-2526-M01"
+     for the first monthly payout of FY 2025-26 with firm_name "Synthcorp
+     Advisory LLP", "SYNTHCORP-2526-RECT" for that year's opening
      reclassification. When firm_name is empty or the token would come out
      empty, the firm prefix is omitted entirely (bare "2526-M01" / no
      leading hyphen) rather than crashing or emitting a malformed ID.
