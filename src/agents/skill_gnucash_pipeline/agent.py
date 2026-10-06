@@ -23,6 +23,7 @@ import csv
 import gzip
 import json
 import logging
+import os
 import re
 import sys
 import tempfile
@@ -46,6 +47,7 @@ from agents.canonical_io import (
     write_canonical_csv,
     write_sidecar,
 )
+from agents import bank_balance_gate as _bg
 from agents.skill_gnucash_reconciler.agent import (
     parse_gnucash_for_reconcile,
     reconcile,
@@ -310,6 +312,94 @@ def _drop_balance_carriers(output_path: str, contra_flags: dict) -> int:
     contra_flags.clear()
     contra_flags.update(remapped)
     return len(dropped)
+
+
+def _run_closing_gate(*, output_path: str, stmt_rows: list[dict], scoped_data,
+                      filter_path, bank_account: str) -> tuple[list[str], bool]:
+    """BNK-09: closing-balance gate + the safe-orientation (bank-as-base) file.
+
+    Returns (log_lines, blocked). Reads the book only through ``scoped_data``
+    (already parsed read-only); writes <stem>.gate.json and the bank-base file.
+    On a failed gate the bank-base file is written header-only so a stale one
+    from an earlier run cannot be imported.
+    """
+    lines: list[str] = []
+    if scoped_data is None or not filter_path:
+        lines.append(
+            "⚠️ Closing-balance gate skipped: this bank's account in the book was not "
+            "resolved, so the book balance cannot be projected. The bank-base import "
+            "file is not produced (no bank account to use as the base).")
+        return lines, False
+    points = _bg.statement_points(stmt_rows)
+    splits = _bg.own_splits(scoped_data, filter_path)
+    twins = _bg.assign_twins(points, splits)
+    with open(output_path, "r", encoding="utf-8", newline="") as f:
+        final_rows = list(csv.DictReader(f))
+    flags, extras = _bg.mark_imported(points, twins, final_rows)
+    book_open = _bg.book_balance_before(splits, min(p["date"] for p in points)) if points else 0.0
+
+    intended: dict[str, str] = {}
+    reasons: dict[str, str] = {}
+    sp = booked_sidecar_path(output_path)
+    if sp.is_file():
+        try:
+            for e in json.loads(sp.read_text(encoding="utf-8")):
+                row = e.get("row") or {}
+                iso = _bg._iso(row.get("Date"))
+                if iso:
+                    k = _bg.point_key(iso, _bg.row_amount(row))
+                    intended[k] = str(row.get("Account") or "")
+                    reasons[k] = "set aside as already booked: " + str(e.get("reason") or "")
+        except (OSError, ValueError):
+            pass
+    for p in points:
+        reasons.setdefault(
+            _bg.point_key(p["date"], p["amount"]),
+            "skipped as already booked (same date and amount, or the date-based filter)")
+    res = _bg.evaluate_gate(points, twins, flags, extras, book_open,
+                            skip_reasons=reasons, intended=intended)
+    _bg.write_gate_sidecar(
+        _bg.gate_sidecar_path(output_path), root=os.path.dirname(os.path.abspath(output_path)), bank_account=bank_account,
+        book_filter_path=filter_path, points=points, twins=twins,
+        book_opening=book_open, intended=intended, skip_reasons=reasons, result=res)
+
+    blocked = res["status"] == "fail"
+    op = res.get("opening") or {}
+    if op and not op.get("ok"):
+        lines.append(
+            f"⚠️ Opening gap detected (pre-existing, reported separately): the book "
+            f"opens at {op['book']:.2f} but the statement at {op['statement']:.2f} "
+            f"(difference {op['gap']:.2f}). The gate below checks the movements.")
+    if blocked:
+        for ln in _bg.format_gate_failure(res):
+            lines.append("❌ " + ln.strip())
+        lines.append("❌ The bank-base import file was NOT released (written empty).")
+    elif res["status"] == "pass":
+        lines.append(f"Closing-balance gate -- PASS: {res['message']}")
+    else:
+        lines.append(f"⚠️ Closing-balance gate -- unverified: {res['message']}")
+    if res["timing"]:
+        lines.append(
+            f"Timing differences (information): {len(res['timing'])} row(s) are booked "
+            f"in this bank's account on a date 1-2 days from the statement's; they net "
+            f"to zero by the end.")
+    for r in res["double_booking_risk"]:
+        lines.append(
+            f"❌ RED FLAG possible double booking: {r['date']} | {r['description'][:60]} | "
+            f"{r['amount']:.2f} -- {r['reason']} (twin dated {r['twin_date']}).")
+
+    dst = _bg.bank_base_name(output_path)
+    n, problems = _bg.write_bank_base_csv(final_rows, dst, root=os.path.dirname(os.path.abspath(output_path)), blocked=blocked)
+    if blocked:
+        pass
+    elif problems:
+        lines.append(f"❌ Bank-base import file not produced: {problems[0]}"
+                     + (f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""))
+        blocked = True
+    else:
+        lines.append(f"Import this file into GnuCash: `{dst.name}` ({n} rows; bank as the "
+                     f"base Account, so GnuCash's duplicate check compares against THIS bank).")
+    return lines, blocked
 
 
 def _contra_log_line(contra_flags: dict) -> str:
@@ -1599,6 +1689,9 @@ def run(
         with open(canonical_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             canonical_rows = list(reader)
+        # BNK-09: the FULL statement, before any row is skipped, for the
+        # closing-balance gate (running balances + every row's amount).
+        stmt_all_rows = list(canonical_rows)
 
         # Running balance check (Intervention 2)
         running = verify_running_balance(canonical_rows)
@@ -1695,6 +1788,7 @@ def run(
         _emit_progress(4, f"{bank}: checking for duplicates in GnuCash")
 
         gnucash_data = None  # unfiltered whole-book parse; contra detection needs it below
+        gnucash_data_scoped = None  # BNK-09: this bank's own account only (closing gate)
         booked_matches: list[dict] = []  # IMP-11
         try:
             if account_filter_path is None:
@@ -1964,6 +2058,28 @@ def run(
         except Exception as e:
             log.warning(f"Own-name advisory skipped: {e}")
 
+        # BNK-09: closing-balance gate. The book must END at the statement
+        # balance, whatever was skipped or flagged. Blocks the safe-orientation
+        # import file when it would not.
+        _gate_blocked = False
+        try:
+            _gl, _gate_blocked = _run_closing_gate(
+                output_path=output_path, stmt_rows=stmt_all_rows,
+                scoped_data=gnucash_data_scoped, filter_path=account_filter_path,
+                bank_account=gnucash_bank_account)
+            log_lines.extend(_gl)
+        except Exception as e:
+            _gate_blocked = True
+            log.warning(f"Closing-balance gate failed: {e}")
+            log_lines.append(
+                f"❌ Closing-balance gate could not run ({e}). The bank-base import "
+                f"file was NOT released; do not import until this is checked.")
+            try:
+                _bg.write_bank_base_csv([], _bg.bank_base_name(output_path),
+                                        root=os.path.dirname(os.path.abspath(output_path)), blocked=True)
+            except Exception:
+                pass
+
         _emit_progress(6, f"{bank}: final balance verification")
         try:
             with open(output_path, "r", encoding="utf-8") as f:
@@ -1997,6 +2113,16 @@ def run(
             formatted_lines.append(f"🟢 {clean}")
 
     steps_summary = "  \n".join(formatted_lines)  # MD line break (two spaces + \n)
+    if _gate_blocked:
+        return (
+            f"## 🔴 {bank} → GnuCash pipeline: IMPORT BLOCKED (closing-balance gate)\n\n"
+            f"The book would not end at the statement closing balance. Nothing may be "
+            f"imported until the rows below are resolved.\n\n"
+            f"{steps_summary}\n\n"
+            f"---\n\n"
+            f"{mapping_result}\n\n"
+            f"**Next:** resolve the rows listed above in **Banks > Review**, then re-run."
+        )
     return (
         f"## {bank} → GnuCash pipeline complete\n\n"
         f"{steps_summary}\n\n"

@@ -474,6 +474,26 @@ _OWN_TRANSFER_NARRATION_RE = re.compile(
     r'|\bown\s+account\b|\bIFT\b', re.IGNORECASE)
 
 
+_UNRESOLVED_COUNTER_RE = re.compile(
+    r'imbalance|orphan|suspense|unspecified|clearing|in[\s\-]*transit', re.IGNORECASE)
+
+
+def _counter_can_be_this_bank(txn: Dict, target_norm: str) -> bool:
+    """BNK-09: True when a book entry in another account may be the other leg of
+    a transfer with the importing bank. No recorded counter-accounts (older
+    parse) => unknown, keep the old behaviour. Otherwise the counter must be the
+    importing bank itself, or only unresolved-holding accounts (Imbalance,
+    Orphan, Suspense...). A real counter-account (another bank, Cash, a
+    category) means the entry belongs to something else."""
+    others = txn.get('other_accounts')
+    if not others:
+        return True
+    norm = [_norm_account_path(o) for o in others]
+    if any(n == target_norm for n in norm):
+        return True
+    return all(_UNRESOLVED_COUNTER_RE.search(n) for n in norm)
+
+
 def detect_contra_entries(
     csv_rows: List[Dict],
     gnucash_data: Dict,
@@ -561,6 +581,14 @@ def detect_contra_entries(
             continue
         # IMP-13: already a complete own transfer between two other banks
         if _is_complete_own_transfer(txn):
+            continue
+        # BNK-09: a book entry that already has a real counter-account (another
+        # bank, Cash, an expense...) is somebody else's transfer or spend, not
+        # the other leg of THIS bank's row. Same amount + a nearby date in a
+        # shared account (e.g. Cash booked from another bank) proves nothing.
+        # It can only be our counterpart when its counter-account is this bank,
+        # or is a holding account for a leg that was never resolved.
+        if not _counter_can_be_this_bank(txn, target_norm):
             continue
         other_txns.append(txn)
 
