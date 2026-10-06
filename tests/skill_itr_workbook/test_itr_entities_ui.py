@@ -757,9 +757,9 @@ def test_entity_to_form_books_line_present_and_blank(tmp_path):
         form_without_books = ui_mod._entity_to_form("SYN-IND", entities)
         form_new = ui_mod._entity_to_form("", entities)
 
-    assert form_with_books[-3] == "2025-26 = C:\\books\\BobDoe2526.gnucash"
-    assert form_without_books[-3] == ""
-    assert form_new[-3] == ""
+    assert form_with_books[-4] == "2025-26 = C:\\books\\BobDoe2526.gnucash"
+    assert form_without_books[-4] == ""
+    assert form_new[-4] == ""
     assert len(form_new) == len(form_with_books)
 
 

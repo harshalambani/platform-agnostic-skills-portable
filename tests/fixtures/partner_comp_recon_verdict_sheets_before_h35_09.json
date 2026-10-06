@@ -64,7 +64,7 @@
    "Interest on capital: computed (schedule, this FY's payslip capital movements only) vs LLP Statement",
    "Computed (interest schedule) = not supplied; LLP Statement (L5) = 12,000.00",
    "INFORMATIONAL",
-   "INFORMATIONAL -- this schedule's basis (rate, day-count, interest-from date) is not established against the LLP Statement's own method; the statement figure is independently checked by the 'L5 tie-out: interest on capital' row above. This row only models KPMG's own computation method and is never a disagreement with the statement, however large the gap. CANNOT RECONCILE -- capital interest rate not supplied for FY2025-26"
+   "INFORMATIONAL -- this schedule's basis (rate, day-count, interest-from date) is not established against the LLP Statement's own method; the statement figure is independently checked by the 'L5 tie-out: interest on capital' row above. This row only models the firm's own computation method and is never a disagreement with the statement, however large the gap. CANNOT RECONCILE -- capital interest rate not supplied for FY2025-26"
   ],
   [
    "s.194T TDS on interest on capital",

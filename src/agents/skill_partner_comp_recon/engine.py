@@ -103,7 +103,7 @@ def fy_prefix(fy: str) -> str:
 
 def firm_token(firm_name: str) -> str:
     """Short firm-scoped Transaction ID prefix derived from firm_name, e.g.
-    "KPMG India Services LLP" -> "KPMG". Moved here (H35-04 rework) from
+    "Synthcorp Advisory LLP" -> "SYNTHCORP". Moved here (H35-04 rework) from
     jv_emitter.py's private _firm_token() -- jv_emitter.py imports this back
     as `_firm_token`, so its own module-level name and every existing test
     that calls `jv_emitter._firm_token(...)` directly keep working
@@ -1355,7 +1355,7 @@ def build_report(data: dict) -> Report:
     _capital_rule_vs_advisory.informational = True
     if _capital_rule_vs_advisory.agree is False:
         _capital_rule_vs_advisory.note += (
-            " -- informational only, never a reconciliation gap: KPMG's own "
+            " -- informational only, never a reconciliation gap: the firm's own "
             "per-instalment rounding-down of the capital contribution routinely "
             "produces a small difference between the rule's projection and the "
             "Advisory's printed projected closing balance."
@@ -1453,7 +1453,7 @@ def build_report(data: dict) -> Report:
     # so a gap here, however large, is never a "STATEMENT DISAGREES"
     # disagreement and never enters the reconciliation counts. The
     # statement's own figure is independently checked by the L5 tie-out row
-    # instead; this schedule sheet only models one possible (KPMG's)
+    # instead; this schedule sheet only models one possible (the firm's)
     # computation method.
     capital_interest_schedule = compute_capital_interest_schedule(monthly, drivers, fy)
     _interest_schedule_category = (
@@ -1465,7 +1465,7 @@ def build_report(data: dict) -> Report:
         "interest-from date) is not established against the LLP Statement's "
         "own method; the statement figure is independently checked by the "
         "'L5 tie-out: interest on capital' row above. This row only models "
-        "KPMG's own computation method and is never a disagreement with the "
+        "the firm's own computation method and is never a disagreement with the "
         "statement, however large the gap. "
     )
     if capital_interest_schedule.rate is None:

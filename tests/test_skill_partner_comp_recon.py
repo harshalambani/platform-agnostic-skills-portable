@@ -444,7 +444,7 @@ def test_no_rate_change_message_does_not_claim_capitals_are_equal(tmp_path):
 
 def test_firm_token_derivation():
     assert jv_emitter._firm_token("Testcorp Alpha LLP") == "TESTCORP"
-    assert jv_emitter._firm_token("KPMG India Services LLP") == "KPMG"
+    assert jv_emitter._firm_token("Synthcorp Advisory LLP") == "SYNTHCORP"
     assert jv_emitter._firm_token("") == ""
     assert jv_emitter._firm_token(None) == ""
 
@@ -5981,7 +5981,7 @@ def test_h35_04_closing_capital_row_statement_is_reference_others_measured_again
     # forward projections against each other) is purely informational and
     # must never enter the LOUD block, whatever it concludes -- including
     # when the Advisory's own printed projection differs from the rule's
-    # purely because of KPMG's per-instalment rounding-down.
+    # purely because of the firm's per-instalment rounding-down.
     advisory_row = _find(report, _CLOSING_CAPITAL_RULE_VS_ADVISORY_CATEGORY)
     assert advisory_row.informational is True
     assert not any(
@@ -8224,3 +8224,24 @@ def test_h35_08_missing_ctc_structuring_shows_not_supplied_never_zero():
     assert result.ctc_structuring_total is None
     assert result.cash_pool is None
     assert "not supplied" in result.reason.lower()
+
+
+def test_written_workbook_label_has_no_hardcoded_firm_name(tmp_path):
+    """SEC-20: with a synthetic firm_name the workbook carries only generic
+    wording for the firm, never a hardcoded real firm string."""
+    import openpyxl
+
+    data = _double_count_regression_data()
+    data["firm_name"] = "Synthcorp Advisory LLP"
+    report = build_report(data)
+    out_path = tmp_path / "label.xlsx"
+    writer.write_report_workbook(report, str(out_path))
+    text = "\n".join(c.value for ws in openpyxl.load_workbook(str(out_path)).worksheets
+                     for row in ws.iter_rows() for c in row if isinstance(c.value, str))
+    assert "one possible (the firm's) computation" in text
+    import re as _re
+    from importlib import util as _u
+    spec = _u.spec_from_file_location("g", Path(__file__).resolve().parent.parent / "scripts" / "check_no_real_data.py")
+    g = _u.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    assert not [h for h in g.scan_text(text) if "SEC-20" in h[1]]            # NEGATIVE

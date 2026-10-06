@@ -157,6 +157,12 @@ class EntityProfile:
                                          # IN to one of them is not a direction clash, and an employer
                                          # reimbursement credit goes to it when exactly one is listed.
                                          # Empty (default) == no exemption, mapper behaves as before.
+    reimbursement_markers: list[str] = field(default_factory=list)  # SEC-20 (was hardcoded in
+                                         # the mapper): whole-word tags the bank puts on an
+                                         # employer NEFT credit that reimburses this entity's
+                                         # owner. Used by the MAP-34 rule only, per entity.
+                                         # Blank entries are dropped. Empty (default) == the
+                                         # reimbursement rule never fires for this entity.
     card_spend_default_account: str = ""  # MAP-35: account path a card spend that nothing else
                                          # matched is booked to (low confidence), instead of
                                          # Suspense. Empty (default) == Suspense, as before.
@@ -201,6 +207,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             extra_items=fields_.get("extra_items") or {},
             partner_comp_accounts=fields_.get("partner_comp_accounts") or {},
             drawings_accounts=[str(x).strip() for x in (fields_.get("drawings_accounts") or []) if str(x).strip()],
+            reimbursement_markers=[str(x).strip() for x in (fields_.get("reimbursement_markers") or []) if str(x).strip()],
             card_spend_default_account=str(fields_.get("card_spend_default_account") or "").strip(),
         )
     return entities
@@ -282,6 +289,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["partner_comp_accounts"] = dict(e.partner_comp_accounts)
     if e.drawings_accounts:
         d["drawings_accounts"] = list(e.drawings_accounts)
+    if e.reimbursement_markers:
+        d["reimbursement_markers"] = list(e.reimbursement_markers)
     if e.card_spend_default_account:
         d["card_spend_default_account"] = e.card_spend_default_account
     return d
