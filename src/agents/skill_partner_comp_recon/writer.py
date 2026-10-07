@@ -205,23 +205,27 @@ def _write_logic_sheet(wb, report: Report):
 
 def _write_drivers_sheet(wb, report: Report):
     ws = wb.create_sheet("Drivers")
-    _write_header(ws, 1, ["Driver", "Value", "Format"])
+    _write_header(ws, 1, ["Driver", "Value", "Format", "Source"])
     d = report.drivers
+    src = getattr(report, "driver_sources", {}) or {}
     rows = [
-        ("Financial year", report.financial_year, None),
-        ("Firm's tax rate", d.get("firms_tax_rate"), P),
-        ("Capital contribution rate", d.get("capital_rate"), P),
-        ("Capital months (total)", d.get("capital_months_total"), N),
-        ("Capital months (achieved)", d.get("capital_months_achieved"), N),
-        ("Target compensation", d.get("target_compensation"), N),
-        ("Remuneration TDS section", d.get("remuneration_tds_section"), None),
-        ("Remuneration TDS rate", d.get("remuneration_tds_rate"), P),
-        ("Remuneration TDS start date", d.get("remuneration_tds_start_date"), None),
+        ("Financial year", report.financial_year, None, None),
+        ("Firm's tax rate", d.get("firms_tax_rate"), P, "firms_tax_rate"),
+        ("Capital contribution rate", d.get("capital_rate"), P, "capital_rate"),
+        ("Capital months (total)", d.get("capital_months_total"), N, "capital_months_total"),
+        ("Capital months (achieved)", d.get("capital_months_achieved"), N, "capital_months_achieved"),
+        ("Target compensation", d.get("target_compensation"), N, "target_compensation"),
+        ("Capital interest rate", d.get("capital_interest_rate"), P, "capital_interest_rate"),
+        ("Remuneration TDS section", d.get("remuneration_tds_section"), None, "remuneration_tds_section"),
+        ("Remuneration TDS rate", d.get("remuneration_tds_rate"), P, "remuneration_tds_rate"),
+        ("Remuneration TDS start date", d.get("remuneration_tds_start_date"), None, "remuneration_tds_start_date"),
     ]
     cell_refs = {}
     row = 2
-    for label, value, fmt in rows:
+    for label, value, fmt, key in rows:
         _set(ws, row, 1, label, bold=True)
+        if key is not None:
+            _set(ws, row, 4, src.get(key, "" if value is not None else "-- missing --"))
         cell = _set(ws, row, 2, "-- not supplied --" if value is None else value,
                     fill=TF, number_format=fmt)
         cell_refs[label] = cell.coordinate
@@ -383,7 +387,8 @@ def _write_inputs_other_sheet(wb, report: Report):
             refs["rate"] = f"B{row}"
         else:
             _set(ws, row, 2, "-- not supplied --", fill=TF)
-        _set(ws, row, 3, "Run input / skill default (drivers.capital_interest_rate)")
+        _set(ws, row, 3, (getattr(report, "driver_sources", {}) or {}).get(
+            "capital_interest_rate", "Entity setting (drivers.capital_interest_rate)"))
         row += 1
         try:
             fy_end = fy_end_date(report.financial_year)

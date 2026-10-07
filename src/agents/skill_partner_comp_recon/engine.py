@@ -939,6 +939,29 @@ class CtcCheckResult:
     reason: str | None = None
 
 
+def ctc_structuring_total_fn(ctc_structuring: dict | None):
+    """The CTC structuring total and where it came from, as (value, source).
+
+    Order: the printed "CTC Structuring" total; else the sum of that total
+    row's printed monthly figures (only when every month is printed); else
+    the sum of the printed component totals (only when every component has
+    one). Anything less is (None, None): a missing figure is never filled
+    with 0 or a partial sum."""
+    if not ctc_structuring:
+        return None, None
+    total = ctc_structuring.get("total")
+    if total is not None:
+        return total, "printed total"
+    months = ctc_structuring.get("months") or {}
+    if months and all(v is not None for v in months.values()):
+        return round(sum(months.values()), 2), "sum of the printed monthly figures"
+    rows = ctc_structuring.get("rows") or {}
+    totals = [r.get("total") for r in rows.values() if isinstance(r, dict)]
+    if totals and all(t is not None for t in totals):
+        return round(sum(totals), 2), "sum of the printed component totals"
+    return None, None
+
+
 def compute_ctc_check(
     monthly: "list[MonthlyLine]", drivers: dict, ctc_structuring: dict | None, fy: str,
 ) -> CtcCheckResult:
@@ -962,9 +985,7 @@ def compute_ctc_check(
     remuneration_total = sum(m.remuneration for m in monthly) if monthly else None
     gross_sop_total = sum(m.share_of_profit_gross for m in monthly) if monthly else None
     arrears_total = sum(m.additional_share_of_profit for m in monthly) if monthly else None
-    ctc_structuring_total = (
-        ctc_structuring.get("total") if ctc_structuring is not None else None
-    )
+    ctc_structuring_total, _ctc_source = ctc_structuring_total_fn(ctc_structuring)
     firms_tax_on_pool = (
         sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else None
     )
@@ -1077,6 +1098,8 @@ class Report:
     # supplied at all). Consumed by agent.py (top of the text summary) and
     # writer.py (top of the Reconciliation sheet) to build the loud block.
     statement_flags: list[str] = field(default_factory=list)
+    # driver key -> "Entity setting" / "Advisory" / a default's label.
+    driver_sources: dict = field(default_factory=dict)
 
 
 def build_report(data: dict) -> Report:
@@ -1086,8 +1109,19 @@ def build_report(data: dict) -> Report:
     Report. Pure -- no I/O.
     """
     fy = data["financial_year"]
-    drivers = data.get("drivers") or {}
+    drivers = dict(data.get("drivers") or {})
     advisory = data.get("advisory") or {}
+    # Where each driver came from. An entity setting always wins; the
+    # Advisory's printed Target Compensation fills only a gap. Capital
+    # months and the capital rate are never read from any document by this
+    # skill today, so they stay unset (and are named when missing).
+    driver_sources: dict = dict(data.get("driver_sources") or {})
+    for _k, _v in drivers.items():
+        if _v is not None:
+            driver_sources.setdefault(_k, "Entity setting")
+    if drivers.get("target_compensation") is None and advisory.get("target_compensation") is not None:
+        drivers["target_compensation"] = advisory["target_compensation"]
+        driver_sources["target_compensation"] = "Advisory"
     external = data.get("external") or {}
     payroll = data.get("payroll") or []
     # H35-02: the L5 (LLP Statement of Account) leg, whole. None if not
@@ -1762,4 +1796,5 @@ def build_report(data: dict) -> Report:
         capital_interest_schedule=capital_interest_schedule,
         ctc_check=ctc_check,
         statement_flags=statement_flags,
+        driver_sources=driver_sources,
     )

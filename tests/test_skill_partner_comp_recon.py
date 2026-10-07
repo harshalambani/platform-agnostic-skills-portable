@@ -8711,3 +8711,93 @@ def test_a_row_with_excluded_months_is_listed_as_open_and_exception(tmp_path):
     writer._write_exceptions_sheet(wb, report)
     text = " ".join(str(c.value) for row in wb["Exceptions"].iter_rows() for c in row)
     assert "AGREE excl. 2025-04" in text
+
+
+# ---------------------------------------------------------------------------
+# H35-08 (Advisory Target Compensation reaches the checks) -- synthetic.
+# ---------------------------------------------------------------------------
+
+def _tc_data(entity_tc=None, advisory_tc=None, ctc=None):
+    data = _h35_02_data()
+    data["drivers"] = {k: v for k, v in data["drivers"].items() if k != "target_compensation"}
+    if entity_tc is not None:
+        data["drivers"]["target_compensation"] = entity_tc
+    if advisory_tc is not None:
+        data.setdefault("advisory", {})["target_compensation"] = advisory_tc
+    data["ctc_structuring"] = ctc if ctc is not None else {"total": 0, "months": {}, "rows": {}}
+    return data
+
+
+def test_h35_08_advisory_target_compensation_feeds_the_ctc_check_and_is_sourced():
+    report = build_report(_tc_data(advisory_tc=600000.0))
+    assert report.ctc_check.status == "OK"
+    assert report.ctc_check.target_compensation == 600000.0
+    assert report.drivers["target_compensation"] == 600000.0
+    assert report.driver_sources["target_compensation"] == "Advisory"
+
+
+def test_h35_08_entity_setting_still_wins_over_the_document_value():       # NEGATIVE
+    report = build_report(_tc_data(entity_tc=700000.0, advisory_tc=600000.0))
+    assert report.ctc_check.target_compensation == 700000.0
+    assert report.driver_sources["target_compensation"] == "Entity setting"
+
+
+def test_h35_08_missing_target_compensation_is_never_zero_or_prior_year():  # NEGATIVE
+    data = _tc_data()
+    data["advisory"] = {"prior_year_target_compensation": 500000.0}
+    report = build_report(data)
+    assert report.ctc_check.status == CANNOT_RECONCILE
+    assert report.ctc_check.target_compensation is None
+    assert "Target Compensation not supplied" in report.ctc_check.reason
+    assert "target_compensation" not in report.driver_sources
+
+
+def test_h35_08_capital_rule_with_missing_inputs_names_each_and_is_not_ok():  # NEGATIVE
+    report = build_report(_tc_data(advisory_tc=600000.0))
+    assert report.capital_rule.status == CANNOT_RECONCILE
+    reason = report.capital_rule.reason
+    assert "capital months achieved" in reason and "capital months total" in reason
+    assert "capital contribution rate" in reason
+    assert "target compensation" not in reason          # the Advisory supplied it
+    row = next(r for r in report.reconciliation if r.category.startswith("CTC walk-down:"))
+    assert row.agree is not False
+
+
+def test_h35_08_ctc_check_with_a_missing_input_is_never_agree():            # NEGATIVE
+    data = _tc_data(advisory_tc=600000.0)
+    data["ctc_structuring"] = {"total": None, "months": {}, "rows": {}}
+    report = build_report(data)
+    assert report.ctc_check.status == CANNOT_RECONCILE
+    row = next(r for r in report.reconciliation if r.category.startswith("CTC walk-down:"))
+    assert row.agree is not True
+    assert "CTC structuring total (not supplied)" in report.ctc_check.reason
+
+
+def test_h35_08_ctc_total_falls_back_only_to_printed_figures():
+    f = engine.ctc_structuring_total_fn
+    assert f({"total": 90.0}) == (90.0, "printed total")
+    assert f({"total": None, "months": {"a": 40.0, "b": 50.0}}) == (
+        90.0, "sum of the printed monthly figures")
+    assert f({"total": None, "months": {"a": None},
+              "rows": {"x": {"total": 30.0}, "y": {"total": 60.0}}}) == (
+        90.0, "sum of the printed component totals")
+    # NEGATIVE: a partial set is never summed into a figure.
+    assert f({"total": None, "months": {"a": 40.0, "b": None}, "rows": {}}) == (None, None)
+    assert f({"total": None, "months": {},
+              "rows": {"x": {"total": 30.0}, "y": {"total": None}}}) == (None, None)
+    assert f(None) == (None, None)
+
+
+def test_h35_08_default_interest_rate_is_labelled_as_a_default(tmp_path):
+    import openpyxl
+    data = _tc_data(advisory_tc=600000.0)
+    data["drivers"]["capital_interest_rate"] = 0.06
+    data["driver_sources"] = {"capital_interest_rate": "Default (6% simple interest, inferred -- not a figure from any document)"}
+    report = build_report(data)
+    out = tmp_path / "d.xlsx"
+    writer.write_report_workbook(report, str(out))
+    ws = openpyxl.load_workbook(str(out))["Drivers"]
+    cells = {r[0].value: r[3].value for r in ws.iter_rows(min_row=2)}
+    assert cells["Target compensation"] == "Advisory"
+    assert "inferred" in cells["Capital interest rate"]
+    assert cells["Capital months (achieved)"] == "-- missing --"

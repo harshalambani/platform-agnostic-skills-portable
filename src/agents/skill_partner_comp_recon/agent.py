@@ -855,7 +855,11 @@ def _run_from_documents(
     # this key explicitly (including to a different rate for a year the LLP
     # actually changed it) -- this default only fills a genuine gap.
     data.setdefault("drivers", {})
-    data["drivers"].setdefault("capital_interest_rate", _DEFAULT_CAPITAL_INTEREST_RATE)
+    if data["drivers"].get("capital_interest_rate") is None:
+        data["drivers"]["capital_interest_rate"] = _DEFAULT_CAPITAL_INTEREST_RATE
+        data.setdefault("driver_sources", {})["capital_interest_rate"] = (
+            "Default (6% simple interest, inferred -- not a figure from any document)"
+        )
     # Section A: feed the 26AS reader's result into the existing
     # external["form_26as_total_credit"] reconciliation leg (engine.py's
     # field_or_reason() treats a None value the same as the key being
