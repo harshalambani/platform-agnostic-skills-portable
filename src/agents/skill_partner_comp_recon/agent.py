@@ -612,7 +612,7 @@ def _run_from_documents(
     not a traceback), the reconciliation is computed, and the workbook is
     written (creating output_path's parent directories). If journal_path
     is supplied, the entity's `partner_comp_accounts` (from the
-    entities.yaml-shaped file at config_path) are resolved and -- if
+    entities.yaml-shaped file at entities_path) are resolved and -- if
     gnucash_path is also supplied -- validated against that book (see
     _validate_accounts_against_book) BEFORE anything is written; a missing
     config or an invalid account path is an "ERROR: ..." string, never a
