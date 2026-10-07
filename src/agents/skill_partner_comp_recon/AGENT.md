@@ -653,6 +653,32 @@ unconditional-bank-leg journal shape to compare against the book in its own
 existing (unrelated) check -- Section C's own "bank" `ACCOUNT_KEYS` leg is
 therefore unchanged by this build and should be re-examined separately.
 
+**H35-12 -- a payout paid as several bank credits.** Sometimes the firm
+pays one monthly payout as 2 or 3 separate bank credits. Single-credit
+matching (above) runs first for every payout and is unchanged. Only a payout
+still unmatched is then tried against SETS of credits, using only credits no
+single match consumed. A set is 2 or 3 credits (`MAX_SPLIT_PARTS`), all on
+the bank account, all posted to the SAME counter-account, each dated in the
+payout's calendar month or within the window of the payout date, adding up
+to the payout within Re 1. Exactly one such set is MATCHED ("split, N
+credits") and its credits are used up. Two or more different sets are a TIE:
+no journal, and a loud note names every set. Nothing is ever auto-picked.
+The journal's cash side lands on the counter-account at the payout amount
+(never on the bank account), so it balances and a within-Re-1 difference
+stays in the bank import's own postings, exactly as for a single match. The
+Bank match sheet lists every part and Total cash received counts them all.
+The reply text says how many payouts were matched as a set.
+
+**Excluded months on the GnuCash tie-out rows.** A payout month with no
+unique bank match (no match or a tie) has no journal, so a tie-out row's
+Computed figure leaves it out. Each row now names the months it leaves out
+whenever that month's would-be legs touch the row's account for a non-zero
+amount. Such a row reads "AGREE excl. <months>" instead of AGREE, is listed
+on the Exceptions and Open items sheets, and counts as undecidable. The
+left-out amount is only described in the note; it is never added to the
+Computed figure. A skipped month that would not touch the account (for
+example no capital that month) changes nothing, so a plain AGREE stays plain.
+
 See `tests/test_skill_partner_comp_recon.py`'s "H35-05" test section for
 every case above, plus a regression test asserting the total amount posted
 to the bank account across a full `build_journals()` emit is exactly 0.
@@ -680,3 +706,12 @@ No PII of any kind appears in this package's code, tests, or fixtures --
 every figure in `tests/fixtures/` is invented and self-consistent, chosen
 to exercise every arithmetic rule in this package's design spec, not
 copied or derived from any real document.
+
+## Award-year documents (H35-14)
+
+The optional "Award-year documents" field takes the Compensation summary of each earlier year whose incentive instalments were paid in the reporting year. The award year is read from inside each document, never from its file name. Each instalment paid this year is matched to the same award year's schedule by gross and compared on gross, firm's tax and capital deducted (AGREE, DIFFERS, or CANNOT RECONCILE when no document, no unique match, or the latest revision cannot be told apart). Several revisions of one year: the latest letter date wins, else the highest revision number; if neither settles it, the row says so and none is used. A Target compensation letter is accepted but is not an instalment source. Award FY, firm's-tax FY and payment FY are shown separately. Recon only; the journal is unchanged.
+
+## Statement of Account vs book, and the profit share (H35-15)
+
+The statement's closing capital and closing current account are compared with the book's balance at 31 March for the entity's partner capital and current accounts, plus this skill's own unposted journals. A gap fully explained by those journals gets the pending-posting verdict; any other gap is a DIFFERS and is never plugged. A separate row compares the statement's profit share with the schedule's gross share of profit less firm's tax plus additional share of profit, shows both readings (before and after firm's tax), and says which one agrees; with neither, it reports both gaps.
+

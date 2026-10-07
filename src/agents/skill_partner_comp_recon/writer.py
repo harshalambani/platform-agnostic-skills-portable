@@ -150,6 +150,8 @@ def _status_fill(r):
     if getattr(r, "not_checked", False):
         return TF, (getattr(r, "status_label", None) or "NOT CHECKED")
     agree = r.agree
+    if agree is True and getattr(r, "excluded_months", ""):
+        return TF, f"AGREE excl. {r.excluded_months}"
     if agree is True:
         return OK, "AGREE"
     if agree is False:
@@ -203,23 +205,27 @@ def _write_logic_sheet(wb, report: Report):
 
 def _write_drivers_sheet(wb, report: Report):
     ws = wb.create_sheet("Drivers")
-    _write_header(ws, 1, ["Driver", "Value", "Format"])
+    _write_header(ws, 1, ["Driver", "Value", "Format", "Source"])
     d = report.drivers
+    src = getattr(report, "driver_sources", {}) or {}
     rows = [
-        ("Financial year", report.financial_year, None),
-        ("Firm's tax rate", d.get("firms_tax_rate"), P),
-        ("Capital contribution rate", d.get("capital_rate"), P),
-        ("Capital months (total)", d.get("capital_months_total"), N),
-        ("Capital months (achieved)", d.get("capital_months_achieved"), N),
-        ("Target compensation", d.get("target_compensation"), N),
-        ("Remuneration TDS section", d.get("remuneration_tds_section"), None),
-        ("Remuneration TDS rate", d.get("remuneration_tds_rate"), P),
-        ("Remuneration TDS start date", d.get("remuneration_tds_start_date"), None),
+        ("Financial year", report.financial_year, None, None),
+        ("Firm's tax rate", d.get("firms_tax_rate"), P, "firms_tax_rate"),
+        ("Capital contribution rate", d.get("capital_rate"), P, "capital_rate"),
+        ("Capital months (total)", d.get("capital_months_total"), N, "capital_months_total"),
+        ("Capital months (achieved)", d.get("capital_months_achieved"), N, "capital_months_achieved"),
+        ("Target compensation", d.get("target_compensation"), N, "target_compensation"),
+        ("Capital interest rate", d.get("capital_interest_rate"), P, "capital_interest_rate"),
+        ("Remuneration TDS section", d.get("remuneration_tds_section"), None, "remuneration_tds_section"),
+        ("Remuneration TDS rate", d.get("remuneration_tds_rate"), P, "remuneration_tds_rate"),
+        ("Remuneration TDS start date", d.get("remuneration_tds_start_date"), None, "remuneration_tds_start_date"),
     ]
     cell_refs = {}
     row = 2
-    for label, value, fmt in rows:
+    for label, value, fmt, key in rows:
         _set(ws, row, 1, label, bold=True)
+        if key is not None:
+            _set(ws, row, 4, src.get(key, "" if value is not None else "-- missing --"))
         cell = _set(ws, row, 2, "-- not supplied --" if value is None else value,
                     fill=TF, number_format=fmt)
         cell_refs[label] = cell.coordinate
@@ -381,7 +387,8 @@ def _write_inputs_other_sheet(wb, report: Report):
             refs["rate"] = f"B{row}"
         else:
             _set(ws, row, 2, "-- not supplied --", fill=TF)
-        _set(ws, row, 3, "Run input / skill default (drivers.capital_interest_rate)")
+        _set(ws, row, 3, (getattr(report, "driver_sources", {}) or {}).get(
+            "capital_interest_rate", "Entity setting (drivers.capital_interest_rate)"))
         row += 1
         try:
             fy_end = fy_end_date(report.financial_year)
@@ -762,7 +769,8 @@ def _write_exceptions_sheet(wb, report: Report):
         # genuine failure -- it never belongs on the Exceptions sheet, the
         # same way it never counts toward the summary's variance/
         # undecidable totals.
-        if r.agree is not True and not r.informational and not getattr(r, "not_checked", False):
+        if ((r.agree is not True or getattr(r, "excluded_months", ""))
+                and not r.informational and not getattr(r, "not_checked", False)):
             fill, text = _status_fill(r)
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, text, fill=fill, bold=True)
@@ -805,7 +813,8 @@ def _write_open_items_sheet(wb, report: Report):
         # H35-04 round 2, item 3: same exclusion as the Exceptions sheet --
         # an informational/not_checked row is not an open item either, it
         # is a deliberate "not yet in scope for this comparison" row.
-        if r.agree is None and not r.informational and not getattr(r, "not_checked", False):
+        if ((r.agree is None or (r.agree is True and getattr(r, "excluded_months", "")))
+                and not r.informational and not getattr(r, "not_checked", False)):
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, r.note, wrap=True)
             _set(ws, row, 3, "Supply the missing source figure for this financial year.",
@@ -891,13 +900,32 @@ def _write_bank_match_sheet(wb, bank_matches):
         _set(ws, row, 1, pm.month)
         _set(ws, row, 2, pm.payout_date)
         _set(ws, row, 3, pm.payout_amount)
-        _set(ws, row, 4, pm.outcome.upper(), fill=outcome_fills.get(pm.outcome), bold=True)
+        _set(ws, row, 4, pm.outcome_label, fill=outcome_fills.get(pm.outcome), bold=True)
+        if pm.is_split_match:
+            # H35-12: one row per part of a split match.
+            n_parts = len(pm.parts)
+            for n, part in enumerate(pm.parts, start=1):
+                if n > 1:
+                    row += 1
+                    _set(ws, row, 1, pm.month)
+                    _set(ws, row, 4, f"  part {n} of {n_parts}")
+                _set(ws, row, 5, part.date)
+                _set(ws, row, 6, part.amount)
+                _set(ws, row, 7, part.account or "")
+            row += 1
+            continue
         _set(ws, row, 5, pm.credit_date or "")
         _set(ws, row, 6, pm.credit_amount if pm.credit_amount is not None else "")
         _set(ws, row, 7, pm.credit_account or "")
-        candidates_text = "; ".join(
-            _format_bank_candidate(c) for c in (pm.candidates or [])
-        )
+        if pm.candidate_sets:
+            candidates_text = " | ".join(
+                f"set {n}: " + " + ".join(_format_bank_candidate(c) for c in st)
+                for n, st in enumerate(pm.candidate_sets, start=1)
+            )
+        else:
+            candidates_text = "; ".join(
+                _format_bank_candidate(c) for c in (pm.candidates or [])
+            )
         _set(ws, row, 8, candidates_text, wrap=True)
         row += 1
     if row == 2:

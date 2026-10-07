@@ -297,6 +297,9 @@ def detect_mid_year_rate_change(instalment_capitals: list[float], target_compens
 # 4. Incentive cohorts and the FY straddle.
 # ---------------------------------------------------------------------------
 
+from .award_year import award_year_rows  # noqa: E402  (H35-14)
+
+
 @dataclass
 class InstalmentRow:
     award_fy: str
@@ -440,6 +443,14 @@ class ReconciliationResult:
     # supplied)" row never prints as "CANNOT RECONCILE".
     not_checked: bool = False
     status_label: str | None = None
+    # Tie-out excluded months: a payout month with no unique bank match has
+    # no journal, so a GnuCash tie-out row's Computed figure leaves it out.
+    # When that month would have touched this row's account for a non-zero
+    # amount, the row names the months here ("2025-04, 2025-05"). A row
+    # with this set is never a clean AGREE: it shows "AGREE excl. <months>",
+    # is listed on the Exceptions and Open items sheets, and counts as
+    # undecidable. The excluded amount is never added to the Computed figure.
+    excluded_months: str = ""
 
 
 def reconcile_category(category: str, sources: dict,
@@ -694,6 +705,95 @@ def residual_current_account_check(report: "Report", applied_accrual: float = 0.
     )
 
 
+def profit_share_three_way(llp_record, monthly, ctc_structuring, drivers, fy,
+                           pending_accrual: dict | None = None) -> "ReconciliationResult":
+    """H35-15: the statement's "Profit Share for the Year" against the
+    schedule's current-award share of profit, read BOTH ways.
+
+      reading A (before firm's tax): gross share of profit + additional
+                                     share of profit;
+      reading B (after firm's tax):  gross share of profit - firm's tax on
+                                     it + additional share of profit.
+
+    Only the CURRENT award's figures are used: firm's tax on earlier
+    cohorts' instalments (MonthlyLine.firms_tax_other) is a different
+    cohort and is left out. Which reading agrees is stated, never chosen
+    silently; if neither agrees, DIFFER with both gaps. With the statement
+    or the schedule's figures absent it is CANNOT RECONCILE -- one leg is
+    never a verdict.
+
+    `pending_accrual` is the same dict build_report() gives the L5
+    current-account row: this skill's own year-end accrual journal, which
+    books exactly the after-firm's-tax gap (year_end_accrual_diff()). When
+    that journal accounts for the whole after-tax gap, the row carries the
+    pending-posting verdict rather than a DIFFER. When the statement instead
+    agrees BEFORE firm's tax, that same journal would book the firm's tax as
+    further share of profit, so the row is a loud RED FLAG, never an AGREE."""
+    category = "Profit share: statement vs schedule (before and after firm's tax)"
+    stmt = llp_record.get("current_profit_share") if llp_record else None
+    gross = sum(m.share_of_profit_gross for m in monthly) if monthly else None
+    if stmt is None or gross is None:
+        missing = []
+        if stmt is None:
+            missing.append("the LLP Statement of Account's Profit Share for the Year")
+        if gross is None:
+            missing.append("the schedule's share of profit")
+        return ReconciliationResult(
+            category=category,
+            sources={"LLP Statement (Profit Share for the Year)": stmt,
+                     "Schedule gross share of profit": gross},
+            agree=None,
+            note=f"{CANNOT_RECONCILE} -- not supplied: {', '.join(missing)}. "
+                 "A profit-share comparison needs both legs.",
+        )
+    tax = sum(m.firms_tax_sop for m in monthly)
+    addl = sum(m.additional_share_of_profit for m in monthly)
+    before = round(gross + addl, 2)
+    after = round(gross + tax + addl, 2)
+    gap_a = round(stmt - before, 2)
+    gap_b = round(stmt - after, 2)
+    tol = RECONCILIATION_TOLERANCE
+    ok_a, ok_b = abs(gap_a) <= tol, abs(gap_b) <= tol
+    parts = (f"gross share of profit {gross:,.2f}, firm's tax on it {tax:,.2f}, "
+             f"additional share of profit {addl:,.2f} (current award only; earlier "
+             "cohorts' firm's tax is kept out)")
+    if ok_a and ok_b:
+        verdict, agree = ("Both readings agree (no firm's tax on the share of profit in the "
+                          "schedule)."), True
+    elif ok_b:
+        verdict, agree = ("AGREES AFTER firm's tax (reading B); before firm's tax it differs by "
+                          f"{gap_a:,.2f}."), True
+    elif ok_a and pending_accrual:
+        ids = ", ".join(pending_accrual.get("journal_ids") or [])
+        verdict, agree = (f"RED FLAG -- the statement agrees BEFORE firm's tax (reading A), but this "
+                          f"skill's year-end accrual journal {ids} books "
+                          f"{pending_accrual['amount']:,.2f} as further share of profit, which is the "
+                          "firm's tax on it. Do not post that journal until it is confirmed whether "
+                          "the statement's profit share is before or after firm's tax."), False
+    elif ok_a:
+        verdict, agree = ("AGREES BEFORE firm's tax (reading A); after firm's tax it differs by "
+                          f"{gap_b:,.2f}."), True
+    elif pending_accrual and abs(gap_b - pending_accrual["amount"]) <= tol:
+        ids = ", ".join(pending_accrual.get("journal_ids") or [])
+        verdict, agree = (f"{PENDING_JOURNAL_VERDICT}: after firm's tax the statement is {gap_b:,.2f} "
+                          f"above the monthly payouts, and journal(s) {ids} (this skill's year-end "
+                          "share-of-profit accrual) book exactly that. Before firm's tax the gap "
+                          f"would be {gap_a:,.2f}. Check the accrual against the payout that settles "
+                          "it."), True
+    else:
+        verdict, agree = (f"DIFFERS on both readings: statement less before-tax reading = "
+                          f"{gap_a:,.2f}; statement less after-tax reading = {gap_b:,.2f}."), False
+    return ReconciliationResult(
+        category=category,
+        sources={"LLP Statement (Profit Share for the Year)": stmt,
+                 "Schedule, before firm's tax (A)": before,
+                 "Schedule, after firm's tax (B)": after},
+        agree=agree,
+        note=f"{verdict} Schedule: {parts}. See also the CTC walk-down row for the "
+             "Target Compensation view of the same pool.",
+    )
+
+
 def fy_end_date(fy: str) -> date:
     """The last day of a "2025-26"-style FY label -- 2026-03-31."""
     return date(fy_start_year(fy) + 1, 3, 31)
@@ -931,6 +1031,29 @@ class CtcCheckResult:
     reason: str | None = None
 
 
+def ctc_structuring_total_fn(ctc_structuring: dict | None):
+    """The CTC structuring total and where it came from, as (value, source).
+
+    Order: the printed "CTC Structuring" total; else the sum of that total
+    row's printed monthly figures (only when every month is printed); else
+    the sum of the printed component totals (only when every component has
+    one). Anything less is (None, None): a missing figure is never filled
+    with 0 or a partial sum."""
+    if not ctc_structuring:
+        return None, None
+    total = ctc_structuring.get("total")
+    if total is not None:
+        return total, "printed total"
+    months = ctc_structuring.get("months") or {}
+    if months and all(v is not None for v in months.values()):
+        return round(sum(months.values()), 2), "sum of the printed monthly figures"
+    rows = ctc_structuring.get("rows") or {}
+    totals = [r.get("total") for r in rows.values() if isinstance(r, dict)]
+    if totals and all(t is not None for t in totals):
+        return round(sum(totals), 2), "sum of the printed component totals"
+    return None, None
+
+
 def compute_ctc_check(
     monthly: "list[MonthlyLine]", drivers: dict, ctc_structuring: dict | None, fy: str,
 ) -> CtcCheckResult:
@@ -954,9 +1077,7 @@ def compute_ctc_check(
     remuneration_total = sum(m.remuneration for m in monthly) if monthly else None
     gross_sop_total = sum(m.share_of_profit_gross for m in monthly) if monthly else None
     arrears_total = sum(m.additional_share_of_profit for m in monthly) if monthly else None
-    ctc_structuring_total = (
-        ctc_structuring.get("total") if ctc_structuring is not None else None
-    )
+    ctc_structuring_total, _ctc_source = ctc_structuring_total_fn(ctc_structuring)
     firms_tax_on_pool = (
         sum(m.firms_tax_sop + m.firms_tax_other for m in monthly) if monthly else None
     )
@@ -1069,6 +1190,8 @@ class Report:
     # supplied at all). Consumed by agent.py (top of the text summary) and
     # writer.py (top of the Reconciliation sheet) to build the loud block.
     statement_flags: list[str] = field(default_factory=list)
+    # driver key -> "Entity setting" / "Advisory" / a default's label.
+    driver_sources: dict = field(default_factory=dict)
 
 
 def build_report(data: dict) -> Report:
@@ -1078,8 +1201,19 @@ def build_report(data: dict) -> Report:
     Report. Pure -- no I/O.
     """
     fy = data["financial_year"]
-    drivers = data.get("drivers") or {}
+    drivers = dict(data.get("drivers") or {})
     advisory = data.get("advisory") or {}
+    # Where each driver came from. An entity setting always wins; the
+    # Advisory's printed Target Compensation fills only a gap. Capital
+    # months and the capital rate are never read from any document by this
+    # skill today, so they stay unset (and are named when missing).
+    driver_sources: dict = dict(data.get("driver_sources") or {})
+    for _k, _v in drivers.items():
+        if _v is not None:
+            driver_sources.setdefault(_k, "Entity setting")
+    if drivers.get("target_compensation") is None and advisory.get("target_compensation") is not None:
+        drivers["target_compensation"] = advisory["target_compensation"]
+        driver_sources["target_compensation"] = "Advisory"
     external = data.get("external") or {}
     payroll = data.get("payroll") or []
     # H35-02: the L5 (LLP Statement of Account) leg, whole. None if not
@@ -1687,6 +1821,15 @@ def build_report(data: dict) -> Report:
             informational_row.note = _informational_prefix + (informational_row.note or "")
             informational_row.informational = True
             reconciliation.append(informational_row)
+        # H35-14: the real per-instalment check against the AWARD-year
+        # documents. Recon only -- no journal reads these rows.
+        reconciliation.extend(award_year_rows(
+            cohorts_raw, reporting_instalments, data.get("award_year_documents")))
+
+    # H35-15: three-way profit share -- statement vs schedule, both readings.
+    reconciliation.append(profit_share_three_way(
+        llp_record, monthly, data.get("ctc_structuring"), drivers, fy,
+        pending_accrual=pending_accrual))
 
     # H35-08: the CTC walk-down. Purely informational (no journal/posted-
     # check impact) -- shown on its own sheet plus this one informational
@@ -1754,4 +1897,5 @@ def build_report(data: dict) -> Report:
         capital_interest_schedule=capital_interest_schedule,
         ctc_check=ctc_check,
         statement_flags=statement_flags,
+        driver_sources=driver_sources,
     )

@@ -67,6 +67,7 @@ from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
 from .gnucash_tieout import (
+    build_statement_book_check,
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
     MATCHED,
     build_balance_tieout,
@@ -82,6 +83,7 @@ from .jv_emitter import (
     write_journal_csv,
 )
 from .mapper import FinancialYearMismatchError, build_input_data
+from . import award_year as _award_year
 from . import precheck as _precheck
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
@@ -186,8 +188,39 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         return f"{label}: parsed from {path}.", record
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
+    except _llp_statement_parser.NotAnL5DocumentError as e:
+        # H35-13: the parser's message already names the file and what the
+        # document is; pass it through whole instead of wrapping it in
+        # "could not parse", which reads as if the statement were unreadable.
+        return f"{label}: not available ({e})", None
     except Exception as e:
         return f"{label}: not available (could not parse {path}: {e})", None
+
+
+def _read_award_year_documents(value, password):
+    """(docs, notes) for the optional award_year_documents input: a
+    directory, a single file, or a list of files. A file that cannot be read
+    is named in a note and skipped; it never stops the run."""
+    if not value:
+        return [], []
+    if isinstance(value, (list, tuple)):
+        paths = [Path(v) for v in value]
+    else:
+        p = Path(value)
+        paths = sorted(q for q in p.iterdir() if q.suffix.lower() == ".pdf") if p.is_dir() else [p]
+    docs, notes = [], []
+    for path in paths:
+        d = _award_year.read_award_year_document(str(path), password, _advisory_parser)
+        docs.append(d)
+        if d["error"]:
+            notes.append(f"Award-year document {d['name']}: {d['error']} -- skipped.")
+        elif d["kind"] == _award_year.KIND_TARGET:
+            notes.append(f"Award-year document {d['name']}: a Target compensation letter; "
+                         "it is recorded but carries no instalment schedule, so it is not used.")
+        elif not d["fy"]:
+            notes.append(f"Award-year document {d['name']}: financial year not found in the "
+                         "document body -- skipped (the file name is never used).")
+    return docs, notes
 
 
 def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | None]:
@@ -392,7 +425,8 @@ def _summarize_report(
     ]
     undecidable = [
         r for r in report.reconciliation
-        if r.agree is None and not r.informational and not r.not_checked
+        if (r.agree is None or (r.agree is True and r.excluded_months))
+        and not r.informational and not r.not_checked
     ]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
@@ -448,6 +482,21 @@ def _summarize_report(
             lines_out.append(f"  ! {flag}")
         lines_out.append("=" * 72)
 
+    # H35-12: say plainly which payouts were matched as a set of bank credits.
+    split_matches = [m for m in (bank_matches or {}).values()
+                     if getattr(m, "is_split_match", False)]
+    if split_matches:
+        lines_out.append(
+            f"BANK MATCH -- {len(split_matches)} payout(s) were paid as several "
+            "bank credits and matched as a set:"
+        )
+        for m in split_matches:
+            parts_text = " + ".join(f"{p.amount:,.2f} on {p.date}" for p in m.parts)
+            lines_out.append(
+                f"  {m.month}: payout {m.payout_amount:,.2f} = {parts_text} "
+                f"(all posted to {m.credit_account})."
+            )
+
     lines_out.append(
         f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
         f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
@@ -499,6 +548,7 @@ def run(
     bank_match_window: str = "7",
     financial_year: str = "",
     entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -548,6 +598,7 @@ def run(
         bank_match_window=bank_match_window,
         financial_year=financial_year,
         entities_path=entities_path,
+        award_year_documents=award_year_documents,
     )
 
 
@@ -569,6 +620,7 @@ def _run_from_documents(
     bank_match_window: str = "7",
     financial_year: str = "",
     entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -819,6 +871,11 @@ def _run_from_documents(
         return "\n".join(lines)
 
     mapper_diagnostics = data.pop("_diagnostics", [])
+    # H35-14: award-year documents (any year). Read, never trusted by file
+    # name; selection and the per-instalment check happen in the engine.
+    _ay_docs, _ay_notes = _read_award_year_documents(award_year_documents, doc_password)
+    data["award_year_documents"] = _ay_docs
+    optional_notes.extend(_ay_notes)
     drivers = drivers_by_fy.get(data["financial_year"])
     if drivers is not None:
         data["drivers"] = drivers
@@ -834,7 +891,11 @@ def _run_from_documents(
     # this key explicitly (including to a different rate for a year the LLP
     # actually changed it) -- this default only fills a genuine gap.
     data.setdefault("drivers", {})
-    data["drivers"].setdefault("capital_interest_rate", _DEFAULT_CAPITAL_INTEREST_RATE)
+    if data["drivers"].get("capital_interest_rate") is None:
+        data["drivers"]["capital_interest_rate"] = _DEFAULT_CAPITAL_INTEREST_RATE
+        data.setdefault("driver_sources", {})["capital_interest_rate"] = (
+            "Default (6% simple interest, inferred -- not a figure from any document)"
+        )
     # Section A: feed the 26AS reader's result into the existing
     # external["form_26as_total_credit"] reconciliation leg (engine.py's
     # field_or_reason() treats a None value the same as the key being
@@ -886,6 +947,15 @@ def _run_from_documents(
     # plain VARIANCE/CANNOT-RECONCILE comparison, unchanged).
     report.reconciliation.extend(
         build_balance_tieout(
+            report, accounts_for_tieout, gnucash_path, report.financial_year,
+            posted_check=posted_check, bank_matches=bank_matches or None,
+            settings_error=settings_error,
+        )
+    )
+
+    # H35-15: statement closing capital / current vs the book at 31 March.
+    report.reconciliation.extend(
+        build_statement_book_check(
             report, accounts_for_tieout, gnucash_path, report.financial_year,
             posted_check=posted_check, bank_matches=bank_matches or None,
             settings_error=settings_error,

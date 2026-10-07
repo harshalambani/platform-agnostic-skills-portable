@@ -5,44 +5,41 @@ Closes a blind spot in skill_gnucash_pipeline's own opening-balance check:
 `_reconcile_opening_balance()` there only ever sees ONE statement against
 ONE account, so a month where NO statement was ever imported for an account
 is invisible to it ("Scenario B ... cannot detect without prior statement").
-This skill looks the other way -- across an account's whole transaction
-history inside a book -- and infers likely-missing months purely from the
-dates already posted, since this codebase has no import ledger to consult
-(write_sidecar/read_sidecar in agents.canonical_io is per-file scratch, not
-history; building an import ledger is explicitly out of scope for v1).
+This skill looks the other way -- across an account's transactions inside a
+book -- and infers likely-missing months purely from the dates already
+posted, since this codebase has no import ledger to consult.
 
 Algorithm, per in-scope account per selected book:
-  1. Collect the dates of every split touching the account.
-  2. The account's ACTIVE WINDOW starts at its first transaction date (not
-     the FY start -- a mid-year account should not manufacture pre-genesis
-     "gaps") and ends at the FY end or today, whichever is earlier.
-  3. Every calendar month inside that window with zero transactions is a
-     suspected gap. Months after the account's LAST transaction (but still
-     inside the window) are a distinct, prominently labelled TRAILING gap --
-     the single highest-value signal here, since it usually means "the most
-     recent statement was never imported".
-  4. Each account's MEDIAN monthly transaction count (opening-balance
-     transactions excluded, since they skew the median) grades every zero
-     month for that account: >= HIGH_CONFIDENCE_MEDIAN_THRESHOLD is HIGH
-     confidence, below is LOW. Never suppressed -- both are reported, with
-     the median shown alongside so the grading is auditable.
-  5. A zero month that falls on an FY boundary (the book's first or last
-     calendar month) is cheaply cross-checked against the adjacent FY's
-     book, if the entity is registered and that book exists: transactions
-     are sometimes filed into the "wrong side" of a financial-year rollover
-     by mistake, and the adjacent book still holding a dated entry for this
-     exact month is treated as proof the gap is a filing artefact, not a
-     missing statement -- suppressed rather than reported.
+  1. SCOPE. Only accounts that receive a monthly statement: GnuCash types
+     BANK and CREDIT. An opt-in (`include_other`) also checks ASSET and
+     LIABILITY accounts, reported in their own labelled section. Hidden,
+     placeholder and no-transaction accounts are never checked.
+  2. WINDOW. Only the book's own financial year (1 Apr - 31 Mar), capped at
+     today. The year comes from the entity registry (or the filename); a
+     book that resolves to no year uses the year of its latest transaction
+     and says so. The window NEVER starts at the account's first-ever
+     transaction, so history from earlier years cannot leak in. If the
+     account's first transaction falls inside the year, months before it
+     are not "missing".
+  3. A month in the window with zero transactions is a gap. Months after the
+     account's last transaction are reported first, as "no transactions
+     since <Mon YYYY>".
+  4. A "quiet" account (fewer than QUIET_TXNS_PER_MONTH transactions a month
+     on average within the year, opening-balance entries excluded) is told
+     to the user as "may be months with no activity - check before importing".
+  5. A gap month on an FY boundary (the year's first or last month) is
+     cross-checked against the adjacent FY's registered book for the same
+     entity/account: postings are sometimes filed on the wrong side of a
+     year rollover, and if the adjacent book holds a dated entry for that
+     exact month the gap is suppressed rather than reported.
 
-Not attempted here: partial-month detection (a different signal, already
-partly covered by skill_gnucash_pipeline's final_closing_balance_verdict()),
-and auto-fetching anything -- this skill only ever reads.
+Not attempted here: partial-month detection and auto-fetching anything --
+this skill only ever reads.
 """
 from __future__ import annotations
 
 import gzip
 import re
-import statistics
 import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
@@ -77,22 +74,27 @@ _NS = {
     'ts': '{http://www.gnucash.org/XML/ts}',
 }
 
-# Both bank-side (BANK/ASSET) and credit-card-side (LIABILITY/CREDIT)
-# accounts are in scope -- month-bucketing is type-agnostic, but the account
-# class is carried through to the report so the two families of account
-# stay visually distinguishable.
-_BANK_TYPES = ("BANK", "ASSET")
-_CREDIT_TYPES = ("CREDIT", "LIABILITY")
-SCOPE_TYPES = frozenset(_BANK_TYPES) | frozenset(_CREDIT_TYPES)
+# Statement accounts: a bank account or a credit card receives a monthly
+# statement, so an empty month is a real signal. Everything else (loans,
+# deposits, investments, fixed assets, tax payables, Suspense) does not.
+CORE_TYPES = frozenset({"BANK", "CREDIT"})
+# Opt-in extras (`include_other`): reported in their own labelled section.
+OTHER_TYPES = frozenset({"ASSET", "LIABILITY"})
+SCOPE_TYPES = CORE_TYPES | OTHER_TYPES
 
-# Named, module-level, tunable: >= this many non-opening-balance
-# transactions per month (median over the account's active window) grades a
-# zero month HIGH confidence; below it, LOW. Never used to suppress a gap,
-# only to grade it -- see module docstring point 4.
-HIGH_CONFIDENCE_MEDIAN_THRESHOLD = 4
+SECTION_CORE = "Bank and card accounts"
+SECTION_OTHER = ("Other accounts - no monthly statement is expected, "
+                 "so empty months here are often normal")
+
+# An account with fewer than this many transactions a month on average
+# (opening-balance entries excluded) inside the checked year is "quiet": an
+# empty month may simply be a month with no activity.
+QUIET_TXNS_PER_MONTH = 1.0
+
+_MONTH_NAMES = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 _FY_RE = re.compile(r"^(\d{4})-(\d{2})$")
-
 
 # ---------------------------------------------------------------------------
 # XML reading
@@ -236,8 +238,33 @@ def _ensure_itr_scripts_importable() -> None:
         sys.path.insert(0, str(scripts_dir))
 
 
-def _account_class(acc_type: str) -> str:
-    return "Bank/Asset" if acc_type in _BANK_TYPES else "Credit/Liability"
+
+# ---------------------------------------------------------------------------
+# Plain-language wording (shared by the reply text and the workbook)
+# ---------------------------------------------------------------------------
+
+def month_label(month_key: str) -> str:
+    """"2025-06" -> "Jun 2025"."""
+    return f"{_MONTH_NAMES[int(month_key[5:7]) - 1]} {month_key[:4]}"
+
+
+def _months_text(month_keys: list) -> str:
+    return ", ".join(month_label(m) for m in month_keys)
+
+
+def _plural(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def fy_title(fy_key: str) -> str:
+    return f"FY {fy_key}"
+
+
+def fy_span_text(fy_key: str) -> str:
+    b = _fy_bounds(fy_key)
+    if not b:
+        return ""
+    return f"{month_label(b[0].isoformat()[:7])} - {month_label(b[1].isoformat()[:7])}"
 
 
 # ---------------------------------------------------------------------------
@@ -245,31 +272,149 @@ def _account_class(acc_type: str) -> str:
 # ---------------------------------------------------------------------------
 
 @dataclass
-class GapRow:
+class AccountResult:
     entity: str
     book: str
     account_path: str
-    account_class: str
-    month: str
-    confidence: str
-    median: float
-    trailing: bool
+    section: str                 # SECTION_CORE or SECTION_OTHER
+    fy_key: str
+    txns_in_fy: int
+    months_checked: int
+    months_with_txns: int
+    first_in_fy: str             # "" if no transaction inside the year
+    last_in_fy: str
+    last_month: str              # YYYY-MM of the last transaction up to the window end
+    gap_months: list = field(default_factory=list)       # empty months before the last transaction
+    trailing_months: list = field(default_factory=list)  # empty months after the last transaction
+    quiet: bool = False
+    suppressed: int = 0          # boundary months shown to be filed in the adjacent book
+
+    @property
+    def is_core(self) -> bool:
+        return self.section == SECTION_CORE
+
+    @property
+    def has_gaps(self) -> bool:
+        return bool(self.gap_months or self.trailing_months)
+
+    @property
+    def months_text(self) -> str:
+        """Every reported empty month, months after the last transaction first."""
+        return _months_text(list(self.trailing_months) + list(self.gap_months))
+
+    @property
+    def meaning(self) -> str:
+        parts = []
+        if self.trailing_months:
+            since = month_label(self.last_month)
+            if self.quiet:
+                parts.append(f"No transactions since {since}.")
+            else:
+                parts.append(f"No transactions since {since} - the latest "
+                             f"statement(s) probably not imported.")
+        if self.gap_months and not self.quiet:
+            parts.append("Statement probably not imported."
+                         if not self.trailing_months else
+                         "Statement probably not imported for the earlier empty months.")
+        if self.quiet:
+            parts.append("This account is quiet, so these may be months with "
+                         "no activity - check before importing.")
+        return " ".join(parts)
+
+    def reply_line(self, show_book: bool) -> str:
+        where = f" [{self.book}]" if show_book else ""
+        return f"  - {self.account_path}{where}: {self.months_text}. {self.meaning}"
 
 
 @dataclass
-class AccountStat:
-    entity: str
-    book: str
-    account_path: str
-    account_class: str
-    first_date: str
-    last_date: str
-    window_end: str
-    median: float
-    confidence: str
-    zero_months: int
-    trailing_zero_months: int
-    suppressed_boundary_gaps: int
+class BookSummary:
+    fy_key: str
+    inferred: bool
+    capped_to: str               # YYYY-MM when the year is cut short by today, else ""
+    core_checked: int = 0
+    core_with_gaps: int = 0
+    other_checked: int = 0
+    other_with_gaps: int = 0
+
+
+@dataclass
+class ScanResult:
+    results: list
+    summaries: list
+    warnings: list
+    books_scanned: int
+    include_other: bool
+
+    def opening_line(self) -> str:
+        """One plain sentence per financial year covered."""
+        merged: dict = {}
+        for s in self.summaries:
+            key = (s.fy_key, s.inferred, s.capped_to)
+            m = merged.setdefault(key, BookSummary(*key))
+            m.core_checked += s.core_checked
+            m.core_with_gaps += s.core_with_gaps
+            m.other_checked += s.other_checked
+            m.other_with_gaps += s.other_with_gaps
+        if not merged:
+            return "No bank or card accounts could be checked."
+        sentences = []
+        for (fy_key, inferred, capped_to), s in merged.items():
+            span = fy_span_text(fy_key)
+            if capped_to:
+                span += f", checked up to {month_label(capped_to)}"
+            head = (f"{_plural(s.core_checked, 'bank and card account', 'bank and card accounts')} "
+                    f"checked for {fy_title(fy_key)} ({span})")
+            if s.core_with_gaps == 0:
+                tail = "no account has months with no transactions."
+            elif s.core_with_gaps == 1:
+                tail = "1 has months with no transactions."
+            else:
+                tail = f"{s.core_with_gaps} have months with no transactions."
+            text = f"{head}; {tail}"
+            if self.include_other:
+                text += (f" Also checked {_plural(s.other_checked, 'other account', 'other accounts')}"
+                         f"; {s.other_with_gaps} with empty months (listed separately).")
+            if inferred:
+                text += (" This book is not registered to a financial year, so the "
+                         "year of its latest transaction was used.")
+            sentences.append(text)
+        return " ".join(sentences)
+
+    def sections(self) -> list:
+        """[(section title, [AccountResult with gaps])] -- trailing gaps first."""
+        out = []
+        titles = [SECTION_CORE] + ([SECTION_OTHER] if self.include_other else [])
+        for title in titles:
+            rows = [r for r in self.results if r.section == title and r.has_gaps]
+            rows.sort(key=lambda r: (not r.trailing_months, r.entity, r.book, r.account_path))
+            out.append((title, rows))
+        return out
+
+    def reply_text(self, output_path: str) -> str:
+        show_book = self.books_scanned > 1
+        lines = [self.opening_line()]
+        any_gap = False
+        for title, rows in self.sections():
+            if not rows:
+                continue
+            any_gap = True
+            lines.append("")
+            lines.append(f"{title}:")
+            lines.extend(r.reply_line(show_book) for r in rows)
+        if not any_gap:
+            lines.append("No account has months with no transactions.")
+        suppressed = sum(r.suppressed for r in self.results)
+        if suppressed:
+            lines.append("")
+            lines.append(f"{_plural(suppressed, 'month', 'months')} left out because the "
+                         f"neighbouring year's book has transactions for that month "
+                         f"(filed in the wrong year).")
+        if self.warnings:
+            lines.append("")
+            lines.extend(self.warnings)
+        lines.append("")
+        lines.append(f"Workbook: {output_path}")
+        return "\n".join(lines)
 
 
 def _boundary_has_adjacent_evidence(
@@ -282,8 +427,8 @@ def _boundary_has_adjacent_evidence(
     calendar month -- treated as proof a statement exists but was filed
     into the wrong side of the FY rollover, so the gap is suppressed rather
     than reported. Only ever called for the book's own FY-boundary months
-    (its first or last calendar month), per the brief's "e.g. March"
-    example. Cheap: only reads one extra book, and only on a boundary hit."""
+    (its first or last calendar month). Cheap: only reads one extra book,
+    and only on a boundary hit."""
     if month == fy_end_month:
         direction = "next"
     elif month == fy_start_month:
@@ -325,104 +470,88 @@ def _boundary_has_adjacent_evidence(
 
 
 def _process_account(
-    account: GncAccount, dates_with_ob: list, fy_key: Optional[str], today: date,
-    entity_key: Optional[str], entities_path: Optional[Path], book_path: Path,
-) -> Optional[tuple]:
-    """Returns (list[gap dict], suppressed_count, median, first, last,
-    window_end_str) for one account, or None if it has no transactions at
-    all (nothing to report -- an account that was never used is not a
-    coverage gap, it's simply unused)."""
-    if not dates_with_ob:
+    account: GncAccount, dates_with_ob: list, fy_key: str,
+    fy_start: date, fy_end: date, window_end: date,
+    entity_label: str, entity_key: Optional[str],
+    entities_path: Optional[Path], book_path: Path,
+) -> Optional[AccountResult]:
+    """Check one account over the financial year only. None if it has no
+    transaction on or before the window end (an unused account is not a
+    coverage gap, it is simply unused)."""
+    window_end_iso = window_end.isoformat()
+    dates = sorted(d for d, _ob in dates_with_ob if d <= window_end_iso)
+    if not dates:
         return None
 
-    dates_all = sorted(d for d, _ob in dates_with_ob)
-    dates_non_ob = sorted(d for d, ob in dates_with_ob if not ob)
-    first_str, last_str = dates_all[0], dates_all[-1]
+    first_ever, last_str = dates[0], dates[-1]
+    fy_start_iso = fy_start.isoformat()
+    in_fy = [d for d in dates if d >= fy_start_iso]
+    non_ob_in_fy = [d for d, ob in dates_with_ob
+                    if not ob and fy_start_iso <= d <= window_end_iso]
 
-    fy_bounds = _fy_bounds(fy_key)
-    if fy_bounds:
-        _fy_start, fy_end = fy_bounds
-        window_end = min(fy_end, today)
-    else:
-        window_end = today
+    # The window is the financial year only. The one exception to "starts on
+    # 1 April": an account whose first transaction is inside the year is not
+    # missing the months before it.
+    start_month = max(_month_key(first_ever), _month_key(fy_start_iso))
+    months = _month_range(start_month, _month_key(window_end_iso))
+    if not months:
+        return None
 
-    first_date_obj = _parse_date(first_str)
-    if first_date_obj > window_end:
-        return None  # account's first transaction is after the window closed
-
-    months = _month_range(_month_key(first_str), _month_key(window_end.isoformat()))
-    counts_all = Counter(_month_key(d) for d in dates_all)
-    counts_non_ob = Counter(_month_key(d) for d in dates_non_ob)
-
-    # Median is computed over EVERY month in the active window (zero months
-    # included) using the opening-balance-EXCLUDED counts, per the brief:
-    # opening-balance transactions would otherwise skew a normally-quiet
-    # account's cadence upward in its genesis month.
-    month_counts_non_ob = [counts_non_ob.get(m, 0) for m in months]
-    median = statistics.median(month_counts_non_ob) if month_counts_non_ob else 0.0
-    confidence = "HIGH" if median >= HIGH_CONFIDENCE_MEDIAN_THRESHOLD else "LOW"
-
+    counts = Counter(_month_key(d) for d in in_fy)
     last_month = _month_key(last_str)
-    fy_start_month = f"{fy_bounds[0].year:04d}-04" if fy_bounds else None
-    fy_end_month = f"{fy_bounds[1].year:04d}-03" if fy_bounds else None
+    fy_start_month = f"{fy_start.year:04d}-04"
+    fy_end_month = f"{fy_end.year:04d}-03"
 
-    gaps = []
-    suppressed = 0
-    trailing_zero_months = 0
+    gap_months, trailing_months, suppressed = [], [], 0
     for m in months:
-        if counts_all.get(m, 0) > 0:
+        if counts.get(m, 0) > 0:
             continue
-        is_trailing = m > last_month
-        if is_trailing:
-            trailing_zero_months += 1
-        if fy_key and entity_key and m in (fy_start_month, fy_end_month):
+        if entity_key and m in (fy_start_month, fy_end_month):
             if _boundary_has_adjacent_evidence(
                 m, fy_key, fy_start_month, fy_end_month,
                 entity_key, entities_path, account.path, book_path,
             ):
                 suppressed += 1
                 continue
-        gaps.append({"month": m, "trailing": is_trailing})
+        (trailing_months if m > last_month else gap_months).append(m)
 
-    return gaps, suppressed, median, confidence, first_str, last_str, window_end.isoformat(), trailing_zero_months
+    return AccountResult(
+        entity=entity_label, book=book_path.name, account_path=account.path,
+        section=SECTION_CORE if account.type in CORE_TYPES else SECTION_OTHER,
+        fy_key=fy_key,
+        txns_in_fy=len(in_fy), months_checked=len(months),
+        months_with_txns=sum(1 for m in months if counts.get(m, 0) > 0),
+        first_in_fy=in_fy[0] if in_fy else "",
+        last_in_fy=in_fy[-1] if in_fy else "",
+        last_month=last_month,
+        gap_months=gap_months, trailing_months=trailing_months,
+        quiet=(len(non_ob_in_fy) / len(months)) < QUIET_TXNS_PER_MONTH,
+        suppressed=suppressed,
+    )
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+def _fy_key_of_latest_transaction(acc_dates: dict, today: date) -> Optional[str]:
+    """FY key ("2025-26") of the book's latest transaction on or before
+    today (or the latest overall if every transaction is post-dated)."""
+    all_d = [d for lst in acc_dates.values() for d, _ob in lst]
+    if not all_d:
+        return None
+    past = [d for d in all_d if d <= today.isoformat()]
+    latest = max(past) if past else max(all_d)
+    y, m = int(latest[:4]), int(latest[5:7])
+    start_year = y if m >= 4 else y - 1
+    return f"{start_year:04d}-{str(start_year + 1)[-2:]}"
 
-def run(
-    books,
-    output_path: str,
-    entities_path: str = "Data/itr/entities.yaml",
-    config_path: str = "config.yaml",
-    model_override: str = None,
-) -> str:
-    """
-    Scan every selected .gnucash book for suspected coverage gaps (calendar
-    months inside an account's active window with zero transactions) and
-    write one consolidated workbook to output_path. Returns a text summary
-    for the UI. Read-only -- never writes to or modifies a .gnucash file.
 
-    `books` is either a list of .gnucash paths or a single newline-separated
-    string of them (the UI's multi-book field is a path textbox holding one
-    path per line, and run_args substitution makes every kwarg a string on
-    the way in -- same convention as the Inter-entity Matrix skill).
-    """
-    if isinstance(books, str):
-        paths = [ln.strip() for ln in books.splitlines() if ln.strip()]
-    else:
-        paths = [str(b).strip() for b in (books or []) if str(b).strip()]
-    paths = list(dict.fromkeys(paths))
-    if not paths:
-        return "ERROR: select at least one .gnucash book."
+def _truthy(value) -> bool:
+    return str(value).strip().lower() in ("yes", "true", "1", "y", "on")
 
-    entities_path_obj = Path(entities_path) if entities_path else None
-    today = date.today()
 
-    all_gaps: list[GapRow] = []
-    all_stats: list[AccountStat] = []
-    warnings: list[str] = []
+def scan_books(paths: list, entities_path: Optional[Path], include_other: bool,
+               today: Optional[date] = None) -> ScanResult:
+    today = today or date.today()
+    scope = SCOPE_TYPES if include_other else CORE_TYPES
+    results, summaries, warnings = [], [], []
     books_scanned = 0
 
     for p in paths:
@@ -437,59 +566,86 @@ def run(
 
         books_scanned += 1
         accounts = load_accounts(book_path)
-        in_scope = [a for a in postable_accounts(accounts) if a.type in SCOPE_TYPES]
+        in_scope = [a for a in postable_accounts(accounts) if a.type in scope]
         ob_ids = frozenset(a.id for a in accounts if "opening-balance" in a.special_flags)
         acc_dates = _collect_account_dates(root, ob_ids)
-        entity_label, entity_key, fy_key = _resolve_entity(book_path, entities_path_obj)
+        entity_label, entity_key, fy_key = _resolve_entity(book_path, entities_path)
 
-        for account in in_scope:
-            dates_with_ob = acc_dates.get(account.id, [])
-            result = _process_account(
-                account, dates_with_ob, fy_key, today,
-                entity_key, entities_path_obj, book_path,
-            )
-            if result is None:
-                continue
-            (gaps, suppressed, median, confidence, first_str, last_str,
-             window_end_str, trailing_zero_months) = result
+        bounds = _fy_bounds(fy_key)
+        inferred = False
+        if bounds is None:
+            # Never fall back to the account's first-ever transaction: use
+            # the year of the book's latest transaction, and say so.
+            fy_key = _fy_key_of_latest_transaction(acc_dates, today)
+            bounds = _fy_bounds(fy_key)
+            inferred = True
+        if bounds is None:
+            warnings.append(f"WARNING: {book_path.name} has no transactions, skipped.")
+            continue
+        fy_start, fy_end = bounds
+        window_end = min(fy_end, today)
+        if window_end < fy_start:
+            warnings.append(f"WARNING: {book_path.name}: {fy_title(fy_key)} has not started yet, skipped.")
+            continue
 
-            for g in gaps:
-                all_gaps.append(GapRow(
-                    entity=entity_label, book=book_path.name,
-                    account_path=account.path,
-                    account_class=_account_class(account.type),
-                    month=g["month"], confidence=confidence, median=median,
-                    trailing=g["trailing"],
-                ))
-            all_stats.append(AccountStat(
-                entity=entity_label, book=book_path.name,
-                account_path=account.path,
-                account_class=_account_class(account.type),
-                first_date=first_str, last_date=last_str,
-                window_end=window_end_str, median=median,
-                confidence=confidence,
-                zero_months=len(gaps) + suppressed,
-                trailing_zero_months=trailing_zero_months,
-                suppressed_boundary_gaps=suppressed,
-            ))
-
-    XL.write_gaps_workbook(all_gaps, all_stats, output_path)
-
-    high = sum(1 for g in all_gaps if g.confidence == "HIGH")
-    low = sum(1 for g in all_gaps if g.confidence == "LOW")
-    trailing = sum(1 for g in all_gaps if g.trailing)
-    suppressed_total = sum(s.suppressed_boundary_gaps for s in all_stats)
-
-    lines = [
-        f"Coverage-gap scan -- {books_scanned} book(s), "
-        f"{len(all_stats)} account(s) with transaction history.",
-        f"  Suspected gaps: {len(all_gaps)}  (HIGH confidence: {high}, LOW confidence: {low})",
-        f"  Trailing gaps (since last transaction): {trailing}",
-    ]
-    if suppressed_total:
-        lines.append(
-            f"  FY-boundary gaps suppressed via adjacent-book evidence: {suppressed_total}"
+        summary = BookSummary(
+            fy_key=fy_key, inferred=inferred,
+            capped_to=_month_key(window_end.isoformat()) if window_end < fy_end else "",
         )
-    lines.extend(warnings)
-    lines.append(f"  Workbook: {output_path}")
-    return "\n".join(lines)
+        for account in in_scope:
+            r = _process_account(
+                account, acc_dates.get(account.id, []), fy_key,
+                fy_start, fy_end, window_end,
+                entity_label, entity_key, entities_path, book_path,
+            )
+            if r is None:
+                continue
+            results.append(r)
+            if r.section == SECTION_CORE:
+                summary.core_checked += 1
+                summary.core_with_gaps += int(r.has_gaps)
+            else:
+                summary.other_checked += 1
+                summary.other_with_gaps += int(r.has_gaps)
+        summaries.append(summary)
+
+    return ScanResult(results, summaries, warnings, books_scanned, include_other)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def run(
+    books,
+    output_path: str,
+    entities_path: str = "Data/itr/entities.yaml",
+    config_path: str = "config.yaml",
+    model_override: str = None,
+    include_other: str = "no",
+) -> str:
+    """
+    Check every selected .gnucash book's bank and card accounts for months
+    with no transactions inside the book's financial year, and write one
+    workbook to output_path. Returns the plain-language text for the UI.
+    Read-only -- never writes to or modifies a .gnucash file.
+
+    `books` is either a list of .gnucash paths or a single newline-separated
+    string of them (the UI's multi-book field is a path textbox holding one
+    path per line, and run_args substitution makes every kwarg a string on
+    the way in -- same convention as the Inter-entity Matrix skill).
+    `include_other` ("yes"/"no") also checks ASSET/LIABILITY accounts, in a
+    separate labelled section.
+    """
+    if isinstance(books, str):
+        paths = [ln.strip() for ln in books.splitlines() if ln.strip()]
+    else:
+        paths = [str(b).strip() for b in (books or []) if str(b).strip()]
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        return "ERROR: select at least one .gnucash book."
+
+    entities_path_obj = Path(entities_path) if entities_path else None
+    scan = scan_books(paths, entities_path_obj, _truthy(include_other))
+    XL.write_report_workbook(scan, output_path)
+    return scan.reply_text(output_path)

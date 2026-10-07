@@ -54,7 +54,7 @@ from .engine import (
     journal_txn_id,
     reconcile_category,
 )
-from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals
+from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, excluded_month_legs
 from .jv_emitter import _strip_root as _jv_strip_root
 
 _ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
@@ -115,13 +115,15 @@ def _book_matched_raw_for_account(
     the two must never compute this independently (do not duplicate it)."""
     total = 0.0
     for m in matched_by_account.get(stripped_path, []):
-        txn = txns_by_guid.get(m.credit_txn_guid) if m.credit_txn_guid else None
-        if txn is None:
-            continue
-        total += float(sum(
-            sp.value for sp in txn.splits
-            if colon_paths.get(sp.account_guid) == stripped_path
-        ))
+        guids = list(m.credit_txn_guids) or ([m.credit_txn_guid] if m.credit_txn_guid else [])
+        for g in guids:
+            txn = txns_by_guid.get(g)
+            if txn is None:
+                continue
+            total += float(sum(
+                sp.value for sp in txn.splits
+                if colon_paths.get(sp.account_guid) == stripped_path
+            ))
     return total
 
 
@@ -306,6 +308,7 @@ def build_balance_tieout(
             matched_by_account.setdefault(m.credit_account, []).append(m)
 
     results: list[ReconciliationResult] = []
+    row_path: dict[str, str] = {}
     for key in ACCOUNT_KEYS:
         category = f"{_TIEOUT_LABEL}: {key}"
         configured_path = accounts.get(key)
@@ -316,6 +319,7 @@ def build_balance_tieout(
             }))
             continue
         stripped_path = _jv_strip_root(configured_path)
+        row_path[category] = stripped_path
 
         if key == "bank" and bank_matches:
             # H35-05 round 3, item 2: since H35-05 this skill never posts
@@ -577,6 +581,7 @@ def build_balance_tieout(
 
     for stripped_path in rerouted_accounts:
         category = f"{_TIEOUT_LABEL}: bank-match counter-account {stripped_path}"
+        row_path[category] = stripped_path
 
         computed_raw = sum(
             s.debit - s.credit
@@ -662,7 +667,145 @@ def build_balance_tieout(
         })
         results.append(result)
 
-    return results
+    return _name_excluded_months(results, row_path, report, accounts, bank_matches)
+
+
+_STATEMENT_BOOK_ROWS = (
+    ("capital_contribution", "capital_closing_balance", "closing capital"),
+    ("current_account", "current_closing_balance", "closing current account"),
+)
+
+
+def build_statement_book_check(
+    report, accounts: dict, gnucash_path: str, year_key: str,
+    posted_check: "list[PostedCheckResult] | None" = None,
+    bank_matches: dict | None = None,
+    settings_error: str | None = None,
+) -> list[ReconciliationResult]:
+    """H35-15: the LLP statement's closing capital and closing current
+    account against the GnuCash balance of the entity's partner capital and
+    current accounts at 31 March, after this skill's OWN journals.
+
+    Book side = the account's cumulative balance to the year end (credit
+    positive, like the statement) PLUS the movement of this run's journals
+    that are not yet posted. A gap that this skill's unposted journal fully
+    explains gets the existing pending-posting verdict. Any other gap is a
+    DIFFER and is never plugged or auto-posted."""
+    from .jv_emitter import _strip_root  # noqa: PLC0415
+    llp = getattr(report, "llp_record", None)
+    out: list[ReconciliationResult] = []
+    book = err = None
+    journals = None
+    if gnucash_path and accounts:
+        book, err = _load_book_safely(gnucash_path)
+        if book is not None:
+            journals, jerr = _journals_safely(report, accounts, bank_matches=bank_matches)
+            err = jerr
+    status = {p.txn_id: p.status for p in (posted_check or [])}
+    end = parse_gnucash.fy_window(year_key)[1]
+    for key, stmt_key, label in _STATEMENT_BOOK_ROWS:
+        category = f"Statement vs book: {label} at 31 March"
+        stmt = llp.get(stmt_key) if llp else None
+        path = accounts.get(key) if accounts else None
+        src = {"LLP Statement": stmt, "GnuCash book at 31 Mar (plus this skill's unposted journals)": None}
+        why = None
+        if stmt is None:
+            why = "the LLP Statement of Account's " + label + " was not supplied or not parsed"
+        elif not gnucash_path:
+            why = "no GnuCash book supplied"
+        elif not accounts or not isinstance(path, str) or not path.strip():
+            why = settings_error or f"no {key} account configured for this entity"
+        elif book is None or err:
+            why = err or "the GnuCash book could not be read"
+        if why:
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=None,
+                note=f"{CANNOT_RECONCILE} -- {why}."))
+            continue
+        stripped = _strip_root(path)
+        colon = _colon_paths(book)
+        guid = next((g for g, p in colon.items() if p == stripped), None)
+        if guid is None:
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=None,
+                note=f"{CANNOT_RECONCILE} -- account path {stripped!r} not found in the supplied GnuCash book."))
+            continue
+        acct_type = book.accounts[guid].type
+        raw = sum(float(sp.value) for t in book.transactions if t.date_posted <= end
+                  for sp in t.splits if sp.account_guid == guid)
+        book_bal = parse_gnucash.normalize_value(raw, acct_type)
+        pend = [j for j in journals if status.get(j.txn_id) == NOT_POSTED
+                and any(s.account == stripped for s in j.splits)]
+        pend_raw = sum(s.debit - s.credit for j in pend for s in j.splits if s.account == stripped)
+        pend_fig = parse_gnucash.normalize_value(pend_raw, acct_type) if pend_raw else 0.0
+        expected = round(book_bal + pend_fig, 2)
+        src["GnuCash book at 31 Mar (plus this skill's unposted journals)"] = expected
+        gap = round(stmt - expected, 2)
+        raw_gap = round(stmt - book_bal, 2)
+        if abs(gap) <= RECONCILIATION_TOLERANCE:
+            if pend and abs(raw_gap) > RECONCILIATION_TOLERANCE:
+                ids = ", ".join(sorted({j.txn_id for j in pend}))
+                out.append(ReconciliationResult(
+                    category=category, sources=src, agree=True,
+                    note=f"{PENDING_JOURNAL_VERDICT}: the book at 31 March is {book_bal:,.2f}; "
+                         f"journal(s) {ids} ({pend_fig:,.2f}) are not yet posted and explain "
+                         f"the whole difference to the statement ({stmt:,.2f})."))
+            else:
+                out.append(ReconciliationResult(
+                    category=category, sources=src, agree=True,
+                    note=f"The book at 31 March ({book_bal:,.2f}) agrees with the statement."))
+        else:
+            tail = (f" Journal(s) not yet posted ({pend_fig:,.2f}) were taken into account; the gap "
+                    "remains." if pend else "")
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=False,
+                note=f"DIFFERS -- statement {stmt:,.2f} against book {book_bal:,.2f} at 31 March: "
+                     f"unexplained difference {gap:,.2f}.{tail} Nothing is plugged or posted for this; "
+                     "find the cause in the book or the statement."))
+    return out
+
+
+def _name_excluded_months(results, row_path, report, accounts, bank_matches):
+    """Tie-out excluded months: a payout month with no unique bank match
+    (no_match or tie, treated alike) has no journal, so the row's Computed
+    figure leaves it out. Name every such month whose would-be legs touch the
+    row's account for a non-zero amount. The amount is only described in the
+    note, never added to a figure. A month that would not have touched the
+    account (for example a month with no capital transferred) is not named,
+    so a plain AGREE stays plain."""
+    try:
+        skipped = excluded_month_legs(report, accounts, bank_matches)
+    except JournalValidationError:
+        return results
+    if not skipped:
+        return results
+    out = []
+    for r in results:
+        path = row_path.get(r.category)
+        if path is None or r.informational or r.not_checked:
+            out.append(r)
+            continue
+        hits = []
+        for month, splits in skipped.items():
+            amt = round(sum(s.debit - s.credit for s in splits if s.account == path), 2)
+            if abs(amt) >= 0.005:
+                hits.append((month, amt))
+        if not hits:
+            out.append(r)
+            continue
+        months = ", ".join(m for m, _ in hits)
+        detail = "; ".join(f"{m}: {a:,.2f}" for m, a in hits)
+        plural = len(hits) > 1
+        extra = (
+            f"EXCLUDES {months} -- no unique bank match for "
+            f"{'those payouts' if plural else 'that payout'}, so no journal was "
+            f"built and the Computed figure leaves {'them' if plural else 'it'} "
+            f"out (would-be amount on this account, not included: {detail})."
+        )
+        r.note = f"{r.note} {extra}".strip()
+        r.excluded_months = months
+        out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +995,10 @@ from .jv_emitter import _month_end as _jv_month_end  # noqa: E402
 
 DEFAULT_BANK_MATCH_WINDOW_DAYS = 7
 
+# H35-12: a payout the firm paid as several separate bank credits is matched
+# as a SET of 2..MAX_SPLIT_PARTS credits (see _split_sets() below).
+MAX_SPLIT_PARTS = 3
+
 MATCHED = "matched"
 NO_MATCH = "no_match"
 TIE = "tie"
@@ -907,6 +1054,24 @@ class PayoutMatch:
     # on this exact transaction, by guid, instead of the account's whole
     # FY movement (see item 2b's rewrite).
     candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE/SPLIT only
+    # H35-12: a MATCHED payout paid as 2..MAX_SPLIT_PARTS separate bank credits
+    # to the same counter-account. `parts` holds every credit (empty for a
+    # single-credit match); credit_amount is then their SUM, credit_date the
+    # latest part's date, credit_txn_guids every part's guid.
+    parts: list = field(default_factory=list)
+    credit_txn_guids: list = field(default_factory=list)
+    # H35-12: TIE between several qualifying SETS -- list[list[BankMatchCandidate]].
+    candidate_sets: list = field(default_factory=list)
+
+    @property
+    def is_split_match(self) -> bool:
+        return self.outcome == MATCHED and len(self.parts) > 1
+
+    @property
+    def outcome_label(self) -> str:
+        if self.is_split_match:
+            return f"MATCHED (split, {len(self.parts)} credits)"
+        return self.outcome.upper()
 
 
 def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict) -> list[BankMatchCandidate]:
@@ -963,6 +1128,40 @@ def _candidate_label(c: "BankMatchCandidate") -> str:
         accts = ", ".join(c.split_accounts or [])
         return f"{c.date} {c.amount:,.2f} -> split across {accts}"
     return f"{c.date} {c.amount:,.2f} -> {c.account}"
+
+
+def _split_sets(pm: "PayoutMatch", deposits: list, used: list, window_days: int) -> list:
+    """H35-12: every set of 2..MAX_SPLIT_PARTS still-unused bank credits that
+    together pay `pm` -- all posted to the SAME single counter-account, each
+    dated in the payout's calendar month or within +/- window_days of the
+    payout date, summing to the payout within RECONCILIATION_TOLERANCE.
+    Returns [[(deposit index, candidate), ...], ...]. Credits spread over
+    several counter-accounts (account is None) never take part."""
+    from itertools import combinations  # noqa: PLC0415
+
+    if pm.payout_amount <= 0:
+        return []
+    pay_date = _datetime.strptime(pm.payout_date, "%Y-%m-%d").date()
+    eligible = []
+    for i, c in enumerate(deposits):
+        if used[i] or c.account is None:
+            continue
+        c_date = _datetime.strptime(c.date, "%Y-%m-%d").date()
+        same_month = (c_date.year, c_date.month) == (pay_date.year, pay_date.month)
+        if not (same_month or abs((c_date - pay_date).days) <= window_days):
+            continue
+        eligible.append((i, c))
+    by_account: dict = {}
+    for item in eligible:
+        by_account.setdefault(item[1].account, []).append(item)
+    found = []
+    for items in by_account.values():
+        for n in range(2, MAX_SPLIT_PARTS + 1):
+            for combo in combinations(items, n):
+                total = round(sum(c.amount for _i, c in combo), 2)
+                if abs(total - pm.payout_amount) <= RECONCILIATION_TOLERANCE + 1e-9:
+                    found.append(sorted(combo, key=lambda t: (t[1].date, t[0])))
+    return found
 
 
 def match_payouts_to_bank(
@@ -1094,7 +1293,8 @@ def match_payouts_to_bank(
     )
 
     matches: dict[int, PayoutMatch] = {}
-    notes: list[str] = []
+    notes_by_idx: dict[int, str] = {}
+    lines_by_idx: dict[int, object] = {}
 
     for idx, line in enumerate(report.monthly, start=1):
         payout_date_iso = _jv_month_end(line.month)
@@ -1118,6 +1318,7 @@ def match_payouts_to_bank(
             payout_amount=payout_amount, outcome=NO_MATCH,
         )
 
+        lines_by_idx[idx] = line
         if not scored:
             matches[idx] = pm
             # H35-05 round 3, item 3: only report this per-payout as a
@@ -1127,11 +1328,8 @@ def match_payouts_to_bank(
             # misleading noise ("genuine gap" implies the import ran and
             # this one payout specifically is missing, which is not known
             # to be true here).
-            if fy_has_deposits:
-                notes.append(
-                    f"payout {line.month} on {payout_date_iso}: no bank credit found "
-                    "-- genuine gap."
-                )
+            # (H35-12: the note is written after the split phase below, once
+            # we know no set of credits matches this payout either.)
             continue
 
         scored.sort(key=lambda t: t[0])
@@ -1149,7 +1347,7 @@ def match_payouts_to_bank(
             ]
             matches[idx] = pm
             cand_text = "; ".join(_candidate_label(c) for c in pm.candidates)
-            notes.append(
+            notes_by_idx[idx] = (
                 f"payout {line.month} on {payout_date_iso}: TIE between "
                 f"{len(tied)} equally-close bank credits, none auto-picked "
                 f"-- candidates: {cand_text}."
@@ -1173,7 +1371,7 @@ def match_payouts_to_bank(
             pm.credit_amount = win_c.amount
             pm.candidates = [win_c]
             matches[idx] = pm
-            notes.append(
+            notes_by_idx[idx] = (
                 f"payout {line.month} on {payout_date_iso}: bank credit found "
                 f"but split across {len(win_c.split_accounts or [])} accounts "
                 f"({', '.join(win_c.split_accounts or [])}) -- cannot route the "
@@ -1187,6 +1385,48 @@ def match_payouts_to_bank(
         pm.credit_account = win_c.account
         pm.credit_txn_guid = win_c.txn_guid
         matches[idx] = pm
+
+    # H35-12: split phase. Single-credit matching above has run for EVERY
+    # payout; only payouts still unmatched are tried here, and only with
+    # credits no single match consumed.
+    for idx in sorted(matches):
+        pm = matches[idx]
+        if pm.outcome != NO_MATCH:
+            continue
+        line = lines_by_idx[idx]
+        sets = _split_sets(pm, all_deposits, used, window_days)
+        if len(sets) == 1:
+            chosen = sets[0]
+            for i, _c in chosen:
+                used[i] = True
+            parts = [c for _i, c in chosen]
+            pm.outcome = MATCHED
+            pm.parts = parts
+            pm.credit_amount = round(sum(c.amount for c in parts), 2)
+            pm.credit_date = max(c.date for c in parts)
+            pm.credit_account = parts[0].account
+            pm.credit_txn_guid = parts[0].txn_guid
+            pm.credit_txn_guids = [c.txn_guid for c in parts]
+        elif len(sets) > 1:
+            pm.outcome = TIE
+            pm.candidate_sets = [[c for _i, c in st] for st in sets]
+            pm.candidates = [c for st in pm.candidate_sets for c in st]
+            set_text = "; ".join(
+                f"set {n}: " + " + ".join(_candidate_label(c) for c in st)
+                for n, st in enumerate(pm.candidate_sets, start=1)
+            )
+            notes_by_idx[idx] = (
+                f"payout {line.month} on {pm.payout_date}: TIE between "
+                f"{len(sets)} different sets of bank credits that each add up to "
+                f"the payout, none auto-picked -- {set_text}."
+            )
+        elif fy_has_deposits:
+            notes_by_idx[idx] = (
+                f"payout {line.month} on {pm.payout_date}: no bank credit found "
+                "-- genuine gap."
+            )
+
+    notes: list[str] = [notes_by_idx[i] for i in sorted(notes_by_idx)]
 
     if not fy_has_deposits:
         notes.insert(0, (

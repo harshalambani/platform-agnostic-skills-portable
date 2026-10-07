@@ -561,6 +561,22 @@ def test_build_report_end_to_end_against_fixture():
             assert not getattr(r, "not_checked", False)
             assert CANNOT_RECONCILE in r.note
             assert "2025-04" in r.note
+        elif cat.startswith("Profit share: statement vs schedule"):
+            # H35-15: the synthetic statement figure is above the after-tax
+            # payouts by exactly what this skill's own year-end accrual
+            # journal books, so the row carries the pending-posting verdict,
+            # never a DIFFER and never a plain AGREE.
+            assert r.agree is True
+            assert PENDING_JOURNAL_VERDICT in r.note
+            assert "DIFFERS" not in r.note
+        elif cat.startswith("Statement vs book:"):
+            assert r.agree is None and CANNOT_RECONCILE in r.note
+        elif cat.startswith("Award-year check ("):
+            # H35-14: the fixture supplies no award-year document, so the
+            # row is a named CANNOT RECONCILE (never an AGREE).
+            assert r.agree is None, f"expected None (no award-year document) for {cat!r}"
+            assert r.informational is False
+            assert CANNOT_RECONCILE in r.note and "2024-25" in r.note
         elif cat.startswith("CTC walk-down:"):
             # H35-08: the fixture supplies no data["ctc_structuring"] block,
             # so the cash pool cannot be computed -- CANNOT RECONCILE, never
@@ -1955,6 +1971,81 @@ def test_l5_document_missing_markers_skipped_with_generic_reason():
     with pytest.raises(NotAnL5DocumentError) as excinfo:
         parse_l5_words(words, source_name="memo.pdf")
     assert "not an l5" in str(excinfo.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# H35-13 -- a wrong document in the LLP statement field is named plainly.
+# ---------------------------------------------------------------------------
+
+def _h13_refusal(lines, name="doc.pdf"):
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_words(_words_from_lines(lines), source_name=name)
+    return str(excinfo.value)
+
+
+def test_h35_13_target_compensation_letter_is_named_plainly():
+    msg = _h13_refusal(
+        ["Target compensation advice : Year ending 31 March 2027", "Target 40,00,000"],
+        name="target_letter.pdf",
+    )
+    assert msg.startswith("target_letter.pdf: this is the")
+    assert '"Target compensation advice" letter' in msg
+    assert "not the LLP Statement of Account" in msg
+    assert "AS ON 31 MARCH" in msg and ".eml" in msg and "-- skipped." in msg
+    assert "Award-year documents" in msg
+    # Never claims the statement itself was unreadable / malformed.
+    for bad in ("missing", "unreadable", "could not", "malformed", "not an L5"):
+        assert bad not in msg
+
+
+def test_h35_13_compensation_summary_is_named_plainly():
+    msg = _h13_refusal(
+        ["Compensation summary : Year ended 31 March 2026", "PAYMENTS", "SCHEDULE"],
+        name="summary.pdf",
+    )
+    assert '"Compensation summary"' in msg and "not the LLP Statement of Account" in msg
+    assert "looks like an L3" not in msg
+
+
+def test_h35_13_real_statement_is_never_refused_even_with_target_words():
+    words = _l5_words(extra_rows=[("Target compensation advice for the year", "-", "-")])
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record  # parsed, not refused
+    words2 = _l5_words()
+    words2 += _l5_word_line("See the Target compensation advice letter separately", 40.0, 900.0)
+    assert parse_l5_words(words2, source_name="stmt2.pdf")
+
+
+def test_h35_13_other_wrong_documents_keep_their_own_messages():
+    l1 = _h13_refusal(["To Whomsoever It may concern", "Remuneration 1,20,000"])
+    assert "payout certificate" in l1
+    sal = _h13_refusal(["SALARY STATEMENT FOR the month of March 2026", "Net Pay 2,00,000"])
+    assert "salary statement" in sal.lower()
+    l3 = _h13_refusal(["Compensation Advisory", "For the year ended 31 March 2026",
+                       "PAYMENTS", "Net Payable 10,00,000", "SCHEDULE", "Opening Balance 1"])
+    assert "L3 Compensation" in l3
+    for m in (l1, sal, l3):
+        assert "Target compensation advice" not in m
+
+
+def test_h35_13_unrecognised_document_still_gets_the_generic_message():
+    msg = _h13_refusal(["Some unrelated memo with no recognisable structure at all."])
+    assert "missing" in msg and "not an L5 LLP Statement of Account" in msg
+    assert "Target compensation" not in msg
+
+
+def test_h35_13_summary_line_carries_the_full_sentence(monkeypatch):
+    from agents.skill_partner_comp_recon import agent as agent_module
+    msg = _h13_refusal(
+        ["Target compensation advice : Year ending 31 March 2027"], name="t.pdf")
+
+    def _boom(path, password=None):
+        raise NotAnL5DocumentError(msg)
+    monkeypatch.setattr(agent_module._llp_statement_parser, "parse", _boom)
+    note, record = agent_module._resolve_llp_leg("t.pdf", None)
+    assert record is None
+    assert note == f"LLP statement of account: not available ({msg})"
+    assert "could not parse" not in note
 
 
 # ---------------------------------------------------------------------------
@@ -7887,6 +7978,234 @@ def test_h35_05_round5_header_counts_payouts_not_notes_guard_partial_gaps():
 
 
 # ---------------------------------------------------------------------------
+# H35-12 -- a payout paid as 2 or 3 separate bank credits (same bank account,
+# same counter-account) is matched as a SET. Single-credit matching runs
+# first for every payout; sets are tried only for payouts still unmatched and
+# only from credits no single match consumed. Synthetic books only.
+# ---------------------------------------------------------------------------
+
+def _split_run(tmp_path, deposits, payouts, name="book_split", window_days=7):
+    """deposits: [(seed, iso_date, amount, counter_name)]; payouts:
+    [(month, total_paid)]. Returns (matches, notes, report, book_path)."""
+    accounts, guids = _gc_tree()
+    txns = [
+        _bank_deposit_txn(seed, d, amt, guids["Current Account"], guids[counter])
+        for seed, d, amt, counter in deposits
+    ]
+    book_path = _write_gnucash_book(
+        tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns),
+    )
+    report = _bank_match_report([_class_a_advice(m, total_paid=t) for m, t in payouts])
+    matches, notes, reason = match_payouts_to_bank(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, window_days=window_days)
+    assert reason is None
+    return matches, notes, report, book_path
+
+
+def test_h35_12_two_credits_matching_exactly_are_one_matched_payout(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert pm.is_split_match and len(pm.parts) == 2
+    assert pm.credit_amount == 100000.0
+    assert pm.credit_account == "Income:PGBP:Remuneration"
+    assert pm.outcome_label == "MATCHED (split, 2 credits)"
+    assert notes == []
+
+
+def test_h35_12_three_credits_within_re1_and_one_part_outside_window(tmp_path):
+    # One part is 14 days before month-end: outside the +/-7 window but
+    # inside the payout's calendar month, so it still counts. Sum is off by
+    # Re 1 (within tolerance).
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED and len(pm.parts) == 3
+    assert pm.credit_amount == 99999.0
+    assert notes == []
+
+
+def test_h35_12_sum_off_by_more_than_re1_is_not_matched(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 39998.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+    assert matches[1].parts == []
+    assert "genuine gap" in notes[0]
+
+
+def test_h35_12_partial_set_of_three_is_not_matched(tmp_path):
+    # Only 2 of the 3 parts are present in the book -- must NOT match.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+    assert matches[1].parts == []
+
+
+def test_h35_12_four_credits_are_never_combined(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-05", 25000.0, "Remuneration"),
+        ("b", "2025-04-10", 25000.0, "Remuneration"),
+        ("c", "2025-04-20", 25000.0, "Remuneration"),
+        ("d", "2025-04-28", 25000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_extra_unrelated_credit_is_not_pulled_into_the_set(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+        ("x", "2025-04-20", 25000.0, "Remuneration"),   # unrelated, same account
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert sorted(p.amount for p in pm.parts) == [40000.0, 60000.0]
+    assert all(p.amount != 25000.0 for p in pm.parts)
+    assert pm.credit_amount == 100000.0
+    assert notes == []
+
+
+def test_h35_12_two_distinct_fitting_sets_are_a_tie_with_no_journal(tmp_path):
+    matches, notes, report, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-20", 40000.0, "Remuneration"),
+        ("c", "2025-04-12", 70000.0, "Remuneration"),
+        ("d", "2025-04-22", 30000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == TIE
+    assert len(pm.candidate_sets) == 2
+    assert len(notes) == 1 and "TIE" in notes[0] and "set 1" in notes[0] and "set 2" in notes[0]
+    for amt in ("60,000.00", "40,000.00", "70,000.00", "30,000.00"):
+        assert amt in notes[0]
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=matches)
+    assert journals == [] or all("2025-04" not in j.description for j in journals)
+
+
+def test_h35_12_parts_on_different_counter_accounts_are_not_a_split_match(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Share of Profit"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_credit_outside_month_and_window_is_never_used(tmp_path):
+    # Payout April (month-end 30 Apr); the second part is 20 days into May:
+    # outside the calendar month AND outside +/-7 days.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-05-20", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_single_match_payout_is_not_rematched_as_a_split(tmp_path):
+    # A single 100000 credit matches the payout; the two smaller credits
+    # that also sum to 100000 must stay untouched.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("s", "2025-04-30", 100000.0, "Remuneration"),
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-20", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert pm.parts == []
+    assert not pm.is_split_match
+    assert pm.credit_amount == 100000.0 and pm.credit_date == "2025-04-30"
+
+
+def test_h35_12_no_credit_is_used_by_two_payouts(tmp_path):
+    # Two payouts of 100000 in adjacent months; April's split uses a+b. May's
+    # single credit is its own. A third credit that could pair with either
+    # April part must not be reused by a second payout.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+        ("m", "2025-05-31", 100000.0, "Remuneration"),
+    ], [("2025-04", 100000.0), ("2025-05", 100000.0), ("2025-06", 100000.0)])
+    assert matches[1].outcome == MATCHED and len(matches[1].parts) == 2
+    assert matches[2].outcome == MATCHED and matches[2].parts == []
+    assert matches[3].outcome == NO_MATCH
+    used = []
+    for pm in matches.values():
+        used.extend(pm.credit_txn_guids or ([pm.credit_txn_guid] if pm.credit_txn_guid else []))
+    assert len(used) == len(set(used)) == 3
+
+
+def test_h35_12_single_matches_win_credits_before_any_split_is_tried(tmp_path):
+    # A wide window lets April's split reach the 3 May credit too, but May's
+    # single-credit match must consume it first.
+    # April payout 100000: parts 40000 (28 Apr) + 60000 (3 May, within +/-7).
+    # May payout 60000: single credit 3 May 60000 is in May's calendar month
+    # and is consumed by May's single match first.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-28", 40000.0, "Remuneration"),
+        ("b", "2025-05-03", 60000.0, "Remuneration"),
+    ], [("2025-04", 100000.0), ("2025-05", 60000.0)], name="book_order", window_days=40)
+    assert matches[2].outcome == MATCHED and matches[2].credit_amount == 60000.0
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_split_journal_balances_and_posts_nothing_to_bank(tmp_path):
+    matches, _n, report, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 160000.0, "Remuneration"),
+        ("b", "2025-04-25", 160000.0, "Remuneration"),
+        ("c", "2025-05-03", 159999.0, "Remuneration"),
+    ], [("2025-04", 480000.0)])
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=matches)
+    monthly = [j for j in journals if "monthly payout 2025-04" in j.description]
+    assert len(monthly) == 1
+    assert monthly[0].balanced
+    bank_path = _GC_TIEOUT_ACCOUNTS["bank"]
+    assert sum(s.debit - s.credit for j in journals for s in j.splits
+               if s.account == bank_path) == 0.0
+    # Cash leg lands on the bank import's own counter-account, at the payout
+    # amount (a within-Re-1 rounding difference stays in the bank import's
+    # own postings -- same as a single-credit match).
+    cash = [s for s in monthly[0].splits if s.account == "Income:PGBP:Remuneration" and s.debit]
+    assert cash and round(sum(s.debit for s in cash), 2) == 480000.0
+
+
+def test_h35_12_bank_match_sheet_lists_every_part(tmp_path):
+    from openpyxl import Workbook  # noqa: PLC0415
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    wb = Workbook()
+    writer._write_bank_match_sheet(wb, matches)
+    ws = wb["Bank match"]
+    rows = [[c.value for c in r] for r in ws.iter_rows(min_row=2)]
+    assert rows[0][3] == "MATCHED (split, 3 credits)"
+    assert [r[5] for r in rows[:3]] == [30000.0, 30000.0, 39999.0]
+    assert [r[4] for r in rows[:3]] == ["2025-04-16", "2025-04-25", "2025-05-03"]
+    assert all(r[6] == "Income:PGBP:Remuneration" for r in rows[:3])
+    assert len(rows) == 3
+
+
+def test_h35_12_total_cash_row_counts_every_part(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    total_matched = sum(m.credit_amount for m in matches.values() if m.outcome == MATCHED)
+    assert total_matched == 99999.0
+
+
+# ---------------------------------------------------------------------------
 # H35-06 -- computed capital-interest schedule (simple interest, actual
 # days/365, on this-FY capital tranches -- MonthlyLine.capital_transferred).
 # 4 required negative tests.
@@ -8294,3 +8613,462 @@ def test_run_accepts_the_entitys_own_26as_workbook(tmp_path, monkeypatch):
     own = _scoped_26as(tmp_path / "own-26AS.xlsx", "Test Individual", "AAAAA0000A")
     result = _run_with_26as(monkeypatch, tmp_path, own)
     assert "belongs to" not in result
+
+
+# ---------------------------------------------------------------------------
+# Tie-out excluded months -- a GnuCash tie-out row names the payout months its
+# Computed figure leaves out (no unique bank match, so no journal). Synthetic
+# books only.
+# ---------------------------------------------------------------------------
+
+_EXCL_ACCOUNTS = dict(_GC_TIEOUT_ACCOUNTS, capital_contribution="Expenses:Tax")
+
+
+def _excl_run(tmp_path, cap_by_month, deposits, name="excl"):
+    """cap_by_month: {"2025-04": capital, "2025-05": capital}. Each payout
+    pays 480000 minus its capital leg, so the journal balances. deposits:
+    [(seed, iso_date, amount)] credited on the bank, counter = Remuneration.
+    Returns {category-suffix: ReconciliationResult} plus the matches."""
+    accounts, guids = _gc_tree()
+    txns = [
+        _bank_deposit_txn(seed, d, amt, guids["Current Account"], guids["Remuneration"])
+        for seed, d, amt in deposits
+    ]
+    book_path = _write_gnucash_book(
+        tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns),
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[
+            _class_a_advice(m, total_paid=480000.0 - cap) for m, cap in cap_by_month.items()
+        ],
+        accounts=_EXCL_ACCOUNTS,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    for line in report.monthly:
+        line.capital_transferred = cap_by_month[line.month]
+    matches, _notes, reason = match_payouts_to_bank(report, _EXCL_ACCOUNTS, book_path)
+    assert reason is None
+    rows = build_balance_tieout(
+        report, _EXCL_ACCOUNTS, book_path, "2025-26", bank_matches=matches,
+    )
+    return {r.category.split(": ", 1)[1]: r for r in rows}, matches
+
+
+def test_excluded_month_with_a_capital_leg_is_named_and_not_a_clean_agree(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    assert matches[1].outcome == NO_MATCH and matches[2].outcome == MATCHED
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "2025-04"
+    assert "EXCLUDES 2025-04" in cap.note and "50,000.00" in cap.note
+    assert writer._status_fill(cap)[1] == "AGREE excl. 2025-04"
+    assert writer._status_fill(cap)[1] != "AGREE"
+
+
+def test_excluded_amount_is_never_added_to_the_computed_figure(tmp_path):
+    rows, _m = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    cap = rows["capital_contribution"]
+    computed = [v for k, v in cap.sources.items() if k.startswith("Computed")][0]
+    assert computed == 0.0
+    assert 50000.0 not in cap.sources.values()
+
+
+def test_excluded_month_with_zero_capital_leaves_a_plain_agree(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 0.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    assert matches[1].outcome == NO_MATCH
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "" and "EXCLUDES" not in cap.note
+    assert cap.agree is True and writer._status_fill(cap)[1] == "AGREE"
+    # An account that the skipped month DID touch is still named.
+    assert rows["tds_expense"].excluded_months == "2025-04"
+
+
+def test_no_skipped_months_changes_nothing(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 0.0, "2025-05": 0.0},
+        [("d4", "2025-04-30", 480000.0), ("d5", "2025-05-31", 480000.0)],
+    )
+    assert all(m.outcome == MATCHED for m in matches.values())
+    assert all(r.excluded_months == "" for r in rows.values())
+    assert all("EXCLUDES" not in r.note for r in rows.values())
+
+
+def test_a_tie_month_is_excluded_the_same_way_as_no_match(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("t1", "2025-04-27", 430000.0), ("t2", "2025-05-03", 430000.0),
+         ("d5", "2025-05-31", 480000.0)],
+        name="excl_tie",
+    )
+    assert matches[1].outcome == TIE
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "2025-04"
+    assert writer._status_fill(cap)[1] == "AGREE excl. 2025-04"
+
+
+def test_a_row_with_excluded_months_is_listed_as_open_and_exception(tmp_path):
+    import openpyxl
+    rows, _m = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    report = _bank_match_report([_class_a_advice("2025-04")])
+    report.reconciliation.append(rows["capital_contribution"])
+    wb = openpyxl.Workbook()
+    writer._write_exceptions_sheet(wb, report)
+    text = " ".join(str(c.value) for row in wb["Exceptions"].iter_rows() for c in row)
+    assert "AGREE excl. 2025-04" in text
+
+
+# ---------------------------------------------------------------------------
+# H35-08 (Advisory Target Compensation reaches the checks) -- synthetic.
+# ---------------------------------------------------------------------------
+
+def _tc_data(entity_tc=None, advisory_tc=None, ctc=None):
+    data = _h35_02_data()
+    data["drivers"] = {k: v for k, v in data["drivers"].items() if k != "target_compensation"}
+    if entity_tc is not None:
+        data["drivers"]["target_compensation"] = entity_tc
+    if advisory_tc is not None:
+        data.setdefault("advisory", {})["target_compensation"] = advisory_tc
+    data["ctc_structuring"] = ctc if ctc is not None else {"total": 0, "months": {}, "rows": {}}
+    return data
+
+
+def test_h35_08_advisory_target_compensation_feeds_the_ctc_check_and_is_sourced():
+    report = build_report(_tc_data(advisory_tc=600000.0))
+    assert report.ctc_check.status == "OK"
+    assert report.ctc_check.target_compensation == 600000.0
+    assert report.drivers["target_compensation"] == 600000.0
+    assert report.driver_sources["target_compensation"] == "Advisory"
+
+
+def test_h35_08_entity_setting_still_wins_over_the_document_value():       # NEGATIVE
+    report = build_report(_tc_data(entity_tc=700000.0, advisory_tc=600000.0))
+    assert report.ctc_check.target_compensation == 700000.0
+    assert report.driver_sources["target_compensation"] == "Entity setting"
+
+
+def test_h35_08_missing_target_compensation_is_never_zero_or_prior_year():  # NEGATIVE
+    data = _tc_data()
+    data["advisory"] = {"prior_year_target_compensation": 500000.0}
+    report = build_report(data)
+    assert report.ctc_check.status == CANNOT_RECONCILE
+    assert report.ctc_check.target_compensation is None
+    assert "Target Compensation not supplied" in report.ctc_check.reason
+    assert "target_compensation" not in report.driver_sources
+
+
+def test_h35_08_capital_rule_with_missing_inputs_names_each_and_is_not_ok():  # NEGATIVE
+    report = build_report(_tc_data(advisory_tc=600000.0))
+    assert report.capital_rule.status == CANNOT_RECONCILE
+    reason = report.capital_rule.reason
+    assert "capital months achieved" in reason and "capital months total" in reason
+    assert "capital contribution rate" in reason
+    assert "target compensation" not in reason          # the Advisory supplied it
+    row = next(r for r in report.reconciliation if r.category.startswith("CTC walk-down:"))
+    assert row.agree is not False
+
+
+def test_h35_08_ctc_check_with_a_missing_input_is_never_agree():            # NEGATIVE
+    data = _tc_data(advisory_tc=600000.0)
+    data["ctc_structuring"] = {"total": None, "months": {}, "rows": {}}
+    report = build_report(data)
+    assert report.ctc_check.status == CANNOT_RECONCILE
+    row = next(r for r in report.reconciliation if r.category.startswith("CTC walk-down:"))
+    assert row.agree is not True
+    assert "CTC structuring total (not supplied)" in report.ctc_check.reason
+
+
+def test_h35_08_ctc_total_falls_back_only_to_printed_figures():
+    f = engine.ctc_structuring_total_fn
+    assert f({"total": 90.0}) == (90.0, "printed total")
+    assert f({"total": None, "months": {"a": 40.0, "b": 50.0}}) == (
+        90.0, "sum of the printed monthly figures")
+    assert f({"total": None, "months": {"a": None},
+              "rows": {"x": {"total": 30.0}, "y": {"total": 60.0}}}) == (
+        90.0, "sum of the printed component totals")
+    # NEGATIVE: a partial set is never summed into a figure.
+    assert f({"total": None, "months": {"a": 40.0, "b": None}, "rows": {}}) == (None, None)
+    assert f({"total": None, "months": {},
+              "rows": {"x": {"total": 30.0}, "y": {"total": None}}}) == (None, None)
+    assert f(None) == (None, None)
+
+
+def test_h35_08_default_interest_rate_is_labelled_as_a_default(tmp_path):
+    import openpyxl
+    data = _tc_data(advisory_tc=600000.0)
+    data["drivers"]["capital_interest_rate"] = 0.06
+    data["driver_sources"] = {"capital_interest_rate": "Default (6% simple interest, inferred -- not a figure from any document)"}
+    report = build_report(data)
+    out = tmp_path / "d.xlsx"
+    writer.write_report_workbook(report, str(out))
+    ws = openpyxl.load_workbook(str(out))["Drivers"]
+    cells = {r[0].value: r[3].value for r in ws.iter_rows(min_row=2)}
+    assert cells["Target compensation"] == "Advisory"
+    assert "inferred" in cells["Capital interest rate"]
+    assert cells["Capital months (achieved)"] == "-- missing --"
+
+
+# ---------------------------------------------------------------------------
+# H35-14 -- award-year documents for prior-year instalments
+# ---------------------------------------------------------------------------
+
+def _ay_doc(fy="2024-25", name="adv.pdf", instalments=None, letter_date=None,
+            revision=None, kind="compensation_summary"):
+    if instalments is None:
+        instalments = [
+            {"instalment_no": 1, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 416667, "net": 233893},
+            {"instalment_no": 2, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 291667, "net": 358893},
+            {"instalment_no": 3, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 291667, "net": 358893},
+        ]
+    return {"name": name, "kind": kind, "fy": fy, "letter_date": letter_date,
+            "revision": revision, "instalments": instalments, "error": None}
+
+
+def _ay_rows(docs):
+    data = dict(_load_fixture())
+    data["award_year_documents"] = docs
+    report = build_report(data)
+    return [r for r in report.reconciliation if r.category.startswith("Award-year check (")]
+
+
+def test_h35_14_matching_award_year_document_agrees_per_instalment():
+    rows = _ay_rows([_ay_doc()])
+    assert len(rows) == 2  # two instalments paid in the reporting year
+    assert all(r.agree is True and not r.informational for r in rows)
+    assert "award FY2024-25" in rows[0].note and "payment FY2025-26" in rows[0].note
+    assert "implied firm's-tax rate" in rows[0].note
+
+
+def test_h35_14_different_tax_or_capital_differs_loudly():
+    docs = [_ay_doc(instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 300000, "capital_contribution": 250000, "net": 0},
+    ])]
+    rows = _ay_rows(docs)
+    assert [r.agree for r in rows] == [False, False]
+    assert "firm's tax" in rows[0].note and "capital deducted" in rows[1].note
+
+
+def test_h35_14_no_document_is_named_cannot_reconcile_never_agree():
+    rows = _ay_rows([])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert CANNOT_RECONCILE in rows[0].note and "2024-25" in rows[0].note
+
+
+def test_h35_14_a_different_year_document_is_never_used():
+    rows = _ay_rows([_ay_doc(fy="2023-24")])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert all(r.agree is not True for r in rows)
+
+
+def test_h35_14_award_year_is_read_from_the_body_not_the_file_name():
+    rows = _ay_rows([_ay_doc(fy="2023-24", name="Compensation summary FY2024-25.pdf")])
+    assert rows[0].agree is None
+
+
+def test_h35_14_later_revision_wins_by_letter_date_and_earlier_never_overrides():
+    wrong = _ay_doc(name="old.pdf", letter_date="2025-04-10", instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    right = _ay_doc(name="new.pdf", letter_date="2025-06-01")
+    for docs in ([wrong, right], [right, wrong]):
+        rows = _ay_rows(docs)
+        assert all(r.agree is True for r in rows)
+
+
+def test_h35_14_revision_number_decides_when_dates_are_missing():
+    wrong = _ay_doc(name="r1.pdf", revision=1, instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    right = _ay_doc(name="r2.pdf", revision=2)
+    assert all(r.agree is True for r in _ay_rows([right, wrong]))
+
+
+def test_h35_14_undeterminable_latest_revision_is_flagged_not_guessed():
+    other = _ay_doc(name="b.pdf", instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    rows = _ay_rows([_ay_doc(name="a.pdf"), other])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert "latest revision cannot be determined" in rows[0].note
+    # identical duplicates are harmless
+    assert all(r.agree is True for r in _ay_rows([_ay_doc(name="a.pdf"), _ay_doc(name="copy.pdf")]))
+
+
+def test_h35_14_target_letter_is_not_an_instalment_source():
+    t = _ay_doc(kind="target_comp_letter", instalments=None)
+    t["instalments"] = None
+    rows = _ay_rows([t])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert "Target compensation letter" in rows[0].note
+
+
+def test_h35_14_unmatched_gross_is_cannot_reconcile_not_agree():
+    rows = _ay_rows([_ay_doc(instalments=[
+        {"instalment_no": 1, "gross": 777, "firms_tax": 0, "capital_contribution": 0, "net": 777}])])
+    assert all(r.agree is None for r in rows)
+
+
+def test_h35_14_journal_is_identical_with_and_without_award_year_documents():
+    base = dict(_load_fixture())
+    with_docs = dict(base, award_year_documents=[_ay_doc()])
+    a = build_journals(build_report(base), base["accounts"])
+    b = build_journals(build_report(with_docs), base["accounts"])
+    assert repr(a) == repr(b)
+
+
+def test_h35_14_letter_date_and_revision_are_read_best_effort():
+    from agents.skill_partner_comp_recon import award_year as ay
+    assert ay.parse_letter_date("Compensation summary\nDate : 12 April 2025") == "2025-04-12"
+    assert ay.parse_letter_date("nothing here") is None
+    assert ay.parse_revision("Revision No. 3") == 3
+    assert ay.parse_revision("no marker") is None
+
+
+# ---------------------------------------------------------------------------
+# H35-15 -- Statement of Account vs book, and the three-way profit share
+# ---------------------------------------------------------------------------
+
+_SB_ACCOUNTS = dict(_GC_TIEOUT_ACCOUNTS_WITH_EQUITY)
+
+
+def _sb_report(statement_capital, statement_current=None, cap=50000.0):
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04", total_paid=480000.0 + cap)],
+        accounts=_SB_ACCOUNTS,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    for line in report.monthly:
+        line.capital_transferred = cap
+    report.llp_record = {"capital_closing_balance": statement_capital,
+                         "current_closing_balance": statement_current}
+    return report
+
+
+def _sb_rows(tmp_path, report, book_txns=(), status=None, name="sb"):
+    accounts, guids = _gc_tree_with_equity()
+    txns = [t(guids) for t in book_txns]
+    book_path = _write_gnucash_book(tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns))
+    posted = [PostedCheckResult(txn_id=j.txn_id, date="2025-04-30", description="x",
+                                status=status or NOT_POSTED, detail="")
+              for j in build_journals(report, _SB_ACCOUNTS)]
+    from agents.skill_partner_comp_recon.gnucash_tieout import build_statement_book_check
+    rows = build_statement_book_check(report, _SB_ACCOUNTS, book_path, "2025-26", posted_check=posted)
+    return {r.category.split(": ", 1)[1]: r for r in rows}
+
+
+def _sb_capital_txn(amount, seed="cap0", date_="2025-04-30"):
+    def make(guids):
+        return _gc_txn_xml(
+            _gc_guid("txn-" + seed), date_, "capital",
+            [_gc_split_xml(_gc_guid("s1-" + seed), -amount, guids["Partner Capital Contribution"]),
+             _gc_split_xml(_gc_guid("s2-" + seed), amount, guids["Current Account"])])
+    return make
+
+
+def test_h35_15_difference_fully_explained_by_unposted_journal_is_pending_not_a_gap(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(50000.0))
+    r = rows["closing capital at 31 March"]
+    assert r.agree is True and PENDING_JOURNAL_VERDICT in r.note
+
+
+def test_h35_15_unexplained_difference_is_never_agree(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(65000.0))
+    r = rows["closing capital at 31 March"]
+    assert r.agree is False
+    assert "unexplained difference 15,000.00" in r.note and "Nothing is plugged" in r.note
+
+
+def test_h35_15_posted_book_that_ties_agrees_and_a_posted_mismatch_differs(tmp_path):
+    ok = _sb_rows(tmp_path, _sb_report(50000.0), [_sb_capital_txn(50000.0)],
+                  status=ALREADY_POSTED, name="ok")["closing capital at 31 March"]
+    assert ok.agree is True and PENDING_JOURNAL_VERDICT not in ok.note
+    bad = _sb_rows(tmp_path, _sb_report(70000.0), [_sb_capital_txn(50000.0)],
+                   status=ALREADY_POSTED, name="bad")["closing capital at 31 March"]
+    assert bad.agree is False
+
+
+def test_h35_15_missing_statement_figure_is_cannot_reconcile(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(None))
+    assert rows["closing capital at 31 March"].agree is None
+    assert rows["closing current account at 31 March"].agree is None
+    assert CANNOT_RECONCILE in rows["closing capital at 31 March"].note
+
+
+def _pst(stmt, gross, tax, addl, pending=None):
+    from agents.skill_partner_comp_recon.engine import profit_share_three_way
+
+    class M:
+        share_of_profit_gross = gross
+        firms_tax_sop = tax
+        additional_share_of_profit = addl
+    return profit_share_three_way({"current_profit_share": stmt}, [M()] if gross is not None else [],
+                                  None, {}, "2025-26", pending_accrual=pending)
+
+
+def _accr(amount):
+    return {"applies_to": "Booked (monthly)", "amount": amount, "journal_ids": ["ACCR-1"],
+            "description": "this skill's year-end share-of-profit accrual journal"}
+
+
+def test_h35_15_three_way_gap_booked_by_own_accrual_is_pending_not_differ():
+    from agents.skill_partner_comp_recon.engine import PENDING_JOURNAL_VERDICT
+    r = _pst(900.0, 1000.0, -400.0, 100.0, _accr(200.0))
+    assert r.agree is True and PENDING_JOURNAL_VERDICT in r.note and "ACCR-1" in r.note
+    assert "DIFFERS" not in r.note
+
+
+def test_h35_15_three_way_accrual_of_a_different_amount_still_differs():
+    r = _pst(900.0, 1000.0, -400.0, 100.0, _accr(150.0))
+    assert r.agree is False and "DIFFERS on both readings" in r.note
+
+
+def test_h35_15_three_way_before_tax_statement_with_accrual_is_red_flag_never_agree():
+    # Statement = gross + additional (before firm's tax); the accrual journal
+    # would then book the firm's tax (400) as further share of profit.
+    r = _pst(1100.0, 1000.0, -400.0, 100.0, _accr(400.0))
+    assert r.agree is False
+    assert r.note.startswith("RED FLAG") and "ACCR-1" in r.note
+    assert "AGREES BEFORE" not in r.note
+
+
+def test_h35_15_three_way_names_which_reading_agrees():
+    after = _pst(700.0, 1000.0, -400.0, 100.0)
+    assert after.agree is True and "AGREES AFTER firm's tax" in after.note
+    before = _pst(1100.0, 1000.0, -400.0, 100.0)
+    assert before.agree is True and "AGREES BEFORE firm's tax" in before.note
+    assert "differs by" in before.note
+
+
+def test_h35_15_three_way_neither_reading_is_a_loud_differ_with_both_gaps():
+    r = _pst(900.0, 1000.0, -400.0, 100.0)
+    assert r.agree is False
+    assert "-200.00" in r.note and "200.00" in r.note and "DIFFERS on both readings" in r.note
+
+
+def test_h35_15_three_way_with_one_leg_is_never_agree():
+    assert _pst(None, 1000.0, -400.0, 100.0).agree is None
+    assert _pst(700.0, None, 0.0, 0.0).agree is None
+
+
+def test_h35_14_unreadable_award_year_file_is_named_and_skipped(tmp_path):
+    from agents.skill_partner_comp_recon.agent import _read_award_year_documents
+    bad = tmp_path / "broken.pdf"
+    bad.write_bytes(b"not a pdf")
+    docs, notes = _read_award_year_documents(str(tmp_path), None)
+    assert len(docs) == 1 and docs[0]["error"]
+    assert "broken.pdf" in notes[0] and "skipped" in notes[0]
+    assert _read_award_year_documents("", None) == ([], [])

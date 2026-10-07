@@ -97,6 +97,18 @@
    "INFORMATIONAL (superseded by the D1 drawings-vs-payouts identity check, H35-04) -- "
   ],
   [
+   "Award-year check (FY2024-25 award): paid instalments vs award-year Advisory",
+   "Award-year Advisory = not supplied; Payment schedule (paid this year) = 2,000,000.00",
+   "CANNOT RECONCILE",
+   "CANNOT RECONCILE -- no award-year document for FY2024-25 was supplied; the FY2024-25 Compensation summary is needed (any other year's cannot stand in)."
+  ],
+  [
+   "Profit share: statement vs schedule (before and after firm's tax)",
+   "LLP Statement (Profit Share for the Year) = 6,000,000.00; Schedule, before firm's tax (A) = 6,650,560.00; Schedule, after firm's tax (B) = 4,553,920.00",
+   "AGREE",
+   "PENDING JOURNAL POSTING (provided by this skill): after firm's tax the statement is 1,446,080.00 above the monthly payouts, and journal(s) NORTHGATE-2526-ACCR (this skill's year-end share-of-profit accrual) book exactly that. Before firm's tax the gap would be -650,560.00. Check the accrual against the payout that settles it. Schedule: gross share of profit 6,000,000.00, firm's tax on it -2,096,640.00, additional share of profit 650,560.00 (current award only; earlier cohorts' firm's tax is kept out). See also the CTC walk-down row for the Target Compensation view of the same pool."
+  ],
+  [
    "CTC walk-down: Target Compensation vs cash pool (remuneration + gross share of profit + CTC structuring + arrears) -- informational",
    "Target Compensation = 10,000,000.00; Cash pool actually paid = not supplied",
    "INFORMATIONAL",
@@ -115,6 +127,11 @@
    "CANNOT RECONCILE -- interest on capital was paid in 2025-04 but the payment schedule's tds_on_rem_ioc and/or the payslip's own tds figure is not supplied for that month; the interest-only TDS cannot be isolated (never assumed to be 0)."
   ],
   [
+   "Award-year check (FY2024-25 award): paid instalments vs award-year Advisory",
+   "CANNOT RECONCILE",
+   "CANNOT RECONCILE -- no award-year document for FY2024-25 was supplied; the FY2024-25 Compensation summary is needed (any other year's cannot stand in)."
+  ],
+  [
    "Capital -- mid-year rate change",
    "RATE CHANGE SUSPECTED",
    "RATE CHANGE SUSPECTED -- instalment capital-deducted figures within this cohort are not equal. Implied old rate 0.5000, implied new rate 0.4000. Re-read this year's Compensation Advisory -- it will have been reissued mid-year at the new rate."
@@ -129,6 +146,11 @@
   [
    "s.194T TDS on interest on capital",
    "CANNOT RECONCILE -- interest on capital was paid in 2025-04 but the payment schedule's tds_on_rem_ioc and/or the payslip's own tds figure is not supplied for that month; the interest-only TDS cannot be isolated (never assumed to be 0).",
+   "Supply the missing source figure for this financial year."
+  ],
+  [
+   "Award-year check (FY2024-25 award): paid instalments vs award-year Advisory",
+   "CANNOT RECONCILE -- no award-year document for FY2024-25 was supplied; the FY2024-25 Compensation summary is needed (any other year's cannot stand in).",
    "Supply the missing source figure for this financial year."
   ]
  ],
