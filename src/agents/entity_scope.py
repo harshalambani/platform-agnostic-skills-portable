@@ -153,3 +153,19 @@ def check_26as_owner(
     if identity_matches(ident, ent):
         return "ok", ""
     return "mismatch", describe_mismatch(ident, entity_key, ent)
+
+
+def check_26as_fy(xlsx_path: str | Path, fy: str | None) -> tuple[str, str]:
+    """Run-time guard: is this 26AS workbook for the financial year `fy`?
+
+    ("ok", "") when `fy` is blank or the workbook states the same year (or no
+    year at all -- identity is checked separately); ("mismatch", message)
+    when it states another year.
+    """
+    if not fy:
+        return "ok", ""
+    ident = read_26as_identity(xlsx_path)
+    wfy = (ident or {}).get("fy") or ""
+    if wfy and wfy != fy:
+        return "mismatch", f"the 26AS workbook is for FY {wfy}, not FY {fy}"
+    return "ok", ""

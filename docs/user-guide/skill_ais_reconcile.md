@@ -11,9 +11,9 @@ Use once you've downloaded your AIS JSON export from the income-tax portal, to c
 
 ## Inputs
 
-- **Entity (optional) -- fills in the GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
-  - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
-  - ⚠️ UI convenience only; leave unset to pick the file manually as before. This does not resolve the AIS export's own entity -- that is always inferred from the AIS filename's masked PAN.
+- **Entity -- the AIS export must be this entity's; fills in the GnuCash book below from the registry** (required) — accepts: One of the entities defined in entities.yaml, via dropdown.
+  - The entity this reconciliation is for. Also auto-fills the GnuCash book field from the registered book for that entity.
+  - ⚠️ Required. The AIS export's own entity is still inferred from the AIS filename's masked PAN, and the run is refused when that is not the entity picked here. The 26AS list below shows only this entity's workbooks.
 - **AIS JSON export (encrypted, as downloaded from the portal)** (required) — accepts: JSON (.json), one export per entity/FY.
   - The AIS JSON export exactly as downloaded from the portal (still encrypted -- decrypted in-process).
   - ⚠️ The filename must keep the portal's own masked-PAN + FY prefix (e.g. "XXXDE1234X_2025-26_..."). If no entity in entities.yaml has a matching PAN, or the matching entity has no DOB/DOI on file, the run fails loud rather than guessing which taxpayer this is.

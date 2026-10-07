@@ -49,6 +49,15 @@ inputs:
     label: "Entity"
     options_from: "itr_entities"
     required: true
+  # UI-18: the financial year the run is for. It narrows the 26AS picker to
+  # that year's workbooks and is handed to the run, which refuses documents
+  # that disagree with it. Same option source as the ITR Workbook's year
+  # select, so it sits in the Entity block and never names the output file.
+  - name: "fy"
+    type: "select"
+    label: "Financial year"
+    options_from: "itr_ay_years"
+    required: true
   - name: "advices_dir"
     type: "files"
     label: 'Monthly payout certificates: the "payout details for the month of ..." PDFs, one per month (or the newer payout statements)'
@@ -84,6 +93,7 @@ inputs:
     label: "26AS workbook (enables the TDS-credit tie-out)"
     match: "*-26AS.xlsx"
     entity_from: "entity"
+    fy_from: "fy"
     required: false
   - name: "journal_path"
     type: "text"
@@ -102,6 +112,7 @@ inputs:
 
 run_args:
   entity: "{inputs.entity}"
+  financial_year: "{inputs.fy}"
   advices_dir: "{inputs.advices_dir}"
   doc_password: "{inputs.doc_password}"
   advisory_path: "{inputs.advisory_path}"
@@ -177,6 +188,13 @@ help:
       tooltip: "The partner/entity this reconciliation is for."
       accepts: "One of the entities defined in entities.yaml, via dropdown."
       gotchas: "Required -- also selects the GnuCash book below when one is registered for this entity."
+    - name: "fy"
+      tooltip: "The financial year this reconciliation is for, e.g. 2025-26."
+      accepts: "One of the years the tax rules cover, via dropdown (newest first)."
+      gotchas: >
+        Required. Narrows the 26AS workbook list to this year, and the run is
+        refused if the advisory, payout documents or the 26AS workbook belong
+        to a different year.
     - name: "advices_dir"
       tooltip: "All of this financial year's monthly payout certificates (each titled \"payout details for the month of ...\"), one per month."
       accepts: "One or more PDF files. A month must come from ONE document: do not add both the certificate and the newer payout statement for the same month."
@@ -230,13 +248,13 @@ help:
       tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
       accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
       gotchas: >
-        Optional. Lists only the selected entity's own 26AS workbooks (the
-        workbook's own assessee PAN/name is matched to the entity, not the
-        file name), newest first, and defaults to the entity's own newest.
-        Choose (none) to skip the tie-out. If the entity has none yet the
-        picker says so: run 26AS Convert first. A workbook typed in by
-        hand that belongs to another entity is refused with a clear
-        message. Absent (or unreadable/malformed), the TDS-credit tie-out
+        Optional. Lists only the selected entity's own 26AS workbooks for the
+        selected financial year (the workbook's own assessee PAN/name and year
+        are matched, not the file name), newest first, and defaults to the
+        newest. Choose (none) to skip the tie-out. If there is none yet the
+        picker says so: run 26AS Convert first. A workbook typed in by hand
+        that belongs to another entity or another year, or that does not
+        state whose it is, is refused with a clear message. Absent (or unreadable/malformed), the TDS-credit tie-out
         leg is reported 'not available', never defaulted.
     - name: "journal_path"
       tooltip: >

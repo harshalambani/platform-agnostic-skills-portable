@@ -88,9 +88,8 @@ def check_payout_set(advice_records: list[dict], fy: str | None,
             what = "; ".join(f"{_source(r)} ({_kind(r)})" for r in recs)
             notes.append(
                 f"{PREFIX}{_label(month)} was given {len(recs)} times: {what}. "
-                "A month must come from ONE document; this run uses them all as "
-                "given, so remove the extra one and run again or that month is "
-                "counted more than once.")
+                "A month must come from ONE document, so this run will be refused "
+                "(nothing is written) until the extra one is removed.")
 
     if in_year and seen:
         missing = [m for m in in_year if m not in seen]
@@ -114,15 +113,15 @@ def check_payout_set(advice_records: list[dict], fy: str | None,
 # ---------------------------------------------------------------------------
 # Advisory slot: Compensation summary vs target-compensation letter
 # ---------------------------------------------------------------------------
-# TODO(UI-17, needs a real specimen): the two titles below are quoted from the
-# printed documents as described in the build brief, but NO fixture of a real
-# target-compensation letter exists in this repo, so the exact text, case and
-# page it prints its title on are unverified. The check is therefore
-# conservative -- it fires only on a positive title match and stays silent on
-# anything else -- and tests/test_partner_form_checks.py guards the marker.
-ADVISORY_TITLE_UNVERIFIED = True
-
-_SUMMARY_TITLE_RE = re.compile(r"compensation\s+summary\s*:?\s*year\s+ended\s+31\s+march", re.I)
+# Verified (UI-17 follow-up) against three real target-compensation letters
+# and the FY25-26 advisory. Page-1 title lines, digits masked:
+#   target letter: "Target compensation advice : Year ending ## March ####"
+#   advisory:      "Compensation summary : Year ended ## March ####"
+# (either may carry a trailing token after the year). The advisory ALSO holds
+# a line "Target Compensation for the year ended ## Mar ## <amount>", which
+# must never read as a target letter -- hence summary is tested first, and
+# the target pattern requires the word "advice".
+_SUMMARY_TITLE_RE = re.compile(r"compensation\s+summary\s*:?\s*year\s+ended\s+\d{1,2}\s+march", re.I)
 _TARGET_TITLE_RE = re.compile(r"target\s+compensation\s+advice", re.I)
 
 

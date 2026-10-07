@@ -1963,12 +1963,21 @@ def _synthetic_book(*, in_fy: bool):
     return book
 
 
-def _empty_26as_workbook(tmp_path) -> Path:
+def _empty_26as_workbook(tmp_path, *, name="Synthetic Taxpayer", pan=PAN, fy="2025-26") -> Path:
     from openpyxl import Workbook
     wb = Workbook()
     ws = wb.active
     ws.title = "Part I"
     ws.append(["Sr.No", "Name of Deductor", "TAN", "Section"])  # header-only, no data rows
+    ident = []
+    if name:
+        ident.append(f"Assessee Name: {name}")
+    if pan:
+        ident.append(f"PAN: {pan}")
+    if fy:
+        ident.append(f"Financial Year: {fy}")
+    if ident:  # row 2 carries the workbook's own assessee, as the 26AS skill writes it
+        ws.cell(row=2, column=1, value="  |  ".join(ident))
     path = tmp_path / "synthetic-26AS.xlsx"
     wb.save(path)
     return path
@@ -1979,7 +1988,7 @@ def test_run_no_entity_match_returns_error(tmp_path):
     ais_path = _write_encrypted_ais(tmp_path)
     out = tmp_path / "out.xlsx"
 
-    summary = AG.run(str(ais_path), str(out), entities_path=str(entities_path))
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, entities_path=str(entities_path))
 
     assert summary.startswith("ERROR:")
     assert "XXXDE1234X" in summary
@@ -1991,7 +2000,7 @@ def test_run_ais_internal_only_resolves_entity_and_writes_workbook(tmp_path, mon
     ais_path = _write_encrypted_ais(tmp_path)
     out = tmp_path / "out.xlsx"
 
-    summary = AG.run(str(ais_path), str(out), entities_path=str(entities_path))
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, entities_path=str(entities_path))
 
     assert "Synthetic Taxpayer" in summary
     assert "2025-26" in summary
@@ -2016,7 +2025,7 @@ def test_run_with_matching_fy_book_runs_books_phase_no_warning(tmp_path, monkeyp
     monkeypatch.setattr(AG.pg, "parse_book", lambda path: book)
     monkeypatch.setattr(AG.configs, "load_mapping", lambda path: mapping)
 
-    summary = AG.run(str(ais_path), str(out), gnucash_path=str(gnucash_path),
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, gnucash_path=str(gnucash_path),
                       entities_path=str(entities_path))
 
     assert "WARNING" not in summary
@@ -2038,7 +2047,7 @@ def test_run_fy_mismatch_warning_fires(tmp_path, monkeypatch):
     monkeypatch.setattr(AG.pg, "parse_book", lambda path: book)
     monkeypatch.setattr(AG.configs, "load_mapping", lambda path: mapping)
 
-    summary = AG.run(str(ais_path), str(out), gnucash_path=str(gnucash_path),
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, gnucash_path=str(gnucash_path),
                       entities_path=str(entities_path))
 
     assert "WARNING" in summary
@@ -2054,7 +2063,7 @@ def test_run_with_26as_workbook_runs_26as_phase(tmp_path):
     xlsx_path = _empty_26as_workbook(tmp_path)
     out = tmp_path / "out.xlsx"
 
-    summary = AG.run(str(ais_path), str(out), xlsx_path=str(xlsx_path), entities_path=str(entities_path))
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, xlsx_path=str(xlsx_path), entities_path=str(entities_path))
 
     assert "26AS:" in summary
     wb = load_workbook(out)
@@ -2070,7 +2079,7 @@ def test_run_huf_entity_uses_doi_for_password(tmp_path):
     ais_path = _write_encrypted_ais(tmp_path)
     out = tmp_path / "out.xlsx"
 
-    summary = AG.run(str(ais_path), str(out), entities_path=str(entities_path))
+    summary = AG.run(str(ais_path), str(out), entity_key="hufentity", entities_path=str(entities_path))
 
     assert summary.startswith("ERROR:")
     assert "doi" in summary

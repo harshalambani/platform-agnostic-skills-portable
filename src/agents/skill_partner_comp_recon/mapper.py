@@ -116,6 +116,11 @@ _MONTH_NAME_TO_NUM = {
 _AMOUNT_TOLERANCE = 1.0
 
 
+class DuplicateMonthError(ValueError):
+    """Two payout documents cover the same month (H35-10). Counting both would
+    double-count that month, so the run is refused rather than picking one."""
+
+
 class FinancialYearMismatchError(ValueError):
     """Raised when two or more supplied documents disagree on the
     financial year they belong to. Never silently trusted/picked -- the
@@ -280,6 +285,7 @@ def _build_monthly(
     """
     diagnostics: list[str] = []
     normalised: list[dict] = []
+    sources: list[str] = []
     for rec in advice_records:
         norm = _normalise_advice_record(rec)
         if not norm.get("month"):
@@ -289,6 +295,19 @@ def _build_monthly(
             )
             continue
         normalised.append(norm)
+        sources.append(rec.get("source_name") or "<unknown file>")
+
+    # H35-10: a month must come from ONE document. No pick-one rule, no silent
+    # dedup -- refuse, naming both files and the month.
+    first_seen: dict[str, str] = {}
+    for norm, src in zip(normalised, sources):
+        month = norm["month"]
+        if month in first_seen:
+            raise DuplicateMonthError(
+                f"two payout documents cover the same month ({month}): "
+                f"{first_seen[month]} and {src}. A month must come from ONE "
+                "document -- remove the extra one and run again; nothing was written.")
+        first_seen[month] = src
 
     normalised.sort(key=lambda r: r["month"])
 

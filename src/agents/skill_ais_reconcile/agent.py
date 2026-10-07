@@ -32,6 +32,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from agents.entity_scope import check_26as_fy, check_26as_owner
 from agents.skill_ais_reconcile import decrypt as D
 from agents.skill_ais_reconcile import normalize as N
 from agents.skill_ais_reconcile import reconcile as R
@@ -91,6 +92,7 @@ def _resolve_entity_from_prefix(entities_path: str, prefix: str) -> "configs.Ent
 def run(
     ais_path: str,
     output_path: str,
+    entity_key: str = "",
     gnucash_path: str = None,
     xlsx_path: str = None,
     config_path: str = "config.yaml",
@@ -107,11 +109,11 @@ def run(
     model_override are accepted for skill-runner-interface symmetry with
     the other skills but are unused here.
 
-    Entity resolution has no explicit entity_key input: the AIS export's
-    own filename carries a masked PAN prefix (see module docstring), which
-    is matched against entities.yaml's `pan` field. No match -> a clear
-    ERROR string (this skill never guesses which taxpayer an AIS belongs
-    to).
+    `entity_key` (UI-18) is REQUIRED: the entity the run is for. The AIS
+    export's own filename carries a masked PAN prefix (see module
+    docstring), which is matched against entities.yaml's `pan` field. No
+    match -> a clear ERROR string (this skill never guesses which taxpayer
+    an AIS belongs to), and a match that is not `entity_key` is refused too.
 
     entities_path/rules_dir are keyword-only conveniences (mirrors
     skill_itr_workbook's own run() params) defaulting to the production
@@ -128,6 +130,11 @@ def run(
     xlsx_path, when supplied, must be a 26AS skill output workbook (Part I
     sheet) for the same entity/year -- feeds the TDS-credit tie-out.
     """
+    if not (entity_key or "").strip():
+        return (
+            "ERROR: pick an Entity -- this reconciliation is for one entity, and the "
+            "AIS export must be that entity's own."
+        )
     basename = Path(ais_path).stem
     parts = basename.split("_")
     if len(parts) < 2:
@@ -141,6 +148,22 @@ def run(
     entity = _resolve_entity_from_prefix(entities_path, prefix)
     if isinstance(entity, str):
         return entity
+    if entity.key != entity_key.strip():
+        return (
+            f"ERROR: the AIS export {Path(ais_path).name!r} belongs to {entity.key!r}, "
+            f"not to the selected entity {entity_key.strip()!r}. Pick the right entity, "
+            "or the right export; nothing was run."
+        )
+    if xlsx_path:
+        _verdict, _why = check_26as_owner(
+            xlsx_path, entity.key, entity.name, getattr(entity, "pan", ""))
+        if _verdict == "ok":
+            _verdict, _why = check_26as_fy(xlsx_path, year_key)
+        if _verdict != "ok":
+            return (
+                f"ERROR: {_why}. Pick {entity.key}'s own 26AS workbook for FY {year_key}, "
+                "or choose (none) to skip the TDS-credit tie-out."
+            )
 
     date_iso = entity.dob if entity.status == "Individual" else entity.doi
     if not date_iso:

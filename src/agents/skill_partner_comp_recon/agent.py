@@ -63,6 +63,7 @@ from pathlib import Path
 import yaml
 
 from .. import gnucash_accounts
+from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
 from .gnucash_tieout import (
@@ -477,6 +478,7 @@ def run(
     accrual_journal_path: str = "",
     input_path: str = "",
     bank_match_window: str = "7",
+    financial_year: str = "",
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -523,6 +525,7 @@ def run(
         journal_path=journal_path,
         accrual_journal_path=accrual_journal_path,
         bank_match_window=bank_match_window,
+        financial_year=financial_year,
     )
 
 
@@ -542,6 +545,7 @@ def _run_from_documents(
     journal_path: str,
     accrual_journal_path: str = "",
     bank_match_window: str = "7",
+    financial_year: str = "",
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -738,10 +742,32 @@ def _run_from_documents(
             lines.extend(f"  - {note}" for note in optional_notes)
             return "\n".join(lines)
         if _verdict == "unknown":
-            optional_notes.append(f"26AS ownership: {_why}.")
+            # UI-18: a workbook that does not say whose it is matches nobody,
+            # so the run agrees with the picker and refuses it.
+            lines = [
+                f"ERROR: {_why}. Pick {entity}'s own 26AS workbook (run 26AS "
+                "Convert on its PDF first), or choose (none) to skip the "
+                "TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
     elif xlsx_26as:
         optional_notes.append(
             "26AS ownership: not checked (the entity's PAN/name are not available).")
+
+    # UI-18: a 26AS workbook for another financial year is refused too -- the
+    # selected year, or failing that the year the documents state.
+    if xlsx_26as:
+        _fy_verdict, _fy_why = check_fy_26as(xlsx_26as, financial_year or _check_fy)
+        if _fy_verdict == "mismatch":
+            lines = [
+                f"ERROR: {_fy_why}. Pick the 26AS workbook for that year, or choose "
+                "(none) to skip the TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
 
     # Now that firm_name is known, do the real 26AS read (filtered to
     # s.194T rows for this firm's deductor -- see xlsx_26as_reader.py).
@@ -750,6 +776,7 @@ def _run_from_documents(
 
     try:
         data = build_input_data(
+            financial_year=(financial_year or None),
             advisory_record=advisory_record,
             advice_records=advice_records,
             llp_record=llp_record,
@@ -1038,6 +1065,15 @@ def _run_from_structured_input(
             "ERROR: input file must be a mapping with at least a "
             "'financial_year' key (see skill.yaml's help text for the shape)."
         )
+
+    # H35-10: the same month twice would be counted twice -- refuse.
+    _seen_months: set = set()
+    for _m in (data.get("monthly") or []):
+        _mk = _m.get("month") if isinstance(_m, dict) else None
+        if _mk is not None and _mk in _seen_months:
+            return (f"ERROR: the structured input lists the month {_mk} more than once. "
+                    "A month must appear ONCE; nothing was written.")
+        _seen_months.add(_mk)
 
     try:
         report = build_report(data)

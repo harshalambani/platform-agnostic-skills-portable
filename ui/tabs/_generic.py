@@ -116,22 +116,37 @@ def _entities_yaml_path():
     return _config.data_root_dir() / "itr" / "entities.yaml"
 
 
-def _scoped_picker_state(inp, entity_key):
-    """(choices, default value, message) for an entity-scoped picker."""
+def _scoped_picker_state(inp, entity_key, fy=None):
+    """(choices, default value, message) for an entity-scoped picker.
+
+    `fy` (UI-18), when the form has a financial-year input, narrows the files
+    to that year as well; blank means no year has been picked, so no filter.
+    """
     from agents import entity_scope  # noqa: PLC0415
     own = entity_scope.filter_choices(
         _scan_output_files(inp.match, tuple(inp.file_types)),
-        entity_key, _entities_yaml_path(),
+        entity_key, _entities_yaml_path(), fy=(fy or None),
     )
     choices = list(own) + [NONE_CHOICE]
     if own:
         return choices, own[0][1], ""
     if not entity_key:
         return choices, "", "Pick an entity first: only that entity's own files are offered here."
+    for_fy = f" for FY {fy}" if fy else ""
     return choices, "", (
-        f"No 26AS workbook for {entity_key} yet: run 26AS Convert on its PDF first "
+        f"No 26AS workbook for {entity_key}{for_fy} yet: run 26AS Convert on its PDF first "
         "(it only reads the PDF, it books nothing). Choose (none) to skip."
     )
+
+
+def _select_initial_value(skill, name):
+    """What a select with a dynamic option source holds when the form opens
+    (its first choice), or None."""
+    for i in skill.inputs:
+        if i.name == name and i.type == "select" and i.options_from:
+            ch = _resolve_options_from(i.options_from)
+            return ch[0][1] if ch else None
+    return None
 
 
 def _entity_initial_value(skill, entity_name):
@@ -1086,7 +1101,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     # refresh button — same UX as the Review-Mappings CSV picker.
                     if inp.entity_from:
                         _choices, _val, _msg = _scoped_picker_state(
-                            inp, _entity_initial_value(skill, inp.entity_from))
+                            inp, _entity_initial_value(skill, inp.entity_from),
+                            _select_initial_value(skill, inp.fy_from) if inp.fy_from else None)
                     else:
                         _choices = _scan_output_files(inp.match, tuple(inp.file_types))
                         _val = _choices[0][1] if _choices else None
@@ -1307,12 +1323,23 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         f"entity_from: '{_sinp.entity_from}', but no input named "
                         f"'{_sinp.entity_from}' exists on this skill.")
 
-                def _rescope(entity_val, _i=_sinp):
-                    ch, val, msg = _scoped_picker_state(_i, entity_val)
+                _scope_inputs = [_ent_comp]
+                if _sinp.fy_from:
+                    _fy_comp = input_by_name.get(_sinp.fy_from)
+                    if _fy_comp is None:
+                        raise ValueError(
+                            f"skill.yaml error in '{skill.name}': input '{_sinp.name}' declares "
+                            f"fy_from: '{_sinp.fy_from}', but no input named "
+                            f"'{_sinp.fy_from}' exists on this skill.")
+                    _scope_inputs.append(_fy_comp)
+
+                def _rescope(entity_val, fy_val=None, _i=_sinp):
+                    ch, val, msg = _scoped_picker_state(_i, entity_val, fy_val)
                     return gr.update(choices=ch, value=val), gr.update(value=msg, visible=bool(msg))
 
-                _ent_comp.change(fn=_rescope, inputs=[_ent_comp], outputs=[_scomp, _smd])
-                _sbtn.click(fn=_rescope, inputs=[_ent_comp], outputs=[_scomp, _smd])
+                for _trigger in _scope_inputs:
+                    _trigger.change(fn=_rescope, inputs=_scope_inputs, outputs=[_scomp, _smd])
+                _sbtn.click(fn=_rescope, inputs=_scope_inputs, outputs=[_scomp, _smd])
 
             for _dcomp, _dinp in dependent_pickers:
                 _srcs = [input_by_name[n] for n in _dinp.depends_on if n in input_by_name]
@@ -1476,11 +1503,14 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 )
             container_tab.select(fn=_rescan_newest, inputs=[], outputs=[_comp])
         for _scomp, _sbtn, _sinp, _smd in scoped_pickers:
-            def _rescan_scoped(entity_val, _i=_sinp):
-                ch, val, msg = _scoped_picker_state(_i, entity_val)
+            def _rescan_scoped(entity_val, fy_val=None, _i=_sinp):
+                ch, val, msg = _scoped_picker_state(_i, entity_val, fy_val)
                 return gr.update(choices=ch, value=val), gr.update(value=msg, visible=bool(msg))
+            _scan_inputs = [input_by_name[_sinp.entity_from]]
+            if _sinp.fy_from:
+                _scan_inputs.append(input_by_name[_sinp.fy_from])
             container_tab.select(
-                fn=_rescan_scoped, inputs=[input_by_name[_sinp.entity_from]],
+                fn=_rescan_scoped, inputs=_scan_inputs,
                 outputs=[_scomp, _smd])
         for _comp, _dbtn, _key in dynamic_pickers:
             def _rescan_options_from(k=_key):
@@ -1518,7 +1548,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             reset_specs.append((
                 _comp,
                 lambda i=_inp: (lambda s: gr.update(choices=s[0], value=s[1]))(
-                    _scoped_picker_state(i, _entity_initial_value(skill, i.entity_from))),
+                    _scoped_picker_state(
+                        i, _entity_initial_value(skill, i.entity_from),
+                        _select_initial_value(skill, i.fy_from) if i.fy_from else None)),
             ))
         elif _inp.type == "output_file":
             reset_specs.append((
@@ -1549,7 +1581,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         reset_specs.append((
             _smd,
             lambda i=_sinp: (lambda s: gr.update(value=s[2], visible=bool(s[2])))(
-                _scoped_picker_state(i, _entity_initial_value(skill, i.entity_from))),
+                _scoped_picker_state(
+                    i, _entity_initial_value(skill, i.entity_from),
+                    _select_initial_value(skill, i.fy_from) if i.fy_from else None)),
         ))
 
     def _handle_reset():
