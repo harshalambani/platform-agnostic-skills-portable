@@ -146,6 +146,16 @@ def reply_label(skill) -> str:
     return "Agent reply" if getattr(getattr(skill, "requires", None), "llm", True) else "Result"
 
 
+def skill_uses_llm(skill_name: str) -> bool:
+    """True when the named skill's manifest says it needs a model (requires.llm).
+    Gates the LLM-endpoint health check on the custom tabs."""
+    from agents.registry import discover
+    for sk in discover():
+        if sk.name == skill_name:
+            return bool(getattr(getattr(sk, "requires", None), "llm", True))
+    return True
+
+
 def reply_label_for(skill_name: str) -> str:
     """reply_label() for a skill looked up by manifest name (custom tabs)."""
     from agents.registry import discover  # noqa: PLC0415

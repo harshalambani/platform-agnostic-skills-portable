@@ -17,7 +17,7 @@ from .. import _config
 from .. import _health
 from .. import _native
 from .. import _runner
-from ._generic import reply_label_for
+from ._generic import reply_label_for, skill_uses_llm
 
 
 def _reply_label() -> str:
@@ -86,24 +86,28 @@ def _run_hsbc(pdf_file, model_choice):
         return
 
     yield add("**Step 2/5** — Native OCR binaries detected."), gr.update(visible=False)
-    yield add("**Step 3/5** — Checking the LLM endpoint."), gr.update(visible=False)
-
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
-    health = _health.check(ep)
-    if not health.ok:
-        yield add(
-            f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
-            "Fix it in Data\\settings\\config.yaml and click Refresh status on the Home tab."
-        ), gr.update(visible=False)
-        return
+    # The LLM endpoint is health-checked only when the manifest says this
+    # skill uses a model (requires.llm).
+    if skill_uses_llm("HSBC"):
+        yield add("**Step 3/5** — Checking the LLM endpoint."), gr.update(visible=False)
+        health = _health.check(ep)
+        if not health.ok:
+            yield add(
+                f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
+                "Fix it in Data\\settings\\config.yaml and click Refresh status on the Home tab."
+            ), gr.update(visible=False)
+            return
 
-    yield add(
-        f"**Step 4/5** — Endpoint OK. Running OCR + agent loop against {ep.get('base_url', '?')} "
-        f"with model {model_choice}. Scanned pages flow through Tesseract — this is the slow part."
-    ), gr.update(visible=False)
+        yield add(
+            f"**Step 4/5** — Endpoint OK. Running OCR + agent loop against {ep.get('base_url', '?')} "
+            f"with model {model_choice}. Scanned pages flow through Tesseract — this is the slow part."
+        ), gr.update(visible=False)
+    else:
+        yield add("**Step 4/5** — Running OCR (no LLM endpoint needed)."), gr.update(visible=False)
 
     out_dir = _config.output_dir()
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
