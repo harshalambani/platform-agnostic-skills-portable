@@ -1220,6 +1220,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 else:  # text
                     comp = gr.Textbox(
                         label=inp.label,
+                        value=getattr(inp, "default", "") or None,
                         **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
                     )
                 input_components.append(comp)
@@ -1537,7 +1538,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 lambda o=(_inp.options[0] if _inp.options else None): gr.update(value=o),
             ))
         else:  # directory, text
-            reset_specs.append((_comp, lambda: gr.update(value="")))
+            reset_specs.append((_comp, lambda d=getattr(_inp, "default", ""): gr.update(value=d)))
 
     # The entity select resets to blank, so its "book filled from the registry"
     # line must go with it -- otherwise it keeps vouching for a field that has

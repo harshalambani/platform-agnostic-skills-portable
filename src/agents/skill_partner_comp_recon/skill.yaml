@@ -51,27 +51,27 @@ inputs:
     required: true
   - name: "advices_dir"
     type: "files"
-    label: "Monthly partner payout certificates / payslips"
+    label: 'Monthly payout certificates: the "payout details for the month of ..." PDFs, one per month (or the newer payout statements)'
     file_types: [".pdf"]
     required: true
   - name: "advisory_path"
     type: "file"
-    label: "Compensation advisory / target compensation advice"
+    label: 'Advisory: the "Compensation summary : Year ended 31 March ..." PDF (not the "Target compensation advice" letter)'
     file_types: [".pdf"]
     required: true
   - name: "llp_statement"
     type: "file"
-    label: "LLP statement of account (enables leg 1, the capital sign-off)"
-    file_types: [".pdf"]
+    label: 'LLP "Statement of Account ... AS ON 31 MARCH" -- the PDF, or the .eml e-mail it arrived in (enables leg 1, the capital sign-off)'
+    file_types: [".pdf", ".eml"]
     required: false
   - name: "payment_schedule"
     type: "file"
-    label: "Incentive payment schedule (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)"
+    label: 'Payment schedule: the "Payment Schedule FY ..." PDF (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)'
     file_types: [".pdf"]
     required: false
   - name: "doc_password"
     type: "password"
-    label: "Document password (optional -- if the advices/advisory PDFs are protected)"
+    label: "Document password (optional -- ONE password opens all of the firm's PDFs: certificates, advisory, statement and schedule)"
     required: false
   - name: "gnucash_path"
     type: "file"
@@ -87,12 +87,14 @@ inputs:
     required: false
   - name: "journal_path"
     type: "text"
-    label: "GnuCash journal CSV output path (optional -- Stage 1b)"
+    label: "GnuCash journal CSV output path (default: auto = named for entity and FY, beside the workbook; clear it to write no journal)"
     required: false
+    default: "auto"
   - name: "accrual_journal_path"
     type: "text"
-    label: "Year-end share-of-profit accrual journal CSV output path (optional -- H35-02, requires journal_path and the LLP statement of account)"
+    label: "Year-end share-of-profit accrual journal CSV output path (default: auto = named for entity and FY; needs the journal above and the LLP statement of account)"
     required: false
+    default: "auto"
   - name: "bank_match_window"
     type: "text"
     label: "Bank-match date window in days (optional -- H35-05, default 7)"
@@ -176,19 +178,19 @@ help:
       accepts: "One of the entities defined in entities.yaml, via dropdown."
       gotchas: "Required -- also selects the GnuCash book below when one is registered for this entity."
     - name: "advices_dir"
-      tooltip: "All of this financial year's monthly payout certificates / payslips, as PDFs."
-      accepts: "One or more PDF files."
+      tooltip: "All of this financial year's monthly payout certificates (each titled \"payout details for the month of ...\"), one per month."
+      accepts: "One or more PDF files. A month must come from ONE document: do not add both the certificate and the newer payout statement for the same month."
       gotchas: >
         Required. Each PDF is dispatched on its CONTENT, never its
         filename, to the monthly payout-advice parser -- a PDF that fails
         to open/parse, or whose content doesn't match that layout, fails
         the whole run loud, naming the file and the reason.
     - name: "doc_password"
-      tooltip: "Password for the payout advices / advisory PDFs, if they are protected."
-      accepts: "The PDFs' own open password, if any."
+      tooltip: "Password for the payout certificates, advisory, LLP statement and payment schedule, if they are protected."
+      accepts: "The one open password the firm uses for all of its PDFs, if any."
       gotchas: "Optional -- leave blank if the PDFs are not password-protected. Never logged, never included in any output file."
     - name: "advisory_path"
-      tooltip: "The firm's Compensation Advisory / target compensation advice letter for this financial year."
+      tooltip: "The \"Compensation summary : Year ended 31 March\" document for this financial year (not the \"Target compensation advice\" letter)."
       accepts: "A single PDF file."
       gotchas: >
         Required. Shares a directory with the monthly payout advices at
@@ -198,8 +200,8 @@ help:
         content doesn't match the Advisory's expected layout, fails the
         whole run loud, naming the file and the reason.
     - name: "llp_statement"
-      tooltip: "The LLP's own statement of account for this partner, this financial year."
-      accepts: "A single PDF file."
+      tooltip: "The LLP's \"Statement of Account ... AS ON 31 MARCH\" for this partner, this financial year."
+      accepts: "A single PDF file, or the .eml e-mail it arrived in (its PDF attachment is read)."
       gotchas: >
         Optional -- enables the capital sign-off leg (leg 1). Absent, or
         supplied but unreadable/malformed/not actually an LLP statement of
@@ -209,7 +211,7 @@ help:
         statement is often issued months after the financial year ends, so
         it is common for it to be genuinely unavailable at filing time.
     - name: "payment_schedule"
-      tooltip: "The firm's own incentive payment schedule for this financial year (the L4 document)."
+      tooltip: "The \"Payment Schedule FY ...\" document for this financial year (the L4 document)."
       accepts: "A single PDF file."
       gotchas: >
         Optional -- enables the schedule leg, and takes PRECEDENCE over the
@@ -243,9 +245,15 @@ help:
         one monthly-payout transaction per month, plus an opening
         reclassification entry if the input's opening_reclass: block is
         present. Leave blank to only produce the workbook.
-      accepts: "A full output file path ending in .csv."
+      accepts: "A full output file path ending in .csv, or the default auto."
       gotchas: >
-        Requires an accounts: block naming the GnuCash account for every
+        The form opens with auto: the file is named for the entity and
+        financial year (for example ENTITY-FY2025-26-partner-journal.csv) and
+        written beside the workbook, but only when the entity has its
+        partner_comp_accounts and a GnuCash book is supplied -- otherwise
+        the journal is skipped with a note, not an error. Clear the box to
+        write no journal; type a path to choose the file yourself (an
+        explicit path keeps the strict rules below). Requires an accounts: block naming the GnuCash account for every
         non-zero split (bank, tds_expense, interest_on_capital,
         current_account, capital_contribution, medical_expense,
         remuneration_income, share_of_profit_income) -- a missing account

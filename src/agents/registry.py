@@ -75,6 +75,7 @@ class SkillInput:
                               # entity owns are offered (see agents/entity_scope.py),
                               # and the choices follow the select. Needs a `match` in
                               # entity_scope.SCOPABLE_MATCHES. Empty = unscoped.
+    default: str = ""       # (text inputs only) value the form opens with
 
 
 @dataclass(frozen=True)
@@ -243,6 +244,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             book_from=inp.get("book_from", ""),
             fy_from=inp.get("fy_from", ""),
             entity_from=inp.get("entity_from", ""),
+            default=str(inp.get("default", "")),
             depends_on=tuple(inp.get("depends_on") or ()),
             multiselect=bool(inp.get("multiselect", False)),
         ))
