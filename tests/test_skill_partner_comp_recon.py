@@ -8245,3 +8245,52 @@ def test_written_workbook_label_has_no_hardcoded_firm_name(tmp_path):
     g = _u.module_from_spec(spec)
     spec.loader.exec_module(g)
     assert not [h for h in g.scan_text(text) if "SEC-20" in h[1]]            # NEGATIVE
+
+
+# ---------------------------------------------------------------------------
+# UI-16 -- run-time refusal of another entity's 26AS workbook (synthetic).
+# ---------------------------------------------------------------------------
+
+class _ScopedProfile(_FakeEntityProfile):
+    name = "Test Individual"
+    pan = "AAAAA0000A"
+
+
+def _scoped_26as(path, name, pan):
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Part I"
+    ws.cell(row=1, column=1, value="PART I")
+    ws.cell(row=2, column=1, value=f"Assessee Name: {name}  |  PAN: {pan}  |  Financial Year: 2025-26")
+    wb.save(path)
+    return path
+
+
+def _run_with_26as(monkeypatch, tmp_path, xlsx):
+    _patch_required_legs_for_firm_name_test(
+        monkeypatch, tmp_path, schedule_entity_name=None, advice_entity_name="Advice Synthetic LLP")
+    from agents.skill_partner_comp_recon import agent as agent_module
+    monkeypatch.setattr(agent_module, "_resolve_entity_config",
+                        lambda entity, config_path: (_ScopedProfile(), None))
+    advisory = tmp_path / "advisory.pdf"
+    advisory.write_bytes(b"%PDF-1.4 not a real pdf")
+    return run(
+        entity="TEST-IND", advices_dir=str(_advices_dir_with_one_pdf(tmp_path)),
+        advisory_path=str(advisory), xlsx_26as=str(xlsx),
+        output_path=str(tmp_path / "out.xlsx"),
+    )
+
+
+def test_run_refuses_a_26as_workbook_of_another_entity(tmp_path, monkeypatch):      # NEGATIVE
+    huf = _scoped_26as(tmp_path / "huf-26AS.xlsx", "Test Family HUF", "BBBBB1111B")
+    result = _run_with_26as(monkeypatch, tmp_path, huf)
+    assert result.startswith("ERROR")
+    assert "Test Family HUF" in result and "TEST-IND" in result
+    assert not (tmp_path / "out.xlsx").exists()          # nothing was produced
+
+
+def test_run_accepts_the_entitys_own_26as_workbook(tmp_path, monkeypatch):
+    own = _scoped_26as(tmp_path / "own-26AS.xlsx", "Test Individual", "AAAAA0000A")
+    result = _run_with_26as(monkeypatch, tmp_path, own)
+    assert "belongs to" not in result

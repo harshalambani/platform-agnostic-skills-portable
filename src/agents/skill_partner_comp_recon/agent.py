@@ -63,6 +63,7 @@ from pathlib import Path
 import yaml
 
 from .. import gnucash_accounts
+from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
 from .gnucash_tieout import (
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
@@ -80,6 +81,7 @@ from .jv_emitter import (
     write_journal_csv,
 )
 from .mapper import FinancialYearMismatchError, build_input_data
+from . import precheck as _precheck
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
 from .parsers import payment_schedule as _payment_schedule_parser
@@ -173,7 +175,11 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
     if not path:
         return f"{label}: not available (no document supplied).", None
     try:
-        record = _llp_statement_parser.parse(path, password)
+        pdf_path = path
+        if path.lower().endswith(".eml"):
+            # UI-17: the statement arrives as an e-mail; take its PDF attachment.
+            pdf_path = _precheck.extract_pdf_from_eml(path)
+        record = _llp_statement_parser.parse(pdf_path, password)
         return f"{label}: parsed from {path}.", record
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
@@ -643,6 +649,11 @@ def _run_from_documents(
     optional_notes = [llp_note, schedule_note, gnucash_note, xlsx_note]
     _gnucash_note_idx = 2
     _xlsx_note_idx = 3
+    # UI-17: WARN-only check that the advisory slot holds the Compensation
+    # summary and not a target-compensation letter. Appended (never inserted)
+    # so the note indexes above stay put; it never stops or alters the run.
+    optional_notes.extend(_precheck.check_advisory_slot(
+        _precheck.read_first_page_text(advisory_path, doc_password)))
 
     # Required legs: the Advisory letter, then every monthly payout advice.
     # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
@@ -670,6 +681,16 @@ def _run_from_documents(
             ]
             lines.extend(f"  - {note}" for note in optional_notes)
             return "\n".join(lines)
+
+    # UI-17: WARN-only checks on the payout set (out-of-year month, same month
+    # twice, months missing). They read the parsed records and change nothing.
+    _check_fy = (advisory_record.get("financial_year")
+                 or (schedule_record or {}).get("financial_year"))
+    _sched_months = None
+    if schedule_record:
+        from .mapper import _schedule_month_map  # noqa: PLC0415
+        _sched_months = set(_schedule_month_map(schedule_record))
+    optional_notes.extend(_precheck.check_payout_set(advice_records, _check_fy, _sched_months))
 
     # Both required documents (and the optional L5 leg, if it resolved)
     # parsed successfully. Resolve the entity's config (accounts/drivers),
@@ -701,6 +722,26 @@ def _run_from_documents(
             if rec.get("entity_name"):
                 firm_name = rec["entity_name"]
                 break
+
+    # UI-16: a 26AS workbook that is not the selected entity's is refused
+    # outright -- its TDS credit would be booked against the wrong person.
+    if xlsx_26as and entity_profile is not None:
+        _verdict, _why = check_owner_26as(
+            xlsx_26as, entity, entity_profile.name, getattr(entity_profile, "pan", ""))
+        if _verdict == "mismatch":
+            lines = [
+                f"ERROR: {_why}. Pick {entity}'s own 26AS workbook (run 26AS "
+                "Convert on its PDF first), or choose (none) to skip the "
+                "TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+        if _verdict == "unknown":
+            optional_notes.append(f"26AS ownership: {_why}.")
+    elif xlsx_26as:
+        optional_notes.append(
+            "26AS ownership: not checked (the entity's PAN/name are not available).")
 
     # Now that firm_name is known, do the real 26AS read (filtered to
     # s.194T rows for this firm's deductor -- see xlsx_26as_reader.py).
@@ -847,6 +888,30 @@ def _run_from_documents(
 
     journal_line = ""
     account_notes: list[str] = []
+    # UI-17: "auto" asks for the default CSV names (entity + FY, beside the
+    # workbook). Unlike an explicit path it is best-effort: with no journal
+    # accounts configured for the entity, or no LLP statement for the accrual,
+    # that journal is skipped with a note instead of failing the run.
+    if str(journal_path).strip().lower() == "auto" or str(accrual_journal_path).strip().lower() == "auto":
+        _auto_j, _auto_a = _precheck.default_journal_paths(
+            entity, data["financial_year"], output_path)
+        if str(journal_path).strip().lower() == "auto":
+            if entity_profile is not None and entity_profile.partner_comp_accounts and gnucash_path:
+                journal_path = _auto_j
+            else:
+                journal_path = ""
+                optional_notes.append(
+                    "Journal CSV: skipped (default path requested, but it needs both "
+                    "this entity's partner_comp_accounts and a GnuCash book to match "
+                    "the bank credits against).")
+        if str(accrual_journal_path).strip().lower() == "auto":
+            if journal_path and llp_record:
+                accrual_journal_path = _auto_a
+            else:
+                accrual_journal_path = ""
+                if journal_path:
+                    optional_notes.append(
+                        "Accrual journal CSV: skipped (needs the LLP statement of account).")
     if journal_path:
         accounts, account_notes, accounts_error = _resolve_accounts_for_journal(
             entity_profile, entity, gnucash_path,

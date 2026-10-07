@@ -86,46 +86,38 @@ def test_files_book_from_source_is_multiselect():
 
 
 def test_itr_entities_select_does_not_hijack_output_filename():
-    """A *consumed* entity select may never be the first consumed input.
+    """An entity / AY select never names the output file, wherever it sits.
 
-    ui/tabs/_generic.py picks
-
-        consumed = {inputs referenced by a {inputs.<name>} token in run_args}
-        primary_input = next((v for k, v in input_map.items()
-                              if v and k in consumed), ...)
-
-    walking inputs in skill.yaml declaration order. An itr_entities select is
-    non-empty as soon as the user picks someone, so a select that is both
-    consumed and declared first would silently become the output-filename
-    source -- files would come out named after the taxpayer instead of the
-    statement.
-
-    Two ways to be safe, and both are in use:
-
-      - UI-only (no `{inputs.<name>}` token anywhere in run_args). This is
-        what lets the select sit at the TOP of the form, where it belongs --
-        it answers for the book field below it, so the user should meet it
-        first. All five book_from skills work this way.
-      - Consumed, but declared after an input that already supplies the
-        output name. ITR Workbook does this: it genuinely passes the entity
-        key through to run(), and `bs_html` leads the form.
+    ui/tabs/_generic.py's _output_name_source() walks the inputs in skill.yaml
+    declaration order and takes the first one that has a value and is consumed
+    by run_args -- but it skips itr_entities / itr_ay_years selects outright
+    (UI-15: Entity now leads EVERY form, consumed or not). So for each skill
+    with such a select, filling in the entity and one other input must name
+    the output after that other input.
     """
+    from ui.tabs._generic import _output_name_source
+
     for skill in _skills():
-        consumed = [
-            inp.name for inp in skill.inputs
-            if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
+        entity_inputs = [i for i in skill.inputs if i.options_from == "itr_entities"]
+        others = [
+            i for i in skill.inputs
+            if i.options_from not in ("itr_entities", "itr_ay_years")
+            and any(f"{{inputs.{i.name}}}" in t for t in skill.run_args.values())
         ]
-        for inp in skill.inputs:
-            if inp.options_from != "itr_entities" or inp.name not in consumed:
-                continue
-            assert consumed[0] != inp.name, (
-                f"{skill.name}: input '{inp.name}' (options_from: "
-                f"itr_entities) is consumed by run_args AND is the first "
-                f"consumed input, so it would name the output file. Either "
-                f"drop the run_args reference (making it UI-only, the usual "
-                f"choice) or declare it after the input that supplies the "
-                f"output name."
-            )
+        if not entity_inputs or not others:
+            continue
+        values = {i.name: f"value-of-{i.name}" for i in skill.inputs}
+        for e in entity_inputs:
+            values[e.name] = "test_individual"
+        got = _output_name_source(skill, values)
+        assert got != "test_individual", (
+            f"{skill.name}: the output would be named after the entity select "
+            f"'{entity_inputs[0].name}'."
+        )
+        assert got == values[others[0].name], (
+            f"{skill.name}: expected the output to be named after "
+            f"'{others[0].name}', got {got!r}."
+        )
 
 
 def test_book_from_source_precedes_its_book_field():

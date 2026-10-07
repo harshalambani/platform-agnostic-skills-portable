@@ -51,6 +51,7 @@ inputs:
     type: "output_file"
     label: "26AS workbook (optional, from the 26AS skill -- enables the TDS-credit tie-out)"
     match: "*-26AS.xlsx"
+    entity_from: "entity"
     required: false
 
 run_args:

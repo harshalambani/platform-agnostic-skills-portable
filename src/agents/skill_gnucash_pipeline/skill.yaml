@@ -17,21 +17,22 @@ mode: "agent"
 entry_point: "agent:run"
 
 inputs:
-  - name: "bank"
-    type: "select"
-    label: "Bank"
-    required: true
-    options_from: "banks"
-
-  # The entity sits right after `bank` and before the book it fills in. It is
-  # consumed (MAP-34/35 and BNK-05 read its profile), so it must NOT be the
-  # first consumed input -- `bank` leads, and names the output file (pinned by
-  # tests/test_entity_book_wiring.py).
+  # Form standard (UI-15): Entity first, then the source picker (Bank), the
+  # statements, the password, the book, and the account pick last. The entity
+  # is consumed (MAP-34/35 and BNK-05 read its profile) but never names the
+  # output file -- ui/tabs/_generic.py's _output_name_source() skips entity
+  # selects, so `bank` still names it.
   - name: "entity"
     type: "select"
     label: "Entity (optional) -- fills in the GnuCash book below from the registry"
     options_from: "itr_entities"
     required: false
+
+  - name: "bank"
+    type: "select"
+    label: "Bank"
+    required: true
+    options_from: "banks"
 
   - name: "statement_files"
     type: "files"
@@ -39,17 +40,17 @@ inputs:
     file_types: [".xls", ".xlsx", ".pdf", ".csv"]
     required: true
 
+  - name: "pdf_password"
+    type: "password"
+    label: "Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)"
+    required: false
+
   - name: "gnucash_file"
     type: "file"
     label: "GnuCash book (.gnucash) — must be closed in GnuCash"
     file_types: [".gnucash"]
     required: true
     book_from: "entity"
-
-  - name: "pdf_password"
-    type: "password"
-    label: "Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)"
-    required: false
 
   # IMP-08: only needed when several of YOUR accounts match the bank name and
   # the statement does not say which. Choices come from the book + bank above

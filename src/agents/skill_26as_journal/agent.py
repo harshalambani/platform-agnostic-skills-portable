@@ -14,6 +14,7 @@ from pathlib import Path
 from langchain_core.tools import tool
 
 from agents.base_agent import build_agent
+from agents.entity_scope import check_26as_owner
 from agents.skill_26as_journal import tools as T
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
@@ -182,6 +183,12 @@ def run(
         partner_comp_configured = _resolve_partner_comp_configured(entity, entities_path)
     except EntityResolutionError as e:
         return f"ERROR: {e}"
+    # UI-16: refuse another entity's 26AS workbook before anything is built.
+    _prof = _load_partner_comp_profile(entity, entities_path)
+    _verdict, _why = check_26as_owner(xlsx_path, entity, _prof.name, _prof.pan)
+    if _verdict == "mismatch":
+        return (f"ERROR: {_why}. Pick this entity's own 26AS workbook "
+                f"(run 26AS Convert on its PDF first) -- nothing was built.")
     # TDS-13: drives the read-only s.194T reconciliation against the Partner
     # Comp journal's own tds_expense postings. Only resolved when this
     # entity IS configured -- an entity without partner_comp_accounts has no

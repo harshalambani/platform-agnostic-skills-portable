@@ -16,27 +16,23 @@ mode: "agent"
 entry_point: "agent:run"
 
 inputs:
-  # xlsx_path leads the form now that `entity` is a consumed input (below) --
-  # see ui/tabs/_generic.py's "consumed" filename logic: only an input that
-  # appears in some run_args `{inputs.<name>}` token may name the output
-  # file, and among those, whichever is FIRST in this list wins. `entity`
-  # used to be safe to declare first because it was UI-only (absent from
-  # run_args); now that this fix (A1, s.194T double-booking) reads it to
-  # check partner_comp_accounts, it is consumed too, so it must not lead --
-  # doing so would name every output "<entity name>-tds-journals.csv"
-  # instead of after the 26AS workbook (mirrors skill_partner_comp_recon's
-  # skill.yaml, which orders its required "entity" the same way for the
-  # same reason).
-  - name: "xlsx_path"
-    type: "output_file"
-    label: "26AS workbook (Convert output)"
-    match: "*-26AS.xlsx"
-    file_types: [".xlsx"]
-    required: true
+  # Form standard (UI-15): Entity first, then source, then the book.
+  # `entity` is a consumed input here (it is read to check
+  # partner_comp_accounts -- the s.194T double-booking guard), but
+  # ui/tabs/_generic.py never lets an entity/AY select name the output file
+  # (see _output_name_source), so it can lead the form and the output is
+  # still named after the 26AS workbook.
   - name: "entity"
     type: "select"
     label: "Entity -- fills in the GnuCash book below from the registry"
     options_from: "itr_entities"
+    required: true
+  - name: "xlsx_path"
+    type: "output_file"
+    label: "26AS workbook (Convert output)"
+    match: "*-26AS.xlsx"
+    entity_from: "entity"
+    file_types: [".xlsx"]
     required: true
   - name: "gnucash_path"
     type: "file"

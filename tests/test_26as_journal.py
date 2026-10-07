@@ -1642,11 +1642,12 @@ def test_skill_yaml_entity_input_is_required():
     assert entity_input["required"] is True, "entity must be required per FL1.1"
     assert "optional" not in entity_input["label"].lower(), \
         "label must drop the stale (optional) wording now that entity is required"
-    # entity must stay out of first place -- it is a "consumed" input (used
-    # in run_args), and ui/tabs/_generic.py names the output after whichever
-    # consumed input is FIRST in this list. xlsx_path must still lead.
-    assert names[0] == "xlsx_path", \
-        "entity must not become the first input -- would break output-file naming"
+    # UI-15: entity leads the form. It is still a "consumed" input, but
+    # ui/tabs/_generic.py's _output_name_source() skips entity selects, so the
+    # output is still named after the 26AS workbook (pinned in
+    # tests/test_form_standard.py and tests/test_entity_book_wiring.py).
+    assert names[0] == "entity", "entity leads the form (UI-15 form standard)"
+    assert names.index("xlsx_path") < names.index("gnucash_path")
 
 
 # ---------------------------------------------------------------------------

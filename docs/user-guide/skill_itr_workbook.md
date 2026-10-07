@@ -11,22 +11,22 @@ Use once book, mapping, and (optionally) Form 16 / 26AS inputs are ready for an 
 
 ## Inputs
 
-- **Balance Sheet (eguile) HTML** (required) — accepts: HTML (.html), one file per entity.
-  - The GnuCash 'Balance Sheet (eguile)' HTML export, as-of 31 March.
-  - ⚠️ Must include the trailing 'Imbalance Amount' row — a truncated export (copy interrupted) is rejected with a hard failure. The as-of date must match the selected Assessment Year, or the run hard-fails before building any schedules.
 - **Entity** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
   - Which entity (from Data/itr/entities.yaml) this run is for.
   - ⚠️ Also supplies the PAN used to auto-decrypt an encrypted Form 16 — leave unset only for ad hoc/exploratory runs without a Form 16.
 - **Assessment Year** (optional) — accepts: One of the years found under Data/itr/rules/, via dropdown.
   - The Assessment Year (income year) this workbook is for.
   - ⚠️ Must agree with the income year inferred from the Balance Sheet HTML's own as-of date, or the run hard-fails with a stub-only workbook.
-- **Regime (blank = use the entity's configured regime)** (optional) — accepts: "new", "old", or blank to use the entity's configured regime.
-  - Overrides the entity's configured tax regime for this run only.
-- **GnuCash book (optional, enables CG lots + dividend quarters)** (optional) — accepts: .gnucash
-- **Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)** (optional) — accepts: .yaml
+- **Balance Sheet (eguile) HTML** (required) — accepts: HTML (.html), one file per entity.
+  - The GnuCash 'Balance Sheet (eguile)' HTML export, as-of 31 March.
+  - ⚠️ Must include the trailing 'Imbalance Amount' row — a truncated export (copy interrupted) is rejected with a hard failure. The as-of date must match the selected Assessment Year, or the run hard-fails before building any schedules.
 - **Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity's PAN if encrypted)** (optional) — accepts: .pdf, .PDF
 - **26AS workbook (optional, feeds TDS tie-out + 234C quarters)** (optional) — accepts: .xlsx
 - **Foreign broker consolidated tax report (optional, fills Schedule FA/FSI/Form 67/Schedule TR)** (optional) — accepts: .xlsx
+- **GnuCash book (optional, enables CG lots + dividend quarters)** (optional) — accepts: .gnucash
+- **Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)** (optional) — accepts: .yaml
+- **Regime (blank = use the entity's configured regime)** (optional) — accepts: "new", "old", or blank to use the entity's configured regime.
+  - Overrides the entity's configured tax regime for this run only.
 
 ## How to run
 

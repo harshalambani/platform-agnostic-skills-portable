@@ -11,21 +11,21 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 
 ## Inputs
 
-- **Bank** (required) — accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).
-  - Which bank the statement is from — this picks the right extractor.
-  - ⚠️ Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help.
 - **Entity (optional) -- fills in the GnuCash book below from the registry** (optional) — accepts: One of the entities defined in entities.yaml, via dropdown.
   - Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity.
   - ⚠️ UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found.
+- **Bank** (required) — accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).
+  - Which bank the statement is from — this picks the right extractor.
+  - ⚠️ Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help.
 - **Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak (HSBC also takes an already-enriched .xlsx); CSV or XLS/XLSX for HDFC / Other** (required) — accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill's own output) instead of PDFs.
   - The statement file(s), matching the bank you chose.
   - ⚠️ File type must match the selected bank, or extraction will fail.
-- **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
-  - Your GnuCash book — used to learn your accounts and map transactions.
-  - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
 - **Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password.
   - Used for an HDFC PDF or an SBM xlsx that is itself password-protected.
   - ⚠️ Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output.
+- **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
+  - Your GnuCash book — used to learn your accounts and map transactions.
+  - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
 - **Bank account (optional -- only if several of your accounts are at this bank and the statement does not say which)** (optional) — accepts: One of the postable accounts at the chosen bank, listed from your book.
   - Which of your accounts at this bank the statement is for. Leave blank unless the run stops and asks.
   - ⚠️ Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing.
