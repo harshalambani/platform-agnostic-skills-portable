@@ -83,6 +83,7 @@ inputs:
     type: "output_file"
     label: "26AS workbook (enables the TDS-credit tie-out)"
     match: "*-26AS.xlsx"
+    entity_from: "entity"
     required: false
   - name: "journal_path"
     type: "text"
@@ -150,6 +151,14 @@ help:
     "not available" note when its input is absent, or when its document
     fails to parse -- every one of these readers is real and implemented
     (see AGENT.md), not a placeholder.
+
+    Run order for a year: (1) import the bank statement, (2) run 26AS
+    Convert on the entity's 26AS PDF (it only reads the PDF into a
+    workbook and books nothing), (3) run this skill, (4) run the 26AS
+    journal. The order the entries are BOOKED in is unchanged: bank, then
+    partner compensation, then 26AS. The 26AS workbook picker below lists
+    only the selected entity's own workbooks, and a workbook that belongs
+    to someone else is refused with a message, never used.
   when_to_use: >
     Use this once a financial year's partner-compensation documents are in
     hand and you want a single reconciliation across remuneration, share
@@ -218,7 +227,15 @@ help:
     - name: "xlsx_26as"
       tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
       accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
-      gotchas: "Optional. Absent (or unreadable/malformed), the TDS-credit tie-out leg is reported 'not available', never defaulted."
+      gotchas: >
+        Optional. Lists only the selected entity's own 26AS workbooks (the
+        workbook's own assessee PAN/name is matched to the entity, not the
+        file name), newest first, and defaults to the entity's own newest.
+        Choose (none) to skip the tie-out. If the entity has none yet the
+        picker says so: run 26AS Convert first. A workbook typed in by
+        hand that belongs to another entity is refused with a clear
+        message. Absent (or unreadable/malformed), the TDS-credit tie-out
+        leg is reported 'not available', never defaulted.
     - name: "journal_path"
       tooltip: >
         Optional. When set, also writes a GnuCash multi-split journal CSV

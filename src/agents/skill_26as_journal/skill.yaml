@@ -31,6 +31,7 @@ inputs:
     type: "output_file"
     label: "26AS workbook (Convert output)"
     match: "*-26AS.xlsx"
+    entity_from: "entity"
     file_types: [".xlsx"]
     required: true
   - name: "gnucash_path"

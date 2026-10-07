@@ -103,6 +103,83 @@ def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[st
     return [(p.name, str(p)) for p in files[:30]]
 
 
+# ---- Entity-scoped output pickers (UI-16) ---------------------------------
+# An output_file picker with `entity_from:` lists only the files the selected
+# entity owns. "(none)" is a real choice (value ""), the default is the
+# entity's OWN newest file, and when there is none the picker says so rather
+# than offering somebody else's file.
+
+NONE_CHOICE = ("(none)", "")
+
+
+def _entities_yaml_path():
+    return _config.data_root_dir() / "itr" / "entities.yaml"
+
+
+def _scoped_picker_state(inp, entity_key):
+    """(choices, default value, message) for an entity-scoped picker."""
+    from agents import entity_scope  # noqa: PLC0415
+    own = entity_scope.filter_choices(
+        _scan_output_files(inp.match, tuple(inp.file_types)),
+        entity_key, _entities_yaml_path(),
+    )
+    choices = list(own) + [NONE_CHOICE]
+    if own:
+        return choices, own[0][1], ""
+    if not entity_key:
+        return choices, "", "Pick an entity first: only that entity's own files are offered here."
+    return choices, "", (
+        f"No 26AS workbook for {entity_key} yet: run 26AS Convert on its PDF first "
+        "(it only reads the PDF, it books nothing). Choose (none) to skip."
+    )
+
+
+def _entity_initial_value(skill, entity_name):
+    """What the entity select holds when the form first opens (blank when it
+    drives a book_from prefill, otherwise its first choice)."""
+    book_sources = {i.book_from for i in skill.inputs
+                    if i.type in ("file", "files") and i.book_from}
+    if entity_name in book_sources:
+        return None
+    for i in skill.inputs:
+        if i.name == entity_name and i.options_from:
+            ch = _resolve_options_from(i.options_from)
+            return ch[0][1] if ch else None
+    return None
+
+
+# Selects whose value says WHO or WHEN a run is for, not WHAT it was run on.
+# They may lead a form (UI-15: Entity first) but must never name the output
+# file, or every output would be called after the taxpayer / the year instead
+# of after the statement or document.
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years"})
+
+
+def _output_name_source(skill, input_map: dict[str, str]) -> str:
+    """The input value an output file is named after.
+
+    The first input, in skill.yaml declaration order, that has a value AND is
+    consumed by the skill (referenced by a ``{inputs.<name>}`` token in
+    run_args), skipping entity / assessment-year selects. Falls back to the
+    first non-empty value of any input, then to "output", so nothing
+    regresses to an empty name. Reordering a form therefore never changes
+    which input names the output, only declaration order among the rest.
+    """
+    skip = {
+        inp.name for inp in skill.inputs
+        if inp.type == "select" and inp.options_from in _NAME_SKIP_OPTION_SOURCES
+    }
+    consumed = {
+        inp.name for inp in skill.inputs
+        if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
+    }
+    return next(
+        (v for k, v in input_map.items() if v and k in consumed and k not in skip),
+        next((v for k, v in input_map.items() if v and k not in skip),
+             next((v for v in input_map.values() if v), "output")),
+    )
+
+
 def _options_from_itr_entities() -> list[tuple[str, str]]:
     """(label, entity_key) pairs from Data/itr/entities.yaml, for the ITR
     Workbook skill's `entity` dropdown (options_from: itr_entities).
@@ -941,6 +1018,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             input_components = []
             input_by_name: dict[str, object] = {}  # inp.name -> its component, for book_from/fy_from wiring below
             output_pickers = []   # (dropdown, refresh_btn, match, file_types)
+            scoped_pickers = []   # (dropdown, refresh_btn, input_def, message_md) -- entity_from pickers
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
@@ -1006,19 +1084,30 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 elif inp.type == "output_file":
                     # Pick a prior-step output from the outputs folder, with a
                     # refresh button — same UX as the Review-Mappings CSV picker.
-                    _choices = _scan_output_files(inp.match, tuple(inp.file_types))
+                    if inp.entity_from:
+                        _choices, _val, _msg = _scoped_picker_state(
+                            inp, _entity_initial_value(skill, inp.entity_from))
+                    else:
+                        _choices = _scan_output_files(inp.match, tuple(inp.file_types))
+                        _val = _choices[0][1] if _choices else None
+                        _msg = ""
                     with gr.Row():
                         comp = gr.Dropdown(
                             label=inp.label,
                             choices=_choices,
-                            value=_choices[0][1] if _choices else None,
+                            value=_val,
                             allow_custom_value=True,
                             interactive=True,
                             scale=5,
                             **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                         )
                         _rbtn = gr.Button("↻", scale=0, min_width=40)
-                    output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
+                    if inp.entity_from:
+                        _scope_md = gr.Markdown(
+                            _msg, visible=bool(_msg), elem_classes=["pa-book-status"])
+                        scoped_pickers.append((comp, _rbtn, inp, _scope_md))
+                    else:
+                        output_pickers.append((comp, _rbtn, inp.match, tuple(inp.file_types)))
                 elif inp.type == "files" and inp.book_from:
                     # Several books at once (Inter-entity Matrix) — a path
                     # textbox for exactly the reasons the single-book field is
@@ -1209,6 +1298,21 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     outputs=[status_md],
                 )
 
+            for _scomp, _sbtn, _sinp, _smd in scoped_pickers:
+                _ent_comp = input_by_name.get(_sinp.entity_from)
+                if _ent_comp is None:
+                    raise ValueError(
+                        f"skill.yaml error in '{skill.name}': input '{_sinp.name}' declares "
+                        f"entity_from: '{_sinp.entity_from}', but no input named "
+                        f"'{_sinp.entity_from}' exists on this skill.")
+
+                def _rescope(entity_val, _i=_sinp):
+                    ch, val, msg = _scoped_picker_state(_i, entity_val)
+                    return gr.update(choices=ch, value=val), gr.update(value=msg, visible=bool(msg))
+
+                _ent_comp.change(fn=_rescope, inputs=[_ent_comp], outputs=[_scomp, _smd])
+                _sbtn.click(fn=_rescope, inputs=[_ent_comp], outputs=[_scomp, _smd])
+
             for _dcomp, _dinp in dependent_pickers:
                 _srcs = [input_by_name[n] for n in _dinp.depends_on if n in input_by_name]
                 if len(_srcs) != len(_dinp.depends_on):
@@ -1370,6 +1474,13 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     value=(choices[0][1] if choices else None),
                 )
             container_tab.select(fn=_rescan_newest, inputs=[], outputs=[_comp])
+        for _scomp, _sbtn, _sinp, _smd in scoped_pickers:
+            def _rescan_scoped(entity_val, _i=_sinp):
+                ch, val, msg = _scoped_picker_state(_i, entity_val)
+                return gr.update(choices=ch, value=val), gr.update(value=msg, visible=bool(msg))
+            container_tab.select(
+                fn=_rescan_scoped, inputs=[input_by_name[_sinp.entity_from]],
+                outputs=[_scomp, _smd])
         for _comp, _dbtn, _key in dynamic_pickers:
             def _rescan_options_from(k=_key):
                 return gr.update(choices=_resolve_options_from(k))
@@ -1402,6 +1513,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             reset_specs.append((_comp, lambda: gr.update(value="")))
         elif _inp.type in ("file", "files"):
             reset_specs.append((_comp, lambda: gr.update(value=None)))
+        elif _inp.type == "output_file" and _inp.entity_from:
+            reset_specs.append((
+                _comp,
+                lambda i=_inp: (lambda s: gr.update(choices=s[0], value=s[1]))(
+                    _scoped_picker_state(i, _entity_initial_value(skill, i.entity_from))),
+            ))
         elif _inp.type == "output_file":
             reset_specs.append((
                 _comp,
@@ -1427,6 +1544,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # just been cleared.
     for _status_md in book_status_md.values():
         reset_specs.append((_status_md, lambda: gr.update(value="", visible=False)))
+    for _scomp, _sbtn, _sinp, _smd in scoped_pickers:
+        reset_specs.append((
+            _smd,
+            lambda i=_sinp: (lambda s: gr.update(value=s[2], visible=bool(s[2])))(
+                _scoped_picker_state(i, _entity_initial_value(skill, i.entity_from))),
+        ))
 
     def _handle_reset():
         from .. import _runner

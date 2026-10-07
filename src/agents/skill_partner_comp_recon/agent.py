@@ -63,6 +63,7 @@ from pathlib import Path
 import yaml
 
 from .. import gnucash_accounts
+from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
 from .gnucash_tieout import (
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
@@ -701,6 +702,26 @@ def _run_from_documents(
             if rec.get("entity_name"):
                 firm_name = rec["entity_name"]
                 break
+
+    # UI-16: a 26AS workbook that is not the selected entity's is refused
+    # outright -- its TDS credit would be booked against the wrong person.
+    if xlsx_26as and entity_profile is not None:
+        _verdict, _why = check_owner_26as(
+            xlsx_26as, entity, entity_profile.name, getattr(entity_profile, "pan", ""))
+        if _verdict == "mismatch":
+            lines = [
+                f"ERROR: {_why}. Pick {entity}'s own 26AS workbook (run 26AS "
+                "Convert on its PDF first), or choose (none) to skip the "
+                "TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+        if _verdict == "unknown":
+            optional_notes.append(f"26AS ownership: {_why}.")
+    elif xlsx_26as:
+        optional_notes.append(
+            "26AS ownership: not checked (the entity's PAN/name are not available).")
 
     # Now that firm_name is known, do the real 26AS read (filtered to
     # s.194T rows for this firm's deductor -- see xlsx_26as_reader.py).

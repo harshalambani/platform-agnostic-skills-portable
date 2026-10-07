@@ -70,6 +70,11 @@ class SkillInput:
                               # "2025-26"), used together with book_from to pick the
                               # right book when an entity has more than one. Empty =
                               # resolve to the entity's newest registered FY.
+    entity_from: str = ""    # (output_file inputs only, optional) name of the entity
+                              # select whose value scopes this picker: only files that
+                              # entity owns are offered (see agents/entity_scope.py),
+                              # and the choices follow the select. Needs a `match` in
+                              # entity_scope.SCOPABLE_MATCHES. Empty = unscoped.
 
 
 @dataclass(frozen=True)
@@ -237,6 +242,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             options_from=inp.get("options_from", ""),
             book_from=inp.get("book_from", ""),
             fy_from=inp.get("fy_from", ""),
+            entity_from=inp.get("entity_from", ""),
             depends_on=tuple(inp.get("depends_on") or ()),
             multiselect=bool(inp.get("multiselect", False)),
         ))
