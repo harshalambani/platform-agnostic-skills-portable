@@ -67,6 +67,7 @@ from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
 from .gnucash_tieout import (
+    build_statement_book_check,
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
     MATCHED,
     build_balance_tieout,
@@ -946,6 +947,15 @@ def _run_from_documents(
     # plain VARIANCE/CANNOT-RECONCILE comparison, unchanged).
     report.reconciliation.extend(
         build_balance_tieout(
+            report, accounts_for_tieout, gnucash_path, report.financial_year,
+            posted_check=posted_check, bank_matches=bank_matches or None,
+            settings_error=settings_error,
+        )
+    )
+
+    # H35-15: statement closing capital / current vs the book at 31 March.
+    report.reconciliation.extend(
+        build_statement_book_check(
             report, accounts_for_tieout, gnucash_path, report.financial_year,
             posted_check=posted_check, bank_matches=bank_matches or None,
             settings_error=settings_error,

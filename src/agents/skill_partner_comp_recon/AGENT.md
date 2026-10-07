@@ -706,3 +706,12 @@ No PII of any kind appears in this package's code, tests, or fixtures --
 every figure in `tests/fixtures/` is invented and self-consistent, chosen
 to exercise every arithmetic rule in this package's design spec, not
 copied or derived from any real document.
+
+## Award-year documents (H35-14)
+
+The optional "Award-year documents" field takes the Compensation summary of each earlier year whose incentive instalments were paid in the reporting year. The award year is read from inside each document, never from its file name. Each instalment paid this year is matched to the same award year's schedule by gross and compared on gross, firm's tax and capital deducted (AGREE, DIFFERS, or CANNOT RECONCILE when no document, no unique match, or the latest revision cannot be told apart). Several revisions of one year: the latest letter date wins, else the highest revision number; if neither settles it, the row says so and none is used. A Target compensation letter is accepted but is not an instalment source. Award FY, firm's-tax FY and payment FY are shown separately. Recon only; the journal is unchanged.
+
+## Statement of Account vs book, and the profit share (H35-15)
+
+The statement's closing capital and closing current account are compared with the book's balance at 31 March for the entity's partner capital and current accounts, plus this skill's own unposted journals. A gap fully explained by those journals gets the pending-posting verdict; any other gap is a DIFFERS and is never plugged. A separate row compares the statement's profit share with the schedule's gross share of profit less firm's tax plus additional share of profit, shows both readings (before and after firm's tax), and says which one agrees; with neither, it reports both gaps.
+

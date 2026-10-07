@@ -561,6 +561,16 @@ def test_build_report_end_to_end_against_fixture():
             assert not getattr(r, "not_checked", False)
             assert CANNOT_RECONCILE in r.note
             assert "2025-04" in r.note
+        elif cat.startswith("Profit share: statement vs schedule"):
+            # H35-15: the synthetic statement figure is above the after-tax
+            # payouts by exactly what this skill's own year-end accrual
+            # journal books, so the row carries the pending-posting verdict,
+            # never a DIFFER and never a plain AGREE.
+            assert r.agree is True
+            assert PENDING_JOURNAL_VERDICT in r.note
+            assert "DIFFERS" not in r.note
+        elif cat.startswith("Statement vs book:"):
+            assert r.agree is None and CANNOT_RECONCILE in r.note
         elif cat.startswith("Award-year check ("):
             # H35-14: the fixture supplies no award-year document, so the
             # row is a named CANNOT RECONCILE (never an AGREE).
@@ -8924,3 +8934,141 @@ def test_h35_14_letter_date_and_revision_are_read_best_effort():
     assert ay.parse_letter_date("nothing here") is None
     assert ay.parse_revision("Revision No. 3") == 3
     assert ay.parse_revision("no marker") is None
+
+
+# ---------------------------------------------------------------------------
+# H35-15 -- Statement of Account vs book, and the three-way profit share
+# ---------------------------------------------------------------------------
+
+_SB_ACCOUNTS = dict(_GC_TIEOUT_ACCOUNTS_WITH_EQUITY)
+
+
+def _sb_report(statement_capital, statement_current=None, cap=50000.0):
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[_class_a_advice("2025-04", total_paid=480000.0 + cap)],
+        accounts=_SB_ACCOUNTS,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    for line in report.monthly:
+        line.capital_transferred = cap
+    report.llp_record = {"capital_closing_balance": statement_capital,
+                         "current_closing_balance": statement_current}
+    return report
+
+
+def _sb_rows(tmp_path, report, book_txns=(), status=None, name="sb"):
+    accounts, guids = _gc_tree_with_equity()
+    txns = [t(guids) for t in book_txns]
+    book_path = _write_gnucash_book(tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns))
+    posted = [PostedCheckResult(txn_id=j.txn_id, date="2025-04-30", description="x",
+                                status=status or NOT_POSTED, detail="")
+              for j in build_journals(report, _SB_ACCOUNTS)]
+    from agents.skill_partner_comp_recon.gnucash_tieout import build_statement_book_check
+    rows = build_statement_book_check(report, _SB_ACCOUNTS, book_path, "2025-26", posted_check=posted)
+    return {r.category.split(": ", 1)[1]: r for r in rows}
+
+
+def _sb_capital_txn(amount, seed="cap0", date_="2025-04-30"):
+    def make(guids):
+        return _gc_txn_xml(
+            _gc_guid("txn-" + seed), date_, "capital",
+            [_gc_split_xml(_gc_guid("s1-" + seed), -amount, guids["Partner Capital Contribution"]),
+             _gc_split_xml(_gc_guid("s2-" + seed), amount, guids["Current Account"])])
+    return make
+
+
+def test_h35_15_difference_fully_explained_by_unposted_journal_is_pending_not_a_gap(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(50000.0))
+    r = rows["closing capital at 31 March"]
+    assert r.agree is True and PENDING_JOURNAL_VERDICT in r.note
+
+
+def test_h35_15_unexplained_difference_is_never_agree(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(65000.0))
+    r = rows["closing capital at 31 March"]
+    assert r.agree is False
+    assert "unexplained difference 15,000.00" in r.note and "Nothing is plugged" in r.note
+
+
+def test_h35_15_posted_book_that_ties_agrees_and_a_posted_mismatch_differs(tmp_path):
+    ok = _sb_rows(tmp_path, _sb_report(50000.0), [_sb_capital_txn(50000.0)],
+                  status=ALREADY_POSTED, name="ok")["closing capital at 31 March"]
+    assert ok.agree is True and PENDING_JOURNAL_VERDICT not in ok.note
+    bad = _sb_rows(tmp_path, _sb_report(70000.0), [_sb_capital_txn(50000.0)],
+                   status=ALREADY_POSTED, name="bad")["closing capital at 31 March"]
+    assert bad.agree is False
+
+
+def test_h35_15_missing_statement_figure_is_cannot_reconcile(tmp_path):
+    rows = _sb_rows(tmp_path, _sb_report(None))
+    assert rows["closing capital at 31 March"].agree is None
+    assert rows["closing current account at 31 March"].agree is None
+    assert CANNOT_RECONCILE in rows["closing capital at 31 March"].note
+
+
+def _pst(stmt, gross, tax, addl, pending=None):
+    from agents.skill_partner_comp_recon.engine import profit_share_three_way
+
+    class M:
+        share_of_profit_gross = gross
+        firms_tax_sop = tax
+        additional_share_of_profit = addl
+    return profit_share_three_way({"current_profit_share": stmt}, [M()] if gross is not None else [],
+                                  None, {}, "2025-26", pending_accrual=pending)
+
+
+def _accr(amount):
+    return {"applies_to": "Booked (monthly)", "amount": amount, "journal_ids": ["ACCR-1"],
+            "description": "this skill's year-end share-of-profit accrual journal"}
+
+
+def test_h35_15_three_way_gap_booked_by_own_accrual_is_pending_not_differ():
+    from agents.skill_partner_comp_recon.engine import PENDING_JOURNAL_VERDICT
+    r = _pst(900.0, 1000.0, -400.0, 100.0, _accr(200.0))
+    assert r.agree is True and PENDING_JOURNAL_VERDICT in r.note and "ACCR-1" in r.note
+    assert "DIFFERS" not in r.note
+
+
+def test_h35_15_three_way_accrual_of_a_different_amount_still_differs():
+    r = _pst(900.0, 1000.0, -400.0, 100.0, _accr(150.0))
+    assert r.agree is False and "DIFFERS on both readings" in r.note
+
+
+def test_h35_15_three_way_before_tax_statement_with_accrual_is_red_flag_never_agree():
+    # Statement = gross + additional (before firm's tax); the accrual journal
+    # would then book the firm's tax (400) as further share of profit.
+    r = _pst(1100.0, 1000.0, -400.0, 100.0, _accr(400.0))
+    assert r.agree is False
+    assert r.note.startswith("RED FLAG") and "ACCR-1" in r.note
+    assert "AGREES BEFORE" not in r.note
+
+
+def test_h35_15_three_way_names_which_reading_agrees():
+    after = _pst(700.0, 1000.0, -400.0, 100.0)
+    assert after.agree is True and "AGREES AFTER firm's tax" in after.note
+    before = _pst(1100.0, 1000.0, -400.0, 100.0)
+    assert before.agree is True and "AGREES BEFORE firm's tax" in before.note
+    assert "differs by" in before.note
+
+
+def test_h35_15_three_way_neither_reading_is_a_loud_differ_with_both_gaps():
+    r = _pst(900.0, 1000.0, -400.0, 100.0)
+    assert r.agree is False
+    assert "-200.00" in r.note and "200.00" in r.note and "DIFFERS on both readings" in r.note
+
+
+def test_h35_15_three_way_with_one_leg_is_never_agree():
+    assert _pst(None, 1000.0, -400.0, 100.0).agree is None
+    assert _pst(700.0, None, 0.0, 0.0).agree is None
+
+
+def test_h35_14_unreadable_award_year_file_is_named_and_skipped(tmp_path):
+    from agents.skill_partner_comp_recon.agent import _read_award_year_documents
+    bad = tmp_path / "broken.pdf"
+    bad.write_bytes(b"not a pdf")
+    docs, notes = _read_award_year_documents(str(tmp_path), None)
+    assert len(docs) == 1 and docs[0]["error"]
+    assert "broken.pdf" in notes[0] and "skipped" in notes[0]
+    assert _read_award_year_documents("", None) == ([], [])

@@ -670,6 +670,101 @@ def build_balance_tieout(
     return _name_excluded_months(results, row_path, report, accounts, bank_matches)
 
 
+_STATEMENT_BOOK_ROWS = (
+    ("capital_contribution", "capital_closing_balance", "closing capital"),
+    ("current_account", "current_closing_balance", "closing current account"),
+)
+
+
+def build_statement_book_check(
+    report, accounts: dict, gnucash_path: str, year_key: str,
+    posted_check: "list[PostedCheckResult] | None" = None,
+    bank_matches: dict | None = None,
+    settings_error: str | None = None,
+) -> list[ReconciliationResult]:
+    """H35-15: the LLP statement's closing capital and closing current
+    account against the GnuCash balance of the entity's partner capital and
+    current accounts at 31 March, after this skill's OWN journals.
+
+    Book side = the account's cumulative balance to the year end (credit
+    positive, like the statement) PLUS the movement of this run's journals
+    that are not yet posted. A gap that this skill's unposted journal fully
+    explains gets the existing pending-posting verdict. Any other gap is a
+    DIFFER and is never plugged or auto-posted."""
+    from .jv_emitter import _strip_root  # noqa: PLC0415
+    llp = getattr(report, "llp_record", None)
+    out: list[ReconciliationResult] = []
+    book = err = None
+    journals = None
+    if gnucash_path and accounts:
+        book, err = _load_book_safely(gnucash_path)
+        if book is not None:
+            journals, jerr = _journals_safely(report, accounts, bank_matches=bank_matches)
+            err = jerr
+    status = {p.txn_id: p.status for p in (posted_check or [])}
+    end = parse_gnucash.fy_window(year_key)[1]
+    for key, stmt_key, label in _STATEMENT_BOOK_ROWS:
+        category = f"Statement vs book: {label} at 31 March"
+        stmt = llp.get(stmt_key) if llp else None
+        path = accounts.get(key) if accounts else None
+        src = {"LLP Statement": stmt, "GnuCash book at 31 Mar (plus this skill's unposted journals)": None}
+        why = None
+        if stmt is None:
+            why = "the LLP Statement of Account's " + label + " was not supplied or not parsed"
+        elif not gnucash_path:
+            why = "no GnuCash book supplied"
+        elif not accounts or not isinstance(path, str) or not path.strip():
+            why = settings_error or f"no {key} account configured for this entity"
+        elif book is None or err:
+            why = err or "the GnuCash book could not be read"
+        if why:
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=None,
+                note=f"{CANNOT_RECONCILE} -- {why}."))
+            continue
+        stripped = _strip_root(path)
+        colon = _colon_paths(book)
+        guid = next((g for g, p in colon.items() if p == stripped), None)
+        if guid is None:
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=None,
+                note=f"{CANNOT_RECONCILE} -- account path {stripped!r} not found in the supplied GnuCash book."))
+            continue
+        acct_type = book.accounts[guid].type
+        raw = sum(float(sp.value) for t in book.transactions if t.date_posted <= end
+                  for sp in t.splits if sp.account_guid == guid)
+        book_bal = parse_gnucash.normalize_value(raw, acct_type)
+        pend = [j for j in journals if status.get(j.txn_id) == NOT_POSTED
+                and any(s.account == stripped for s in j.splits)]
+        pend_raw = sum(s.debit - s.credit for j in pend for s in j.splits if s.account == stripped)
+        pend_fig = parse_gnucash.normalize_value(pend_raw, acct_type) if pend_raw else 0.0
+        expected = round(book_bal + pend_fig, 2)
+        src["GnuCash book at 31 Mar (plus this skill's unposted journals)"] = expected
+        gap = round(stmt - expected, 2)
+        raw_gap = round(stmt - book_bal, 2)
+        if abs(gap) <= RECONCILIATION_TOLERANCE:
+            if pend and abs(raw_gap) > RECONCILIATION_TOLERANCE:
+                ids = ", ".join(sorted({j.txn_id for j in pend}))
+                out.append(ReconciliationResult(
+                    category=category, sources=src, agree=True,
+                    note=f"{PENDING_JOURNAL_VERDICT}: the book at 31 March is {book_bal:,.2f}; "
+                         f"journal(s) {ids} ({pend_fig:,.2f}) are not yet posted and explain "
+                         f"the whole difference to the statement ({stmt:,.2f})."))
+            else:
+                out.append(ReconciliationResult(
+                    category=category, sources=src, agree=True,
+                    note=f"The book at 31 March ({book_bal:,.2f}) agrees with the statement."))
+        else:
+            tail = (f" Journal(s) not yet posted ({pend_fig:,.2f}) were taken into account; the gap "
+                    "remains." if pend else "")
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=False,
+                note=f"DIFFERS -- statement {stmt:,.2f} against book {book_bal:,.2f} at 31 March: "
+                     f"unexplained difference {gap:,.2f}.{tail} Nothing is plugged or posted for this; "
+                     "find the cause in the book or the statement."))
+    return out
+
+
 def _name_excluded_months(results, row_path, report, accounts, bank_matches):
     """Tie-out excluded months: a payout month with no unique bank match
     (no_match or tie, treated alike) has no journal, so the row's Computed
