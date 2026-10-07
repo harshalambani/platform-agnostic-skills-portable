@@ -297,6 +297,9 @@ def detect_mid_year_rate_change(instalment_capitals: list[float], target_compens
 # 4. Incentive cohorts and the FY straddle.
 # ---------------------------------------------------------------------------
 
+from .award_year import award_year_rows  # noqa: E402  (H35-14)
+
+
 @dataclass
 class InstalmentRow:
     award_fy: str
@@ -1729,6 +1732,10 @@ def build_report(data: dict) -> Report:
             informational_row.note = _informational_prefix + (informational_row.note or "")
             informational_row.informational = True
             reconciliation.append(informational_row)
+        # H35-14: the real per-instalment check against the AWARD-year
+        # documents. Recon only -- no journal reads these rows.
+        reconciliation.extend(award_year_rows(
+            cohorts_raw, reporting_instalments, data.get("award_year_documents")))
 
     # H35-08: the CTC walk-down. Purely informational (no journal/posted-
     # check impact) -- shown on its own sheet plus this one informational

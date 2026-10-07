@@ -73,6 +73,11 @@ inputs:
     label: 'LLP "Statement of Account ... AS ON 31 MARCH" -- the PDF, or the .eml e-mail it arrived in (not the Target compensation advice letter; enables leg 1, the capital sign-off)'
     file_types: [".pdf", ".eml"]
     required: false
+  - name: "award_year_documents"
+    type: "files"
+    label: 'Award-year documents (optional): the "Compensation summary" of each earlier year whose incentive instalments were paid this year (any year; the year is read from inside each document)'
+    file_types: [".pdf"]
+    required: false
   - name: "payment_schedule"
     type: "file"
     label: 'Payment schedule: the "Payment Schedule FY ..." PDF (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)'
@@ -116,6 +121,7 @@ run_args:
   advices_dir: "{inputs.advices_dir}"
   doc_password: "{inputs.doc_password}"
   advisory_path: "{inputs.advisory_path}"
+  award_year_documents: "{inputs.award_year_documents}"
   llp_statement: "{inputs.llp_statement}"
   payment_schedule: "{inputs.payment_schedule}"
   gnucash_path: "{inputs.gnucash_path}"
@@ -218,6 +224,17 @@ help:
         document families apart. A PDF that fails to open/parse, or whose
         content doesn't match the Advisory's expected layout, fails the
         whole run loud, naming the file and the reason.
+    - name: "award_year_documents"
+      tooltip: "The Compensation summary of each EARLIER year whose incentive instalments were paid in this financial year. Used to check each paid instalment's gross, firm's tax and capital deducted."
+      accepts: "One or more PDF files, any years. Several revisions of the same year may be added: the latest letter date (else the highest revision number) is used."
+      gotchas: >
+        Optional. The award year is read from inside each document, never
+        from its file name. A different year's document is never used for an
+        instalment. If the latest revision cannot be told apart, or no
+        document is supplied for a year, the row says CANNOT RECONCILE and
+        names why. A "Target compensation advice" letter is accepted but
+        carries no instalment schedule, so it is not used. Recon only: the
+        journal is the same with or without these documents.
     - name: "llp_statement"
       tooltip: "The LLP's \"Statement of Account ... AS ON 31 MARCH\" for this partner, this financial year."
       accepts: "A single PDF file, or the .eml e-mail it arrived in (its PDF attachment is read)."

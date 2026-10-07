@@ -82,6 +82,7 @@ from .jv_emitter import (
     write_journal_csv,
 )
 from .mapper import FinancialYearMismatchError, build_input_data
+from . import award_year as _award_year
 from . import precheck as _precheck
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
@@ -193,6 +194,32 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         return f"{label}: not available ({e})", None
     except Exception as e:
         return f"{label}: not available (could not parse {path}: {e})", None
+
+
+def _read_award_year_documents(value, password):
+    """(docs, notes) for the optional award_year_documents input: a
+    directory, a single file, or a list of files. A file that cannot be read
+    is named in a note and skipped; it never stops the run."""
+    if not value:
+        return [], []
+    if isinstance(value, (list, tuple)):
+        paths = [Path(v) for v in value]
+    else:
+        p = Path(value)
+        paths = sorted(q for q in p.iterdir() if q.suffix.lower() == ".pdf") if p.is_dir() else [p]
+    docs, notes = [], []
+    for path in paths:
+        d = _award_year.read_award_year_document(str(path), password, _advisory_parser)
+        docs.append(d)
+        if d["error"]:
+            notes.append(f"Award-year document {d['name']}: {d['error']} -- skipped.")
+        elif d["kind"] == _award_year.KIND_TARGET:
+            notes.append(f"Award-year document {d['name']}: a Target compensation letter; "
+                         "it is recorded but carries no instalment schedule, so it is not used.")
+        elif not d["fy"]:
+            notes.append(f"Award-year document {d['name']}: financial year not found in the "
+                         "document body -- skipped (the file name is never used).")
+    return docs, notes
 
 
 def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | None]:
@@ -520,6 +547,7 @@ def run(
     bank_match_window: str = "7",
     financial_year: str = "",
     entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -569,6 +597,7 @@ def run(
         bank_match_window=bank_match_window,
         financial_year=financial_year,
         entities_path=entities_path,
+        award_year_documents=award_year_documents,
     )
 
 
@@ -590,6 +619,7 @@ def _run_from_documents(
     bank_match_window: str = "7",
     financial_year: str = "",
     entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -840,6 +870,11 @@ def _run_from_documents(
         return "\n".join(lines)
 
     mapper_diagnostics = data.pop("_diagnostics", [])
+    # H35-14: award-year documents (any year). Read, never trusted by file
+    # name; selection and the per-instalment check happen in the engine.
+    _ay_docs, _ay_notes = _read_award_year_documents(award_year_documents, doc_password)
+    data["award_year_documents"] = _ay_docs
+    optional_notes.extend(_ay_notes)
     drivers = drivers_by_fy.get(data["financial_year"])
     if drivers is not None:
         data["drivers"] = drivers

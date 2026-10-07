@@ -561,6 +561,12 @@ def test_build_report_end_to_end_against_fixture():
             assert not getattr(r, "not_checked", False)
             assert CANNOT_RECONCILE in r.note
             assert "2025-04" in r.note
+        elif cat.startswith("Award-year check ("):
+            # H35-14: the fixture supplies no award-year document, so the
+            # row is a named CANNOT RECONCILE (never an AGREE).
+            assert r.agree is None, f"expected None (no award-year document) for {cat!r}"
+            assert r.informational is False
+            assert CANNOT_RECONCILE in r.note and "2024-25" in r.note
         elif cat.startswith("CTC walk-down:"):
             # H35-08: the fixture supplies no data["ctc_structuring"] block,
             # so the cash pool cannot be computed -- CANNOT RECONCILE, never
@@ -1975,7 +1981,8 @@ def test_h35_13_target_compensation_letter_is_named_plainly():
     assert msg.startswith("target_letter.pdf: this is the")
     assert '"Target compensation advice" letter' in msg
     assert "not the LLP Statement of Account" in msg
-    assert "AS ON 31 MARCH" in msg and ".eml" in msg and msg.endswith("skipped.")
+    assert "AS ON 31 MARCH" in msg and ".eml" in msg and "-- skipped." in msg
+    assert "Award-year documents" in msg
     # Never claims the statement itself was unreadable / malformed.
     for bad in ("missing", "unreadable", "could not", "malformed", "not an L5"):
         assert bad not in msg
@@ -8801,3 +8808,119 @@ def test_h35_08_default_interest_rate_is_labelled_as_a_default(tmp_path):
     assert cells["Target compensation"] == "Advisory"
     assert "inferred" in cells["Capital interest rate"]
     assert cells["Capital months (achieved)"] == "-- missing --"
+
+
+# ---------------------------------------------------------------------------
+# H35-14 -- award-year documents for prior-year instalments
+# ---------------------------------------------------------------------------
+
+def _ay_doc(fy="2024-25", name="adv.pdf", instalments=None, letter_date=None,
+            revision=None, kind="compensation_summary"):
+    if instalments is None:
+        instalments = [
+            {"instalment_no": 1, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 416667, "net": 233893},
+            {"instalment_no": 2, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 291667, "net": 358893},
+            {"instalment_no": 3, "gross": 1000000, "firms_tax": 349440,
+             "capital_contribution": 291667, "net": 358893},
+        ]
+    return {"name": name, "kind": kind, "fy": fy, "letter_date": letter_date,
+            "revision": revision, "instalments": instalments, "error": None}
+
+
+def _ay_rows(docs):
+    data = dict(_load_fixture())
+    data["award_year_documents"] = docs
+    report = build_report(data)
+    return [r for r in report.reconciliation if r.category.startswith("Award-year check (")]
+
+
+def test_h35_14_matching_award_year_document_agrees_per_instalment():
+    rows = _ay_rows([_ay_doc()])
+    assert len(rows) == 2  # two instalments paid in the reporting year
+    assert all(r.agree is True and not r.informational for r in rows)
+    assert "award FY2024-25" in rows[0].note and "payment FY2025-26" in rows[0].note
+    assert "implied firm's-tax rate" in rows[0].note
+
+
+def test_h35_14_different_tax_or_capital_differs_loudly():
+    docs = [_ay_doc(instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 300000, "capital_contribution": 250000, "net": 0},
+    ])]
+    rows = _ay_rows(docs)
+    assert [r.agree for r in rows] == [False, False]
+    assert "firm's tax" in rows[0].note and "capital deducted" in rows[1].note
+
+
+def test_h35_14_no_document_is_named_cannot_reconcile_never_agree():
+    rows = _ay_rows([])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert CANNOT_RECONCILE in rows[0].note and "2024-25" in rows[0].note
+
+
+def test_h35_14_a_different_year_document_is_never_used():
+    rows = _ay_rows([_ay_doc(fy="2023-24")])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert all(r.agree is not True for r in rows)
+
+
+def test_h35_14_award_year_is_read_from_the_body_not_the_file_name():
+    rows = _ay_rows([_ay_doc(fy="2023-24", name="Compensation summary FY2024-25.pdf")])
+    assert rows[0].agree is None
+
+
+def test_h35_14_later_revision_wins_by_letter_date_and_earlier_never_overrides():
+    wrong = _ay_doc(name="old.pdf", letter_date="2025-04-10", instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    right = _ay_doc(name="new.pdf", letter_date="2025-06-01")
+    for docs in ([wrong, right], [right, wrong]):
+        rows = _ay_rows(docs)
+        assert all(r.agree is True for r in rows)
+
+
+def test_h35_14_revision_number_decides_when_dates_are_missing():
+    wrong = _ay_doc(name="r1.pdf", revision=1, instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    right = _ay_doc(name="r2.pdf", revision=2)
+    assert all(r.agree is True for r in _ay_rows([right, wrong]))
+
+
+def test_h35_14_undeterminable_latest_revision_is_flagged_not_guessed():
+    other = _ay_doc(name="b.pdf", instalments=[
+        {"instalment_no": 1, "gross": 1000000, "firms_tax": 1, "capital_contribution": 1, "net": 0}])
+    rows = _ay_rows([_ay_doc(name="a.pdf"), other])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert "latest revision cannot be determined" in rows[0].note
+    # identical duplicates are harmless
+    assert all(r.agree is True for r in _ay_rows([_ay_doc(name="a.pdf"), _ay_doc(name="copy.pdf")]))
+
+
+def test_h35_14_target_letter_is_not_an_instalment_source():
+    t = _ay_doc(kind="target_comp_letter", instalments=None)
+    t["instalments"] = None
+    rows = _ay_rows([t])
+    assert len(rows) == 1 and rows[0].agree is None
+    assert "Target compensation letter" in rows[0].note
+
+
+def test_h35_14_unmatched_gross_is_cannot_reconcile_not_agree():
+    rows = _ay_rows([_ay_doc(instalments=[
+        {"instalment_no": 1, "gross": 777, "firms_tax": 0, "capital_contribution": 0, "net": 777}])])
+    assert all(r.agree is None for r in rows)
+
+
+def test_h35_14_journal_is_identical_with_and_without_award_year_documents():
+    base = dict(_load_fixture())
+    with_docs = dict(base, award_year_documents=[_ay_doc()])
+    a = build_journals(build_report(base), base["accounts"])
+    b = build_journals(build_report(with_docs), base["accounts"])
+    assert repr(a) == repr(b)
+
+
+def test_h35_14_letter_date_and_revision_are_read_best_effort():
+    from agents.skill_partner_comp_recon import award_year as ay
+    assert ay.parse_letter_date("Compensation summary\nDate : 12 April 2025") == "2025-04-12"
+    assert ay.parse_letter_date("nothing here") is None
+    assert ay.parse_revision("Revision No. 3") == 3
+    assert ay.parse_revision("no marker") is None

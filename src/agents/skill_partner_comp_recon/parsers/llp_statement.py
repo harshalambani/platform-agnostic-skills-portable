@@ -347,7 +347,8 @@ def parse_l5_words(words: list[dict], source_name: str = "") -> dict:
         if _doc_kind == "target_comp_letter":
             raise NotAnL5DocumentError(
                 f"{source_name or '<words>'}: this is the \"Target compensation "
-                f"advice\" letter, not the LLP Statement of Account. {_what_field_needs}"
+                f"advice\" letter, not the LLP Statement of Account. {_what_field_needs} "
+                "A Target compensation letter can go in the \"Award-year documents\" field."
             )
         if _doc_kind == "compensation_summary":
             raise NotAnL5DocumentError(
