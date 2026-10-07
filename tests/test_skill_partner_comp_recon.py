@@ -1958,6 +1958,80 @@ def test_l5_document_missing_markers_skipped_with_generic_reason():
 
 
 # ---------------------------------------------------------------------------
+# H35-13 -- a wrong document in the LLP statement field is named plainly.
+# ---------------------------------------------------------------------------
+
+def _h13_refusal(lines, name="doc.pdf"):
+    with pytest.raises(NotAnL5DocumentError) as excinfo:
+        parse_l5_words(_words_from_lines(lines), source_name=name)
+    return str(excinfo.value)
+
+
+def test_h35_13_target_compensation_letter_is_named_plainly():
+    msg = _h13_refusal(
+        ["Target compensation advice : Year ending 31 March 2027", "Target 40,00,000"],
+        name="target_letter.pdf",
+    )
+    assert msg.startswith("target_letter.pdf: this is the")
+    assert '"Target compensation advice" letter' in msg
+    assert "not the LLP Statement of Account" in msg
+    assert "AS ON 31 MARCH" in msg and ".eml" in msg and msg.endswith("skipped.")
+    # Never claims the statement itself was unreadable / malformed.
+    for bad in ("missing", "unreadable", "could not", "malformed", "not an L5"):
+        assert bad not in msg
+
+
+def test_h35_13_compensation_summary_is_named_plainly():
+    msg = _h13_refusal(
+        ["Compensation summary : Year ended 31 March 2026", "PAYMENTS", "SCHEDULE"],
+        name="summary.pdf",
+    )
+    assert '"Compensation summary"' in msg and "not the LLP Statement of Account" in msg
+    assert "looks like an L3" not in msg
+
+
+def test_h35_13_real_statement_is_never_refused_even_with_target_words():
+    words = _l5_words(extra_rows=[("Target compensation advice for the year", "-", "-")])
+    record = parse_l5_words(words, source_name="stmt.pdf")
+    assert record  # parsed, not refused
+    words2 = _l5_words()
+    words2 += _l5_word_line("See the Target compensation advice letter separately", 40.0, 900.0)
+    assert parse_l5_words(words2, source_name="stmt2.pdf")
+
+
+def test_h35_13_other_wrong_documents_keep_their_own_messages():
+    l1 = _h13_refusal(["To Whomsoever It may concern", "Remuneration 1,20,000"])
+    assert "payout certificate" in l1
+    sal = _h13_refusal(["SALARY STATEMENT FOR the month of March 2026", "Net Pay 2,00,000"])
+    assert "salary statement" in sal.lower()
+    l3 = _h13_refusal(["Compensation Advisory", "For the year ended 31 March 2026",
+                       "PAYMENTS", "Net Payable 10,00,000", "SCHEDULE", "Opening Balance 1"])
+    assert "L3 Compensation" in l3
+    for m in (l1, sal, l3):
+        assert "Target compensation advice" not in m
+
+
+def test_h35_13_unrecognised_document_still_gets_the_generic_message():
+    msg = _h13_refusal(["Some unrelated memo with no recognisable structure at all."])
+    assert "missing" in msg and "not an L5 LLP Statement of Account" in msg
+    assert "Target compensation" not in msg
+
+
+def test_h35_13_summary_line_carries_the_full_sentence(monkeypatch):
+    from agents.skill_partner_comp_recon import agent as agent_module
+    msg = _h13_refusal(
+        ["Target compensation advice : Year ending 31 March 2027"], name="t.pdf")
+
+    def _boom(path, password=None):
+        raise NotAnL5DocumentError(msg)
+    monkeypatch.setattr(agent_module._llp_statement_parser, "parse", _boom)
+    note, record = agent_module._resolve_llp_leg("t.pdf", None)
+    assert record is None
+    assert note == f"LLP statement of account: not available ({msg})"
+    assert "could not parse" not in note
+
+
+# ---------------------------------------------------------------------------
 # L4 (payment schedule) parser -- payment_schedule.py.
 # parse_payment_schedule_pages() is PURE and coordinate-based: every
 # fixture below is a synthetic, self-invented list of per-page word lists
@@ -7884,6 +7958,234 @@ def test_h35_05_round5_header_counts_payouts_not_notes_guard_partial_gaps():
 
     assert "BANK MATCH -- 2 of 12 payout(s) could not be matched" in summary
     assert summary.count("genuine gap") == 2
+
+
+# ---------------------------------------------------------------------------
+# H35-12 -- a payout paid as 2 or 3 separate bank credits (same bank account,
+# same counter-account) is matched as a SET. Single-credit matching runs
+# first for every payout; sets are tried only for payouts still unmatched and
+# only from credits no single match consumed. Synthetic books only.
+# ---------------------------------------------------------------------------
+
+def _split_run(tmp_path, deposits, payouts, name="book_split", window_days=7):
+    """deposits: [(seed, iso_date, amount, counter_name)]; payouts:
+    [(month, total_paid)]. Returns (matches, notes, report, book_path)."""
+    accounts, guids = _gc_tree()
+    txns = [
+        _bank_deposit_txn(seed, d, amt, guids["Current Account"], guids[counter])
+        for seed, d, amt, counter in deposits
+    ]
+    book_path = _write_gnucash_book(
+        tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns),
+    )
+    report = _bank_match_report([_class_a_advice(m, total_paid=t) for m, t in payouts])
+    matches, notes, reason = match_payouts_to_bank(
+        report, _GC_TIEOUT_ACCOUNTS, book_path, window_days=window_days)
+    assert reason is None
+    return matches, notes, report, book_path
+
+
+def test_h35_12_two_credits_matching_exactly_are_one_matched_payout(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert pm.is_split_match and len(pm.parts) == 2
+    assert pm.credit_amount == 100000.0
+    assert pm.credit_account == "Income:PGBP:Remuneration"
+    assert pm.outcome_label == "MATCHED (split, 2 credits)"
+    assert notes == []
+
+
+def test_h35_12_three_credits_within_re1_and_one_part_outside_window(tmp_path):
+    # One part is 14 days before month-end: outside the +/-7 window but
+    # inside the payout's calendar month, so it still counts. Sum is off by
+    # Re 1 (within tolerance).
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED and len(pm.parts) == 3
+    assert pm.credit_amount == 99999.0
+    assert notes == []
+
+
+def test_h35_12_sum_off_by_more_than_re1_is_not_matched(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 39998.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+    assert matches[1].parts == []
+    assert "genuine gap" in notes[0]
+
+
+def test_h35_12_partial_set_of_three_is_not_matched(tmp_path):
+    # Only 2 of the 3 parts are present in the book -- must NOT match.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+    assert matches[1].parts == []
+
+
+def test_h35_12_four_credits_are_never_combined(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-05", 25000.0, "Remuneration"),
+        ("b", "2025-04-10", 25000.0, "Remuneration"),
+        ("c", "2025-04-20", 25000.0, "Remuneration"),
+        ("d", "2025-04-28", 25000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_extra_unrelated_credit_is_not_pulled_into_the_set(tmp_path):
+    matches, notes, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+        ("x", "2025-04-20", 25000.0, "Remuneration"),   # unrelated, same account
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert sorted(p.amount for p in pm.parts) == [40000.0, 60000.0]
+    assert all(p.amount != 25000.0 for p in pm.parts)
+    assert pm.credit_amount == 100000.0
+    assert notes == []
+
+
+def test_h35_12_two_distinct_fitting_sets_are_a_tie_with_no_journal(tmp_path):
+    matches, notes, report, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-20", 40000.0, "Remuneration"),
+        ("c", "2025-04-12", 70000.0, "Remuneration"),
+        ("d", "2025-04-22", 30000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == TIE
+    assert len(pm.candidate_sets) == 2
+    assert len(notes) == 1 and "TIE" in notes[0] and "set 1" in notes[0] and "set 2" in notes[0]
+    for amt in ("60,000.00", "40,000.00", "70,000.00", "30,000.00"):
+        assert amt in notes[0]
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=matches)
+    assert journals == [] or all("2025-04" not in j.description for j in journals)
+
+
+def test_h35_12_parts_on_different_counter_accounts_are_not_a_split_match(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Share of Profit"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_credit_outside_month_and_window_is_never_used(tmp_path):
+    # Payout April (month-end 30 Apr); the second part is 20 days into May:
+    # outside the calendar month AND outside +/-7 days.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-05-20", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_single_match_payout_is_not_rematched_as_a_split(tmp_path):
+    # A single 100000 credit matches the payout; the two smaller credits
+    # that also sum to 100000 must stay untouched.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("s", "2025-04-30", 100000.0, "Remuneration"),
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-20", 40000.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    pm = matches[1]
+    assert pm.outcome == MATCHED
+    assert pm.parts == []
+    assert not pm.is_split_match
+    assert pm.credit_amount == 100000.0 and pm.credit_date == "2025-04-30"
+
+
+def test_h35_12_no_credit_is_used_by_two_payouts(tmp_path):
+    # Two payouts of 100000 in adjacent months; April's split uses a+b. May's
+    # single credit is its own. A third credit that could pair with either
+    # April part must not be reused by a second payout.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-10", 60000.0, "Remuneration"),
+        ("b", "2025-04-29", 40000.0, "Remuneration"),
+        ("m", "2025-05-31", 100000.0, "Remuneration"),
+    ], [("2025-04", 100000.0), ("2025-05", 100000.0), ("2025-06", 100000.0)])
+    assert matches[1].outcome == MATCHED and len(matches[1].parts) == 2
+    assert matches[2].outcome == MATCHED and matches[2].parts == []
+    assert matches[3].outcome == NO_MATCH
+    used = []
+    for pm in matches.values():
+        used.extend(pm.credit_txn_guids or ([pm.credit_txn_guid] if pm.credit_txn_guid else []))
+    assert len(used) == len(set(used)) == 3
+
+
+def test_h35_12_single_matches_win_credits_before_any_split_is_tried(tmp_path):
+    # A wide window lets April's split reach the 3 May credit too, but May's
+    # single-credit match must consume it first.
+    # April payout 100000: parts 40000 (28 Apr) + 60000 (3 May, within +/-7).
+    # May payout 60000: single credit 3 May 60000 is in May's calendar month
+    # and is consumed by May's single match first.
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-28", 40000.0, "Remuneration"),
+        ("b", "2025-05-03", 60000.0, "Remuneration"),
+    ], [("2025-04", 100000.0), ("2025-05", 60000.0)], name="book_order", window_days=40)
+    assert matches[2].outcome == MATCHED and matches[2].credit_amount == 60000.0
+    assert matches[1].outcome == NO_MATCH
+
+
+def test_h35_12_split_journal_balances_and_posts_nothing_to_bank(tmp_path):
+    matches, _n, report, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 160000.0, "Remuneration"),
+        ("b", "2025-04-25", 160000.0, "Remuneration"),
+        ("c", "2025-05-03", 159999.0, "Remuneration"),
+    ], [("2025-04", 480000.0)])
+    journals = build_journals(report, _GC_TIEOUT_ACCOUNTS, bank_matches=matches)
+    monthly = [j for j in journals if "monthly payout 2025-04" in j.description]
+    assert len(monthly) == 1
+    assert monthly[0].balanced
+    bank_path = _GC_TIEOUT_ACCOUNTS["bank"]
+    assert sum(s.debit - s.credit for j in journals for s in j.splits
+               if s.account == bank_path) == 0.0
+    # Cash leg lands on the bank import's own counter-account, at the payout
+    # amount (a within-Re-1 rounding difference stays in the bank import's
+    # own postings -- same as a single-credit match).
+    cash = [s for s in monthly[0].splits if s.account == "Income:PGBP:Remuneration" and s.debit]
+    assert cash and round(sum(s.debit for s in cash), 2) == 480000.0
+
+
+def test_h35_12_bank_match_sheet_lists_every_part(tmp_path):
+    from openpyxl import Workbook  # noqa: PLC0415
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    wb = Workbook()
+    writer._write_bank_match_sheet(wb, matches)
+    ws = wb["Bank match"]
+    rows = [[c.value for c in r] for r in ws.iter_rows(min_row=2)]
+    assert rows[0][3] == "MATCHED (split, 3 credits)"
+    assert [r[5] for r in rows[:3]] == [30000.0, 30000.0, 39999.0]
+    assert [r[4] for r in rows[:3]] == ["2025-04-16", "2025-04-25", "2025-05-03"]
+    assert all(r[6] == "Income:PGBP:Remuneration" for r in rows[:3])
+    assert len(rows) == 3
+
+
+def test_h35_12_total_cash_row_counts_every_part(tmp_path):
+    matches, _n, _r, _b = _split_run(tmp_path, [
+        ("a", "2025-04-16", 30000.0, "Remuneration"),
+        ("b", "2025-04-25", 30000.0, "Remuneration"),
+        ("c", "2025-05-03", 39999.0, "Remuneration"),
+    ], [("2025-04", 100000.0)])
+    total_matched = sum(m.credit_amount for m in matches.values() if m.outcome == MATCHED)
+    assert total_matched == 99999.0
 
 
 # ---------------------------------------------------------------------------

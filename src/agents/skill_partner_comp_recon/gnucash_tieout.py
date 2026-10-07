@@ -115,13 +115,15 @@ def _book_matched_raw_for_account(
     the two must never compute this independently (do not duplicate it)."""
     total = 0.0
     for m in matched_by_account.get(stripped_path, []):
-        txn = txns_by_guid.get(m.credit_txn_guid) if m.credit_txn_guid else None
-        if txn is None:
-            continue
-        total += float(sum(
-            sp.value for sp in txn.splits
-            if colon_paths.get(sp.account_guid) == stripped_path
-        ))
+        guids = list(m.credit_txn_guids) or ([m.credit_txn_guid] if m.credit_txn_guid else [])
+        for g in guids:
+            txn = txns_by_guid.get(g)
+            if txn is None:
+                continue
+            total += float(sum(
+                sp.value for sp in txn.splits
+                if colon_paths.get(sp.account_guid) == stripped_path
+            ))
     return total
 
 
@@ -852,6 +854,10 @@ from .jv_emitter import _month_end as _jv_month_end  # noqa: E402
 
 DEFAULT_BANK_MATCH_WINDOW_DAYS = 7
 
+# H35-12: a payout the firm paid as several separate bank credits is matched
+# as a SET of 2..MAX_SPLIT_PARTS credits (see _split_sets() below).
+MAX_SPLIT_PARTS = 3
+
 MATCHED = "matched"
 NO_MATCH = "no_match"
 TIE = "tie"
@@ -907,6 +913,24 @@ class PayoutMatch:
     # on this exact transaction, by guid, instead of the account's whole
     # FY movement (see item 2b's rewrite).
     candidates: list = field(default_factory=list)  # list[BankMatchCandidate], TIE/SPLIT only
+    # H35-12: a MATCHED payout paid as 2..MAX_SPLIT_PARTS separate bank credits
+    # to the same counter-account. `parts` holds every credit (empty for a
+    # single-credit match); credit_amount is then their SUM, credit_date the
+    # latest part's date, credit_txn_guids every part's guid.
+    parts: list = field(default_factory=list)
+    credit_txn_guids: list = field(default_factory=list)
+    # H35-12: TIE between several qualifying SETS -- list[list[BankMatchCandidate]].
+    candidate_sets: list = field(default_factory=list)
+
+    @property
+    def is_split_match(self) -> bool:
+        return self.outcome == MATCHED and len(self.parts) > 1
+
+    @property
+    def outcome_label(self) -> str:
+        if self.is_split_match:
+            return f"MATCHED (split, {len(self.parts)} credits)"
+        return self.outcome.upper()
 
 
 def _bank_deposits(book: "parse_gnucash.Book", bank_guid: str, colon_paths: dict) -> list[BankMatchCandidate]:
@@ -963,6 +987,40 @@ def _candidate_label(c: "BankMatchCandidate") -> str:
         accts = ", ".join(c.split_accounts or [])
         return f"{c.date} {c.amount:,.2f} -> split across {accts}"
     return f"{c.date} {c.amount:,.2f} -> {c.account}"
+
+
+def _split_sets(pm: "PayoutMatch", deposits: list, used: list, window_days: int) -> list:
+    """H35-12: every set of 2..MAX_SPLIT_PARTS still-unused bank credits that
+    together pay `pm` -- all posted to the SAME single counter-account, each
+    dated in the payout's calendar month or within +/- window_days of the
+    payout date, summing to the payout within RECONCILIATION_TOLERANCE.
+    Returns [[(deposit index, candidate), ...], ...]. Credits spread over
+    several counter-accounts (account is None) never take part."""
+    from itertools import combinations  # noqa: PLC0415
+
+    if pm.payout_amount <= 0:
+        return []
+    pay_date = _datetime.strptime(pm.payout_date, "%Y-%m-%d").date()
+    eligible = []
+    for i, c in enumerate(deposits):
+        if used[i] or c.account is None:
+            continue
+        c_date = _datetime.strptime(c.date, "%Y-%m-%d").date()
+        same_month = (c_date.year, c_date.month) == (pay_date.year, pay_date.month)
+        if not (same_month or abs((c_date - pay_date).days) <= window_days):
+            continue
+        eligible.append((i, c))
+    by_account: dict = {}
+    for item in eligible:
+        by_account.setdefault(item[1].account, []).append(item)
+    found = []
+    for items in by_account.values():
+        for n in range(2, MAX_SPLIT_PARTS + 1):
+            for combo in combinations(items, n):
+                total = round(sum(c.amount for _i, c in combo), 2)
+                if abs(total - pm.payout_amount) <= RECONCILIATION_TOLERANCE + 1e-9:
+                    found.append(sorted(combo, key=lambda t: (t[1].date, t[0])))
+    return found
 
 
 def match_payouts_to_bank(
@@ -1094,7 +1152,8 @@ def match_payouts_to_bank(
     )
 
     matches: dict[int, PayoutMatch] = {}
-    notes: list[str] = []
+    notes_by_idx: dict[int, str] = {}
+    lines_by_idx: dict[int, object] = {}
 
     for idx, line in enumerate(report.monthly, start=1):
         payout_date_iso = _jv_month_end(line.month)
@@ -1118,6 +1177,7 @@ def match_payouts_to_bank(
             payout_amount=payout_amount, outcome=NO_MATCH,
         )
 
+        lines_by_idx[idx] = line
         if not scored:
             matches[idx] = pm
             # H35-05 round 3, item 3: only report this per-payout as a
@@ -1127,11 +1187,8 @@ def match_payouts_to_bank(
             # misleading noise ("genuine gap" implies the import ran and
             # this one payout specifically is missing, which is not known
             # to be true here).
-            if fy_has_deposits:
-                notes.append(
-                    f"payout {line.month} on {payout_date_iso}: no bank credit found "
-                    "-- genuine gap."
-                )
+            # (H35-12: the note is written after the split phase below, once
+            # we know no set of credits matches this payout either.)
             continue
 
         scored.sort(key=lambda t: t[0])
@@ -1149,7 +1206,7 @@ def match_payouts_to_bank(
             ]
             matches[idx] = pm
             cand_text = "; ".join(_candidate_label(c) for c in pm.candidates)
-            notes.append(
+            notes_by_idx[idx] = (
                 f"payout {line.month} on {payout_date_iso}: TIE between "
                 f"{len(tied)} equally-close bank credits, none auto-picked "
                 f"-- candidates: {cand_text}."
@@ -1173,7 +1230,7 @@ def match_payouts_to_bank(
             pm.credit_amount = win_c.amount
             pm.candidates = [win_c]
             matches[idx] = pm
-            notes.append(
+            notes_by_idx[idx] = (
                 f"payout {line.month} on {payout_date_iso}: bank credit found "
                 f"but split across {len(win_c.split_accounts or [])} accounts "
                 f"({', '.join(win_c.split_accounts or [])}) -- cannot route the "
@@ -1187,6 +1244,48 @@ def match_payouts_to_bank(
         pm.credit_account = win_c.account
         pm.credit_txn_guid = win_c.txn_guid
         matches[idx] = pm
+
+    # H35-12: split phase. Single-credit matching above has run for EVERY
+    # payout; only payouts still unmatched are tried here, and only with
+    # credits no single match consumed.
+    for idx in sorted(matches):
+        pm = matches[idx]
+        if pm.outcome != NO_MATCH:
+            continue
+        line = lines_by_idx[idx]
+        sets = _split_sets(pm, all_deposits, used, window_days)
+        if len(sets) == 1:
+            chosen = sets[0]
+            for i, _c in chosen:
+                used[i] = True
+            parts = [c for _i, c in chosen]
+            pm.outcome = MATCHED
+            pm.parts = parts
+            pm.credit_amount = round(sum(c.amount for c in parts), 2)
+            pm.credit_date = max(c.date for c in parts)
+            pm.credit_account = parts[0].account
+            pm.credit_txn_guid = parts[0].txn_guid
+            pm.credit_txn_guids = [c.txn_guid for c in parts]
+        elif len(sets) > 1:
+            pm.outcome = TIE
+            pm.candidate_sets = [[c for _i, c in st] for st in sets]
+            pm.candidates = [c for st in pm.candidate_sets for c in st]
+            set_text = "; ".join(
+                f"set {n}: " + " + ".join(_candidate_label(c) for c in st)
+                for n, st in enumerate(pm.candidate_sets, start=1)
+            )
+            notes_by_idx[idx] = (
+                f"payout {line.month} on {pm.payout_date}: TIE between "
+                f"{len(sets)} different sets of bank credits that each add up to "
+                f"the payout, none auto-picked -- {set_text}."
+            )
+        elif fy_has_deposits:
+            notes_by_idx[idx] = (
+                f"payout {line.month} on {pm.payout_date}: no bank credit found "
+                "-- genuine gap."
+            )
+
+    notes: list[str] = [notes_by_idx[i] for i in sorted(notes_by_idx)]
 
     if not fy_has_deposits:
         notes.insert(0, (

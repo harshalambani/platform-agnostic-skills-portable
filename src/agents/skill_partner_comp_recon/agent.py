@@ -186,6 +186,11 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         return f"{label}: parsed from {path}.", record
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
+    except _llp_statement_parser.NotAnL5DocumentError as e:
+        # H35-13: the parser's message already names the file and what the
+        # document is; pass it through whole instead of wrapping it in
+        # "could not parse", which reads as if the statement were unreadable.
+        return f"{label}: not available ({e})", None
     except Exception as e:
         return f"{label}: not available (could not parse {path}: {e})", None
 
@@ -447,6 +452,21 @@ def _summarize_report(
         for flag in bank_match_notes:
             lines_out.append(f"  ! {flag}")
         lines_out.append("=" * 72)
+
+    # H35-12: say plainly which payouts were matched as a set of bank credits.
+    split_matches = [m for m in (bank_matches or {}).values()
+                     if getattr(m, "is_split_match", False)]
+    if split_matches:
+        lines_out.append(
+            f"BANK MATCH -- {len(split_matches)} payout(s) were paid as several "
+            "bank credits and matched as a set:"
+        )
+        for m in split_matches:
+            parts_text = " + ".join(f"{p.amount:,.2f} on {p.date}" for p in m.parts)
+            lines_out.append(
+                f"  {m.month}: payout {m.payout_amount:,.2f} = {parts_text} "
+                f"(all posted to {m.credit_account})."
+            )
 
     lines_out.append(
         f"Partner Compensation Reconciliation for FY{report.financial_year} -- "

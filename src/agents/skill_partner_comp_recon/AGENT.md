@@ -653,6 +653,22 @@ unconditional-bank-leg journal shape to compare against the book in its own
 existing (unrelated) check -- Section C's own "bank" `ACCOUNT_KEYS` leg is
 therefore unchanged by this build and should be re-examined separately.
 
+**H35-12 -- a payout paid as several bank credits.** Sometimes the firm
+pays one monthly payout as 2 or 3 separate bank credits. Single-credit
+matching (above) runs first for every payout and is unchanged. Only a payout
+still unmatched is then tried against SETS of credits, using only credits no
+single match consumed. A set is 2 or 3 credits (`MAX_SPLIT_PARTS`), all on
+the bank account, all posted to the SAME counter-account, each dated in the
+payout's calendar month or within the window of the payout date, adding up
+to the payout within Re 1. Exactly one such set is MATCHED ("split, N
+credits") and its credits are used up. Two or more different sets are a TIE:
+no journal, and a loud note names every set. Nothing is ever auto-picked.
+The journal's cash side lands on the counter-account at the payout amount
+(never on the bank account), so it balances and a within-Re-1 difference
+stays in the bank import's own postings, exactly as for a single match. The
+Bank match sheet lists every part and Total cash received counts them all.
+The reply text says how many payouts were matched as a set.
+
 See `tests/test_skill_partner_comp_recon.py`'s "H35-05" test section for
 every case above, plus a regression test asserting the total amount posted
 to the bank account across a full `build_journals()` emit is exactly 0.

@@ -3,7 +3,7 @@
 
 *Mode: direct · 🔌 offline (no LLM)*
 
-This codebase has no ledger of which statements were ever imported, so this skill infers likely-missing months a different way: for every bank (BANK/ASSET) and credit-card (LIABILITY/CREDIT) account in the book(s) you select, it buckets that account's own transactions by calendar month across its active window (first transaction to FY-end or today, whichever is earlier) and reports every zero-transaction month it finds. Each zero month is graded HIGH or LOW confidence from that account's own median monthly transaction count (shown alongside so the grading is auditable) -- never silently suppressed. Months after an account's LAST transaction get their own prominent trailing-gap flag, since that usually means the most recent statement was never imported. A zero month that falls on the book's own FY-boundary (its first or last calendar month) is cross-checked against the adjacent FY's registered book for the same entity/account before being reported, since postings are sometimes filed on the wrong side of a year rollover by mistake.
+This codebase has no ledger of which statements were ever imported, so this skill infers likely-missing months from the dates already posted. It looks only at accounts that receive a monthly statement -- the bank accounts and credit cards in the book -- and only inside the book's financial year (1 April to 31 March, or up to today if the year is still running). Earlier years are never checked, however long the book's history. Every month in that year with no transactions is listed by name, for example "Jun 2025, Jul 2025". Months after an account's last transaction come first ("no transactions since Oct 2025"), because that usually means the latest statement was never imported. An account with very few transactions (under one a month on average) is marked quiet: its empty months may simply be months with no activity, so check before importing. If the book is not registered to a financial year, the year of its latest transaction is used and the report says so. A month at the start or end of the year is first checked against the neighbouring year's registered book for the same entity, since postings are sometimes filed on the wrong side of a year rollover.
 
 ## When to use it
 
@@ -17,12 +17,16 @@ Run periodically (e.g. monthly, or before filing) to catch a bank or credit-card
 - **GnuCash books (.gnucash) -- one or more; all must be closed in GnuCash** (required) — accepts: Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse.
   - One or more GnuCash books to scan, one path per line.
   - ⚠️ Close each book in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Selecting several entities produces one consolidated report.
+- **Also check other asset and liability accounts (loans, deposits, investments...)? Default no** (optional) — accepts: no (default) or yes.
+  - Also check loans, deposits, investments and other non-statement accounts. Off by default.
+  - ⚠️ These accounts have no monthly statement, so empty months there are often normal. They are reported in a separate, clearly labelled section.
 
 ## How to run
 
 1. Pick the entities to scan -- their registered books fill in automatically.
 2. Browse to any book that did not fill in (closed in GnuCash).
-3. Click Run and download the coverage gap report.
+3. Leave 'Also check other asset and liability accounts' on no, unless you want them.
+4. Click Run. The result lists the months with no transactions; download the report for the same list plus every account checked.
 
 ## Output
 
@@ -34,15 +38,16 @@ Data/outputs/YYYY-MM-DD-HHMMSS-<input>-Coverage-Gaps.xlsx
 
 Files produced:
 
-- **`YYYY-MM-DD-HHMMSS-<input>-Coverage-Gaps.xlsx`** — Gaps sheet (one row per suspected gap month: entity, book, account, account class, month, HIGH/LOW confidence, the account's own median, and a TRAILING flag for gaps since the last transaction) and a Summary sheet (one row per in-scope account: first/last transaction, active-window end, median, confidence, and gap counts).
+- **`YYYY-MM-DD-HHMMSS-<input>-Coverage-Gaps.xlsx`** — "Missing months" sheet: an opening line, then one row per account with empty months (account, the months, and what it means). "Accounts checked" sheet: one row per account checked, including those with nothing missing -- transactions in the year, months with transactions out of months checked, and the first and last transaction in the year.
 
 ## Tips
 
-Start with the TRAILING rows in the Gaps sheet -- those are gaps since an account's most recent transaction and are the most likely to mean a statement still needs importing. A LOW-confidence gap on a quiet account (e.g. a savings account paid quarterly interest) is often expected -- check the account's own median in the Summary sheet before chasing it.
+Start with the accounts that say "no transactions since ..." -- the latest statement is the most likely one to be missing. For an account marked quiet, look at the Accounts checked sheet first: a savings account that only pays interest now and then often has empty months that are normal.
 
 ## Troubleshooting
 
 | If… | Then… |
 |------|-------|
-| An account I expect to see is missing from both sheets. | Accounts with NO transactions at all in the book are not reported -- there is nothing to grade a cadence against. Placeholder/hidden accounts are also excluded, same as elsewhere in the GnuCash skills. |
-| A gap I know about did not show up. | It may have been suppressed because the adjacent FY's registered book has a transaction for the same account in that exact month -- a sign it was filed on the wrong side of the year rollover rather than missing. Check the Summary sheet's 'FY-Boundary Suppressed' column. |
+| An account I expect to see is not listed. | Only bank and credit-card accounts are checked unless you turn on 'Also check other asset and liability accounts'. Accounts with no transactions up to the end of the year, and hidden or placeholder accounts, are never checked. |
+| The report covers a year I did not expect. | The year comes from the entity's registered book (or the book's file name). If the book is not registered to a year, the year of its latest transaction is used, and the first line of the report says so. |
+| A gap I know about did not show up. | It may have been left out because the neighbouring year's registered book has a transaction for the same account in that exact month -- a sign it was filed on the wrong side of the year rollover rather than missing. |

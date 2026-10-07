@@ -100,6 +100,11 @@ import pdfplumber
 
 from .payout_advice import _FFFD_RUN_RE, _parse_amount
 
+# H35-13: the Target compensation letter and the Compensation summary are
+# named by the same verified title patterns the advisory-slot check uses.
+# precheck.py imports nothing from this package, so there is no cycle.
+from ..precheck import classify_advisory_text
+
 # ---------------------------------------------------------------------------
 # Content-dispatch markers.
 # ---------------------------------------------------------------------------
@@ -333,6 +338,21 @@ def parse_l5_words(words: list[dict], source_name: str = "") -> dict:
                 f"{source_name or '<words>'}: looks like a salary statement "
                 "(\"SALARY STATEMENT FOR\"), not an L5 LLP Statement of Account "
                 "-- skipped."
+            )
+        _doc_kind = classify_advisory_text(full_text)
+        _what_field_needs = (
+            'This field needs the "Statement of Account ... AS ON 31 MARCH" '
+            "PDF (or the .eml it came in) -- skipped."
+        )
+        if _doc_kind == "target_comp_letter":
+            raise NotAnL5DocumentError(
+                f"{source_name or '<words>'}: this is the \"Target compensation "
+                f"advice\" letter, not the LLP Statement of Account. {_what_field_needs}"
+            )
+        if _doc_kind == "compensation_summary":
+            raise NotAnL5DocumentError(
+                f"{source_name or '<words>'}: this is the \"Compensation summary\" "
+                f"(year-end Advisory), not the LLP Statement of Account. {_what_field_needs}"
             )
         if _NON_L5_L3_PAYMENTS_RE.search(full_text) and _NON_L5_L3_SCHEDULE_RE.search(full_text):
             raise NotAnL5DocumentError(

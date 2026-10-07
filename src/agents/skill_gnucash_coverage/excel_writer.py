@@ -1,17 +1,18 @@
 """
 excel_writer.py -- writes the Coverage Gap Detector's report workbook.
 
-Two sheets, mirroring skill_ais_reconcile/excel_writer.py's conventions
-(same font, same header/confidence fills, same autosize/freeze-pane habits)
-so every GnuCash-family skill's output looks and behaves the same way:
+Two sheets, in plain language (same font and header habits as the other
+GnuCash-family skills):
 
-  1. "Gaps"    -- one row per suspected gap month: entity, book, account,
-                  account class, month, confidence, the account's median
-                  (so the grading is auditable), and a prominent TRAILING
-                  flag/highlight for gaps after an account's last posting.
-  2. "Summary" -- one row per in-scope account with transaction history:
-                  first/last transaction date, active-window end, median,
-                  confidence, and gap/trailing/suppressed counts.
+  1. "Missing months"   -- the opening line on top, then one row per account
+                           with empty months: Account | Months with no
+                           transactions | What it means. Accounts that are
+                           only checked on request ("Other accounts") sit in
+                           their own labelled section underneath.
+  2. "Accounts checked" -- one row per checked account, including the ones
+                           with nothing missing: transactions in the year,
+                           months with transactions out of months checked,
+                           and the first/last transaction date in the year.
 """
 from __future__ import annotations
 
@@ -61,80 +62,66 @@ def _autosize(ws, ncols: int, min_width: int = 10, max_width: int = 44) -> None:
         ws.column_dimensions[letter].width = max(min_width, min(max_width, longest + 2))
 
 
-def _write_gaps_sheet(wb: Workbook, gaps: list) -> None:
-    ws = wb.create_sheet("Gaps")
-    headers = ["Entity", "Book", "Account", "Account Class", "Month",
-               "Confidence", "Account Median (txns/mo)", "Trailing Gap"]
+def _write_missing_sheet(wb: Workbook, scan) -> None:
+    ws = wb.create_sheet("Missing months")
+    _set(ws, 1, 1, scan.opening_line(), bold=True)
+    headers = ["Account", "Months with no transactions", "What it means"]
+    _write_header(ws, 3, headers)
+
+    row = 4
+    any_gap = False
+    for idx, (title, rows) in enumerate(scan.sections()):
+        if not rows:
+            continue
+        any_gap = True
+        if idx > 0 or scan.include_other:
+            _set(ws, row, 1, title, bold=True, fill=_YELLOW_FILL, color=_YELLOW_FONT_COLOR)
+            ws.cell(row=row, column=2).fill = _YELLOW_FILL
+            ws.cell(row=row, column=3).fill = _YELLOW_FILL
+            row += 1
+        for r in rows:
+            name = r.account_path if scan.books_scanned <= 1 else f"{r.account_path} [{r.book}]"
+            _set(ws, row, 1, name)
+            _set(ws, row, 2, r.months_text,
+                 fill=(_RED_FILL if r.trailing_months else None),
+                 color=(_RED_FONT_COLOR if r.trailing_months else None))
+            _set(ws, row, 3, r.meaning)
+            for col in (2, 3):
+                ws.cell(row=row, column=col).alignment = Alignment(wrap_text=True, vertical="top")
+            row += 1
+    if not any_gap:
+        _set(ws, row, 1, "No account has months with no transactions.")
+    for w, letter in ((46, "A"), (46, "B"), (70, "C")):
+        ws.column_dimensions[letter].width = w
+
+
+def _write_checked_sheet(wb: Workbook, scan) -> None:
+    ws = wb.create_sheet("Accounts checked")
+    headers = ["Account", "Book", "Kind of account", "Financial year",
+               "Transactions in the year", "Months with transactions",
+               "First transaction in the year", "Last transaction in the year"]
     _write_header(ws, 1, headers)
-
     row = 2
-    if not gaps:
-        _set(ws, row, 1, "No suspected coverage gaps found in the selected book(s).")
-        _autosize(ws, len(headers))
-        return
-
-    # Trailing gaps first (highest-value signal), then interior gaps; within
-    # each, HIGH confidence first -- keeps the most actionable rows on top.
-    ordered = sorted(
-        gaps,
-        key=lambda g: (not g.trailing, g.confidence != "HIGH", g.entity, g.book,
-                       g.account_path, g.month),
-    )
-    for g in ordered:
-        is_high = g.confidence == "HIGH"
-        fill = _RED_FILL if (g.trailing and is_high) else (_YELLOW_FILL if is_high else None)
-        color = (_RED_FONT_COLOR if (g.trailing and is_high)
-                 else (_YELLOW_FONT_COLOR if is_high else None))
-        _set(ws, row, 1, g.entity)
-        _set(ws, row, 2, g.book)
-        _set(ws, row, 3, g.account_path)
-        _set(ws, row, 4, g.account_class)
-        _set(ws, row, 5, g.month)
-        _set(ws, row, 6, g.confidence, fill=fill, color=color, bold=is_high)
-        _set(ws, row, 7, round(g.median, 2))
-        _set(ws, row, 8, "TRAILING" if g.trailing else "",
-             fill=(_RED_FILL if g.trailing else None),
-             color=(_RED_FONT_COLOR if g.trailing else None),
-             bold=g.trailing)
+    order = sorted(scan.results, key=lambda r: (not r.is_core,
+                                                r.entity, r.book, r.account_path))
+    for r in order:
+        _set(ws, row, 1, r.account_path)
+        _set(ws, row, 2, r.book)
+        _set(ws, row, 3, "Bank or card" if r.is_core else "Other")
+        _set(ws, row, 4, r.fy_key)
+        _set(ws, row, 5, r.txns_in_fy)
+        _set(ws, row, 6, f"{r.months_with_txns} of {r.months_checked}")
+        _set(ws, row, 7, r.first_in_fy or "-")
+        _set(ws, row, 8, r.last_in_fy or "-")
         row += 1
-
+    if not scan.results:
+        _set(ws, row, 1, "No accounts with transactions were found to check.")
     _autosize(ws, len(headers))
 
 
-def _write_summary_sheet(wb: Workbook, stats: list) -> None:
-    ws = wb.create_sheet("Summary")
-    headers = ["Entity", "Book", "Account", "Account Class", "First Txn",
-               "Last Txn", "Window End", "Median (txns/mo)", "Confidence",
-               "Zero Months", "Trailing Zero Months", "FY-Boundary Suppressed"]
-    _write_header(ws, 1, headers)
-
-    row = 2
-    for s in sorted(stats, key=lambda s: (s.entity, s.book, s.account_path)):
-        _set(ws, row, 1, s.entity)
-        _set(ws, row, 2, s.book)
-        _set(ws, row, 3, s.account_path)
-        _set(ws, row, 4, s.account_class)
-        _set(ws, row, 5, s.first_date)
-        _set(ws, row, 6, s.last_date)
-        _set(ws, row, 7, s.window_end)
-        _set(ws, row, 8, round(s.median, 2))
-        _set(ws, row, 9, s.confidence, bold=(s.confidence == "HIGH"))
-        _set(ws, row, 10, s.zero_months)
-        _set(ws, row, 11, s.trailing_zero_months,
-             bold=s.trailing_zero_months > 0,
-             color=(_RED_FONT_COLOR if s.trailing_zero_months > 0 else None))
-        _set(ws, row, 12, s.suppressed_boundary_gaps)
-        row += 1
-
-    if not stats:
-        _set(ws, row, 1, "No in-scope accounts with transaction history were found.")
-
-    _autosize(ws, len(headers))
-
-
-def write_gaps_workbook(gaps: list, stats: list, out_path: str) -> None:
+def write_report_workbook(scan, out_path: str) -> None:
     wb = Workbook()
     wb.remove(wb.active)
-    _write_gaps_sheet(wb, gaps)
-    _write_summary_sheet(wb, stats)
+    _write_missing_sheet(wb, scan)
+    _write_checked_sheet(wb, scan)
     wb.save(out_path)

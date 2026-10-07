@@ -70,7 +70,7 @@ inputs:
     required: true
   - name: "llp_statement"
     type: "file"
-    label: 'LLP "Statement of Account ... AS ON 31 MARCH" -- the PDF, or the .eml e-mail it arrived in (enables leg 1, the capital sign-off)'
+    label: 'LLP "Statement of Account ... AS ON 31 MARCH" -- the PDF, or the .eml e-mail it arrived in (not the Target compensation advice letter; enables leg 1, the capital sign-off)'
     file_types: [".pdf", ".eml"]
     required: false
   - name: "payment_schedule"

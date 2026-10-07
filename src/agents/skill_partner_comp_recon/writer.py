@@ -891,13 +891,32 @@ def _write_bank_match_sheet(wb, bank_matches):
         _set(ws, row, 1, pm.month)
         _set(ws, row, 2, pm.payout_date)
         _set(ws, row, 3, pm.payout_amount)
-        _set(ws, row, 4, pm.outcome.upper(), fill=outcome_fills.get(pm.outcome), bold=True)
+        _set(ws, row, 4, pm.outcome_label, fill=outcome_fills.get(pm.outcome), bold=True)
+        if pm.is_split_match:
+            # H35-12: one row per part of a split match.
+            n_parts = len(pm.parts)
+            for n, part in enumerate(pm.parts, start=1):
+                if n > 1:
+                    row += 1
+                    _set(ws, row, 1, pm.month)
+                    _set(ws, row, 4, f"  part {n} of {n_parts}")
+                _set(ws, row, 5, part.date)
+                _set(ws, row, 6, part.amount)
+                _set(ws, row, 7, part.account or "")
+            row += 1
+            continue
         _set(ws, row, 5, pm.credit_date or "")
         _set(ws, row, 6, pm.credit_amount if pm.credit_amount is not None else "")
         _set(ws, row, 7, pm.credit_account or "")
-        candidates_text = "; ".join(
-            _format_bank_candidate(c) for c in (pm.candidates or [])
-        )
+        if pm.candidate_sets:
+            candidates_text = " | ".join(
+                f"set {n}: " + " + ".join(_format_bank_candidate(c) for c in st)
+                for n, st in enumerate(pm.candidate_sets, start=1)
+            )
+        else:
+            candidates_text = "; ".join(
+                _format_bank_candidate(c) for c in (pm.candidates or [])
+            )
         _set(ws, row, 8, candidates_text, wrap=True)
         row += 1
     if row == 2:
