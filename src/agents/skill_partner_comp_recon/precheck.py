@@ -88,9 +88,8 @@ def check_payout_set(advice_records: list[dict], fy: str | None,
             what = "; ".join(f"{_source(r)} ({_kind(r)})" for r in recs)
             notes.append(
                 f"{PREFIX}{_label(month)} was given {len(recs)} times: {what}. "
-                "A month must come from ONE document; this run uses them all as "
-                "given, so remove the extra one and run again or that month is "
-                "counted more than once.")
+                "A month must come from ONE document, so this run will be refused "
+                "(nothing is written) until the extra one is removed.")
 
     if in_year and seen:
         missing = [m for m in in_year if m not in seen]

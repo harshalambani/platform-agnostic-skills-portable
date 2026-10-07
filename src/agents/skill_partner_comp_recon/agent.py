@@ -1039,6 +1039,15 @@ def _run_from_structured_input(
             "'financial_year' key (see skill.yaml's help text for the shape)."
         )
 
+    # H35-10: the same month twice would be counted twice -- refuse.
+    _seen_months: set = set()
+    for _m in (data.get("monthly") or []):
+        _mk = _m.get("month") if isinstance(_m, dict) else None
+        if _mk is not None and _mk in _seen_months:
+            return (f"ERROR: the structured input lists the month {_mk} more than once. "
+                    "A month must appear ONCE; nothing was written.")
+        _seen_months.add(_mk)
+
     try:
         report = build_report(data)
     except KeyError as e:

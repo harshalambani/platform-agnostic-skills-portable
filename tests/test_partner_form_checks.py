@@ -114,7 +114,7 @@ def test_no_records_or_unknown_fy_is_silent():                           # NEGAT
     assert precheck.check_payout_set(full_year(), None, None) == []
 
 
-def test_run_surfaces_warnings_and_still_uses_every_document(tmp_path, monkeypatch):
+def test_run_surfaces_the_duplicate_and_is_refused_for_it(tmp_path, monkeypatch):
     d = tmp_path / "advices"
     d.mkdir()
     for n in ("a.pdf", "b.pdf"):
@@ -137,7 +137,9 @@ def test_run_surfaces_warnings_and_still_uses_every_document(tmp_path, monkeypat
         output_path=str(tmp_path / "o.xlsx"), config_path=None, model_override=None,
         journal_path="")
     assert "given 2 times" in out
-    assert seen == ["a.pdf", "b.pdf"]            # both were handed on, none dropped
+    assert out.startswith("ERROR")               # H35-10: refused, not counted twice
+    assert seen == ["a.pdf", "b.pdf"]            # both were read ...
+    assert not (tmp_path / "o.xlsx").exists()    # ... and nothing was written
 
 
 # ---- advisory slot ---------------------------------------------------------
