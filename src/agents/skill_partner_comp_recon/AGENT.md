@@ -669,6 +669,16 @@ stays in the bank import's own postings, exactly as for a single match. The
 Bank match sheet lists every part and Total cash received counts them all.
 The reply text says how many payouts were matched as a set.
 
+**Excluded months on the GnuCash tie-out rows.** A payout month with no
+unique bank match (no match or a tie) has no journal, so a tie-out row's
+Computed figure leaves it out. Each row now names the months it leaves out
+whenever that month's would-be legs touch the row's account for a non-zero
+amount. Such a row reads "AGREE excl. <months>" instead of AGREE, is listed
+on the Exceptions and Open items sheets, and counts as undecidable. The
+left-out amount is only described in the note; it is never added to the
+Computed figure. A skipped month that would not touch the account (for
+example no capital that month) changes nothing, so a plain AGREE stays plain.
+
 See `tests/test_skill_partner_comp_recon.py`'s "H35-05" test section for
 every case above, plus a regression test asserting the total amount posted
 to the bank account across a full `build_journals()` emit is exactly 0.

@@ -150,6 +150,8 @@ def _status_fill(r):
     if getattr(r, "not_checked", False):
         return TF, (getattr(r, "status_label", None) or "NOT CHECKED")
     agree = r.agree
+    if agree is True and getattr(r, "excluded_months", ""):
+        return TF, f"AGREE excl. {r.excluded_months}"
     if agree is True:
         return OK, "AGREE"
     if agree is False:
@@ -762,7 +764,8 @@ def _write_exceptions_sheet(wb, report: Report):
         # genuine failure -- it never belongs on the Exceptions sheet, the
         # same way it never counts toward the summary's variance/
         # undecidable totals.
-        if r.agree is not True and not r.informational and not getattr(r, "not_checked", False):
+        if ((r.agree is not True or getattr(r, "excluded_months", ""))
+                and not r.informational and not getattr(r, "not_checked", False)):
             fill, text = _status_fill(r)
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, text, fill=fill, bold=True)
@@ -805,7 +808,8 @@ def _write_open_items_sheet(wb, report: Report):
         # H35-04 round 2, item 3: same exclusion as the Exceptions sheet --
         # an informational/not_checked row is not an open item either, it
         # is a deliberate "not yet in scope for this comparison" row.
-        if r.agree is None and not r.informational and not getattr(r, "not_checked", False):
+        if ((r.agree is None or (r.agree is True and getattr(r, "excluded_months", "")))
+                and not r.informational and not getattr(r, "not_checked", False)):
             _set(ws, row, 1, r.category, wrap=True)
             _set(ws, row, 2, r.note, wrap=True)
             _set(ws, row, 3, "Supply the missing source figure for this financial year.",

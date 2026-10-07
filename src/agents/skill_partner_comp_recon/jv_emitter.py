@@ -330,6 +330,31 @@ def _monthly_journal(
     return Journal(txn_id=txn_id, date=date, description=desc, splits=splits)
 
 
+def excluded_month_legs(report, accounts: dict, bank_matches: dict | None) -> dict:
+    """Months whose payout got NO journal because the bank match was not a
+    unique match (no_match or tie), with the legs that journal would have
+    carried, as {month: [Split, ...]} (cash/bank leg left out).
+
+    Used only to NAME what a GnuCash tie-out row leaves out. It never feeds
+    a journal, and its amounts are never added to any computed figure."""
+    out: dict = {}
+    if not bank_matches:
+        return out
+    fy_pfx = fy_prefix(report.financial_year)
+    firm_name = getattr(report, "firm_name", "") or ""
+    probe_accounts = dict(accounts or {})
+    probe_accounts["bank"] = "__excluded_probe__"
+    for idx, line in enumerate(report.monthly, start=1):
+        m = bank_matches.get(idx)
+        if m is None or m.outcome == "matched":
+            continue
+        journal = _monthly_journal(line, probe_accounts, fy_pfx, firm_name, idx, bank_match=None)
+        if journal is None:
+            continue
+        out[line.month] = [s for s in journal.splits if s.account != "__excluded_probe__"]
+    return out
+
+
 def _opening_reclass_journal(block: dict | None, fy_pfx: str, firm_name: str = "") -> "Journal | None":
     """Build the optional opening reclassification entry (spec 2.6). This
     exists because a closed, filed year is corrected by a prior-period

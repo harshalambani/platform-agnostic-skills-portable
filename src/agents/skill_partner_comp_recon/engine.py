@@ -440,6 +440,14 @@ class ReconciliationResult:
     # supplied)" row never prints as "CANNOT RECONCILE".
     not_checked: bool = False
     status_label: str | None = None
+    # Tie-out excluded months: a payout month with no unique bank match has
+    # no journal, so a GnuCash tie-out row's Computed figure leaves it out.
+    # When that month would have touched this row's account for a non-zero
+    # amount, the row names the months here ("2025-04, 2025-05"). A row
+    # with this set is never a clean AGREE: it shows "AGREE excl. <months>",
+    # is listed on the Exceptions and Open items sheets, and counts as
+    # undecidable. The excluded amount is never added to the Computed figure.
+    excluded_months: str = ""
 
 
 def reconcile_category(category: str, sources: dict,

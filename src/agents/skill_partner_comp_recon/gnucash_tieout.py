@@ -54,7 +54,7 @@ from .engine import (
     journal_txn_id,
     reconcile_category,
 )
-from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals
+from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, excluded_month_legs
 from .jv_emitter import _strip_root as _jv_strip_root
 
 _ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
@@ -308,6 +308,7 @@ def build_balance_tieout(
             matched_by_account.setdefault(m.credit_account, []).append(m)
 
     results: list[ReconciliationResult] = []
+    row_path: dict[str, str] = {}
     for key in ACCOUNT_KEYS:
         category = f"{_TIEOUT_LABEL}: {key}"
         configured_path = accounts.get(key)
@@ -318,6 +319,7 @@ def build_balance_tieout(
             }))
             continue
         stripped_path = _jv_strip_root(configured_path)
+        row_path[category] = stripped_path
 
         if key == "bank" and bank_matches:
             # H35-05 round 3, item 2: since H35-05 this skill never posts
@@ -579,6 +581,7 @@ def build_balance_tieout(
 
     for stripped_path in rerouted_accounts:
         category = f"{_TIEOUT_LABEL}: bank-match counter-account {stripped_path}"
+        row_path[category] = stripped_path
 
         computed_raw = sum(
             s.debit - s.credit
@@ -664,7 +667,50 @@ def build_balance_tieout(
         })
         results.append(result)
 
-    return results
+    return _name_excluded_months(results, row_path, report, accounts, bank_matches)
+
+
+def _name_excluded_months(results, row_path, report, accounts, bank_matches):
+    """Tie-out excluded months: a payout month with no unique bank match
+    (no_match or tie, treated alike) has no journal, so the row's Computed
+    figure leaves it out. Name every such month whose would-be legs touch the
+    row's account for a non-zero amount. The amount is only described in the
+    note, never added to a figure. A month that would not have touched the
+    account (for example a month with no capital transferred) is not named,
+    so a plain AGREE stays plain."""
+    try:
+        skipped = excluded_month_legs(report, accounts, bank_matches)
+    except JournalValidationError:
+        return results
+    if not skipped:
+        return results
+    out = []
+    for r in results:
+        path = row_path.get(r.category)
+        if path is None or r.informational or r.not_checked:
+            out.append(r)
+            continue
+        hits = []
+        for month, splits in skipped.items():
+            amt = round(sum(s.debit - s.credit for s in splits if s.account == path), 2)
+            if abs(amt) >= 0.005:
+                hits.append((month, amt))
+        if not hits:
+            out.append(r)
+            continue
+        months = ", ".join(m for m, _ in hits)
+        detail = "; ".join(f"{m}: {a:,.2f}" for m, a in hits)
+        plural = len(hits) > 1
+        extra = (
+            f"EXCLUDES {months} -- no unique bank match for "
+            f"{'those payouts' if plural else 'that payout'}, so no journal was "
+            f"built and the Computed figure leaves {'them' if plural else 'it'} "
+            f"out (would-be amount on this account, not included: {detail})."
+        )
+        r.note = f"{r.note} {extra}".strip()
+        r.excluded_months = months
+        out.append(r)
+    return out
 
 
 # ---------------------------------------------------------------------------

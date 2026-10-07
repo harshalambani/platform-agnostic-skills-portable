@@ -8596,3 +8596,118 @@ def test_run_accepts_the_entitys_own_26as_workbook(tmp_path, monkeypatch):
     own = _scoped_26as(tmp_path / "own-26AS.xlsx", "Test Individual", "AAAAA0000A")
     result = _run_with_26as(monkeypatch, tmp_path, own)
     assert "belongs to" not in result
+
+
+# ---------------------------------------------------------------------------
+# Tie-out excluded months -- a GnuCash tie-out row names the payout months its
+# Computed figure leaves out (no unique bank match, so no journal). Synthetic
+# books only.
+# ---------------------------------------------------------------------------
+
+_EXCL_ACCOUNTS = dict(_GC_TIEOUT_ACCOUNTS, capital_contribution="Expenses:Tax")
+
+
+def _excl_run(tmp_path, cap_by_month, deposits, name="excl"):
+    """cap_by_month: {"2025-04": capital, "2025-05": capital}. Each payout
+    pays 480000 minus its capital leg, so the journal balances. deposits:
+    [(seed, iso_date, amount)] credited on the bank, counter = Remuneration.
+    Returns {category-suffix: ReconciliationResult} plus the matches."""
+    accounts, guids = _gc_tree()
+    txns = [
+        _bank_deposit_txn(seed, d, amt, guids["Current Account"], guids["Remuneration"])
+        for seed, d, amt in deposits
+    ]
+    book_path = _write_gnucash_book(
+        tmp_path / f"{name}.gnucash", _gc_document_xml(accounts, txns),
+    )
+    data = build_input_data(
+        financial_year="2025-26",
+        advice_records=[
+            _class_a_advice(m, total_paid=480000.0 - cap) for m, cap in cap_by_month.items()
+        ],
+        accounts=_EXCL_ACCOUNTS,
+        firm_name="Synthetic Test LLP",
+    )
+    report = build_report(data)
+    for line in report.monthly:
+        line.capital_transferred = cap_by_month[line.month]
+    matches, _notes, reason = match_payouts_to_bank(report, _EXCL_ACCOUNTS, book_path)
+    assert reason is None
+    rows = build_balance_tieout(
+        report, _EXCL_ACCOUNTS, book_path, "2025-26", bank_matches=matches,
+    )
+    return {r.category.split(": ", 1)[1]: r for r in rows}, matches
+
+
+def test_excluded_month_with_a_capital_leg_is_named_and_not_a_clean_agree(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    assert matches[1].outcome == NO_MATCH and matches[2].outcome == MATCHED
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "2025-04"
+    assert "EXCLUDES 2025-04" in cap.note and "50,000.00" in cap.note
+    assert writer._status_fill(cap)[1] == "AGREE excl. 2025-04"
+    assert writer._status_fill(cap)[1] != "AGREE"
+
+
+def test_excluded_amount_is_never_added_to_the_computed_figure(tmp_path):
+    rows, _m = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    cap = rows["capital_contribution"]
+    computed = [v for k, v in cap.sources.items() if k.startswith("Computed")][0]
+    assert computed == 0.0
+    assert 50000.0 not in cap.sources.values()
+
+
+def test_excluded_month_with_zero_capital_leaves_a_plain_agree(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 0.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    assert matches[1].outcome == NO_MATCH
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "" and "EXCLUDES" not in cap.note
+    assert cap.agree is True and writer._status_fill(cap)[1] == "AGREE"
+    # An account that the skipped month DID touch is still named.
+    assert rows["tds_expense"].excluded_months == "2025-04"
+
+
+def test_no_skipped_months_changes_nothing(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 0.0, "2025-05": 0.0},
+        [("d4", "2025-04-30", 480000.0), ("d5", "2025-05-31", 480000.0)],
+    )
+    assert all(m.outcome == MATCHED for m in matches.values())
+    assert all(r.excluded_months == "" for r in rows.values())
+    assert all("EXCLUDES" not in r.note for r in rows.values())
+
+
+def test_a_tie_month_is_excluded_the_same_way_as_no_match(tmp_path):
+    rows, matches = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("t1", "2025-04-27", 430000.0), ("t2", "2025-05-03", 430000.0),
+         ("d5", "2025-05-31", 480000.0)],
+        name="excl_tie",
+    )
+    assert matches[1].outcome == TIE
+    cap = rows["capital_contribution"]
+    assert cap.excluded_months == "2025-04"
+    assert writer._status_fill(cap)[1] == "AGREE excl. 2025-04"
+
+
+def test_a_row_with_excluded_months_is_listed_as_open_and_exception(tmp_path):
+    import openpyxl
+    rows, _m = _excl_run(
+        tmp_path, {"2025-04": 50000.0, "2025-05": 0.0},
+        [("d5", "2025-05-31", 480000.0)],
+    )
+    report = _bank_match_report([_class_a_advice("2025-04")])
+    report.reconciliation.append(rows["capital_contribution"])
+    wb = openpyxl.Workbook()
+    writer._write_exceptions_sheet(wb, report)
+    text = " ".join(str(c.value) for row in wb["Exceptions"].iter_rows() for c in row)
+    assert "AGREE excl. 2025-04" in text

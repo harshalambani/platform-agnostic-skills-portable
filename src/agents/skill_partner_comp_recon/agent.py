@@ -397,7 +397,8 @@ def _summarize_report(
     ]
     undecidable = [
         r for r in report.reconciliation
-        if r.agree is None and not r.informational and not r.not_checked
+        if (r.agree is None or (r.agree is True and r.excluded_months))
+        and not r.informational and not r.not_checked
     ]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
