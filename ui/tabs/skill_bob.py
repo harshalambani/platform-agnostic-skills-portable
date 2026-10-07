@@ -18,6 +18,12 @@ import gradio as gr
 from .. import _config
 from .. import _health
 from .. import _runner
+from ._generic import reply_label_for, skill_uses_llm
+
+
+def _reply_label() -> str:
+    """Heading for the run text -- decided from this skill's own manifest (UI-20)."""
+    return reply_label_for("BoB")
 
 
 def _refresh_models() -> list[tuple[str, str]]:
@@ -59,24 +65,28 @@ def _run_bob(pdf_file, model_choice):
         yield add(f"Warning: PDF not found at {pdf_path}."), gr.update(visible=False)
         return
 
-    yield add("**Step 2/4** — Checking the LLM endpoint."), gr.update(visible=False)
-
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
     active = cfg.get("active_endpoint", "")
     ep = endpoints.get(active) or {}
-    health = _health.check(ep)
-    if not health.ok:
-        yield add(
-            f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
-            "Fix it in Data\\settings\\config.yaml and click Refresh status on the Home tab."
-        ), gr.update(visible=False)
-        return
+    # The LLM endpoint is health-checked only when the manifest says this
+    # skill uses a model (requires.llm).
+    if skill_uses_llm("BoB"):
+        yield add("**Step 2/4** — Checking the LLM endpoint."), gr.update(visible=False)
+        health = _health.check(ep)
+        if not health.ok:
+            yield add(
+                f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
+                "Fix it in Data\\settings\\config.yaml and click Refresh status on the Home tab."
+            ), gr.update(visible=False)
+            return
 
-    yield add(
-        f"**Step 3/4** — Endpoint OK. Calling agent loop against {ep.get('base_url', '?')} "
-        f"with model {model_choice}. First call can take 30–60s while the model warms up."
-    ), gr.update(visible=False)
+        yield add(
+            f"**Step 3/4** — Endpoint OK. Calling agent loop against {ep.get('base_url', '?')} "
+            f"with model {model_choice}. First call can take 30–60s while the model warms up."
+        ), gr.update(visible=False)
+    else:
+        yield add("**Step 3/4** — Running (no LLM endpoint needed)."), gr.update(visible=False)
 
     out_dir = _config.output_dir()
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
@@ -119,7 +129,7 @@ def _run_bob(pdf_file, model_choice):
     if not out_path.is_file():
         yield add(
             f"Warning: skill returned but no output file was produced at {out_path}.\n\n"
-            f"**Agent reply:**\n\n{agent_reply}"
+            f"**{_reply_label()}:**\n\n{agent_reply}"
         ), gr.update(visible=False)
         return
 
@@ -130,7 +140,7 @@ def _run_bob(pdf_file, model_choice):
         f"**Saved to:** {out_abs}\n\n"
         f"Click the **Download CSV** button below to save it locally.\n\n"
         f"---\n\n"
-        f"**Agent reply:**\n\n{agent_reply}"
+        f"**{_reply_label()}:**\n\n{agent_reply}"
     )
     yield msg, gr.update(value=out_abs, visible=True)
 

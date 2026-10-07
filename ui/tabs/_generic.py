@@ -116,6 +116,55 @@ def _entities_yaml_path():
     return _config.data_root_dir() / "itr" / "entities.yaml"
 
 
+def build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir) -> dict:
+    """Substitute the {token} placeholders in skill.run_args. `{config_path}` is
+    the AI-model settings file; entity settings travel separately (the manifest
+    passes `{data_root}/itr/entities.yaml`)."""
+    kwargs: dict = {}
+    for param, template in skill.run_args.items():
+        val = template
+        for inp_name, inp_val in input_map.items():
+            val = val.replace(f"{{inputs.{inp_name}}}", inp_val)
+        val = val.replace("{output_path}", str(out_path))
+        val = val.replace("{output_path_dir}", str(out_path))
+        val = val.replace("{config_path}", str(legacy_cfg))
+        val = val.replace("{model_override}", model_choice or "")
+        val = val.replace("{work_dir}", work_dir)
+        val = val.replace("{data_root}", str(_config.data_root_dir()))
+        # Don't pass empty model_override -- let the skill default.
+        if param == "model_override" and val == "":
+            val = None
+        kwargs[param] = val
+    return kwargs
+
+
+def reply_label(skill) -> str:
+    """Heading for the text a run returns. "Agent reply" only where a model
+    actually answers (the skill needs an LLM); every deterministic skill
+    shows "Result" (UI-20). Same flag that drives the "deterministic skill
+    (no LLM required)" status line."""
+    return "Agent reply" if getattr(getattr(skill, "requires", None), "llm", True) else "Result"
+
+
+def skill_uses_llm(skill_name: str) -> bool:
+    """True when the named skill's manifest says it needs a model (requires.llm).
+    Gates the LLM-endpoint health check on the custom tabs."""
+    from agents.registry import discover
+    for sk in discover():
+        if sk.name == skill_name:
+            return bool(getattr(getattr(sk, "requires", None), "llm", True))
+    return True
+
+
+def reply_label_for(skill_name: str) -> str:
+    """reply_label() for a skill looked up by manifest name (custom tabs)."""
+    from agents.registry import discover  # noqa: PLC0415
+    for sk in discover():
+        if sk.name == skill_name:
+            return reply_label(sk)
+    return "Agent reply"
+
+
 def _scoped_picker_state(inp, entity_key, fy=None):
     """(choices, default value, message) for an entity-scoped picker.
 
@@ -808,27 +857,7 @@ def _make_run_handler(skill: SkillInfo):
 
         # -- Build kwargs from skill.run_args template --
         work_dir = tempfile.mkdtemp(prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-")
-        kwargs: dict[str, str] = {}
-        for param, template in skill.run_args.items():
-            val = template
-            # Replace tokens.
-            for inp_name, inp_val in input_map.items():
-                val = val.replace(f"{{inputs.{inp_name}}}", inp_val)
-            val = val.replace("{output_path}", str(out_path))
-            val = val.replace("{output_path_dir}", str(out_path))
-            val = val.replace("{config_path}", str(legacy_cfg))
-            val = val.replace("{model_override}", model_choice or "")
-            val = val.replace("{work_dir}", work_dir)
-            # Same Data\ anchor as data_root_dir() in both source and frozen
-            # builds -- lets a skill.yaml `run:` token resolve config
-            # subfolders (e.g. Data/itr/...) without baking in a CWD-relative
-            # "Data/" prefix that doubles up when the frozen Launcher already
-            # sets CWD to Data\ (see agent.py Batch 8 / defect A).
-            val = val.replace("{data_root}", str(_config.data_root_dir()))
-            # Don't pass empty model_override — let the skill default.
-            if param == "model_override" and val == "":
-                val = None
-            kwargs[param] = val
+        kwargs = build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir)
 
         # -- Execute --
         def work():
@@ -887,7 +916,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"was produced at {out_path}. Check the details below, fix "
                     f"the input, and run again.\n\n"
                     f"Full log: `{log_path}`\n\n"
-                    f"**Agent reply:**\n\n{agent_reply}"
+                    f"**{reply_label(skill)}:**\n\n{agent_reply}"
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
             out_abs = str(out_path.resolve())
@@ -909,7 +938,7 @@ def _make_run_handler(skill: SkillInfo):
                 f"### Done\n\n"
                 f"**Output folder:** {out_abs}\n\n"
                 f"{review_section}"
-                f"---\n\n**Agent reply:**\n\n{agent_reply}"
+                f"---\n\n**{reply_label(skill)}:**\n\n{agent_reply}"
             )
             yield msg, gr.update(interactive=False, value=None), gr.update(value=out_abs)
         else:
@@ -919,7 +948,7 @@ def _make_run_handler(skill: SkillInfo):
                     f"file was produced, so there is nothing to download. "
                     f"Check the details below, fix the input, and run again.\n\n"
                     f"Full log: `{log_path}`\n\n"
-                    f"**Agent reply:**\n\n{agent_reply}"
+                    f"**{reply_label(skill)}:**\n\n{agent_reply}"
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
 
@@ -956,7 +985,7 @@ def _make_run_handler(skill: SkillInfo):
                 f"**File:** {out_path.name}\n\n"
                 f"**Saved to:** {out_path.resolve()}\n\n"
                 f"Click **{skill.output.download_label}** below.\n\n"
-                f"---\n\n**Agent reply:**\n\n{agent_reply}"
+                f"---\n\n**{reply_label(skill)}:**\n\n{agent_reply}"
             )
             yield msg, gr.update(value=out_abs, interactive=True), gr.update(value=str(out_path.resolve()))
 
