@@ -159,18 +159,44 @@ def test_unknown_or_unreadable_advisory_is_silent():                      # NEGA
     assert precheck.read_first_page_text(str(ROOT / "nope.pdf"), None) is None
 
 
-def test_target_comp_detection_is_marked_unverified_until_a_specimen_exists():
-    """GUARD. The two printed titles come from the build brief; no real
-    target-compensation letter is in the repo. When a specimen fixture is
-    added and the detection verified against it, flip the flag, add the
-    specimen test, and delete this guard."""
+NL = chr(10)
+# Synthetic strings shaped like the verified title lines (no real figures).
+_TARGET = ("ACME LLP"+NL+"Target compensation advice : Year ending 31 March 2027"+NL+"Dear Partner")
+_ADVISORY = ("ACME LLP"+NL+"Compensation summary : Year ended 31 March 2026"+NL+
+             "Target Compensation for the year ended 31 Mar 26 1,000.00")
+
+
+def test_marker_and_todo_are_gone():
     src = (ROOT / "src/agents/skill_partner_comp_recon/precheck.py").read_text(encoding="utf-8")
-    assert "TODO(UI-17, needs a real specimen)" in src
-    assert precheck.ADVISORY_TITLE_UNVERIFIED is True
-    specimens = list((ROOT / "tests").rglob("*target_comp*"))
-    assert not specimens, (
-        "A target-compensation specimen now exists: verify classify_advisory_text "
-        f"against it, set ADVISORY_TITLE_UNVERIFIED = False, drop this guard: {specimens}")
+    assert "ADVISORY_TITLE_UNVERIFIED" not in src and "TODO(UI-17" not in src
+
+
+def test_target_letter_classifies_as_target_comp_letter():
+    assert precheck.classify_advisory_text(_TARGET) == "target_comp_letter"
+
+
+def test_advisory_with_a_target_compensation_line_stays_a_summary():      # NEGATIVE
+    assert precheck.classify_advisory_text(_ADVISORY) == "compensation_summary"
+    assert precheck.check_advisory_slot(_ADVISORY) == []
+
+
+def test_year_ending_never_matches_the_summary_title():                   # NEGATIVE
+    assert not precheck._SUMMARY_TITLE_RE.search("Compensation summary : Year ending 31 March 2027")
+    assert not precheck._SUMMARY_TITLE_RE.search(_TARGET)
+
+
+def test_trailing_token_after_the_year_is_tolerated():
+    assert precheck.classify_advisory_text(
+        "Compensation summary : Year ended 31 March 2026 (revised)") == "compensation_summary"
+    assert precheck.classify_advisory_text(
+        "Target compensation advice : Year ending 31 March 2027 v2") == "target_comp_letter"
+
+
+def test_summary_title_allows_a_one_or_two_digit_day():
+    assert precheck.classify_advisory_text(
+        "Compensation summary : Year ended 1 March 2026") == "compensation_summary"
+    assert precheck.classify_advisory_text(
+        "Compensation summary : Year ended 31 March 2026") == "compensation_summary"
 
 
 # ---- .eml ------------------------------------------------------------------
