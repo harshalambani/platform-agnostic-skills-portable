@@ -11,15 +11,12 @@ Use this once a financial year's partner-compensation documents are in hand and 
 
 ## Inputs
 
-- **Monthly partner payout certificates / payslips** (required) — accepts: One or more PDF files.
-  - All of this financial year's monthly payout certificates / payslips, as PDFs.
-  - ⚠️ Required. Each PDF is dispatched on its CONTENT, never its filename, to the monthly payout-advice parser -- a PDF that fails to open/parse, or whose content doesn't match that layout, fails the whole run loud, naming the file and the reason.
 - **Entity** (required) — accepts: One of the entities defined in entities.yaml, via dropdown.
   - The partner/entity this reconciliation is for.
   - ⚠️ Required -- also selects the GnuCash book below when one is registered for this entity.
-- **Document password (optional -- if the advices/advisory PDFs are protected)** (optional) — accepts: The PDFs' own open password, if any.
-  - Password for the payout advices / advisory PDFs, if they are protected.
-  - ⚠️ Optional -- leave blank if the PDFs are not password-protected. Never logged, never included in any output file.
+- **Monthly partner payout certificates / payslips** (required) — accepts: One or more PDF files.
+  - All of this financial year's monthly payout certificates / payslips, as PDFs.
+  - ⚠️ Required. Each PDF is dispatched on its CONTENT, never its filename, to the monthly payout-advice parser -- a PDF that fails to open/parse, or whose content doesn't match that layout, fails the whole run loud, naming the file and the reason.
 - **Compensation advisory / target compensation advice** (required) — accepts: A single PDF file.
   - The firm's Compensation Advisory / target compensation advice letter for this financial year.
   - ⚠️ Required. Shares a directory with the monthly payout advices at some firms -- this skill dispatches on document CONTENT, never filename, since filenames are not a reliable way to tell the two document families apart. A PDF that fails to open/parse, or whose content doesn't match the Advisory's expected layout, fails the whole run loud, naming the file and the reason.
@@ -29,6 +26,9 @@ Use this once a financial year's partner-compensation documents are in hand and 
 - **Incentive payment schedule (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)** (optional) — accepts: A single PDF file.
   - The firm's own incentive payment schedule for this financial year (the L4 document).
   - ⚠️ Optional -- enables the schedule leg, and takes PRECEDENCE over the payout advices for gross share of profit and both firm's-tax figures (firm_tax_on_sop, firm_tax_others) when supplied. Absent, or supplied but unreadable/malformed/not actually a payment schedule, this leg degrades to an explicit "not available" note naming the reason; it never fails the whole run. A disagreement between the schedule and a payout advice is reported as a diagnostic note, not a run failure.
+- **Document password (optional -- if the advices/advisory PDFs are protected)** (optional) — accepts: The PDFs' own open password, if any.
+  - Password for the payout advices / advisory PDFs, if they are protected.
+  - ⚠️ Optional -- leave blank if the PDFs are not password-protected. Never logged, never included in any output file.
 - **GnuCash book (READ ONLY -- enables the books tie-out)** (optional) — accepts: GnuCash XML book (.gnucash), optionally gzip-compressed.
   - This entity's GnuCash book, opened READ ONLY for the books tie-out.
   - ⚠️ Optional. Never opened for writing by this skill. Absent (or unreadable/malformed), the books tie-out leg is reported 'not available', never defaulted.

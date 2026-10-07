@@ -148,6 +148,38 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
     except Exception:
         return []
 
+# Selects whose value says WHO or WHEN a run is for, not WHAT it was run on.
+# They may lead a form (UI-15: Entity first) but must never name the output
+# file, or every output would be called after the taxpayer / the year instead
+# of after the statement or document.
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years"})
+
+
+def _output_name_source(skill, input_map: dict[str, str]) -> str:
+    """The input value an output file is named after.
+
+    The first input, in skill.yaml declaration order, that has a value AND is
+    consumed by the skill (referenced by a ``{inputs.<name>}`` token in
+    run_args), skipping entity / assessment-year selects. Falls back to the
+    first non-empty value of any input, then to "output", so nothing
+    regresses to an empty name. Reordering a form therefore never changes
+    which input names the output, only declaration order among the rest.
+    """
+    skip = {
+        inp.name for inp in skill.inputs
+        if inp.type == "select" and inp.options_from in _NAME_SKIP_OPTION_SOURCES
+    }
+    consumed = {
+        inp.name for inp in skill.inputs
+        if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
+    }
+    return next(
+        (v for k, v in input_map.items() if v and k in consumed and k not in skip),
+        next((v for k, v in input_map.items() if v and k not in skip),
+             next((v for v in input_map.values() if v), "output")),
+    )
+
+
 
 def _options_from_banks() -> list[tuple[str, str]]:
     """(display_name, display_name) pairs from agents.banks.discover(), for
@@ -649,22 +681,11 @@ def _make_run_handler(skill: SkillInfo):
             out_path = out_dir / f"{stamp}-{skill.output.suffix}"
             out_path.mkdir(parents=True, exist_ok=True)
         else:
-            # Only inputs the skill actually consumes may name the output file.
-            # UI-only inputs — ones that appear in no `{inputs.<name>}` token in
-            # run_args, i.e. the `entity` selects — are pure convenience and must
-            # never hijack the filename. Skipping them is what frees an entity
-            # select to be declared FIRST in skill.yaml (where the user expects
-            # it) instead of being pushed to the bottom of the form to keep it
-            # out of the way. Falls back to the old any-input behaviour if no
-            # consumed input has a value, so nothing regresses to "output".
-            consumed = {
-                inp.name for inp in skill.inputs
-                if any(f"{{inputs.{inp.name}}}" in t for t in skill.run_args.values())
-            }
-            primary_input = next(
-                (v for k, v in input_map.items() if v and k in consumed),
-                next((v for v in input_map.values() if v), "output"),
-            )
+            # Only inputs the skill actually consumes may name the output file,
+            # and an entity / assessment-year select never does -- see
+            # _output_name_source() for why that is what lets the entity lead
+            # every form.
+            primary_input = _output_name_source(skill, input_map)
             # A multi-book field holds one path per line; name the output after
             # the first of them rather than splicing a newline into a filename.
             primary_input = (primary_input.splitlines() or [""])[0].strip() or "output"

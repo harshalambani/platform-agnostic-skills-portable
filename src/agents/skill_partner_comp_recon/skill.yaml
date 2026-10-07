@@ -38,28 +38,22 @@ mode: "direct"
 entry_point: "agent:run"
 
 inputs:
-  # advices_dir leads the form (and so supplies the output filename, via
-  # run_args below) -- mirroring ITR Workbook's bs_html/entity ordering.
-  # entity is declared right after it: it is genuinely required and
-  # consumed via run_args (unlike AIS Reconcile's UI-only "entity"), but
-  # an itr_entities select must never be the FIRST consumed input, or it
-  # would silently name the output file after the taxpayer instead of the
-  # statement (see tests/test_entity_book_wiring.py). Picking someone
-  # here also fills in the GnuCash book input below (book_from).
-  - name: "advices_dir"
-    type: "files"
-    label: "Monthly partner payout certificates / payslips"
-    file_types: [".pdf"]
-    required: true
+  # Form standard (UI-15): Entity first, then the source documents, the one
+  # password that opens them, the book, the 26AS workbook, the outputs, and
+  # the advanced options last. `entity` is consumed by run() but never names
+  # the output file: ui/tabs/_generic.py's _output_name_source() skips entity
+  # selects, so the output is still named after the first document.
+  # Picking an entity also fills in the GnuCash book input below (book_from).
   - name: "entity"
     type: "select"
     label: "Entity"
     options_from: "itr_entities"
     required: true
-  - name: "doc_password"
-    type: "password"
-    label: "Document password (optional -- if the advices/advisory PDFs are protected)"
-    required: false
+  - name: "advices_dir"
+    type: "files"
+    label: "Monthly partner payout certificates / payslips"
+    file_types: [".pdf"]
+    required: true
   - name: "advisory_path"
     type: "file"
     label: "Compensation advisory / target compensation advice"
@@ -74,6 +68,10 @@ inputs:
     type: "file"
     label: "Incentive payment schedule (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)"
     file_types: [".pdf"]
+    required: false
+  - name: "doc_password"
+    type: "password"
+    label: "Document password (optional -- if the advices/advisory PDFs are protected)"
     required: false
   - name: "gnucash_path"
     type: "file"

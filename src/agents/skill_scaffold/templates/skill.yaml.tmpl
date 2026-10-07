@@ -16,6 +16,19 @@ version: "0.1.0"
 mode: "{{MODE}}"
 entry_point: "{{ENTRY_POINT}}"
 
+# Form standard (UI-15) -- declare inputs in this order, and drop any that do
+# not apply (a skill with no entity picker does not need one):
+#   1. Entity (options_from: "itr_entities"), plus its FY/AY or period if any
+#   2. Source picker, such as Bank
+#   3. Source documents
+#   4. Password
+#   5. GnuCash book (book_from: the entity input)
+#   6. Output file
+#   7. Advanced options
+# Entity-first is enforced by tests/test_form_standard.py. Inputs reach run()
+# by NAME through run_args, never by position, so order is purely cosmetic.
+# An output_file picker that lists another step's workbooks must name the
+# entity input in `entity_from:` so it only offers that entity's own files.
 inputs:
   - name: "input_path"
     type: "text"

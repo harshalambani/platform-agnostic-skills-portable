@@ -73,11 +73,11 @@ mode: "direct"
 entry_point: "agent:run"
 
 inputs:
-  - name: "bs_html"
-    type: "file"
-    label: "Balance Sheet (eguile) HTML"
-    file_types: [".html"]
-    required: true
+  # Form standard (UI-15): Entity (+ its AY) first, then the source documents,
+  # then the book and the mapping, then advanced options. `entity` and `ay` are
+  # consumed by run() but never name the output file: ui/tabs/_generic.py's
+  # _output_name_source() skips itr_entities / itr_ay_years selects, so the
+  # output is still named after the balance-sheet HTML.
   - name: "entity"
     type: "select"
     label: "Entity"
@@ -88,21 +88,11 @@ inputs:
     label: "Assessment Year"
     options_from: "itr_ay_years"
     required: false
-  - name: "regime"
-    type: "select"
-    label: "Regime (blank = use the entity's configured regime)"
-    options: ["", "new", "old"]
-    required: false
-  - name: "book_file"
+  - name: "bs_html"
     type: "file"
-    label: "GnuCash book (optional, enables CG lots + dividend quarters)"
-    file_types: [".gnucash"]
-    required: false
-  - name: "mapping_file"
-    type: "file"
-    label: "Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)"
-    file_types: [".yaml"]
-    required: false
+    label: "Balance Sheet (eguile) HTML"
+    file_types: [".html"]
+    required: true
   - name: "form16_pdf"
     type: "file"
     label: "Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity's PAN if encrypted)"
@@ -117,6 +107,21 @@ inputs:
     type: "file"
     label: "Foreign broker consolidated tax report (optional, fills Schedule FA/FSI/Form 67/Schedule TR)"
     file_types: [".xlsx"]
+    required: false
+  - name: "book_file"
+    type: "file"
+    label: "GnuCash book (optional, enables CG lots + dividend quarters)"
+    file_types: [".gnucash"]
+    required: false
+  - name: "mapping_file"
+    type: "file"
+    label: "Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)"
+    file_types: [".yaml"]
+    required: false
+  - name: "regime"
+    type: "select"
+    label: "Regime (blank = use the entity's configured regime)"
+    options: ["", "new", "old"]
     required: false
 
 run_args:

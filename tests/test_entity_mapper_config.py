@@ -136,7 +136,9 @@ def test_skill_yaml_passes_entity_without_letting_it_name_the_output():
     assert sk["run_args"]["entity"] == "{inputs.entity}"
     assert sk["run_args"]["entities_path"] == "{data_root}/itr/entities.yaml"
     names = [i["name"] for i in sk["inputs"]]
-    assert names.index("bank") < names.index("entity") < names.index("gnucash_file")
+    # UI-15: Entity leads the form. It still must not name the output file
+    # (ui/tabs/_generic.py _output_name_source skips entity selects).
+    assert names.index("entity") < names.index("bank") < names.index("gnucash_file")
 
 
 # --------------------------------- Entities tab fields for the mapper settings
