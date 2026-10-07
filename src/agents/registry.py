@@ -65,11 +65,13 @@ class SkillInput:
                               # of other inputs whose value feeds the option
                               # resolver; the UI refreshes the choices when
                               # any of them changes.
-    fy_from: str = ""        # (file inputs only, optional) name of another input
+    fy_from: str = ""        # (file inputs, optional) name of another input
                               # in this skill whose value is a bare FY string (e.g.
                               # "2025-26"), used together with book_from to pick the
                               # right book when an entity has more than one. Empty =
                               # resolve to the entity's newest registered FY.
+                              # (output_file inputs with entity_from, UI-18) the
+                              # picker also offers only workbooks of that FY.
     entity_from: str = ""    # (output_file inputs only, optional) name of the entity
                               # select whose value scopes this picker: only files that
                               # entity owns are offered (see agents/entity_scope.py),

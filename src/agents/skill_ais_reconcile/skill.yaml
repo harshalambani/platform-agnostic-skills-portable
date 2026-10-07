@@ -3,8 +3,9 @@
 #
 # v0.1.0 (alpha): decrypts an Income-Tax AIS JSON export in-process (no
 # manual password entry -- the entity is resolved from the export's own
-# masked-PAN filename prefix, and the decrypt password derives from that
-# entity's PAN + DOB/DOI on file), then runs up to three reconciliations
+# masked-PAN filename prefix and must be the entity picked on the form, and
+# the decrypt password derives from that entity's PAN + DOB/DOI on file),
+# then runs up to three reconciliations
 # (AIS-internal always; AIS<->26AS and AIS<->GnuCash books when their
 # optional inputs are supplied) plus a set of ADVISORY portal-feedback
 # suggestions derived from the deltas. Nothing here submits anything to
@@ -28,14 +29,15 @@ entry_point: "agent:run"
 
 inputs:
   # Entity leads the form: picking someone here fills in the GnuCash book
-  # below, so it belongs before the field it answers for. Safe to declare
-  # first because it is UI-only (absent from run_args) and ui/tabs/_generic.py
-  # only lets inputs the skill actually consumes name the output file.
+  # below, so it belongs before the field it answers for. It is REQUIRED
+  # (UI-18): the AIS export's own entity (from its masked-PAN filename) must
+  # be this one, and the 26AS picker below lists only this entity's files.
+  # ui/tabs/_generic.py never lets an entity select name the output file.
   - name: "entity"
     type: "select"
-    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
+    label: "Entity -- the AIS export must be this entity's; fills in the GnuCash book below from the registry"
     options_from: "itr_entities"
-    required: false
+    required: true
   - name: "ais_path"
     type: "file"
     label: "AIS JSON export (encrypted, as downloaded from the portal)"
@@ -55,6 +57,7 @@ inputs:
     required: false
 
 run_args:
+  entity_key: "{inputs.entity}"
   ais_path: "{inputs.ais_path}"
   gnucash_path: "{inputs.gnucash_path}"
   xlsx_path: "{inputs.xlsx_path}"
@@ -131,9 +134,9 @@ help:
         carries a loud WARNING -- the numbers on that sheet are almost
         certainly meaningless for a wrong-year book.
     - name: "entity"
-      tooltip: "Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity."
+      tooltip: "The entity this reconciliation is for. Also auto-fills the GnuCash book field from the registered book for that entity."
       accepts: "One of the entities defined in entities.yaml, via dropdown."
-      gotchas: "UI convenience only; leave unset to pick the file manually as before. This does not resolve the AIS export's own entity -- that is always inferred from the AIS filename's masked PAN."
+      gotchas: "Required. The AIS export's own entity is still inferred from the AIS filename's masked PAN, and the run is refused when that is not the entity picked here. The 26AS list below shows only this entity's workbooks."
     - name: "xlsx_path"
       tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
       accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
