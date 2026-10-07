@@ -122,6 +122,7 @@ run_args:
   xlsx_26as: "{inputs.xlsx_26as}"
   output_path: "{output_path}"
   config_path: "{config_path}"
+  entities_path: "{data_root}/itr/entities.yaml"
   model_override: "{model_override}"
   journal_path: "{inputs.journal_path}"
   accrual_journal_path: "{inputs.accrual_journal_path}"

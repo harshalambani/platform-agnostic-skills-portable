@@ -161,6 +161,7 @@ def build_balance_tieout(
     report, accounts: dict, gnucash_path: str, year_key: str,
     posted_check: "list[PostedCheckResult] | None" = None,
     bank_matches: dict | None = None,
+    settings_error: str | None = None,
 ) -> list[ReconciliationResult]:
     """One ReconciliationResult per jv_emitter.ACCOUNT_KEYS entry, comparing
     this run's implied FY movement against the GnuCash book's actual FY
@@ -255,6 +256,8 @@ def build_balance_tieout(
     if not gnucash_path:
         return _blank("no GnuCash book supplied")
     if not accounts:
+        if settings_error:
+            return _blank(settings_error)
         return _blank("no partner_comp_accounts configured for this entity")
 
     book, err = _load_book_safely(gnucash_path)
@@ -726,6 +729,7 @@ def _fallback_classify(journal, fy_txns, colon_paths: dict) -> tuple[str, str]:
 def build_posted_check(
     report, accounts: dict, gnucash_path: str, year_key: str,
     bank_matches: dict | None = None,
+    settings_error: str | None = None,
 ) -> tuple[list[PostedCheckResult], str]:
     """Classify every journal build_journals() would produce for this run
     as NOT POSTED / ALREADY POSTED / PARTIALLY POSTED -- AMBIGUOUS /
@@ -750,6 +754,8 @@ def build_posted_check(
     if not gnucash_path:
         return [], f"{_POSTED_LABEL}: not available (no GnuCash book supplied)."
     if not accounts:
+        if settings_error:
+            return [], f"{_POSTED_LABEL}: not available ({settings_error})"
         return [], (
             f"{_POSTED_LABEL}: not available (no partner_comp_accounts configured "
             "for this entity)."
@@ -962,6 +968,7 @@ def _candidate_label(c: "BankMatchCandidate") -> str:
 def match_payouts_to_bank(
     report, accounts: dict, gnucash_path: str,
     window_days: int = DEFAULT_BANK_MATCH_WINDOW_DAYS,
+    settings_error: str | None = None,
 ) -> tuple[dict[int, PayoutMatch], list[str], str | None]:
     """H35-05: match each of report.monthly's payouts (1-indexed, matching
     jv_emitter.build_journals()'s own enumerate) against a bank deposit
@@ -1017,6 +1024,13 @@ def match_payouts_to_bank(
             "no GnuCash book was supplied -- the bank import's own postings "
             "cannot be read, so payouts cannot be matched against bank "
             "credits already booked."
+        )
+        return {}, [], reason
+    if not accounts.get("bank") and settings_error:
+        reason = (
+            f"{settings_error} The bank account path comes from the entity's "
+            "settings, so payouts cannot be matched against bank credits "
+            "already booked."
         )
         return {}, [], reason
     if not accounts.get("bank"):

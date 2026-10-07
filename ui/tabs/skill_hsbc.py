@@ -17,6 +17,13 @@ from .. import _config
 from .. import _health
 from .. import _native
 from .. import _runner
+from ._generic import reply_label_for
+
+
+def _reply_label() -> str:
+    """Heading for the run text -- decided from this skill's own manifest (UI-20)."""
+    return reply_label_for("HSBC")
+
 
 _NATIVE = _native.ensure_native_path()
 
@@ -139,7 +146,7 @@ def _run_hsbc(pdf_file, model_choice):
     if not out_path.is_file():
         yield add(
             f"Warning: skill returned but no output file was produced at {out_path}.\n\n"
-            f"**Agent reply:**\n\n{agent_reply}"
+            f"**{_reply_label()}:**\n\n{agent_reply}"
         ), gr.update(visible=False)
         return
 
@@ -150,7 +157,7 @@ def _run_hsbc(pdf_file, model_choice):
         f"**Saved to:** {out_abs}\n\n"
         f"Click the **Download Excel** button below to save it locally.\n\n"
         f"---\n\n"
-        f"**Agent reply:**\n\n{agent_reply}"
+        f"**{_reply_label()}:**\n\n{agent_reply}"
     )
     yield msg, gr.update(value=out_abs, visible=True)
 

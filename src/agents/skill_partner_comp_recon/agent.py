@@ -104,10 +104,12 @@ _DEFAULT_CAPITAL_INTEREST_RATE = 0.06
 # skill_itr_workbook/scripts is a separate package (not importable via the
 # agents.* package path) that carries the entities.yaml loader this skill
 # reuses rather than re-implementing its own -- same sys.path pattern
-# skill_ais_reconcile/agent.py uses for the same reason. `config_path` (an
-# existing run() parameter, previously accepted-but-unused on this entry
-# path) is repurposed here as the path to that entities.yaml-shaped file:
-# each entity's `partner_comp_accounts` field supplies its GnuCash account
+# skill_ais_reconcile/agent.py uses for the same reason. `entities_path` is
+# the path to that entities.yaml-shaped file (the app passes
+# {data_root}/itr/entities.yaml). `config_path` is the AI-model settings file
+# the app hands every skill; it is accepted but NEVER read as entity settings
+# (H35-11: reading it made every app run fail to load the entity). Each
+# entity's `partner_comp_accounts` field supplies its GnuCash account
 # map (see configs.py / bundling/canonical/itr/entities.example.yaml), and
 # its generic `extra_items["partner_comp_drivers"][<financial_year>]`
 # supplies this skill's own rate/period drivers (firm's tax rate, capital
@@ -210,24 +212,33 @@ def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | 
         return f"{label}: not available (could not parse {path}: {e})", None
 
 
-def _resolve_entity_config(entity: str, config_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
-    """Look up `entity` in the entities.yaml-shaped file at `config_path`.
+def _resolve_entity_config(entity: str, entities_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
+    """Look up `entity` in the entities.yaml-shaped file at `entities_path`.
     Returns (profile, None) on success, (None, note) otherwise -- a note
-    describing why no entity config is available (no config_path supplied,
-    file missing, or entity key not found), never an exception. Absence
+    "entity settings could not be loaded from <path> (<reason>)" (no path
+    supplied, file missing/invalid, or entity key not found), never an
+    exception. Absence
     of an entity profile is not itself a run-ending error: it simply means
     `accounts`/`drivers` stay unset, and every account-key/rate that would
     have come from it degrades to its own explicit CANNOT-RECONCILE/ERROR
     downstream (never guessed)."""
-    if not config_path:
-        return None, "entity config: not available (no config_path supplied)."
+    if not entities_path:
+        return None, (
+            "entity settings could not be loaded (no entities file path was "
+            "supplied)."
+        )
     try:
-        entities = configs.load_entities(config_path)
-    except (OSError, configs.ConfigValidationError) as e:
-        return None, f"entity config: could not load {config_path} ({e})."
+        entities = configs.load_entities(entities_path)
+    except Exception as e:  # unreadable / invalid file: report, never raise
+        return None, (
+            f"entity settings could not be loaded from {entities_path} ({e})."
+        )
     profile = entities.get(entity)
     if profile is None:
-        return None, f"entity config: {entity!r} not found in {config_path}."
+        return None, (
+            f"entity settings could not be loaded from {entities_path} "
+            f"(entity {entity!r} is not in that file)."
+        )
     return profile, None
 
 
@@ -291,6 +302,7 @@ def _resolve_accounts_for_journal(
     entity_profile: "configs.EntityProfile | None",
     entity: str,
     gnucash_path: str,
+    settings_error: str | None = None,
 ) -> tuple[dict, list[str], str | None]:
     """Section 4.3's three degradation rules for the journal leg, given
     that journal_path IS supplied (the caller only calls this when it is).
@@ -305,6 +317,13 @@ def _resolve_accounts_for_journal(
         all-good returns (accounts, [], None).
     """
     accounts = dict(entity_profile.partner_comp_accounts) if entity_profile else {}
+    if not accounts and entity_profile is None and settings_error:
+        return (
+            {},
+            [],
+            f"ERROR: journal_path was supplied but {settings_error} The journal "
+            "needs the entity's account paths, so nothing was written.",
+        )
     if not accounts:
         return (
             {},
@@ -479,6 +498,7 @@ def run(
     input_path: str = "",
     bank_match_window: str = "7",
     financial_year: str = "",
+    entities_path: str | None = None,
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -509,6 +529,7 @@ def run(
             model_override=model_override,
             journal_path=journal_path,
             accrual_journal_path=accrual_journal_path,
+            entities_path=entities_path,
         )
     return _run_from_documents(
         entity=entity,
@@ -526,6 +547,7 @@ def run(
         accrual_journal_path=accrual_journal_path,
         bank_match_window=bank_match_window,
         financial_year=financial_year,
+        entities_path=entities_path,
     )
 
 
@@ -546,6 +568,7 @@ def _run_from_documents(
     accrual_journal_path: str = "",
     bank_match_window: str = "7",
     financial_year: str = "",
+    entities_path: str | None = None,
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -700,9 +723,14 @@ def _run_from_documents(
     # parsed successfully. Resolve the entity's config (accounts/drivers),
     # assemble the parsed records into engine.build_report()'s input
     # shape, compute the reconciliation, and write the workbook.
-    entity_profile, entity_config_note = _resolve_entity_config(entity, config_path)
+    # H35-11: entity settings come ONLY from entities_path. config_path is the
+    # AI-model settings file and is never read as entity settings.
+    entity_profile, entity_config_note = _resolve_entity_config(entity, entities_path)
     if entity_config_note:
         optional_notes.append(entity_config_note)
+    # A failed load is reported as such everywhere downstream (never as "not
+    # configured"), and again at the very top of the reply.
+    settings_error = entity_config_note if entity_profile is None else None
 
     if entity_profile is not None:
         drivers_by_fy = entity_profile.extra_items.get("partner_comp_drivers") or {}
@@ -754,7 +782,9 @@ def _run_from_documents(
             return "\n".join(lines)
     elif xlsx_26as:
         optional_notes.append(
-            "26AS ownership: not checked (the entity's PAN/name are not available).")
+            "26AS ownership: not checked ("
+            + (settings_error or "the entity's PAN/name are not available")
+            + ").")
 
     # UI-18: a 26AS workbook for another financial year is refused too -- the
     # selected year, or failing that the year the documents state.
@@ -841,11 +871,12 @@ def _run_from_documents(
     bank_matches, bank_match_notes, bank_match_unavailable = match_payouts_to_bank(
         report, accounts_for_tieout, gnucash_path,
         window_days=_window_days(bank_match_window),
+        settings_error=settings_error,
     )
 
     posted_check, gnucash_note = build_posted_check(
         report, accounts_for_tieout, gnucash_path, report.financial_year,
-        bank_matches=bank_matches or None,
+        bank_matches=bank_matches or None, settings_error=settings_error,
     )
     optional_notes[_gnucash_note_idx] = gnucash_note
     # H35-04 round 2 item 1: build_balance_tieout() now needs the SAME
@@ -857,6 +888,7 @@ def _run_from_documents(
         build_balance_tieout(
             report, accounts_for_tieout, gnucash_path, report.financial_year,
             posted_check=posted_check, bank_matches=bank_matches or None,
+            settings_error=settings_error,
         )
     )
 
@@ -927,10 +959,14 @@ def _run_from_documents(
                 journal_path = _auto_j
             else:
                 journal_path = ""
-                optional_notes.append(
-                    "Journal CSV: skipped (default path requested, but it needs both "
-                    "this entity's partner_comp_accounts and a GnuCash book to match "
-                    "the bank credits against).")
+                if settings_error:
+                    optional_notes.append(
+                        f"Journal CSV: skipped (default path requested, but {settings_error})")
+                else:
+                    optional_notes.append(
+                        "Journal CSV: skipped (default path requested, but it needs both "
+                        "this entity's partner_comp_accounts and a GnuCash book to match "
+                        "the bank credits against).")
         if str(accrual_journal_path).strip().lower() == "auto":
             if journal_path and llp_record:
                 accrual_journal_path = _auto_a
@@ -941,7 +977,7 @@ def _run_from_documents(
                         "Accrual journal CSV: skipped (needs the LLP statement of account).")
     if journal_path:
         accounts, account_notes, accounts_error = _resolve_accounts_for_journal(
-            entity_profile, entity, gnucash_path,
+            entity_profile, entity, gnucash_path, settings_error,
         )
         if accounts_error:
             return accounts_error
@@ -1017,6 +1053,11 @@ def _run_from_documents(
     lines.extend(f"  - {note}" for note in optional_notes)
     lines.extend(f"  - {note}" for note in account_notes)
     lines.extend(f"  - {note}" for note in mapper_diagnostics)
+    if settings_error:
+        # Near the top of the reply, not buried in the optional-leg list.
+        lines.insert(0, f"WARNING: {settings_error} The journal, the posted-already "
+                        "check, the bank match, the GnuCash tie-out and the 26AS "
+                        "ownership check were NOT run with this entity's settings.")
     return "\n".join(lines)
 
 
@@ -1028,6 +1069,7 @@ def _run_from_structured_input(
     model_override: str | None,
     journal_path: str,
     accrual_journal_path: str = "",
+    entities_path: str | None = None,
 ) -> str:
     """TEST-ONLY entry path (see module docstring). Read the structured
     YAML/JSON input for one financial year, compute the reconciliation
