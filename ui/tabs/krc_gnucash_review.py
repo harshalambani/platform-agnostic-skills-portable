@@ -63,6 +63,7 @@ import yaml
 
 from .. import _config as _config_mod
 from .. import _filedialog
+from .. import _safe_paths
 from . import _entity_book
 from .._review_engine import (
     Column,
@@ -306,19 +307,23 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str) -
 def _load_review_data(review_path: str, gnucash_path: str) -> str:
     """Load a Review.csv + the GnuCash book's STOCK/MUTUAL accounts, return
     the interactive HTML table."""
-    if review_path and Path(review_path).is_dir():
-        # A run folder with no Review.csv (UI-27): say so plainly.
-        return _no_review_html(Path(review_path))
-    if not review_path or not gnucash_path:
+    if not review_path:
         return "<p>Select both a Review.csv and a GnuCash file, then click Load.</p>"
-
-    review_p = Path(review_path)
-    gc_p = Path(gnucash_path)
-
-    if not review_p.is_file():
-        return f"<p>Review.csv not found: {review_p}</p>"
-    if not gc_p.is_file():
-        return f"<p>GnuCash file not found: {gc_p.name}</p>"
+    import html as _html
+    try:
+        run_p, review_p = _safe_paths.resolve_run_target(
+            review_path, "-KRC-GnuCash", "Review.csv")
+    except _safe_paths.UnsafePathError as e:
+        return f"<p>{_html.escape(str(e))}</p>"
+    if review_p is None:
+        # A run folder with no Review.csv (UI-27): say so plainly.
+        return _no_review_html(run_p)
+    if not gnucash_path:
+        return "<p>Select both a Review.csv and a GnuCash file, then click Load.</p>"
+    try:
+        gc_p = _safe_paths.resolve_input_file(gnucash_path, (".gnucash",))
+    except _safe_paths.UnsafePathError as e:
+        return f"<p>{_html.escape(str(e))}</p>"
 
     rows = _load_review_rows(str(review_p))
     if not rows:
@@ -372,9 +377,13 @@ def _save_changes(changes_json: str) -> str:
     if not review_path:
         return "Error: no review file in context — nothing was saved."
 
-    review_file = Path(review_path)
-    if not review_file.is_file():
-        return f"Error: review file not found: {review_file} — nothing was saved."
+    try:
+        _run_p, review_file = _safe_paths.resolve_run_target(
+            review_path, "-KRC-GnuCash", "Review.csv")
+    except _safe_paths.UnsafePathError as e:
+        return f"Error: {e} — nothing was saved."
+    if review_file is None:
+        return "Error: no Review.csv in that run — nothing was saved."
 
     fresh_rows = _load_review_rows(str(review_file))
 
@@ -386,6 +395,11 @@ def _save_changes(changes_json: str) -> str:
     # verbatim, so a forged account is rejected and reported like a locked
     # row, not silently written into security_aliases.
     gnucash_path = str(context.get("gnucash_path") or "").strip()
+    if gnucash_path:
+        try:
+            gnucash_path = str(_safe_paths.resolve_input_file(gnucash_path, (".gnucash",)))
+        except _safe_paths.UnsafePathError as e:
+            return f"Error: {e} — nothing was saved."
     valid_accounts = set(_extract_stock_accounts(gnucash_path)) if gnucash_path else set()
 
     applied = 0

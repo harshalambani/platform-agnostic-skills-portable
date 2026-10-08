@@ -806,6 +806,7 @@ def test_save_changes_persists_learning_to_disk(tmp_path):
     review_p = tmp_path / "2026-FY2526-tds-journals-review.csv"
     journal_p = tmp_path / "2026-FY2526-tds-journals.csv"
     gnucash_path = str(tmp_path / "2025-26.gnucash")
+    (tmp_path / "2025-26.gnucash").write_text("x", encoding="utf-8")
 
     _write_csv(review_p, tjr._REVIEW_HEADERS, [_review_row()])
     _write_csv(journal_p, tjr._JOURNAL_HEADERS, [
@@ -907,3 +908,23 @@ def test_apply_changes_ambiguous_row_accepts_non_tied_account():
     assert applied == 1
     assert review_rows[0]["Credit Account"] == "Income:Interest:Not Tied At All"
     assert journal_rows[2]["Account"] == "Income:Interest:Not Tied At All"
+
+
+def test_book_path_outside_known_folders_or_not_gnucash_is_not_opened(tmp_path, monkeypatch):
+    """SEC-19: a book path from the UI is used only if it is an existing
+    .gnucash file inside a known folder; anything else is treated as no book
+    (pre-flight reports NOT CHECKED) and is never opened."""
+    opened = []
+    monkeypatch.setattr(tjr, "_extract_account_tree", lambda p: opened.append(p) or [])
+    outside = tmp_path.parent / "outside-book.gnucash"
+    outside.write_text("x", encoding="utf-8")
+    notbook = tmp_path / "notes.txt"
+    notbook.write_text("x", encoding="utf-8")
+    for bad in (str(outside), str(notbook), str(tmp_path / ".." / "outside-book.gnucash")):
+        assert tjr._safe_book(bad) == ""
+        _full, _part, err = tjr._preflight([], [], bad)
+        assert err and ("outside" in err or "expected" in err)
+    good = tmp_path / "ok.gnucash"
+    good.write_text("x", encoding="utf-8")
+    assert tjr._safe_book(str(good)).lower() == str(good.resolve()).lower()
+    assert opened == []

@@ -216,9 +216,12 @@ def test_gnucash_review_screen_has_resize_handles_and_reset(tmp_path):
     _assert_screen_has_resizing(m._load_review_data(str(p), str(p)), m.APP_ID)
 
 
-def test_krc_gnucash_review_screen_has_resize_handles_and_reset(tmp_path):
+def test_krc_gnucash_review_screen_has_resize_handles_and_reset(tmp_path, monkeypatch):
+    from ui import _safe_paths
     from ui.tabs import krc_gnucash_review as m
-    p = tmp_path / "Review.csv"
+    monkeypatch.setattr(_safe_paths, "known_folders", lambda: [tmp_path.resolve()])
+    (tmp_path / "20260101-000000-KRC-GnuCash").mkdir()
+    p = tmp_path / "20260101-000000-KRC-GnuCash" / "Review.csv"
     p.write_text("CN No,Type,Security,Net,Reason\n"
                  'CN1,Sale,SYNCORP LTD,1000.00,"no security account match (fuzzy:0.30) for \'SYNCORP LTD\'"\n',
                  encoding="utf-8")

@@ -243,10 +243,9 @@ def _load_review_data(review_path: str, gnucash_path: str) -> str:
         return "<p>Review CSV is empty -- nothing to review.</p>"
 
     accounts: list[str] = []
+    gnucash_path = _safe_book(gnucash_path)
     if gnucash_path:
-        gc_p = Path(gnucash_path)
-        if gc_p.is_file():
-            accounts = _extract_account_tree(str(gc_p))
+        accounts = _extract_account_tree(gnucash_path)
     if not accounts:
         accounts = sorted({r.get(TARGET_COL, "") for r in rows if r.get(TARGET_COL)})
 
@@ -623,6 +622,17 @@ def _collect_learnings_to_save(changes: list[dict], review_rows: list[dict]) -> 
 # TDS-15: net-interest account, Leave out, income-balance pre-flight
 # ---------------------------------------------------------------------------
 
+def _safe_book(path) -> str:
+    """A GnuCash book path from the UI, validated: an existing .gnucash file
+    inside a known folder, else "" (so no file access happens on it)."""
+    if not path:
+        return ""
+    try:
+        return str(_safe_paths.resolve_input_file(path, (".gnucash",)))
+    except _safe_paths.UnsafePathError:
+        return ""
+
+
 def _load_preflight_tools():
     """build_tds_journals' balance reader + pre-flight (single source of truth;
     fails loud like _load_split_part_ii rather than guessing)."""
@@ -642,12 +652,16 @@ def _load_preflight_tools():
 def _preflight(journal_rows: list[dict], part_i_rows: list[dict], gnucash_path: str):
     """-> (full_issues, part_i_issues, error). `error` is a string when the check
     could not run (no book / unreadable) -- never read as 'clean'."""
-    if not gnucash_path or not Path(gnucash_path).is_file():
+    if not gnucash_path:
         return [], [], "no GnuCash book is loaded, so account balances could not be read"
     try:
+        book = _safe_paths.resolve_input_file(gnucash_path, (".gnucash",))
+    except _safe_paths.UnsafePathError as e:
+        return [], [], f"{e}"
+    try:
         b = _load_preflight_tools()
-        accounts = b.load_accounts(Path(gnucash_path))
-        balances = b.load_account_balances(Path(gnucash_path))
+        accounts = b.load_accounts(book)
+        balances = b.load_account_balances(book)
         full = b.income_debit_preflight(journal_rows, balances, accounts, "full journal")
         part = (b.income_debit_preflight(part_i_rows, balances, accounts, "Part I only file")
                 if part_i_rows else [])
@@ -867,7 +881,7 @@ def _save_changes(
     changes = payload["changes"]
     context = payload["context"]
     review_path = context.get("review_path", "")
-    gnucash_path = context.get("gnucash_path", "")
+    gnucash_path = _safe_book(context.get("gnucash_path", ""))
 
     # TDS-15: typed net-interest edits ride in all_rows / excluded; the Leave
     # out state is the engine's "excluded" list (authoritative when present).
@@ -894,7 +908,7 @@ def _save_changes(
     journal_rows = _read_csv_rows(journal_p)
 
     known_accounts: set[str] | None = None
-    if gnucash_path and Path(gnucash_path).is_file():
+    if gnucash_path:
         known_accounts = set(_extract_account_tree(gnucash_path))
 
     if left_out_keys is None:        # no exclude info in the payload: keep as is
