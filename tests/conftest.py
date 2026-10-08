@@ -21,7 +21,8 @@ for _p in (str(_ROOT), str(_ROOT / "src")):
 
 @pytest.fixture(autouse=True)
 def _review_tabs_known_folders(request, tmp_path_factory, monkeypatch):
-    if Path(str(request.node.fspath)).name == "test_sec19_path_guard.py":
+    if Path(str(request.node.fspath)).name in ("test_sec19_path_guard.py",
+                                               "test_registered_book_folders.py"):
         return
     try:
         from ui import _safe_paths

@@ -28,6 +28,25 @@ class UnsafePathError(ValueError):
     """The path was refused. str(e) is a user-facing message (no traceback)."""
 
 
+def _registered_book_folders() -> list[Path]:
+    """Parent folders of every book registered in entities.yaml (all entities,
+    all FYs). Any problem reading the registry adds nothing."""
+    found: list[Path] = []
+    try:
+        from . import _book_registry as _reg  # noqa: PLC0415
+        entities = _reg._load_entities_tolerant(_reg._default_entities_path())
+        for profile in entities.values():
+            for book in (getattr(profile, "books", None) or {}).values():
+                try:
+                    if str(book).strip():
+                        found.append(Path(str(book)).resolve().parent)
+                except (OSError, ValueError):
+                    continue
+    except Exception:  # noqa: BLE001 -- an unreadable registry must not widen access
+        return []
+    return found
+
+
 def known_folders() -> list[Path]:
     """The folders a review input/journal may be read from (resolved)."""
     folders: list[Path] = [_config_mod.data_root_dir()]
@@ -40,6 +59,7 @@ def known_folders() -> list[Path]:
     except Exception:  # noqa: BLE001
         extra = []
     folders.extend(Path(str(p)) for p in extra if str(p).strip())
+    folders.extend(_registered_book_folders())
     out: list[Path] = []
     for f in folders:
         try:
