@@ -65,7 +65,12 @@ import yaml
 from .. import gnucash_accounts
 from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
-from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
+from .engine import (
+    CANNOT_RECONCILE,
+    WITHIN_TOLERANCE_LIMIT,
+    ReconciliationResult,
+    build_report,
+)
 from .gnucash_tieout import (
     build_statement_book_check,
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
@@ -428,6 +433,13 @@ def _summarize_report(
         if (r.agree is None or (r.agree is True and r.excluded_months))
         and not r.informational and not r.not_checked
     ]
+    # H35-16: rows that agree only within Rs 10 are counted on their own line,
+    # never under "variance".
+    within = [
+        r for r in report.reconciliation
+        if r.agree is True and r.within_tolerance_diff is not None
+        and not r.informational and not r.not_checked
+    ]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
 
@@ -442,6 +454,11 @@ def _summarize_report(
     # shown here when report.statement_flags is empty (statement agrees
     # everywhere and its own arithmetic checks out, or no statement was
     # supplied at all).
+    if report.statement_within:
+        lines_out.append(
+            f"  Statement agrees within Rs {WITHIN_TOLERANCE_LIMIT:g} (not a disagreement): "
+            + "; ".join(report.statement_within)
+        )
     if report.statement_flags:
         lines_out.append("=" * 72)
         lines_out.append(
@@ -506,6 +523,11 @@ def _summarize_report(
         lines_out.append(
             f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
             "-- see Reconciliation/Exceptions sheets."
+        )
+    if within:
+        lines_out.append(
+            f"  NOTE: {len(within)} category(ies) agree only within Rs {WITHIN_TOLERANCE_LIMIT:g} "
+            "(not a variance; the difference is printed on each row) -- see the Reconciliation sheet."
         )
     if undecidable:
         lines_out.append(

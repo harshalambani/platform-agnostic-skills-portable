@@ -5738,14 +5738,29 @@ def test_h35_02_residual_variance_vs_tie():
     report_variance = build_report(data_variance)
     journal, note, residual = jv_emitter.build_accrual_journal(report_variance, _H35_ACCOUNTS)
     assert journal is not None  # the profit-share accrual itself still books
-    assert residual.agree is False
-    assert "Variance" in residual.note
+    # H35-16: Rs 6 is above Re 1 but inside the Rs 10 limit -> an amber
+    # "agree within Rs 10" with the difference carried, not a variance.
+    assert residual.agree is True
+    assert residual.within_tolerance_diff == 6.0
+    assert "Variance" not in residual.note
     # The residual is reported, never folded into the accrual's own splits.
     posted_current_leg = next(
         s.debit - s.credit for s in journal.splits
         if s.account == _H35_ACCOUNTS["current_account"]
     )
     assert posted_current_leg == accrual_amount  # exactly the SoP accrual, not +6
+
+    # 4a-bis: Rs 10.01 off stays a VARIANCE (H35-16 negative test).
+    data_over = _h35_02_data(
+        llp_record={
+            "current_profit_share": 350000,
+            "current_opening_balance": 100000,
+            "current_closing_balance": 150010.01,
+        },
+    )
+    _, _, residual_over = jv_emitter.build_accrual_journal(build_report(data_over), _H35_ACCOUNTS)
+    assert residual_over.agree is False
+    assert residual_over.within_tolerance_diff is None
 
     # 4b: residual exactly Re 1 off -> ties (within RECONCILIATION_TOLERANCE).
     data_tie = _h35_02_data(
@@ -5925,10 +5940,11 @@ def test_h35_04_statement_reference_row_agrees_exactly_at_re1_boundary():
 
 def test_h35_04_statement_reference_row_disagrees_just_beyond_re1_boundary():
     result = statement_reference_row(
-        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100001.01},
-    )
+        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100010.01},
+    )  # H35-16: Rs 10.01 off is still a disagreement
     assert result.agree is False
     assert result.note.startswith("STATEMENT DISAGREES")
+    assert result.within_tolerance_diff is None
 
 
 def test_h35_04_statement_reference_row_cannot_reconcile_with_no_other_sources():
@@ -6254,7 +6270,7 @@ def test_h35_04_loud_block_triggered_just_beyond_re1_difference():
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
         advisory_closing=1000000,
-        return_closing=999998.99,   # Rs 1.01 off -> disagrees
+        return_closing=999989.99,   # Rs 10.01 off -> disagrees (H35-16: Rs 10 limit)
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -8277,7 +8293,7 @@ def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
     # (a) beyond Re 1: the underlying comparison still disagrees (visible in
     # `agree`/`sources`), but it is NEVER a LOUD "STATEMENT DISAGREES" entry
     # and NEVER counted in report.statement_flags -- see requirement 1.
-    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6002.0}}
+    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6010.01}}
     report_over = build_report(over)
     row_over = next(r for r in report_over.reconciliation if r.category == category)
     assert row_over.agree is False
@@ -8459,8 +8475,8 @@ def test_s194t_tds_diff_over_re1_variance_within_re1_agrees():
     row_exact = next(r for r in report_exact.reconciliation if r.category == _S194T_CATEGORY)
     assert row_exact.agree is True
 
-    # (b) computed = |-1501.50 - (-300)| = 1201.50 -- 1.50 over Re 1: variance.
-    over = _s194t_data(tds_schedule=-1501.50, tds_payslip=-300.0)
+    # (b) computed = 1211.01 -- 11.01 over (beyond the Rs 10 limit): variance.
+    over = _s194t_data(tds_schedule=-1511.01, tds_payslip=-300.0)
     report_over = build_report(over)
     row_over = next(r for r in report_over.reconciliation if r.category == _S194T_CATEGORY)
     assert row_over.agree is False
@@ -9147,3 +9163,128 @@ def test_h35_15_sources_figure_and_note_figure_are_always_equal(tmp_path):
         r = _sb_rows(tmp_path, _accr_report(stmt), name=name)[_CUR]
         assert _figure_in_note(r.note) == r.sources[key], (stmt, r.note)
         assert r.sources[key] == -_ACCR_AMT
+
+
+# ===========================================================================
+# H35-16 -- "AGREE within Rs 10 (difference Rs N)": an amber conditional
+# green for a difference above Re 1 and up to Rs 10. Reconciliation verdicts
+# only; bank matching, journal amounts and RED FLAG checks never use it.
+# ===========================================================================
+
+def test_h35_16_reconcile_category_within_rs10_is_amber_agree_with_difference():
+    from agents.skill_partner_comp_recon import writer
+    from agents.skill_partner_comp_recon.engine import WITHIN_TOLERANCE_LIMIT
+    r = reconcile_category("X", {"A": 1000.0, "B": 1006.0})
+    assert r.agree is True and r.within_tolerance_diff == 6.0
+    fill, text = writer._status_fill(r)
+    assert text == "AGREE within Rs 10 (difference Rs 6.00)"
+    assert fill is writer.TF and fill is not writer.OK
+    assert WITHIN_TOLERANCE_LIMIT == 10.0
+
+
+def test_h35_16_rs_10_01_stays_a_variance_and_re1_stays_plain_agree():
+    from agents.skill_partner_comp_recon import writer
+    over = reconcile_category("X", {"A": 1000.0, "B": 1010.01})
+    assert over.agree is False and over.within_tolerance_diff is None
+    assert writer._status_fill(over)[1] == "VARIANCE"
+    edge = reconcile_category("X", {"A": 1000.0, "B": 1010.0})
+    assert edge.agree is True and edge.within_tolerance_diff == 10.0
+    plain = reconcile_category("X", {"A": 1000.0, "B": 1001.0})
+    assert plain.agree is True and plain.within_tolerance_diff is None
+    fill, text = writer._status_fill(plain)
+    assert text == "AGREE" and fill is writer.OK
+
+
+def test_h35_16_statement_row_within_rs10_is_agree_not_disagreement():
+    r = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                {"Other source": 100006.0})
+    assert r.agree is True and r.within_tolerance_diff == 6.0 and r.statement_ref
+    assert "STATEMENT DISAGREES" not in r.note
+    assert "6.00" in r.note
+    far = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                  {"Other source": 100010.01})
+    assert far.agree is False and far.within_tolerance_diff is None
+
+
+def test_h35_16_book_vs_statement_within_rs10_shows_the_difference(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 6.0))[_CUR]
+    assert r.agree is True and r.within_tolerance_diff == 6.0
+    assert "6.00" in r.note and "DIFFERS" not in r.note
+    far = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 10.01), name="far")[_CUR]
+    assert far.agree is False and far.within_tolerance_diff is None
+
+
+def _h35_16_report(diff):
+    """A report whose only reconciliation row is a statement-referenced row
+    that is `diff` rupees off (isolated from the other rows of the fixture)."""
+    report = build_report(_h35_02_data())
+    row = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                  {"Other source": 100000.0 + diff})
+    report.reconciliation = [row]
+    report.statement_flags = (
+        [f"{row.category}: {row.note}"] if row.note.startswith("STATEMENT DISAGREES") else [])
+    report.statement_within = (
+        [f"{row.category}: difference Rs {row.within_tolerance_diff:,.2f}"]
+        if row.within_tolerance_diff is not None else [])
+    return report
+
+
+def test_h35_16_headline_counts_within_rows_separately_and_lists_them_once(tmp_path):
+    from agents.skill_partner_comp_recon.agent import _summarize_report
+    text = _summarize_report(_h35_16_report(6.0), str(tmp_path / "x.xlsx"))
+    assert "agree only within Rs 10" in text
+    assert text.count("difference Rs 6.00") == 1          # listed once
+    assert "STATEMENT DISAGREES" not in text              # not a disagreement
+    assert "reconciliation variance" not in text          # not a variance
+    # Re 1 behaviour: a tie prints neither line.
+    assert "within Rs 10" not in _summarize_report(_h35_16_report(1.0), str(tmp_path / "y.xlsx"))
+    # Rs 10.01 is a real disagreement and a variance, not a within row.
+    far = _summarize_report(_h35_16_report(10.01), str(tmp_path / "z.xlsx"))
+    assert "STATEMENT DISAGREES" in far and "reconciliation variance" in far
+    assert "within Rs 10" not in far
+
+
+def test_h35_16_workbook_shows_the_limit_on_drivers_and_amber_status(tmp_path):
+    import openpyxl
+    from agents.skill_partner_comp_recon import writer
+    out = tmp_path / "w.xlsx"
+    writer.write_report_workbook(_h35_16_report(6.0), str(out))
+    wb = openpyxl.load_workbook(out)
+    drivers = {row[0].value: row[1].value for row in wb["Drivers"].iter_rows(min_row=2)}
+    assert drivers["Agree-within limit (Rs)"] == 10.0
+    texts = [str(c.value) for row in wb["Reconciliation"].iter_rows() for c in row if c.value]
+    assert any(t.startswith("AGREE within Rs 10 (difference Rs 6.00)") for t in texts)
+    assert any(t.startswith("AGREES WITHIN Rs 10") for t in texts)
+
+
+def test_h35_16_journals_are_byte_identical_with_and_without_a_small_difference(tmp_path):
+    from agents.skill_partner_comp_recon import jv_emitter
+    outs = []
+    for closing, name in ((150000, "a"), (150006, "b")):
+        rep = build_report(_h35_02_data(llp_record={
+            "current_profit_share": 350000, "current_opening_balance": 100000,
+            "current_closing_balance": closing}))
+        j, _n, _r = jv_emitter.build_accrual_journal(rep, _H35_ACCOUNTS)
+        p = tmp_path / f"{name}.csv"
+        jv_emitter.write_accrual_journal_csv(j, str(p))
+        outs.append(p.read_bytes())
+    assert outs[0] == outs[1]
+
+
+def test_h35_16_red_flag_on_a_small_amount_is_still_raised():
+    # Statement agrees BEFORE firm's tax (reading A); the pending accrual would
+    # book a tiny firm's tax: still a RED FLAG, never softened by the Rs 10 band.
+    r = _pst(1100.0, 1000.0, -4.0, 100.0, _accr(4.0))
+    assert r.agree is False and r.note.startswith("RED FLAG")
+    assert r.within_tolerance_diff is None
+
+
+def test_h35_16_bank_matching_tolerance_is_unchanged():
+    from agents.skill_partner_comp_recon import gnucash_tieout as gt
+    from agents.skill_partner_comp_recon.engine import RECONCILIATION_TOLERANCE
+    assert RECONCILIATION_TOLERANCE == 1.0
+    assert gt.WITHIN_TOLERANCE_LIMIT == 10.0   # imported for the statement rows only
+    import inspect
+    src = inspect.getsource(gt)
+    # the bank matcher still compares against the strict tolerance
+    assert "pm.payout_amount) <= RECONCILIATION_TOLERANCE" in src

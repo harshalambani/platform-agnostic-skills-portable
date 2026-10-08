@@ -49,6 +49,8 @@ from .engine import (
     CANNOT_RECONCILE,
     PENDING_JOURNAL_VERDICT,
     RECONCILIATION_TOLERANCE,
+    WITHIN_TOLERANCE_LIMIT,
+    within_tolerance_band,
     ReconciliationResult,
     fy_prefix,
     journal_txn_id,
@@ -792,6 +794,13 @@ def build_statement_book_check(
                 out.append(ReconciliationResult(
                     category=category, sources=src, agree=True,
                     note=f"The book figure ({parts}) agrees with the statement ({stmt:,.2f})."))
+        elif within_tolerance_band(gap):
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=True,
+                note=f"The book figure ({parts}) agrees with the statement ({stmt:,.2f}) only "
+                     f"within Rs {WITHIN_TOLERANCE_LIMIT:g}: difference Rs {abs(gap):,.2f}. "
+                     "Nothing is plugged or posted for this.",
+                within_tolerance_diff=round(abs(gap), 2), statement_ref=True))
         else:
             tail = (" The journal(s) not yet posted were taken into account; the gap remains."
                     if pend else "")

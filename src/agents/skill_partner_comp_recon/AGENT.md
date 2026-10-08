@@ -333,7 +333,11 @@ supplied and parseable) and is now the sole source for four things:
    vs. the booked current-account balance rolled forward from the L5's own
    opening balance plus whatever the accrual (if any) applied. A residual
    beyond Re 1 is reported as a VARIANCE -- it is never booked or
-   corrected automatically by any function in this package.
+   corrected automatically by any function in this package. H35-16: a
+   difference above Re 1 and up to Rs 10 (`WITHIN_TOLERANCE_LIMIT`) is an
+   amber "AGREE within Rs 10 (difference Rs N)", counted apart from
+   variances; it applies to reconciliation verdicts only (never bank
+   matching, journal amounts or RED FLAG checks).
 
 See `tests/test_skill_partner_comp_recon.py`'s "H35-02" test section for
 the negative-test proof that monthly-booked share of profit plus this
