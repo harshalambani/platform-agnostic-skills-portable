@@ -111,6 +111,41 @@ from .xlsx_26as_reader import read_form_26as_tds_credit
 # wins over this default.
 _DEFAULT_CAPITAL_INTEREST_RATE = 0.06
 
+# H35-19: s.194T withholding rate on payments to a partner. Used for the TDS
+# check only (never any journal amount), and only when the entity sets neither
+# capital_interest_tds_rate nor remuneration_tds_rate for the year.
+_DEFAULT_S194T_TDS_RATE = 0.10
+
+# H35-20: the capital rule (required capital = target compensation x months
+# completed / total months x rate). The entity sets none of these by hand
+# any more: the rate and total default here, and months completed come from
+# the entity's "Date admitted as partner". Anything the entity sets
+# explicitly in partner_comp_drivers for the year wins over all of it.
+_DEFAULT_CAPITAL_RATE = 0.40
+_DEFAULT_CAPITAL_MONTHS_TOTAL = 48
+
+
+def apply_capital_rule_defaults(data: dict, admission_date) -> None:
+    """Fill capital_rate / capital_months_total / capital_months_achieved in
+    data["drivers"] only where the entity left them unset. Feeds the
+    informational capital row only; never touches a journal amount."""
+    from .engine import capital_months_from_admission
+    drivers = data.setdefault("drivers", {})
+    sources = data.setdefault("driver_sources", {})
+    if drivers.get("capital_rate") is None:
+        drivers["capital_rate"] = _DEFAULT_CAPITAL_RATE
+        sources["capital_rate"] = "Default (40% of target compensation over 48 months)"
+    if drivers.get("capital_months_total") is None:
+        drivers["capital_months_total"] = _DEFAULT_CAPITAL_MONTHS_TOTAL
+        sources["capital_months_total"] = "Default (48 months)"
+    if drivers.get("capital_months_achieved") is None:
+        months, note = capital_months_from_admission(
+            admission_date, data.get("financial_year") or "",
+            drivers.get("capital_months_total"))
+        if months is not None:
+            drivers["capital_months_achieved"] = months
+        sources["capital_months_achieved"] = note
+
 # skill_itr_workbook/scripts is a separate package (not importable via the
 # agents.* package path) that carries the entities.yaml loader this skill
 # reuses rather than re-implementing its own -- same sys.path pattern
@@ -1009,6 +1044,13 @@ def _run_from_documents(
         data.setdefault("driver_sources", {})["capital_interest_rate"] = (
             "Default (6% simple interest, inferred -- not a figure from any document)"
         )
+    apply_capital_rule_defaults(
+        data, getattr(entity_profile, "partner_admission_date", None))
+    if (data["drivers"].get("capital_interest_tds_rate") is None
+            and data["drivers"].get("remuneration_tds_rate") is None):
+        data["drivers"]["capital_interest_tds_rate"] = _DEFAULT_S194T_TDS_RATE
+        data.setdefault("driver_sources", {})["capital_interest_tds_rate"] = (
+            "statutory default 10% (s.194T) -- not set for this entity")
     # Section A: feed the 26AS reader's result into the existing
     # external["form_26as_total_credit"] reconciliation leg (engine.py's
     # field_or_reason() treats a None value the same as the key being

@@ -1101,6 +1101,7 @@ def render(container_tab=None) -> None:
                 gr.update(), gr.update(), gr.update(), gr.update(),
                 _CONFIRM_BAR.format(what="Reset"),
                 gr.update(value=_LOAD_LABEL), gr.update(value=_RESET_CONFIRM_LABEL),
+                gr.update(), gr.update(),
             )
         choices = _scan_import_ready_csvs()
         return (
@@ -1114,12 +1115,15 @@ def render(container_tab=None) -> None:
             "",                                                       # _payload_box
             "",                                                       # guard_md
             gr.update(value=_LOAD_LABEL), gr.update(value=_RESET_LABEL),
+            "",                                                       # check_result
+            gr.update(interactive=False, value=None),                 # check_download
         )
 
     reset_btn.click(
         fn=_handle_reset_review,
         inputs=[_guard_box],
         outputs=[csv_dropdown, gnucash_file, entity_dd, book_status_md, review_html,
-                 save_result, download_file, _payload_box, guard_md, load_btn, reset_btn],
+                 save_result, download_file, _payload_box, guard_md, load_btn, reset_btn,
+                 check_result, check_download],
         js=_guard_js("reset"),
     )

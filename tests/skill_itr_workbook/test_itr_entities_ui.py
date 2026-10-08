@@ -911,3 +911,56 @@ def test_delete_rollback_on_mid_cascade_failure(tmp_path):
 
     archive_dir = data_root / "itr" / "_archive"
     assert not archive_dir.exists() or not list(archive_dir.iterdir())
+
+
+# ---------------------------------------------------------------------------
+# H35-20 -- optional "Date admitted as partner" per entity.
+# ---------------------------------------------------------------------------
+
+def _save_syn(data_root, key, admission, orig=""):
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_entity(
+            orig, key, "Synthetic Partner", "CCCCC2222C", "Individual", "Resident",
+            "1990-01-01", "", "", "", "", "", "", "new", "", False, "", "", "",
+            partner_admission_date=admission,
+        )
+        return msg, ui_mod._load_entities()
+
+
+def test_partner_admission_date_saves_round_trips_and_shows_on_form(tmp_path):
+    data_root = _seed(tmp_path)
+    msg, ents = _save_syn(data_root, "SYN-P", "2022-07-15")
+    assert "Saved" in msg
+    assert ents["SYN-P"].partner_admission_date == "2022-07-15"
+    assert "2022-07-15" in ui_mod._entity_to_form("SYN-P", ents)
+
+
+def test_partner_admission_date_none_save_preserves_stored_value(tmp_path):  # NEGATIVE
+    data_root = _seed(tmp_path)
+    _save_syn(data_root, "SYN-P", "2022-07-15")
+    msg, ents = _save_syn(data_root, "SYN-P", None, orig="SYN-P")
+    assert "Saved" in msg
+    assert ents["SYN-P"].partner_admission_date == "2022-07-15"
+
+
+def test_partner_admission_date_bad_value_blocks_save(tmp_path):  # NEGATIVE
+    data_root = _seed(tmp_path)
+    msg, ents = _save_syn(data_root, "SYN-P", "15/07/2022")
+    assert "Not saved" in msg
+    assert "SYN-P" not in ents
+
+
+def test_partner_admission_date_unquoted_yaml_date_loads_as_string(tmp_path):
+    data_root = _seed(tmp_path, {"SYN-P": {
+        "name": "Synthetic Partner", "pan": "CCCCC2222C", "status": "Individual",
+        "residency": "Resident", "default_regime": "new",
+        "partner_admission_date": __import__("datetime").date(2021, 4, 2)}})
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        ents = ui_mod._load_entities()
+    assert ents["SYN-P"].partner_admission_date == "2021-04-02"
+
+
+def test_entity_without_admission_date_has_none(tmp_path):  # NEGATIVE
+    data_root = _seed(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        assert ui_mod._load_entities()["SYN-IND"].partner_admission_date is None

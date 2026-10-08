@@ -139,4 +139,5 @@ SYN-IND-NR:
   #   - "Equity:Drawings"  # reimbursement credit goes here when exactly one is listed
   # reimbursement_markers:  # SEC-20: whole-word tags on an employer NEFT credit that reimburses the
   #   - "ABCD"              # owner (MAP-34). Per entity; empty/absent = the rule never fires.
+  # partner_admission_date: "2020-04-01"  # date admitted as a partner (YYYY-MM-DD); drives the partner skill's capital rule
   # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)

@@ -243,6 +243,43 @@ def required_cumulative_capital(target_compensation, months_achieved, months_tot
 CAPITAL_TOLERANCE = 1.0  # rupee
 
 
+def capital_months_from_admission(admission, fy: str, months_total):
+    """H35-20: whole months a partner has completed, counted from the date
+    admitted as partner to the end of the financial year (31 March),
+    capped at `months_total`.
+
+    PART MONTHS: only completed months count. The year end is taken as the
+    start of the next day (1 April), so a partner admitted on 1 April has
+    completed 12 months by 31 March of that year, while one admitted on
+    2 April has completed 11 (the part month is not counted).
+
+    Returns (months, note). `months` is None when it cannot be worked out:
+    no date, an unreadable date, or an admission after the year end (a
+    partner not yet admitted has no requirement that year -- never a
+    negative count). `note` says why or how it was counted.
+    """
+    if admission in (None, ""):
+        return None, ("Date admitted as partner is not set -- enter it for this "
+                      "entity on the Entities screen (GnuCash > Entities).")
+    try:
+        adm = _parse_date(admission)
+    except (ValueError, TypeError):
+        return None, (f"Date admitted as partner ({admission}) is not a valid "
+                      "YYYY-MM-DD date -- correct it on the Entities screen.")
+    end = date(fy_start_year(fy) + 1, 4, 1)  # day after 31 March
+    if adm >= end:
+        return None, (f"Not applicable -- admitted as partner on {adm.isoformat()}, "
+                      f"after the end of FY{fy}; no capital requirement for this year.")
+    months = (end.year - adm.year) * 12 + (end.month - adm.month)
+    if end.day < adm.day:
+        months -= 1
+    months = max(months, 0)
+    if months_total is not None:
+        months = min(months, int(months_total))
+    return months, (f"Counted from the date admitted as partner ({adm.isoformat()}) to "
+                    f"31 March FY{fy}: {months} whole month(s) completed.")
+
+
 @dataclass
 class RateChangeSuspect:
     implied_old_rate: float
@@ -585,6 +622,7 @@ def statement_reference_row(
     agreements = []
     closures = []  # rows whose gap is FULLY explained by a pending journal
     withins = []  # (label, diff): above tolerance, inside the Rs 10 limit (H35-16)
+    closure_rounding = []  # H35-18: residual after the pending journal, inside the Rs 10 limit
     for label, value in present_others.items():
         diff = value - statement_value
         if abs(diff) <= tolerance:
@@ -604,6 +642,20 @@ def statement_reference_row(
                     f"({pj_amount:,.2f}, journal {ids}) = {adjusted_value:,.2f}, which "
                     f"ties to the statement ({statement_value:,.2f}) within tolerance. "
                     f"Post {ids} and this row is reconciled; it is not a disagreement."
+                )
+                continue
+            if within_tolerance_band(adjusted_diff, tolerance):
+                # H35-18: same Rs 10 band as the row verdicts. What is left
+                # after the pending journal is rounding, not a disagreement.
+                closure_rounding.append(round(adjusted_diff, 2))
+                closures.append(
+                    f"{PENDING_JOURNAL_VERDICT} -- {label} ({value:,.2f}) plus "
+                    f"{pj_description or 'a not-yet-posted journal'} "
+                    f"({pj_amount:,.2f}, journal {ids}) = {adjusted_value:,.2f}, which "
+                    f"ties to the statement ({statement_value:,.2f}) within rounding "
+                    f"(difference Rs {abs(adjusted_diff):,.2f}, within the Rs "
+                    f"{WITHIN_TOLERANCE_LIMIT:g} limit). Post {ids} and this row is "
+                    f"reconciled; it is not a disagreement."
                 )
                 continue
             # H35-04 round 2 item 5: LEAD with the genuine residual (the
@@ -635,7 +687,9 @@ def statement_reference_row(
         f"Statement says {statement_value:,.2f}; {lab} says {statement_value + d:,.2f}; "
         f"difference Rs {abs(d):,.2f}, within the Rs {WITHIN_TOLERANCE_LIMIT:g} limit."
         for lab, d in withins)
-    within_max = round(max((abs(d) for _l, d in withins), default=0.0), 2) or None
+    within_max = round(max([abs(d) for _l, d in withins]
+                           + [abs(d) for d in closure_rounding], default=0.0), 2) or None
+    _is_ref = bool(withins) or bool(closure_rounding)
 
     if disagreements:
         note = "STATEMENT DISAGREES -- " + " ".join(disagreements)
@@ -658,7 +712,7 @@ def statement_reference_row(
         if missing_others:
             note += f" Not supplied: {', '.join(missing_others)}."
         return ReconciliationResult(category=category, sources=sources, agree=True, note=note,
-                                    within_tolerance_diff=within_max, statement_ref=bool(withins))
+                                    within_tolerance_diff=within_max, statement_ref=_is_ref)
 
     note = "All supplied sources agree with the LLP Statement of Account (the reference)."
     if withins:
@@ -667,7 +721,7 @@ def statement_reference_row(
     if missing_others:
         note += f" Not supplied: {', '.join(missing_others)}."
     return ReconciliationResult(category=category, sources=sources, agree=True, note=note,
-                                within_tolerance_diff=within_max, statement_ref=bool(withins))
+                                within_tolerance_diff=within_max, statement_ref=_is_ref)
 
 
 def booked_current_account_closing(monthly: "list[MonthlyLine]", llp_record: dict | None):
@@ -991,6 +1045,7 @@ class S194tInterestTdsResult:
     rate: float | None = None
     external: float | None = None
     reason: str | None = None
+    rate_key: str | None = None  # H35-19: which driver supplied the rate
 
 
 def compute_s194t_interest_tds(
@@ -1039,7 +1094,9 @@ def compute_s194t_interest_tds(
 
     rate, rate_reason = driver(drivers, "capital_interest_tds_rate", fy,
                                 "s.194T TDS rate on interest on capital")
+    rate_key = "capital_interest_tds_rate"
     if rate is None:
+        rate_key = "remuneration_tds_rate"
         rate, rate_reason = driver(
             drivers, "remuneration_tds_rate", fy,
             "s.194T TDS rate on interest on capital (capital_interest_tds_rate "
@@ -1067,7 +1124,7 @@ def compute_s194t_interest_tds(
     expected = round(rate * statement_interest, 2)
     return S194tInterestTdsResult(
         status="OK", computed=computed, expected=expected, rate=rate,
-        external=external_value,
+        external=external_value, rate_key=rate_key,
     )
 
 
@@ -1552,6 +1609,15 @@ def build_report(data: dict) -> Report:
          "Advisory": advisory_closing},
     )
     _capital_rule_vs_advisory.informational = True
+    if capital_rule.status != "OK":
+        # H35-20: say what is missing and where to set it; never a pass.
+        _hint = driver_sources.get("capital_months_achieved") if (
+            drivers.get("capital_months_achieved") is None) else None
+        if _hint and _hint.startswith("Not applicable"):
+            _capital_rule_vs_advisory.note = _hint
+        else:
+            _capital_rule_vs_advisory.note = (capital_rule.reason or CANNOT_RECONCILE) + (
+                f" {_hint}" if _hint else "")
     if _capital_rule_vs_advisory.agree is False:
         _capital_rule_vs_advisory.note += (
             " -- informational only, never a reconciliation gap: the firm's own "
@@ -1707,7 +1773,13 @@ def build_report(data: dict) -> Report:
         }
         if s194t_interest.external is not None:
             _s194t_sources["Externally reported"] = s194t_interest.external
-        reconciliation.append(reconcile_category(_s194t_category, _s194t_sources))
+        _s194t_row = reconcile_category(_s194t_category, _s194t_sources)
+        # H35-19: always say where the rate came from.
+        _rate_src = driver_sources.get(s194t_interest.rate_key or "", "Entity setting")
+        _s194t_row.note = ((_s194t_row.note or "").rstrip() +
+                           f" s.194T rate used: {s194t_interest.rate * 100:g}% "
+                           f"({_rate_src}).").strip()
+        reconciliation.append(_s194t_row)
     else:
         reconciliation.append(ReconciliationResult(
             category=_s194t_category,
