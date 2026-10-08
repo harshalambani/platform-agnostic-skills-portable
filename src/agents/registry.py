@@ -78,6 +78,22 @@ class SkillInput:
                               # and the choices follow the select. Needs a `match` in
                               # entity_scope.SCOPABLE_MATCHES. Empty = unscoped.
     default: str = ""       # (text inputs only) value the form opens with
+    group: str = ""         # (UI-25, optional) name of an `input_groups:` entry; the
+                              # input is drawn inside that group's collapsed
+                              # accordion. Empty = drawn as before. A name that is
+                              # not declared refuses the manifest at load.
+    gather_samples: tuple[str, ...] = ()  # (UI-25, optional) names of other inputs
+                              # whose help samples are gathered into ONE panel
+                              # under this input. Empty = no such panel. A name that
+                              # is not an input refuses the manifest at load.
+    gather_samples_title: str = ""  # title of that gathered panel
+
+
+@dataclass(frozen=True)
+class SkillInputGroup:
+    """A named, collapsed section of the input form (UI-25)."""
+    name: str
+    title: str
 
 
 @dataclass(frozen=True)
@@ -127,6 +143,7 @@ class SkillHelpInput:
     tooltip: str = ""
     accepts: str = ""
     gotchas: str = ""
+    heading: str = ""        # short heading used in a gathered samples panel (UI-25)
     # UI-21: optional "What does this file look like?" panel. `sample_html`
     # is a hand-drawn, made-up illustration (never a real document image);
     # `looks_like` is the plain description; `not_these` lists look-alikes
@@ -191,11 +208,31 @@ class SkillInfo:
     manifest_path: Path
     help: SkillHelp | None = None
     check: SkillCheck | None = None
+    input_groups: tuple[SkillInputGroup, ...] = ()
 
 
 # ---------------------------------------------------------------------------
 # Parsing.
 # ---------------------------------------------------------------------------
+
+def _validate_form_layout(skill_name: str, inputs, groups) -> None:
+    """UI-25: refuse, loudly, a manifest whose group or gather_samples names do
+    not resolve. Raising (rather than skipping the skill or the input) means a
+    typo can never silently drop an input from the form."""
+    known_groups = {g.name for g in groups}
+    names = {i.name for i in inputs}
+    for i in inputs:
+        if i.group and i.group not in known_groups:
+            raise ValueError(
+                f"skill.yaml error in '{skill_name}': input '{i.name}' declares "
+                f"group: '{i.group}', but input_groups declares only "
+                f"{sorted(known_groups) or 'nothing'}.")
+        for ref in i.gather_samples:
+            if ref not in names:
+                raise ValueError(
+                    f"skill.yaml error in '{skill_name}': input '{i.name}' lists "
+                    f"'{ref}' in gather_samples, but no input has that name.")
+
 
 def _parse_check(raw: Any) -> SkillCheck | None:
     if not isinstance(raw, dict) or not raw.get("function"):
@@ -215,6 +252,7 @@ def _parse_help(raw: Any) -> SkillHelp | None:
             continue
         h_inputs.append(SkillHelpInput(
             name=inp["name"],
+            heading=(inp.get("heading") or "").strip(),
             tooltip=(inp.get("tooltip") or "").strip(),
             accepts=(inp.get("accepts") or "").strip(),
             gotchas=(inp.get("gotchas") or "").strip(),
@@ -292,7 +330,17 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             default=str(inp.get("default", "")),
             depends_on=tuple(inp.get("depends_on") or ()),
             multiselect=bool(inp.get("multiselect", False)),
+            group=str(inp.get("group") or "").strip(),
+            gather_samples=tuple(str(x) for x in (inp.get("gather_samples") or ())),
+            gather_samples_title=str(inp.get("gather_samples_title") or "").strip(),
         ))
+
+    groups = tuple(
+        SkillInputGroup(name=str(g["name"]).strip(),
+                        title=str(g.get("title") or g["name"]).strip())
+        for g in (raw.get("input_groups") or ()) if isinstance(g, dict) and g.get("name")
+    )
+    _validate_form_layout(raw["name"], inputs, groups)
 
     out_raw = raw.get("output") or {}
     output = SkillOutput(
@@ -339,6 +387,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         manifest_path=path,
         help=help_block,
         check=_parse_check(raw.get("check")),
+        input_groups=groups,
     )
 
 
