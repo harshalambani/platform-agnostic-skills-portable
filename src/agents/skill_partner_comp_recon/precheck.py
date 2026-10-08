@@ -144,6 +144,51 @@ def check_advisory_slot(text: str | None) -> list[str]:
     return []
 
 
+PASSWORD_MISSING_MESSAGE = (
+    "this PDF is password-protected: enter the firm's Document password on the form")
+PASSWORD_WRONG_MESSAGE = (
+    "this PDF is password-protected and the Document password entered did not open it: "
+    "check the Document password on the form")
+
+
+def password_problem(exc: BaseException, password: str | None) -> str | None:
+    """UI-22: a plain message when `exc` means "the PDF is encrypted and the
+    password is missing or wrong", else None (so the caller keeps the real
+    error). The PDF library raises this with no message at all, which used to
+    print as an empty reason. The message never contains the password."""
+    # pdfplumber wraps the library's error (PdfminerException), so look
+    # through the args and the cause chain as well as the exception itself.
+    seen, todo, found = set(), [exc], False
+    while todo and not found:
+        e = todo.pop()
+        if id(e) in seen or not isinstance(e, BaseException):
+            continue
+        seen.add(id(e))
+        found = any(c.__name__ == "PDFPasswordIncorrect" for c in type(e).__mro__)
+        todo.extend(list(e.args) + [e.__cause__, e.__context__])
+    if not found:
+        return None
+    return PASSWORD_WRONG_MESSAGE if (password or "").strip() else PASSWORD_MISSING_MESSAGE
+
+
+def explain_pdf_error(exc: BaseException, password: str | None) -> str:
+    """The reason to show for a PDF that failed to open or parse: the
+    password message when that is the cause, else the real error text (its
+    type name when the library gave it no text)."""
+    return password_problem(exc, password) or (str(exc) or type(exc).__name__)
+
+
+def pdf_open_problem(path: str, password: str | None) -> str | None:
+    """The password message for `path` when it cannot be opened for that
+    reason; None when it opens, or fails for any other reason."""
+    try:
+        import pdfplumber  # noqa: PLC0415
+        with pdfplumber.open(path, password=password or None):
+            return None
+    except Exception as e:  # noqa: BLE001
+        return password_problem(e, password)
+
+
 def read_first_page_text(path: str, password: str | None) -> str | None:
     """Text of the first page, or None on any problem (the real parser will
     report an unreadable file by itself)."""

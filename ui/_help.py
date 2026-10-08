@@ -60,6 +60,47 @@ def input_info_map(skill: "SkillInfo") -> dict[str, str]:
     return out
 
 
+def sample_panel_markdown(hi) -> str:
+    """UI-21: HTML/Markdown body of the "What does this file look like?" panel
+    for one help input, or "" when that input has no sample/description.
+
+    Everything here is authored in the manifest and made up -- never a real
+    document image."""
+    if hi is None:
+        return ""
+    if not (hi.sample_html or hi.looks_like or hi.not_these or hi.filename_note):
+        return ""
+    parts: list[str] = []
+    if hi.sample_html:
+        parts.append(hi.sample_html)
+    if hi.looks_like:
+        parts.append("**What it looks like.** " + hi.looks_like)
+    if hi.not_these:
+        parts.append(
+            "**Look-alikes NOT to pick here:**\n"
+            + "\n".join(f"- {x}" for x in hi.not_these)
+        )
+    if hi.filename_note:
+        parts.append("**File names.** " + hi.filename_note)
+    return "\n\n".join(parts)
+
+
+def mount_sample_panel(skill: "SkillInfo", input_name: str) -> bool:
+    """Mount a collapsed accordion with the sample under the current input.
+    Returns True when a panel was drawn; an input with no sample draws
+    nothing and renders as before."""
+    if not skill.help:
+        return False
+    hi = next((h for h in skill.help.inputs if h.name == input_name), None)
+    body = sample_panel_markdown(hi)
+    if not body:
+        return False
+    import gradio as gr
+    with gr.Accordion("What does this file look like?", open=False):
+        gr.Markdown(body, sanitize_html=False)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Shared derivations.
 # ---------------------------------------------------------------------------

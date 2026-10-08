@@ -732,8 +732,29 @@ def _parse_balance_row(
     return None, False, as_on_date
 
 
-def _parse_schedule_row_numbers(rest: str, lines: list[str], start_idx: int, need: int) -> list[float | None]:
-    numbers = _extract_numbers(rest) if rest else []
+_SCHEDULE_CELL_RE = re.compile(
+    r"(?<!\S)[-–—](?!\S)|" + _NUMBER_TOKEN_RE.pattern)
+
+
+def _extract_schedule_cells(rest: str) -> list[float | None]:
+    """The cells of one schedule row's own line, in order, where a lone dash
+    is a printed nil cell and counts as 0.0. Without this a dash in the
+    middle of a row (e.g. an Arrears row with no capital deduction) vanishes
+    and every later figure slides one column to the left (H35-17)."""
+    text = _repair_l3_number_spacing(_FFFD_RUN_RE.sub(" ", rest))
+    out: list[float | None] = []
+    for m in _SCHEDULE_CELL_RE.finditer(text):
+        tok = m.group(0)
+        out.append(0.0 if tok in ("-", "–", "—") else _parse_amount(tok))
+    return out
+
+
+def _parse_schedule_row_numbers(rest: str, lines: list[str], start_idx: int, need: int,
+                                dash_cells: bool = False) -> list[float | None]:
+    if dash_cells:
+        numbers = _extract_schedule_cells(rest) if rest else []
+    else:
+        numbers = _extract_numbers(rest) if rest else []
     lookahead_idx = start_idx
     while len(numbers) < need and lookahead_idx + 1 < len(lines):
         lookahead_idx += 1
@@ -814,7 +835,7 @@ def _parse_schedule(
         inst_m = _INSTALMENT_ROW_RE_NEW.match(line) or _INSTALMENT_ROW_RE_OLD.match(line)
         if inst_m:
             rest = line[inst_m.end():].strip()
-            numbers = _parse_schedule_row_numbers(rest, lines, idx, 4)
+            numbers = _parse_schedule_row_numbers(rest, lines, idx, 4, dash_cells=True)
             rows.append(
                 ScheduleInstalment(
                     instalment_no=int(inst_m.group(1)),
@@ -829,7 +850,7 @@ def _parse_schedule(
         arrears_m = _ARREARS_ROW_RE.match(line)
         if arrears_m:
             rest = line[arrears_m.end():].strip()
-            numbers = _parse_schedule_row_numbers(rest, lines, idx, 4)
+            numbers = _parse_schedule_row_numbers(rest, lines, idx, 4, dash_cells=True)
             rows.append(
                 ScheduleInstalment(
                     instalment_no=None,

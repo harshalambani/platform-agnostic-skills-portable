@@ -67,7 +67,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .engine import Report, fy_end_date
+from .engine import WITHIN_TOLERANCE_LIMIT, Report, fy_end_date
 from .gnucash_tieout import _candidate_label as _format_bank_candidate
 
 FONT_NAME = "Arial"
@@ -152,6 +152,9 @@ def _status_fill(r):
     agree = r.agree
     if agree is True and getattr(r, "excluded_months", ""):
         return TF, f"AGREE excl. {r.excluded_months}"
+    if agree is True and getattr(r, "within_tolerance_diff", None) is not None:
+        return TF, (f"AGREE within Rs {WITHIN_TOLERANCE_LIMIT:g} "
+                    f"(difference Rs {r.within_tolerance_diff:,.2f})")
     if agree is True:
         return OK, "AGREE"
     if agree is False:
@@ -219,6 +222,7 @@ def _write_drivers_sheet(wb, report: Report):
         ("Remuneration TDS section", d.get("remuneration_tds_section"), None, "remuneration_tds_section"),
         ("Remuneration TDS rate", d.get("remuneration_tds_rate"), P, "remuneration_tds_rate"),
         ("Remuneration TDS start date", d.get("remuneration_tds_start_date"), None, "remuneration_tds_start_date"),
+        ("Agree-within limit (Rs)", WITHIN_TOLERANCE_LIMIT, N, None),
     ]
     cell_refs = {}
     row = 2
@@ -742,6 +746,14 @@ def _write_reconciliation_sheet(wb, report: Report):
             _set(ws, flag_row, 2, flag, fill=BAD, wrap=True)
             flag_row += 1
         header_row = flag_row + 1  # blank row separates the loud block from the table
+    if getattr(report, "statement_within", None):
+        # H35-16: amber, once, separate from the disagreements above.
+        _set(ws, header_row, 1, f"AGREES WITHIN Rs {WITHIN_TOLERANCE_LIMIT:g}", fill=TF, bold=True)
+        _set(ws, header_row, 2,
+             f"{len(report.statement_within)} row(s) agree with the LLP Statement only within "
+             f"Rs {WITHIN_TOLERANCE_LIMIT:g}: " + "; ".join(report.statement_within),
+             fill=TF, wrap=True)
+        header_row += 2
     headers = ["Category", "Sources", "Status", "Note"]
     _write_header(ws, header_row, headers)
     row = header_row + 1
@@ -769,7 +781,8 @@ def _write_exceptions_sheet(wb, report: Report):
         # genuine failure -- it never belongs on the Exceptions sheet, the
         # same way it never counts toward the summary's variance/
         # undecidable totals.
-        if ((r.agree is not True or getattr(r, "excluded_months", ""))
+        if ((r.agree is not True or getattr(r, "excluded_months", "")
+                or getattr(r, "within_tolerance_diff", None) is not None)
                 and not r.informational and not getattr(r, "not_checked", False)):
             fill, text = _status_fill(r)
             _set(ws, row, 1, r.category, wrap=True)
@@ -939,9 +952,26 @@ def _write_bank_match_sheet(wb, bank_matches):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def write_report_workbook(report: Report, out_path: str, posted_check=None, bank_matches=None) -> None:
+def _write_inputs_files_sheet(wb, rows):
+    """UI-23: what each dropped file was recognised as and what became of it."""
+    ws = wb.create_sheet("Inputs")
+    _write_header(ws, 1, ["File", "Recognised as", "Year read from inside",
+                          "Used for / skipped and why"])
+    for r, row in enumerate(rows, start=2):
+        for c, v in enumerate(row, start=1):
+            _set(ws, r, c, v, wrap=(c == 4))
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 80
+
+
+def write_report_workbook(report: Report, out_path: str, posted_check=None, bank_matches=None,
+                          inputs_rows=None) -> None:
     wb = Workbook()
     wb.remove(wb.active)
+    if inputs_rows is not None:
+        _write_inputs_files_sheet(wb, inputs_rows)
     _write_logic_sheet(wb, report)
     driver_refs = _write_drivers_sheet(wb, report)
     _write_inputs_monthly_sheet(wb, report)

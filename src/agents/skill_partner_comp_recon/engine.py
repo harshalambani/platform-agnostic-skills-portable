@@ -53,6 +53,22 @@ PENDING_JOURNAL_VERDICT = "PENDING JOURNAL POSTING (provided by this skill)"
 # call sites.
 RECONCILIATION_TOLERANCE = 1.0
 
+# H35-16: a RECONCILIATION VERDICT whose difference is above the Re 1
+# tolerance but no more than this many rupees is shown as an amber
+# "AGREE within Rs 10 (difference Rs N)" -- never plain green, and the
+# difference is always printed. It applies to reconciliation verdicts only:
+# bank matching, journal amounts, the year-end accrual "ties" test and every
+# RED FLAG / double-booking check keep using RECONCILIATION_TOLERANCE alone.
+# Nothing is ever plugged. The value is shown on the Drivers sheet.
+WITHIN_TOLERANCE_LIMIT = 10.0
+
+
+def within_tolerance_band(diff, tolerance: float = RECONCILIATION_TOLERANCE) -> bool:
+    """True when `diff` is beyond the strict tolerance but inside the Rs 10
+    limit (H35-16). A difference at or under the tolerance is a plain AGREE;
+    one above the limit is a VARIANCE."""
+    return tolerance < abs(diff) <= WITHIN_TOLERANCE_LIMIT + 1e-9
+
 
 def _parse_date(value) -> date:
     if isinstance(value, date):
@@ -297,7 +313,7 @@ def detect_mid_year_rate_change(instalment_capitals: list[float], target_compens
 # 4. Incentive cohorts and the FY straddle.
 # ---------------------------------------------------------------------------
 
-from .award_year import award_year_rows  # noqa: E402  (H35-14)
+from .award_year import award_year_rows, select_award_year_documents  # noqa: E402  (H35-14)
 
 
 @dataclass
@@ -451,6 +467,14 @@ class ReconciliationResult:
     # is listed on the Exceptions and Open items sheets, and counts as
     # undecidable. The excluded amount is never added to the Computed figure.
     excluded_months: str = ""
+    # H35-16: set (to the absolute difference in rupees) when the row agrees
+    # only within WITHIN_TOLERANCE_LIMIT. Such a row has agree=True but is
+    # shown amber as "AGREE within Rs 10 (difference Rs N)", is counted
+    # separately from variances, and is never plain green.
+    within_tolerance_diff: float | None = None
+    # True when the row is measured against the LLP Statement (L5); only
+    # those rows feed the "agrees within Rs 10" statement block.
+    statement_ref: bool = False
 
 
 def reconcile_category(category: str, sources: dict,
@@ -470,6 +494,14 @@ def reconcile_category(category: str, sources: dict,
     baseline = values[0]
     agree = all(abs(v - baseline) <= tolerance for v in values[1:])
     note = ""
+    if not agree and all(abs(v - baseline) <= WITHIN_TOLERANCE_LIMIT + 1e-9 for v in values[1:]):
+        spread = max(values) - min(values)
+        note = (f"Sources differ by Rs {spread:,.2f}, within the Rs "
+                f"{WITHIN_TOLERANCE_LIMIT:g} limit: {present}")
+        if missing:
+            note += f" Not supplied: {', '.join(missing)}."
+        return ReconciliationResult(category=category, sources=sources, agree=True, note=note,
+                                    within_tolerance_diff=round(spread, 2))
     if not agree:
         spread = max(values) - min(values)
         note = f"Variance of {spread:,.2f} across sources: {present}"
@@ -552,10 +584,14 @@ def statement_reference_row(
     disagreements = []
     agreements = []
     closures = []  # rows whose gap is FULLY explained by a pending journal
+    withins = []  # (label, diff): above tolerance, inside the Rs 10 limit (H35-16)
     for label, value in present_others.items():
         diff = value - statement_value
         if abs(diff) <= tolerance:
             agreements.append(label)
+            continue
+        if within_tolerance_band(diff, tolerance):
+            withins.append((label, diff))
             continue
         if has_pending and label == pj_label:
             ids = ", ".join(pj_ids) if pj_ids else "the journal this skill produced"
@@ -595,10 +631,18 @@ def statement_reference_row(
             f"difference {diff:,.2f}."
         )
 
+    within_text = " ".join(
+        f"Statement says {statement_value:,.2f}; {lab} says {statement_value + d:,.2f}; "
+        f"difference Rs {abs(d):,.2f}, within the Rs {WITHIN_TOLERANCE_LIMIT:g} limit."
+        for lab, d in withins)
+    within_max = round(max((abs(d) for _l, d in withins), default=0.0), 2) or None
+
     if disagreements:
         note = "STATEMENT DISAGREES -- " + " ".join(disagreements)
         if closures:
             note += " " + " ".join(closures)
+        if withins:
+            note += " Also agrees within Rs " + f"{WITHIN_TOLERANCE_LIMIT:g}: " + within_text
         if agreements:
             note += f" (agrees with: {', '.join(agreements)})."
         if missing_others:
@@ -609,14 +653,21 @@ def statement_reference_row(
         note = " ".join(closures)
         if agreements:
             note += f" Also agrees with: {', '.join(agreements)}."
+        if withins:
+            note += " Also agrees within Rs " + f"{WITHIN_TOLERANCE_LIMIT:g}: " + within_text
         if missing_others:
             note += f" Not supplied: {', '.join(missing_others)}."
-        return ReconciliationResult(category=category, sources=sources, agree=True, note=note)
+        return ReconciliationResult(category=category, sources=sources, agree=True, note=note,
+                                    within_tolerance_diff=within_max, statement_ref=bool(withins))
 
     note = "All supplied sources agree with the LLP Statement of Account (the reference)."
+    if withins:
+        note = ("Every supplied source agrees with the LLP Statement of Account (the reference); "
+                "some only within Rs " + f"{WITHIN_TOLERANCE_LIMIT:g}: " + within_text)
     if missing_others:
         note += f" Not supplied: {', '.join(missing_others)}."
-    return ReconciliationResult(category=category, sources=sources, agree=True, note=note)
+    return ReconciliationResult(category=category, sources=sources, agree=True, note=note,
+                                within_tolerance_diff=within_max, statement_ref=bool(withins))
 
 
 def booked_current_account_closing(monthly: "list[MonthlyLine]", llp_record: dict | None):
@@ -753,6 +804,7 @@ def profit_share_three_way(llp_record, monthly, ctc_structuring, drivers, fy,
     gap_a = round(stmt - before, 2)
     gap_b = round(stmt - after, 2)
     tol = RECONCILIATION_TOLERANCE
+    within_diff = None
     ok_a, ok_b = abs(gap_a) <= tol, abs(gap_b) <= tol
     parts = (f"gross share of profit {gross:,.2f}, firm's tax on it {tax:,.2f}, "
              f"additional share of profit {addl:,.2f} (current award only; earlier "
@@ -780,6 +832,14 @@ def profit_share_three_way(llp_record, monthly, ctc_structuring, drivers, fy,
                           "share-of-profit accrual) book exactly that. Before firm's tax the gap "
                           f"would be {gap_a:,.2f}. Check the accrual against the payout that settles "
                           "it."), True
+    elif not pending_accrual and min(abs(gap_a), abs(gap_b)) <= WITHIN_TOLERANCE_LIMIT + 1e-9:
+        # H35-16: closest reading is off by more than Re 1 but at most Rs 10.
+        # Not offered while this skill's accrual journal is pending (that
+        # case keeps its RED FLAG / DIFFERS handling untouched).
+        within_diff = round(min(abs(gap_a), abs(gap_b)), 2)
+        which = "before" if abs(gap_a) <= abs(gap_b) else "after"
+        verdict, agree = (f"Agrees {which} firm's tax within Rs {WITHIN_TOLERANCE_LIMIT:g} "
+                          f"(difference Rs {within_diff:,.2f})."), True
     else:
         verdict, agree = (f"DIFFERS on both readings: statement less before-tax reading = "
                           f"{gap_a:,.2f}; statement less after-tax reading = {gap_b:,.2f}."), False
@@ -791,6 +851,8 @@ def profit_share_three_way(llp_record, monthly, ctc_structuring, drivers, fy,
         agree=agree,
         note=f"{verdict} Schedule: {parts}. See also the CTC walk-down row for the "
              "Target Compensation view of the same pool.",
+        within_tolerance_diff=within_diff,
+        statement_ref=within_diff is not None,
     )
 
 
@@ -1190,6 +1252,9 @@ class Report:
     # supplied at all). Consumed by agent.py (top of the text summary) and
     # writer.py (top of the Reconciliation sheet) to build the loud block.
     statement_flags: list[str] = field(default_factory=list)
+    # H35-16: statement-referenced rows that agree only within Rs 10, listed
+    # once, separately from statement_flags (they are NOT disagreements).
+    statement_within: list[str] = field(default_factory=list)
     # driver key -> "Entity setting" / "Advisory" / a default's label.
     driver_sources: dict = field(default_factory=dict)
 
@@ -1797,7 +1862,23 @@ def build_report(data: dict) -> Report:
         cohort_gross_total = sum(
             i.gross for i in reporting_instalments if i.gross is not None
         ) if reporting_instalments else 0.0
-        if advisory_fy != award_fy:
+        _ay_sel = select_award_year_documents(data.get("award_year_documents")).get(award_fy)
+        if advisory_fy != award_fy and _ay_sel and _ay_sel["status"] == "ok":
+            # H35-17: the award-year document WAS supplied (it is read by the
+            # per-instalment check below), so this row must not claim the
+            # Advisory is missing, and it does not compare totals either.
+            reconciliation.append(ReconciliationResult(
+                category=category_name,
+                sources={"Award-year Advisory (schedule_instalments)": None,
+                         "Payment-schedule cohort ledger": cohort_gross_total},
+                agree=None,
+                note=_informational_prefix +
+                     f"The FY{award_fy} award-year Advisory was supplied "
+                     f"({_ay_sel['doc']['name']}); it is checked instalment by instalment "
+                     "in the 'Award-year check' rows below, not as a total here.",
+                informational=True,
+            ))
+        elif advisory_fy != award_fy:
             reconciliation.append(ReconciliationResult(
                 category=category_name,
                 sources={"Award-year Advisory (schedule_instalments)": None,
@@ -1884,6 +1965,12 @@ def build_report(data: dict) -> Report:
         for line in llp_record.get("diagnostics", []) or []:
             if line.startswith("ERROR:"):
                 statement_flags.append(f"Statement arithmetic -- {line}")
+    statement_within: list[str] = [
+        f"{r.category}: difference Rs {r.within_tolerance_diff:,.2f}"
+        for r in reconciliation
+        if r.statement_ref and r.within_tolerance_diff is not None and r.agree is True
+        and not r.informational and not r.not_checked
+    ]
 
     return Report(
         financial_year=fy, drivers=drivers, monthly=monthly, cohorts_raw=cohorts_raw,
@@ -1897,5 +1984,6 @@ def build_report(data: dict) -> Report:
         capital_interest_schedule=capital_interest_schedule,
         ctc_check=ctc_check,
         statement_flags=statement_flags,
+        statement_within=statement_within,
         driver_sources=driver_sources,
     )

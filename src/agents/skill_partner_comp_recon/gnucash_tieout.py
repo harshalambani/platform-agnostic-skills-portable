@@ -49,12 +49,20 @@ from .engine import (
     CANNOT_RECONCILE,
     PENDING_JOURNAL_VERDICT,
     RECONCILIATION_TOLERANCE,
+    WITHIN_TOLERANCE_LIMIT,
+    within_tolerance_band,
     ReconciliationResult,
     fy_prefix,
     journal_txn_id,
     reconcile_category,
 )
-from .jv_emitter import ACCOUNT_KEYS, JournalValidationError, build_journals, excluded_month_legs
+from .jv_emitter import (
+    ACCOUNT_KEYS,
+    JournalValidationError,
+    build_accrual_journal,
+    build_journals,
+    excluded_month_legs,
+)
 from .jv_emitter import _strip_root as _jv_strip_root
 
 _ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
@@ -670,6 +678,30 @@ def build_balance_tieout(
     return _name_excluded_months(results, row_path, report, accounts, bank_matches)
 
 
+def _unposted_accrual_journal(report, accounts: dict, book, year_key: str):
+    """H35-15: the year-end ACCR accrual journal (jv_emitter.
+    build_accrual_journal) when it is NOT yet in the book, else None.
+
+    build_journals() only returns the monthly M-journals; the accrual is
+    built separately, so a check that adds "this run's unposted journals"
+    to the book must add it explicitly. It is classified exactly like the
+    M-journals: a Transaction ID/Num hit in the book means ALREADY POSTED
+    (the book balance already holds it -- counting it again would book it
+    twice); only a clean NOT POSTED is counted. Anything partial or
+    ambiguous is left out, and the gap stays visible."""
+    try:
+        journal, _note, _res = build_accrual_journal(report, accounts or {})
+    except JournalValidationError:
+        return None
+    if journal is None:
+        return None
+    if any(t.num and t.num == journal.txn_id for t in book.transactions):
+        return None
+    status, _detail = _fallback_classify(
+        journal, parse_gnucash.fy_transactions(book, year_key), _colon_paths(book))
+    return journal if status == NOT_POSTED else None
+
+
 _STATEMENT_BOOK_ROWS = (
     ("capital_contribution", "capital_closing_balance", "closing capital"),
     ("current_account", "current_closing_balance", "closing current account"),
@@ -736,30 +768,45 @@ def build_statement_book_check(
         book_bal = parse_gnucash.normalize_value(raw, acct_type)
         pend = [j for j in journals if status.get(j.txn_id) == NOT_POSTED
                 and any(s.account == stripped for s in j.splits)]
+        accr = _unposted_accrual_journal(report, accounts, book, year_key)
+        if accr is not None and any(s.account == stripped for s in accr.splits):
+            pend = pend + [accr]
         pend_raw = sum(s.debit - s.credit for j in pend for s in j.splits if s.account == stripped)
         pend_fig = parse_gnucash.normalize_value(pend_raw, acct_type) if pend_raw else 0.0
         expected = round(book_bal + pend_fig, 2)
         src["GnuCash book at 31 Mar (plus this skill's unposted journals)"] = expected
         gap = round(stmt - expected, 2)
         raw_gap = round(stmt - book_bal, 2)
+        # ONE book figure everywhere: the Sources column and every note quote
+        # `expected` (book + unposted journals). The book alone and the
+        # unposted amount are only ever named as its two parts.
+        parts = (f"{expected:,.2f} = book {book_bal:,.2f} + journal(s) not yet posted "
+                 f"{pend_fig:,.2f}") if pend else f"{expected:,.2f}"
         if abs(gap) <= RECONCILIATION_TOLERANCE:
             if pend and abs(raw_gap) > RECONCILIATION_TOLERANCE:
                 ids = ", ".join(sorted({j.txn_id for j in pend}))
                 out.append(ReconciliationResult(
                     category=category, sources=src, agree=True,
-                    note=f"{PENDING_JOURNAL_VERDICT}: the book at 31 March is {book_bal:,.2f}; "
-                         f"journal(s) {ids} ({pend_fig:,.2f}) are not yet posted and explain "
-                         f"the whole difference to the statement ({stmt:,.2f})."))
+                    note=f"{PENDING_JOURNAL_VERDICT}: book figure {parts}. Journal(s) {ids} "
+                         f"are not yet posted and explain the whole difference to the "
+                         f"statement ({stmt:,.2f})."))
             else:
                 out.append(ReconciliationResult(
                     category=category, sources=src, agree=True,
-                    note=f"The book at 31 March ({book_bal:,.2f}) agrees with the statement."))
+                    note=f"The book figure ({parts}) agrees with the statement ({stmt:,.2f})."))
+        elif within_tolerance_band(gap):
+            out.append(ReconciliationResult(
+                category=category, sources=src, agree=True,
+                note=f"The book figure ({parts}) agrees with the statement ({stmt:,.2f}) only "
+                     f"within Rs {WITHIN_TOLERANCE_LIMIT:g}: difference Rs {abs(gap):,.2f}. "
+                     "Nothing is plugged or posted for this.",
+                within_tolerance_diff=round(abs(gap), 2), statement_ref=True))
         else:
-            tail = (f" Journal(s) not yet posted ({pend_fig:,.2f}) were taken into account; the gap "
-                    "remains." if pend else "")
+            tail = (" The journal(s) not yet posted were taken into account; the gap remains."
+                    if pend else "")
             out.append(ReconciliationResult(
                 category=category, sources=src, agree=False,
-                note=f"DIFFERS -- statement {stmt:,.2f} against book {book_bal:,.2f} at 31 March: "
+                note=f"DIFFERS -- statement {stmt:,.2f} against book figure {parts} at 31 March: "
                      f"unexplained difference {gap:,.2f}.{tail} Nothing is plugged or posted for this; "
                      "find the cause in the book or the statement."))
     return out

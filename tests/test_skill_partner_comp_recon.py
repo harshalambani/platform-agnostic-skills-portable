@@ -5738,14 +5738,29 @@ def test_h35_02_residual_variance_vs_tie():
     report_variance = build_report(data_variance)
     journal, note, residual = jv_emitter.build_accrual_journal(report_variance, _H35_ACCOUNTS)
     assert journal is not None  # the profit-share accrual itself still books
-    assert residual.agree is False
-    assert "Variance" in residual.note
+    # H35-16: Rs 6 is above Re 1 but inside the Rs 10 limit -> an amber
+    # "agree within Rs 10" with the difference carried, not a variance.
+    assert residual.agree is True
+    assert residual.within_tolerance_diff == 6.0
+    assert "Variance" not in residual.note
     # The residual is reported, never folded into the accrual's own splits.
     posted_current_leg = next(
         s.debit - s.credit for s in journal.splits
         if s.account == _H35_ACCOUNTS["current_account"]
     )
     assert posted_current_leg == accrual_amount  # exactly the SoP accrual, not +6
+
+    # 4a-bis: Rs 10.01 off stays a VARIANCE (H35-16 negative test).
+    data_over = _h35_02_data(
+        llp_record={
+            "current_profit_share": 350000,
+            "current_opening_balance": 100000,
+            "current_closing_balance": 150010.01,
+        },
+    )
+    _, _, residual_over = jv_emitter.build_accrual_journal(build_report(data_over), _H35_ACCOUNTS)
+    assert residual_over.agree is False
+    assert residual_over.within_tolerance_diff is None
 
     # 4b: residual exactly Re 1 off -> ties (within RECONCILIATION_TOLERANCE).
     data_tie = _h35_02_data(
@@ -5925,10 +5940,11 @@ def test_h35_04_statement_reference_row_agrees_exactly_at_re1_boundary():
 
 def test_h35_04_statement_reference_row_disagrees_just_beyond_re1_boundary():
     result = statement_reference_row(
-        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100001.01},
-    )
+        "Some category", 100000.0, "LLP Statement (L5)", {"Other source": 100010.01},
+    )  # H35-16: Rs 10.01 off is still a disagreement
     assert result.agree is False
     assert result.note.startswith("STATEMENT DISAGREES")
+    assert result.within_tolerance_diff is None
 
 
 def test_h35_04_statement_reference_row_cannot_reconcile_with_no_other_sources():
@@ -6254,7 +6270,7 @@ def test_h35_04_loud_block_triggered_just_beyond_re1_difference():
     data = _h35_04_data(
         llp_record={"capital_closing_balance": 1000000, "current_profit_share": 300000},
         advisory_closing=1000000,
-        return_closing=999998.99,   # Rs 1.01 off -> disagrees
+        return_closing=999989.99,   # Rs 10.01 off -> disagrees (H35-16: Rs 10 limit)
         return_exempt_sop=300000,
     )
     report = build_report(data)
@@ -8277,7 +8293,7 @@ def test_h35_06_statement_mismatch_over_re1_reported_within_re1_not():
     # (a) beyond Re 1: the underlying comparison still disagrees (visible in
     # `agree`/`sources`), but it is NEVER a LOUD "STATEMENT DISAGREES" entry
     # and NEVER counted in report.statement_flags -- see requirement 1.
-    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6002.0}}
+    over = {**base, "llp_record": {**base["llp_record"], "capital_interest_on_capital": 6010.01}}
     report_over = build_report(over)
     row_over = next(r for r in report_over.reconciliation if r.category == category)
     assert row_over.agree is False
@@ -8459,8 +8475,8 @@ def test_s194t_tds_diff_over_re1_variance_within_re1_agrees():
     row_exact = next(r for r in report_exact.reconciliation if r.category == _S194T_CATEGORY)
     assert row_exact.agree is True
 
-    # (b) computed = |-1501.50 - (-300)| = 1201.50 -- 1.50 over Re 1: variance.
-    over = _s194t_data(tds_schedule=-1501.50, tds_payslip=-300.0)
+    # (b) computed = 1211.01 -- 11.01 over (beyond the Rs 10 limit): variance.
+    over = _s194t_data(tds_schedule=-1511.01, tds_payslip=-300.0)
     report_over = build_report(over)
     row_over = next(r for r in report_over.reconciliation if r.category == _S194T_CATEGORY)
     assert row_over.agree is False
@@ -8859,8 +8875,8 @@ def test_h35_14_different_tax_or_capital_differs_loudly():
         {"instalment_no": 1, "gross": 1000000, "firms_tax": 300000, "capital_contribution": 250000, "net": 0},
     ])]
     rows = _ay_rows(docs)
-    assert [r.agree for r in rows] == [False, False]
-    assert "firm's tax" in rows[0].note and "capital deducted" in rows[1].note
+    assert [r.agree for r in rows] == [False, None]  # the one line is used once only
+    assert "firm's tax" in rows[0].note and "capital deducted" in rows[0].note
 
 
 def test_h35_14_no_document_is_named_cannot_reconcile_never_agree():
@@ -9072,3 +9088,414 @@ def test_h35_14_unreadable_award_year_file_is_named_and_skipped(tmp_path):
     assert len(docs) == 1 and docs[0]["error"]
     assert "broken.pdf" in notes[0] and "skipped" in notes[0]
     assert _read_award_year_documents("", None) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# H35-15 (reopened) -- the year-end ACCR accrual journal is on the book side
+# ---------------------------------------------------------------------------
+
+_ACCR_AMT = 7000.0
+_CUR = "closing current account at 31 March"
+
+
+def _accr_report(statement_current):
+    """A report whose L5 profit share is _ACCR_AMT above the monthly total,
+    so build_accrual_journal() produces an ACCR journal (Dr current account
+    / Cr share of profit). The synthetic current account is EQUITY, so a
+    7,000 debit moves its credit-positive balance by -7,000."""
+    report = _sb_report(50000.0, statement_current)
+    booked = sum(m.share_of_profit_gross + m.firms_tax_sop + m.additional_share_of_profit
+                 for m in report.monthly)
+    report.llp_record["current_profit_share"] = booked + _ACCR_AMT
+    return report
+
+
+def _accr_posted_txn(num=""):
+    def make(guids):
+        return _gc_txn_xml(
+            _gc_guid("txn-accr-posted"), "2026-03-31", "accrual",
+            [_gc_split_xml(_gc_guid("sa1"), _ACCR_AMT, guids["Partner Current Account"]),
+             _gc_split_xml(_gc_guid("sa2"), -_ACCR_AMT, guids["Share of Profit"])],
+            num=num)
+    return make
+
+
+def _figure_in_note(note):
+    import re as _re
+    m = _re.search(r"book figure ([-\d,]+\.\d\d)", note)
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def test_h35_15_gap_explained_by_the_accrual_journal_is_pending_never_differs(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT))[_CUR]
+    assert r.agree is True and r.agree is not False
+    assert PENDING_JOURNAL_VERDICT in r.note and "ACCR" in r.note
+    assert "DIFFERS" not in r.note
+
+
+def test_h35_15_gap_the_accrual_does_not_explain_is_never_agree(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 500.0))[_CUR]
+    assert r.agree is False and r.agree is not True
+    assert "unexplained difference -500.00" in r.note
+
+
+def test_h35_15_a_posted_accrual_is_not_counted_twice(tmp_path):
+    # Posted by Transaction ID/Num, and the statement agrees with the book alone.
+    from agents.skill_partner_comp_recon.jv_emitter import build_accrual_journal
+    rep = _accr_report(-_ACCR_AMT)
+    accr_id = build_accrual_journal(rep, _SB_ACCOUNTS)[0].txn_id
+    ok = _sb_rows(tmp_path, rep, [_accr_posted_txn(num=accr_id)], name="n1")[_CUR]
+    assert ok.agree is True and PENDING_JOURNAL_VERDICT not in ok.note
+    # Counted twice would make -14,000 the "expected" figure and hide this gap.
+    twice = _sb_rows(tmp_path, _accr_report(-2 * _ACCR_AMT),
+                     [_accr_posted_txn(num=accr_id)], name="n2")[_CUR]
+    assert twice.agree is False
+    # Same when it is recognised by its exact date/amount/accounts (no Num).
+    ok2 = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT), [_accr_posted_txn()], name="n3")[_CUR]
+    assert ok2.agree is True and PENDING_JOURNAL_VERDICT not in ok2.note
+    twice2 = _sb_rows(tmp_path, _accr_report(-2 * _ACCR_AMT), [_accr_posted_txn()], name="n4")[_CUR]
+    assert twice2.agree is False
+
+
+def test_h35_15_sources_figure_and_note_figure_are_always_equal(tmp_path):
+    key = "GnuCash book at 31 Mar (plus this skill's unposted journals)"
+    for stmt, name in ((-_ACCR_AMT, "e1"), (-_ACCR_AMT - 500.0, "e2"), (0.0, "e3")):
+        r = _sb_rows(tmp_path, _accr_report(stmt), name=name)[_CUR]
+        assert _figure_in_note(r.note) == r.sources[key], (stmt, r.note)
+        assert r.sources[key] == -_ACCR_AMT
+
+
+# ===========================================================================
+# H35-16 -- "AGREE within Rs 10 (difference Rs N)": an amber conditional
+# green for a difference above Re 1 and up to Rs 10. Reconciliation verdicts
+# only; bank matching, journal amounts and RED FLAG checks never use it.
+# ===========================================================================
+
+def test_h35_16_reconcile_category_within_rs10_is_amber_agree_with_difference():
+    from agents.skill_partner_comp_recon import writer
+    from agents.skill_partner_comp_recon.engine import WITHIN_TOLERANCE_LIMIT
+    r = reconcile_category("X", {"A": 1000.0, "B": 1006.0})
+    assert r.agree is True and r.within_tolerance_diff == 6.0
+    fill, text = writer._status_fill(r)
+    assert text == "AGREE within Rs 10 (difference Rs 6.00)"
+    assert fill is writer.TF and fill is not writer.OK
+    assert WITHIN_TOLERANCE_LIMIT == 10.0
+
+
+def test_h35_16_rs_10_01_stays_a_variance_and_re1_stays_plain_agree():
+    from agents.skill_partner_comp_recon import writer
+    over = reconcile_category("X", {"A": 1000.0, "B": 1010.01})
+    assert over.agree is False and over.within_tolerance_diff is None
+    assert writer._status_fill(over)[1] == "VARIANCE"
+    edge = reconcile_category("X", {"A": 1000.0, "B": 1010.0})
+    assert edge.agree is True and edge.within_tolerance_diff == 10.0
+    plain = reconcile_category("X", {"A": 1000.0, "B": 1001.0})
+    assert plain.agree is True and plain.within_tolerance_diff is None
+    fill, text = writer._status_fill(plain)
+    assert text == "AGREE" and fill is writer.OK
+
+
+def test_h35_16_statement_row_within_rs10_is_agree_not_disagreement():
+    r = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                {"Other source": 100006.0})
+    assert r.agree is True and r.within_tolerance_diff == 6.0 and r.statement_ref
+    assert "STATEMENT DISAGREES" not in r.note
+    assert "6.00" in r.note
+    far = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                  {"Other source": 100010.01})
+    assert far.agree is False and far.within_tolerance_diff is None
+
+
+def test_h35_16_book_vs_statement_within_rs10_shows_the_difference(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 6.0))[_CUR]
+    assert r.agree is True and r.within_tolerance_diff == 6.0
+    assert "6.00" in r.note and "DIFFERS" not in r.note
+    far = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 10.01), name="far")[_CUR]
+    assert far.agree is False and far.within_tolerance_diff is None
+
+
+def _h35_16_report(diff):
+    """A report whose only reconciliation row is a statement-referenced row
+    that is `diff` rupees off (isolated from the other rows of the fixture)."""
+    report = build_report(_h35_02_data())
+    row = statement_reference_row("Some category", 100000.0, "LLP Statement (L5)",
+                                  {"Other source": 100000.0 + diff})
+    report.reconciliation = [row]
+    report.statement_flags = (
+        [f"{row.category}: {row.note}"] if row.note.startswith("STATEMENT DISAGREES") else [])
+    report.statement_within = (
+        [f"{row.category}: difference Rs {row.within_tolerance_diff:,.2f}"]
+        if row.within_tolerance_diff is not None else [])
+    return report
+
+
+def test_h35_16_headline_counts_within_rows_separately_and_lists_them_once(tmp_path):
+    from agents.skill_partner_comp_recon.agent import _summarize_report
+    text = _summarize_report(_h35_16_report(6.0), str(tmp_path / "x.xlsx"))
+    assert "agree only within Rs 10" in text
+    assert text.count("difference Rs 6.00") == 1          # listed once
+    assert "STATEMENT DISAGREES" not in text              # not a disagreement
+    assert "reconciliation variance" not in text          # not a variance
+    # Re 1 behaviour: a tie prints neither line.
+    assert "within Rs 10" not in _summarize_report(_h35_16_report(1.0), str(tmp_path / "y.xlsx"))
+    # Rs 10.01 is a real disagreement and a variance, not a within row.
+    far = _summarize_report(_h35_16_report(10.01), str(tmp_path / "z.xlsx"))
+    assert "STATEMENT DISAGREES" in far and "reconciliation variance" in far
+    assert "within Rs 10" not in far
+
+
+def test_h35_16_workbook_shows_the_limit_on_drivers_and_amber_status(tmp_path):
+    import openpyxl
+    from agents.skill_partner_comp_recon import writer
+    out = tmp_path / "w.xlsx"
+    writer.write_report_workbook(_h35_16_report(6.0), str(out))
+    wb = openpyxl.load_workbook(out)
+    drivers = {row[0].value: row[1].value for row in wb["Drivers"].iter_rows(min_row=2)}
+    assert drivers["Agree-within limit (Rs)"] == 10.0
+    texts = [str(c.value) for row in wb["Reconciliation"].iter_rows() for c in row if c.value]
+    assert any(t.startswith("AGREE within Rs 10 (difference Rs 6.00)") for t in texts)
+    assert any(t.startswith("AGREES WITHIN Rs 10") for t in texts)
+
+
+def test_h35_16_journals_are_byte_identical_with_and_without_a_small_difference(tmp_path):
+    from agents.skill_partner_comp_recon import jv_emitter
+    outs = []
+    for closing, name in ((150000, "a"), (150006, "b")):
+        rep = build_report(_h35_02_data(llp_record={
+            "current_profit_share": 350000, "current_opening_balance": 100000,
+            "current_closing_balance": closing}))
+        j, _n, _r = jv_emitter.build_accrual_journal(rep, _H35_ACCOUNTS)
+        p = tmp_path / f"{name}.csv"
+        jv_emitter.write_accrual_journal_csv(j, str(p))
+        outs.append(p.read_bytes())
+    assert outs[0] == outs[1]
+
+
+def test_h35_16_red_flag_on_a_small_amount_is_still_raised():
+    # Statement agrees BEFORE firm's tax (reading A); the pending accrual would
+    # book a tiny firm's tax: still a RED FLAG, never softened by the Rs 10 band.
+    r = _pst(1100.0, 1000.0, -4.0, 100.0, _accr(4.0))
+    assert r.agree is False and r.note.startswith("RED FLAG")
+    assert r.within_tolerance_diff is None
+
+
+def test_h35_16_bank_matching_tolerance_is_unchanged():
+    from agents.skill_partner_comp_recon import gnucash_tieout as gt
+    from agents.skill_partner_comp_recon.engine import RECONCILIATION_TOLERANCE
+    assert RECONCILIATION_TOLERANCE == 1.0
+    assert gt.WITHIN_TOLERANCE_LIMIT == 10.0   # imported for the statement rows only
+    import inspect
+    src = inspect.getsource(gt)
+    # the bank matcher still compares against the strict tolerance
+    assert "pm.payout_amount) <= RECONCILIATION_TOLERANCE" in src
+
+
+# ===========================================================================
+# UI-22 -- a password-protected PDF with a missing / wrong Document password
+# gets a plain message on every PDF input (never an empty reason, never the
+# password itself); an unprotected PDF that fails keeps its real error.
+# ===========================================================================
+
+_UI22_SECRET = "zx-made-up-pw-91"
+
+
+def _ui22_pdf(path, password=None, text="Hello made-up page"):
+    from reportlab.pdfgen import canvas
+    kwargs = {"encrypt": password} if password else {}
+    c = canvas.Canvas(str(path), **kwargs)
+    c.drawString(72, 720, text)
+    c.save()
+    return str(path)
+
+
+def test_ui22_missing_password_says_enter_the_document_password(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    note, rec = ag._resolve_llp_leg(pdf, None)
+    assert rec is None and precheck.PASSWORD_MISSING_MESSAGE in note
+    note, rec = ag._resolve_schedule_leg(pdf, "")
+    assert rec is None and precheck.PASSWORD_MISSING_MESSAGE in note
+
+
+def test_ui22_wrong_password_has_its_own_message_and_never_echoes_it(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    wrong = "wrong-guess-77"
+    note, _rec = ag._resolve_llp_leg(pdf, wrong)
+    assert precheck.PASSWORD_WRONG_MESSAGE in note
+    assert precheck.PASSWORD_MISSING_MESSAGE not in note
+    assert wrong not in note and _UI22_SECRET not in note
+    note2, _ = ag._resolve_schedule_leg(pdf, wrong)
+    assert precheck.PASSWORD_WRONG_MESSAGE in note2 and wrong not in note2
+
+
+def test_ui22_award_year_and_advisory_and_certificates_use_the_message(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import award_year, precheck
+    from agents.skill_partner_comp_recon.parsers import advisory, payout_advice
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    d = award_year.read_award_year_document(pdf, None, advisory)
+    assert d["error"] == precheck.PASSWORD_MISSING_MESSAGE
+    d2 = award_year.read_award_year_document(pdf, "nope-nope", advisory)
+    assert d2["error"] == precheck.PASSWORD_WRONG_MESSAGE and "nope-nope" not in d2["error"]
+    for parser in (advisory, payout_advice):
+        try:
+            parser.parse(pdf, None)
+        except Exception as e:  # noqa: BLE001
+            assert precheck.explain_pdf_error(e, None) == precheck.PASSWORD_MISSING_MESSAGE
+        else:
+            raise AssertionError("expected the locked PDF to fail")
+    docs, notes = ag._read_award_year_documents([pdf], None)
+    assert precheck.PASSWORD_MISSING_MESSAGE in notes[0]
+
+
+def test_ui22_an_unprotected_pdf_that_fails_keeps_its_real_error(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "plain.pdf")          # opens fine, is no L5 / schedule
+    note, rec = ag._resolve_llp_leg(pdf, None)
+    assert rec is None and "password" not in note.lower()
+    note, rec = ag._resolve_schedule_leg(pdf, None)
+    assert rec is None and "password" not in note.lower()
+    # Not a PDF at all: the real error, never the password message.
+    junk = tmp_path / "junk.pdf"
+    junk.write_bytes(b"not a pdf")
+    note, _ = ag._resolve_llp_leg(str(junk), None)
+    assert precheck.PASSWORD_MISSING_MESSAGE not in note and "could not parse" in note
+    # An exception with no text still names its type, never an empty reason.
+    assert precheck.explain_pdf_error(KeyError(), None) == "KeyError"
+
+
+# ---------------------------------------------------------------------------
+# H35-17 -- award-year matching: arrears + instalment paid as one payment
+# ---------------------------------------------------------------------------
+# Made-up figures. The fixture's two reporting-year payments are
+#   1,000,000 / 349,440 / 416,667 / net 233,893   (2025-07-31)
+#   1,000,000 / 349,440 / 291,667 / net 358,893   (2025-10-31)
+
+_ARR = {"instalment_no": None, "label": "Arrears for FY 24-25", "gross": 150000,
+        "firms_tax": 52416, "capital_contribution": 0, "net": 97584}
+_I1B = {"instalment_no": 1, "gross": 850000, "firms_tax": 297024,
+        "capital_contribution": 416667, "net": 136309}
+_I2 = {"instalment_no": 2, "gross": 1000000, "firms_tax": 349440,
+       "capital_contribution": 291667, "net": 358893}
+_S1 = {"instalment_no": 1, "gross": 1000000, "firms_tax": 349440,
+       "capital_contribution": 416667, "net": 233893}
+
+
+def test_h35_17_arrears_plus_instalment_agrees_and_names_the_lines():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_I2)])])
+    assert [r.agree for r in rows] == [True, True]
+    assert "Arrears" in rows[0].note and "1st instalment" in rows[0].note
+    assert "net agree" in rows[0].note
+    assert all(CANNOT_RECONCILE not in r.note for r in rows)
+
+
+def test_h35_17_gross_only_match_is_never_agree():
+    bad = dict(_I1B, net=136000)  # net differs, gross/tax/capital sum still fits
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), bad])])
+    assert rows[0].agree is not True
+    assert CANNOT_RECONCILE in rows[0].note
+    assert "Advisory yielded:" in rows[0].note and "Arrears gross 150,000.00" in rows[0].note
+
+
+def test_h35_17_a_used_line_is_never_reused():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_S1)])])
+    assert rows[0].agree is True
+    assert rows[1].agree is None  # payment 2 has no line of its own
+    assert CANNOT_RECONCILE in rows[1].note
+    assert "1st instalment gross 1,000,000.00" in rows[1].note
+
+
+def test_h35_17_two_fitting_combinations_are_ambiguous():
+    rows = _ay_rows([_ay_doc(instalments=[
+        dict(_ARR), dict(_I1B), dict(_I1B, instalment_no=3), dict(_I2)])])
+    assert rows[0].agree is None
+    assert CANNOT_RECONCILE in rows[0].note and "ambiguous" in rows[0].note
+    assert "Arrears + 1st instalment" in rows[0].note and "Arrears + 3rd instalment" in rows[0].note
+
+
+def test_h35_17_single_line_match_wins_over_a_combination():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_S1), dict(_I2)])])
+    assert [r.agree for r in rows] == [True, True]
+    assert " + " not in rows[0].note.split("Advisory")[-1]
+    assert "Arrears" not in rows[0].note
+
+
+def test_h35_17_nothing_parsed_is_reported_as_none_parsed_not_as_not_supplied():
+    rows = _ay_rows([_ay_doc(instalments=[])])
+    # a document with no usable lines is not "ok": it is not offered as supplied
+    assert all(r.agree is None for r in rows)
+    assert all(r.agree is not True for r in rows)
+
+
+def test_h35_17_totals_opening_and_closing_rows_never_take_part(monkeypatch):
+    from agents.skill_partner_comp_recon import award_year, precheck
+    monkeypatch.setattr(precheck, "read_first_page_text", lambda p, pw: "Compensation Summary")
+    monkeypatch.setattr(precheck, "classify_advisory_text", lambda t: "compensation_summary")
+
+    class _P:
+        @staticmethod
+        def parse(path, password):
+            return {"financial_year": "2024-25", "schedule_instalments": [
+                {"instalment_no": None, "label": "TOTAL", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Opening balance", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Projected closing balance", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Additions pertaining to prior year",
+                 "gross": 1000000, "firms_tax": None, "capital_contribution": None, "net": 1000000},
+                dict(_ARR), dict(_I1B)]}
+
+    doc = award_year.read_award_year_document("x.pdf", None, _P)
+    assert [award_year._line_name(a) for a in doc["instalments"]] == ["Arrears", "1st instalment"]
+    # a payment equal to the TOTAL row alone is therefore never matched
+    rows = _ay_rows([doc])
+    assert rows[0].agree is True and "Arrears + 1st instalment" in rows[0].note
+    assert rows[1].agree is None
+
+
+def test_h35_17_row_is_not_missing_when_the_award_year_document_was_supplied():
+    data = dict(_load_fixture())
+    data["advisory"] = dict(data["advisory"], financial_year="2025-26")
+    data["award_year_documents"] = [_ay_doc()]
+    row = next(r for r in build_report(data).reconciliation
+               if r.category == "Incentive instalments: award-year Advisory vs payment schedule")
+    assert "missing" not in row.note and row.agree is None
+    assert "ay_doc" not in row.note and "adv.pdf" in row.note
+    data["award_year_documents"] = []
+    row = next(r for r in build_report(data).reconciliation
+               if r.category == "Incentive instalments: award-year Advisory vs payment schedule")
+    assert row.agree is not True and "missing" in row.note
+
+
+def test_h35_17_journals_do_not_depend_on_the_award_year_documents():
+    base = dict(_load_fixture())
+    a = build_report(dict(base, award_year_documents=[]))
+    b = build_report(dict(base, award_year_documents=[_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_I2)])]))
+    ja = build_journals(a, base["accounts"])
+    jb = build_journals(b, base["accounts"])
+    assert ja
+    assert repr(ja) == repr(jb)
+
+
+def test_h35_17_parser_reads_a_dash_capital_arrears_row_and_the_double_star_marker():
+    from agents.skill_partner_comp_recon.parsers import advisory as adv
+    lines = [
+        "Opening balance (as on 1 Apr 25)   10,00,000",
+        "Arrears for FY 24-25   1,50,000   52,416   -   97,584",
+        "PLMI : FY 25 (1st instalment)   8,50,000   2,97,024   4,16,667   1,36,309 **",
+        "- - - - - - - - - - - -",
+        "10,00,000   3,49,440   4,16,667   2,33,893",
+        "Projected closing balance (as on 31 Mar 26)   12,00,000",
+    ]
+    (_o, _on, _od, _c, _cn, _cd, rows, totals, _unk) = adv._parse_schedule(lines)
+    assert [(r.gross, r.firms_tax, r.capital_contribution, r.net) for r in rows] == [
+        (150000.0, 52416.0, 0.0, 97584.0),
+        (850000.0, 297024.0, 416667.0, 136309.0)]
+    assert rows[0].instalment_no is None and rows[0].label.startswith("Arrears")
+    assert rows[1].instalment_no == 1
+    assert totals is not None and totals.gross == 1000000.0

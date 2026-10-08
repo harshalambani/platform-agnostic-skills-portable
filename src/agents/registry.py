@@ -81,12 +81,33 @@ class SkillInput:
 
 
 @dataclass(frozen=True)
+class SkillExtraOutput:
+    """A further file a run may write beside the main output (UI-24), e.g. a
+    journal CSV. Declared in skill.yaml under output.extra_outputs; the skill
+    reports which of them THIS run actually wrote (agents.outputs)."""
+    key: str
+    label: str = ""
+    download_label: str = "Download"
+
+
+@dataclass(frozen=True)
+class SkillCheck:
+    """An optional "check the inputs only" action beside Run (UI-23). Declared
+    in skill.yaml under check:. `function` is a callable in the skill's entry
+    point module taking one dict {input name: value} and returning Markdown;
+    it must not write any output file."""
+    function: str
+    label: str = "Check my files"
+
+
+@dataclass(frozen=True)
 class SkillOutput:
     """Output configuration from skill.yaml."""
     extension: str = ".txt"
     suffix: str = "output"
     download_label: str = "Download"
     type: str = "file"
+    extra_outputs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -106,6 +127,14 @@ class SkillHelpInput:
     tooltip: str = ""
     accepts: str = ""
     gotchas: str = ""
+    # UI-21: optional "What does this file look like?" panel. `sample_html`
+    # is a hand-drawn, made-up illustration (never a real document image);
+    # `looks_like` is the plain description; `not_these` lists look-alikes
+    # that must NOT be picked; `filename_note` is a free-text reminder.
+    sample_html: str = ""
+    looks_like: str = ""
+    not_these: tuple[str, ...] = ()
+    filename_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -161,11 +190,19 @@ class SkillInfo:
     package: str
     manifest_path: Path
     help: SkillHelp | None = None
+    check: SkillCheck | None = None
 
 
 # ---------------------------------------------------------------------------
 # Parsing.
 # ---------------------------------------------------------------------------
+
+def _parse_check(raw: Any) -> SkillCheck | None:
+    if not isinstance(raw, dict) or not raw.get("function"):
+        return None
+    return SkillCheck(function=str(raw["function"]).strip(),
+                      label=str(raw.get("label") or "Check my files").strip())
+
 
 def _parse_help(raw: Any) -> SkillHelp | None:
     """Parse an optional help: block. Returns None when absent/empty."""
@@ -181,6 +218,12 @@ def _parse_help(raw: Any) -> SkillHelp | None:
             tooltip=(inp.get("tooltip") or "").strip(),
             accepts=(inp.get("accepts") or "").strip(),
             gotchas=(inp.get("gotchas") or "").strip(),
+            sample_html=(inp.get("sample_html") or "").strip(),
+            looks_like=(inp.get("looks_like") or "").strip(),
+            not_these=tuple(
+                str(x).strip() for x in (inp.get("not_these") or []) if str(x).strip()
+            ),
+            filename_note=(inp.get("filename_note") or "").strip(),
         ))
 
     out_raw = raw.get("outputs") or {}
@@ -257,6 +300,14 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         suffix=out_raw.get("suffix", "output"),
         download_label=out_raw.get("download_label", "Download"),
         type=out_raw.get("type", "file"),
+        extra_outputs=tuple(
+            SkillExtraOutput(
+                key=str(x["key"]),
+                label=str(x.get("label", x["key"])),
+                download_label=str(x.get("download_label", "Download")),
+            )
+            for x in (out_raw.get("extra_outputs") or ())
+        ),
     )
 
     req_raw = raw.get("requires") or {}
@@ -287,6 +338,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         package=package,
         manifest_path=path,
         help=help_block,
+        check=_parse_check(raw.get("check")),
     )
 
 
@@ -346,6 +398,15 @@ def get(name: str) -> SkillInfo | None:
 # ---------------------------------------------------------------------------
 # Lazy import of the skill's run() function.
 # ---------------------------------------------------------------------------
+
+def load_check_function(skill: SkillInfo) -> Callable[..., Any] | None:
+    """The skill's declared check callable, or None when it declares none."""
+    if skill.check is None:
+        return None
+    module_part, _ = skill.entry_point.split(":", 1)
+    mod = importlib.import_module(f"{skill.package}.{module_part}")
+    return getattr(mod, skill.check.function)
+
 
 def load_run_function(skill: SkillInfo) -> Callable[..., Any]:
     """Import the skill's entry_point and return the callable."""

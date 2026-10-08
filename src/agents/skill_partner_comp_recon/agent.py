@@ -57,6 +57,7 @@ could write.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -65,7 +66,12 @@ import yaml
 from .. import gnucash_accounts
 from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
-from .engine import CANNOT_RECONCILE, ReconciliationResult, build_report
+from .engine import (
+    CANNOT_RECONCILE,
+    WITHIN_TOLERANCE_LIMIT,
+    ReconciliationResult,
+    build_report,
+)
 from .gnucash_tieout import (
     build_statement_book_check,
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
@@ -82,8 +88,10 @@ from .jv_emitter import (
     write_accrual_journal_csv,
     write_journal_csv,
 )
+from ..outputs import ReplyWithOutputs, extra_output
 from .mapper import FinancialYearMismatchError, build_input_data
 from . import award_year as _award_year
+from . import intake as _intake
 from . import precheck as _precheck
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
@@ -194,7 +202,8 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         # "could not parse", which reads as if the statement were unreadable.
         return f"{label}: not available ({e})", None
     except Exception as e:
-        return f"{label}: not available (could not parse {path}: {e})", None
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
 
 
 def _read_award_year_documents(value, password):
@@ -242,7 +251,8 @@ def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | 
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
     except Exception as e:
-        return f"{label}: not available (could not parse {path}: {e})", None
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
 
 
 def _resolve_entity_config(entity: str, entities_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
@@ -428,6 +438,13 @@ def _summarize_report(
         if (r.agree is None or (r.agree is True and r.excluded_months))
         and not r.informational and not r.not_checked
     ]
+    # H35-16: rows that agree only within Rs 10 are counted on their own line,
+    # never under "variance".
+    within = [
+        r for r in report.reconciliation
+        if r.agree is True and r.within_tolerance_diff is not None
+        and not r.informational and not r.not_checked
+    ]
     suspects = len(report.rate_change_suspects)
     suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
 
@@ -442,6 +459,11 @@ def _summarize_report(
     # shown here when report.statement_flags is empty (statement agrees
     # everywhere and its own arithmetic checks out, or no statement was
     # supplied at all).
+    if report.statement_within:
+        lines_out.append(
+            f"  Statement agrees within Rs {WITHIN_TOLERANCE_LIMIT:g} (not a disagreement): "
+            + "; ".join(report.statement_within)
+        )
     if report.statement_flags:
         lines_out.append("=" * 72)
         lines_out.append(
@@ -507,6 +529,11 @@ def _summarize_report(
             f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
             "-- see Reconciliation/Exceptions sheets."
         )
+    if within:
+        lines_out.append(
+            f"  NOTE: {len(within)} category(ies) agree only within Rs {WITHIN_TOLERANCE_LIMIT:g} "
+            "(not a variance; the difference is printed on each row) -- see the Reconciliation sheet."
+        )
     if undecidable:
         lines_out.append(
             f"  NOTE: {len(undecidable)} category(ies) could not be reconciled -- "
@@ -549,6 +576,7 @@ def run(
     financial_year: str = "",
     entities_path: str | None = None,
     award_year_documents: str | list | None = None,
+    firm_documents: str | list | None = None,
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -581,7 +609,43 @@ def run(
             accrual_journal_path=accrual_journal_path,
             entities_path=entities_path,
         )
-    return _run_from_documents(
+    inputs_rows = None
+    sorted_docs = None
+    table = ""
+    if firm_documents:
+        # UI-23: the drop zone. Files are sorted by their CONTENT into the
+        # roles the pickers cover; a picker that was filled in always wins.
+        sorted_docs = _intake.sort_documents(
+            firm_documents, financial_year, doc_password,
+            manual=_manual_picks(advices_dir, advisory_path, award_year_documents,
+                                 llp_statement, payment_schedule))
+        table = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            _intake.cleanup(sorted_docs)
+            return table + f"\nERROR: {sorted_docs.stop}"
+        inputs_rows = sorted_docs.table_rows()
+        if sorted_docs.advices:
+            pdir = Path(sorted_docs.workdir) / "payouts"
+            pdir.mkdir(exist_ok=True)
+            for k, src in enumerate(sorted_docs.advices, start=1):
+                name = Path(src).name
+                if (pdir / name).exists():
+                    name = f"{k:03d}_{name}"
+                shutil.copy2(src, pdir / name)
+            advices_dir = str(pdir)
+        advisory_path = advisory_path or sorted_docs.advisory
+        llp_statement = llp_statement or sorted_docs.llp
+        payment_schedule = payment_schedule or sorted_docs.schedule
+        if not award_year_documents and sorted_docs.award:
+            award_year_documents = list(sorted_docs.award)
+        # A required role the folder did not hold: say so with the table.
+        for value, role in ((advices_dir, "monthly payout documents"),
+                            (advisory_path, "this year's Advisory")):
+            if not value:
+                _intake.cleanup(sorted_docs)
+                return table + f"\nERROR: no {role} were found in the documents. Add them to the folder, or pick them by hand."
+    try:
+        reply = _run_from_documents(
         entity=entity,
         advices_dir=advices_dir,
         doc_password=doc_password,
@@ -599,7 +663,53 @@ def run(
         financial_year=financial_year,
         entities_path=entities_path,
         award_year_documents=award_year_documents,
+        inputs_rows=inputs_rows,
     )
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
+    if not table:
+        return reply
+    text = table + "\n" + str(reply)
+    if isinstance(reply, ReplyWithOutputs):
+        return ReplyWithOutputs(text, reply.extra_outputs)
+    return text
+
+
+def _manual_picks(advices_dir, advisory_path, award_year_documents,
+                  llp_statement, payment_schedule) -> dict:
+    """Which roles the user filled in by hand (those always win)."""
+    return {"payout": bool(advices_dir), "advisory": bool(advisory_path),
+            "award": bool(award_year_documents), "llp": bool(llp_statement),
+            "schedule": bool(payment_schedule)}
+
+
+def check_documents(inputs: dict) -> str:
+    """UI-23 "Check my files": run ONLY the intake sort on the dropped files
+    and any manual picks, and return the same Inputs table a run shows.
+    Reads no GnuCash book, parses nothing beyond what intake needs, writes
+    no workbook or journal, and removes its own temp files."""
+    docs = inputs.get("firm_documents")
+    if not docs:
+        return ("Nothing to check: drop the firm's documents (a folder, files or a zip) "
+                "into the \"All of the firm's documents\" box first.")
+    sorted_docs = None
+    try:
+        sorted_docs = _intake.sort_documents(
+            docs, str(inputs.get("fy") or inputs.get("financial_year") or ""),
+            inputs.get("doc_password") or None,
+            manual=_manual_picks(inputs.get("advices_dir"), inputs.get("advisory_path"),
+                                 inputs.get("award_year_documents"),
+                                 inputs.get("llp_statement"), inputs.get("payment_schedule")))
+        text = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            return text + f"\nERROR: {sorted_docs.stop}"
+        return text
+    except Exception as e:  # noqa: BLE001 -- a check never shows a traceback
+        return f"ERROR: the files could not be checked ({type(e).__name__}: {e})"
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
 
 
 def _run_from_documents(
@@ -621,6 +731,7 @@ def _run_from_documents(
     financial_year: str = "",
     entities_path: str | None = None,
     award_year_documents: str | list | None = None,
+    inputs_rows: list | None = None,
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -743,7 +854,8 @@ def _run_from_documents(
         advisory_record = _advisory_parser.parse(advisory_path, doc_password)
     except Exception as e:
         lines = [
-            f"ERROR: could not parse the Compensation advisory ({advisory_path}): {e}",
+            f"ERROR: could not parse the Compensation advisory ({advisory_path}): "
+            f"{_precheck.explain_pdf_error(e, doc_password)}",
             "  Optional-leg status (unaffected by the error above):",
         ]
         lines.extend(f"  - {note}" for note in optional_notes)
@@ -755,7 +867,8 @@ def _run_from_documents(
             advice_records.append(_payout_advice_parser.parse(str(pdf), doc_password))
         except Exception as e:
             lines = [
-                f"ERROR: could not parse payout advice ({pdf}): {e}",
+                f"ERROR: could not parse payout advice ({pdf}): "
+                f"{_precheck.explain_pdf_error(e, doc_password)}",
                 "  Optional-leg status (unaffected by the error above):",
             ]
             lines.extend(f"  - {note}" for note in optional_notes)
@@ -1013,10 +1126,18 @@ def _run_from_documents(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_report_workbook(
         report, str(out_path), posted_check=posted_check, bank_matches=bank_matches or None,
+        inputs_rows=inputs_rows,
     )
 
     journal_line = ""
     account_notes: list[str] = []
+    # UI-24: which journal files THIS run wrote, handed to the UI as structured
+    # data (agents.outputs) -- never scraped from the reply text.
+    monthly_out: str | None = None
+    monthly_why = ("No journal written: the journal path was left blank, or the default "
+                   "path was skipped (see Optional-leg status).")
+    accrual_out: str | None = None
+    accrual_why = "No accrual journal written: needs the journal above and its own path."
     # UI-17: "auto" asks for the default CSV names (entity + FY, beside the
     # workbook). Unlike an explicit path it is best-effort: with no journal
     # accounts configured for the entity, or no LLP statement for the accrual,
@@ -1062,16 +1183,19 @@ def _run_from_documents(
         # below, so it is never lost even when the monthly journal itself
         # is refused.
         accrual_line = ""
+        accrual_why = "No accrual journal written: the accrual journal path was left blank."
         if accrual_journal_path:
             accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
             write_accrual_journal_csv(accrual_journal, accrual_journal_path)
             if accrual_journal is not None:
+                accrual_out = accrual_journal_path
                 accrual_line = (
                     f"  Accrual journal CSV: {accrual_journal_path} "
                     f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
                 )
             else:
                 accrual_line = f"  Accrual journal: not written. {accrual_note}"
+                accrual_why = f"No accrual journal written: {accrual_note}"
             # H35-02 item 4: the residual current-account comparison after
             # whatever the accrual applied -- reported here, never booked.
             residual_status = (
@@ -1100,13 +1224,17 @@ def _run_from_documents(
             ]
             if accrual_line:
                 lines.append(accrual_line)
-            return "\n".join(lines)
+            return ReplyWithOutputs("\n".join(lines), [
+                extra_output("journal_csv", None, f"No journal written: {bank_match_unavailable}"),
+                extra_output("accrual_journal_csv", accrual_out, accrual_why),
+            ])
 
         try:
             journals = build_journals(report, accounts, bank_matches=bank_matches or None)
         except JournalValidationError as e:
             return f"ERROR: {e}"
         write_journal_csv(journals, journal_path)
+        monthly_out = journal_path
         row_count = sum(len(j.splits) for j in journals)
         journal_line = (
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
@@ -1128,7 +1256,10 @@ def _run_from_documents(
         lines.insert(0, f"WARNING: {settings_error} The journal, the posted-already "
                         "check, the bank match, the GnuCash tie-out and the 26AS "
                         "ownership check were NOT run with this entity's settings.")
-    return "\n".join(lines)
+    return ReplyWithOutputs("\n".join(lines), [
+        extra_output("journal_csv", monthly_out, "" if monthly_out else monthly_why),
+        extra_output("accrual_journal_csv", accrual_out, "" if accrual_out else accrual_why),
+    ])
 
 
 def _run_from_structured_input(
