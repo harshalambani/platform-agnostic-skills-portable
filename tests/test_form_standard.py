@@ -149,7 +149,7 @@ def test_output_name_does_not_follow_entity_to_the_top():
     from ui.tabs._generic import _output_name_source
 
     expect_first = {
-        "skill_partner_comp_recon": "advices_dir",
+        "skill_partner_comp_recon": "firm_documents",
         "skill_26as_journal": "xlsx_path",
         "skill_itr_workbook": "bs_html",
         "skill_gnucash_pipeline": "bank",

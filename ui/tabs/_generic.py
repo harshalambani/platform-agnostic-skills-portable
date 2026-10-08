@@ -1108,6 +1108,32 @@ def _open_output_folder(suffix: str, is_dir_output: bool):
     return None
 
 
+def _plain_value(val):
+    """A Gradio component value as plain text/paths for the check handler."""
+    if val is None:
+        return ""
+    if isinstance(val, (list, tuple)):
+        return [str(getattr(v, "name", v)) for v in val]
+    if hasattr(val, "name"):
+        return str(val.name)
+    return val
+
+
+def run_check(skill: SkillInfo, values) -> str:
+    """The skill's "Check my files" action: its declared check function over
+    the form's current values. Touches no output component other than the
+    result text, and never raises."""
+    from agents.registry import load_check_function  # noqa: PLC0415
+    fn = load_check_function(skill)
+    if fn is None:
+        return "This skill has no check."
+    inputs = {inp.name: _plain_value(v) for inp, v in zip(skill.inputs, values)}
+    try:
+        return str(fn(inputs))
+    except Exception as e:  # noqa: BLE001
+        return f"ERROR: the files could not be checked ({type(e).__name__}: {e})"
+
+
 def render(skill: SkillInfo, container_tab=None) -> None:
     """
     Render a complete Gradio tab body for the given skill.
@@ -1360,6 +1386,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     )
                 input_components.append(comp)
                 input_by_name[inp.name] = comp
+                # UI-21: a collapsed "What does this file look like?" panel
+                # under the picker. Draws nothing for an input without one.
+                _help.mount_sample_panel(skill, inp.name)
 
             # Entity -> GnuCash book prefill wiring (Phase 5 core, 2026-07-30
             # handover): for each `file` input declaring `book_from`, wire the
@@ -1497,6 +1526,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 run_btn = gr.Button("Run", variant="primary")
                 stop_btn = gr.Button("Stop", variant="stop", visible=True)
                 reset_btn = gr.Button("Reset", variant="secondary")
+            # UI-23: only a skill that declares a check: handler gets this button.
+            check_btn = (gr.Button(skill.check.label, variant="secondary")
+                         if getattr(skill, "check", None) is not None else None)
 
         with gr.Column(scale=2):
             result_md = gr.Markdown("_Awaiting input._", min_height=200)
@@ -1530,12 +1562,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 gr.DownloadButton(
                     label=_x.download_label, visible=True, interactive=False, variant="secondary",
                 )
-                for _x in skill.output.extra_outputs
+                for _x in getattr(skill.output, "extra_outputs", ())
             ]
             extra_path_tb = (
                 gr.Textbox(label="Saved journal path(s)", value="", interactive=False,
                            lines=2, buttons=["copy"])
-                if skill.output.extra_outputs else None
+                if getattr(skill.output, "extra_outputs", ()) else None
             )
             # Every result tab gets a button to open the output location in
             # the file manager (directory skills -> their result folder;
@@ -1739,6 +1771,15 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         fn=_handle_reset,
         outputs=[result_md, download, path_tb] + _extra_components + [_c for _c, _fn in reset_specs],
     )
+
+    if check_btn is not None:
+        # Writes ONLY the result text: the download buttons and the saved-path
+        # boxes are neither enabled nor cleared by a check.
+        check_btn.click(
+            fn=lambda *vals, _s=skill: run_check(_s, vals),
+            inputs=input_components,
+            outputs=[result_md],
+        )
 
     handler = _make_run_handler(skill)
     run_btn.click(

@@ -617,9 +617,8 @@ def run(
         # roles the pickers cover; a picker that was filled in always wins.
         sorted_docs = _intake.sort_documents(
             firm_documents, financial_year, doc_password,
-            manual={"payout": bool(advices_dir), "advisory": bool(advisory_path),
-                    "award": bool(award_year_documents), "llp": bool(llp_statement),
-                    "schedule": bool(payment_schedule)})
+            manual=_manual_picks(advices_dir, advisory_path, award_year_documents,
+                                 llp_statement, payment_schedule))
         table = _intake.inputs_text(sorted_docs)
         if sorted_docs.stop:
             _intake.cleanup(sorted_docs)
@@ -675,6 +674,42 @@ def run(
     if isinstance(reply, ReplyWithOutputs):
         return ReplyWithOutputs(text, reply.extra_outputs)
     return text
+
+
+def _manual_picks(advices_dir, advisory_path, award_year_documents,
+                  llp_statement, payment_schedule) -> dict:
+    """Which roles the user filled in by hand (those always win)."""
+    return {"payout": bool(advices_dir), "advisory": bool(advisory_path),
+            "award": bool(award_year_documents), "llp": bool(llp_statement),
+            "schedule": bool(payment_schedule)}
+
+
+def check_documents(inputs: dict) -> str:
+    """UI-23 "Check my files": run ONLY the intake sort on the dropped files
+    and any manual picks, and return the same Inputs table a run shows.
+    Reads no GnuCash book, parses nothing beyond what intake needs, writes
+    no workbook or journal, and removes its own temp files."""
+    docs = inputs.get("firm_documents")
+    if not docs:
+        return ("Nothing to check: drop the firm's documents (a folder, files or a zip) "
+                "into the \"All of the firm's documents\" box first.")
+    sorted_docs = None
+    try:
+        sorted_docs = _intake.sort_documents(
+            docs, str(inputs.get("fy") or inputs.get("financial_year") or ""),
+            inputs.get("doc_password") or None,
+            manual=_manual_picks(inputs.get("advices_dir"), inputs.get("advisory_path"),
+                                 inputs.get("award_year_documents"),
+                                 inputs.get("llp_statement"), inputs.get("payment_schedule")))
+        text = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            return text + f"\nERROR: {sorted_docs.stop}"
+        return text
+    except Exception as e:  # noqa: BLE001 -- a check never shows a traceback
+        return f"ERROR: the files could not be checked ({type(e).__name__}: {e})"
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
 
 
 def _run_from_documents(
