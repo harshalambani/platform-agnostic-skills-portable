@@ -657,6 +657,56 @@ def test_year_guard_would_catch_a_literal_year():                           # NE
     assert not YEAR.search("Year ended 31 March [end of CY]")
 
 
+from html.parser import HTMLParser  # noqa: E402
+
+
+class _TextWithoutOwnColour(HTMLParser):
+    """Collect elements that hold direct text but carry no colour in their OWN
+    inline style (an inherited colour does not count: the dark theme sets a
+    light colour straight on b/div/th/td, which beats inheritance)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.bad = [], []
+
+    def handle_starttag(self, tag, attrs):
+        style = dict(attrs).get("style") or ""
+        self.stack.append((tag, bool(re.search(r"(?:^|;)\s*color\s*:", style))))
+
+    def handle_endtag(self, tag):
+        for k in range(len(self.stack) - 1, -1, -1):
+            if self.stack[k][0] == tag:
+                del self.stack[k:]
+                break
+
+    def handle_data(self, data):
+        if data.strip() and self.stack and not self.stack[-1][1]:
+            self.bad.append((self.stack[-1][0], data.strip()[:30]))
+
+
+def _uncoloured(html_text):
+    p = _TextWithoutOwnColour()
+    p.feed(html_text)
+    return p.bad
+
+
+def test_every_sample_text_element_carries_its_own_inline_colour():       # NEGATIVE
+    scanned = 0
+    for sk in discover():
+        if not sk.help:
+            continue
+        for hi in sk.help.inputs:
+            if hi.sample_html:
+                scanned += 1
+                assert _uncoloured(hi.sample_html) == [], (sk.name, hi.name)
+    assert scanned >= 5
+
+
+def test_colour_guard_fails_a_td_without_its_own_colour():                # NEGATIVE (guard works)
+    assert _uncoloured('<div style="color:#222;"><table><tr><td>x</td></tr></table></div>') == [("td", "x")]
+    assert _uncoloured('<td style="color:#222;">x</td>') == []
+
+
 def test_input_without_a_sample_still_renders():                           # NEGATIVE
     import gradio as gr
     sk = _skill()
