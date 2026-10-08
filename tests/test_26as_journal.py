@@ -231,12 +231,15 @@ def test_write_review_appends_tied_candidates_as_last_column():
     with out.open(newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     header = rows[0]
-    assert header == ["Sr", "Deductor", "Section", "Category", "Credit Account",
-                      "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
-                      "Needs Review", "Basis", "Tied Candidates", "TAN"]
+    # TDS-15 appended five columns AFTER these 14; the first 14 keep their positions.
+    assert header[:14] == ["Sr", "Deductor", "Section", "Category", "Credit Account",
+                           "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
+                           "Needs Review", "Basis", "Tied Candidates", "TAN"]
+    assert header[14:] == ["Net Interest Account", "Net Interest Source",
+                           "Net Interest Choice Needed", "Left Out", "Left Out Splits"]
     data_row = rows[1]
-    assert data_row[-1] == "AAAA00000A"
-    assert data_row[-2] == (
+    assert data_row[13] == "AAAA00000A"
+    assert data_row[12] == (
         "Income:Interest Income:Interest on Zenith Bank; "
         "Income:Interest Income:Interest on Zenith Global"
     )

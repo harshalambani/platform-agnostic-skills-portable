@@ -36,6 +36,7 @@ for why a stale hand-filtered copy was the original bug.
 from __future__ import annotations
 
 import csv
+import json
 from html import escape as html_escape
 from pathlib import Path
 
@@ -57,6 +58,11 @@ from ui.tabs._generic import _MAX_UPLOAD_SIZE_BYTES
 
 APP_ID = "tdsjr"
 TARGET_COL = "Credit Account"
+# TDS-15: Category A only -- the account the NET interest (c - a) is booked in.
+# Edited inline (double-click); the typed text travels in NET_EDIT_KEY.
+NET_COL = "Net Interest Account"
+NET_EDIT_KEY = "Net Interest Edit"
+NET_PICK_BASIS = "Net interest account chosen on Review"
 
 # Shared with the spec's also_set (see _spec()) so the "what does a user
 # override look like" answer lives in exactly one place.
@@ -152,6 +158,13 @@ def _row_presentation(row: dict) -> None:
     if badges:
         row["_badges"] = badges
 
+    if (row.get("Net Interest Choice Needed") or "").strip().lower() == "yes":
+        # Two or more FD/bond/EPF asset accounts match this deductor: the build
+        # did not guess. Shown on the net-interest cell so it cannot be missed.
+        badges = dict(badges) if badges else {}
+        badges[NET_COL] = {"text": "CHOOSE", "cls": "amber"}
+        row["_badges"] = badges
+
     note = row.get("Basis") or ""
     tied = (row.get("Tied Candidates") or "").strip()
     if tied:
@@ -164,6 +177,9 @@ def _load_review_rows(review_path: str) -> list[dict]:
         rows = list(csv.DictReader(f))
     for row in rows:
         _row_presentation(row)
+        # TDS-15: a row left out on a previous Save starts struck through.
+        if (row.get("Left Out") or "").strip().lower() == "yes":
+            row["_excluded"] = True
     return rows
 
 
@@ -176,6 +192,7 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str = 
             Column("Section", "Section"),
             Column("Category", "Category"),
             Column(TARGET_COL, "Credit Account"),
+            Column(NET_COL, "Net interest booked in", edit_key=NET_EDIT_KEY),
             Column("Confidence", "Confidence"),
             Column("Account Exists", "Account Exists"),
             Column("Balanced", "Balanced"),
@@ -204,6 +221,9 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str = 
         apply_matching_on="",
         also_set={"Confidence": OVERRIDE_CONFIDENCE, "Basis": OVERRIDE_BASIS},
         context={"review_path": review_path, "gnucash_path": gnucash_path},
+        # TDS-15: "Don't import selected" is the per-row Leave out. A left-out
+        # row is in NO download (full or Part I only) after the next Save.
+        allow_exclude=True,
     )
 
 
@@ -223,16 +243,16 @@ def _load_review_data(review_path: str, gnucash_path: str) -> str:
         return "<p>Review CSV is empty -- nothing to review.</p>"
 
     accounts: list[str] = []
+    gnucash_path = _safe_book(gnucash_path)
     if gnucash_path:
-        gc_p = Path(gnucash_path)
-        if gc_p.is_file():
-            accounts = _extract_account_tree(str(gc_p))
+        accounts = _extract_account_tree(gnucash_path)
     if not accounts:
         accounts = sorted({r.get(TARGET_COL, "") for r in rows if r.get(TARGET_COL)})
 
     picker_items = [PickerItem(value=a, primary=a) for a in accounts]
     spec = _spec(picker_items, str(review_p), gnucash_path or "")
-    return payload_box_css(spec.payload_box_id) + build_html(spec, rows)
+    banner = _preflight_banner_html(_journal_path_for(str(review_p)), gnucash_path or "")
+    return payload_box_css(spec.payload_box_id) + banner + build_html(spec, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -509,7 +529,9 @@ _JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description",
                     "Account", "Amount", "Currency"]
 _REVIEW_HEADERS = ["Sr", "Deductor", "Section", "Category", "Credit Account",
                    "Confidence", "Account Exists", "Balanced", "Debit",
-                   "Credit", "Needs Review", "Basis", "Tied Candidates", "TAN"]
+                   "Credit", "Needs Review", "Basis", "Tied Candidates", "TAN",
+                   "Net Interest Account", "Net Interest Source",
+                   "Net Interest Choice Needed", "Left Out", "Left Out Splits"]
 
 
 def _read_csv_rows(path: Path) -> list[dict]:
@@ -596,6 +618,244 @@ def _collect_learnings_to_save(changes: list[dict], review_rows: list[dict]) -> 
     return items
 
 
+# ---------------------------------------------------------------------------
+# TDS-15: net-interest account, Leave out, income-balance pre-flight
+# ---------------------------------------------------------------------------
+
+def _safe_book(path) -> str:
+    """A GnuCash book path from the UI, validated: an existing .gnucash file
+    inside a known folder, else "" (so no file access happens on it)."""
+    if not path:
+        return ""
+    try:
+        return str(_safe_paths.resolve_input_file(path, (".gnucash",)))
+    except _safe_paths.UnsafePathError:
+        return ""
+
+
+def _load_preflight_tools():
+    """build_tds_journals' balance reader + pre-flight (single source of truth;
+    fails loud like _load_split_part_ii rather than guessing)."""
+    try:
+        import sys as _sys
+
+        _src = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from agents.skill_26as_journal.scripts import build_tds_journals as _b
+    except ImportError as e:
+        raise ImportError("could not load the income-balance pre-flight from "
+                          "build_tds_journals") from e
+    return _b
+
+
+def _preflight(journal_rows: list[dict], part_i_rows: list[dict], gnucash_path: str):
+    """-> (full_issues, part_i_issues, error). `error` is a string when the check
+    could not run (no book / unreadable) -- never read as 'clean'."""
+    if not gnucash_path:
+        return [], [], "no GnuCash book is loaded, so account balances could not be read"
+    try:
+        book = _safe_paths.resolve_input_file(gnucash_path, (".gnucash",))
+    except _safe_paths.UnsafePathError as e:
+        return [], [], f"{e}"
+    try:
+        b = _load_preflight_tools()
+        accounts = b.load_accounts(book)
+        balances = b.load_account_balances(book)
+        full = b.income_debit_preflight(journal_rows, balances, accounts, "full journal")
+        part = (b.income_debit_preflight(part_i_rows, balances, accounts, "Part I only file")
+                if part_i_rows else [])
+        return full, part, ""
+    except Exception as e:  # noqa: BLE001
+        return [], [], f"balances could not be read ({type(e).__name__}: {e})"
+
+
+def _preflight_lines(full_issues: list, part_issues: list) -> list[str]:
+    b = _load_preflight_tools()
+    return b.format_preflight(full_issues) + b.format_preflight(part_issues)
+
+
+def _preflight_banner_html(journal_p: Path, gnucash_path: str) -> str:
+    """Banner shown above the table on Load: RED FLAG(s) for the journal as it
+    stands on disk, or a NOT CHECKED notice. Empty when clean."""
+    try:
+        if not journal_p.is_file():
+            return ""
+        rows = _read_csv_rows(journal_p)
+        split_part_ii, _pp, _w = _load_split_part_ii()
+        part_i_rows, part_ii_rows, _prob = split_part_ii(rows)
+        full, part, err = _preflight(rows, part_i_rows if part_ii_rows else [], gnucash_path)
+        lines = _preflight_lines(full, part)
+    except Exception as e:  # noqa: BLE001
+        return ("<div style='border:2px solid #b45309;padding:8px;margin:6px 0'>"
+                f"NOT CHECKED - income-balance pre-flight failed: {html_escape(str(e))}</div>")
+    out = ""
+    for ln in lines:
+        out += ("<div style='border:2px solid #b91c1c;background:#fef2f2;color:#7f1d1d;"
+                "padding:8px;margin:6px 0;font-weight:600'>" + html_escape(ln) + "</div>")
+    if err:
+        out += ("<div style='border:2px solid #b45309;padding:8px;margin:6px 0'>"
+                "NOT CHECKED - the income-balance pre-flight did not run: "
+                + html_escape(err) + ". Downloads after Save are NOT protected by it.</div>")
+    return out
+
+
+def _row_key(r: dict) -> tuple:
+    return (str(r.get("Sr", "")).strip(), (r.get("Category") or "").strip())
+
+
+def _apply_net_edits(
+    review_rows: list[dict], journal_rows: list[dict], edited_rows: list[dict],
+    known_accounts: set[str] | None, left_out_keys: set,
+) -> tuple[list[dict], list[tuple]]:
+    """Apply typed "Net interest booked in" edits. Category A only; the account
+    must be a POSTABLE account of the loaded book (so a hidden/placeholder/
+    missing account is refused, never written). The split to change is the
+    unique positive-amount split on the current net account -- never guessed.
+    Returns (problems, applied) where applied = [(review_row, new_account)]."""
+    problems: list[str] = []
+    applied: list[tuple] = []
+    fy_prefix = _fy_prefix_from(journal_rows)
+    by_key = {_row_key(r): r for r in review_rows}
+    for er in edited_rows:
+        new = (er.get(NET_EDIT_KEY) or "").strip()
+        if not new:
+            continue
+        key = _row_key(er)
+        label = f"Sr {key[0]}/{key[1]}"
+        row = by_key.get(key)
+        if row is None:
+            problems.append(f"{label}: net-interest edit has no matching review row -- skipped")
+            continue
+        if key in left_out_keys or (row.get("Left Out") or "").strip().lower() == "yes":
+            problems.append(f"{label}: row is left out -- net-interest edit not applied "
+                            "(put the row back first)")
+            continue
+        if key[1] != "A":
+            problems.append(f"{label}: only interest rows (Category A) have a net-interest "
+                            "account -- skipped")
+            continue
+        if known_accounts is None:
+            problems.append(f"{label}: no GnuCash book is loaded, so {new!r} cannot be "
+                            "checked as a postable account -- skipped")
+            continue
+        if new not in known_accounts:
+            problems.append(f"{label}: {new!r} is not a postable account in the book "
+                            "(missing, hidden or a header account) -- skipped")
+            continue
+        old = (row.get(NET_COL) or "").strip()
+        if new == old:
+            continue
+        if not fy_prefix:
+            problems.append(f"{label}: could not determine fy_prefix from the journal -- skipped")
+            continue
+        try:
+            txn_id = _txn_id_for(fy_prefix, key[0], key[1])
+        except (ValueError, ImportError) as e:
+            problems.append(f"{label}: could not build the Transaction ID ({e}) -- skipped")
+            continue
+        hits = []
+        for i, jr in enumerate(journal_rows):
+            if (jr.get("Transaction ID") or "").strip() != txn_id:
+                continue
+            if (jr.get("Account") or "") != old:
+                continue
+            try:
+                if float(jr.get("Amount") or 0) > 0:
+                    hits.append(i)
+            except ValueError:
+                pass
+        if len(hits) != 1:
+            problems.append(f"{label} ({txn_id}): found {len(hits)} debit split(s) on "
+                            f"{old!r}; expected exactly one -- skipped")
+            continue
+        journal_rows[hits[0]]["Account"] = new
+        row[NET_COL] = new
+        row["Net Interest Source"] = "user pick"
+        was_choice = (row.get("Net Interest Choice Needed") or "").strip().lower() == "yes"
+        row["Net Interest Choice Needed"] = ""
+        basis = row.get("Basis") or ""
+        row["Basis"] = (basis + " -- " if basis else "") + NET_PICK_BASIS
+        # Clear Needs Review only if this choice was the reason AND the credit
+        # side is otherwise settled (not Suspense / Ambiguous / Low / blocked).
+        conf = (row.get("Confidence") or "").strip()
+        credit_ok = (conf not in ("Ambiguous", "Suspense", "Low")
+                     and "suspense" not in (row.get("Credit Account") or "").lower()
+                     and "BLOCKED ACCOUNT" not in basis)
+        if was_choice and credit_ok and "Needs Review" in row:
+            row["Needs Review"] = ""
+        if known_accounts is not None:
+            row["Account Exists"] = "yes"
+        applied.append((row, new))
+    return problems, applied
+
+
+def _apply_left_out(
+    review_rows: list[dict], journal_rows: list[dict], left_out_keys: set,
+) -> tuple[list[dict], list[str], int, int]:
+    """Make the journal match the Leave out state: a left-out row's splits are
+    REMOVED from journal_rows (so they are in no download, full or Part I) and
+    stashed as JSON in the review row's "Left Out Splits"; a row put back has its
+    stashed splits restored. Whole transactions only. -> (journal_rows,
+    problems, n_left_out, n_restored)."""
+    problems: list[str] = []
+    out_n = back_n = 0
+    fy_prefix = _fy_prefix_from(journal_rows)
+    for row in review_rows:
+        key = _row_key(row)
+        is_out = (row.get("Left Out") or "").strip().lower() == "yes"
+        want_out = key in left_out_keys
+        label = f"Sr {key[0]}/{key[1]}"
+        if want_out and not is_out:
+            if not fy_prefix:
+                problems.append(f"{label}: could not determine fy_prefix -- not left out")
+                continue
+            try:
+                txn_id = _txn_id_for(fy_prefix, key[0], key[1])
+            except (ValueError, ImportError) as e:
+                problems.append(f"{label}: could not build the Transaction ID ({e}) -- not left out")
+                continue
+            mine = [r for r in journal_rows
+                    if (r.get("Transaction ID") or "").strip() == txn_id]
+            if not mine:
+                problems.append(f"{label}: no splits in the journal (nothing to leave out) "
+                                "-- not changed")
+                continue
+            journal_rows = [r for r in journal_rows
+                            if (r.get("Transaction ID") or "").strip() != txn_id]
+            row["Left Out Splits"] = json.dumps(mine)
+            row["Left Out"] = "yes"
+            out_n += 1
+        elif is_out and not want_out:
+            try:
+                stash = json.loads(row.get("Left Out Splits") or "[]")
+            except ValueError:
+                stash = []
+            if not stash:
+                problems.append(f"{label}: no saved splits to put back -- re-run the build "
+                                "to restore this row")
+                continue
+            journal_rows = journal_rows + [dict(r) for r in stash]
+            row["Left Out Splits"] = ""
+            row["Left Out"] = ""
+            back_n += 1
+    return journal_rows, problems, out_n, back_n
+
+
+def _collect_net_learnings(applied: list[tuple]) -> list:
+    """[(key, account)] for net-interest picks THIS human Save applied. A
+    Suspense account is never learned."""
+    tds_learnings = _import_tds_learnings()
+    items = []
+    for row, account in applied:
+        if not account or "Suspense" in account:
+            continue
+        key = tds_learnings.deductor_key(tds_learnings.DOMAIN_NETINT, row.get("TAN") or "",
+                                         row.get("Deductor") or "")
+        items.append((key, account))
+    return items
+
+
 def _save_changes(
     changes_json: str,
 ) -> tuple[str, "gr.update", "gr.update"]:
@@ -621,9 +881,17 @@ def _save_changes(
     changes = payload["changes"]
     context = payload["context"]
     review_path = context.get("review_path", "")
-    gnucash_path = context.get("gnucash_path", "")
+    gnucash_path = _safe_book(context.get("gnucash_path", ""))
 
-    if not changes:
+    # TDS-15: typed net-interest edits ride in all_rows / excluded; the Leave
+    # out state is the engine's "excluded" list (authoritative when present).
+    excluded_rows = payload.get("excluded") if "excluded" in payload else None
+    net_edit_rows = [r for r in (payload["all_rows"] + (excluded_rows or []))
+                     if (r.get(NET_EDIT_KEY) or "").strip()]
+    left_out_keys = ({_row_key(r) for r in excluded_rows} if excluded_rows is not None
+                     else None)
+
+    if not changes and not net_edit_rows and excluded_rows is None:
         return ("No changes to save.",) + no_change
     if not review_path:
         return ("Error: no review CSV path in payload -- nothing was saved.",) + no_change
@@ -640,12 +908,27 @@ def _save_changes(
     journal_rows = _read_csv_rows(journal_p)
 
     known_accounts: set[str] | None = None
-    if gnucash_path and Path(gnucash_path).is_file():
+    if gnucash_path:
         known_accounts = set(_extract_account_tree(gnucash_path))
+
+    if left_out_keys is None:        # no exclude info in the payload: keep as is
+        left_out_keys = {_row_key(r) for r in review_rows
+                         if (r.get("Left Out") or "").strip().lower() == "yes"}
+    current_out = {_row_key(r) for r in review_rows
+                   if (r.get("Left Out") or "").strip().lower() == "yes"}
+    if not changes and not net_edit_rows and left_out_keys == current_out:
+        return ("No changes to save.",) + no_change
 
     review_rows, journal_rows, problems, applied = _apply_changes(
         review_rows, journal_rows, changes, known_accounts=known_accounts,
     )
+    net_problems, net_applied = _apply_net_edits(
+        review_rows, journal_rows, net_edit_rows, known_accounts, left_out_keys)
+    problems = list(problems) + net_problems
+    journal_rows, out_problems, n_left_out, n_restored = _apply_left_out(
+        review_rows, journal_rows, left_out_keys)
+    problems += out_problems
+    applied_total = applied + len(net_applied)
 
     # TDS-11: persist this Save's human-confirmed credit-account picks as
     # learnings (src/agents/skill_26as_journal/scripts/tds_learnings.py), so
@@ -658,11 +941,12 @@ def _save_changes(
     # never block the actual CSV save that follows -- caught and reported
     # as a warning, same pattern as gnucash_review.py's override save.
     learnings_msg = ""
-    if applied:
+    if applied_total:
         if gnucash_path:
             try:
                 tds_learnings = _import_tds_learnings()
-                learn_items = _collect_learnings_to_save(changes, review_rows)
+                learn_items = (_collect_learnings_to_save(changes, review_rows)
+                               + _collect_net_learnings(net_applied))
                 if learn_items:
                     tds_learnings.save_learnings_batch(gnucash_path, learn_items)
                     learnings_msg = (
@@ -728,8 +1012,28 @@ def _save_changes(
     excluded_txns = sorted({(r.get("Transaction ID") or "").strip()
                             for r in part_ii_rows if r.get("Transaction ID")})
 
-    lines = ["**Saved**", ""]
+    # TDS-15: pre-flight -- would importing this on top of the book push an
+    # income account the journal debits onto a DEBIT balance? Checked on the
+    # rows just written, for the full journal AND the Part I only file.
+    pf_full, pf_part, pf_error = _preflight(journal_rows, part_i_rows if part_ii_rows else [], gnucash_path)
+    pf_lines = _preflight_lines(pf_full, pf_part)
+
+    lines = []
+    for ln in pf_lines:
+        lines.append("**" + ln + "**")
+        lines.append("")
+    if pf_error:
+        lines.append("**NOT CHECKED - the income-balance pre-flight did not run: "
+                     + pf_error + ". These downloads are NOT protected by it.**")
+        lines.append("")
+    lines += ["**Saved**", ""]
     lines.append(f"Applied {applied} of {len(changes)} change(s).")
+    if net_applied:
+        lines.append(f"Net-interest account changed on {len(net_applied)} row(s).")
+    if n_left_out or n_restored:
+        lines.append(f"Left out {n_left_out} row(s) and put back {n_restored}; a left-out "
+                     "row is in no download. (A re-run of the build starts from the 26AS "
+                     "again and forgets Review-time leave-outs.)")
     lines.append(f"Rewrote {review_p.name} and {journal_p.name}.")
     if learnings_msg:
         lines.append(learnings_msg)
@@ -812,13 +1116,23 @@ def _save_changes(
 
     download_path: str | None = None
     try:
-        download_path = _stage_for_download(journal_p)
+        if pf_full:
+            lines.append("")
+            lines.append("**No download offered for the full journal: fix the RED FLAG "
+                         "above (re-point the net-interest account or leave the rows "
+                         "out), then Save again.**")
+        else:
+            download_path = _stage_for_download(journal_p)
     except Exception as e:
         lines.append("")
         lines.append(f"Warning: could not stage download -- {e}")
 
     part_i_download_path: str | None = None
-    if part_i_path:
+    if part_i_path and pf_part:
+        lines.append("")
+        lines.append("**No download offered for the Part I only file: fix the RED FLAG "
+                     "above, then Save again.**")
+    elif part_i_path:
         try:
             part_i_download_path = _stage_for_download(Path(part_i_path))
         except Exception as e:

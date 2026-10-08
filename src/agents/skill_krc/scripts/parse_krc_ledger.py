@@ -415,7 +415,12 @@ def _tag_row(row: dict, utr_dates: set) -> str:
         or row["date"] in utr_dates
     )
     if is_bank:
-        return "Bank Pay-In" if row["credit"] else "Bank Pay-Out"
+        # Direction follows the Dr/Cr side NUMERICALLY. Raw cells are strings
+        # (a zero side can read "0.00", which is truthy), so truthiness of the
+        # string must never decide it. A credit-side client receipt is Pay-In.
+        credit = _num(row["credit"]) or 0.0
+        debit = _num(row["debit"]) or 0.0
+        return "Bank Pay-In" if credit > 0 and credit >= debit else "Bank Pay-Out"
     return "Settlement Movement"
 
 

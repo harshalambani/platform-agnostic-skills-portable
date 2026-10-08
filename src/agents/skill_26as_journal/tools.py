@@ -225,6 +225,19 @@ def _existing_account_paths(gnucash_path: str):
     return {full(i) for i in by_id}
 
 
+def preflight_issues(output_path: str, gnucash_path: str) -> tuple:
+    """TDS-15: -> (issues, error). `issues` = income accounts the journal (full
+    file or its Part-I-only split) would leave on a DEBIT balance, computed
+    from the book's own balances. `error` is non-empty when the check could not
+    run (no/unreadable book); a caller must show that, never treat it as clean."""
+    if not gnucash_path:
+        return [], "no GnuCash book was given, so account balances could not be read"
+    out = Path(output_path)
+    if not out.is_file():
+        return [], "the journal file was not found"
+    return _BTJ.preflight_for_csv(out, Path(gnucash_path))
+
+
 def final_summary(output_path: str, gnucash_path: str = "",
                   xlsx_path: str = "", tds_expense_account: str = "") -> str:
     """The single authoritative summary shown to the user, computed from the
@@ -239,7 +252,15 @@ def final_summary(output_path: str, gnucash_path: str = "",
     subprocess's stdout, so this stays the single authoritative summary."""
     out = Path(output_path)
     review = out.with_name(out.stem + "-review.csv")
-    lines = ["**Journals built**"]
+    lines = []
+    # TDS-15: RED FLAGs go at the very TOP, before any count.
+    pf_issues, pf_error = preflight_issues(output_path, gnucash_path)
+    for rf in _BTJ.format_preflight(pf_issues):
+        lines.append("**" + rf + "**")
+    if pf_error:
+        lines.append("- NOT CHECKED - income-account balance pre-flight did not run: "
+                     + pf_error)
+    lines.append("**Journals built**")
 
     if review.is_file():
         with review.open(newline="", encoding="utf-8") as f:

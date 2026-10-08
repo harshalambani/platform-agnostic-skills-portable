@@ -28,6 +28,25 @@ class UnsafePathError(ValueError):
     """The path was refused. str(e) is a user-facing message (no traceback)."""
 
 
+def _registered_book_folders() -> list[Path]:
+    """Parent folders of every book registered in entities.yaml (all entities,
+    all FYs). Any problem reading the registry adds nothing."""
+    found: list[Path] = []
+    try:
+        from . import _book_registry as _reg  # noqa: PLC0415
+        entities = _reg._load_entities_tolerant(_reg._default_entities_path())
+        for profile in entities.values():
+            for book in (getattr(profile, "books", None) or {}).values():
+                try:
+                    if str(book).strip():
+                        found.append(Path(str(book)).resolve().parent)
+                except (OSError, ValueError):
+                    continue
+    except Exception:  # noqa: BLE001 -- an unreadable registry must not widen access
+        return []
+    return found
+
+
 def known_folders() -> list[Path]:
     """The folders a review input/journal may be read from (resolved)."""
     folders: list[Path] = [_config_mod.data_root_dir()]
@@ -40,6 +59,7 @@ def known_folders() -> list[Path]:
     except Exception:  # noqa: BLE001
         extra = []
     folders.extend(Path(str(p)) for p in extra if str(p).strip())
+    folders.extend(_registered_book_folders())
     out: list[Path] = []
     for f in folders:
         try:
@@ -92,6 +112,50 @@ def resolve_input_file(path, extensions: Iterable[str],
         f"{name} is outside the folders this tab may read from. Move it into the "
         f"Data or outputs folder (or list its folder under "
         f"'{KNOWN_FOLDERS_SETTING}' in the portable config).")
+
+
+def resolve_run_target(path, suffix: str, review_name: str,
+                       folders: Iterable[Path] | None = None) -> tuple[Path, Path | None]:
+    """Resolve a run-folder-or-review-file value from a UI box.
+
+    Accepts only (a) an existing folder whose name ends with `suffix`, or
+    (b) an existing file called `review_name` directly inside such a folder,
+    and only when it lies inside a known folder. Returns (run_dir, review_file
+    or None). Anything else raises UnsafePathError before any file access.
+    Same string-prefix sanitiser form as resolve_input_file."""
+    raw = str(path or "").strip()
+    if not raw or "\x00" in raw:
+        raise UnsafePathError("No review file or run folder given.")
+    try:
+        norm = _norm(raw)
+    except (OSError, RuntimeError, ValueError):
+        raise UnsafePathError("That path could not be resolved.") from None
+    roots = []
+    for f in (folders if folders is not None else known_folders()):
+        try:
+            roots.append(_norm(f))
+        except (OSError, RuntimeError, ValueError):
+            continue
+    for root in roots:
+        if norm.startswith(root.rstrip(os.sep) + os.sep):
+            if os.path.basename(norm) == os.path.normcase(review_name):
+                run_s = os.path.dirname(norm)
+                review_s = norm
+            else:
+                run_s, review_s = norm, None
+            if not os.path.basename(run_s).endswith(os.path.normcase(suffix)):
+                raise UnsafePathError(
+                    f"That is not a {suffix} run folder (or its {review_name}).")
+            if review_s is not None:
+                if not os.path.isfile(review_s):
+                    raise UnsafePathError(f"{review_name} not found in that run folder.")
+                return Path(run_s), Path(review_s)
+            if not os.path.isdir(run_s):
+                raise UnsafePathError("That run folder does not exist.")
+            return Path(run_s), None
+    raise UnsafePathError(
+        "That location is outside the folders this tab may read from. Pick a run "
+        "from the list (it must be inside the outputs folder).")
 
 
 def safe_staged_name(name: str) -> str:

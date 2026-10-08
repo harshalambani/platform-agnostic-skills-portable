@@ -19,6 +19,7 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,8 +32,18 @@ from ui.tabs import krc_gnucash_review as m  # noqa: E402
 _HEADER = "CN No,Type,Security,Net,Reason\n"
 
 
+@pytest.fixture(autouse=True)
+def _tmp_is_a_known_folder(tmp_path, monkeypatch):
+    """SEC-19 guard: the tab only reads inside known folders."""
+    from ui import _safe_paths
+    monkeypatch.setattr(_safe_paths, "known_folders", lambda: [tmp_path.resolve()])
+    (tmp_path / "book.gnucash").write_text("x", encoding="utf-8")
+
+
 def _write_review_csv(tmp_path: Path, rows: list[str], name: str = "Review.csv") -> Path:
-    p = tmp_path / name
+    run = tmp_path / "20260101-000000-KRC-GnuCash"
+    run.mkdir(exist_ok=True)
+    p = run / name
     p.write_text(_HEADER + "".join(rows), encoding="utf-8")
     return p
 
@@ -102,13 +113,58 @@ def test_load_review_data_missing_both_inputs_is_safe():
 
 
 def test_load_review_data_review_csv_not_found_is_safe(tmp_path):
-    html = m._load_review_data(str(tmp_path / "nope.csv"), str(tmp_path / "book.gnucash"))
+    run = tmp_path / "20260101-000000-KRC-GnuCash"
+    run.mkdir()
+    html = m._load_review_data(str(run / "Review.csv"), str(tmp_path / "book.gnucash"))
     assert "not found" in html.lower()
 
 
+# --- SEC-19 path guard: nothing outside a KRC run folder / .gnucash is read ---
+
+def test_review_path_outside_the_outputs_is_refused_and_never_read(tmp_path, monkeypatch):
+    outside = tmp_path.parent / "elsewhere-KRC-GnuCash"
+    outside.mkdir(exist_ok=True)
+    (outside / "Review.csv").write_text(_HEADER + ROW_ACCOUNT_MAPPING, encoding="utf-8")
+    reads = []
+    monkeypatch.setattr(m, "_load_review_rows", lambda p: reads.append(p) or [])
+    for bad in (str(outside / "Review.csv"), str(outside),
+                str(tmp_path / ".." / "elsewhere-KRC-GnuCash" / "Review.csv")):
+        html = m._load_review_data(bad, str(tmp_path / "book.gnucash"))
+        assert "outside the folders" in html and "<table" not in html
+        msg = m._save_changes(json.dumps({"changes": [{"idx": 0}], "all_rows": [],
+                                          "context": {"review_path": bad, "gnucash_path": ""}}))
+        assert "nothing was saved" in msg
+    assert reads == []
+
+
+def test_a_folder_or_file_not_in_a_krc_run_folder_is_refused(tmp_path):
+    other = tmp_path / "plain-folder"
+    other.mkdir()
+    (other / "Review.csv").write_text(_HEADER, encoding="utf-8")
+    assert "not a -KRC-GnuCash run folder" in m._load_review_data(
+        str(other / "Review.csv"), str(tmp_path / "book.gnucash"))
+
+
+def test_a_non_gnucash_book_path_is_refused(tmp_path):
+    review_p = _write_review_csv(tmp_path, [ROW_ACCOUNT_MAPPING])
+    notbook = tmp_path / "notes.txt"
+    notbook.write_text("x", encoding="utf-8")
+    html = m._load_review_data(str(review_p), str(notbook))
+    assert "<table" not in html and ".gnucash" in html
+    msg = m._save_changes(json.dumps({"changes": [{"idx": 0}], "all_rows": [],
+                                      "context": {"review_path": str(review_p),
+                                                  "gnucash_path": str(notbook)}}))
+    assert "nothing was saved" in msg
+
+
+def test_a_run_folder_value_still_loads_the_nothing_to_review_page(tmp_path):
+    run = tmp_path / "20260101-000000-KRC-GnuCash"
+    run.mkdir()
+    assert "Nothing to review in this run" in m._load_review_data(str(run), "")
+
+
 def test_load_review_data_empty_review_csv_reports_clearly(tmp_path):
-    review_p = tmp_path / "Review.csv"
-    review_p.write_text(_HEADER, encoding="utf-8")
+    review_p = _write_review_csv(tmp_path, [])
     gnucash_p = tmp_path / "book.gnucash"
     gnucash_p.write_text("x", encoding="utf-8")
     html = m._load_review_data(str(review_p), str(gnucash_p))

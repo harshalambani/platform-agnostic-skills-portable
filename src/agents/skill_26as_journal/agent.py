@@ -216,5 +216,11 @@ def run(
     # only job was to make the apply_overrides tool calls; its prose is dropped.
     summary = T.final_summary(output_path, gnucash_path, xlsx_path, tds_expense_account)
     if summary:
+        # TDS-15: a RED FLAG from the income-balance pre-flight withholds the
+        # download panel until the user re-points or leaves out rows on Review.
+        issues, _err = T.preflight_issues(output_path, gnucash_path)
+        if issues:
+            from agents.outputs import ReplyWithOutputs
+            return ReplyWithOutputs(summary, (), withhold_primary=True)
         return summary
     return result["messages"][-1].content

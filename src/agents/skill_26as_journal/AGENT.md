@@ -17,7 +17,14 @@ year.
 
 **A. Interest — sections 194A, 193**
 - Dr `Expense:TDS on Interest` = a
-- Dr `Income:Interest Income:Interest on FD` = c − a  (fixed generic account)
+- Dr `<net interest account>` = c − a  (TDS-15: the deductor's remembered choice; else the ONE
+  matching FD/bond/EPF asset account; else, if 2+ match, the generic `Income:Interest Income:Interest on FD`
+  with the row marked as needing a choice; else the generic account. Hidden/placeholder accounts are never used.
+  Overridable per row on the Review tab; the pick is remembered per deductor.)
+- Pre-flight (TDS-15): before any download the skill reads the book's balances and, if an income account
+  the journal debits would end up with a debit balance, shows a RED FLAG naming account and rows and offers
+  no download. With no book loaded it says NOT CHECKED.
+- Review tab: select a row and use "Don't import selected" to leave it out of every download.
 - Cr `<matched interest income account>` = c
 
 **B. Dividend — section 194**
