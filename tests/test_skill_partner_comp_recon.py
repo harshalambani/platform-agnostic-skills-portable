@@ -9072,3 +9072,78 @@ def test_h35_14_unreadable_award_year_file_is_named_and_skipped(tmp_path):
     assert len(docs) == 1 and docs[0]["error"]
     assert "broken.pdf" in notes[0] and "skipped" in notes[0]
     assert _read_award_year_documents("", None) == ([], [])
+
+
+# ---------------------------------------------------------------------------
+# H35-15 (reopened) -- the year-end ACCR accrual journal is on the book side
+# ---------------------------------------------------------------------------
+
+_ACCR_AMT = 7000.0
+_CUR = "closing current account at 31 March"
+
+
+def _accr_report(statement_current):
+    """A report whose L5 profit share is _ACCR_AMT above the monthly total,
+    so build_accrual_journal() produces an ACCR journal (Dr current account
+    / Cr share of profit). The synthetic current account is EQUITY, so a
+    7,000 debit moves its credit-positive balance by -7,000."""
+    report = _sb_report(50000.0, statement_current)
+    booked = sum(m.share_of_profit_gross + m.firms_tax_sop + m.additional_share_of_profit
+                 for m in report.monthly)
+    report.llp_record["current_profit_share"] = booked + _ACCR_AMT
+    return report
+
+
+def _accr_posted_txn(num=""):
+    def make(guids):
+        return _gc_txn_xml(
+            _gc_guid("txn-accr-posted"), "2026-03-31", "accrual",
+            [_gc_split_xml(_gc_guid("sa1"), _ACCR_AMT, guids["Partner Current Account"]),
+             _gc_split_xml(_gc_guid("sa2"), -_ACCR_AMT, guids["Share of Profit"])],
+            num=num)
+    return make
+
+
+def _figure_in_note(note):
+    import re as _re
+    m = _re.search(r"book figure ([-\d,]+\.\d\d)", note)
+    return float(m.group(1).replace(",", "")) if m else None
+
+
+def test_h35_15_gap_explained_by_the_accrual_journal_is_pending_never_differs(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT))[_CUR]
+    assert r.agree is True and r.agree is not False
+    assert PENDING_JOURNAL_VERDICT in r.note and "ACCR" in r.note
+    assert "DIFFERS" not in r.note
+
+
+def test_h35_15_gap_the_accrual_does_not_explain_is_never_agree(tmp_path):
+    r = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT - 500.0))[_CUR]
+    assert r.agree is False and r.agree is not True
+    assert "unexplained difference -500.00" in r.note
+
+
+def test_h35_15_a_posted_accrual_is_not_counted_twice(tmp_path):
+    # Posted by Transaction ID/Num, and the statement agrees with the book alone.
+    from agents.skill_partner_comp_recon.jv_emitter import build_accrual_journal
+    rep = _accr_report(-_ACCR_AMT)
+    accr_id = build_accrual_journal(rep, _SB_ACCOUNTS)[0].txn_id
+    ok = _sb_rows(tmp_path, rep, [_accr_posted_txn(num=accr_id)], name="n1")[_CUR]
+    assert ok.agree is True and PENDING_JOURNAL_VERDICT not in ok.note
+    # Counted twice would make -14,000 the "expected" figure and hide this gap.
+    twice = _sb_rows(tmp_path, _accr_report(-2 * _ACCR_AMT),
+                     [_accr_posted_txn(num=accr_id)], name="n2")[_CUR]
+    assert twice.agree is False
+    # Same when it is recognised by its exact date/amount/accounts (no Num).
+    ok2 = _sb_rows(tmp_path, _accr_report(-_ACCR_AMT), [_accr_posted_txn()], name="n3")[_CUR]
+    assert ok2.agree is True and PENDING_JOURNAL_VERDICT not in ok2.note
+    twice2 = _sb_rows(tmp_path, _accr_report(-2 * _ACCR_AMT), [_accr_posted_txn()], name="n4")[_CUR]
+    assert twice2.agree is False
+
+
+def test_h35_15_sources_figure_and_note_figure_are_always_equal(tmp_path):
+    key = "GnuCash book at 31 Mar (plus this skill's unposted journals)"
+    for stmt, name in ((-_ACCR_AMT, "e1"), (-_ACCR_AMT - 500.0, "e2"), (0.0, "e3")):
+        r = _sb_rows(tmp_path, _accr_report(stmt), name=name)[_CUR]
+        assert _figure_in_note(r.note) == r.sources[key], (stmt, r.note)
+        assert r.sources[key] == -_ACCR_AMT
