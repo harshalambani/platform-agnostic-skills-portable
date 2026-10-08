@@ -657,6 +657,56 @@ def test_year_guard_would_catch_a_literal_year():                           # NE
     assert not YEAR.search("Year ended 31 March [end of CY]")
 
 
+from html.parser import HTMLParser  # noqa: E402
+
+
+class _TextWithoutOwnColour(HTMLParser):
+    """Collect elements that hold direct text but carry no colour in their OWN
+    inline style (an inherited colour does not count: the dark theme sets a
+    light colour straight on b/div/th/td, which beats inheritance)."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.bad = [], []
+
+    def handle_starttag(self, tag, attrs):
+        style = dict(attrs).get("style") or ""
+        self.stack.append((tag, bool(re.search(r"(?:^|;)\s*color\s*:", style))))
+
+    def handle_endtag(self, tag):
+        for k in range(len(self.stack) - 1, -1, -1):
+            if self.stack[k][0] == tag:
+                del self.stack[k:]
+                break
+
+    def handle_data(self, data):
+        if data.strip() and self.stack and not self.stack[-1][1]:
+            self.bad.append((self.stack[-1][0], data.strip()[:30]))
+
+
+def _uncoloured(html_text):
+    p = _TextWithoutOwnColour()
+    p.feed(html_text)
+    return p.bad
+
+
+def test_every_sample_text_element_carries_its_own_inline_colour():       # NEGATIVE
+    scanned = 0
+    for sk in discover():
+        if not sk.help:
+            continue
+        for hi in sk.help.inputs:
+            if hi.sample_html:
+                scanned += 1
+                assert _uncoloured(hi.sample_html) == [], (sk.name, hi.name)
+    assert scanned >= 5
+
+
+def test_colour_guard_fails_a_td_without_its_own_colour():                # NEGATIVE (guard works)
+    assert _uncoloured('<div style="color:#222;"><table><tr><td>x</td></tr></table></div>') == [("td", "x")]
+    assert _uncoloured('<td style="color:#222;">x</td>') == []
+
+
 def test_input_without_a_sample_still_renders():                           # NEGATIVE
     import gradio as gr
     sk = _skill()
@@ -832,3 +882,206 @@ def test_a_skill_with_no_check_handler_shows_no_button():                  # NEG
     for s in others[:3]:
         labels, _ = _button_labels(s)
         assert "Check my files" not in labels
+
+
+# ------------------------------------------- UI-25: collapsed override group + gathered samples
+
+import dataclasses  # noqa: E402
+
+from agents import registry as _registry  # noqa: E402
+
+GROUP_TITLE_START = "Pick files by hand instead"
+GATHER_TITLE = "What do the firm's documents look like?"
+OVERRIDE_INPUTS = ("advices_dir", "advisory_path", "llp_statement",
+                   "award_year_documents", "payment_schedule")
+OUTSIDE_INPUTS = ("entity", "fy", "firm_documents", "doc_password", "gnucash_path",
+                  "xlsx_26as", "journal_path", "accrual_journal_path", "bank_match_window")
+
+
+def _form(skill):
+    import gradio as gr
+    with gr.Blocks() as demo:
+        _generic.render(skill)
+    return demo
+
+
+def _ancestors(block):
+    out = []
+    while getattr(block, "parent", None) is not None:
+        block = block.parent
+        out.append(block)
+    return out
+
+
+def _accordions(demo, title_start):
+    import gradio as gr
+    return [b for b in demo.blocks.values()
+            if isinstance(b, gr.Accordion) and str(b.label).startswith(title_start)]
+
+
+def _by_label(demo, skill):
+    """input name -> its component, found by the (unique) label."""
+    out = {}
+    for inp in skill.inputs:
+        hits = [b for b in demo.blocks.values()
+                if getattr(b, "label", None) == inp.label and not hasattr(b, "children")]
+        if hits:
+            out[inp.name] = hits[0]
+    return out
+
+
+def test_the_partner_form_has_one_collapsed_accordion_holding_exactly_the_overrides():
+    sk = _skill()
+    demo = _form(sk)
+    accs = _accordions(demo, GROUP_TITLE_START)
+    assert len(accs) == 1 and accs[0].open is False
+    comps = _by_label(demo, sk)
+    inside = {n for n, c in comps.items() if accs[0] in _ancestors(c)}
+    assert inside == set(OVERRIDE_INPUTS)
+
+
+def test_the_other_inputs_are_never_inside_the_accordion():                # NEGATIVE
+    sk = _skill()
+    demo = _form(sk)
+    acc = _accordions(demo, GROUP_TITLE_START)[0]
+    comps = _by_label(demo, sk)
+    for n in OUTSIDE_INPUTS:
+        assert n in comps, n
+        assert acc not in _ancestors(comps[n]), n
+
+
+def test_each_override_keeps_its_own_sample_panel_inside_the_accordion():
+    sk = _skill()
+    demo = _form(sk)
+    acc = _accordions(demo, GROUP_TITLE_START)[0]
+    panels = [a for a in _accordions(demo, "What does this file look like?")
+              if acc in _ancestors(a)]
+    assert len(panels) == len(OVERRIDE_INPUTS)
+
+
+def test_a_skill_with_no_group_gets_no_accordion_and_no_gathered_panel():  # NEGATIVE
+    others = [s for s in discover(refresh=True) if not s.input_groups]
+    assert others
+    for s in others[:3]:
+        demo = _form(s)
+        assert not _accordions(demo, GROUP_TITLE_START)
+        assert not _accordions(demo, GATHER_TITLE)
+
+
+def test_grouped_values_still_reach_the_run_and_the_check_in_order():     # NEGATIVE (not dropped)
+    import gradio as gr
+    sk = _skill()
+    demo = _form(sk)
+    comps = _by_label(demo, sk)
+    want = [comps[i.name]._id for i in sk.inputs]
+    run_btn = next(b for b in demo.blocks.values()
+                   if isinstance(b, gr.Button) and b.value == "Run")
+    dep = next(d for d in demo.fns.values() if any(t[0] == run_btn._id for t in d.targets))
+    assert [c._id for c in dep.inputs][:len(want)] == want
+    chk = next(b for b in demo.blocks.values()
+               if isinstance(b, gr.Button) and b.value == "Check my files")
+    dep2 = next(d for d in demo.fns.values() if any(t[0] == chk._id for t in d.targets))
+    assert [c._id for c in dep2.inputs] == want
+    # Reset clears the grouped pickers too.
+    rst = next(b for b in demo.blocks.values()
+               if isinstance(b, gr.Button) and b.value == "Reset")
+    dep3 = next(d for d in demo.fns.values() if any(t[0] == rst._id for t in d.targets))
+    out_ids = {c._id for c in dep3.outputs}
+    assert {comps[n]._id for n in OVERRIDE_INPUTS} <= out_ids
+
+
+def test_a_value_picked_in_the_collapsed_group_wins_over_the_dropped_file(tmp_path, monkeypatch):  # NEGATIVE
+    d = folder(tmp_path, full_set())
+    picked = tmp_path / "picked.pdf"
+    picked.write_text(ADVISORY_26, encoding="utf-8")
+    seen = {}
+    monkeypatch.setattr(agent_module, "_run_from_documents", lambda **kw: seen.update(kw) or "ok")
+    sk = _skill()
+    # the run's argument mapping still carries the grouped input by name
+    assert sk.run_args["advisory_path"] == "{inputs.advisory_path}"
+    agent_module.run(entity="X", firm_documents=str(d), advisory_path=str(picked),
+                     financial_year=FY, output_path=str(tmp_path / "o.xlsx"))
+    assert seen["advisory_path"] == str(picked)
+
+
+def _manifest_with(tmp_path, old, new):
+    text = (ROOT / "src" / "agents" / "skill_partner_comp_recon" / "skill.yaml").read_text(encoding="utf-8")
+    assert old in text
+    d = tmp_path / "skill_partner_comp_recon"
+    d.mkdir()
+    (d / "skill.yaml").write_text(text.replace(old, new, 1), encoding="utf-8")
+    return d / "skill.yaml"
+
+
+def test_an_unknown_group_name_is_refused_loudly_not_dropped(tmp_path):    # NEGATIVE
+    path = _manifest_with(tmp_path, 'group: "manual_picks"', 'group: "no_such_group"')
+    with pytest.raises(ValueError, match="no_such_group"):
+        _registry._parse_manifest(path)
+
+
+def test_gathered_panel_lists_the_five_kinds_in_form_order_with_each_sample_once():
+    sk = _skill()
+    drop = next(i for i in sk.inputs if i.name == "firm_documents")
+    body = _help.gathered_samples_markdown(sk, drop)
+    heads = re.findall(r"^#### (.+)$", body, re.M)
+    form_order = [i.name for i in sk.inputs if i.name in OVERRIDE_INPUTS]
+    assert list(drop.gather_samples) == form_order
+    by = {h.name: h for h in sk.help.inputs}
+    assert heads == [by[n].heading for n in form_order] and len(heads) == 5
+    for n in form_order:
+        assert body.count(by[n].sample_html) == 1
+    note = by[form_order[0]].filename_note
+    assert note and body.count(note) == 1
+
+
+def test_the_gathered_panel_sits_under_the_check_button_above_the_group():
+    import gradio as gr
+    sk = _skill()
+    demo = _form(sk)
+    gather = _accordions(demo, GATHER_TITLE)
+    assert len(gather) == 1 and gather[0].open is False
+    group = _accordions(demo, GROUP_TITLE_START)[0]
+    chk = next(b for b in demo.blocks.values()
+               if isinstance(b, gr.Button) and b.value == "Check my files")
+    comps = _by_label(demo, sk)
+    assert comps["firm_documents"]._id < chk._id < gather[0]._id < group._id
+
+
+def test_a_skill_without_gather_samples_gets_no_gathered_panel():          # NEGATIVE
+    sk = _skill()
+    plain = next(i for i in sk.inputs if i.name == "entity")
+    assert _help.gathered_samples_markdown(sk, plain) == ""
+    import gradio as gr
+    with gr.Blocks():
+        assert _help.mount_gathered_panel(sk, plain) is False
+
+
+def test_a_listed_input_with_no_sample_is_skipped_without_an_empty_heading():   # NEGATIVE
+    sk = _skill()
+    drop = next(i for i in sk.inputs if i.name == "firm_documents")
+    hs = tuple(dataclasses.replace(h, sample_html="", looks_like="", not_these=(), filename_note="")
+               if h.name == "advisory_path" else h for h in sk.help.inputs)
+    sk2 = dataclasses.replace(sk, help=dataclasses.replace(sk.help, inputs=hs))
+    body = _help.gathered_samples_markdown(sk2, drop)
+    heads = re.findall(r"^#### (.+)$", body, re.M)
+    assert "This year's Advisory" not in heads and len(heads) == 4
+    assert all(h.strip() for h in heads)
+
+
+def test_a_gather_name_that_is_not_an_input_fails_at_manifest_load(tmp_path):   # NEGATIVE
+    path = _manifest_with(tmp_path, 'gather_samples: ["advices_dir",',
+                          'gather_samples: ["no_such_input", "advices_dir",')
+    with pytest.raises(ValueError, match="no_such_input"):
+        _registry._parse_manifest(path)
+
+
+def test_the_gathered_panel_html_also_has_an_own_colour_on_every_text_element():
+    sk = _skill()
+    drop = next(i for i in sk.inputs if i.name == "firm_documents")
+    body = _help.gathered_samples_markdown(sk, drop)
+    assert "<table" in body and _uncoloured(body) == []
+
+
+def test_plain_text_in_a_panel_is_escaped_so_year_is_not_swallowed_as_a_tag():   # NEGATIVE
+    _, body = _panel("advisory_path")
+    assert "&lt;year&gt;" in body and "<year>" not in body

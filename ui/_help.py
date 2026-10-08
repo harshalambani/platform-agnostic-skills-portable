@@ -60,6 +60,12 @@ def input_info_map(skill: "SkillInfo") -> dict[str, str]:
     return out
 
 
+def _esc(text: str) -> str:
+    """Plain text in a panel body: a literal <year> must show as text, not be
+    swallowed as an HTML tag (the drawn sample itself is the only raw HTML)."""
+    return html.escape(text, quote=False)
+
+
 def sample_panel_markdown(hi) -> str:
     """UI-21: HTML/Markdown body of the "What does this file look like?" panel
     for one help input, or "" when that input has no sample/description.
@@ -74,14 +80,14 @@ def sample_panel_markdown(hi) -> str:
     if hi.sample_html:
         parts.append(hi.sample_html)
     if hi.looks_like:
-        parts.append("**What it looks like.** " + hi.looks_like)
+        parts.append("**What it looks like.** " + _esc(hi.looks_like))
     if hi.not_these:
         parts.append(
             "**Look-alikes NOT to pick here:**\n"
-            + "\n".join(f"- {x}" for x in hi.not_these)
+            + "\n".join(f"- {_esc(x)}" for x in hi.not_these)
         )
     if hi.filename_note:
-        parts.append("**File names.** " + hi.filename_note)
+        parts.append("**File names.** " + _esc(hi.filename_note))
     return "\n\n".join(parts)
 
 
@@ -97,6 +103,53 @@ def mount_sample_panel(skill: "SkillInfo", input_name: str) -> bool:
         return False
     import gradio as gr
     with gr.Accordion("What does this file look like?", open=False):
+        gr.Markdown(body, sanitize_html=False)
+    return True
+
+
+def gathered_samples_markdown(skill: "SkillInfo", drop_input) -> str:
+    """UI-25: ONE body gathering the samples of the inputs that `drop_input`
+    lists in gather_samples, in that order, one short heading per kind. Each
+    kind shows the same sample_html / looks_like / not_these its own picker
+    shows; the file-name note is shown once, at the end. Built from the
+    existing help entries (nothing is copied). An input with no sample is
+    skipped, so no empty heading is drawn. "" when nothing is gathered."""
+    names = getattr(drop_input, "gather_samples", ()) or ()
+    if not names or not skill.help:
+        return ""
+    labels = _input_labels(skill)
+    by_name = {h.name: h for h in skill.help.inputs}
+    parts: list[str] = []
+    notes: list[str] = []
+    for name in names:
+        hi = by_name.get(name)
+        if hi is None or not (hi.sample_html or hi.looks_like or hi.not_these):
+            continue
+        parts.append("#### " + (hi.heading or labels.get(name, name)))
+        if hi.sample_html:
+            parts.append(hi.sample_html)
+        if hi.looks_like:
+            parts.append("**What it looks like.** " + _esc(hi.looks_like))
+        if hi.not_these:
+            parts.append("**Look-alikes NOT to pick here:**" + chr(10)
+                         + chr(10).join(f"- {_esc(x)}" for x in hi.not_these))
+        if hi.filename_note and hi.filename_note not in notes:
+            notes.append(hi.filename_note)
+    if not parts:
+        return ""
+    for n in notes:
+        parts.append("**File names.** " + _esc(n))
+    return (chr(10) * 2).join(parts)
+
+
+def mount_gathered_panel(skill: "SkillInfo", drop_input) -> bool:
+    """Mount the collapsed gathered-samples panel under `drop_input`. Returns
+    False (drawing nothing) when the input lists no samples."""
+    body = gathered_samples_markdown(skill, drop_input)
+    if not body:
+        return False
+    title = getattr(drop_input, "gather_samples_title", "") or "What do these files look like?"
+    with gr.Accordion(title, open=False):
         gr.Markdown(body, sanitize_html=False)
     return True
 

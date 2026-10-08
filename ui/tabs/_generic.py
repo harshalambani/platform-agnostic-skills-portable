@@ -28,6 +28,7 @@ Supported input types (declared in skill.yaml):
 """
 from __future__ import annotations
 
+import contextlib
 import re
 import shutil
 import tempfile
@@ -1236,7 +1237,22 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 if inp.type in ("file", "files") and inp.book_from
             }
             book_status_md: dict[str, object] = {}  # file input name -> its status Markdown
+            # UI-25: inputs that declare `group:` are drawn inside that group's
+            # collapsed accordion. Values are submitted like any other input;
+            # only the layout differs. No group declared = nothing changes.
+            _group_titles = {g.name: g.title for g in getattr(skill, "input_groups", ())}
+            _group_stack = contextlib.ExitStack()
+            _open_group = ""
+            check_btn = None
             for inp in skill.inputs:
+                _g = getattr(inp, "group", "") or ""
+                if _g != _open_group:
+                    _group_stack.close()
+                    _group_stack = contextlib.ExitStack()
+                    _open_group = _g
+                    if _g:
+                        _group_stack.enter_context(
+                            gr.Accordion(_group_titles.get(_g, _g), open=False))
                 if inp.type == "file" and inp.book_from:
                     # A GnuCash book is NOT an upload — it is a live file on
                     # disk that the skill opens read-only, in place. Handing
@@ -1429,6 +1445,13 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 # UI-21: a collapsed "What does this file look like?" panel
                 # under the picker. Draws nothing for an input without one.
                 _help.mount_sample_panel(skill, inp.name)
+                # UI-25: under the drop zone, the Check button and then ONE
+                # panel gathering the samples of the pickers below it.
+                if getattr(inp, "gather_samples", ()):
+                    if getattr(skill, "check", None) is not None and check_btn is None:
+                        check_btn = gr.Button(skill.check.label, variant="secondary")
+                    _help.mount_gathered_panel(skill, inp)
+            _group_stack.close()
 
             # Entity -> GnuCash book prefill wiring (Phase 5 core, 2026-07-30
             # handover): for each `file` input declaring `book_from`, wire the
@@ -1567,8 +1590,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 stop_btn = gr.Button("Stop", variant="stop", visible=True)
                 reset_btn = gr.Button("Reset", variant="secondary")
             # UI-23: only a skill that declares a check: handler gets this button.
-            check_btn = (gr.Button(skill.check.label, variant="secondary")
-                         if getattr(skill, "check", None) is not None else None)
+            if check_btn is None and getattr(skill, "check", None) is not None:
+                check_btn = gr.Button(skill.check.label, variant="secondary")
 
         with gr.Column(scale=2):
             result_md = gr.Markdown("_Awaiting input._", min_height=200)
