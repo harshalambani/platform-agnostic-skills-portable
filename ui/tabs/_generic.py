@@ -632,15 +632,79 @@ def _registry_book_fill(skill, inp_def, input_map) -> str:
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
 
+def _stage_extra_outputs(skill, agent_reply) -> dict | None:
+    """UI-24: the extra files (e.g. journal CSVs) THIS run reports writing.
+
+    Returns None when the skill declares no `output.extra_outputs`. Otherwise
+    {"block": markdown for the Done panel, "updates": one DownloadButton
+    update per declared extra, "paths": the saved paths for the copy box}.
+
+    Only files the skill itself reported through its structured reply
+    (agents.outputs.ReplyWithOutputs) are considered: a folder is never
+    scanned for the latest *.csv, so a file left by an earlier run can never
+    be offered. Same containment and staging as the main file: the path must
+    resolve inside output_dir(), and only a COPY in download_staging_dir() is
+    served -- Gradio's allowed paths are not widened."""
+    declared = tuple(getattr(skill.output, "extra_outputs", ()) or ())
+    if not declared:
+        return None
+    reported = {e.get("key"): e for e in (getattr(agent_reply, "extra_outputs", ()) or ())}
+    off = lambda: gr.update(interactive=False, value=None)  # noqa: E731
+    written: list[str] = []
+    not_written: list[str] = []
+    updates: list = []
+    paths: list[str] = []
+    try:
+        root = _config.output_dir().resolve()
+    except Exception:
+        root = None
+    for x in declared:
+        e = reported.get(x.key) or {}
+        p = e.get("path")
+        if not p:
+            not_written.append(f"- **{x.label}:** not written. "
+                               f"{e.get('note') or 'This run did not report writing it.'}")
+            updates.append(off())
+            continue
+        try:
+            rp = Path(p).resolve()
+            if not rp.is_file():
+                not_written.append(f"- **{x.label}:** the run reported {rp} but no such file exists, "
+                                   "so it is not offered.")
+                updates.append(off())
+            elif root is None or not rp.is_relative_to(root):
+                written.append(f"- **{x.label}:** {rp} (saved outside the outputs folder, "
+                               "so there is no download button for it)")
+                paths.append(str(rp))
+                updates.append(off())
+            else:
+                served = _config.download_staging_dir() / rp.name
+                shutil.copy2(rp, served)
+                written.append(f"- **{x.label}:** {rp}")
+                paths.append(str(rp))
+                updates.append(gr.update(value=str(served.resolve()), interactive=True))
+        except Exception as ex:  # noqa: BLE001
+            not_written.append(f"- **{x.label}:** could not be staged for download ({ex}).")
+            updates.append(off())
+    if not written:
+        first = not_written[0].split("not written. ", 1)[-1] if not_written else ""
+        block = ("**Journals to import into GnuCash:** none written. " + first).strip()
+    else:
+        block = "**Journals to import into GnuCash**\n\n" + "\n".join(written + not_written)
+    return {"block": block, "updates": updates, "paths": paths}
+
+
 def _make_run_handler(skill: SkillInfo):
     """
     Return a Gradio-compatible generator function that runs the skill.
 
     The returned function's signature matches the generic tab's input
-    components: (file_or_dir, *text_inputs, model_choice).
+    components: (file_or_dir, *text_inputs, model_choice). A skill that
+    declares output.extra_outputs gets len(extra_outputs)+1 further outputs
+    (one DownloadButton each, then the saved-path box).
     """
 
-    def _run(*args):
+    def _run_core(state, *args):
         # Last arg is always model_choice; everything before maps to skill.inputs.
         *input_values, model_choice = args
         log: list[str] = []
@@ -980,16 +1044,42 @@ def _make_run_handler(skill: SkillInfo):
                 return
             # --- end security block ---
 
+            extras = _stage_extra_outputs(skill, agent_reply)
+            state["extras"] = extras
+            extras_md = f"{extras['block']}\n\n" if extras else ""
             msg = add(
                 f"### Done\n\n"
                 f"**File:** {out_path.name}\n\n"
                 f"**Saved to:** {out_path.resolve()}\n\n"
                 f"Click **{skill.output.download_label}** below.\n\n"
+                f"{extras_md}"
                 f"---\n\n**{reply_label(skill)}:**\n\n{agent_reply}"
             )
             yield msg, gr.update(value=out_abs, interactive=True), gr.update(value=str(out_path.resolve()))
 
-    return _run
+    declared = tuple(getattr(skill.output, "extra_outputs", ()) or ())
+    if not declared:
+        def _run(*args):
+            yield from _run_core({}, *args)
+        return _run
+
+    def _run_with_extras(*args):
+        state: dict = {}
+        first = True
+        for t in _run_core(state, *args):
+            if first:
+                # A new run starts with every extra output disabled and empty.
+                ext = [gr.update(interactive=False, value=None) for _ in declared]
+                ext.append(gr.update(value=""))
+                first = False
+            elif state.get("extras") and not state.get("extras_sent"):
+                ext = list(state["extras"]["updates"])
+                ext.append(gr.update(value="\n".join(state["extras"]["paths"])))
+                state["extras_sent"] = True
+            else:
+                ext = [gr.update() for _ in range(len(declared) + 1)]
+            yield (*t, *ext)
+    return _run_with_extras
 
 
 # ---------------------------------------------------------------------------
@@ -1433,6 +1523,20 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 interactive=False,
                 buttons=["copy"],
             )
+            # UI-24: extra output files this run wrote (e.g. journal CSVs).
+            # Same always-mounted pattern as `download` above: toggled with
+            # `interactive`, never `visible`.
+            extra_downloads = [
+                gr.DownloadButton(
+                    label=_x.download_label, visible=True, interactive=False, variant="secondary",
+                )
+                for _x in skill.output.extra_outputs
+            ]
+            extra_path_tb = (
+                gr.Textbox(label="Saved journal path(s)", value="", interactive=False,
+                           lines=2, buttons=["copy"])
+                if skill.output.extra_outputs else None
+            )
             # Every result tab gets a button to open the output location in
             # the file manager (directory skills -> their result folder;
             # file skills -> the outputs folder holding the dated file).
@@ -1615,6 +1719,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     _select_initial_value(skill, i.fy_from) if i.fy_from else None)),
         ))
 
+    _extra_components = list(extra_downloads) + ([extra_path_tb] if extra_path_tb is not None else [])
+
     def _handle_reset():
         from .. import _runner
         _runner.reset_cancel()
@@ -1623,19 +1729,22 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             gr.update(interactive=False, value=None),   # download
             gr.update(value=""),   # path_tb
         ]
+        updates.extend(gr.update(interactive=False, value=None) for _ in extra_downloads)
+        if extra_path_tb is not None:
+            updates.append(gr.update(value=""))
         updates.extend(fn() for _c, fn in reset_specs)
         return tuple(updates)
 
     reset_btn.click(
         fn=_handle_reset,
-        outputs=[result_md, download, path_tb] + [_c for _c, _fn in reset_specs],
+        outputs=[result_md, download, path_tb] + _extra_components + [_c for _c, _fn in reset_specs],
     )
 
     handler = _make_run_handler(skill)
     run_btn.click(
         fn=handler,
         inputs=input_components + [model_dd],
-        outputs=[result_md, download, path_tb],
+        outputs=[result_md, download, path_tb] + _extra_components,
     )
 
     open_folder_btn.click(

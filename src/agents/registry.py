@@ -81,12 +81,23 @@ class SkillInput:
 
 
 @dataclass(frozen=True)
+class SkillExtraOutput:
+    """A further file a run may write beside the main output (UI-24), e.g. a
+    journal CSV. Declared in skill.yaml under output.extra_outputs; the skill
+    reports which of them THIS run actually wrote (agents.outputs)."""
+    key: str
+    label: str = ""
+    download_label: str = "Download"
+
+
+@dataclass(frozen=True)
 class SkillOutput:
     """Output configuration from skill.yaml."""
     extension: str = ".txt"
     suffix: str = "output"
     download_label: str = "Download"
     type: str = "file"
+    extra_outputs: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -257,6 +268,14 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         suffix=out_raw.get("suffix", "output"),
         download_label=out_raw.get("download_label", "Download"),
         type=out_raw.get("type", "file"),
+        extra_outputs=tuple(
+            SkillExtraOutput(
+                key=str(x["key"]),
+                label=str(x.get("label", x["key"])),
+                download_label=str(x.get("download_label", "Download")),
+            )
+            for x in (out_raw.get("extra_outputs") or ())
+        ),
     )
 
     req_raw = raw.get("requires") or {}

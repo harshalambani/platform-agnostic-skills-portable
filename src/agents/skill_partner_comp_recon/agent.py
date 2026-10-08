@@ -87,6 +87,7 @@ from .jv_emitter import (
     write_accrual_journal_csv,
     write_journal_csv,
 )
+from ..outputs import ReplyWithOutputs, extra_output
 from .mapper import FinancialYearMismatchError, build_input_data
 from . import award_year as _award_year
 from . import precheck as _precheck
@@ -1043,6 +1044,13 @@ def _run_from_documents(
 
     journal_line = ""
     account_notes: list[str] = []
+    # UI-24: which journal files THIS run wrote, handed to the UI as structured
+    # data (agents.outputs) -- never scraped from the reply text.
+    monthly_out: str | None = None
+    monthly_why = ("No journal written: the journal path was left blank, or the default "
+                   "path was skipped (see Optional-leg status).")
+    accrual_out: str | None = None
+    accrual_why = "No accrual journal written: needs the journal above and its own path."
     # UI-17: "auto" asks for the default CSV names (entity + FY, beside the
     # workbook). Unlike an explicit path it is best-effort: with no journal
     # accounts configured for the entity, or no LLP statement for the accrual,
@@ -1088,16 +1096,19 @@ def _run_from_documents(
         # below, so it is never lost even when the monthly journal itself
         # is refused.
         accrual_line = ""
+        accrual_why = "No accrual journal written: the accrual journal path was left blank."
         if accrual_journal_path:
             accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
             write_accrual_journal_csv(accrual_journal, accrual_journal_path)
             if accrual_journal is not None:
+                accrual_out = accrual_journal_path
                 accrual_line = (
                     f"  Accrual journal CSV: {accrual_journal_path} "
                     f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
                 )
             else:
                 accrual_line = f"  Accrual journal: not written. {accrual_note}"
+                accrual_why = f"No accrual journal written: {accrual_note}"
             # H35-02 item 4: the residual current-account comparison after
             # whatever the accrual applied -- reported here, never booked.
             residual_status = (
@@ -1126,13 +1137,17 @@ def _run_from_documents(
             ]
             if accrual_line:
                 lines.append(accrual_line)
-            return "\n".join(lines)
+            return ReplyWithOutputs("\n".join(lines), [
+                extra_output("journal_csv", None, f"No journal written: {bank_match_unavailable}"),
+                extra_output("accrual_journal_csv", accrual_out, accrual_why),
+            ])
 
         try:
             journals = build_journals(report, accounts, bank_matches=bank_matches or None)
         except JournalValidationError as e:
             return f"ERROR: {e}"
         write_journal_csv(journals, journal_path)
+        monthly_out = journal_path
         row_count = sum(len(j.splits) for j in journals)
         journal_line = (
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
@@ -1154,7 +1169,10 @@ def _run_from_documents(
         lines.insert(0, f"WARNING: {settings_error} The journal, the posted-already "
                         "check, the bank match, the GnuCash tie-out and the 26AS "
                         "ownership check were NOT run with this entity's settings.")
-    return "\n".join(lines)
+    return ReplyWithOutputs("\n".join(lines), [
+        extra_output("journal_csv", monthly_out, "" if monthly_out else monthly_why),
+        extra_output("accrual_journal_csv", accrual_out, "" if accrual_out else accrual_why),
+    ])
 
 
 def _run_from_structured_input(

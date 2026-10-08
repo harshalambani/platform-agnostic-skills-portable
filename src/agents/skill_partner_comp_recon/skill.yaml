@@ -138,6 +138,13 @@ output:
   extension: ".xlsx"
   suffix: "partner-comp-recon"
   download_label: "Download Partner Compensation Reconciliation"
+  extra_outputs:
+    - key: "journal_csv"
+      label: "Monthly journal"
+      download_label: "Download journal CSV"
+    - key: "accrual_journal_csv"
+      label: "Year-end accrual journal"
+      download_label: "Download accrual journal CSV"
 
 requires:
   native_binaries: []
