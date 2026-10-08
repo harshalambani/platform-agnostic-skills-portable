@@ -73,7 +73,8 @@ def read_award_year_document(path: str, password: str | None, advisory_parser) -
            "revision": None, "instalments": None, "error": None}
     text = _precheck.read_first_page_text(path, password)
     if text is None:
-        doc["error"] = "could not be opened (wrong password or not a readable PDF)"
+        doc["error"] = (_precheck.pdf_open_problem(path, password)
+                        or "could not be opened (not a readable PDF)")
         return doc
     doc["kind"] = _precheck.classify_advisory_text(text)
     doc["letter_date"] = parse_letter_date(text)
@@ -83,7 +84,7 @@ def read_award_year_document(path: str, password: str | None, advisory_parser) -
     try:
         rec = advisory_parser.parse(path, password)
     except Exception as e:  # noqa: BLE001
-        doc["error"] = f"could not be parsed ({e})"
+        doc["error"] = f"could not be parsed ({_precheck.explain_pdf_error(e, password)})"
         return doc
     doc["fy"] = rec.get("financial_year")
     doc["instalments"] = [

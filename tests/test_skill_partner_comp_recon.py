@@ -9288,3 +9288,81 @@ def test_h35_16_bank_matching_tolerance_is_unchanged():
     src = inspect.getsource(gt)
     # the bank matcher still compares against the strict tolerance
     assert "pm.payout_amount) <= RECONCILIATION_TOLERANCE" in src
+
+
+# ===========================================================================
+# UI-22 -- a password-protected PDF with a missing / wrong Document password
+# gets a plain message on every PDF input (never an empty reason, never the
+# password itself); an unprotected PDF that fails keeps its real error.
+# ===========================================================================
+
+_UI22_SECRET = "zx-made-up-pw-91"
+
+
+def _ui22_pdf(path, password=None, text="Hello made-up page"):
+    from reportlab.pdfgen import canvas
+    kwargs = {"encrypt": password} if password else {}
+    c = canvas.Canvas(str(path), **kwargs)
+    c.drawString(72, 720, text)
+    c.save()
+    return str(path)
+
+
+def test_ui22_missing_password_says_enter_the_document_password(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    note, rec = ag._resolve_llp_leg(pdf, None)
+    assert rec is None and precheck.PASSWORD_MISSING_MESSAGE in note
+    note, rec = ag._resolve_schedule_leg(pdf, "")
+    assert rec is None and precheck.PASSWORD_MISSING_MESSAGE in note
+
+
+def test_ui22_wrong_password_has_its_own_message_and_never_echoes_it(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    wrong = "wrong-guess-77"
+    note, _rec = ag._resolve_llp_leg(pdf, wrong)
+    assert precheck.PASSWORD_WRONG_MESSAGE in note
+    assert precheck.PASSWORD_MISSING_MESSAGE not in note
+    assert wrong not in note and _UI22_SECRET not in note
+    note2, _ = ag._resolve_schedule_leg(pdf, wrong)
+    assert precheck.PASSWORD_WRONG_MESSAGE in note2 and wrong not in note2
+
+
+def test_ui22_award_year_and_advisory_and_certificates_use_the_message(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import award_year, precheck
+    from agents.skill_partner_comp_recon.parsers import advisory, payout_advice
+    pdf = _ui22_pdf(tmp_path / "locked.pdf", _UI22_SECRET)
+    d = award_year.read_award_year_document(pdf, None, advisory)
+    assert d["error"] == precheck.PASSWORD_MISSING_MESSAGE
+    d2 = award_year.read_award_year_document(pdf, "nope-nope", advisory)
+    assert d2["error"] == precheck.PASSWORD_WRONG_MESSAGE and "nope-nope" not in d2["error"]
+    for parser in (advisory, payout_advice):
+        try:
+            parser.parse(pdf, None)
+        except Exception as e:  # noqa: BLE001
+            assert precheck.explain_pdf_error(e, None) == precheck.PASSWORD_MISSING_MESSAGE
+        else:
+            raise AssertionError("expected the locked PDF to fail")
+    docs, notes = ag._read_award_year_documents([pdf], None)
+    assert precheck.PASSWORD_MISSING_MESSAGE in notes[0]
+
+
+def test_ui22_an_unprotected_pdf_that_fails_keeps_its_real_error(tmp_path):
+    from agents.skill_partner_comp_recon import agent as ag
+    from agents.skill_partner_comp_recon import precheck
+    pdf = _ui22_pdf(tmp_path / "plain.pdf")          # opens fine, is no L5 / schedule
+    note, rec = ag._resolve_llp_leg(pdf, None)
+    assert rec is None and "password" not in note.lower()
+    note, rec = ag._resolve_schedule_leg(pdf, None)
+    assert rec is None and "password" not in note.lower()
+    # Not a PDF at all: the real error, never the password message.
+    junk = tmp_path / "junk.pdf"
+    junk.write_bytes(b"not a pdf")
+    note, _ = ag._resolve_llp_leg(str(junk), None)
+    assert precheck.PASSWORD_MISSING_MESSAGE not in note and "could not parse" in note
+    # An exception with no text still names its type, never an empty reason.
+    assert precheck.explain_pdf_error(KeyError(), None) == "KeyError"

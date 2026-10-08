@@ -199,7 +199,8 @@ def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]
         # "could not parse", which reads as if the statement were unreadable.
         return f"{label}: not available ({e})", None
     except Exception as e:
-        return f"{label}: not available (could not parse {path}: {e})", None
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
 
 
 def _read_award_year_documents(value, password):
@@ -247,7 +248,8 @@ def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | 
     except NotImplementedError as e:
         return f"{label}: not available ({e})", None
     except Exception as e:
-        return f"{label}: not available (could not parse {path}: {e})", None
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
 
 
 def _resolve_entity_config(entity: str, entities_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
@@ -765,7 +767,8 @@ def _run_from_documents(
         advisory_record = _advisory_parser.parse(advisory_path, doc_password)
     except Exception as e:
         lines = [
-            f"ERROR: could not parse the Compensation advisory ({advisory_path}): {e}",
+            f"ERROR: could not parse the Compensation advisory ({advisory_path}): "
+            f"{_precheck.explain_pdf_error(e, doc_password)}",
             "  Optional-leg status (unaffected by the error above):",
         ]
         lines.extend(f"  - {note}" for note in optional_notes)
@@ -777,7 +780,8 @@ def _run_from_documents(
             advice_records.append(_payout_advice_parser.parse(str(pdf), doc_password))
         except Exception as e:
             lines = [
-                f"ERROR: could not parse payout advice ({pdf}): {e}",
+                f"ERROR: could not parse payout advice ({pdf}): "
+                f"{_precheck.explain_pdf_error(e, doc_password)}",
                 "  Optional-leg status (unaffected by the error above):",
             ]
             lines.extend(f"  - {note}" for note in optional_notes)
