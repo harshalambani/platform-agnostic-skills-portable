@@ -54,12 +54,8 @@ def run(
         for key, fname in _FILES
     )
     if result.returncode == 2:
-        tail = f"
-
-{err}" if err else ""
-        return ReplyWithOutputs(f"Completed with items to review:
-
-{out}{tail}", extras)
+        tail = f"\n\n{err}" if err else ""
+        return ReplyWithOutputs(f"Completed with items to review:\n\n{out}{tail}", extras)
     return ReplyWithOutputs(out or "GnuCash CSVs generated.", extras)
 
 

@@ -20,6 +20,9 @@ Run this last of the three KRChoksey tabs, after Reconcile (Part II). It produce
 - **GnuCash book (.gnucash)** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used for account paths and FIFO cost basis.
   - ⚠️ Close the book in GnuCash before running. It is read only, never modified.
+- **Demat charges expense account (remembered per entity)** (optional) — accepts: An expense account from the book picked above (hidden and placeholder accounts are not offered).
+  - The expense account demat (DP) charges are booked to. Without one, Charges.csv is not written and the run is flagged incomplete.
+  - ⚠️ Remembered per entity, so pick the entity too. The list fills once the GnuCash book is chosen.
 
 ## How to run
 
@@ -41,6 +44,8 @@ Files produced:
 - **`Purchase.csv`** — One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount.
 - **`SLBM.csv`** — One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income).
 - **`Sale.csv`** — Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit).
+- **`Charges.csv`** — One transaction per demat charge: Dr the demat-charges expense account, Cr the KR Choksey broker account. Only written once an expense account is picked.
+- **`NewSecurities.csv`** — Purchases of a security with no account in the book yet: suggested account path, type Stock. Those purchases are NOT in Purchase.csv - create the commodity and account, then re-run.
 - **`Review.csv`** — Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots.
 
 ## Tips

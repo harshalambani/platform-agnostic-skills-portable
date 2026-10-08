@@ -1043,6 +1043,19 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
 
+            # TDS-15: a skill can withhold its own download (ReplyWithOutputs
+            # withhold_primary) when the run found a blocking problem; the
+            # file stays on disk but no button is enabled and no copy staged.
+            if getattr(agent_reply, "withhold_primary", False):
+                yield add(
+                    f"### Not ready to import\n\n"
+                    f"The run wrote `{out_path.name}` but found a problem that must be "
+                    f"fixed first, so **no download is offered**. Fix it on the "
+                    f"review screen (or re-run), then download from there.\n\n"
+                    f"---\n\n**{reply_label(skill)}:**\n\n{agent_reply}"
+                ), gr.update(interactive=False, value=None), gr.update()
+                return
+
             # --- Path containment + download staging (security: finding #5) ---
             # 1. Assert the produced file resolves inside output_dir so a buggy
             #    or malicious run_fn can't point us at an arbitrary path.

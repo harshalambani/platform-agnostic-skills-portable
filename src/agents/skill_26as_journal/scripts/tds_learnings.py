@@ -22,6 +22,8 @@ see build_tcs_journals()). Sharing one namespace across both would let a
 human's TDS-income confirmation silently redirect an unrelated TCS
 contra-account pick just because the same bank happens to hold both roles.
 DOMAIN_INCOME covers A/B/C/G; DOMAIN_TCS covers T.
+DOMAIN_NETINT (TDS-15) holds the asset/income account a Category A row's NET
+interest (c - a) is booked in, remembered per deductor.
 
 This module is a SELF-CONTAINED sibling of build_tds_journals.py -- it must
 never import from the `agents` package. build_tds_journals.py runs as a
@@ -63,6 +65,9 @@ SOURCE_USER = "user"
 
 DOMAIN_INCOME = "income"  # Categories A/B/C/G -- credit leg is an income account
 DOMAIN_TCS = "tcs"        # Category T -- credit leg is a spending-side contra account
+DOMAIN_NETINT = "netint"  # TDS-15: Category A -- the account the NET interest (c - a) is booked in.
+                          # Its own namespace: the same deductor's CREDIT (income) account and its
+                          # NET-interest (usually an asset) account are two different answers.
 
 _TRAILING_YEAR_DIGITS_RE = re.compile(r"\d+$")
 _WS_RE = re.compile(r"\s+")

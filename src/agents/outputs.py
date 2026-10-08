@@ -14,10 +14,14 @@ class ReplyWithOutputs(str):
     file this run wrote, or None when it wrote none (then `note` says why)."""
 
     extra_outputs: tuple
+    withhold_primary: bool
 
-    def __new__(cls, text: str, extra_outputs=()):
+    def __new__(cls, text: str, extra_outputs=(), withhold_primary: bool = False):
         obj = super().__new__(cls, text)
         obj.extra_outputs = tuple(extra_outputs)
+        # TDS-15: True -> the UI must NOT offer the skill's main output file
+        # (the run found a blocking problem, reported in `text`).
+        obj.withhold_primary = bool(withhold_primary)
         return obj
 
 

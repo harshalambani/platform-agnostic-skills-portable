@@ -288,6 +288,16 @@ class Journal:
     # TDS-04: placeholder/hidden accounts this journal would have posted to
     # and was NOT allowed to (the leg was moved to Suspense instead).
     blocked_targets: list = field(default_factory=list)
+    # TDS-15 (Category A only): where the NET interest (c - a) is booked.
+    #   source: "learned" (a prior human pick for this deductor), "unique match"
+    #   (exactly one FD/bond/EPF asset account matches the deductor),
+    #   "generic" (the generic Interest-on-FD account, as before).
+    # choice_needed: two or more asset accounts match -- NOT guessed; the generic
+    #   account is used meanwhile and the row is sent to Review.
+    net_interest_account: str = ""
+    net_interest_source: str = ""
+    net_interest_choice_needed: bool = False
+    net_interest_candidates: list = field(default_factory=list)
 
     @property
     def total_debit(self) -> float:
@@ -995,6 +1005,91 @@ def enforce_postable(journals: list[Journal], accounts: list[Account]) -> list[J
     return journals
 
 
+# TDS-15: tokens that mark an account as an interest-bearing INSTRUMENT (the
+# place a fixed deposit / bond / provident-fund balance actually sits).
+NET_INSTRUMENT_TOKENS = {"FD", "FDS", "FIXED", "DEPOSIT", "DEPOSITS", "BOND", "BONDS",
+                         "EPF", "PF", "PROVIDENT", "DEBENTURE", "DEBENTURES", "NCD",
+                         "NCDS", "PPF", "RD"}
+# Words in an asset path that say nothing about WHO the deductor is.
+NET_GENERIC_TOKENS = {"ASSETS", "ASSET", "CURRENT", "INVESTMENTS", "INVESTMENT", "NON",
+                      "LONG", "SHORT", "TERM", "BANK", "ACCOUNT", "FUND", "ACCOUNTS",
+                      "RETIREMENT", "SAVINGS", "SECURITIES"}
+NET_ASSET_TYPES = {"ASSET", "BANK"}
+
+
+def find_net_interest_candidates(deductor_name: str, accounts: list[Account]) -> list[str]:
+    """TDS-15: asset accounts (FD / bond / EPF ...) that belong to this deductor.
+
+    An account qualifies only if it is an ASSET/BANK account that is NOT
+    hidden/placeholder, its path names an interest-bearing instrument, AND it
+    shares a distinguishing word with the deductor (a bare 'Bank', 'FD' or
+    'Limited' is never enough; EPF/PF accounts match through the alias table).
+    Returned in chart order; the caller auto-picks ONLY when exactly one
+    comes back."""
+    d_tokens_list = [t for t in _tokens(deductor_name)
+                     if t not in STOPWORDS and t not in NET_GENERIC_TOKENS
+                     and t not in NET_INSTRUMENT_TOKENS and len(t) > 1]
+    d_tokens = set(d_tokens_list)
+    d_all = {t for t in _tokens(deductor_name) if t not in STOPWORDS}
+    d_acro = _acronym(d_tokens_list)
+    out: list[str] = []
+    for a in accounts:
+        if a.blocked or a.special or a.type not in NET_ASSET_TYPES:
+            continue
+        ptoks = [t for t in _tokens(a.path)]
+        pset = set(ptoks)
+        if not (pset & NET_INSTRUMENT_TOKENS):
+            continue
+        ent = {t for t in ptoks if t not in NET_GENERIC_TOKENS
+               and t not in NET_INSTRUMENT_TOKENS and t not in STOPWORDS and len(t) > 1}
+        hit = bool(ent & d_tokens)
+        if not hit:
+            for ct in ent:
+                if len(ct) >= 3 and any(dt != ct and (dt.startswith(ct) or ct.startswith(dt))
+                                        for dt in d_tokens):
+                    hit = True
+                    break
+        if not hit and d_acro:
+            hit = any(len(ct) >= 2 and ct == d_acro for ct in ent)
+        if not hit:
+            for ct in ptoks:
+                alias = ALIASES.get(ct)
+                if alias and (alias & d_all):
+                    hit = True
+                    break
+        if hit:
+            out.append(a.path)
+    return out
+
+
+def resolve_net_interest_account(d: Deductor, accounts: list[Account], learnings: dict,
+                                 fd_account: str) -> tuple:
+    """TDS-15: -> (account, source, choice_needed, candidates, note).
+
+    Order: (1) the choice remembered for this deductor (a human Review save);
+    (2) the one FD/bond/EPF asset account that matches, ONLY if exactly one;
+    (3) the generic Interest-on-FD account, as before. Two or more matches are
+    never guessed among: generic is used, choice_needed is True. A remembered
+    or matched account that is hidden/placeholder, or no longer in the book, is
+    never used."""
+    by_path = {a.path: a for a in accounts}
+    key = tds_learnings.deductor_key(tds_learnings.DOMAIN_NETINT, d.tan, d.name)
+    learned = learnings.get(key)
+    note = ""
+    if learned:
+        acc = by_path.get(learned)
+        if acc is not None and not acc.blocked and not acc.special:
+            return learned, "learned", False, [], ""
+        note = (f"remembered net-interest account {learned!r} is not a usable account in "
+                "this book (missing, hidden or a header account), so it was not used")
+    cands = find_net_interest_candidates(d.name, accounts)
+    if len(cands) == 1:
+        return cands[0], "unique match", False, cands, note
+    if len(cands) >= 2:
+        return fd_account, "generic", True, cands, note
+    return fd_account, "generic", False, [], note
+
+
 def build_journals(deductors: list[Deductor], accounts: list[Account],
                    overrides: Optional[dict] = None,
                    partner_comp_configured: bool = False,
@@ -1088,11 +1183,30 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
             j.needs_review = acct is None or conf in ("Low", "Suspense", "Ambiguous")
 
         if cat == "A":
+            net_acc, net_src, net_need, net_cands, net_note = resolve_net_interest_account(
+                d, accounts, learnings, fd_account)
+            j.net_interest_account = net_acc
+            j.net_interest_source = net_src
+            j.net_interest_choice_needed = net_need
+            j.net_interest_candidates = net_cands
             j.splits = [
                 Split(ACC_TDS_INTEREST, debit=a),
-                Split(fd_account, debit=round(c - a, 2)),
+                Split(net_acc, debit=round(c - a, 2)),
                 Split(credit_acc, credit=c),
             ]
+            extra = []
+            if net_src in ("learned", "unique match"):
+                extra.append(f"Net interest booked in {net_acc} ({net_src})")
+            if net_need:
+                j.needs_review = True
+                extra.append(
+                    "NET INTEREST ACCOUNT NEEDS A CHOICE: " + str(len(net_cands))
+                    + " asset accounts match this deductor (" + "; ".join(net_cands)
+                    + f") - not guessed; posted to {net_acc} until you pick one")
+            if net_note:
+                extra.append(net_note)
+            if extra:
+                j.credit_basis = ((j.credit_basis + " -- ") if j.credit_basis else "") + " -- ".join(extra)
         elif cat == "B":
             j.splits = [
                 Split(ACC_TDS_DIVIDEND, debit=a),
@@ -1533,7 +1647,9 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
         # deductor/collector (see _parse_party_sheet).
         w.writerow(["Sr", "Deductor", "Section", "Category", "Credit Account",
                     "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
-                    "Needs Review", "Basis", "Tied Candidates", "TAN"])
+                    "Needs Review", "Basis", "Tied Candidates", "TAN",
+                    "Net Interest Account", "Net Interest Source",
+                    "Net Interest Choice Needed", "Left Out", "Left Out Splits"])
         for j in journals:
             w.writerow([
                 j.sr, j.deductor, j.section_label, j.category, j.credit_account,
@@ -1545,7 +1661,154 @@ def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -
                 "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
                 f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
                 j.credit_basis, "; ".join(j.tied_candidates), j.tan,
+                # TDS-15: Category A only (the account holding the NET interest);
+                # "Left Out" / "Left Out Splits" are set by the Review screen.
+                (j.splits[1].account if j.category == "A" and len(j.splits) > 1 else ""),
+                (j.net_interest_source if j.category == "A" else ""),
+                "yes" if (j.category == "A" and j.net_interest_choice_needed) else "",
+                "", "",
             ])
+
+
+# -------------------- TDS-15: pre-flight on income-account balances --------------------
+
+def load_account_balances(gnucash_path: Path) -> dict[str, float]:
+    """Read-only: {account path -> sum of every split value} for the WHOLE book
+    (all dates, not limited to the FY). GnuCash convention: debit positive, so a
+    normal INCOME account holds a NEGATIVE number. Never writes to the book.
+
+    Per-FY books (one book per entity+FY) make the whole-book figure the FY
+    figure; for a multi-year book it is the running balance, which is what an
+    'income account has gone debit' check needs to be conservative about."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    by_id: dict = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    paths = {aid: full_path(aid) for aid in by_id}
+    out: dict[str, float] = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            path = paths[acc.text]
+            out[path] = out.get(path, 0.0) + _parse_split_amount(
+                val.text if val is not None else None)
+    return {k: round(v, 2) for k, v in out.items()}
+
+
+INCOME_ROOT_PREFIX = "Income"
+
+
+def income_debit_preflight(journal_rows: list[dict], balances: dict,
+                           accounts: list[Account], scope: str = "journal") -> list[dict]:
+    """TDS-15: for every INCOME account the journal DEBITS, the balance it would
+    have after this journal is imported on top of the book. Returns one issue
+    per account that would end on a DEBIT balance (income should be credit):
+
+        {"account", "scope", "book_credit", "journal_net_debit",
+         "post_credit", "rows": [(txn_id, description, amount), ...]}
+
+    An account the journal debits that is not in the book yet is treated as an
+    income account with a zero balance when its path starts with 'Income' (it
+    will be created empty, so the debit takes it negative straight away)."""
+    types = {a.path: a.type for a in accounts}
+    net: dict[str, float] = {}
+    debit_rows: dict[str, list] = {}
+    for r in journal_rows:
+        acct = (r.get("Account") or "").strip()
+        try:
+            amt = float(r.get("Amount") or 0)
+        except ValueError:
+            continue
+        if not acct:
+            continue
+        net[acct] = net.get(acct, 0.0) + amt
+        if amt > 0:
+            debit_rows.setdefault(acct, []).append(
+                ((r.get("Transaction ID") or "").strip(),
+                 (r.get("Description") or "").strip(), round(amt, 2)))
+    issues = []
+    for acct, rows in debit_rows.items():
+        if acct in types:
+            is_income = types[acct] == "INCOME"
+        else:
+            is_income = acct.split(":")[0] == INCOME_ROOT_PREFIX
+        if not is_income:
+            continue
+        book = balances.get(acct, 0.0)
+        post_value = book + net[acct]          # debit-positive
+        if post_value > 0.005:
+            issues.append({
+                "account": acct, "scope": scope,
+                "book_credit": round(-book, 2),
+                "journal_net_debit": round(net[acct], 2),
+                "post_credit": round(-post_value, 2),
+                "rows": rows,
+            })
+    return sorted(issues, key=lambda i: i["account"])
+
+
+def format_preflight(issues: list[dict]) -> list[str]:
+    """RED FLAG lines for income_debit_preflight() issues (empty when clean)."""
+    out = []
+    for i in issues:
+        rows = "; ".join(f"{t}: {d} ({a:.2f})" for t, d, a in i["rows"][:12])
+        more = f" (+{len(i['rows']) - 12} more)" if len(i["rows"]) > 12 else ""
+        out.append(
+            f"RED FLAG - Income account would go to a DEBIT balance: {i['account']} "
+            f"({i['scope']}). Book credit balance today {i['book_credit']:.2f}; this "
+            f"journal debits it by {i['journal_net_debit']:.2f} net, leaving "
+            f"{i['post_credit']:.2f} (negative = debit). Rows: {rows}{more}. Re-point "
+            f"the net-interest account of those rows, or leave the rows out, on the "
+            f"Review screen. No download is offered until this is cleared.")
+    return out
+
+
+def preflight_for_csv(journal_csv: Path, gnucash_path: Path,
+                      accounts: Optional[list] = None) -> tuple:
+    """-> (issues, error). Reads the journal CSV on disk, checks it AND its
+    Part-I-only split against the book's balances. error is a string when the
+    check could not run (no book, unreadable) - never silently 'clean'."""
+    try:
+        accounts = accounts if accounts is not None else load_accounts(gnucash_path)
+        balances = load_account_balances(gnucash_path)
+        with Path(journal_csv).open("r", encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:  # noqa: BLE001
+        return [], f"balances could not be read ({type(e).__name__}: {e})"
+    issues = income_debit_preflight(rows, balances, accounts, "full journal")
+    try:
+        part_i, part_ii, _problems = split_part_ii(rows)
+    except Exception:
+        part_i, part_ii = rows, []
+    if part_ii:
+        seen = {i["account"] for i in issues}
+        for i in income_debit_preflight(part_i, balances, accounts, "Part I only file"):
+            if i["account"] not in seen:
+                issues.append(i)
+    return issues, ""
 
 
 # -------------------- orchestration --------------------
@@ -1637,7 +1900,14 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
             "tied_candidates": j.tied_candidates,
         })
 
+    # TDS-15: pre-flight on the post-import balance of every income account the
+    # journal debits. If the balances cannot be read the result says so
+    # (preflight_error) rather than passing silently.
+    pf_issues, pf_error = preflight_for_csv(out_path, gnucash_path, accounts)
+
     return {
+        "preflight_issues": pf_issues,
+        "preflight_error": pf_error,
         "fy": fy,
         "journal_date": journal_date(),
         "deductors": len(deductors),
@@ -1743,6 +2013,10 @@ def main(argv: list[str]) -> int:
                tcs_overrides=tcs_overrides, g_overrides=g_overrides,
                partner_comp_configured=partner_comp_configured,
                tds_expense_account=tds_expense_account)
+    for line in format_preflight(stats.get("preflight_issues") or []):
+        print(line)
+    if stats.get("preflight_error"):
+        print("NOTE - income-balance pre-flight NOT run: " + stats["preflight_error"])
     print(f"FY {stats['fy']}  date {stats['journal_date']}  "
           f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
           f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
