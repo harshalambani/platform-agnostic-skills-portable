@@ -313,7 +313,7 @@ def detect_mid_year_rate_change(instalment_capitals: list[float], target_compens
 # 4. Incentive cohorts and the FY straddle.
 # ---------------------------------------------------------------------------
 
-from .award_year import award_year_rows  # noqa: E402  (H35-14)
+from .award_year import award_year_rows, select_award_year_documents  # noqa: E402  (H35-14)
 
 
 @dataclass
@@ -1862,7 +1862,23 @@ def build_report(data: dict) -> Report:
         cohort_gross_total = sum(
             i.gross for i in reporting_instalments if i.gross is not None
         ) if reporting_instalments else 0.0
-        if advisory_fy != award_fy:
+        _ay_sel = select_award_year_documents(data.get("award_year_documents")).get(award_fy)
+        if advisory_fy != award_fy and _ay_sel and _ay_sel["status"] == "ok":
+            # H35-17: the award-year document WAS supplied (it is read by the
+            # per-instalment check below), so this row must not claim the
+            # Advisory is missing, and it does not compare totals either.
+            reconciliation.append(ReconciliationResult(
+                category=category_name,
+                sources={"Award-year Advisory (schedule_instalments)": None,
+                         "Payment-schedule cohort ledger": cohort_gross_total},
+                agree=None,
+                note=_informational_prefix +
+                     f"The FY{award_fy} award-year Advisory was supplied "
+                     f"({_ay_sel['doc']['name']}); it is checked instalment by instalment "
+                     "in the 'Award-year check' rows below, not as a total here.",
+                informational=True,
+            ))
+        elif advisory_fy != award_fy:
             reconciliation.append(ReconciliationResult(
                 category=category_name,
                 sources={"Award-year Advisory (schedule_instalments)": None,

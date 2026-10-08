@@ -87,11 +87,45 @@ def read_award_year_document(path: str, password: str | None, advisory_parser) -
         doc["error"] = f"could not be parsed ({_precheck.explain_pdf_error(e, password)})"
         return doc
     doc["fy"] = rec.get("financial_year")
+    # Numbered instalments plus the "Arrears for FY .." line: a cohort payment
+    # can be the arrears and an instalment paid together. Opening, TOTAL,
+    # additions and projected-closing rows never come through here.
     doc["instalments"] = [
         i for i in (rec.get("schedule_instalments") or [])
-        if i.get("instalment_no") is not None
+        if i.get("instalment_no") is not None or _is_arrears(i)
     ]
     return doc
+
+
+def _is_arrears(line: dict) -> bool:
+    return (line.get("instalment_no") is None
+            and str(line.get("label") or "").strip().lower().startswith("arrears"))
+
+
+def _line_name(a: dict) -> str:
+    if a.get("instalment_no") is not None:
+        n = a["instalment_no"]
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n if n % 100 not in (11, 12, 13) else 0, "th")
+        return f"{n}{suffix} instalment"
+    return "Arrears"
+
+
+def _line_figs(a: dict):
+    g = _abs(a.get("gross")) or 0.0
+    t = _abs(a.get("firms_tax")) or 0.0
+    c = _abs(a.get("capital_contribution")) or 0.0
+    n = _abs(a.get("net"))
+    return g, t, c, (n if n is not None else round(g - t - c, 2))
+
+
+def _yielded(adv: list[dict]) -> str:
+    if not adv:
+        return "none parsed"
+    parts = []
+    for a in adv:
+        g, t, c, _n = _line_figs(a)
+        parts.append(f"{_line_name(a)} gross {g:,.2f}, firm's tax {t:,.2f}, capital {c:,.2f}")
+    return "; ".join(parts)
 
 
 def _fingerprint(doc: dict):
@@ -191,14 +225,79 @@ def award_year_rows(cohorts_raw: list[dict], reporting_instalments: list, docs: 
             continue
         doc = sel["doc"]
         adv = doc["instalments"]
+        used: set = set()  # an Advisory line is used at most once per cohort
         for i in sorted(paid, key=lambda r: r.payment_date):
             pay_fy = i.instalment_fy
             cat = (f"{base}: instalment paid {i.payment_date.isoformat()} "
                    f"(payment FY{pay_fy})")
-            hits = [a for a in adv
-                    if a.get("gross") is not None and abs(abs(a["gross"]) - abs(i.gross)) <= tol]
             sched = {"gross": _abs(i.gross), "tax": _abs(i.firms_tax) or 0.0,
                      "capital": _abs(i.capital) or 0.0}
+            sched["net"] = (_abs(i.net) if i.net is not None
+                            else round(sched["gross"] - sched["tax"] - sched["capital"], 2))
+            avail = [k for k in range(len(adv)) if k not in used]
+
+            def _fits(figs, s=sched):
+                return all(abs(figs[x] - s[k]) <= tol for x, k in enumerate(("gross", "tax", "capital", "net")))
+
+            # 1. a single Advisory line that agrees on all four components wins
+            single = [k for k in avail if adv[k].get("gross") is not None and _fits(_line_figs(adv[k]))]
+            if len(single) >= 1:
+                used.add(single[0])
+                a = adv[single[0]]
+                rows.append(ReconciliationResult(
+                    category=cat,
+                    sources={"Award-year Advisory (gross - tax - capital)":
+                             round(_line_figs(a)[0] - _line_figs(a)[1] - _line_figs(a)[2], 2),
+                             "Payment schedule (gross - tax - capital)":
+                             round(sched["gross"] - sched["tax"] - sched["capital"], 2)},
+                    agree=True,
+                    note=("Gross, firm's tax and capital agree. "
+                          f"award FY{award_fy}, firm's-tax FY{pay_fy} (payment year), payment FY{pay_fy}; "
+                          f"implied firm's-tax rate: schedule "
+                          f"{(sched['tax'] / sched['gross'] if sched['gross'] else 0.0):.2%}, Advisory "
+                          f"{(_line_figs(a)[1] / _line_figs(a)[0] if _line_figs(a)[0] else 0.0):.2%}; "
+                          f"Advisory {_line_name(a)} in {doc['name']}."),
+                ))
+                continue
+            # 2. otherwise a combination of 2-3 lines (arrears + instalment rows)
+            #    that agrees on gross, firm's tax, capital AND net
+            from itertools import combinations  # noqa: PLC0415
+            combos = []
+            for size in (2, 3):
+                for c in combinations([k for k in avail if adv[k].get("gross") is not None], size):
+                    figs = [sum(_line_figs(adv[k])[x] for k in c) for x in range(4)]
+                    if _fits(figs):
+                        combos.append(c)
+            if len(combos) == 1:
+                c = combos[0]
+                used.update(c)
+                names = " + ".join(_line_name(adv[k]) for k in c)
+                rows.append(ReconciliationResult(
+                    category=cat,
+                    sources={"Award-year Advisory (gross - tax - capital)":
+                             round(sched["gross"] - sched["tax"] - sched["capital"], 2),
+                             "Payment schedule (gross - tax - capital)":
+                             round(sched["gross"] - sched["tax"] - sched["capital"], 2)},
+                    agree=True,
+                    note=(f"Gross, firm's tax, capital and net agree with the sum of {names} "
+                          f"(paid together as one payment). award FY{award_fy}, firm's-tax "
+                          f"FY{pay_fy} (payment year), payment FY{pay_fy}; in {doc['name']}."),
+                ))
+                continue
+            if len(combos) > 1:
+                alts = " or ".join(" + ".join(_line_name(adv[k]) for k in c) for c in combos)
+                rows.append(ReconciliationResult(
+                    category=cat,
+                    sources={"Award-year Advisory (gross)": None,
+                             "Payment schedule (gross)": sched["gross"]},
+                    agree=None,
+                    note=(f"{CANNOT_RECONCILE} -- ambiguous: lines {alts} each add up to this "
+                          f"payment, so which is meant cannot be told ({doc['name']}). "
+                          f"Advisory yielded: {_yielded(adv)}."),
+                ))
+                continue
+            hits = [a for a in (adv[k] for k in avail)
+                    if a.get("gross") is not None and abs(abs(a["gross"]) - abs(i.gross)) <= tol]
             if len(hits) > 1:
                 # Several instalments share this gross: prefer the one whose
                 # tax and capital also agree; if none does, we cannot tell
@@ -219,10 +318,12 @@ def award_year_rows(cohorts_raw: list[dict], reporting_instalments: list, docs: 
                     sources={"Award-year Advisory (gross)": None,
                              "Payment schedule (gross)": sched["gross"]},
                     agree=None,
-                    note=f"{CANNOT_RECONCILE} -- {reason} ({doc['name']}).",
+                    note=(f"{CANNOT_RECONCILE} -- {reason} ({doc['name']}). "
+                          f"Advisory yielded: {_yielded(adv)}."),
                 ))
                 continue
             a = hits[0]
+            used.add(adv.index(a))
             adv_tax = _abs(a.get("firms_tax")) or 0.0
             adv_cap = _abs(a.get("capital_contribution")) or 0.0
             gaps = []

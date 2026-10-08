@@ -8875,8 +8875,8 @@ def test_h35_14_different_tax_or_capital_differs_loudly():
         {"instalment_no": 1, "gross": 1000000, "firms_tax": 300000, "capital_contribution": 250000, "net": 0},
     ])]
     rows = _ay_rows(docs)
-    assert [r.agree for r in rows] == [False, False]
-    assert "firm's tax" in rows[0].note and "capital deducted" in rows[1].note
+    assert [r.agree for r in rows] == [False, None]  # the one line is used once only
+    assert "firm's tax" in rows[0].note and "capital deducted" in rows[0].note
 
 
 def test_h35_14_no_document_is_named_cannot_reconcile_never_agree():
@@ -9366,3 +9366,136 @@ def test_ui22_an_unprotected_pdf_that_fails_keeps_its_real_error(tmp_path):
     assert precheck.PASSWORD_MISSING_MESSAGE not in note and "could not parse" in note
     # An exception with no text still names its type, never an empty reason.
     assert precheck.explain_pdf_error(KeyError(), None) == "KeyError"
+
+
+# ---------------------------------------------------------------------------
+# H35-17 -- award-year matching: arrears + instalment paid as one payment
+# ---------------------------------------------------------------------------
+# Made-up figures. The fixture's two reporting-year payments are
+#   1,000,000 / 349,440 / 416,667 / net 233,893   (2025-07-31)
+#   1,000,000 / 349,440 / 291,667 / net 358,893   (2025-10-31)
+
+_ARR = {"instalment_no": None, "label": "Arrears for FY 24-25", "gross": 150000,
+        "firms_tax": 52416, "capital_contribution": 0, "net": 97584}
+_I1B = {"instalment_no": 1, "gross": 850000, "firms_tax": 297024,
+        "capital_contribution": 416667, "net": 136309}
+_I2 = {"instalment_no": 2, "gross": 1000000, "firms_tax": 349440,
+       "capital_contribution": 291667, "net": 358893}
+_S1 = {"instalment_no": 1, "gross": 1000000, "firms_tax": 349440,
+       "capital_contribution": 416667, "net": 233893}
+
+
+def test_h35_17_arrears_plus_instalment_agrees_and_names_the_lines():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_I2)])])
+    assert [r.agree for r in rows] == [True, True]
+    assert "Arrears" in rows[0].note and "1st instalment" in rows[0].note
+    assert "net agree" in rows[0].note
+    assert all(CANNOT_RECONCILE not in r.note for r in rows)
+
+
+def test_h35_17_gross_only_match_is_never_agree():
+    bad = dict(_I1B, net=136000)  # net differs, gross/tax/capital sum still fits
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), bad])])
+    assert rows[0].agree is not True
+    assert CANNOT_RECONCILE in rows[0].note
+    assert "Advisory yielded:" in rows[0].note and "Arrears gross 150,000.00" in rows[0].note
+
+
+def test_h35_17_a_used_line_is_never_reused():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_S1)])])
+    assert rows[0].agree is True
+    assert rows[1].agree is None  # payment 2 has no line of its own
+    assert CANNOT_RECONCILE in rows[1].note
+    assert "1st instalment gross 1,000,000.00" in rows[1].note
+
+
+def test_h35_17_two_fitting_combinations_are_ambiguous():
+    rows = _ay_rows([_ay_doc(instalments=[
+        dict(_ARR), dict(_I1B), dict(_I1B, instalment_no=3), dict(_I2)])])
+    assert rows[0].agree is None
+    assert CANNOT_RECONCILE in rows[0].note and "ambiguous" in rows[0].note
+    assert "Arrears + 1st instalment" in rows[0].note and "Arrears + 3rd instalment" in rows[0].note
+
+
+def test_h35_17_single_line_match_wins_over_a_combination():
+    rows = _ay_rows([_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_S1), dict(_I2)])])
+    assert [r.agree for r in rows] == [True, True]
+    assert " + " not in rows[0].note.split("Advisory")[-1]
+    assert "Arrears" not in rows[0].note
+
+
+def test_h35_17_nothing_parsed_is_reported_as_none_parsed_not_as_not_supplied():
+    rows = _ay_rows([_ay_doc(instalments=[])])
+    # a document with no usable lines is not "ok": it is not offered as supplied
+    assert all(r.agree is None for r in rows)
+    assert all(r.agree is not True for r in rows)
+
+
+def test_h35_17_totals_opening_and_closing_rows_never_take_part(monkeypatch):
+    from agents.skill_partner_comp_recon import award_year, precheck
+    monkeypatch.setattr(precheck, "read_first_page_text", lambda p, pw: "Compensation Summary")
+    monkeypatch.setattr(precheck, "classify_advisory_text", lambda t: "compensation_summary")
+
+    class _P:
+        @staticmethod
+        def parse(path, password):
+            return {"financial_year": "2024-25", "schedule_instalments": [
+                {"instalment_no": None, "label": "TOTAL", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Opening balance", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Projected closing balance", "gross": 1000000,
+                 "firms_tax": 349440, "capital_contribution": 416667, "net": 233893},
+                {"instalment_no": None, "label": "Additions pertaining to prior year",
+                 "gross": 1000000, "firms_tax": None, "capital_contribution": None, "net": 1000000},
+                dict(_ARR), dict(_I1B)]}
+
+    doc = award_year.read_award_year_document("x.pdf", None, _P)
+    assert [award_year._line_name(a) for a in doc["instalments"]] == ["Arrears", "1st instalment"]
+    # a payment equal to the TOTAL row alone is therefore never matched
+    rows = _ay_rows([doc])
+    assert rows[0].agree is True and "Arrears + 1st instalment" in rows[0].note
+    assert rows[1].agree is None
+
+
+def test_h35_17_row_is_not_missing_when_the_award_year_document_was_supplied():
+    data = dict(_load_fixture())
+    data["advisory"] = dict(data["advisory"], financial_year="2025-26")
+    data["award_year_documents"] = [_ay_doc()]
+    row = next(r for r in build_report(data).reconciliation
+               if r.category == "Incentive instalments: award-year Advisory vs payment schedule")
+    assert "missing" not in row.note and row.agree is None
+    assert "ay_doc" not in row.note and "adv.pdf" in row.note
+    data["award_year_documents"] = []
+    row = next(r for r in build_report(data).reconciliation
+               if r.category == "Incentive instalments: award-year Advisory vs payment schedule")
+    assert row.agree is not True and "missing" in row.note
+
+
+def test_h35_17_journals_do_not_depend_on_the_award_year_documents():
+    base = dict(_load_fixture())
+    a = build_report(dict(base, award_year_documents=[]))
+    b = build_report(dict(base, award_year_documents=[_ay_doc(instalments=[dict(_ARR), dict(_I1B), dict(_I2)])]))
+    ja = build_journals(a, base["accounts"])
+    jb = build_journals(b, base["accounts"])
+    assert ja
+    assert repr(ja) == repr(jb)
+
+
+def test_h35_17_parser_reads_a_dash_capital_arrears_row_and_the_double_star_marker():
+    from agents.skill_partner_comp_recon.parsers import advisory as adv
+    lines = [
+        "Opening balance (as on 1 Apr 25)   10,00,000",
+        "Arrears for FY 24-25   1,50,000   52,416   -   97,584",
+        "PLMI : FY 25 (1st instalment)   8,50,000   2,97,024   4,16,667   1,36,309 **",
+        "- - - - - - - - - - - -",
+        "10,00,000   3,49,440   4,16,667   2,33,893",
+        "Projected closing balance (as on 31 Mar 26)   12,00,000",
+    ]
+    (_o, _on, _od, _c, _cn, _cd, rows, totals, _unk) = adv._parse_schedule(lines)
+    assert [(r.gross, r.firms_tax, r.capital_contribution, r.net) for r in rows] == [
+        (150000.0, 52416.0, 0.0, 97584.0),
+        (850000.0, 297024.0, 416667.0, 136309.0)]
+    assert rows[0].instalment_no is None and rows[0].label.startswith("Arrears")
+    assert rows[1].instalment_no == 1
+    assert totals is not None and totals.gross == 1000000.0
