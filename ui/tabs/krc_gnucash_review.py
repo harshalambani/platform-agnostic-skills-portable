@@ -107,19 +107,79 @@ def _classify_reason(reason: str) -> str:
 # _scan_import_ready_csvs — same output_dir()/glob/mtime-sort pattern).
 # ---------------------------------------------------------------------------
 
+def _run_info(run_dir: Path) -> dict:
+    """The run's own metadata (run_info.json, written by the build script), or
+    {} for an older run / unreadable file. Nothing is inferred."""
+    import json
+    try:
+        d = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _run_label(run_dir: Path) -> str:
+    code = _run_info(run_dir).get("client_code")
+    code_txt = f"client code {code}" if code else "code not recorded"
+    has_review = (run_dir / "Review.csv").is_file()
+    tail = "Review.csv" if has_review else "nothing to review"
+    return f"{run_dir.name} | {code_txt} | {tail}"
+
+
 def _scan_review_csvs() -> list[tuple[str, str]]:
-    """Find */Review.csv under KRChoksey Convert to GnuCash output folders,
-    newest first. label = "<run folder name>/Review.csv"."""
+    """UI-27: EVERY */-KRC-GnuCash run folder, newest first -- including runs
+    that wrote no Review.csv, so a newer clean run is never hidden behind an
+    older run's file. value = that run's Review.csv when it has one, else the
+    run folder itself (the loader then says "Nothing to review in this run").
+    The first entry is the newest run, which is the default selection."""
     try:
         out_dir = _config_mod.output_dir()
     except Exception:
         return []
-    candidates = sorted(
-        out_dir.glob("*-KRC-GnuCash/Review.csv"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    return [(f"{p.parent.name}/{p.name}", str(p)) for p in candidates[:20]]
+    try:
+        runs = sorted(
+            (q for q in out_dir.glob("*-KRC-GnuCash") if q.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        return []
+    out = []
+    for r in runs[:20]:
+        rv = r / "Review.csv"
+        out.append((_run_label(r), str(rv if rv.is_file() else r)))
+    return out
+
+
+def _flags_panel_html(run_dir: Path) -> str:
+    """RED FLAG / FLAG lines the run recorded (KRC-03, KRC-01) plus its client
+    code, for the top of the Review tab."""
+    import html
+    info = _run_info(run_dir)
+    code = info.get("client_code")
+    bits = [f"<div><strong>Run:</strong> {html.escape(run_dir.name)} &nbsp; "
+            f"<strong>Client code:</strong> "
+            f"{html.escape(str(code)) if code else 'code not recorded'}</div>"]
+    for line in info.get("red_flags") or []:
+        bits.append('<div style="margin-top:6px;padding:6px 10px;border:1px solid #a33;'
+                    'background:#3a1515;color:#fcc;font-weight:600;">'
+                    f"{html.escape(str(line))}</div>")
+    for line in info.get("flags") or []:
+        bits.append('<div style="margin-top:6px;padding:6px 10px;border:1px solid #a80;'
+                    'background:#332a10;color:#fe9;">'
+                    f"{html.escape(str(line))}</div>")
+    return ('<div style="margin-bottom:8px;font-size:12px;color:#ccc;">'
+            + "".join(bits) + "</div>")
+
+
+def _no_review_html(run_dir: Path) -> str:
+    import html
+    files = sorted(f.name for f in run_dir.iterdir() if f.is_file()) if run_dir.is_dir() else []
+    listing = ("<ul>" + "".join(f"<li>{html.escape(n)}</li>" for n in files) + "</ul>"
+               if files else "<p>(no files)</p>")
+    return (_flags_panel_html(run_dir)
+            + "<p><strong>Nothing to review in this run.</strong> "
+              "It wrote no Review.csv. Files this run wrote:</p>" + listing)
 
 
 def _config_path() -> Path:
@@ -246,6 +306,9 @@ def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str) -
 def _load_review_data(review_path: str, gnucash_path: str) -> str:
     """Load a Review.csv + the GnuCash book's STOCK/MUTUAL accounts, return
     the interactive HTML table."""
+    if review_path and Path(review_path).is_dir():
+        # A run folder with no Review.csv (UI-27): say so plainly.
+        return _no_review_html(Path(review_path))
     if not review_path or not gnucash_path:
         return "<p>Select both a Review.csv and a GnuCash file, then click Load.</p>"
 
@@ -267,7 +330,8 @@ def _load_review_data(review_path: str, gnucash_path: str) -> str:
 
     picker_items = [PickerItem(value=a, primary=a) for a in accounts]
     spec = _spec(picker_items, str(review_p), str(gc_p))
-    return payload_box_css(spec.payload_box_id) + build_html(spec, rows)
+    panel = _flags_panel_html(review_p.parent) if (review_p.parent / "run_info.json").is_file() else ""
+    return payload_box_css(spec.payload_box_id) + panel + build_html(spec, rows)
 
 
 # ---------------------------------------------------------------------------

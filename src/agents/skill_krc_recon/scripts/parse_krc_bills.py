@@ -303,6 +303,15 @@ def parse_trade_old(t, fname):
     return rec, lines
 
 
+_CLIENT_CODE_RE = re.compile(r"Client\s*Code\s*:\s*([A-Za-z0-9]+)")
+
+
+def client_code_of(text):
+    """The client / trading code printed on a contract note, or None."""
+    m = _CLIENT_CODE_RE.search(text or "")
+    return m.group(1) if m else None
+
+
 def parse_cn(pdf, pw):
     scratch = f"/tmp/_cn_{Path(pdf).stem}.pdf"
     decrypt(pdf, pw, scratch)
@@ -313,10 +322,16 @@ def parse_cn(pdf, pw):
         pass
     fname = Path(pdf).name
     if "SLB Session" in t or "LENDING & BORROWING" in t:
-        return parse_slbm(t, fname)
-    if "Net Amount Receivable/Payable By Client" in t:
-        return parse_trade(t, fname)
-    return parse_trade_old(t, fname)
+        rec, lines = parse_slbm(t, fname)
+    elif "Net Amount Receivable/Payable By Client" in t:
+        rec, lines = parse_trade(t, fname)
+    else:
+        rec, lines = parse_trade_old(t, fname)
+    # UI-27: record the client / trading code the note itself carries, so a
+    # later screen can label a run by it. None when the note does not print one
+    # (never inferred).
+    rec["client_code"] = client_code_of(t)
+    return rec, lines
 
 
 # ---------- Part I workbook (Simplified Ledger + References) ----------
@@ -355,16 +370,34 @@ def classify_and_match(led_rows, bills, settlements, utrs):
         by_amt.setdefault(round(b["net_amount"], 2), []).append(b)
     utr_dates = {u["date"] for u in utrs}
 
-    out, used = [], set()
-    for r in led_rows:
+    used = set()
+    claimed = {}   # ledger row index -> bill
+
+    def _take(i, r, allowed):
         amt = r["debit"] or r["credit"] or 0.0
+        if not allowed(r):
+            return
+        cand = [b for b in by_amt.get(round(amt, 2), []) if b["cn_no"] not in used]
+        if cand:
+            used.add(cand[0]["cn_no"])
+            claimed[i] = cand[0]
+
+    # Pass 1: a bill is matched to its OWN bill line (a non-bank settlement row).
+    for i, r in enumerate(led_rows):
+        _take(i, r, lambda r: (r["tag"] or "") not in
+              ("Bank Pay-In", "Bank Pay-Out", "Opening Balance", "Demat Charge"))
+    # Pass 2 (last fallback, amount only): any row left EXCEPT a bank receipt.
+    for i, r in enumerate(led_rows):
+        if i not in claimed:
+            _take(i, r, lambda r: (r["tag"] or "") != "Bank Pay-In")
+
+    out = []
+    for i, r in enumerate(led_rows):
         tag = r["tag"] or ""
         cat = bill_cn = bill_setl = match = note = None
 
-        cand = [b for b in by_amt.get(round(amt, 2), []) if b["cn_no"] not in used]
-        if cand:
-            b = cand[0]
-            used.add(b["cn_no"])
+        b = claimed.get(i)
+        if b is not None:
             bill_cn, bill_setl = b["cn_no"], b["settlement"]
             cat = "Trade Bill" if b["type"] == "TRADE" else "SLBM Bill"
             setl_ok = str(b["settlement"]) in settlements
@@ -527,6 +560,12 @@ def write_workbook(out_path, bills, trade_lines, recon, unmatched, diag):
         ws4.append(["CN No", "Type", "Amount", "Settlement"])
         for b in unmatched:
             ws4.append([b["cn_no"], b["type"], b["net_amount"], b["settlement"]])
+
+    codes = sorted({str(b["client_code"]) for b in bills if b.get("client_code")})
+    if codes:
+        ws5 = wb.create_sheet("Run Info")
+        ws5.append(["Field", "Value"])
+        ws5.append(["Client Code", ", ".join(codes)])
 
     wb.save(out_path)
 

@@ -19,6 +19,13 @@ produce a reconciliation workbook that:
   row that has no matching contract note as REVIEW — that means a bill is
   missing.
 
+## Matching order and direction (KRC-02)
+A credit-side ledger row (client receipt) is tagged Bank Pay-In, never Pay-Out.
+A bill is matched to its own bill/debit line first; the amount-only fallback is a
+last resort and never draws from a bank receipt row. The workbook also carries a
+"Run Info" sheet with the client / trading code read from the contract notes
+(absent when none was found; never inferred).
+
 ## Why amount is the primary key
 The settlement label printed on a surviving ledger amount-row is offset (it can
 belong to a different settlement). The true bill-to-settlement link lives on the

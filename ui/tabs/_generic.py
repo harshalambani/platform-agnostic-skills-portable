@@ -360,7 +360,19 @@ def _options_from_bank_accounts(book, bank) -> list[tuple[str, str]]:
         return []
 
 
-_DEPENDENT_RESOLVERS = {"bank_accounts": _options_from_bank_accounts}
+def _options_from_expense_accounts(book) -> list[tuple[str, str]]:
+    """Postable EXPENSE accounts in ``book`` (KRC-01); hidden/placeholder
+    accounts are never offered. Value is the full path."""
+    try:
+        from agents.gnucash_accounts import load_accounts, postable_accounts
+        accts = postable_accounts(load_accounts(str(book or "")))
+        return sorted((a.path, a.path) for a in accts if str(a.type).upper() == "EXPENSE")
+    except Exception:
+        return []
+
+
+_DEPENDENT_RESOLVERS = {"bank_accounts": _options_from_bank_accounts,
+                        "expense_accounts": _options_from_expense_accounts}
 
 
 def _resolve_dependent_options(key: str, *vals) -> list[tuple[str, str]]:
@@ -632,7 +644,7 @@ def _registry_book_fill(skill, inp_def, input_map) -> str:
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
 
-def _stage_extra_outputs(skill, agent_reply) -> dict | None:
+def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict | None:
     """UI-24: the extra files (e.g. journal CSVs) THIS run reports writing.
 
     Returns None when the skill declares no `output.extra_outputs`. Otherwise
@@ -644,7 +656,11 @@ def _stage_extra_outputs(skill, agent_reply) -> dict | None:
     scanned for the latest *.csv, so a file left by an earlier run can never
     be offered. Same containment and staging as the main file: the path must
     resolve inside output_dir(), and only a COPY in download_staging_dir() is
-    served -- Gradio's allowed paths are not widened."""
+    served -- Gradio's allowed paths are not widened.
+
+    UI-28: a directory-output skill passes `run_dir` (this run's folder). A
+    reported file must then resolve INSIDE that folder, so a button can never
+    serve a file from a different run. `heading` overrides the panel title."""
     declared = tuple(getattr(skill.output, "extra_outputs", ()) or ())
     if not declared:
         return None
@@ -658,6 +674,8 @@ def _stage_extra_outputs(skill, agent_reply) -> dict | None:
         root = _config.output_dir().resolve()
     except Exception:
         root = None
+    run_root = Path(run_dir).resolve() if run_dir is not None else None
+    title = heading or "Journals to import into GnuCash"
     for x in declared:
         e = reported.get(x.key) or {}
         p = e.get("path")
@@ -668,7 +686,11 @@ def _stage_extra_outputs(skill, agent_reply) -> dict | None:
             continue
         try:
             rp = Path(p).resolve()
-            if not rp.is_file():
+            if run_root is not None and not rp.is_relative_to(run_root):
+                not_written.append(f"- **{x.label}:** the run reported a file outside this run's "
+                                   "folder, so it is not offered.")
+                updates.append(off())
+            elif not rp.is_file():
                 not_written.append(f"- **{x.label}:** the run reported {rp} but no such file exists, "
                                    "so it is not offered.")
                 updates.append(off())
@@ -688,9 +710,9 @@ def _stage_extra_outputs(skill, agent_reply) -> dict | None:
             updates.append(off())
     if not written:
         first = not_written[0].split("not written. ", 1)[-1] if not_written else ""
-        block = ("**Journals to import into GnuCash:** none written. " + first).strip()
+        block = (f"**{title}:** none written. " + first).strip()
     else:
-        block = "**Journals to import into GnuCash**\n\n" + "\n".join(written + not_written)
+        block = f"**{title}**\n\n" + "\n".join(written + not_written)
     return {"block": block, "updates": updates, "paths": paths}
 
 
@@ -998,9 +1020,14 @@ def _make_run_handler(skill: SkillInfo):
                 except Exception:
                     review_section = ""
 
+            extras = _stage_extra_outputs(skill, agent_reply, run_dir=out_path,
+                                          heading="Files written by this run")
+            state["extras"] = extras
+            extras_md = f"{extras['block']}\n\n" if extras else ""
             msg = add(
                 f"### Done\n\n"
                 f"**Output folder:** {out_abs}\n\n"
+                f"{extras_md}"
                 f"{review_section}"
                 f"---\n\n**{reply_label(skill)}:**\n\n{agent_reply}"
             )
