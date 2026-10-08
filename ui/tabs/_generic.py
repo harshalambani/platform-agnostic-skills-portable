@@ -1695,8 +1695,14 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         choices = _scan_output_files(m, f)
         return gr.update(choices=choices, value=(choices[0][1] if choices else None))
 
-    def _reset_options_from_picker(k):
+    def _reset_options_from_picker(k, blank=False, multi=False):
+        # UI-26: a select that drives a book_from prefill opens BLANK (see
+        # _book_from_sources above), so Reset puts it back to blank -- an empty
+        # list for a multiselect -- never to its first choice, which would
+        # refill that entity's book. Any other select keeps the first choice.
         choices = _resolve_options_from(k)
+        if blank:
+            return gr.update(choices=choices, value=([] if multi else None))
         return gr.update(choices=choices, value=(choices[0][1] if choices else None))
 
     # One reset spec per input, in the same order as input_components, so the
@@ -1724,18 +1730,26 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             ))
         elif _inp.type == "parser_file":
             reset_specs.append((_comp, lambda: gr.update(value=None)))
+        elif _inp.type == "select" and _inp.options_from and getattr(_inp, "depends_on", ()):
+            # Opens empty and is refilled from the inputs it depends on, so
+            # Reset empties it too -- it must not keep vouching for a book or
+            # bank that has just been cleared.
+            reset_specs.append((_comp, lambda: gr.update(choices=[], value=None)))
         elif _inp.type == "select" and _inp.options_from:
             reset_specs.append((
                 _comp,
-                lambda k=_inp.options_from: _reset_options_from_picker(k),
+                lambda k=_inp.options_from, b=(_inp.name in _book_from_sources),
+                       m=bool(_inp.multiselect): _reset_options_from_picker(k, b, m),
             ))
         elif _inp.type == "select":
             reset_specs.append((
                 _comp,
                 lambda o=(_inp.options[0] if _inp.options else None): gr.update(value=o),
             ))
-        else:  # directory, text
-            reset_specs.append((_comp, lambda d=getattr(_inp, "default", ""): gr.update(value=d)))
+        elif _inp.type in ("directory", "password"):
+            reset_specs.append((_comp, lambda: gr.update(value="")))
+        else:  # text: back to its declared default, as when the form opened
+            reset_specs.append((_comp, lambda d=(getattr(_inp, "default", "") or ""): gr.update(value=d)))
 
     # The entity select resets to blank, so its "book filled from the registry"
     # line must go with it -- otherwise it keeps vouching for a field that has

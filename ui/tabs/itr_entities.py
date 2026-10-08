@@ -231,7 +231,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
     if e is None:
         return (
             key, "", "", "Individual", "Resident", "", "", "", "", "",
-            "", "", "new", "", False, "", _AUDIT_BASIS_BLANK, "", "", "",
+            "", "", "new", "", False, "", _AUDIT_BASIS_BLANK, "", "", "", "",
             "", "", "",
         )
     return (
@@ -240,6 +240,7 @@ def _entity_to_form(key: str, entities: dict) -> tuple:
         e.business_subtree or "", e.workbook_match or "", e.default_regime, _format_kv_lines(e.regime_by_ay),
         e.audit_case, _format_kv_lines(e.audit_case_by_ay),
         e.audit_case_basis or _AUDIT_BASIS_BLANK,
+        getattr(e, "partner_admission_date", None) or "",
         _format_list_lines((e.extra_items or {}).get("bf_losses") or []),
         _format_list_lines((e.extra_items or {}).get("clubbing_notes") or []),
         _format_kv_lines(e.books),
@@ -366,6 +367,7 @@ def _save_entity(
     drawings_accounts_text: str | None = None,
     card_spend_default_account: str | None = None,
     reimbursement_markers_text: str | None = None,
+    partner_admission_date: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -395,6 +397,7 @@ def _save_entity(
         dob=dob or None, doi=doi or None, default_regime=default_regime,
         regime_by_ay=regime_by_ay, audit_case_by_ay=audit_case_by_ay,
         audit_case_basis=audit_case_basis,
+        partner_admission_date=(partner_admission_date or None),
     )
     errors = field_errors + kv_errors
     if errors:
@@ -482,12 +485,16 @@ def _save_entity(
             new_profile.card_spend_default_account = prior.card_spend_default_account
         if reimbursement_markers_text is None:
             new_profile.reimbursement_markers = copy.deepcopy(prior.reimbursement_markers)
+        if partner_admission_date is None:
+            new_profile.partner_admission_date = prior.partner_admission_date
     if drawings_accounts_text is not None:
         new_profile.drawings_accounts = _parse_list_lines(drawings_accounts_text)
     if card_spend_default_account is not None:
         new_profile.card_spend_default_account = (card_spend_default_account or "").strip()
     if reimbursement_markers_text is not None:
         new_profile.reimbursement_markers = _parse_marker_text(reimbursement_markers_text)
+    if partner_admission_date is not None:
+        new_profile.partner_admission_date = (partner_admission_date or "").strip() or None
 
     entities[new_key] = new_profile
     if is_rename:
@@ -866,6 +873,13 @@ def render(container_tab=None) -> None:
                      "routed to Drawings (needs exactly one Drawings account above). "
                      "Blank = the rule never fires.",
             )
+            partner_admission_box = gr.Textbox(
+                label="Date admitted as partner (YYYY-MM-DD, optional)", interactive=True,
+                info="Only for a partner of a firm. The Partner Compensation skill counts "
+                     "whole months from this date to 31 March of each year for the capital "
+                     "rule (40% of target compensation over 48 months). Blank = the "
+                     "capital check says the date is not set.",
+            )
             bf_losses_box = gr.Textbox(
                 label="B/f losses (one per line)", lines=3, interactive=True,
             )
@@ -888,6 +902,7 @@ def render(container_tab=None) -> None:
         dob_box, doi_box, address_box, father_name_box, aadhaar_box,
         business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
         audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
+        partner_admission_box,
         bf_losses_box, clubbing_notes_box,
         books_box,
         drawings_accounts_box, card_default_box, reimbursement_markers_box,
@@ -927,7 +942,7 @@ def render(container_tab=None) -> None:
         audit_case, audit_case_by_ay_text, audit_case_basis,
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
-        reimbursement_markers_text,
+        reimbursement_markers_text, partner_admission_date,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -939,6 +954,7 @@ def render(container_tab=None) -> None:
             drawings_accounts_text=drawings_accounts_text,
             card_spend_default_account=card_spend_default_account,
             reimbursement_markers_text=reimbursement_markers_text,
+            partner_admission_date=partner_admission_date,
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -951,7 +967,8 @@ def render(container_tab=None) -> None:
                 business_subtree_box, workbook_match_box, default_regime_dd, regime_by_ay_box,
                 audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
                 bf_losses_box, clubbing_notes_box,
-                books_box, drawings_accounts_box, card_default_box, reimbursement_markers_box],
+                books_box, drawings_accounts_box, card_default_box, reimbursement_markers_box,
+                partner_admission_box],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )
 

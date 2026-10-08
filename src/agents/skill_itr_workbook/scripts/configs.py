@@ -163,6 +163,10 @@ class EntityProfile:
                                          # owner. Used by the MAP-34 rule only, per entity.
                                          # Blank entries are dropped. Empty (default) == the
                                          # reimbursement rule never fires for this entity.
+    partner_admission_date: str | None = None  # H35-20: date admitted as a partner of
+                                         # the firm (YYYY-MM-DD, optional). The partner skill
+                                         # counts whole months from it to 31 March of each FY
+                                         # for the 40%-of-target-compensation capital rule.
     card_spend_default_account: str = ""  # MAP-35: account path a card spend that nothing else
                                          # matched is booked to (low confidence), instead of
                                          # Suspense. Empty (default) == Suspense, as before.
@@ -209,6 +213,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             drawings_accounts=[str(x).strip() for x in (fields_.get("drawings_accounts") or []) if str(x).strip()],
             reimbursement_markers=[str(x).strip() for x in (fields_.get("reimbursement_markers") or []) if str(x).strip()],
             card_spend_default_account=str(fields_.get("card_spend_default_account") or "").strip(),
+            partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
+                                    if fields_.get("partner_admission_date") else None),
         )
     return entities
 
@@ -293,6 +299,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["reimbursement_markers"] = list(e.reimbursement_markers)
     if e.card_spend_default_account:
         d["card_spend_default_account"] = e.card_spend_default_account
+    if e.partner_admission_date:
+        d["partner_admission_date"] = e.partner_admission_date
     return d
 
 
@@ -457,6 +465,7 @@ def validate_entity_fields(
     audit_case_by_ay: dict | None = None,
     audit_case_basis: str = "",
     foreign_dividends_in_book_by_ay: dict | None = None,
+    partner_admission_date: str | None = None,
 ) -> list[str]:
     """Validate the fields of one entity before a write. Returns a list of
     human-readable error strings (empty list == valid). Pure/side-effect-free
@@ -493,6 +502,7 @@ def validate_entity_fields(
 
     _check_date("dob", dob)
     _check_date("doi", doi)
+    _check_date("partner_admission_date", partner_admission_date)
 
     for ay, regime in (regime_by_ay or {}).items():
         if regime not in _ENTITY_REGIME_CHOICES:
