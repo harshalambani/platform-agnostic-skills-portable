@@ -250,7 +250,8 @@ help:
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
-        <div><b>Payout details for the month of June 2025</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the month is worded in the title</span></div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div><b>Payout details for the month of June (CY)</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the month is worded in the title</span></div>
         <div>Partner: Example Partner &nbsp;|&nbsp; Firm: Example Advisory LLP</div>
         <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Particulars</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Amount (Rs)</th></tr><tr><td style="padding:2px 8px;">Share of profit (gross)</td><td style="padding:2px 8px;">1,00,000</td></tr><tr><td style="padding:2px 8px;">Tax deducted</td><td style="padding:2px 8px;">10,000</td></tr><tr><td style="padding:2px 8px;">Net payout</td><td style="padding:2px 8px;">90,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; table rows</span></td></tr></table>
         </div>
@@ -262,7 +263,7 @@ help:
         - "An older certificate format that is no longer used."
         - "The same month supplied twice (the certificate and the newer statement)."
       filename_note: >
-        File names carry the START year of the financial year (a file named 2025 is the year 2025-26), and a name is never used to decide what a document is -- the skill reads the content.
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
     - name: "doc_password"
       tooltip: "Password for the payout certificates, advisory, LLP statement and payment schedule, if they are protected."
       accepts: "The one open password the firm uses for all of its PDFs, if any."
@@ -280,19 +281,20 @@ help:
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
-        <div><b>Compensation summary : Year ended 31 March 2026</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the year is the year ENDED</span></div>
-        <div>Partner: Example Partner &nbsp;|&nbsp; Letter date: 10 April 2026 &nbsp;|&nbsp; Revision: (1)</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div><b>Compensation summary : Year ended 31 March [end of CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the year is the year ENDED</span></div>
+        <div>Partner: Example Partner &nbsp;|&nbsp; Letter date: April, after CY ends &nbsp;|&nbsp; Revision: (1)</div>
         <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Component</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Amount (Rs)</th></tr><tr><td style="padding:2px 8px;">Fixed share</td><td style="padding:2px 8px;">12,00,000</td></tr><tr><td style="padding:2px 8px;">Variable share</td><td style="padding:2px 8px;">6,00,000</td></tr><tr><td style="padding:2px 8px;">Total compensation</td><td style="padding:2px 8px;">18,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; table of components</span></td></tr></table>
         </div>
       looks_like: >
-        The title line reads "Compensation summary : Year ended 31 March <year>"; the year is the year the period ENDS, so the 2025-26 Advisory says 2026. Under the header block sits a table of compensation components.
+        The title line reads "Compensation summary : Year ended 31 March <year>"; the year printed is the year the period ENDS (the Advisory for CY prints the year CY ends in). Under the header block sits a table of compensation components.
       not_these:
         - "The Target compensation advice letter (a plan for a coming year, not this year's result)."
         - "A forward-looking Compensation summary preview for the next year."
         - "An older certificate format."
         - "An Advisory superseded by a revised copy: the one marked (2), or with the later letter date, is the one to use."
       filename_note: >
-        File names carry the START year of the financial year (a file named 2025 is the year 2025-26), and a name is never used to decide what a document is -- the skill reads the content.
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
     - name: "award_year_documents"
       tooltip: "The Compensation summary of each EARLIER year whose incentive instalments were paid in this financial year. Used to check each paid instalment's gross, firm's tax and capital deducted."
       accepts: "One or more PDF files, any years. Several revisions of the same year may be added: the latest letter date (else the highest revision number) is used."
@@ -307,9 +309,10 @@ help:
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
-        <div><b>Compensation summary : Year ended 31 March 2024</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; an EARLIER year, read from inside</span></div>
-        <div>Partner: Example Partner &nbsp;|&nbsp; Letter date: 12 April 2024</div>
-        <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Instalment</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Due</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Gross (Rs)</th></tr><tr><td style="padding:2px 8px;">1st</td><td style="padding:2px 8px;">July 2025</td><td style="padding:2px 8px;">2,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; instalment schedule</span></td></tr><tr><td style="padding:2px 8px;">2nd</td><td style="padding:2px 8px;">July 2026</td><td style="padding:2px 8px;">2,00,000</td></tr></table>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div><b>Compensation summary : Year ended 31 March [end of PY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; an EARLIER year, read from inside</span></div>
+        <div>Partner: Example Partner &nbsp;|&nbsp; Letter date: April, after PY ends</div>
+        <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Instalment</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Due</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Gross (Rs)</th></tr><tr><td style="padding:2px 8px;">1st</td><td style="padding:2px 8px;">July (CY)</td><td style="padding:2px 8px;">2,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; instalment schedule</span></td></tr><tr><td style="padding:2px 8px;">2nd</td><td style="padding:2px 8px;">October (CY)</td><td style="padding:2px 8px;">2,00,000</td></tr></table>
         </div>
       looks_like: >
         The same layout as the Advisory, for an EARLIER year; the year is read from inside the document. It carries a schedule of incentive instalments.
@@ -318,7 +321,7 @@ help:
         - "The Target compensation advice letter (accepted but it carries no instalment schedule)."
         - "An earlier revision when a later (2) copy of the same year exists."
       filename_note: >
-        File names carry the START year of the financial year (a file named 2025 is the year 2025-26), and a name is never used to decide what a document is -- the skill reads the content.
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
     - name: "llp_statement"
       tooltip: "The LLP's \"Statement of Account ... AS ON 31 MARCH\" for this partner, this financial year."
       accepts: "A single PDF file, or the .eml e-mail it arrived in (its PDF attachment is read)."
@@ -333,7 +336,8 @@ help:
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
-        <div><b>Statement of Account of Example Partner AS ON 31 MARCH 2026</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div><b>Statement of Account of Example Partner AS ON 31 MARCH [end of CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
         <div>Firm: Example Advisory LLP</div>
         <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Account</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Debit</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Credit</th></tr><tr><td style="padding:2px 8px;">Capital account</td><td style="padding:2px 8px;"></td><td style="padding:2px 8px;">25,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; capital has its own block</span></td></tr><tr><td style="padding:2px 8px;">Current account</td><td style="padding:2px 8px;">1,00,000</td><td style="padding:2px 8px;"></td></tr></table>
         </div>
@@ -344,7 +348,7 @@ help:
         - "The Advisory or a payout document."
         - "A statement for a different year."
       filename_note: >
-        File names carry the START year of the financial year (a file named 2025 is the year 2025-26), and a name is never used to decide what a document is -- the skill reads the content.
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
     - name: "payment_schedule"
       tooltip: "The \"Payment Schedule FY ...\" document for this financial year (the L4 document)."
       accepts: "A single PDF file."
@@ -360,9 +364,10 @@ help:
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
-        <div><b>Payment Schedule FY 2025-26</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div><b>Payment Schedule FY [CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
         <div>Partner: Example Partner</div>
-        <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Month</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Gross (Rs)</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Tax (Rs)</th></tr><tr><td style="padding:2px 8px;">April 2025</td><td style="padding:2px 8px;">1,00,000</td><td style="padding:2px 8px;">10,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; one row per month</span></td></tr><tr><td style="padding:2px 8px;">May 2025</td><td style="padding:2px 8px;">1,00,000</td><td style="padding:2px 8px;">10,000</td></tr></table>
+        <table style="border-collapse:collapse;margin-top:6px;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Month</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Gross (Rs)</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;">Tax (Rs)</th></tr><tr><td style="padding:2px 8px;">April (CY)</td><td style="padding:2px 8px;">1,00,000</td><td style="padding:2px 8px;">10,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; one row per month</span></td></tr><tr><td style="padding:2px 8px;">May (CY)</td><td style="padding:2px 8px;">1,00,000</td><td style="padding:2px 8px;">10,000</td></tr></table>
         </div>
       looks_like: >
         A "Payment Schedule FY ..." document: title line, header block, then one table row per month.
@@ -370,7 +375,7 @@ help:
         - "A monthly payout document."
         - "A schedule for a different year."
       filename_note: >
-        File names carry the START year of the financial year (a file named 2025 is the year 2025-26), and a name is never used to decide what a document is -- the skill reads the content.
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
     - name: "gnucash_path"
       tooltip: "This entity's GnuCash book, opened READ ONLY for the books tie-out."
       accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."

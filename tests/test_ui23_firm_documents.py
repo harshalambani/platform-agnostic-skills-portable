@@ -628,6 +628,35 @@ def test_pan_guard_would_catch_a_pan():                                    # NEG
     assert PAN_LIKE.search("Partner: ABCDE1234F")
 
 
+YEAR = re.compile(r"\b20\d\d\b")
+
+
+def test_no_skill_sample_or_its_help_text_carries_a_literal_year():        # NEGATIVE
+    seen = 0
+    for sk in discover():
+        if not sk.help:
+            continue
+        for hi in sk.help.inputs:
+            for field in (hi.sample_html, hi.looks_like, hi.filename_note, *hi.not_these):
+                if field:
+                    seen += 1
+                    assert not YEAR.search(field), (sk.name, hi.name, YEAR.search(field).group(0))
+    assert seen >= 15
+
+
+@pytest.mark.parametrize("name", SAMPLE_INPUTS)
+def test_partner_sample_keeps_the_sample_line_and_the_cy_py_legend(name):
+    hi, _ = _panel(name)
+    assert "SAMPLE" in hi.sample_html
+    assert "CY = the financial year you are reconciling; PY = the year before it." in hi.sample_html
+    assert hi.sample_html.index("SAMPLE") < hi.sample_html.index("CY = ")
+
+
+def test_year_guard_would_catch_a_literal_year():                           # NEGATIVE (guard works)
+    assert YEAR.search("Year ended 31 March 2026")
+    assert not YEAR.search("Year ended 31 March [end of CY]")
+
+
 def test_input_without_a_sample_still_renders():                           # NEGATIVE
     import gradio as gr
     sk = _skill()
