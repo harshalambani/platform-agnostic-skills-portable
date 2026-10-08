@@ -57,6 +57,7 @@ could write.
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -90,6 +91,7 @@ from .jv_emitter import (
 from ..outputs import ReplyWithOutputs, extra_output
 from .mapper import FinancialYearMismatchError, build_input_data
 from . import award_year as _award_year
+from . import intake as _intake
 from . import precheck as _precheck
 from .parsers import advisory as _advisory_parser
 from .parsers import llp_statement as _llp_statement_parser
@@ -574,6 +576,7 @@ def run(
     financial_year: str = "",
     entities_path: str | None = None,
     award_year_documents: str | list | None = None,
+    firm_documents: str | list | None = None,
 ) -> str:
     """Skill entry point -- see the module docstring for the two entry
     paths. `input_path`, when supplied, takes the TEST-ONLY structured
@@ -606,7 +609,44 @@ def run(
             accrual_journal_path=accrual_journal_path,
             entities_path=entities_path,
         )
-    return _run_from_documents(
+    inputs_rows = None
+    sorted_docs = None
+    table = ""
+    if firm_documents:
+        # UI-23: the drop zone. Files are sorted by their CONTENT into the
+        # roles the pickers cover; a picker that was filled in always wins.
+        sorted_docs = _intake.sort_documents(
+            firm_documents, financial_year, doc_password,
+            manual={"payout": bool(advices_dir), "advisory": bool(advisory_path),
+                    "award": bool(award_year_documents), "llp": bool(llp_statement),
+                    "schedule": bool(payment_schedule)})
+        table = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            _intake.cleanup(sorted_docs)
+            return table + f"\nERROR: {sorted_docs.stop}"
+        inputs_rows = sorted_docs.table_rows()
+        if sorted_docs.advices:
+            pdir = Path(sorted_docs.workdir) / "payouts"
+            pdir.mkdir(exist_ok=True)
+            for k, src in enumerate(sorted_docs.advices, start=1):
+                name = Path(src).name
+                if (pdir / name).exists():
+                    name = f"{k:03d}_{name}"
+                shutil.copy2(src, pdir / name)
+            advices_dir = str(pdir)
+        advisory_path = advisory_path or sorted_docs.advisory
+        llp_statement = llp_statement or sorted_docs.llp
+        payment_schedule = payment_schedule or sorted_docs.schedule
+        if not award_year_documents and sorted_docs.award:
+            award_year_documents = list(sorted_docs.award)
+        # A required role the folder did not hold: say so with the table.
+        for value, role in ((advices_dir, "monthly payout documents"),
+                            (advisory_path, "this year's Advisory")):
+            if not value:
+                _intake.cleanup(sorted_docs)
+                return table + f"\nERROR: no {role} were found in the documents. Add them to the folder, or pick them by hand."
+    try:
+        reply = _run_from_documents(
         entity=entity,
         advices_dir=advices_dir,
         doc_password=doc_password,
@@ -624,7 +664,17 @@ def run(
         financial_year=financial_year,
         entities_path=entities_path,
         award_year_documents=award_year_documents,
+        inputs_rows=inputs_rows,
     )
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
+    if not table:
+        return reply
+    text = table + "\n" + str(reply)
+    if isinstance(reply, ReplyWithOutputs):
+        return ReplyWithOutputs(text, reply.extra_outputs)
+    return text
 
 
 def _run_from_documents(
@@ -646,6 +696,7 @@ def _run_from_documents(
     financial_year: str = "",
     entities_path: str | None = None,
     award_year_documents: str | list | None = None,
+    inputs_rows: list | None = None,
 ) -> str:
     """Document-driven entry point (the skill.yaml-facing path).
 
@@ -1040,6 +1091,7 @@ def _run_from_documents(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     write_report_workbook(
         report, str(out_path), posted_check=posted_check, bank_matches=bank_matches or None,
+        inputs_rows=inputs_rows,
     )
 
     journal_line = ""

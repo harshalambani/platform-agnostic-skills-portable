@@ -952,9 +952,26 @@ def _write_bank_match_sheet(wb, bank_matches):
 # Entry point
 # ---------------------------------------------------------------------------
 
-def write_report_workbook(report: Report, out_path: str, posted_check=None, bank_matches=None) -> None:
+def _write_inputs_files_sheet(wb, rows):
+    """UI-23: what each dropped file was recognised as and what became of it."""
+    ws = wb.create_sheet("Inputs")
+    _write_header(ws, 1, ["File", "Recognised as", "Year read from inside",
+                          "Used for / skipped and why"])
+    for r, row in enumerate(rows, start=2):
+        for c, v in enumerate(row, start=1):
+            _set(ws, r, c, v, wrap=(c == 4))
+    ws.column_dimensions["A"].width = 44
+    ws.column_dimensions["B"].width = 32
+    ws.column_dimensions["C"].width = 22
+    ws.column_dimensions["D"].width = 80
+
+
+def write_report_workbook(report: Report, out_path: str, posted_check=None, bank_matches=None,
+                          inputs_rows=None) -> None:
     wb = Workbook()
     wb.remove(wb.active)
+    if inputs_rows is not None:
+        _write_inputs_files_sheet(wb, inputs_rows)
     _write_logic_sheet(wb, report)
     driver_refs = _write_drivers_sheet(wb, report)
     _write_inputs_monthly_sheet(wb, report)
