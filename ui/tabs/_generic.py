@@ -19,7 +19,7 @@ Supported input types (declared in skill.yaml):
                    render time (with a refresh button) — see
                    _OPTIONS_FROM_RESOLVERS below. Allows custom values typed
                    by the user either way.
-  - "directory"  → paste a folder path (gr.Textbox)
+  - "directory"  → folder path (gr.Textbox plus a native Browse... button)
   - "text"       → free-text input (gr.Textbox)
   - "password"   → masked free-text input (gr.Textbox, type="password").
                    Shoulder-surfing protection only — the value is passed as
@@ -859,7 +859,12 @@ def _make_run_handler(skill: SkillInfo):
                         return
                     input_map[inp_def.name] = ""
                 else:
-                    input_map[inp_def.name] = str(val).strip()
+                    _folder = str(val).strip()
+                    if not Path(_folder).is_dir():
+                        yield add(f"Warning: {inp_def.label} - this folder does not exist: {_folder}. "
+                                  "Use Browse... or paste an existing folder path."), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    input_map[inp_def.name] = _folder
             elif inp_def.type in ("select", "parser_file"):
                 # A multiselect dropdown hands back a list. Everything downstream
                 # -- run_args substitution, the output filename -- is str.replace()
@@ -1235,6 +1240,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
+            folder_buttons = []   # (button, textbox, input_def) for the native folder Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
             # their first choice. Gradio's .change() does not fire for an initial
             # value, so a pre-selected name would sit above an empty book field —
@@ -1434,11 +1440,17 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                             **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                         )
                 elif inp.type == "directory":
-                    comp = gr.Textbox(
-                        label=inp.label,
-                        placeholder="Paste full folder path here",
-                        **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
-                    )
+                    # UI-30: same row layout as the file boxes -- textbox plus a
+                    # native "Browse..." button. Typing or pasting still works.
+                    with gr.Row():
+                        comp = gr.Textbox(
+                            label=inp.label,
+                            placeholder="Browse... to a folder, or paste the full folder path",
+                            scale=5,
+                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                        )
+                        _fbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    folder_buttons.append((_fbtn, comp, inp))
                 elif inp.type == "password":
                     comp = gr.Textbox(
                         label=inp.label,
@@ -1734,6 +1746,15 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             inputs=([_fcomp] if _books_box else []),
             outputs=[_fcomp],
         )
+
+    # UI-30: "Browse..." beside every folder box. Opens at the box's remembered
+    # folder; a cancelled pick leaves whatever is typed there untouched.
+    for _fbtn, _tcomp, _finp in folder_buttons:
+        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label):
+            picked = _filedialog.pick_folder(bk, title=f"Select folder - {label}")
+            return gr.update(value=picked) if picked else gr.update()
+
+        _fbtn.click(fn=_browse_folder, inputs=[_tcomp], outputs=[_tcomp])
 
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.

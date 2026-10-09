@@ -178,6 +178,74 @@ def _native_open_dialog(
     return _parse_ofn_buffer(buf[:])
 
 
+def _native_folder_dialog(*, initialdir: str | None, title: str) -> str | None:
+    """Open the OS folder picker and return the chosen absolute folder.
+
+    Returns None on cancel, error, or a non-Windows platform. Like
+    ``_native_open_dialog`` this is the only part that touches Win32, so tests
+    monkeypatch it.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    BIF_RETURNONLYFSDIRS = 0x00000001
+    BIF_NEWDIALOGSTYLE = 0x00000040
+    BFFM_INITIALIZED = 1
+    BFFM_SETSELECTIONW = 0x0400 + 103
+
+    class BROWSEINFOW(ctypes.Structure):
+        _fields_ = [
+            ("hwndOwner", wintypes.HWND),
+            ("pidlRoot", wintypes.LPVOID),
+            ("pszDisplayName", wintypes.LPWSTR),
+            ("lpszTitle", wintypes.LPCWSTR),
+            ("ulFlags", wintypes.UINT),
+            ("lpfn", wintypes.LPVOID),
+            ("lParam", wintypes.LPARAM),
+            ("iImage", ctypes.c_int),
+        ]
+
+    callback_t = ctypes.WINFUNCTYPE(ctypes.c_int, wintypes.HWND, wintypes.UINT,
+                                    wintypes.LPARAM, wintypes.LPARAM)
+
+    def _on_event(hwnd, msg, _lparam, _data):
+        if msg == BFFM_INITIALIZED and initialdir:
+            ctypes.windll.user32.SendMessageW(hwnd, BFFM_SETSELECTIONW, 1, initialdir)
+        return 0
+
+    cb = callback_t(_on_event)  # keep a reference alive for the whole call
+    shell32 = ctypes.windll.shell32
+    shell32.SHBrowseForFolderW.restype = wintypes.LPVOID
+    shell32.SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
+    shell32.SHGetPathFromIDListW.argtypes = [wintypes.LPVOID, wintypes.LPWSTR]
+
+    display = ctypes.create_unicode_buffer(260)
+    info = BROWSEINFOW()
+    try:
+        info.hwndOwner = ctypes.windll.user32.GetForegroundWindow()
+    except Exception:
+        info.hwndOwner = None
+    info.pszDisplayName = ctypes.cast(display, wintypes.LPWSTR)
+    info.lpszTitle = title
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE
+    info.lpfn = ctypes.cast(cb, wintypes.LPVOID)
+    pidl = shell32.SHBrowseForFolderW(ctypes.byref(info))
+    if not pidl:
+        return None
+    try:
+        out = ctypes.create_unicode_buffer(1 << 15)
+        if not shell32.SHGetPathFromIDListW(pidl, out):
+            return None
+        return out.value or None
+    finally:
+        try:
+            ctypes.windll.ole32.CoTaskMemFree(ctypes.c_void_p(pidl))
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Public: pick + validate + remember.
 # ---------------------------------------------------------------------------
@@ -236,3 +304,28 @@ def pick_files(
     if valid:
         remember_dir(box_key, str(Path(valid[0]).parent), path=path)
     return valid, warnings
+
+
+def pick_folder(
+    box_key: str,
+    *,
+    title: str = "Select a folder",
+    fallback_dir: str | None = None,
+    path: Path | None = None,
+) -> str | None:
+    """Open the native folder picker at this box's remembered folder.
+
+    ``fallback_dir`` is used only when nothing is remembered (or the remembered
+    folder has vanished). Returns the chosen folder, or None on cancel / a pick
+    that is not an existing folder -- the caller then keeps the box's current
+    value. A successful pick is remembered under the same ``"<skill>.<input>"``
+    key the file boxes use.
+    """
+    initial = last_dir_for(box_key, path=path)
+    if not initial and fallback_dir and Path(fallback_dir).is_dir():
+        initial = fallback_dir
+    picked = _native_folder_dialog(initialdir=initial, title=title)
+    if not picked or not Path(picked).is_dir():
+        return None
+    remember_dir(box_key, picked, path=path)
+    return picked
