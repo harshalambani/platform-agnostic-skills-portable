@@ -17,12 +17,16 @@ Use this as the first step when you have a pile of statement emails and PDFs fro
 - **PDF password(s), comma-separated (or leave blank for auto-detect)** (optional) — accepts: Text — one password, or several comma-separated. Optional.
   - Password(s) for protected PDFs. Leave blank to auto-try common patterns.
   - ⚠️ If decryption fails, supply the exact password here; auto-detect only covers common formats.
+- **Period for the completeness check: 2025-26, 2025-26 Q3, Oct 2025, or 2025-07-15 to 2025-09-20 (blank = last completed financial year)** (optional) — accepts: 2025-26, or 2025-26 Q1 to Q4, or a month such as Oct 2025, or 2025-07-15 to 2025-09-20. Optional.
+  - The period the completeness check covers: a financial year, a quarter of it, one month, or a custom date range. Leave blank for the last completed financial year.
+  - ⚠️ Statements outside the period are ignored; one that straddles an edge counts for the part inside. From must not be after to.
 
 ## How to run
 
 1. Select the folder holding your statement emails / PDFs.
 2. Optionally enter PDF password(s); leave blank to auto-detect.
-3. Click Run, then open the output folder.
+3. Optionally enter the financial year to check (default: the last completed one).
+4. Click Run, then open the output folder.
 
 ## Output
 

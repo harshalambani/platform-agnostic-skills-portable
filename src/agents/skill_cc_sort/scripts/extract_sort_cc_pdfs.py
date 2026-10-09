@@ -634,6 +634,11 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
     with open(checksums_file, 'w') as f:
         json.dump(results['checksums'], f, indent=2)
 
+    # CC-01: the agent's completeness check needs to know what failed to
+    # decrypt (file names only -- no passwords, no contents).
+    with open(output_path / 'sort_results.json', 'w') as f:
+        json.dump({'failed_decryption': list(results['failed_decryption'])}, f, indent=2)
+
     return results
 
 if __name__ == "__main__":
