@@ -92,3 +92,10 @@ def resolve_period(period: str | None, custom_start: str = "", custom_end: str =
     ya = fs.year if a >= 4 else fs.year + 1
     yb = fs.year if b >= 4 else fs.year + 1
     return date(ya, a, 1), date(yb, b, calendar.monthrange(yb, b)[1]), f"FY {m.group(1)} {q}"
+
+
+def period_slug(label: str) -> str:
+    """Filesystem-safe form of a period label, for file names:
+    "FY 2025-26 Q1" -> "FY2025-26-Q1"; "2025-04-01 to 2025-06-30" -> "2025-04-01_to_2025-06-30"."""
+    t = re.sub(r"[^A-Za-z0-9._-]+", "-", label.strip().replace(" to ", "_to_"))
+    return re.sub(r"-{2,}", "-", t).strip("-").replace("FY-", "FY")

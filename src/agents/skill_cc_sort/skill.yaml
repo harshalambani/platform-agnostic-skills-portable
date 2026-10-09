@@ -67,7 +67,7 @@ help:
     folder to extract the actual transactions.
   inputs:
     - name: "input_folder"
-      tooltip: "A folder containing your .msg emails and/or statement PDFs (subfolders are fine)."
+      tooltip: "A folder containing your .msg emails and/or statement PDFs (subfolders are fine). Use Browse, or type or paste the path."
       accepts: "A folder of .msg and/or .pdf files."
       gotchas: "Point at the folder itself, not an individual file."
     - name: "period"

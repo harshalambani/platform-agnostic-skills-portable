@@ -19,7 +19,7 @@ Supported input types (declared in skill.yaml):
                    render time (with a refresh button) — see
                    _OPTIONS_FROM_RESOLVERS below. Allows custom values typed
                    by the user either way.
-  - "directory"  → paste a folder path (gr.Textbox)
+  - "directory"  → folder path (gr.Textbox plus a native Browse... button)
   - "text"       → free-text input (gr.Textbox)
   - "password"   → masked free-text input (gr.Textbox, type="password").
                    Shoulder-surfing protection only — the value is passed as
@@ -218,6 +218,22 @@ def _entity_initial_value(skill, entity_name):
 # file, or every output would be called after the taxpayer / the year instead
 # of after the statement or document.
 _NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
+
+
+def _newest_cc_sort_pdfs() -> str | None:
+    """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None.
+    Only a starting point for the CC Transactions picker when nothing is
+    remembered; it never fills the box by itself."""
+    try:
+        runs = sorted((d for d in _config.output_dir().glob("*-CC-Sort") if d.is_dir()),
+                      key=lambda d: d.name, reverse=True)
+    except OSError:
+        return None
+    for d in runs:
+        target = d / "Decrypted_PDFs_Correct"
+        if target.is_dir():
+            return str(target)
+    return None
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -617,38 +633,6 @@ def _colorize_status(md: str) -> str:
     return "\n".join(out)
 
 
-def _registry_book_fill(skill, inp_def, input_map) -> str:
-    """Auto-fill an empty, optional `book_file` input for the ITR Workbook
-    skill from the app-side GnuCash book registry (ui/_book_registry.py),
-    keyed off the entity + FY already chosen earlier in the same run (the
-    ITR Workbook skill.yaml orders inputs bs_html(0)/entity(1)/ay(2)/
-    regime(3)/book_file(4), so both are already in `input_map` by the time
-    this runs). Note: the `ay` select actually carries the FY string (e.g.
-    "2025-26", populated from meta.fy) -- exactly the key resolve_book()
-    expects -- so no AY->FY conversion happens here.
-
-    Deliberately narrow: only fires for skill.name == "ITR Workbook" and
-    inp_def.name == "book_file", so the generic runner stays generic for
-    every other skill/input. Returns "" (never raises) whenever the entity
-    is unset, unknown, has no registered/legacy book, or the resolved path
-    doesn't exist on disk -- the book stays optional and the run proceeds
-    book-less exactly as before this seam existed.
-    """
-    if getattr(skill, "name", "") != "ITR Workbook" or getattr(inp_def, "name", "") != "book_file":
-        return ""
-    entity_key = input_map.get("entity")
-    if not entity_key:
-        return ""
-    try:
-        from .. import _book_registry  # noqa: PLC0415
-        resolved = _book_registry.resolve_book(entity_key, input_map.get("ay") or None)
-    except Exception:
-        return ""
-    if resolved is not None and resolved.is_file():
-        return str(resolved)
-    return ""
-
-
 # ---------------------------------------------------------------------------
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
@@ -767,13 +751,9 @@ def _make_run_handler(skill: SkillInfo):
                     if inp_def.required:
                         yield add(f"Warning: please provide: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
                         return
-                    registry_book = _registry_book_fill(skill, inp_def, input_map)
-                    input_map[inp_def.name] = registry_book
-                    if registry_book:
-                        yield add(
-                            f"Using registered book for {input_map.get('entity')} "
-                            f"(FY {input_map.get('ay')})."
-                        ), gr.update(interactive=False, value=None), gr.update()
+                    # An empty book box means NO book: it is never refilled
+                    # from the registry behind the user's back (UI-31).
+                    input_map[inp_def.name] = ""
                 else:
                     fpath = Path(val.name if hasattr(val, "name") else val)
                     if not fpath.is_file():
@@ -859,7 +839,12 @@ def _make_run_handler(skill: SkillInfo):
                         return
                     input_map[inp_def.name] = ""
                 else:
-                    input_map[inp_def.name] = str(val).strip()
+                    _folder = str(val).strip()
+                    if not Path(_folder).is_dir():
+                        yield add(f"Warning: {inp_def.label} - this folder does not exist: {_folder}. "
+                                  "Use Browse... or paste an existing folder path."), gr.update(interactive=False, value=None), gr.update()
+                        return
+                    input_map[inp_def.name] = _folder
             elif inp_def.type in ("select", "parser_file"):
                 # A multiselect dropdown hands back a list. Everything downstream
                 # -- run_args substitution, the output filename -- is str.replace()
@@ -936,6 +921,20 @@ def _make_run_handler(skill: SkillInfo):
             # picker), it already carries a "YYYY-MM-DD-HHMMSS-" stamp; strip it
             # so we don't double-stamp and bloat the path.
             stem = re.sub(r"^\d{4}-\d{2}-\d{2}-\d{6}-", "", stem)
+            # A skill with the shared period picker names the range it ran in the
+            # file name too (e.g. "...-FY2025-26-Q1-CC-Transactions.xlsx").
+            slug = ""
+            _names = {i.name for i in skill.inputs}
+            if "period" in _names and "custom_start" in _names:
+                try:
+                    from agents.period_picker import period_slug, resolve_period
+                    slug = period_slug(resolve_period(
+                        input_map.get("period", ""), input_map.get("custom_start", ""),
+                        input_map.get("custom_end", ""))[2])
+                except ValueError:
+                    slug = ""   # the skill itself reports a bad range
+            if slug:
+                stem = f"{stem}-{slug}"
             out_path = out_dir / f"{stamp}-{stem}-{skill.output.suffix}{skill.output.extension}"
 
         # -- Materialise legacy config --
@@ -1235,13 +1234,14 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
+            folder_buttons = []   # (button, textbox, input_def) for the native folder Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
             # their first choice. Gradio's .change() does not fire for an initial
             # value, so a pre-selected name would sit above an empty book field —
             # reading as "this book belongs to that person" when nothing was
             # resolved. Start blank; the first real pick fires .change() and fills
-            # the book. Selects that are not book_from sources (e.g. ITR Workbook's
-            # `entity`) keep their existing pre-select behaviour.
+            # the book. Selects that are not book_from sources keep their existing
+            # pre-select behaviour.
             _book_from_sources = {
                 inp.book_from
                 for inp in skill.inputs
@@ -1434,11 +1434,17 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                             **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                         )
                 elif inp.type == "directory":
-                    comp = gr.Textbox(
-                        label=inp.label,
-                        placeholder="Paste full folder path here",
-                        **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
-                    )
+                    # UI-30: same row layout as the file boxes -- textbox plus a
+                    # native "Browse..." button. Typing or pasting still works.
+                    with gr.Row():
+                        comp = gr.Textbox(
+                            label=inp.label,
+                            placeholder="Browse... to a folder, or paste the full folder path",
+                            scale=5,
+                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                        )
+                        _fbtn = gr.Button("Browse…", scale=0, min_width=110)
+                    folder_buttons.append((_fbtn, comp, inp))
                 elif inp.type == "password":
                     comp = gr.Textbox(
                         label=inp.label,
@@ -1470,8 +1476,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # _entity_book.book_update(). Done after ALL components are built so
             # book_from/fy_from can reference any input regardless of declaration
             # order in skill.yaml. This is independent of, and does not replace,
-            # the existing run-time `_registry_book_fill()` belt-and-braces path
-            # for ITR Workbook (left untouched above/below).
+            # (UI-31: the ITR Workbook run-time refill was removed; the book
+            # reaches the run one way only, visibly, through this box.)
             for inp in skill.inputs:
                 if inp.type not in ("file", "files") or not inp.book_from:
                     continue
@@ -1514,19 +1520,28 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         if multi
                         else _entity_book.book_status_update
                     )
+                    # The box's own value goes in too, so a miss can tell a
+                    # registered book left over from another entity or FY
+                    # (cleared) from a hand-picked path (kept).
                     if len(wiring_inputs) == 2:
-                        def _handler(entity_val, fy_val):
-                            return fill(entity_val, fy_val), say(entity_val, fy_val)
+                        def _handler(entity_val, fy_val, current):
+                            cur = current if isinstance(current, str) else None
+                            return (fill(entity_val, fy_val, cur),
+                                    say(entity_val, fy_val, cur))
                     else:
-                        def _handler(entity_val):
-                            return fill(entity_val), say(entity_val)
+                        def _handler(entity_val, current):
+                            cur = current if isinstance(current, str) else None
+                            return fill(entity_val, None, cur), say(entity_val, None, cur)
                     return _handler
 
-                entity_comp.change(
-                    fn=_make_book_from_handler(),
-                    inputs=wiring_inputs,
-                    outputs=[file_comp, status_md],
-                )
+                # Changing the FY must re-resolve too, or the box would keep
+                # the book of the previous year (UI-31).
+                for _trig in wiring_inputs:
+                    _trig.change(
+                        fn=_make_book_from_handler(),
+                        inputs=[*wiring_inputs, file_comp],
+                        outputs=[file_comp, status_md],
+                    )
 
                 # ...and the moment the field holds a path — from Browse…,
                 # typing, or the prefill above — the "pick a book" line has
@@ -1734,6 +1749,17 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             inputs=([_fcomp] if _books_box else []),
             outputs=[_fcomp],
         )
+
+    # UI-30: "Browse..." beside every folder box. Opens at the box's remembered
+    # folder; a cancelled pick leaves whatever is typed there untouched.
+    for _fbtn, _tcomp, _finp in folder_buttons:
+        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label):
+            picked = _filedialog.pick_folder(
+                bk, title=f"Select folder - {label}",
+                fallback_dir=_newest_cc_sort_pdfs() if bk == "CC Transactions.pdf_dir" else None)
+            return gr.update(value=picked) if picked else gr.update()
+
+        _fbtn.click(fn=_browse_folder, inputs=[_tcomp], outputs=[_tcomp])
 
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.

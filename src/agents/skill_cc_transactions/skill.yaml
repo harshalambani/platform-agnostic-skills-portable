@@ -17,10 +17,26 @@ inputs:
     type: "directory"
     label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)"
     required: true
+  - name: "period"
+    type: "select"
+    options_from: "report_periods"
+    label: "Period to extract (Indian FY = 1 Apr to 31 Mar)"
+    required: true
+  - name: "custom_start"
+    type: "text"
+    label: "Custom start date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "custom_end"
+    type: "text"
+    label: "Custom end date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
 
 run_args:
   pdf_dir: "{inputs.pdf_dir}"
   output_excel: "{output_path}"
+  period: "{inputs.period}"
+  custom_start: "{inputs.custom_start}"
+  custom_end: "{inputs.custom_end}"
   config_path: "{config_path}"
   model_override: "{model_override}"
 
@@ -30,23 +46,35 @@ output:
   download_label: "Download Excel"
 
 requires:
-  native_binaries: ["poppler"]
+  native_binaries: []
   external_tools: []
   llm: false
 
 help:
   overview: >
     Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every
-    transaction table into one consolidated Excel workbook — one row per
+    transaction row into one consolidated Excel workbook — one row per
     transaction across all cards. Runs fully offline.
   when_to_use: >
     Use this as the second step, right after "Credit Card — Sort PDFs". It expects the decrypted,
     sorted folder that Credit Card — Sort PDFs produced, not raw statement files.
   inputs:
     - name: "pdf_dir"
-      tooltip: "The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs."
+      tooltip: "The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs. Type or paste the path, or use Browse."
       accepts: "A folder of decrypted statement PDFs."
       gotchas: "Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder."
+    - name: "period"
+      tooltip: "Which statements to keep. A statement is kept when its period overlaps the range. The Tie-out sheet always covers whole statements."
+      accepts: "A FY, a quarter of a FY, or a custom date range. The first choice is the last completed FY."
+      gotchas: "For a single month, choose 'Custom date range' and enter the first and last day below. The range is part of the Excel file name."
+    - name: "custom_start"
+      tooltip: "Start date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "custom_end"
+      tooltip: "End date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
   steps:
     - "Run Credit Card — Sort PDFs first if you have not already."
     - "Select the Decrypted_PDFs_Correct/ folder."
@@ -56,9 +84,8 @@ help:
     files:
       - name: "YYYY-MM-DD-HHMMSS-<input>-CC-Transactions.xlsx"
         tooltip: >
-          One consolidated sheet of transactions across all sorted statements,
-          with date, description and amount columns extracted from each card's
-          table.
+          Transactions (date, description, amount, direction, kind), Summary, a Tie-out sheet
+          (one row per statement: PASS / FAIL / NOT AVAILABLE) and a Fees sheet listing every card fee.
   tips: >
     Because the PDFs are already grouped by issuer, the consolidated sheet keeps
     cards together — handy for per-card filtering in Excel.

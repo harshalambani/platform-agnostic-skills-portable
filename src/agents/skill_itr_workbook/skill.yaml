@@ -113,6 +113,8 @@ inputs:
     label: "GnuCash book (optional, enables CG lots + dividend quarters)"
     file_types: [".gnucash"]
     required: false
+    book_from: "entity"
+    fy_from: "ay"
   - name: "mapping_file"
     type: "file"
     label: "Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)"
