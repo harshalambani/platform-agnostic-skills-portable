@@ -739,6 +739,7 @@ def main():
     # ---- completeness (KRC-01 c) ----
     emitted = purchases + slbm + sales + charges
     comp_line = None
+    closing_info = None   # KRC-04: information only, every run
     if ledger is None:
         comp_line = ("Completeness check skipped: the Bills workbook has no Reconciliation "
                      "sheet (re-run Part II Reconcile to get one).")
@@ -748,6 +749,9 @@ def main():
             comp_line = "Completeness check skipped: the ledger rows carry no closing balance."
         else:
             diff, expected, closing = comp
+            closing_info = (f"INFO: broker account closing balance per the ledger: {closing:.2f} "
+                            f"(this run's total: {expected:.2f}). Information only; "
+                            f"nothing is booked from it.")
             if abs(diff) >= 0.01:
                 red_flags.append(
                     f"RED FLAG - Broker account will NOT close to the ledger: opening + bank "
@@ -819,6 +823,8 @@ def main():
         print(f"Demat-charges account: {demat_acct} ({demat_src})")
     if comp_line:
         print(comp_line)
+    if closing_info:
+        print(closing_info)
     print(f"Files written: {', '.join(written) if written else '(none)'}")
     print(f"Needs review:     {len(review)}" + (" -> Review.csv" if review else ""))
     for b, why in review:
