@@ -1602,9 +1602,14 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # backend update carries the correct visible=True + value, but
             # the button never mounts). Toggling `interactive` instead keeps
             # the component always mounted, sidestepping that issue.
+            # UI-29: a directory-output skill never produces a single file, so
+            # this button would stay greyed for ever and duplicate the real
+            # "Open output folder" button below. It is created hidden (it is
+            # never toggled for these skills, so the Gradio 6 note above does
+            # not apply) and stays in the outputs lists so handler arity holds.
             download = gr.DownloadButton(
                 label=skill.output.download_label,
-                visible=True,
+                visible=(skill.output.type != "directory"),
                 interactive=False,
                 variant="primary",
             )

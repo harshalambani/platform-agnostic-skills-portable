@@ -55,6 +55,7 @@ from ui._review_engine import (
     payload_box_css,
 )
 from ui.tabs._generic import _MAX_UPLOAD_SIZE_BYTES
+from agents.skill_26as_journal.scripts.part_labels import PART_II_LABEL
 
 APP_ID = "tdsjr"
 TARGET_COL = "Credit Account"
@@ -1062,7 +1063,7 @@ def _save_changes(
     if part_i_path:
         lines.append(
             f"{len(excluded_txns)} transaction(s) excluded from "
-            f"{Path(part_i_path).name} because they are 15G/15H (Part II) "
+            f"{Path(part_i_path).name} because they are {PART_II_LABEL} "
             f"reclassifications -- **if you post Part II by hand in "
             f"GnuCash, import {Path(part_i_path).name}, not "
             f"{journal_p.name}, or the reclassification will be "
@@ -1085,7 +1086,7 @@ def _save_changes(
     elif split_failed:
         lines.append(
             "**WARNING: the Part I split could not be regenerated -- we do "
-            "not know whether this run has 15G/15H (Part II) transactions, "
+            f"not know whether this run has {PART_II_LABEL} transactions, "
             f"so we cannot say whether {journal_p.name} is safe to import "
             "on its own. Do NOT assume it is the only file to import.** "
             + (
@@ -1101,7 +1102,7 @@ def _save_changes(
         )
     else:
         lines.append(
-            "No 15G/15H (Part II) transactions in this run -- there is "
+            f"No {PART_II_LABEL} transactions in this run -- there is "
             f"nothing to exclude, so {journal_p.name} is the only file "
             "to import."
         )

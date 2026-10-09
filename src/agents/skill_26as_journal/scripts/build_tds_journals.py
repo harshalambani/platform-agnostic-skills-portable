@@ -97,6 +97,7 @@ from openpyxl import load_workbook
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 import tds_learnings  # noqa: E402
+from part_labels import PART_II_LABEL  # noqa: E402
 
 # -------------------- fixed account names --------------------
 
@@ -1250,7 +1251,7 @@ def build_journals(deductors: list[Deductor], accounts: list[Account],
 def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
                        overrides: Optional[dict] = None,
                        learnings: Optional[dict] = None) -> list[Journal]:
-    """Part II (15G/15H) -> Category G journals.
+    """The 15G/15H section of Part II -> Category G journals.
 
     Reuses Category A's exact posting template and account-matching pool
     (interest income accounts) — no new maths, per the spec: with tax
@@ -1488,7 +1489,7 @@ def build_csv_rows(journals: list[Journal], fy: str) -> list[dict]:
         if j.category == "T":
             tag, part_label = "TCS", "Part VI"
         elif j.category == "G":
-            tag, part_label = "15G/15H TDS", "Part II (15G/15H)"
+            tag, part_label = "15G/15H TDS", PART_II_LABEL
         else:
             tag, part_label = "TDS", "Part I"
         txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
