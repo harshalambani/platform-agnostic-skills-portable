@@ -876,7 +876,10 @@ def _write_posted_check_sheet(wb, posted_check):
         _set(ws, row, 2, r.date)
         _set(ws, row, 3, r.description, wrap=True)
         _set(ws, row, 4, r.status, fill=status_fills.get(r.status), bold=True)
-        _set(ws, row, 5, r.detail, wrap=True)
+        detail = r.detail
+        if r.status == "ALREADY POSTED":
+            detail += " Already in the book - do not import this journal."
+        _set(ws, row, 5, detail, wrap=True)
         row += 1
     if row == 2:
         _set(ws, row, 1, "No journals to check -- either no GnuCash book was supplied, no "

@@ -654,8 +654,12 @@ def statement_reference_row(
                     f"({pj_amount:,.2f}, journal {ids}) = {adjusted_value:,.2f}, which "
                     f"ties to the statement ({statement_value:,.2f}) within rounding "
                     f"(difference Rs {abs(adjusted_diff):,.2f}, within the Rs "
-                    f"{WITHIN_TOLERANCE_LIMIT:g} limit). Post {ids} and this row is "
-                    f"reconciled; it is not a disagreement."
+                    f"{WITHIN_TOLERANCE_LIMIT:g} limit). The year-end journal adds a "
+                    f"rounding line of Rs {abs(adjusted_diff):,.2f} against the salary "
+                    f"clearing account so the account closes at the statement figure "
+                    f"(when that account is configured; otherwise the rounding is only "
+                    f"reported). Post {ids} and this row is reconciled; it is not a "
+                    f"disagreement."
                 )
                 continue
             # H35-04 round 2 item 5: LEAD with the genuine residual (the

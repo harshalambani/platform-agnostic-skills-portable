@@ -222,3 +222,15 @@ def test_partner_skill_declares_both_journals_and_the_ui_mounts_them_by_interact
     assert keys == ["journal_csv", "accrual_journal_csv"]
     src = Path(ROOT / "ui" / "tabs" / "_generic.py").read_text(encoding="utf-8")
     assert "label=_x.download_label, visible=True, interactive=False" in src
+
+
+def test_note_on_a_written_file_is_shown_next_to_it_h35_21(dirs):
+    a = _write(dirs.out / "ENT-FY2025-26-partner-accrual-journal.csv")
+    msg = "ALREADY POSTED: X-ACCR is already in the book - do not import this file."
+    r = _stage_extra_outputs(_skill(), ReplyWithOutputs("ok", [
+        extra_output("accrual_journal_csv", a, msg)]))
+    assert "do not import this file" in r["block"]
+    # a written file with no note stays unchanged
+    r2 = _stage_extra_outputs(_skill(), ReplyWithOutputs("ok", [
+        extra_output("accrual_journal_csv", a, "")]))
+    assert "do not import" not in r2["block"]

@@ -73,6 +73,10 @@ from .engine import (
     build_report,
 )
 from .gnucash_tieout import (
+    ALREADY_POSTED,
+    accrual_book_gap,
+    accrual_txn_id,
+    restate_posted_accrual_rows,
     build_statement_book_check,
     DEFAULT_BANK_MATCH_WINDOW_DAYS,
     MATCHED,
@@ -82,6 +86,7 @@ from .gnucash_tieout import (
 )
 from .jv_emitter import (
     ACCOUNT_KEYS,
+    ROUNDING_KEY,
     JournalValidationError,
     build_accrual_journal,
     build_journals,
@@ -1117,6 +1122,11 @@ def _run_from_documents(
         )
     )
 
+    # H35-21: rows built before the book was read offer the year-end accrual
+    # as pending; when the book already holds it, say so instead.
+    restate_posted_accrual_rows(report.reconciliation, posted_check, report)
+    posted_ids = {p.txn_id for p in posted_check if p.status == ALREADY_POSTED}
+
     # H35-05: per-payout fuzzy match result reported above. `bank_matches`
     # is {} whenever matching could not run at all (see
     # `bank_match_unavailable`) -- in that case the engine.py
@@ -1227,7 +1237,23 @@ def _run_from_documents(
         accrual_line = ""
         accrual_why = "No accrual journal written: the accrual journal path was left blank."
         if accrual_journal_path:
-            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
+            # H35-22: the rounding line goes against the salary clearing
+            # account only; never a Drawings account of this entity.
+            _clearing = str(accounts.get(ROUNDING_KEY) or "").strip()
+            _drawings = {str(d).strip() for d in (entity_profile.drawings_accounts if entity_profile else [])}
+            if _clearing and (_clearing in _drawings or _clearing.split(":", 1)[-1] in _drawings):
+                return (f"ERROR: partner_comp_accounts['{ROUNDING_KEY}'] = {_clearing!r} is one of this "
+                        "entity's Drawings accounts and cannot take the rounding line. Nothing was written.")
+            # H35-22: size the rounding against the book (None when the
+            # accrual is already posted: a posted journal is final).
+            _gap = accrual_book_gap(
+                report, accounts, gnucash_path, report.financial_year,
+                posted_check=posted_check, bank_matches=bank_matches or None)
+            try:
+                accrual_journal, accrual_note, residual = build_accrual_journal(
+                    report, accounts, book_gap=_gap)
+            except JournalValidationError as e:
+                return f"ERROR: {e}"
             write_accrual_journal_csv(accrual_journal, accrual_journal_path)
             if accrual_journal is not None:
                 accrual_out = accrual_journal_path
@@ -1235,6 +1261,12 @@ def _run_from_documents(
                     f"  Accrual journal CSV: {accrual_journal_path} "
                     f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
                 )
+                if accrual_journal.txn_id in posted_ids:
+                    accrual_posted_note = (
+                        f"ALREADY POSTED: {accrual_journal.txn_id} is already in the book - "
+                        "do not import this file.")
+                    accrual_line += f"\n  {accrual_posted_note}"
+                    accrual_why = accrual_posted_note
             else:
                 accrual_line = f"  Accrual journal: not written. {accrual_note}"
                 accrual_why = f"No accrual journal written: {accrual_note}"
@@ -1282,6 +1314,13 @@ def _run_from_documents(
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
+        _already = [j.txn_id for j in journals if j.txn_id in posted_ids]
+        if _already:
+            monthly_posted_note = (
+                f"ALREADY POSTED: {', '.join(_already)} ({len(_already)} of {len(journals)}) "
+                "already in the book - do not import those.")
+            journal_line += f"\n  {monthly_posted_note}"
+            monthly_why = monthly_posted_note
         if accrual_line:
             journal_line += f"\n{accrual_line}"
 
@@ -1299,8 +1338,12 @@ def _run_from_documents(
                         "check, the bank match, the GnuCash tie-out and the 26AS "
                         "ownership check were NOT run with this entity's settings.")
     return ReplyWithOutputs("\n".join(lines), [
-        extra_output("journal_csv", monthly_out, "" if monthly_out else monthly_why),
-        extra_output("accrual_journal_csv", accrual_out, "" if accrual_out else accrual_why),
+        extra_output("journal_csv", monthly_out,
+                     (monthly_why if monthly_why.startswith("ALREADY POSTED") else "")
+                     if monthly_out else monthly_why),
+        extra_output("accrual_journal_csv", accrual_out,
+                     (accrual_why if accrual_why.startswith("ALREADY POSTED") else "")
+                     if accrual_out else accrual_why),
     ])
 
 

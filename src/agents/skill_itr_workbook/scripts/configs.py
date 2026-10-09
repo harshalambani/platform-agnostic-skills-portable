@@ -142,6 +142,8 @@ class EntityProfile:
     partner_comp_accounts: dict[str, str] = field(default_factory=dict)  # Partner
                                          # Compensation Reconciliation skill's GnuCash account
                                          # map: {account_key: "Full:Colon:Path"} for the eight
+                                         # (optional extra key "salary_clearing": the account the payout
+                                         # statements run through; takes the year-end rounding line, H35-22)
                                          # keys in skill_partner_comp_recon.jv_emitter.ACCOUNT_KEYS
                                          # ("bank", "tds_expense", "interest_on_capital",
                                          # "current_account", "capital_contribution",
