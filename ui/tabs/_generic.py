@@ -1520,12 +1520,18 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         if multi
                         else _entity_book.book_status_update
                     )
+                    # The box's own value goes in too, so a miss can tell a
+                    # registered book left over from another entity or FY
+                    # (cleared) from a hand-picked path (kept).
                     if len(wiring_inputs) == 2:
-                        def _handler(entity_val, fy_val):
-                            return fill(entity_val, fy_val), say(entity_val, fy_val)
+                        def _handler(entity_val, fy_val, current):
+                            cur = current if isinstance(current, str) else None
+                            return (fill(entity_val, fy_val, cur),
+                                    say(entity_val, fy_val, cur))
                     else:
-                        def _handler(entity_val):
-                            return fill(entity_val), say(entity_val)
+                        def _handler(entity_val, current):
+                            cur = current if isinstance(current, str) else None
+                            return fill(entity_val, None, cur), say(entity_val, None, cur)
                     return _handler
 
                 # Changing the FY must re-resolve too, or the box would keep
@@ -1533,7 +1539,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 for _trig in wiring_inputs:
                     _trig.change(
                         fn=_make_book_from_handler(),
-                        inputs=wiring_inputs,
+                        inputs=[*wiring_inputs, file_comp],
                         outputs=[file_comp, status_md],
                     )
 

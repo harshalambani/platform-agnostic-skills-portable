@@ -45,6 +45,7 @@ reading is wrong.
 """
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -218,3 +219,47 @@ def set_book(
 
     profile.books[fy] = str(path)
     entities_file.write_text(configs.dump_entities(entities), encoding="utf-8")
+
+
+def _norm_path(value: str | Path) -> str:
+    """Comparison key for a book path: trimmed, unquoted, normalised, and
+    case-folded on Windows. Pure string work -- the file is never opened."""
+    text = str(value).strip().strip('"').strip("'").strip()
+    if not text:
+        return ""
+    return os.path.normcase(os.path.normpath(text))
+
+
+def registered_book_paths(entities_path: str | Path | None = None) -> set[str]:
+    """Normalised paths of every book registered on any entity (the FY-keyed
+    `books` plus a legacy single `book:`). Read-only: it reads entities.yaml
+    and compares strings -- it never opens, copies or stats a book. Empty set
+    on any missing/malformed file."""
+    path = Path(entities_path) if entities_path is not None else _default_entities_path()
+    found: set[str] = set()
+    entities = _load_entities_tolerant(path)
+    for key, profile in entities.items():
+        for book in (profile.books or {}).values():
+            norm = _norm_path(book)
+            if norm:
+                found.add(norm)
+        legacy = _legacy_book_path(key, path)
+        if legacy is not None:
+            norm = _norm_path(legacy)
+            if norm:
+                found.add(norm)
+    return found
+
+
+def is_registered_book(
+    book_path: str | Path | None,
+    entities_path: str | Path | None = None,
+) -> bool:
+    """True when `book_path` is a registered book of ANY entity or FY.
+    Read-only string comparison; never opens or copies the book."""
+    if book_path is None:
+        return False
+    norm = _norm_path(book_path)
+    if not norm:
+        return False
+    return norm in registered_book_paths(entities_path)

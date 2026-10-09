@@ -957,11 +957,11 @@ def render(container_tab=None) -> None:
         gnucash_browse_btn = gr.Button("Browse...", scale=0, min_width=110)
 
     entity_dd.change(
-        fn=lambda entity_val: (
-            _entity_book.book_update(entity_val, None),
-            _entity_book.book_status_update(entity_val, None),
+        fn=lambda entity_val, current=None: (
+            _entity_book.book_update(entity_val, None, current),
+            _entity_book.book_status_update(entity_val, None, current),
         ),
-        inputs=[entity_dd],
+        inputs=[entity_dd, gnucash_file],
         outputs=[gnucash_file, book_status_md],
     )
 
