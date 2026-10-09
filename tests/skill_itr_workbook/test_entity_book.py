@@ -405,7 +405,7 @@ def test_book_from_source_select_renders_blank(monkeypatch):
 
 def test_non_book_from_select_keeps_preselect(monkeypatch):
     """The blank default is targeted: a plain `options_from: itr_entities`
-    select that no file input points at (e.g. ITR Workbook's `entity`) keeps
+    select that no file input points at keeps
     its existing pre-select-first-choice behaviour."""
     kwargs = _render_and_capture_entity_dropdown(
         monkeypatch, _make_options_from_skill(wire_book_from=False)

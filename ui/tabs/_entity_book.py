@@ -17,7 +17,7 @@ hand-written tab a single place to:
 
 `ui._book_registry.resolve_book()` is imported lazily inside the function
 bodies (not at module import time) -- this matches the existing pattern in
-`_generic._registry_book_fill()` and matters for PyInstaller-frozen builds,
+the generic book_from wiring and matters for PyInstaller-frozen builds,
 where eager imports at module load time can pull in more than the frozen
 build's import graph expects.
 """

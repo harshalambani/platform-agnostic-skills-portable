@@ -12,7 +12,7 @@ Use this as the first step when you have a pile of statement emails and PDFs fro
 ## Inputs
 
 - **Input folder (MSG files and/or PDFs)** (required) — accepts: A folder of .msg and/or .pdf files.
-  - A folder containing your .msg emails and/or statement PDFs (subfolders are fine).
+  - A folder containing your .msg emails and/or statement PDFs (subfolders are fine). Use Browse, or type or paste the path.
   - ⚠️ Point at the folder itself, not an individual file.
 - **PDF password(s), comma-separated (or leave blank for auto-detect)** (optional) — accepts: Text — one password, or several comma-separated. Optional.
   - Password(s) for protected PDFs. Leave blank to auto-try common patterns.
