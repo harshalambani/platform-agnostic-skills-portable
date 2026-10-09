@@ -43,7 +43,9 @@ def run(
     input_folder: str,
     output_folder: str,
     password: str = "",
-    financial_year: str = "",
+    period: str = "",
+    custom_start: str = "",
+    custom_end: str = "",
     config_path: str = "config.yaml",
     model_override: str = None,
 ) -> str:
@@ -77,17 +79,20 @@ def run(
 
     out_dir = Path(output_folder)
     failed: list[str] = []
+    unreadable = False
     try:
         failed = list(json.loads((out_dir / "sort_results.json").read_text(encoding="utf-8"))
                       .get("failed_decryption", []))
     except Exception:
-        pass
+        unreadable = True   # never a silent success: decrypt failures may be missing
 
     # CC-01: completeness check -- never say "successfully" over a gap.
+    from agents import period_picker
     from agents.skill_cc_sort import completeness
-    fy = (financial_year or "").strip() or completeness.default_financial_year()
     try:
-        report = completeness.check_folder(out_dir / "Decrypted_PDFs_Correct", fy, failed)
+        chosen = period_picker.resolve_period(period, custom_start, custom_end)
+        report = completeness.check_folder(out_dir / "Decrypted_PDFs_Correct", chosen, failed,
+                                           results_unreadable=unreadable)
     except ValueError as e:
         return f"ERROR: {e}"
     issues = report.issues

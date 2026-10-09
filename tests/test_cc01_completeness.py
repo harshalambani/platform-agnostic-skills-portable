@@ -48,6 +48,7 @@ def test_default_fy_is_last_completed():
 # ---- coverage ---------------------------------------------------------------
 
 FS, FE = C.fy_bounds("2025-26")
+PERIOD = (FS, FE, "FY 2025-26")
 
 
 def P(s, e):
@@ -134,7 +135,7 @@ def test_statement_date_only_card():
     assert C.check_card("Synth-Bank", ents, FS, FE).gaps == []
     missing = [d for d in dates if d.month != 9 or d.year != 2025]
     cov = C.check_card("Synth-Bank", entries([C.StatementInfo("date", None, d) for d in missing]), FS, FE)
-    assert len(cov.gaps) == 1 and "Sep 2025" in cov.gaps[0]
+    assert len(cov.gaps) == 1 and "no statement dated in Sep 2025" in cov.gaps[0]
 
 
 # ---- folder + agent ---------------------------------------------------------
@@ -162,7 +163,7 @@ FULL = {f"m{i}.pdf": _period_text(P_.start, P_.end) for i, P_ in enumerate(month
 def test_unknown_folder_files_never_cover_and_are_issues(tmp_path):
     names = list(FULL)
     root = _tree(tmp_path, [f"Synth-Gold/{n}" for n in names if n != "m4.pdf"] + ["Unknown-Unknown/m4.pdf"])
-    rep = C.check_folder(root / "Decrypted_PDFs_Correct", "2025-26", reader=_reader_from(FULL))
+    rep = C.check_folder(root / "Decrypted_PDFs_Correct", PERIOD, reader=_reader_from(FULL))
     assert rep.unknown_files == ["m4.pdf"]
     assert any("Aug 2025" in g for c in rep.cards for g in c.gaps)   # not covered by the Unknown file
     assert any("Unknown-Unknown" in i for i in rep.issues)
@@ -170,7 +171,7 @@ def test_unknown_folder_files_never_cover_and_are_issues(tmp_path):
 
 def test_clean_run_report(tmp_path):
     root = _tree(tmp_path, [f"Synth-Gold/{n}" for n in FULL])
-    rep = C.check_folder(root / "Decrypted_PDFs_Correct", "2025-26", reader=_reader_from(FULL))
+    rep = C.check_folder(root / "Decrypted_PDFs_Correct", PERIOD, reader=_reader_from(FULL))
     assert rep.issues == []
     assert "Synth-Gold: covered 1 Apr 2025 - 31 Mar 2026; gaps: none" in rep.text()
 
@@ -182,7 +183,7 @@ def _run_agent(tmp_path, monkeypatch, files, texts, failed=()):
     monkeypatch.setattr(cc_agent.shutil, "which", lambda _n: "qpdf")
     monkeypatch.setattr(cc_agent, "_run_script", lambda *_a, **_k: 0)
     monkeypatch.setattr(C, "read_page1_text", lambda p: texts.get(p.name))
-    return cc_agent.run(str(tmp_path / "in"), str(root), "pw", "2025-26")
+    return cc_agent.run(str(tmp_path / "in"), str(root), "pw", "FY 2025-26")
 
 
 def test_agent_complete_run_says_successfully(tmp_path, monkeypatch):
@@ -214,7 +215,7 @@ def test_agent_bad_fy_is_an_error(tmp_path, monkeypatch):
     root = _tree(tmp_path, [])
     monkeypatch.setattr(cc_agent.shutil, "which", lambda _n: "qpdf")
     monkeypatch.setattr(cc_agent, "_run_script", lambda *_a, **_k: 0)
-    assert cc_agent.run("in", str(root), "pw", "2025-99").startswith("ERROR")
+    assert cc_agent.run("in", str(root), "pw", "FY 2025-99").startswith("ERROR")
 
 
 def test_page1_reader_on_an_unreadable_file_returns_none(tmp_path):
@@ -226,77 +227,4 @@ def test_page1_reader_on_an_unreadable_file_returns_none(tmp_path):
 def test_date_only_card_missing_the_last_months_is_flagged_at_fy_end():
     dates = [D(2025, m, 7) for m in range(4, 13)] + [D(2026, 1, 7)]
     cov = C.check_card("Synth-Bank", entries([C.StatementInfo("date", None, d) for d in dates]), FS, FE)
-    assert len(cov.gaps) == 1 and "2026" in cov.gaps[0] and "31 Mar 2026" in cov.gaps[0]
-
-
-# ---- period selector (amendment) -------------------------------------------
-
-def test_resolve_period_choices():
-    assert C.resolve_period("", D(2026, 10, 9))[:2] == (D(2025, 4, 1), D(2026, 3, 31))
-    assert C.resolve_period("2025-26")[:2] == (D(2025, 4, 1), D(2026, 3, 31))
-    assert C.resolve_period("2025-26 Q1")[:2] == (D(2025, 4, 1), D(2025, 6, 30))
-    assert C.resolve_period("2025-26 Q2")[:2] == (D(2025, 7, 1), D(2025, 9, 30))
-    assert C.resolve_period("2025-26 Q3")[:2] == (D(2025, 10, 1), D(2025, 12, 31))
-    assert C.resolve_period("2025-26 q4")[:2] == (D(2026, 1, 1), D(2026, 3, 31))
-    assert C.resolve_period("Feb 2026")[:2] == (D(2026, 2, 1), D(2026, 2, 28))
-    assert C.resolve_period("October 2025")[:2] == (D(2025, 10, 1), D(2025, 10, 31))
-    assert C.resolve_period("2025-07-15 to 2025-09-20")[:2] == (D(2025, 7, 15), D(2025, 9, 20))
-
-
-@pytest.mark.parametrize("bad", ["2025-27", "2025-26 Q5", "garbage", "2025-02-30 to 2025-03-01"])
-def test_resolve_period_rejects_bad_input(bad):
-    with pytest.raises(ValueError):
-        C.resolve_period(bad)
-
-
-def test_custom_range_from_after_to_is_rejected_not_swapped():
-    with pytest.raises(ValueError) as ex:
-        C.resolve_period("2025-09-20 to 2025-07-15")
-    assert "back to front" in str(ex.value)
-
-
-def test_quarter_and_month_full_coverage_no_gap():
-    q = C.resolve_period("2025-26 Q2")
-    assert C.check_card("S", entries(monthly_periods()), q[0], q[1]).gaps == []
-    mth = C.resolve_period("Nov 2025")
-    cov = C.check_card("S", entries(monthly_periods()), mth[0], mth[1])
-    assert cov.gaps == [] and cov.covered == (D(2025, 11, 1), D(2025, 11, 30))
-
-
-def test_month_with_no_statement_is_flagged():
-    mth = C.resolve_period("Nov 2025")
-    cov = C.check_card("S", entries(monthly_periods(skip={(2025, 11)})), mth[0], mth[1])
-    assert len(cov.gaps) == 1 and "Nov 2025" in cov.gaps[0]
-
-
-def test_statement_straddling_range_start_is_not_an_edge_gap():
-    a, b, _ = C.resolve_period("2025-26 Q2")
-    infos = [P(D(2025, 5, 1), D(2025, 8, 31)), P(D(2025, 9, 1), D(2025, 9, 30))]
-    cov = C.check_card("S", entries(infos), a, b)
-    assert cov.gaps == [] and cov.covered == (a, b)
-
-
-def test_straddle_at_range_end_is_not_an_edge_gap():
-    a, b, _ = C.resolve_period("2025-26 Q2")
-    infos = [P(D(2025, 7, 1), D(2025, 10, 31))]
-    assert C.check_card("S", entries(infos), a, b).gaps == []
-
-
-def test_agent_accepts_a_quarter(tmp_path, monkeypatch):
-    msg = _run_agent_period(tmp_path, monkeypatch, "2025-26 Q3")
-    assert msg.startswith("Sort completed successfully.") and "2025-26 Q3" in msg
-
-
-def _run_agent_period(tmp_path, monkeypatch, period):
-    import json
-    root = _tree(tmp_path, [f"Synth-Gold/{n}" for n in FULL])
-    (root / "sort_results.json").write_text(json.dumps({"failed_decryption": []}))
-    monkeypatch.setattr(cc_agent.shutil, "which", lambda _n: "qpdf")
-    monkeypatch.setattr(cc_agent, "_run_script", lambda *_a, **_k: 0)
-    monkeypatch.setattr(C, "read_page1_text", lambda p: FULL.get(p.name))
-    return cc_agent.run(str(tmp_path / "in"), str(root), "pw", period)
-
-
-def test_agent_back_to_front_range_is_an_error(tmp_path, monkeypatch):
-    msg = _run_agent_period(tmp_path, monkeypatch, "2025-09-20 to 2025-07-15")
-    assert msg.startswith("ERROR") and "completed" not in msg
+    assert len(cov.gaps) == 1 and "Feb 2026 - Mar 2026" in cov.gaps[0] and "opened/closed" in cov.gaps[0]

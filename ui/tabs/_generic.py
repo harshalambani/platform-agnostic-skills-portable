@@ -217,7 +217,7 @@ def _entity_initial_value(skill, entity_name):
 # They may lead a form (UI-15: Entity first) but must never name the output
 # file, or every output would be called after the taxpayer / the year instead
 # of after the statement or document.
-_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years"})
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -294,7 +294,7 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
 # They may lead a form (UI-15: Entity first) but must never name the output
 # file, or every output would be called after the taxpayer / the year instead
 # of after the statement or document.
-_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years"})
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -323,6 +323,13 @@ def _output_name_source(skill, input_map: dict[str, str]) -> str:
 
 
 
+def _report_period_options() -> list[str]:
+    """FY / quarter / custom choices for a `period` select (options_from:
+    report_periods). Computed from today, so it never goes stale each April."""
+    from agents.period_picker import period_options
+    return period_options()
+
+
 def _options_from_banks() -> list[tuple[str, str]]:
     """(display_name, display_name) pairs from agents.banks.discover(), for
     the GnuCash Import Pipeline skill's `bank` dropdown (options_from:
@@ -349,6 +356,7 @@ _OPTIONS_FROM_RESOLVERS = {
     "itr_entities": _options_from_itr_entities,
     "itr_ay_years": _options_from_itr_ay_years,
     "banks": _options_from_banks,
+    "report_periods": lambda: [(o, o) for o in _report_period_options()],
 }
 
 

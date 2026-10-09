@@ -17,9 +17,15 @@ Use this as the first step when you have a pile of statement emails and PDFs fro
 - **PDF password(s), comma-separated (or leave blank for auto-detect)** (optional) — accepts: Text — one password, or several comma-separated. Optional.
   - Password(s) for protected PDFs. Leave blank to auto-try common patterns.
   - ⚠️ If decryption fails, supply the exact password here; auto-detect only covers common formats.
-- **Period for the completeness check: 2025-26, 2025-26 Q3, Oct 2025, or 2025-07-15 to 2025-09-20 (blank = last completed financial year)** (optional) — accepts: 2025-26, or 2025-26 Q1 to Q4, or a month such as Oct 2025, or 2025-07-15 to 2025-09-20. Optional.
-  - The period the completeness check covers: a financial year, a quarter of it, one month, or a custom date range. Leave blank for the last completed financial year.
-  - ⚠️ Statements outside the period are ignored; one that straddles an edge counts for the part inside. From must not be after to.
+- **Completeness check period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a quarter of a FY, or a custom date range. The first choice is the last completed FY.
+  - Which period the completeness check covers. Indian financial year runs 1 Apr to 31 Mar; Q1 is Apr-Jun, Q4 is Jan-Mar.
+  - ⚠️ For a single month, choose 'Custom date range' and enter the first and last day below.
+- **Custom start date (YYYY-MM-DD) -- only for 'Custom date range'** (optional) — accepts: YYYY-MM-DD.
+  - Start date, only used when 'Custom date range' is selected.
+  - ⚠️ Both start and end are required for a custom range, and start must not be after end.
+- **Custom end date (YYYY-MM-DD) -- only for 'Custom date range'** (optional) — accepts: YYYY-MM-DD.
+  - End date, only used when 'Custom date range' is selected.
+  - ⚠️ Both start and end are required for a custom range.
 
 ## How to run
 

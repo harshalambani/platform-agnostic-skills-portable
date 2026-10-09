@@ -13,6 +13,10 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from agents.period_picker import (  # noqa: F401  (re-exported for callers and tests)
+    default_financial_year, fy_bounds, resolve_period,
+)
+
 M = r'(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*'
 
 # (name, regex, strptime format). Tried in order. Two groups = (start, end).
@@ -87,68 +91,8 @@ def read_page1_text(pdf_path) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Financial year
+# Period (shared picker: agents/period_picker.py)
 # ---------------------------------------------------------------------------
-
-def default_financial_year(today: date | None = None) -> str:
-    """The last COMPLETED FY, e.g. "2025-26" for any day from 1 Apr 2026."""
-    today = today or date.today()
-    start = today.year - 1 if today >= date(today.year, 4, 1) else today.year - 2
-    return f"{start}-{(start + 1) % 100:02d}"
-
-
-def fy_bounds(fy: str) -> tuple[date, date]:
-    m = re.fullmatch(r"\s*(\d{4})-(\d{2})\s*", fy or "")
-    if not m or (int(m.group(1)) + 1) % 100 != int(m.group(2)):
-        raise ValueError(f"financial year {fy!r} is not in 'YYYY-YY' form (e.g. 2025-26)")
-    y = int(m.group(1))
-    return date(y, 4, 1), date(y + 1, 3, 31)
-
-
-_QUARTERS = {"Q1": (4, 6), "Q2": (7, 9), "Q3": (10, 12), "Q4": (1, 3)}
-
-
-def resolve_period(spec: str | None, today: date | None = None) -> tuple[date, date, str]:
-    """Turn the user's period choice into (start_date, end_date, label).
-
-    ""                         -> last completed FY
-    "2025-26"                  -> the FY
-    "2025-26 Q3"               -> a quarter of that FY (Q1 Apr-Jun ... Q4 Jan-Mar)
-    "Oct 2025" / "October 2025"-> a single month
-    "2025-07-15 to 2025-09-20" -> custom range (ISO dates, from <= to)
-    """
-    s = (spec or "").strip()
-    if not s:
-        s = default_financial_year(today)
-    m = re.fullmatch(r"(\d{4}-\d\d)\s+(Q[1-4])", s, flags=re.I)
-    if m:
-        fs, _fe = fy_bounds(m.group(1))
-        q = m.group(2).upper()
-        a, b = _QUARTERS[q]
-        ya = fs.year if a >= 4 else fs.year + 1
-        yb = fs.year if b >= 4 else fs.year + 1
-        return (date(ya, a, 1), date(yb, b, calendar.monthrange(yb, b)[1]),
-                f"FY{m.group(1)} {q}")
-    m = re.fullmatch(r"(\d{4}-\d\d-\d\d)\s+to\s+(\d{4}-\d\d-\d\d)", s, flags=re.I)
-    if m:
-        try:
-            a = datetime.strptime(m.group(1), "%Y-%m-%d").date()
-            b = datetime.strptime(m.group(2), "%Y-%m-%d").date()
-        except ValueError:
-            raise ValueError(f"custom range {s!r} has an impossible date") from None
-        if a > b:
-            raise ValueError(f"custom range is back to front: from {a.isoformat()} is after "
-                             f"to {b.isoformat()}. Swap them yourself; they are not swapped for you.")
-        return a, b, f"{_fmt(a)} - {_fmt(b)}"
-    mo = parse_date("1 " + s, "%d %b %Y")
-    if mo:
-        return mo, date(mo.year, mo.month, calendar.monthrange(mo.year, mo.month)[1]), mo.strftime("%b %Y")
-    if re.fullmatch(r"\d{4}-\d\d", s):
-        a, b = fy_bounds(s)
-        return a, b, f"FY{s}"
-    raise ValueError(f"period {s!r} not understood. Use a financial year (2025-26), a quarter "
-                     "(2025-26 Q3), a month (Oct 2025) or a range (2025-07-15 to 2025-09-20).")
-
 
 def _month_back(d: date) -> date:
     y, mo = (d.year, d.month - 1) if d.month > 1 else (d.year - 1, 12)
@@ -172,6 +116,7 @@ class CardCoverage:
     outside_fy: int = 0
     duplicates: list[str] = field(default_factory=list)      # "B duplicates A"
     not_statements: list[str] = field(default_factory=list)  # file names
+    same_month: list[str] = field(default_factory=list)      # listed, never a gap
 
     def line(self) -> str:
         span = f"{_fmt(self.covered[0])} - {_fmt(self.covered[1])}" if self.covered else "nothing in this FY"
@@ -186,12 +131,65 @@ def _interval(info: StatementInfo) -> tuple[date, date]:
     return _month_back(info.end) + timedelta(days=1), info.end
 
 
+def _months(start: date, end: date) -> list[tuple[int, int]]:
+    out, y, m = [], start.year, start.month
+    while (y, m) <= (end.year, end.month):
+        out.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return out
+
+
+def _ym(ym: tuple[int, int]) -> str:
+    return date(ym[0], ym[1], 1).strftime("%b %Y")
+
+
+def _check_by_month(cov: CardCoverage, kept, start: date, end: date) -> CardCoverage:
+    """Cards that only print a statement date: one statement is expected in each
+    calendar month of the range. The date may move within its month (10th, then
+    15th) -- that is not a gap. Two in one month are listed, not a gap."""
+    needed = _months(start, end)
+    by_month: dict[tuple[int, int], list[tuple[str, date]]] = {}
+    for name, info in kept:
+        ym = (info.end.year, info.end.month)
+        if ym in needed:
+            by_month.setdefault(ym, []).append((name, info.end))
+        else:
+            cov.outside_fy += 1
+    cov.statements = sum(len(v) for v in by_month.values())
+    for ym, items in sorted(by_month.items()):
+        if len(items) > 1:
+            cov.same_month.append(f"{_ym(ym)}: " + ", ".join(n for n, _d in items))
+    present = [ym for ym in needed if ym in by_month]
+    if not present:
+        cov.gaps.append(f"no statement covers {_fmt(start)} - {_fmt(end)} "
+                        "- card opened/closed, or statement missing?")
+        return cov
+    cov.covered = (max(start, date(present[0][0], present[0][1], 1)),
+                   min(end, date(present[-1][0], present[-1][1],
+                                 calendar.monthrange(*present[-1])[1])))
+    i = 0
+    while i < len(needed):
+        if needed[i] in by_month:
+            i += 1
+            continue
+        j = i
+        while j + 1 < len(needed) and needed[j + 1] not in by_month:
+            j += 1
+        span = _ym(needed[i]) if i == j else f"{_ym(needed[i])} - {_ym(needed[j])}"
+        edge = i == 0 or j == len(needed) - 1
+        cov.gaps.append(f"no statement dated in {span}"
+                        + (" - card opened/closed, or statement missing?" if edge else ""))
+        i = j + 1
+    return cov
+
+
 def check_card(card: str, entries: list[tuple[str, StatementInfo | None]],
                fy_start: date, fy_end: date) -> CardCoverage:
     """entries: (file name, StatementInfo or None for "not a statement")."""
     cov = CardCoverage(card=card)
     seen: dict[tuple, str] = {}
     intervals: list[tuple[date, date]] = []
+    kept: list[tuple[str, StatementInfo]] = []
     last_date_only: date | None = None  # latest date-only statement date in the FY
     for name, info in sorted(entries, key=lambda e: e[0]):
         if info is None:
@@ -206,6 +204,11 @@ def check_card(card: str, entries: list[tuple[str, StatementInfo | None]],
         if e < fy_start or s > fy_end:
             cov.outside_fy += 1
             continue
+        kept.append((name, info))
+    if kept and all(i.kind == "date" for _n, i in kept):
+        return _check_by_month(cov, kept, fy_start, fy_end)
+    for _n, info in kept:
+        s, e = _interval(info)
         intervals.append((s, e))
         if info.kind == "date":
             last_date_only = max(last_date_only or e, e)
@@ -249,10 +252,20 @@ class CompletenessReport:
     cards: list[CardCoverage]
     unknown_files: list[str]
     failed_decryption: list[str]
+    results_unreadable: bool = False
+    card_folders_found: int = 0
 
     @property
     def issues(self) -> list[str]:
-        out = [f"could not decrypt: {n}" for n in self.failed_decryption]
+        out = []
+        if self.results_unreadable:
+            out.append("could not read the decrypt results - decrypt failures may be "
+                       "missing from this report")
+        out += [f"could not decrypt: {n}" for n in self.failed_decryption]
+        if not self.cards:
+            out.append("no card folders found in Decrypted_PDFs_Correct - nothing was checked")
+        elif not any(c.statements or c.outside_fy for c in self.cards):
+            out.append("no statements found in any card folder - nothing was checked")
         out += [f"sorted to {UNKNOWN_FOLDER} (bank/card not recognised): {n}"
                 for n in self.unknown_files]
         for c in self.cards:
@@ -267,6 +280,10 @@ class CompletenessReport:
         if nots:
             lines.append("Not a statement (no period or statement date found; never counted):")
             lines += [f"  {card}: {n}" for card, n in nots]
+        sm = [(c.card, d) for c in self.cards for d in c.same_month]
+        if sm:
+            lines.append("Several statements in one month (listed; not a gap):")
+            lines += [f"  {card}: {d}" for card, d in sm]
         dups = [(c.card, d) for c in self.cards for d in c.duplicates]
         if dups:
             lines.append("Duplicates (same period; counted once):")
@@ -274,10 +291,12 @@ class CompletenessReport:
         return "\n".join(lines)
 
 
-def check_folder(decrypted_dir, fy: str, failed_decryption=(), reader=None) -> CompletenessReport:
-    """Read every PDF under <decrypted_dir>/<card folder>/ and check coverage."""
+def check_folder(decrypted_dir, period, failed_decryption=(), reader=None,
+                 results_unreadable: bool = False) -> CompletenessReport:
+    """Read every PDF under <decrypted_dir>/<card folder>/ and check coverage.
+    period is (start, end, label) from period_picker.resolve_period."""
     reader = reader or read_page1_text
-    fy_start, fy_end, label = resolve_period(fy)
+    fy_start, fy_end, label = period
     root = Path(decrypted_dir)
     cards: list[CardCoverage] = []
     unknown: list[str] = []
@@ -289,4 +308,5 @@ def check_folder(decrypted_dir, fy: str, failed_decryption=(), reader=None) -> C
                 continue
             entries = [(p.name, classify_text(reader(p))) for p in pdfs]
             cards.append(check_card(folder.name, entries, fy_start, fy_end))
-    return CompletenessReport(label, cards, unknown, list(failed_decryption))
+    return CompletenessReport(label, cards, unknown, list(failed_decryption),
+                              results_unreadable, len(cards))
