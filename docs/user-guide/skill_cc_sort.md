@@ -17,12 +17,22 @@ Use this as the first step when you have a pile of statement emails and PDFs fro
 - **PDF password(s), comma-separated (or leave blank for auto-detect)** (optional) — accepts: Text — one password, or several comma-separated. Optional.
   - Password(s) for protected PDFs. Leave blank to auto-try common patterns.
   - ⚠️ If decryption fails, supply the exact password here; auto-detect only covers common formats.
+- **Completeness check period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a quarter of a FY, or a custom date range. The first choice is the last completed FY.
+  - Which period the completeness check covers. Indian financial year runs 1 Apr to 31 Mar; Q1 is Apr-Jun, Q4 is Jan-Mar.
+  - ⚠️ For a single month, choose 'Custom date range' and enter the first and last day below.
+- **Custom start date (YYYY-MM-DD) -- only for 'Custom date range'** (optional) — accepts: YYYY-MM-DD.
+  - Start date, only used when 'Custom date range' is selected.
+  - ⚠️ Both start and end are required for a custom range, and start must not be after end.
+- **Custom end date (YYYY-MM-DD) -- only for 'Custom date range'** (optional) — accepts: YYYY-MM-DD.
+  - End date, only used when 'Custom date range' is selected.
+  - ⚠️ Both start and end are required for a custom range.
 
 ## How to run
 
 1. Select the folder holding your statement emails / PDFs.
 2. Optionally enter PDF password(s); leave blank to auto-detect.
-3. Click Run, then open the output folder.
+3. Optionally enter the financial year to check (default: the last completed one).
+4. Click Run, then open the output folder.
 
 ## Output
 

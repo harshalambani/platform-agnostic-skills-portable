@@ -383,10 +383,14 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Input folder (MSG files and/or PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing your .msg emails and/or statement PDFs (subfolders are fine). ⚠️ Point at the folder itself, not an individual file.">ℹ️</span><br><span class="fmt">accepts: A folder of .msg and/or .pdf files.</span></li>
 <li><b>PDF password(s), comma-separated (or leave blank for auto-detect)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Password(s) for protected PDFs. Leave blank to auto-try common patterns. ⚠️ If decryption fails, supply the exact password here; auto-detect only covers common formats.">ℹ️</span><br><span class="fmt">accepts: Text — one password, or several comma-separated. Optional.</span></li>
+<li><b>Completeness check period (Indian FY = 1 Apr to 31 Mar)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which period the completeness check covers. Indian financial year runs 1 Apr to 31 Mar; Q1 is Apr-Jun, Q4 is Jan-Mar. ⚠️ For a single month, choose &#x27;Custom date range&#x27; and enter the first and last day below.">ℹ️</span><br><span class="fmt">accepts: A FY, a quarter of a FY, or a custom date range. The first choice is the last completed FY.</span></li>
+<li><b>Custom start date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="Start date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range, and start must not be after end.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Custom end date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="End date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Select the folder holding your statement emails / PDFs.</li>
 <li>Optionally enter PDF password(s); leave blank to auto-detect.</li>
+<li>Optionally enter the financial year to check (default: the last completed one).</li>
 <li>Click Run, then open the output folder.</li>
 </ol>
 <h3>Output</h3>

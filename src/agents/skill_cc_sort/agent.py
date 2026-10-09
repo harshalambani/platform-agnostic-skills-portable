@@ -6,6 +6,7 @@ runpy.run_path() to avoid re-launching the entire exe as a child process; in
 source mode we use subprocess. Pre-flight dependency checks are deterministic
 (no language model).
 """
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -42,6 +43,9 @@ def run(
     input_folder: str,
     output_folder: str,
     password: str = "",
+    period: str = "",
+    custom_start: str = "",
+    custom_end: str = "",
     config_path: str = "config.yaml",
     model_override: str = None,
 ) -> str:
@@ -73,11 +77,42 @@ def run(
     if rc != 0:
         return f"Sort failed with exit code {rc}. Check output above for details."
 
+    out_dir = Path(output_folder)
+    failed: list[str] = []
+    unreadable = False
+    try:
+        failed = list(json.loads((out_dir / "sort_results.json").read_text(encoding="utf-8"))
+                      .get("failed_decryption", []))
+    except Exception:
+        unreadable = True   # never a silent success: decrypt failures may be missing
+
+    # CC-01: completeness check -- never say "successfully" over a gap.
+    from agents import period_picker
+    from agents.skill_cc_sort import completeness
+    try:
+        chosen = period_picker.resolve_period(period, custom_start, custom_end)
+        report = completeness.check_folder(out_dir / "Decrypted_PDFs_Correct", chosen, failed,
+                                           results_unreadable=unreadable)
+    except ValueError as e:
+        return f"ERROR: {e}"
+    issues = report.issues
+    body = report.text()
+    try:
+        (out_dir / "completeness_report.txt").write_text(body + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+    if issues:
+        head = (f"Sort completed with {len(issues)} issue(s):\n"
+                + "\n".join(f"  - {i}" for i in issues))
+    else:
+        head = "Sort completed successfully."
     msg = (
-        f"Sort completed successfully.\n"
+        f"{head}\n"
         f"Input:  {input_folder}\n"
         f"Output: {output_folder}\n"
-        f"Check the Decrypted_PDFs_Correct/ folder in the output location."
+        f"Check the Decrypted_PDFs_Correct/ folder in the output location.\n\n"
+        f"{body}"
     )
     if notes:
         msg += "\n\n" + "\n".join(notes)
