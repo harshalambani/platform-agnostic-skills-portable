@@ -680,6 +680,9 @@ def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict
     for x in declared:
         e = reported.get(x.key) or {}
         p = e.get("path")
+        # H35-21: a note on a WRITTEN file (e.g. "already in the book - do not
+        # import") is shown right next to that file and its button.
+        tail = f" -- {e['note']}" if (p and e.get("note")) else ""
         if not p:
             not_written.append(f"- **{x.label}:** not written. "
                                f"{e.get('note') or 'This run did not report writing it.'}")
@@ -697,13 +700,13 @@ def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict
                 updates.append(off())
             elif root is None or not rp.is_relative_to(root):
                 written.append(f"- **{x.label}:** {rp} (saved outside the outputs folder, "
-                               "so there is no download button for it)")
+                               f"so there is no download button for it){tail}")
                 paths.append(str(rp))
                 updates.append(off())
             else:
                 served = _config.download_staging_dir() / rp.name
                 shutil.copy2(rp, served)
-                written.append(f"- **{x.label}:** {rp}")
+                written.append(f"- **{x.label}:** {rp}{tail}")
                 paths.append(str(rp))
                 updates.append(gr.update(value=str(served.resolve()), interactive=True))
         except Exception as ex:  # noqa: BLE001

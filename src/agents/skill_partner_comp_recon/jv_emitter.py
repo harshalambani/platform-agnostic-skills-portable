@@ -63,6 +63,8 @@ from pathlib import Path
 
 from .engine import (
     RECONCILIATION_TOLERANCE,
+    WITHIN_TOLERANCE_LIMIT,
+    booked_current_account_closing,
     residual_current_account_check,
     year_end_accrual_diff,
     fy_prefix,
@@ -100,6 +102,14 @@ ACCOUNT_KEYS = (
     "capital_contribution", "medical_expense", "remuneration_income",
     "share_of_profit_income",
 )
+
+
+# H35-22: OPTIONAL account key (not in ACCOUNT_KEYS, so never required and
+# never given a tie-out row): the salary clearing account the payout
+# statements run through. It is the counter-account of the year-end
+# current-account rounding line, and is used for nothing else.
+ROUNDING_KEY = "salary_clearing"
+ROUNDING_MIN = 0.005
 
 
 class JournalValidationError(ValueError):
@@ -442,7 +452,7 @@ def build_journals(report, accounts: dict, bank_matches: dict | None = None) -> 
     return journals
 
 
-def build_accrual_journal(report, accounts: dict) -> tuple:
+def build_accrual_journal(report, accounts: dict, book_gap=None) -> tuple:
     """H35-02: the year-end share-of-profit accrual journal.
 
     The L5 LLP Statement of Account is the final authority for the year's
@@ -524,18 +534,28 @@ def build_accrual_journal(report, accounts: dict) -> tuple:
     )
     diff = year_end_accrual_diff(llp_record, monthly)
 
-    if abs(diff) <= RECONCILIATION_TOLERANCE:
-        return None, (
-            f"L5 'Profit Share for the Year' ({l5_profit_share:,.2f}) already "
-            f"ties to the monthly total already booked ({booked_sop:,.2f}) "
-            f"within Rs {RECONCILIATION_TOLERANCE:.2f} -- no accrual journal needed."
-        ), residual_current_account_check(report, 0.0)
-    if diff < 0:
+    if diff < -RECONCILIATION_TOLERANCE:
         return None, (
             f"FLAGGED, NOT BOOKED: the monthly total already booked "
             f"({booked_sop:,.2f}) EXCEEDS the L5 'Profit Share for the Year' "
             f"({l5_profit_share:,.2f}) by {abs(diff):,.2f}. This is not reversed "
             "automatically -- review manually before any correcting entry."
+        ), residual_current_account_check(report, 0.0)
+
+    accrual_amt = diff if diff > RECONCILIATION_TOLERANCE else 0.0
+
+    # H35-22: rounding follows the Statement of Account. Whatever is left on
+    # the current account after the accrual, if non-zero and within the Rs 10
+    # band, is booked as ONE separate line against the salary clearing
+    # account so the account closes at exactly the statement figure.
+    rounding_dr, rounding_note = _rounding_amount(report, accounts, accrual_amt, book_gap)
+
+    if accrual_amt == 0.0 and rounding_dr == 0.0:
+        return None, (
+            f"L5 'Profit Share for the Year' ({l5_profit_share:,.2f}) already "
+            f"ties to the monthly total already booked ({booked_sop:,.2f}) "
+            f"within Rs {RECONCILIATION_TOLERANCE:.2f} -- no accrual journal needed."
+            + (f" {rounding_note}" if rounding_note else "")
         ), residual_current_account_check(report, 0.0)
 
     fy = report.financial_year
@@ -569,22 +589,98 @@ def build_accrual_journal(report, accounts: dict) -> tuple:
     ctx = "year-end share-of-profit accrual (H35-02, per L5)"
 
     splits: list = []
-    _add_leg(splits, accounts, "current_account", ctx, diff)
-    _add_leg(splits, accounts, "share_of_profit_income", ctx, -diff)
+    if accrual_amt:
+        _add_leg(splits, accounts, "current_account", ctx, accrual_amt)
+        _add_leg(splits, accounts, "share_of_profit_income", ctx, -accrual_amt)
+    if rounding_dr:
+        rctx = "current-account rounding to the L5 statement (H35-22)"
+        _add_leg(splits, accounts, "current_account", rctx, rounding_dr)
+        _add_leg(splits, accounts, ROUNDING_KEY, rctx, -rounding_dr)
 
+    what = []
+    if accrual_amt:
+        what.append("year-end share-of-profit accrual per L5")
+    if rounding_dr:
+        what.append(f"current-account rounding to L5 statement (Rs {rounding_dr:+,.2f})")
+    label = " + ".join(what)
     if firm_name:
-        description = f"{firm_name} - year-end share-of-profit accrual per L5 (FY{fy})"
+        description = f"{firm_name} - {label} (FY{fy})"
     else:
-        description = f"Year-end share-of-profit accrual per L5 (FY{fy})"
+        description = f"{label[:1].upper()}{label[1:]} (FY{fy})"
 
     txn_id = _txn_id(fy_pfx, firm_name, "ACCR")
     journal = Journal(txn_id=txn_id, date=date, description=description, splits=splits)
     _check_balanced(journal)
-    return journal, (
-        f"Accrual of {diff:,.2f} booked (Dr current account / Cr share of "
-        f"profit income): L5 'Profit Share for the Year' {l5_profit_share:,.2f} "
-        f"vs {booked_sop:,.2f} already booked by the monthly journal."
-    ), residual_current_account_check(report, diff)
+    parts = []
+    if accrual_amt:
+        parts.append(
+            f"Accrual of {accrual_amt:,.2f} booked (Dr current account / Cr share of "
+            f"profit income): L5 'Profit Share for the Year' {l5_profit_share:,.2f} "
+            f"vs {booked_sop:,.2f} already booked by the monthly journal."
+        )
+    if rounding_dr:
+        side = "Dr" if rounding_dr > 0 else "Cr"
+        other = "Cr" if rounding_dr > 0 else "Dr"
+        parts.append(
+            f"Rounding line added: {side} current account / {other} salary clearing "
+            f"account {abs(rounding_dr):,.2f}, so the current account closes at the "
+            "statement figure."
+        )
+    if rounding_note:
+        parts.append(rounding_note)
+    return journal, " ".join(parts), residual_current_account_check(
+        report, accrual_amt + rounding_dr)
+
+
+def _rounding_amount(report, accounts: dict, accrual_amt: float, book_gap) -> tuple:
+    """H35-22: (signed Dr amount for the current account, note). 0.0 when no
+    rounding line applies. Applies only when the residual left after the
+    accrual is non-zero and within WITHIN_TOLERANCE_LIMIT (Rs 10); above
+    that it stays a reported variance, never booked. `book_gap`, when the
+    caller has the GnuCash book, is the statement less what the book (plus
+    this run's other unposted journals and the accrual) already shows, so a
+    rounding hand-booked earlier is never added a second time; None falls
+    back to the figure implied by the statement and the monthly payouts."""
+    llp_record = getattr(report, "llp_record", None)
+    if book_gap is not None:
+        residual = round(float(book_gap), 2)
+    else:
+        closing = llp_record.get("current_closing_balance") if llp_record else None
+        booked = booked_current_account_closing(getattr(report, "monthly", None) or [], llp_record)
+        if closing is None or booked is None:
+            return 0.0, ""
+        residual = round(closing - (booked + accrual_amt), 2)
+    if abs(residual) < ROUNDING_MIN:
+        return 0.0, ""
+    if abs(residual) > WITHIN_TOLERANCE_LIMIT + 1e-9:
+        return 0.0, ""
+    clearing = accounts.get(ROUNDING_KEY)
+    if not isinstance(clearing, str) or not clearing.strip():
+        return 0.0, (
+            f"Rounding of Rs {abs(residual):,.2f} to the statement was NOT booked: "
+            f"no accounts.{ROUNDING_KEY} (the salary clearing account) is configured."
+        )
+    _check_rounding_target(accounts, clearing)
+    return residual, ""
+
+
+_BLOCKED_ROUNDING_WORDS = ("capital", "drawing")
+
+
+def _check_rounding_target(accounts: dict, clearing: str) -> None:
+    """The rounding counter-account is never a capital or Drawings account,
+    nor the current account itself."""
+    path = _strip_root(clearing)
+    others = {
+        _strip_root(accounts[k]) for k in ("current_account", "capital_contribution")
+        if isinstance(accounts.get(k), str) and accounts[k].strip()
+    }
+    segs = [x.strip().lower() for x in path.split(":")]
+    if path in others or any(w in seg for seg in segs for w in _BLOCKED_ROUNDING_WORDS):
+        raise JournalValidationError(
+            f"accounts.{ROUNDING_KEY} = {clearing!r} cannot be a capital, Drawings or "
+            "current account: the rounding line must go to the salary clearing account."
+        )
 
 
 def write_accrual_journal_csv(journal, output_path: str) -> None:

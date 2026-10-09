@@ -58,6 +58,7 @@ from .engine import (
 )
 from .jv_emitter import (
     ACCOUNT_KEYS,
+    ROUNDING_KEY,
     JournalValidationError,
     build_accrual_journal,
     build_journals,
@@ -158,6 +159,23 @@ def _journals_safely(report, accounts: dict, bank_matches: dict | None = None):
         return build_journals(report, accounts or {}, bank_matches=bank_matches), None
     except JournalValidationError as e:
         return None, f"could not build this run's implied journal: {e}"
+
+
+def _accrual_journal_safely(report, accounts: dict, book_gap=None):
+    """H35-21: the year-end ACCR journal this run would write, or None. Never
+    raises. build_journals() returns only the monthly (and opening-reclass)
+    journals, so every check that must cover "every journal this run writes"
+    adds this one explicitly."""
+    try:
+        journal, _note, _res = build_accrual_journal(report, accounts or {}, book_gap=book_gap)
+    except JournalValidationError:
+        return None
+    return journal
+
+
+def accrual_txn_id(report) -> str:
+    return journal_txn_id(
+        fy_prefix(report.financial_year), getattr(report, "firm_name", "") or "", "ACCR")
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +295,20 @@ def build_balance_tieout(
     journals, err = _journals_safely(report, accounts, bank_matches=bank_matches)
     if err:
         return _blank(err)
+
+    # H35-21: a year-end accrual that is already in the book is part of what
+    # the book holds, so it belongs on the computed side too -- otherwise the
+    # whole accrual shows as a false VARIANCE on current_account and
+    # share_of_profit_income. Only a definite ALREADY POSTED counts; an
+    # unposted or partial one stays out, exactly as before.
+    _accr = _accrual_journal_safely(report, accounts)
+    if _accr is not None and all(j.txn_id != _accr.txn_id for j in journals):
+        _accr_status = {p.txn_id: p.status for p in (posted_check or [])}.get(_accr.txn_id)
+        if _accr_status is None and posted_check is None:
+            _accr_status = (ALREADY_POSTED if any(
+                t.num and t.num == _accr.txn_id for t in book.transactions) else None)
+        if _accr_status == ALREADY_POSTED:
+            journals = list(journals) + [_accr]
 
     colon_paths = _colon_paths(book)
     path_to_guid: dict[str, str] = {}
@@ -678,7 +710,48 @@ def build_balance_tieout(
     return _name_excluded_months(results, row_path, report, accounts, bank_matches)
 
 
-def _unposted_accrual_journal(report, accounts: dict, book, year_key: str):
+def _without_rounding(accounts: dict) -> dict:
+    return {k: v for k, v in (accounts or {}).items() if k != ROUNDING_KEY}
+
+
+def _current_account_book_gap(report, accounts: dict, book, year_key: str,
+                              journals, status: dict):
+    """H35-22: the Dr amount that would make the current account in the book
+    close exactly at the statement figure, counting what the book already
+    holds, this run's unposted monthly journals and the (rounding-free)
+    year-end accrual. None when it cannot be worked out. A rounding already
+    booked (by hand or by a posted ACCR) is inside the book figure, so it is
+    never asked for a second time."""
+    llp = getattr(report, "llp_record", None) or {}
+    stmt = llp.get("current_closing_balance")
+    path = (accounts or {}).get("current_account")
+    if stmt is None or not isinstance(path, str) or not path.strip():
+        return None
+    stripped = _jv_strip_root(path)
+    colon = _colon_paths(book)
+    guid = next((g for g, pth in colon.items() if pth == stripped), None)
+    if guid is None:
+        return None
+    end = parse_gnucash.fy_window(year_key)[1]
+    total_raw = sum(float(sp.value) for t in book.transactions if t.date_posted <= end
+                    for sp in t.splits if sp.account_guid == guid)
+    for j in (journals or []):
+        if status.get(j.txn_id) == NOT_POSTED:
+            total_raw += sum(sp.debit - sp.credit for sp in j.splits if sp.account == stripped)
+    base = _accrual_journal_safely(report, _without_rounding(accounts))
+    if base is not None and not any(t.num and t.num == base.txn_id for t in book.transactions):
+        base_status, _d = _fallback_classify(
+            base, parse_gnucash.fy_transactions(book, year_key), colon)
+        if base_status == NOT_POSTED:
+            total_raw += sum(sp.debit - sp.credit for sp in base.splits if sp.account == stripped)
+    acct_type = book.accounts[guid].type
+    sign = parse_gnucash.normalize_value(1.0, acct_type)
+    expected = parse_gnucash.normalize_value(total_raw, acct_type)
+    return round((stmt - expected) * sign, 2)
+
+
+def _unposted_accrual_journal(report, accounts: dict, book, year_key: str,
+                              journals=None, status: dict | None = None):
     """H35-15: the year-end ACCR accrual journal (jv_emitter.
     build_accrual_journal) when it is NOT yet in the book, else None.
 
@@ -688,18 +761,68 @@ def _unposted_accrual_journal(report, accounts: dict, book, year_key: str):
     M-journals: a Transaction ID/Num hit in the book means ALREADY POSTED
     (the book balance already holds it -- counting it again would book it
     twice); only a clean NOT POSTED is counted. Anything partial or
-    ambiguous is left out, and the gap stays visible."""
-    try:
-        journal, _note, _res = build_accrual_journal(report, accounts or {})
-    except JournalValidationError:
-        return None
+    ambiguous is left out, and the gap stays visible.
+
+    H35-22: the journal returned carries the rounding line sized against the
+    BOOK (see _current_account_book_gap), the same one the run writes."""
+    status = status or {}
+    gap = _current_account_book_gap(report, accounts, book, year_key, journals, status)
+    journal = _accrual_journal_safely(report, accounts, book_gap=gap)
     if journal is None:
         return None
     if any(t.num and t.num == journal.txn_id for t in book.transactions):
         return None
-    status, _detail = _fallback_classify(
+    status_, _detail = _fallback_classify(
         journal, parse_gnucash.fy_transactions(book, year_key), _colon_paths(book))
-    return journal if status == NOT_POSTED else None
+    return journal if status_ == NOT_POSTED else None
+
+
+def accrual_book_gap(report, accounts: dict, gnucash_path: str, year_key: str,
+                     posted_check=None, bank_matches=None):
+    """Public wrapper for agent.py: the book-sized rounding gap for the
+    year-end journal, or None when the book is unavailable or the accrual is
+    already posted (a posted journal is final -- never re-sized)."""
+    if not gnucash_path or not accounts:
+        return None
+    book, err = _load_book_safely(gnucash_path)
+    if err:
+        return None
+    status = {p.txn_id: p.status for p in (posted_check or [])}
+    if status.get(accrual_txn_id(report)) == ALREADY_POSTED:
+        return None
+    journals, jerr = _journals_safely(report, accounts, bank_matches=bank_matches)
+    if jerr:
+        return None
+    return _current_account_book_gap(report, accounts, book, year_key, journals, status)
+
+
+def restate_posted_accrual_rows(rows, posted_check, report) -> None:
+    """H35-21: rows built before the book was read (the L5 tie-out and the
+    profit-share row) offer the year-end accrual as a "PENDING JOURNAL
+    POSTING" closure. When the book already holds that journal it is not
+    pending: restate those rows in place so the report never says "Post
+    <id>" for a journal that is already posted. A row that tied only because
+    of the pending accrual stays a tie (the journal is in the book); a row
+    that still disagrees keeps its figures but loses the word pending."""
+    acc_id = accrual_txn_id(report)
+    if {p.txn_id: p.status for p in (posted_check or [])}.get(acc_id) != ALREADY_POSTED:
+        return
+    for r in rows:
+        note = r.note or ""
+        if acc_id not in note:
+            continue
+        if PENDING_JOURNAL_VERDICT in note and r.agree:
+            r.note = (
+                f"ALREADY POSTED -- journal {acc_id} (the year-end accrual) is already in "
+                "the book and is not pending; with it this row ties to the statement. "
+                "Do not post it again."
+            )
+        elif "not yet posted" in note or "not-yet-posted" in note:
+            r.note = (
+                f"NOTE: journal {acc_id} is ALREADY POSTED in the book, not pending. "
+                + note.replace("not yet posted", "already posted")
+                      .replace("not-yet-posted", "already-posted")
+            )
 
 
 _STATEMENT_BOOK_ROWS = (
@@ -768,7 +891,7 @@ def build_statement_book_check(
         book_bal = parse_gnucash.normalize_value(raw, acct_type)
         pend = [j for j in journals if status.get(j.txn_id) == NOT_POSTED
                 and any(s.account == stripped for s in j.splits)]
-        accr = _unposted_accrual_journal(report, accounts, book, year_key)
+        accr = _unposted_accrual_journal(report, accounts, book, year_key, journals, status)
         if accr is not None and any(s.account == stripped for s in accr.splits):
             pend = pend + [accr]
         pend_raw = sum(s.debit - s.credit for j in pend for s in j.splits if s.account == stripped)
@@ -958,6 +1081,13 @@ def build_posted_check(
     journals, err = _journals_safely(report, accounts, bank_matches=bank_matches)
     if err:
         return [], f"{_POSTED_LABEL}: not available ({err})."
+
+    # H35-21: the year-end accrual is a journal this run writes too, so it is
+    # classified exactly like the monthly ones (same definite trn:num match,
+    # same exact fallback).
+    accr = _accrual_journal_safely(report, accounts)
+    if accr is not None and all(j.txn_id != accr.txn_id for j in journals):
+        journals = list(journals) + [accr]
 
     if not journals:
         return [], f"{_POSTED_LABEL}: no journal entries implied by this run -- nothing to check."
