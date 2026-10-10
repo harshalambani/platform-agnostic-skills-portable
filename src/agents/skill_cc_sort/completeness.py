@@ -26,6 +26,7 @@ PERIOD_PATTERNS = [
     ("HSBC", r'(\d\d [A-Z]{3} \d{4}) To (\d\d [A-Z]{3} \d{4})', "%d %b %Y"),
     ("ICICI", r'Statement period : (' + M + r' \d{1,2}, \d{4}) to (' + M + r' \d{1,2}, \d{4})', "%B %d, %Y"),
     ("YES", r'(\d\d/\d\d/\d{4}) To (\d\d/\d\d/\d{4})', "%d/%m/%Y"),
+    ("SBI", r'Statement Period\s*:\s*(\d\d ' + M + r' \d\d) to (\d\d ' + M + r' \d\d)\b', "%d %b %y"),
 ]
 # One group = the statement date.
 DATE_PATTERNS = [
