@@ -247,11 +247,64 @@ def _j(account=FOOD, d=date(2025, 4, 5), amount=100.0, side="W", num="CCSB-x"):
                      card="C", statement="s", account=account)
 
 
-def test_rf1_a_ccp_transaction_never_proves_a_journal_is_booked():             # NEGATIVE
+def test_rf1_a_bill_payment_never_proves_a_journal_is_booked():                 # NEGATIVE
     j = _j()
-    other_card_payment = BookTxn("t1", date(2025, 4, 5), "other", "", ((FOOD, 100.0), (CCP_PATH, -100.0)))
-    J.mark_booked([j], [other_card_payment], CCP_PATH)
+    payment = BookTxn("t1", date(2025, 4, 5), "card bill", "", ((CCP_PATH, 100.0), (BANK, -100.0)))
+    J.mark_booked([j], [payment], CCP_PATH)
     assert j.status == J.ST_READY
+
+
+def test_r1_hand_entry_dr_expense_cr_ccp_is_withheld():
+    j = _j()
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 5), "hand", "", ((FOOD, 100.0), (CCP_PATH, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_POSSIBLY and "05 Apr 2025" in j.why and FOOD in j.why
+
+
+def test_r1_hand_entry_two_days_off_is_withheld():
+    j = _j()
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 7), "hand", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_POSSIBLY
+
+
+def test_r1_hand_entry_on_a_different_expense_account_is_withheld():
+    j = _j(account=FOOD)
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 5), "hand", "", ((SHOP, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_POSSIBLY and SHOP in j.why
+
+
+def test_r1_six_days_off_is_not_matched():                                     # NEGATIVE
+    j = _j()
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 11), "hand", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_READY
+    assert J.ALREADY_BOOKED_WINDOW_DAYS == 5
+
+
+def test_r1_two_identical_spends_one_hand_entry_withholds_exactly_one():
+    a, b = _j(num="CCSB-a"), _j(num="CCSB-b")
+    J.mark_booked([a, b], [BookTxn("t1", date(2025, 4, 6), "hand", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert sorted([a.status, b.status]) == sorted([J.ST_READY, J.ST_POSSIBLY])
+
+
+def test_r1_nearest_date_is_paired_first():
+    a = _j(num="CCSB-a", d=date(2025, 4, 5))
+    b = _j(num="CCSB-b", d=date(2025, 4, 10))
+    J.mark_booked([a, b], [BookTxn("t1", date(2025, 4, 10), "hand", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert b.status == J.ST_POSSIBLY and a.status == J.ST_READY
+
+
+def test_r1_an_unmapped_spend_still_gets_the_check():
+    j = _j(account="")
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 5), "hand", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_POSSIBLY
+
+
+def test_r1_credit_side_kinds_match_the_credit_leg():
+    j = _j(side="D")
+    J.mark_booked([j], [BookTxn("t1", date(2025, 4, 5), "refund", "", ((BANK, 100.0), (FOOD, -100.0)))], CCP_PATH)
+    assert j.status == J.ST_POSSIBLY
+    k = _j(side="D")
+    J.mark_booked([k], [BookTxn("t2", date(2025, 4, 5), "wrong way", "", ((FOOD, 100.0), (BANK, -100.0)))], CCP_PATH)
+    assert k.status == J.ST_READY                                              # NEGATIVE
 
 
 def test_rf1_a_transaction_without_ccp_withholds_one_to_one():

@@ -9,7 +9,8 @@ Every journal is two splits against the Credit Card Payment account (CCP):
   fee reversal   Dr CCP                     Cr Bank Service Charge
   CRED overage   Dr CCP                     Cr Drawings
 
-EMI rows are never journalled here (see emi_block). Nothing in this module reads
+EMI interest (to the entity's EMI interest account) and the EMI processing fee / GST
+(as fees) are journalled; EMI conversion, principal and unclassified rows are never journalled here. Nothing in this module reads
 or writes a file.
 """
 from __future__ import annotations
@@ -20,6 +21,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 NUM_PREFIX = "CCSB-"
+ALREADY_BOOKED_WINDOW_DAYS = 5
+EXPENSE_PREFIXES = ("Expense:", "Expenses:")
 LARGE_SPEND_FLAG = "Possible asset (jewellery, phone, appliance ...)"
 
 K_SPEND, K_REFUND, K_CASHBACK = "spend", "refund", "cashback"
@@ -249,26 +252,45 @@ def fee_totals(journals: list) -> dict:
 
 def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     """A book transaction whose Num equals the journal's Num means the journal is
-    ALREADY BOOKED (definite). The fallback is an exact (date, account, amount)
-    match against a book transaction that has NO split on CCP (RF-1: a CCP
-    transaction on the same day and amount is another card's payment or spend,
-    never proof that this one is booked). The fallback pairs one-to-one and only
-    withholds with a warning."""
+    ALREADY BOOKED (definite). The fallback catches a hand-booked entry: a book
+    transaction whose Num is not ours and that has at least one split on an
+    expense account other than CCP, with an expense split equal to the journal's
+    amount (Dr for a debit-side kind, Cr for a credit-side kind), dated within
+    ALREADY_BOOKED_WINDOW_DAYS of the statement or booking date. Whether it also
+    touches CCP does not matter: Dr Expense / Cr CCP is a booked spend. A bill
+    payment (CCP against a bank or asset account, no expense split) is not a
+    candidate (RF-1). The account the mapper would choose is irrelevant, and an
+    unmapped journal is checked too. Pairing is one-to-one, nearest date first,
+    and only withholds with a warning."""
     by_num = {t.num: t for t in txns if t.num}
     for j in journals:
         if j.status == ST_READY and j.num in by_num:
             j.status = ST_BOOKED
             j.why = f"book transaction with Num {j.num} exists"
-    candidates = [t for t in txns if not t.has_path(ccp_path) and not t.num.startswith(NUM_PREFIX)]
-    claimed: set = set()
-    for j in journals:
-        if j.status != ST_READY or not j.account:
+    cands = [t for t in txns if not (t.num or "").startswith(NUM_PREFIX)
+             and any(p != ccp_path and p.startswith(EXPENSE_PREFIXES) for p, _ in t.splits)]
+    pairs = []
+    for ji, j in enumerate(journals):
+        if j.status != ST_READY:
             continue
-        want = j.amount if j.side == "W" else -j.amount          # Account side: debit +, credit -
-        hits = [t for t in candidates if t.guid not in claimed and t.date in (j.date, j.real_date)
-                and abs(t.amount_on(j.account) - want) <= 0.005]
-        if hits:
-            claimed.add(hits[0].guid)
-            j.status = ST_POSSIBLY
-            j.why = (f"a transaction without a card-payment split on {hits[0].date:%d %b %Y} already has "
-                     f"{j.amount:,.2f} on {j.account} ({hits[0].description[:40]})")
+        want = j.amount if j.side == "W" else -j.amount          # expense side: debit +, credit -
+        for t in cands:
+            dist = min(abs((t.date - j.real_date).days), abs((t.date - j.date).days))
+            if dist > ALREADY_BOOKED_WINDOW_DAYS:
+                continue
+            hit = next(((p, v) for p, v in t.splits
+                        if p != ccp_path and p.startswith(EXPENSE_PREFIXES) and abs(v - want) <= 0.005), None)
+            if hit is not None:
+                pairs.append((dist, ji, t.guid, t, hit[0]))
+    pairs.sort(key=lambda x: (x[0], x[1], x[2]))
+    used_j: set = set()
+    used_t: set = set()
+    for dist, ji, guid, t, path in pairs:
+        if ji in used_j or guid in used_t:
+            continue
+        used_j.add(ji)
+        used_t.add(guid)
+        j = journals[ji]
+        j.status = ST_POSSIBLY
+        j.why = (f"a book transaction on {t.date:%d %b %Y} ({dist} day(s) off) already has {j.amount:,.2f} "
+                 f"on {path} ({t.description[:40]})")

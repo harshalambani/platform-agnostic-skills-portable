@@ -257,6 +257,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 if j.kind in (J.K_CASHBACK, J.K_OVERAGE):
                     j.account, j.confidence, j.match_reason = draw[0], "high", _MAPPER_DRAW_REASON
 
+        # ---- already booked (before mapping: an unmapped journal is checked too) ----
+        J.mark_booked(journals, view.txns, CCP_PATH)
+
         # ---- mapper for spends and refunds ---------------------------------
         to_map = [j for j in journals if j.needs_mapping and j.status == J.ST_READY]
         if to_map:
@@ -297,8 +300,6 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             bad = _usable(j.account)
             if bad:
                 j.status, j.why = (J.ST_BLOCKED if "cannot be used" in bad else J.ST_NO_ACCOUNT), bad
-
-        J.mark_booked(journals, view.txns, CCP_PATH)
 
         # ---- CCP tie-out -------------------------------------------------------
         before = round(sum(t.amount_on(CCP_PATH) for t in view.txns if start <= t.date <= end), 2)
