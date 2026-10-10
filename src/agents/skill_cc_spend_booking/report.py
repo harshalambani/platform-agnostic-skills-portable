@@ -38,6 +38,7 @@ class RunReport:
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
     emi: dict = field(default_factory=dict)
+    emi_interest_reason: str = ""
     issues: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
     duplicates: list = field(default_factory=list)
@@ -87,7 +88,7 @@ def fee_block(rep: RunReport) -> str:
         return ""
     t = J.fee_totals(rep.journals)
     lines = [f"FEES BOOKED ({t['count']}): charged {money(t['fees'])}, reversed {money(t['reversals'])}, "
-             f"net {money(t['net'])} (EMI interest is not in this total)"]
+             f"net {money(t['net'])} (EMI interest is not in this total; EMI processing fee and GST are)"]
     for j in sorted(fees, key=lambda x: (x.card, x.real_date)):
         tail = f" (reverses {j.paired_with})" if j.paired_with else ""
         lines.append(f"  {j.card} | {j.real_date:%d %b %Y} | {J.KIND_LABEL[j.kind]} | {j.raw_description[:50] or j.description[:50]} "
@@ -148,19 +149,30 @@ def statement_block(rep: RunReport) -> str:
 
 def emi_block(rep: RunReport) -> str:
     rows = (rep.emi or {}).get("rows") or []
+    booked = [j for j in rep.journals if j.emi and j.status == J.ST_READY]
+    lines = []
+    if booked:
+        lines.append(f"EMI ROWS BOOKED ({len(booked)}) - {J.EMI_UNVALIDATED}")
+        for j in booked:
+            lines.append(f"  {j.card} | {j.real_date:%d %b %Y} | {J.KIND_LABEL[j.kind]} | "
+                         f"{j.raw_description[:50]} | {money(j.amount)} | {j.account}")
+    interest = (rep.emi or {}).get("interest") or {}
+    interest_lines = []
+    if interest:
+        interest_lines.append("  EMI interest (its own subtotal, not a fee):")
+        for (card, fy), v in interest.items():
+            interest_lines.append(f"    {card} | FY {fy} | {money(v)}")
     if not rows:
-        return ""
-    lines = [f"{J.EMI_UNBOOKED_TITLE.upper()} ({len(rows)}):"]
+        return "\n".join(lines + interest_lines)
+    if rep.emi_interest_reason and any(r.kind == "emi_interest" for r in rows):
+        lines.append(f"EMI INTEREST NOT BOOKED - {rep.emi_interest_reason}. Nothing was guessed and it was not "
+                     f"sent to Bank Service Charge or the mapper.")
+    lines.append(f"{J.EMI_UNBOOKED_TITLE.upper()} ({len(rows)}):")
     for r in rows:
         when = r.date.strftime("%d %b %Y") if r.date else "undated"
         lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:50]} | "
                      f"{money(r.amount)} {r.direction}")
-    interest = (rep.emi or {}).get("interest") or {}
-    if interest:
-        lines.append("  EMI interest (its own subtotal, not a fee):")
-        for (card, fy), v in interest.items():
-            lines.append(f"    {card} | FY {fy} | {money(v)}")
-    return "\n".join(lines)
+    return "\n".join(lines + interest_lines)
 
 
 def tie_block(rep: RunReport) -> str:

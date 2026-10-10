@@ -6,7 +6,7 @@ and writes an import-ready journal CSV that books that statement's spends,
 refunds, cashback and fees against CCP. Read-only on the book.
 
 Nothing is guessed: a payment that matches no statement, an ambiguous payment,
-a statement that does not tie out, a part payment and every EMI row are
+a statement that does not tie out, a part payment and every EMI conversion, principal and unclassified row are
 reported and NOT booked. The run never says it completed successfully while
 any of those is open.
 """
@@ -187,12 +187,30 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             nxt = next((o for o in res.pool if o is not st and mod.find_prior(o, res.pool) is st), None)
             (rep.unpaid if nxt is not None and id(nxt) in run_ids else rep.awaiting).append(st)
 
+        # ---- fixed accounts: usable test, and the EMI interest account -----------
+        def _usable(path):
+            p = _strip_root(path)
+            if p not in view.paths:
+                return f"{path!r} is not an account in the book"
+            r = guard.blocked_target_reason(p)
+            return f"{path!r} cannot be used: {r}" if r else None
+
+        emi_acct = _strip_root(getattr(ent, "card_emi_interest_account", "") or "")
+        if not emi_acct:
+            emi_bad = "the entity has no card_emi_interest_account in entities.yaml"
+        else:
+            emi_bad = _usable(emi_acct)
+            if emi_bad:
+                emi_bad = f"card_emi_interest_account: {emi_bad}"
+        rep.emi_interest_reason = emi_bad or ""
+
         # ---- journals ------------------------------------------------------
         journals, per_statement = [], {}
         for s in settlements:
             if s.status != M.S_SETTLED:
                 continue
-            js, _emi, iss = J.journals_for_settlement(s.target, s.pay_date, mod.FEE_REVERSAL_RX, threshold)
+            js, _emi, iss = J.journals_for_settlement(s.target, s.pay_date, mod.FEE_REVERSAL_RX, threshold,
+                                                      book_interest=not emi_bad)
             rep.issues += iss
             for pr in s.pairings:
                 ov = J.overage_journal(pr, min(p.date for p in pr.payments))
@@ -202,20 +220,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             journals += js
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)
+        booked_rows = {j.row_id for j in journals if j.emi}
         rep.emi = J.emi_summary(res.emi_rows)
+        rep.emi["rows"] = [r for r in res.emi_rows if id(r) not in booked_rows]
+        left = {id(r) for r in rep.emi["rows"]}
         for s in settlements:
-            if s.status == M.S_SETTLED and any(r.kind.startswith("emi") for r in s.target.parsed.rows):
-                rep.partly_booked.append((s.target, "has EMI rows; only its other rows are booked"))
+            if s.status == M.S_SETTLED and any(id(r) in left for r in s.target.parsed.rows):
+                rep.partly_booked.append((s.target, "has EMI rows that are not booked; only its other rows are booked"))
         rep.journals = journals
 
         # ---- fixed accounts --------------------------------------------------
-        def _usable(path):
-            p = _strip_root(path)
-            if p not in view.paths:
-                return f"{path!r} is not an account in the book"
-            r = guard.blocked_target_reason(p)
-            return f"{path!r} cannot be used: {r}" if r else None
-
         if any(j.kind in (J.K_FEE, J.K_FEE_REV) for j in journals):
             bsc = _strip_root(ent.bank_service_charge_account)
             if not bsc:
@@ -228,6 +242,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             for j in journals:
                 if j.kind in (J.K_FEE, J.K_FEE_REV):
                     j.account, j.confidence, j.match_reason = bsc, "high", _MAPPER_FEE_REASON
+        for j in journals:
+            if j.kind == J.K_EMI_INT:
+                j.account, j.confidence, j.match_reason = emi_acct, "high", "entity card_emi_interest_account"
         if any(j.kind in (J.K_CASHBACK, J.K_OVERAGE) for j in journals):
             draw = [_strip_root(d) for d in ent.drawings_accounts]
             if len(draw) != 1:

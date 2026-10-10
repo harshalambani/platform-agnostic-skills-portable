@@ -3,7 +3,7 @@
 
 *Mode: direct · 🔌 offline (no LLM)*
 
-Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount, within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS are booked. EMI rows are never booked; they are listed for a decision.
+Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount, within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS are booked. EMI interest is booked to the entity card_emi_interest_account, the EMI processing fee and GST to Bank Service Charge (EMI wording is UNVALIDATED); conversion, principal and unclassified EMI rows are listed for a decision, never booked.
 
 ## When to use it
 

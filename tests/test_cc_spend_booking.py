@@ -26,7 +26,8 @@ from agents.skill_cc_transactions.agent import _load_script      # noqa: E402
 MOD = _load_script()
 BANK = "Assets:Bank:Synthetic"
 FOOD, SHOP, BSC, DRAW = "Expenses:Food", "Expenses:Shopping", "Expenses:Bank Service Charge", "Equity:Drawings"
-PATHS = {CCP_PATH, BANK, FOOD, SHOP, BSC, DRAW}
+EMI_INT = "Expenses:EMI Interest"
+PATHS = {CCP_PATH, BANK, FOOD, SHOP, BSC, DRAW, EMI_INT}
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +98,8 @@ def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, th
     pdfs = tmp_path / "pdfs"
     pdfs.mkdir(exist_ok=True)
     ent = {"name": "Synthetic", "pan": "AAAAA0000A", "status": "Individual", "residency": "Resident",
-           "default_regime": "new", "bank_service_charge_account": BSC, "drawings_accounts": [DRAW]}
+           "default_regime": "new", "bank_service_charge_account": BSC, "drawings_accounts": [DRAW],
+           "card_emi_interest_account": EMI_INT}
     ent.update(entity_extra or {})
     ent = {k: v for k, v in ent.items() if v is not None}
     ents = tmp_path / "entities.yaml"
@@ -440,32 +442,109 @@ def test_large_spend_flag_is_in_the_workbook(tmp_path, monkeypatch):
 
 # ---- EMI --------------------------------------------------------------------
 
-def emi_stmts():
+def emi_stmts(extra=None):
     rows_ = [row("PHONE STORE", 5000, (4, 3)),
              row("SWIGGY ORDER", 400, (4, 4)),
              row("EMI CONVERSION PHONE STORE", 5000, (4, 6), kind="emi_conversion", direction="Cr"),
+             row("EMI PRINCIPAL INSTALMENT 1", 800, (4, 7), kind="emi_principal"),
+             row("EMI SOMETHING ELSE", 55, (4, 8), kind="emi_unclassified"),
              row("EMI INTEREST", 120, (4, 30), kind="emi_interest"),
              row("EMI PROCESSING FEE", 99, (4, 30), kind="emi_processing_fee"),
-             row("ANNUAL FEE", 100, (4, 10), kind="fee")]
+             row("GST ON EMI PROCESSING FEE", 18, (4, 30), kind="gst_on_emi"),
+             row("ANNUAL FEE", 100, (4, 10), kind="fee")] + (extra or [])
     s1 = stmt(APR, rows_)
-    s2 = stmt(MAY, [row("PAYMENT RECEIVED", 719, (5, 12), kind="payment", direction="Cr")])
-    emi = [r for r in rows_ if r.kind.startswith("emi")]
-    return s1, s2, emi
+    total = 5000 + 400 - 5000 + 800 + 55 + 120 + 99 + 18 + 100
+    s2 = stmt(MAY, [row("PAYMENT RECEIVED", total, (5, 12), kind="payment", direction="Cr")])
+    emi = [r for r in rows_ if r.kind.startswith("emi") or r.kind == "gst_on_emi"]
+    return s1, s2, emi, float(total)
 
 
-def run_emi(tmp_path, monkeypatch):
-    s1, s2, emi = emi_stmts()
-    return go(tmp_path, monkeypatch, [s1, s2], [tie(s1, printed=719.0), tie(s2, printed=0.0)],
-              [book_pay("p1", 719, date(2025, 5, 12))], emi=emi)
+def run_emi(tmp_path, monkeypatch, entity_extra=None, txns_extra=None):
+    s1, s2, emi, total = emi_stmts()
+    return go(tmp_path, monkeypatch, [s1, s2], [tie(s1, printed=total), tie(s2, printed=0.0)],
+              [book_pay("p1", total, date(2025, 5, 12))] + (txns_extra or []), emi=emi, entity_extra=entity_extra)
 
 
-def test_emi_rows_are_never_booked_and_the_statement_is_partly_booked(tmp_path, monkeypatch):
+def test_conversion_principal_and_unclassified_are_never_booked(tmp_path, monkeypatch):      # NEGATIVE
     reply, rows, calls, _ = run_emi(tmp_path, monkeypatch)
     descs = [r["Description"] for r in rows]
-    assert not any("EMI" in d for d in descs)                                     # NEGATIVE
-    assert not any("EMI" in d for batch in calls for d in batch)                  # never even sent to the mapper
+    for bad in ("CONVERSION", "PRINCIPAL", "SOMETHING ELSE"):
+        assert not any(bad in d for d in descs)
+        assert not any(bad in d for batch in calls for d in batch)               # never even sent to the mapper
     assert "PARTLY BOOKED" in reply and J.EMI_UNBOOKED_TITLE.upper() in reply
+    assert "EMI CONVERSION PHONE STORE" in reply and "EMI PRINCIPAL INSTALMENT 1" in reply
     assert "completed successfully" not in reply
+
+
+def test_unbooked_emi_rows_stay_unbooked_on_a_rerun(tmp_path, monkeypatch):                  # NEGATIVE
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _r, rows1, _c, _ = run_emi(tmp_path / "a", monkeypatch)
+    ids = [r["Transaction ID"] for r in rows1]
+    booked = [BookTxn(f"b{i}", date(2025, 5, 12), "x", n, ((FOOD, 1.0), (CCP_PATH, -1.0))) for i, n in enumerate(ids)]
+    reply, rows2, _c, _ = run_emi(tmp_path / "b", monkeypatch, txns_extra=booked)
+    assert rows2 == []
+    assert "EMI PRINCIPAL INSTALMENT 1" in reply and "PARTLY BOOKED" in reply
+
+
+def test_emi_interest_is_booked_to_the_entity_interest_account_once_and_marked_unvalidated(tmp_path, monkeypatch):
+    reply, rows, calls, _ = run_emi(tmp_path, monkeypatch)
+    ints = [r for r in rows if r["Description"] == "EMI INTEREST"]
+    assert len(ints) == 1 and ints[0]["Account"] == EMI_INT and ints[0]["Amount (Withdrawal)"] == "120.00"
+    assert ints[0]["Transfer Account"] == CCP_PATH
+    assert "UNVALIDATED" in reply
+    assert not any("EMI INTEREST" in d for batch in calls for d in batch)       # NEGATIVE: never via the mapper
+    assert ints[0]["Account"] != BSC                                              # NEGATIVE: never Bank Service Charge
+    assert sum(1 for r in rows if "INTEREST" in r["Description"]) == 1           # NEGATIVE: not twice
+
+
+def test_emi_interest_already_in_the_book_is_not_booked_twice(tmp_path, monkeypatch):        # NEGATIVE
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    _r, rows1, _c, _ = run_emi(tmp_path / "a", monkeypatch)
+    n = next(r["Transaction ID"] for r in rows1 if r["Description"] == "EMI INTEREST")
+    t = BookTxn("bx", date(2025, 4, 30), "x", n, ((EMI_INT, 120.0), (CCP_PATH, -120.0)))
+    _r, rows2, _c, _ = run_emi(tmp_path / "b", monkeypatch, txns_extra=[t])
+    assert not any(r["Description"] == "EMI INTEREST" for r in rows2)
+
+
+def test_processing_fee_and_gst_go_to_bsc_and_always_in_the_fee_block(tmp_path, monkeypatch):
+    reply, rows, _c, _ = run_emi(tmp_path, monkeypatch)
+    by = {r["Description"]: r for r in rows}
+    for d, amt in (("EMI PROCESSING FEE", "99.00"), ("GST ON EMI PROCESSING FEE", "18.00"), ("ANNUAL FEE", "100.00")):
+        assert by[d]["Account"] == BSC and by[d]["Amount (Withdrawal)"] == amt
+    fee_block = reply[reply.index("FEES BOOKED"):].split("\n\n")[0]
+    assert "FEES BOOKED (3): charged 217.00" in fee_block
+    assert "EMI PROCESSING FEE" in fee_block and "GST ON EMI PROCESSING FEE" in fee_block
+
+
+def test_emi_interest_never_enters_the_fee_total_or_the_bsc_total(tmp_path, monkeypatch):     # NEGATIVE
+    reply, rows, _c, _ = run_emi(tmp_path, monkeypatch)
+    assert "EMI interest (its own subtotal" in reply and "FY 2025-26 | 120.00" in reply
+    assert "charged 217.00" in reply and "charged 337.00" not in reply
+    bsc = sum(float(r["Amount (Withdrawal)"] or 0) for r in rows if r["Account"] == BSC)
+    assert bsc == 217.0
+
+
+def test_missing_emi_interest_account_books_no_interest_and_reports_it(tmp_path, monkeypatch):   # NEGATIVE
+    reply, rows, calls, _ = run_emi(tmp_path, monkeypatch, entity_extra={"card_emi_interest_account": None})
+    assert not any(r["Description"] == "EMI INTEREST" for r in rows)
+    assert not any("EMI INTEREST" in d for batch in calls for d in batch)
+    assert all(r["Account"] != EMI_INT for r in rows)
+    assert "EMI INTEREST NOT BOOKED" in reply and "card_emi_interest_account" in reply
+    assert "EMI INTEREST" in reply.split(J.EMI_UNBOOKED_TITLE.upper())[1]        # sits in the awaiting block
+    assert "completed successfully" not in reply
+
+
+def test_hidden_or_placeholder_emi_interest_account_books_no_interest(tmp_path, monkeypatch):    # NEGATIVE
+    Guard.blocked = {EMI_INT: "placeholder"}
+    try:
+        reply, rows, calls, _ = run_emi(tmp_path, monkeypatch)
+    finally:
+        Guard.blocked = {}
+    assert not any(r["Description"] == "EMI INTEREST" for r in rows)
+    assert all(r["Account"] != EMI_INT for r in rows)
+    assert "EMI INTEREST NOT BOOKED" in reply and "placeholder" in reply
 
 
 def test_original_purchase_and_its_conversion_reversal_are_never_both_booked(tmp_path, monkeypatch):
@@ -475,18 +554,19 @@ def test_original_purchase_and_its_conversion_reversal_are_never_both_booked(tmp
     assert "converted to EMI" in reply
 
 
-def test_emi_interest_has_its_own_subtotal_and_is_not_in_fee_or_bsc_totals(tmp_path, monkeypatch):
-    reply, rows, _c, _ = run_emi(tmp_path, monkeypatch)
-    assert "EMI interest (its own subtotal" in reply and "FY 2025-26 | 120.00" in reply
-    assert "FEES BOOKED (1): charged 100.00" in reply                              # NEGATIVE: not 220 / 319
-    bsc = sum(float(r["Amount (Withdrawal)"] or 0) for r in rows if r["Account"] == BSC)
-    assert bsc == 100.0
-
-
 def test_emi_summary_keeps_interest_out_of_fee_totals():
-    s1, _s2, emi = emi_stmts()
+    s1, _s2, emi, _t = emi_stmts()
     js, _e, _i = J.journals_for_settlement(s1, date(2025, 5, 12), MOD.FEE_REVERSAL_RX, 20000)
-    assert J.fee_totals(js)["fees"] == 100.0 and J.emi_summary(emi)["interest"] == {("HDFC-Regalia", "2025-26"): 120.0}
+    assert J.fee_totals(js)["fees"] == 217.0
+    assert J.emi_summary(emi)["interest"] == {("HDFC-Regalia", "2025-26"): 120.0}
+
+
+def test_journals_for_settlement_never_journals_principal_conversion_or_unclassified():       # NEGATIVE
+    s1, _s2, _emi, _t = emi_stmts()
+    for book_interest in (True, False):
+        js, left, _i = J.journals_for_settlement(s1, date(2025, 5, 12), MOD.FEE_REVERSAL_RX, 20000, book_interest)
+        assert {r.kind for r in left} >= {"emi_conversion", "emi_principal", "emi_unclassified"}
+        assert not any(j.kind == J.K_EMI_INT for j in js) == (not book_interest)
 
 
 # ---- payments without a statement (RED FLAG) --------------------------------

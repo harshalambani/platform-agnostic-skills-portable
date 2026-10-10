@@ -24,8 +24,14 @@ LARGE_SPEND_FLAG = "Possible asset (jewellery, phone, appliance ...)"
 
 K_SPEND, K_REFUND, K_CASHBACK = "spend", "refund", "cashback"
 K_FEE, K_FEE_REV, K_OVERAGE = "fee", "fee_reversal", "cred_overage"
+K_EMI_INT = "emi_interest"
+# EMI kinds that ARE booked (user decision 10 Oct); every other emi_* kind is never booked.
+EMI_FEE_KINDS = ("emi_processing_fee", "gst_on_emi")
+EMI_UNVALIDATED = ("UNVALIDATED: EMI wording has not been checked against a real statement - "
+                   "check every EMI row booked below before importing.")
 KIND_LABEL = {K_SPEND: "Spend", K_REFUND: "Refund", K_CASHBACK: "Cashback", K_FEE: "Fee",
-              K_FEE_REV: "Fee reversal", K_OVERAGE: "CRED overage"}
+              K_FEE_REV: "Fee reversal", K_OVERAGE: "CRED overage",
+              K_EMI_INT: "EMI interest"}
 
 ST_READY = "READY"
 ST_BOOKED = "ALREADY BOOKED"
@@ -59,6 +65,8 @@ class Journal:
     note: str = ""
     paired_with: str = ""        # a fee reversal: the fee it reverses
     raw_description: str = ""    # the statement wording, without the date suffix (what the mapper reads)
+    emi: bool = False            # came from an emi_* row (booking is UNVALIDATED)
+    row_id: int = 0              # id() of the statement row it came from
 
     @property
     def ccp_effect(self) -> float:
@@ -98,7 +106,8 @@ def _desc(base: str, real: date, moved: bool, label: str) -> str:
     return f"{base} [{label} {real:%d-%b-%Y}]" if moved else base
 
 
-def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_threshold: float) -> tuple:
+def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_threshold: float,
+                            book_interest: bool = True) -> tuple:
     """(journals, emi_rows, issues) for one SETTLED statement."""
     journals: list = []
     emi_rows: list = []
@@ -110,15 +119,25 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
                 issues.append(f"{target.card} {target.label}: payment reversal row not booked: "
                               f"{r.description[:40]} {r.amount:,.2f}")
             continue
-        if r.kind.startswith("emi"):
-            emi_rows.append(r)
-            continue
+        emi_kind = None
+        if r.kind.startswith("emi") or r.kind == "gst_on_emi":
+            # only interest (when its account is usable) and the processing fee / GST are booked;
+            # conversion, principal and unclassified rows are never booked
+            if r.kind == "emi_interest" and r.direction == "Dr" and book_interest:
+                emi_kind = K_EMI_INT
+            elif r.kind in EMI_FEE_KINDS and r.direction == "Dr":
+                emi_kind = K_FEE
+            else:
+                emi_rows.append(r)
+                continue
         if r.date is None:
             issues.append(f"{target.card} {target.label}: row without a date not booked: "
                           f"{r.description[:40]} {r.amount:,.2f}")
             continue
         real = _day(r.date)
-        if r.kind == "spend" and r.direction == "Dr":
+        if emi_kind:
+            kind, side = emi_kind, "W"
+        elif r.kind == "spend" and r.direction == "Dr":
             kind, side = K_SPEND, "W"
         elif r.kind == "refund" and r.direction == "Cr":
             if fee_reversal_rx is not None and fee_reversal_rx.search(r.description or ""):
@@ -143,6 +162,7 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
             description=_desc(r.description, real, moved, "spend" if kind == K_SPEND else KIND_LABEL[kind].lower()),
             amount=round(r.amount, 2), side=side, card=r.card, statement=target.label, source=target.source,
             needs_mapping=kind in (K_SPEND, K_REFUND), raw_description=" ".join(r.description.split()),
+            emi=bool(emi_kind), row_id=id(r),
         )
         if moved:
             j.note = f"dated {real:%d %b %Y}, before the financial year of the payment: booked on {when:%d %b %Y}"
