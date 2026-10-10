@@ -253,7 +253,8 @@ def fee_totals(journals: list) -> dict:
 def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     """A book transaction whose Num equals the journal's Num means the journal is
     ALREADY BOOKED (definite). The fallback catches a hand-booked entry: a book
-    transaction whose Num is not ours and that has at least one split on an
+    transaction (including one this skill numbered on an earlier run, unless it was exact-matched
+    above) that has at least one split on an
     expense account other than CCP, with an expense split equal to the journal's
     amount (Dr for a debit-side kind, Cr for a credit-side kind), dated within
     ALREADY_BOOKED_WINDOW_DAYS of the statement or booking date. Whether it also

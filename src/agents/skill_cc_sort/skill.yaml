@@ -5,7 +5,7 @@ display_name: "Credit Card — Sort PDFs"
 description: >
   Extract PDFs from Outlook emails (.msg) and organize credit card statement
   PDFs by bank and card type. Supports encrypted PDFs with multiple passwords.
-  Auto-detects bank from filename (Axis, HDFC, YES, SBM, ICICI).
+  Auto-detects bank from filename (Axis, HDFC, YES, SBM, ICICI, HSBC, SBI).
 category: "credit_card"
 version: "1.0.0"
 

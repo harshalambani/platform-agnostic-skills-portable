@@ -195,6 +195,8 @@ class Parsed:
     tol_loose: bool = False                            # total printed without paise
     missing: list[str] = field(default_factory=list)   # summary figures not found
     errors: list[str] = field(default_factory=list)    # unparsed lines, bad dates
+    rows_net_expected: float | None = None             # printed (debits + fees - credits): rows must equal it exactly
+    note: str = ""                                     # layout note carried into the tie-out note
 
 
 @dataclass
@@ -568,6 +570,82 @@ def resolve_sbm_roles(opening, middle, total, rows):
 MONEY_LABEL_WORDS = r"balance|purchase|payment|credit|amount|due|charge|limit|interest|fee"
 
 
+# SBI (BPCL Octane). Dates print as "DD Mon YY" (space, 2-digit year) and the
+# trailing letter is the sign (C = credit, D = debit). The reader is keyed on
+# bank == "SBI" so the date shape cannot change any other bank's parse.
+SBI_ROUNDING_NOTE = ("SBI rounds the printed total to the rupee: the total tie-out allows a difference "
+                     "strictly below 1.00 and FAILS at 1.00 or more; the rows must equal the printed "
+                     "debits + fees - credits exactly")
+SBI_DATE = r"\d\d (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d\d"
+SBI_ROW_RX = re.compile(rf"^({SBI_DATE})\s+(.*\S)\s+({AMT})\s+([CD])\s*$")
+SBI_GST_RX = re.compile(rf"^(IGST\b.*?)\s+({AMT})\s+([CD])\s*$")
+SBI_DATE_START = re.compile(rf"^{SBI_DATE}\b")
+SBI_LEGEND = "Purchases & Other Debits;"
+SBI_SUMMARY_RX = re.compile(rf"^{AMT}(?:\s+CR)?(?:\s+{AMT}(?:\s+CR)?){{4}}$")
+
+
+def sbi_date(text: str) -> datetime | None:
+    try:
+        return datetime.strptime(text, "%d %b %y")
+    except ValueError:
+        return None
+
+
+def is_sbi_row(line: str) -> bool:
+    """A dated SBI transaction row (guard use): date, description, amount, C|D."""
+    return bool(SBI_ROW_RX.match(line.strip()))
+
+
+def parse_sbi(lines, bank, card, period) -> Parsed:
+    p = Parsed(tol_loose=True, note=SBI_ROUNDING_NOTE)
+    in_block = False
+    last_date: datetime | None = None
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if SBI_LEGEND in line:
+            in_block = False
+            continue
+        if re.match(r"^Date\s+Transaction Details\s+Amount", line) or re.match(r"^for Statement Period\s*:", line, re.I):
+            in_block = True
+            continue
+        if not p.summary and SBI_SUMMARY_RX.match(line) and any(
+                "Previous Balance" in ln for ln in lines[max(0, i - 4):i]):
+            parts = re.findall(rf"({AMT})(\s+CR)?", line)
+            vals = [num(a) for a, _ in parts]
+            crs = [bool(c) for _, c in parts]
+            for idx, label in ((1, "payments/credits"), (2, "purchases/debits"), (3, "fees/taxes/interest")):
+                if crs[idx]:
+                    p.errors.append(f"unexpected CR on the {label} figure of the summary")
+            prev, total = (-vals[0] if crs[0] else vals[0]), (-vals[4] if crs[4] else vals[4])
+            p.summary = dict(prev=prev, payments=vals[1], purchases=vals[2], finance=vals[3], total=total)
+            p.printed_closing = round(prev - vals[1] + vals[2] + vals[3], 2)
+            p.rows_net_expected = round(vals[2] + vals[3] - vals[1], 2)
+            continue
+        if not in_block:
+            continue
+        m = SBI_ROW_RX.match(line)
+        if m:
+            when = sbi_date(m.group(1))
+            if when is None:
+                p.errors.append(f"unreadable date: {line[:70]}")
+                continue
+            last_date = when
+            p.rows.append(_mk_row(bank, card, when, m.group(2), num(m.group(3)), "Cr" if m.group(4) == "C" else "Dr"))
+            continue
+        g = SBI_GST_RX.match(line)
+        if g:
+            if last_date is None:
+                p.errors.append(f"tax row before any dated row: {line[:70]}")
+                continue
+            p.rows.append(_mk_row(bank, card, last_date, g.group(1), num(g.group(2)), "Cr" if g.group(3) == "C" else "Dr"))
+            continue
+        if SBI_DATE_START.match(line) and re.search(AMT, line):
+            p.errors.append(f"unparsed line: {line[:70]}")
+    if not p.summary:
+        p.missing.append("summary line")
+    return p
+
+
 def parse_yes(lines, bank, card, period) -> Parsed:
     p = Parsed()
     row_rx = re.compile(rf"^(\d\d/\d\d/\d{{4}})\s+(.*?)\s+({AMT})\s+(Dr|Cr)\s*$", re.I)
@@ -679,7 +757,7 @@ def detect_period(lines):
 NO_TEXT_LAYER = "No text layer: cannot read"
 
 
-def non_statement_reason(lines) -> str | None:
+def non_statement_reason(lines, bank: str | None = None) -> str | None:
     """A document that is not a statement and must be skipped by title (A),
     never parsed to 0 rows and never counted as NOT AVAILABLE:
       - a "Most Important Terms and Conditions" document (fee table, no
@@ -692,6 +770,8 @@ def non_statement_reason(lines) -> str | None:
     text = "\n".join(lines)
     up = text.upper()
     has_txn_rows = any(DATE_START.match(ln.strip()) and re.search(AMT, ln) for ln in lines)
+    if not has_txn_rows and (bank or "").lower() == "sbi":
+        has_txn_rows = any(is_sbi_row(ln) for ln in lines)
     if ("MOST IMPORTANT TERMS" in up or re.search(r"\bMITC\b", up)) and not has_txn_rows:
         return "Most Important Terms and Conditions"
     if (re.search(r"YEAR\s+END\s+STATEMENT", up)
@@ -716,6 +796,8 @@ def parse_statement(lines, bank, card_type, source) -> Statement:
         parsed = parse_hsbc(lines, bank, card_type, period)
     elif b == "sbm":
         parsed = parse_sbm(lines, bank, card_type, period)
+    elif b == "sbi":
+        parsed = parse_sbi(lines, bank, card_type, period)
     elif b == "yes":
         parsed = parse_yes(lines, bank, card_type, period)
     else:
@@ -819,6 +901,13 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
         ok = False
         notes.append("printed summary figures do not add up to the printed total "
                      "(the summary line may be misread)")
+    exp = st.parsed.rows_net_expected
+    if exp is not None and abs(round(sum(r.signed for r in rows) - exp, 2)) > TOL_STRICT:
+        ok = False
+        notes.append(f"parsed rows net {sum(r.signed for r in rows):,.2f} but the printed summary implies {exp:,.2f}: "
+                     "a row is dropped, doubled or misread")
+    if st.parsed.note:
+        notes.append(st.parsed.note)
     return TieOut(previous=prev, computed=computed, printed=total, difference=diff,
                   result=RESULT_PASS if ok else "FAIL", note="; ".join(notes), **base)
 
@@ -1032,7 +1121,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             # A scanned statement: never 0 rows, never PASS.
             issues.append(f"{pdf.name}: {NO_TEXT_LAYER}")
             continue
-        reason = non_statement_reason(lines)
+        reason = non_statement_reason(lines, bank)
         if reason:
             skipped.append(f"{pdf.name} ({reason})")
             continue
