@@ -254,6 +254,21 @@ def test_rf1_a_bill_payment_never_proves_a_journal_is_booked():                 
     assert j.status == J.ST_READY
 
 
+def test_r2_prior_ccsb_entry_with_a_different_num_is_withheld():                # NEGATIVE
+    for off in (0, 3, 5):
+        j = _j(num="CCSB-new")
+        t = BookTxn("t1", date(2025, 4, 5 + off), "old text", "CCSB-old", ((FOOD, 100.0), (CCP_PATH, -100.0)))
+        J.mark_booked([j], [t], CCP_PATH)
+        assert j.status == J.ST_POSSIBLY and "earlier run (Num CCSB-old)" in j.why
+
+
+def test_r2_same_num_is_booked_and_does_not_also_withhold_a_second_spend():     # NEGATIVE
+    a, b = _j(num="CCSB-a"), _j(num="CCSB-b")
+    t = BookTxn("t1", date(2025, 4, 5), "x", "CCSB-a", ((FOOD, 100.0), (CCP_PATH, -100.0)))
+    J.mark_booked([a, b], [t], CCP_PATH)
+    assert a.status == J.ST_BOOKED and b.status == J.ST_READY
+
+
 def test_r1_hand_entry_dr_expense_cr_ccp_is_withheld():
     j = _j()
     J.mark_booked([j], [BookTxn("t1", date(2025, 4, 5), "hand", "", ((FOOD, 100.0), (CCP_PATH, -100.0)))], CCP_PATH)

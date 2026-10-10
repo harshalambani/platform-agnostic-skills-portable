@@ -263,11 +263,15 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     unmapped journal is checked too. Pairing is one-to-one, nearest date first,
     and only withholds with a warning."""
     by_num = {t.num: t for t in txns if t.num}
+    claimed_guids: set = set()
     for j in journals:
         if j.status == ST_READY and j.num in by_num:
             j.status = ST_BOOKED
             j.why = f"book transaction with Num {j.num} exists"
-    cands = [t for t in txns if not (t.num or "").startswith(NUM_PREFIX)
+            claimed_guids.add(by_num[j.num].guid)
+    # CCSB-numbered entries are candidates too (an earlier run or release may have
+    # hashed a different Num); only those exact-matched in this run are excluded.
+    cands = [t for t in txns if t.guid not in claimed_guids
              and any(p != ccp_path and p.startswith(EXPENSE_PREFIXES) for p, _ in t.splits)]
     pairs = []
     for ji, j in enumerate(journals):
@@ -292,5 +296,7 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
         used_t.add(guid)
         j = journals[ji]
         j.status = ST_POSSIBLY
-        j.why = (f"a book transaction on {t.date:%d %b %Y} ({dist} day(s) off) already has {j.amount:,.2f} "
+        who = (f"booked by this skill on an earlier run (Num {t.num})" if (t.num or "").startswith(NUM_PREFIX)
+               else "a book transaction")
+        j.why = (f"{who} on {t.date:%d %b %Y} ({dist} day(s) off) already has {j.amount:,.2f} "
                  f"on {path} ({t.description[:40]})")
