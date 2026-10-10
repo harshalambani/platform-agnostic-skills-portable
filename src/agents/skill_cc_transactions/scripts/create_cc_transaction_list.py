@@ -974,6 +974,7 @@ class Result:
     skipped: list[str] = field(default_factory=list)       # not statements, skipped by title
     statements: list = field(default_factory=list)         # the Statement objects behind ties (same order)
     emi_rows: list = field(default_factory=list)
+    pool: list = field(default_factory=list)               # every distinct statement parsed (prior-statement lookups)
 
 
 def _overlaps(period, start, end) -> bool:
@@ -1115,7 +1116,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         parts.append("Duplicate statements:\n" + "\n".join(f"  {d}" for d in duplicates))
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
-                  skipped=skipped, statements=statements, emi_rows=emi_rows)
+                  skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool)
 
 
 # ---------------------------------------------------------------------------

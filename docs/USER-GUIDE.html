@@ -55,6 +55,7 @@ padding-top:14px}
 <a href="#skill_gnucash_pipeline">Convert to GnuCash</a>
 <a href="#skill_krc_gnucash">Convert to GnuCash</a>
 <a href="#skill_gnucash_coverage">Coverage Gap Detector</a>
+<a href="#skill_cc_spend_booking">Credit Card - Book Spends</a>
 <a href="#skill_cc_sort">Credit Card — Sort PDFs</a>
 <a href="#skill_cc_transactions">Credit Card — Transactions</a>
 <a href="#skill_summarize">Document Summarizer</a>
@@ -374,6 +375,38 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <tr><td>An account I expect to see is not listed.</td><td>Only bank and credit-card accounts are checked unless you turn on &#x27;Also check other asset and liability accounts&#x27;. Accounts with no transactions up to the end of the year, and hidden or placeholder accounts, are never checked.</td></tr>
 <tr><td>The report covers a year I did not expect.</td><td>The year comes from the entity&#x27;s registered book (or the book&#x27;s file name). If the book is not registered to a year, the year of its latest transaction is used, and the first line of the report says so.</td></tr>
 <tr><td>A gap I know about did not show up.</td><td>It may have been left out because the neighbouring year&#x27;s registered book has a transaction for the same account in that exact month -- a sign it was filed on the wrong side of the year rollover rather than missing.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_cc_spend_booking" class="skill">
+<h2>Credit Card - Book Spends <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount, within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement&#x27;s spends, refunds, cashback and fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS are booked. EMI rows are never booked; they are listed for a decision.</p>
+<p class="whenuse"><b>When to use it.</b> After the bank statements are imported and the card statements are sorted, when you want the card spends booked to their expense accounts.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Entity -- fills in the GnuCash book below and names the Bank Service Charge and Drawings accounts</b> <em>(required)</em> <span class="pa-tip" data-tip="The entity whose book this is. Its Bank Service Charge, Drawings and card default accounts come from entities.yaml. ⚠️ A run with card fees stops with a named error if the entity has no bank_service_charge_account.">ℹ️</span><br><span class="fmt">accepts: One of the entities in entities.yaml.</span></li>
+<li><b>Financial year -- picks the entity&#x27;s book for that year</b> <em>(required)</em> <span class="pa-tip" data-tip="The financial year of the book. ⚠️ Pick the year of the book you want the payments read from.">ℹ️</span><br><span class="fmt">accepts: One of the years the tax rules cover.</span></li>
+<li><b>GnuCash book (read-only; its card payments are matched to the statements)</b> <em>(required)</em> <span class="pa-tip" data-tip="The book. It is only read. ⚠️ A book that cannot be read stops the run; nothing is booked.">ℹ️</span><br><span class="fmt">accepts: A .gnucash file.</span></li>
+<li><b>Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card - Sort PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="The Decrypted_PDFs_Correct/ folder created by Credit Card - Sort PDFs. ⚠️ Read statements from before the range too, if you want the first payments of the range to settle them.">ℹ️</span><br><span class="fmt">accepts: A folder of decrypted statement PDFs.</span></li>
+<li><b>Period of bank payments to book (Indian FY = 1 Apr to 31 Mar)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which bank payments (and statements) to cover. ⚠️ A payment that settles a statement from before the period is listed as a RED FLAG, not booked.">ℹ️</span><br><span class="fmt">accepts: A FY, a quarter of a FY, or a custom date range.</span></li>
+<li><b>Custom start date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="Start date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+<li><b>Custom end date (YYYY-MM-DD) -- only for &#x27;Custom date range&#x27;</b> <em>(optional)</em> <span class="pa-tip" data-tip="End date, only used when &#x27;Custom date range&#x27; is selected. ⚠️ Both start and end are required for a custom range.">ℹ️</span><br><span class="fmt">accepts: YYYY-MM-DD.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Run Credit Card - Sort PDFs first, and import the bank statements into the book.</li>
+<li>Pick the entity and financial year, then the statements folder and the period.</li>
+<li>Read the result from the top: a RED FLAG block means a bank payment matched no statement.</li>
+<li>Review the import-ready CSV in the Review tab, then import it into GnuCash.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-CC-Spend_GnuCash_import_ready.csv</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-CC-Spend_GnuCash_import_ready.csv</code><span class="pa-tip" data-tip="Journals ready to import. Transfer Account is Credit Card Payment; Account is the spend, refund or fee account.">ℹ️</span> — Journals ready to import. Transfer Account is Credit Card Payment; Account is the spend, refund or fee account.</li>
+<li><code>..._report.xlsx</code><span class="pa-tip" data-tip="Journals, payments matched, payments without a statement, large spends, fees, EMI rows, the Credit Card Payment tie-out and issues.">ℹ️</span> — Journals, payments matched, payments without a statement, large spends, fees, EMI rows, the Credit Card Payment tie-out and issues.</li>
+</ul>
+<h3>Tips</h3><p>A spend at or above the large-spend threshold (Settings, default 20,000) is flagged as a possible asset. The flag never changes its account.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>RED FLAG: payments match no statement.</td><td>Check the statements folder has the statement the payment settles, and that its tie-out is PASS.</td></tr>
+<tr><td>Nothing was written.</td><td>No journal was ready to import; the result lists why (refused statements, part payments, EMI rows).</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
@@ -900,7 +933,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 27 UI skills, 6 internal steps.</footer>
+<footer>Generated from skill manifests · 28 UI skills, 6 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];

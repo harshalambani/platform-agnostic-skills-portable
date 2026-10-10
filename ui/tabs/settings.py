@@ -164,6 +164,24 @@ def _check_for_updates() -> str:
 # Public: render the Settings tab.
 # ---------------------------------------------------------------------------
 
+def _load_large_spend_threshold() -> float:
+    from agents.skill_cc_spend_booking.settings_io import read_large_spend_threshold
+    return read_large_spend_threshold(_config.PORTABLE_CONFIG_PATH)
+
+
+def _save_large_spend_threshold(value) -> str:
+    """Persist the card large-spend threshold (CC-03). A value that is not a
+    positive number is refused and nothing is written."""
+    from agents.skill_cc_spend_booking.settings_io import THRESHOLD_KEY, parse_threshold
+    got = parse_threshold(value)
+    if got is None:
+        return "Not saved: enter a positive number of rupees."
+    cfg = _config.load_portable_config()
+    cfg[THRESHOLD_KEY] = got
+    _config.write_portable_config(cfg)
+    return f"Saved: card spends of {got:,.0f} or more are flagged as a possible asset."
+
+
 def render() -> None:
     """
     Render the complete Settings tab body.
@@ -385,6 +403,26 @@ def render() -> None:
             ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap, ep_set_active,
         ],
     )
+
+    # -----------------------------------------------------------------------
+    # Card large-spend flag (CC-03).
+    # -----------------------------------------------------------------------
+    gr.Markdown("### Credit card: large-spend flag")
+    gr.Markdown(
+        "_A card spend of this amount or more is flagged **Possible asset (jewellery, "
+        "phone, appliance ...)** in Credit Card - Book spends. The flag is a prompt "
+        "to look; it never moves a spend to an asset account._"
+    )
+    with gr.Row():
+        large_spend_num = gr.Number(
+            label="Large-spend threshold (rupees)",
+            value=_load_large_spend_threshold(),
+            precision=2, minimum=1, interactive=True,
+        )
+        large_spend_btn = gr.Button("Save threshold", variant="secondary")
+    large_spend_status = gr.Markdown("")
+    large_spend_btn.click(fn=_save_large_spend_threshold, inputs=[large_spend_num],
+                          outputs=[large_spend_status])
 
     # -----------------------------------------------------------------------
     # Section 3: About.

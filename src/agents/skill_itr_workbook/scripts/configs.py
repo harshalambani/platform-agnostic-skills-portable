@@ -172,6 +172,10 @@ class EntityProfile:
     card_spend_default_account: str = ""  # MAP-35: account path a card spend that nothing else
                                          # matched is booked to (low confidence), instead of
                                          # Suspense. Empty (default) == Suspense, as before.
+    bank_service_charge_account: str = ""  # CC-03: account path for card fees, interest and GST on
+                                         # fees. Empty == the card-spend booking skill refuses (named error).
+    card_emi_interest_account: str = ""  # CC-03: account path for card EMI interest only (never the
+                                         # Bank Service Charge account). Empty == named error if needed.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -215,6 +219,8 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             drawings_accounts=[str(x).strip() for x in (fields_.get("drawings_accounts") or []) if str(x).strip()],
             reimbursement_markers=[str(x).strip() for x in (fields_.get("reimbursement_markers") or []) if str(x).strip()],
             card_spend_default_account=str(fields_.get("card_spend_default_account") or "").strip(),
+            bank_service_charge_account=str(fields_.get("bank_service_charge_account") or "").strip(),
+            card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
             partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
                                     if fields_.get("partner_admission_date") else None),
         )
@@ -301,6 +307,10 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["reimbursement_markers"] = list(e.reimbursement_markers)
     if e.card_spend_default_account:
         d["card_spend_default_account"] = e.card_spend_default_account
+    if e.bank_service_charge_account:
+        d["bank_service_charge_account"] = e.bank_service_charge_account
+    if e.card_emi_interest_account:
+        d["card_emi_interest_account"] = e.card_emi_interest_account
     if e.partner_admission_date:
         d["partner_admission_date"] = e.partner_admission_date
     return d

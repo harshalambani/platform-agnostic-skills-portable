@@ -141,3 +141,5 @@ SYN-IND-NR:
   #   - "ABCD"              # owner (MAP-34). Per entity; empty/absent = the rule never fires.
   # partner_admission_date: "2020-04-01"  # date admitted as a partner (YYYY-MM-DD); drives the partner skill's capital rule
   # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)
+  # bank_service_charge_account: "Expenses:Bank Service Charge"  # CC-03: card fees, interest and GST on fees. Missing = the card-spend booking skill stops with a named error.
+  # card_emi_interest_account: "Expenses:Card EMI Interest"  # CC-03: card EMI interest only (never mixed into Bank Service Charge)

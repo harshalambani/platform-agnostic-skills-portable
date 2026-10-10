@@ -1,0 +1,139 @@
+# skill.yaml - Credit Card - Book Spends (cash basis)
+
+name: "CC Book Spends"
+display_name: "Credit Card - Book Spends"
+description: >
+  Match each bank payment to a credit card to the statement it settles, and write an
+  import-ready GnuCash journal that books that statement's spends, refunds, cashback and
+  fees against Expense:Withdrawals:Credit Card Payment. Nothing is guessed: unmatched
+  payments, statements that do not tie out, part payments and EMI rows are reported, not booked.
+category: "gnucash"
+version: "0.1.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "entity"
+    type: "select"
+    label: "Entity -- fills in the GnuCash book below and names the Bank Service Charge and Drawings accounts"
+    options_from: "itr_entities"
+    required: true
+  - name: "fy"
+    type: "select"
+    label: "Financial year -- picks the entity's book for that year"
+    options_from: "itr_ay_years"
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (read-only; its card payments are matched to the statements)"
+    file_types: [".gnucash"]
+    required: true
+    book_from: "entity"
+    fy_from: "fy"
+  - name: "pdf_dir"
+    type: "directory"
+    label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card - Sort PDFs)"
+    required: true
+  - name: "period"
+    type: "select"
+    options_from: "report_periods"
+    label: "Period of bank payments to book (Indian FY = 1 Apr to 31 Mar)"
+    required: true
+  - name: "custom_start"
+    type: "text"
+    label: "Custom start date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+  - name: "custom_end"
+    type: "text"
+    label: "Custom end date (YYYY-MM-DD) -- only for 'Custom date range'"
+    required: false
+
+run_args:
+  pdf_dir: "{inputs.pdf_dir}"
+  entity_key: "{inputs.entity}"
+  gnucash_path: "{inputs.gnucash_path}"
+  output_path: "{output_path}"
+  period: "{inputs.period}"
+  custom_start: "{inputs.custom_start}"
+  custom_end: "{inputs.custom_end}"
+  entities_path: "{data_root}/itr/entities.yaml"
+  settings_path: "{data_root}/settings/config.yaml"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "CC-Spend_GnuCash_import_ready"
+  download_label: "Download import-ready CSV"
+  extra_outputs:
+    - key: "workbook"
+      label: "Run workbook"
+      download_label: "Download run workbook (Excel)"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card.
+    Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to
+    that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount,
+    within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly
+    matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and
+    fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS
+    are booked. EMI rows are never booked; they are listed for a decision.
+  when_to_use: >
+    After the bank statements are imported and the card statements are sorted, when you want the
+    card spends booked to their expense accounts.
+  inputs:
+    - name: "entity"
+      tooltip: "The entity whose book this is. Its Bank Service Charge, Drawings and card default accounts come from entities.yaml."
+      accepts: "One of the entities in entities.yaml."
+      gotchas: "A run with card fees stops with a named error if the entity has no bank_service_charge_account."
+    - name: "fy"
+      tooltip: "The financial year of the book."
+      accepts: "One of the years the tax rules cover."
+      gotchas: "Pick the year of the book you want the payments read from."
+    - name: "gnucash_path"
+      tooltip: "The book. It is only read."
+      accepts: "A .gnucash file."
+      gotchas: "A book that cannot be read stops the run; nothing is booked."
+    - name: "pdf_dir"
+      tooltip: "The Decrypted_PDFs_Correct/ folder created by Credit Card - Sort PDFs."
+      accepts: "A folder of decrypted statement PDFs."
+      gotchas: "Read statements from before the range too, if you want the first payments of the range to settle them."
+    - name: "period"
+      tooltip: "Which bank payments (and statements) to cover."
+      accepts: "A FY, a quarter of a FY, or a custom date range."
+      gotchas: "A payment that settles a statement from before the period is listed as a RED FLAG, not booked."
+    - name: "custom_start"
+      tooltip: "Start date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+    - name: "custom_end"
+      tooltip: "End date, only used when 'Custom date range' is selected."
+      accepts: "YYYY-MM-DD."
+      gotchas: "Both start and end are required for a custom range."
+  steps:
+    - "Run Credit Card - Sort PDFs first, and import the bank statements into the book."
+    - "Pick the entity and financial year, then the statements folder and the period."
+    - "Read the result from the top: a RED FLAG block means a bank payment matched no statement."
+    - "Review the import-ready CSV in the Review tab, then import it into GnuCash."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-CC-Spend_GnuCash_import_ready.csv"
+        tooltip: "Journals ready to import. Transfer Account is Credit Card Payment; Account is the spend, refund or fee account."
+      - name: "..._report.xlsx"
+        tooltip: "Journals, payments matched, payments without a statement, large spends, fees, EMI rows, the Credit Card Payment tie-out and issues."
+  tips: >
+    A spend at or above the large-spend threshold (Settings, default 20,000) is flagged as a possible asset.
+    The flag never changes its account.
+  troubleshooting:
+    - problem: "RED FLAG: payments match no statement."
+      fix: "Check the statements folder has the statement the payment settles, and that its tie-out is PASS."
+    - problem: "Nothing was written."
+      fix: "No journal was ready to import; the result lists why (refused statements, part payments, EMI rows)."

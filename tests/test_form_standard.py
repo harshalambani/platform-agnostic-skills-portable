@@ -23,6 +23,7 @@ from agents.registry import discover
 # skill is a deliberate act that updates this list.
 ENTITY_SKILLS = {
     "skill_ais_reconcile",
+    "skill_cc_spend_booking",
     "skill_gnucash_coverage",
     "skill_gnucash_intercompany",
     "skill_gnucash_intercompany_matrix",

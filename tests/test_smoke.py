@@ -123,7 +123,7 @@ def test_registry_discovers_all_skills():
     # against Advisory, bank, 26AS and the return (structured YAML/JSON
     # input this build; PDF parsers under parsers/ are Stage 2 placeholders)
     assert "partner_comp_recon" in names
-    assert len(skills) == 27
+    assert len(skills) == 28
 
 
 def test_registry_get_by_name():
