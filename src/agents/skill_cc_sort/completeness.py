@@ -36,6 +36,33 @@ DATE_PATTERNS = [
 
 TOLERANCE_DAYS = 3  # next period must start 1..3 days after the previous end
 UNKNOWN_FOLDER = "Unknown-Unknown"
+# CC-07: documents that are not statements at all (card terms leaflets, a bank's
+# year-end summary) get their own folder instead of Unknown-Unknown, so they are
+# neither a "bank not recognised" issue nor ever part of a card's coverage.
+NOT_STATEMENT_FOLDER = "Not-A-Statement"
+
+
+def non_statement_title(pdf_path) -> str | None:
+    """Why this PDF is not a statement ("Most Important Terms and Conditions",
+    "Year End Statement & Summary"), or None when it may be one. The rule lives
+    in the Credit Card Transactions script (non_statement_reason); it is loaded
+    from there rather than copied. Any read failure answers None, so an
+    unreadable file is never hidden as a non-statement."""
+    try:
+        import importlib.util
+        script = (Path(__file__).resolve().parent.parent / "skill_cc_transactions"
+                  / "scripts" / "create_cc_transaction_list.py")
+        spec = importlib.util.spec_from_file_location("_cc_txn_nsr", script)
+        mod = importlib.util.module_from_spec(spec)
+        import sys
+        sys.modules[spec.name] = mod      # dataclasses resolve annotations through it
+        try:
+            spec.loader.exec_module(mod)
+            return mod.non_statement_reason(mod.read_lines(pdf_path))
+        finally:
+            sys.modules.pop(spec.name, None)
+    except Exception:
+        return None
 
 
 def parse_date(text: str, fmt: str) -> date | None:
@@ -122,7 +149,7 @@ class CardCoverage:
     def line(self) -> str:
         span = f"{_fmt(self.covered[0])} - {_fmt(self.covered[1])}" if self.covered else "nothing in this FY"
         gaps = "; ".join(self.gaps) if self.gaps else "none"
-        return f"{self.card}: covered {span}; gaps: {gaps}"
+        return f"{self.card}: {self.statements} statement(s) found, covered {span}; missing: {gaps}"
 
 
 def _interval(info: StatementInfo) -> tuple[date, date]:
@@ -255,29 +282,73 @@ class CompletenessReport:
     failed_decryption: list[str]
     results_unreadable: bool = False
     card_folders_found: int = 0
+    non_statement_files: list[str] = field(default_factory=list)   # Not-A-Statement folder
 
-    @property
-    def issues(self) -> list[str]:
+    def _issues(self, names: bool) -> list[str]:
         out = []
         if self.results_unreadable:
             out.append("could not read the decrypt results - decrypt failures may be "
                        "missing from this report")
-        out += [f"could not decrypt: {n}" for n in self.failed_decryption]
+        if self.failed_decryption:
+            out += ([f"could not decrypt: {n}" for n in self.failed_decryption] if names
+                    else [f"could not decrypt {len(self.failed_decryption)} file(s)"])
         if not self.cards:
             out.append("no card folders found in Decrypted_PDFs_Correct - nothing was checked")
         elif not any(c.statements or c.outside_fy for c in self.cards):
             out.append("no statements found in any card folder - nothing was checked")
-        out += [f"sorted to {UNKNOWN_FOLDER} (bank/card not recognised): {n}"
-                for n in self.unknown_files]
+        if self.unknown_files:
+            out += ([f"sorted to {UNKNOWN_FOLDER} (bank/card not recognised): {n}"
+                     for n in self.unknown_files] if names
+                    else [f"{len(self.unknown_files)} file(s) sorted to {UNKNOWN_FOLDER} "
+                          "(bank/card not recognised)"])
         for c in self.cards:
             out += [f"{c.card}: {g}" for g in c.gaps]
         return out
 
+    @property
+    def issues(self) -> list[str]:
+        """What the result panel shows: counts, never file names. Only real
+        problems -- missing months, decrypt failures, unrecognised files -- are
+        issues; non-statements and duplicates never are."""
+        return self._issues(names=False)
+
+    @property
+    def full_issues(self) -> list[str]:
+        return self._issues(names=True)
+
+    @property
+    def not_statement_count(self) -> int:
+        return sum(len(c.not_statements) for c in self.cards) + len(self.non_statement_files)
+
+    @property
+    def duplicate_count(self) -> int:
+        return sum(len(c.duplicates) for c in self.cards)
+
     def text(self) -> str:
+        """Panel summary: one line per card, then counts only."""
         lines = [f"Completeness check, {self.financial_year}:"]
         for c in self.cards:
             lines.append("  " + c.line())
+        if self.not_statement_count:
+            lines.append(f"Not a statement (never counted): {self.not_statement_count} file(s)")
+        sm = sum(len(c.same_month) for c in self.cards)
+        if sm:
+            lines.append(f"Several statements in one month (not a gap): {sm} month(s)")
+        if self.duplicate_count:
+            lines.append(f"Duplicates (same period; counted once): {self.duplicate_count} file(s)")
+        if (self.not_statement_count or sm or self.duplicate_count or self.failed_decryption
+                or self.unknown_files):
+            lines.append("File names are listed in completeness_report.txt.")
+        return "\n".join(lines)
+
+    def full_text(self) -> str:
+        """The saved report: the summary plus every file name."""
+        lines = [self.text(), ""]
+        if self.full_issues:
+            lines.append("Issues:")
+            lines += [f"  {i}" for i in self.full_issues]
         nots = [(c.card, n) for c in self.cards for n in c.not_statements]
+        nots += [(NOT_STATEMENT_FOLDER, n) for n in self.non_statement_files]
         if nots:
             lines.append("Not a statement (no period or statement date found; never counted):")
             lines += [f"  {card}: {n}" for card, n in nots]
@@ -301,13 +372,17 @@ def check_folder(decrypted_dir, period, failed_decryption=(), reader=None,
     root = Path(decrypted_dir)
     cards: list[CardCoverage] = []
     unknown: list[str] = []
+    non_statements: list[str] = []
     if root.is_dir():
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
             pdfs = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
             if folder.name == UNKNOWN_FOLDER:
                 unknown += [p.name for p in pdfs]   # never counts toward any card
                 continue
+            if folder.name == NOT_STATEMENT_FOLDER:
+                non_statements += [p.name for p in pdfs]   # never an issue, never a card
+                continue
             entries = [(p.name, classify_text(reader(p))) for p in pdfs]
             cards.append(check_card(folder.name, entries, fy_start, fy_end))
     return CompletenessReport(label, cards, unknown, list(failed_decryption),
-                              results_unreadable, len(cards))
+                              results_unreadable, len(cards), non_statements)
