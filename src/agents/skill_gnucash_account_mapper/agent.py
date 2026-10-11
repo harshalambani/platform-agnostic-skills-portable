@@ -2064,6 +2064,75 @@ _LLM_RUN_STATUS: Dict = {}
 _LLM_STOPPED_MARKER = "AI pass stopped"   # in MatchReason of rows the stopped pass never reached
 
 
+# CC-11: why the last AI call failed (HTTP status + the provider's own message),
+# filled by the two chat functions and read once by _LLMGuard.ask. The API key and
+# the Authorization header are never put in here.
+_LLM_LAST_ERROR: Dict = {}
+
+_SECRET_LIKE_RX = re.compile(r"(?i)\bBearer\s+\S+|\b(?:sk|key|tok)[-_][A-Za-z0-9_\-]{8,}")
+
+
+def _redact_llm_text(text, api_key=None) -> str:
+    s = str(text or "")
+    if api_key:
+        s = s.replace(str(api_key), "***")
+    return _SECRET_LIKE_RX.sub("***", s)
+
+
+def _provider_message(err, api_key=None) -> str:
+    """The provider's own error text from an HTTPError body (OpenAI style
+    {"error": {"message": ...}}), redacted and capped. "" when there is none."""
+    try:
+        raw = err.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return ""
+    msg = ""
+    try:
+        body = json.loads(raw)
+        e = body.get("error") if isinstance(body, dict) else None
+        msg = (e.get("message") if isinstance(e, dict) else e) or (body.get("message") if isinstance(body, dict) else "") or ""
+    except Exception:  # noqa: BLE001
+        msg = raw if len(raw) < 200 else ""
+    return _redact_llm_text(str(msg).strip(), api_key)[:200]
+
+
+def _note_llm_error(exc, base_url: str, model: str, timeout, api_key=None) -> None:
+    """Record, in plain words, why an AI call failed. `fatal` means retrying
+    cannot help (the key or the model is refused), so the pass stops at once."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+    host = urlparse(str(base_url or "")).netloc or str(base_url or "the AI service")
+    fatal = False
+    if isinstance(exc, _HTTPError):
+        code = exc.code
+        pmsg = _provider_message(exc, api_key)
+        low = pmsg.lower()
+        shown = f"HTTP {code}: {pmsg}" if pmsg else f"HTTP {code}"
+        if code in (401, 403):
+            reason = f"the AI service refused the API key ({shown}) - update the key in Settings"
+            fatal = True
+        elif code == 404 or ("model" in low and any(k in low for k in ("not found", "does not exist", "not exist", "unknown", "unsupported"))):
+            reason = f"the AI service does not offer model {model} ({shown})"
+            fatal = True
+        else:
+            reason = f"the AI service answered {shown}"
+    elif isinstance(exc, (TimeoutError,)) or "timed out" in str(exc).lower():
+        reason = f"no answer from {host} within {int(timeout) if timeout else '?'}s"
+    else:
+        inner = getattr(exc, "reason", None)
+        if isinstance(inner, TimeoutError) or "timed out" in str(inner).lower():
+            reason = f"no answer from {host} within {int(timeout) if timeout else '?'}s"
+        else:
+            reason = f"could not reach {host} ({type(exc).__name__})"
+    _LLM_LAST_ERROR.clear()
+    _LLM_LAST_ERROR.update({"reason": reason, "fatal": fatal})
+
+
+def _take_llm_error() -> Dict:
+    err = dict(_LLM_LAST_ERROR)
+    _LLM_LAST_ERROR.clear()
+    return err
+
+
 class _LLMRateLimited(Exception):
     """The provider answered HTTP 429. `retry_after` is the seconds the server
     asked for (None if it sent no usable Retry-After)."""
@@ -2118,6 +2187,7 @@ class _LLMGuard:
         self.invalid = 0
         self.stopped = False
         self.reason = ""
+        self.last_error = ""      # CC-11: why the most recent failed call failed
 
     def _stop(self, reason: str) -> None:
         self.stopped = True
@@ -2128,6 +2198,7 @@ class _LLMGuard:
         """Returns the reply, or None on failure / when the pass has stopped."""
         rate_limited = 0
         while not self.stopped:
+            _LLM_LAST_ERROR.clear()
             try:
                 reply = _llm_chat(provider, base_url, model, system, user,
                                   api_key=api_key, timeout=timeout)
@@ -2148,9 +2219,17 @@ class _LLMGuard:
                 continue
             if reply is None:
                 self.consecutive_failures += 1
+                err = _take_llm_error()
+                if err.get("reason"):
+                    self.last_error = err["reason"]
+                if err.get("fatal"):
+                    # the key or the model is refused: more calls cannot help
+                    self._stop(err["reason"])
+                    return None
                 if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
                     self._stop(f"the provider kept failing ({self.consecutive_failures} "
-                               f"calls in a row without a reply)")
+                               f"calls in a row without a reply)"
+                               + (f": {self.last_error}" if self.last_error else ""))
                 return None
             self.consecutive_failures = 0
             return reply
@@ -2385,10 +2464,12 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _emit_mapper_progress(f"  Ollama error: {e}")
+        _note_llm_error(e, base_url, model, timeout)
+        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
     except Exception as e:  # noqa: BLE001
-        _emit_mapper_progress(f"  Ollama error: {e}")
+        _note_llm_error(e, base_url, model, timeout)
+        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
 
 
@@ -2444,10 +2525,12 @@ def _openai_compatible_chat(
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        _note_llm_error(e, base_url, model, timeout, api_key)
+        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
     except Exception as e:  # noqa: BLE001
-        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        _note_llm_error(e, base_url, model, timeout, api_key)
+        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
 
 
@@ -2820,7 +2903,7 @@ def llm_fallback_mapping(
         _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
         _LLM_RUN_STATUS.update({
             'stopped': True,
-            'reason': guard.reason or "the AI model did not answer the warm-up call",
+            'reason': guard.reason or guard.last_error or "the AI model did not answer the warm-up call",
             'unattempted_rows': [r["row"] for r in unmatched_rows],
         })
         return {}
