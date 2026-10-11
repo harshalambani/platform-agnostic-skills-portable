@@ -664,7 +664,32 @@ def _check_external_tools(skill: SkillInfo) -> str | None:
 # tab via add()/tick() in the run handler.
 # ---------------------------------------------------------------------------
 
+_OK_BLOCK_RX = re.compile(
+    r"\b(?:issues?|incomplete|not|cannot|unable|fail(?:s|ed|ure|ures)?|errors?|"
+    r"red\s+flag|without)\b|n't\b",
+    re.IGNORECASE,
+)
+_OK_WORD_RX = re.compile(r"\bcomplete(?:d)?\b|\ball balanced\b", re.IGNORECASE)
+
+
+def _is_success_line(s: str, low: str) -> bool:
+    """UI-32: a line is green only when it really reports success.
+
+    Whole words only (so "incomplete" never matches "complete"), and any
+    wording of failure, doubt or a count of issues vetoes the green box.
+    """
+    if _OK_BLOCK_RX.search(s) or "⛔" in s or "⚠" in s:
+        return False
+    if (s.startswith("### Done") or s.startswith("### ✓") or s.startswith("✓")
+            or low.startswith("ok —") or low.startswith("ok -")):
+        return True
+    return bool(_OK_WORD_RX.search(s))
+
+
 def _colorize_status(md: str) -> str:
+    # Each box is followed by a blank line: a raw HTML block runs to the next
+    # blank line in Markdown, so without it every following line (bullets,
+    # tables) is swallowed into the block and collapses into one paragraph.
     out: list[str] = []
     for ln in md.split("\n"):
         s = ln.strip()
@@ -673,18 +698,16 @@ def _colorize_status(md: str) -> str:
             out.append(ln)
             continue
         if low.startswith("error:") or low.startswith("security error:"):
-            out.append(f'<div class="rag-error">⛔ {s}</div>')
+            out.append(f'<div class="rag-error">⛔ {s}</div>\n')
         elif low.startswith("warning:"):
-            out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>')
+            out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>\n')
         elif "**cancelled**" in low or low.startswith("cancelled"):
-            out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>')
-        elif (s.startswith("### Done") or s.startswith("### ✓") or s.startswith("✓")
-              or low.startswith("ok —") or low.startswith("ok -")
-              or "all balanced" in low or "complete" in low):
+            out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>\n')
+        elif _is_success_line(s, low):
             txt = s.lstrip("#").replace("**", "").strip()
             if txt.startswith("✓"):
                 txt = txt[1:].strip()
-            out.append(f'<div class="rag-ok">✅ {txt}</div>')
+            out.append(f'<div class="rag-ok">✅ {txt}</div>\n')
         else:
             out.append(ln)
     return "\n".join(out)
