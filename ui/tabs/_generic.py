@@ -1553,7 +1553,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     # UI-30: same row layout as the file boxes -- textbox plus a
                     # native "Browse..." button. Typing or pasting still works.
                     with gr.Row():
-                        if inp.folders_from:
+                        if getattr(inp, "folders_from", ""):
                             # UI-33: known folders in a dropdown that still takes
                             # a typed or pasted path; newest run preselected.
                             _fch = _known_folders(inp.folders_from)
@@ -1891,7 +1891,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # folder; a cancelled pick leaves whatever is typed there untouched.
     for _fbtn, _tcomp, _finp in folder_buttons:
         def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label,
-                           fsrc=_finp.folders_from):
+                           fsrc=getattr(_finp, "folders_from", "")):
             picked = _filedialog.pick_folder(
                 bk, title=f"Select folder - {label}",
                 fallback_dir=(_newest_cc_sort_pdfs() if fsrc == "cc_sort_runs" else None))
