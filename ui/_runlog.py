@@ -30,15 +30,25 @@ def new_log_path(skill_name: str) -> Path:
     return logs_dir / f"{stamp}-{safe_name}.log"
 
 
+def redact(text: str, secrets=()) -> str:
+    """Replace every non-empty secret value (a statement password) with ***."""
+    for s in secrets or ():
+        if isinstance(s, str) and s:
+            text = text.replace(s, "***")
+    return text
+
+
 def write_run_log(
     path: Path,
     *,
     skill_name: str,
     run_log_lines: list[str],
     traceback_text: str | None = None,
+    secrets=(),
 ) -> None:
     """Write the full per-run log. Never raises -- logging must never be the
-    thing that breaks a run."""
+    thing that breaks a run. Any value in ``secrets`` (password inputs) is
+    replaced by *** wherever it appears."""
     try:
         parts = [
             f"Skill: {skill_name}",
@@ -49,6 +59,19 @@ def write_run_log(
         ]
         if traceback_text:
             parts += ["", "=== Traceback ===", traceback_text]
-        path.write_text("\n".join(parts), encoding="utf-8")
+        path.write_text(redact("\n".join(parts), secrets), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def append_outcome(path: Path, text: str, *, secrets=()) -> None:
+    """CC-08: add the run's final error or result text to the log file the UI
+    names as "Full log", so the file holds what the screen showed. Existing
+    content is left as it was. Never raises; secrets are redacted."""
+    try:
+        if not text:
+            return
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("\n\n=== Outcome ===\n" + redact(str(text), secrets) + "\n")
     except Exception:
         pass

@@ -15,6 +15,7 @@ from __future__ import annotations
 import csv
 import sys
 import tempfile
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -27,6 +28,20 @@ from .settings_io import read_large_spend_threshold
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent
 _MAPPER_FEE_REASON = "Fixed account: card fee or fee reversal -> the entity's Bank Service Charge account"
 _MAPPER_DRAW_REASON = "Fixed account: card cashback or CRED overage -> the entity's Drawings account"
+
+
+def _fee_row(r, fee_rx) -> bool:
+    """A statement row that will become a K_FEE / K_FEE_REV journal (same test as journal.py)."""
+    if r.kind in J.EMI_FEE_KINDS and r.direction == "Dr":
+        return True
+    if r.kind == "fee" and r.direction == "Dr":
+        return True
+    return bool(r.kind == "refund" and r.direction == "Cr" and fee_rx is not None
+                and fee_rx.search(r.description or ""))
+
+
+def _cashback_row(r) -> bool:
+    return r.kind == "cashback" and r.direction == "Cr"
 
 
 def _error(text: str):
@@ -151,6 +166,15 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
     rep = RunReport(label=label, threshold=threshold, ccp_path=CCP_PATH, entity=entity_key)
 
     # ---- statements -------------------------------------------------------
+    _t0 = time.perf_counter()
+    _marks: list = []
+
+    def _mark(name):
+        nonlocal _t0
+        now = time.perf_counter()
+        _marks.append(f"{name} {now - _t0:.2f}s")
+        _t0 = now
+
     with tempfile.TemporaryDirectory() as tmp:
         mod, res = _extract(pdf_dir, Path(tmp) / "extraction.xlsx", start, end, label)
         rep.skipped, rep.duplicates = list(res.skipped), list(res.duplicates)
@@ -160,9 +184,41 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         ties_by_id = {id(s): t for s, t in zip(res.statements, res.ties)}
         rep.refused = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
 
+        _mark("parse")
+        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result)]
+
+        # ---- CC-08: fixed-account checks BEFORE any matching work ----------------
+        # Fee / cashback rows on a passing statement need the entity's Bank Service Charge /
+        # Drawings account. Say so now, not after the payment matching. The same checks run
+        # again below on the journals as a backstop.
+        def _usable(path):
+            p = _strip_root(path)
+            if p not in view.paths:
+                return f"{path!r} is not an account in the book"
+            r = guard.blocked_target_reason(p)
+            return f"{path!r} cannot be used: {r}" if r else None
+
+        _rows = [r for s in passing for r in s.parsed.rows]
+        if any(_fee_row(r, mod.FEE_REVERSAL_RX) for r in _rows):
+            _bsc = _strip_root(ent.bank_service_charge_account)
+            if not _bsc:
+                return _error(f"ERROR: entity {entity_key!r} has no bank_service_charge_account in entities.yaml, "
+                              f"and this run has card fees to book. Add it (the account fees, interest and GST on "
+                              f"fees go to). Nothing was booked.")
+            _bad = _usable(_bsc)
+            if _bad:
+                return _error(f"ERROR: entity {entity_key!r} bank_service_charge_account: {_bad}. Nothing was booked.")
+        if any(_cashback_row(r) for r in _rows):
+            _draw = [_strip_root(d) for d in ent.drawings_accounts]
+            if len(_draw) != 1:
+                return _error(f"ERROR: entity {entity_key!r} needs exactly one drawings_accounts entry for card "
+                              f"cashback / CRED overage ({len(_draw)} found). Nothing was booked.")
+            _bad = _usable(_draw[0])
+            if _bad:
+                return _error(f"ERROR: entity {entity_key!r} drawings account: {_bad}. Nothing was booked.")
+
         # ---- payments ------------------------------------------------------
         pool_pay = _payment_pool(view, start, end)
-        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result)]
         lines = M.pay_lines(res.statements)          # lines on every statement in range; refusal is decided at settlement
         outcome = M.match_payments(lines, pool_pay)
         rep.pairings = outcome.pairings
@@ -187,14 +243,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             nxt = next((o for o in res.pool if o is not st and mod.find_prior(o, res.pool) is st), None)
             (rep.unpaid if nxt is not None and id(nxt) in run_ids else rep.awaiting).append(st)
 
-        # ---- fixed accounts: usable test, and the EMI interest account -----------
-        def _usable(path):
-            p = _strip_root(path)
-            if p not in view.paths:
-                return f"{path!r} is not an account in the book"
-            r = guard.blocked_target_reason(p)
-            return f"{path!r} cannot be used: {r}" if r else None
-
+        _mark("match")
+        # ---- the EMI interest account (soft: a problem withholds the interest rows only) ----
         emi_acct = _strip_root(getattr(ent, "card_emi_interest_account", "") or "")
         if not emi_acct:
             emi_bad = "the entity has no card_emi_interest_account in entities.yaml"
@@ -233,7 +283,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 rep.partly_booked.append((s.target, "has EMI rows that are not booked; only its other rows are booked"))
         rep.journals = journals
 
-        # ---- fixed accounts --------------------------------------------------
+        _mark("journals")
+        # ---- fixed accounts (backstop: the early check above already covers the normal case) ----
         if any(j.kind in (J.K_FEE, J.K_FEE_REV) for j in journals):
             bsc = _strip_root(ent.bank_service_charge_account)
             if not bsc:
@@ -263,6 +314,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
 
         # ---- already booked (before mapping: an unmapped journal is checked too) ----
         J.mark_booked(journals, view.txns, CCP_PATH)
+        _mark("already-booked check")
 
         # ---- mapper for spends and refunds ---------------------------------
         to_map = [j for j in journals if j.needs_mapping and j.status == J.ST_READY]
@@ -294,6 +346,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                         j.account, j.confidence = orig.account, "high"
                         j.match_reason = "refund of an identical purchase in this run"
 
+        _mark("map")
         # ---- guard on every account ------------------------------------------
         for j in journals:
             if j.status != J.ST_READY:
@@ -333,6 +386,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         write_workbook(rep, str(xlsx))
         rep.output_xlsx = str(xlsx)
 
+        _mark("write")
     msg = build_message(rep)
+    msg += "\n\nTiming: " + ", ".join(_marks)
     return ReplyWithOutputs(msg, [extra_output("workbook", rep.output_xlsx, "Journals, payments, fees, EMI rows, CCP tie-out")],
                             withhold_primary=not ready)

@@ -1071,6 +1071,15 @@ def _make_run_handler(skill: SkillInfo):
         work_dir = tempfile.mkdtemp(prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-")
         kwargs = build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir)
 
+        # CC-08: password inputs are never written to the run log.
+        secrets = [str(input_map.get(i.name) or "") for i in skill.inputs
+                   if getattr(i, "type", "") == "password"]
+
+        def outcome(text):
+            # the final error / result text also goes in the "Full log" file
+            _runlog.append_outcome(log_path, text, secrets=secrets)
+            return text
+
         # -- Execute --
         def work():
             return run_fn(**kwargs)
@@ -1098,7 +1107,9 @@ def _make_run_handler(skill: SkillInfo):
             log_path = _runlog.new_log_path(skill.name)
             _runlog.write_run_log(
                 log_path, skill_name=skill.name, run_log_lines=log, traceback_text=tb,
+                secrets=secrets,
             )
+            outcome(f"Error: run failed: {e}")
             yield add(
                 f"Error: run failed: {e}\n\n"
                 f"Full log: `{log_path}`\n\n"
@@ -1116,13 +1127,15 @@ def _make_run_handler(skill: SkillInfo):
         #    failure inside a successful-looking agent reply still leaves a
         #    trace on disk. --
         log_path = _runlog.new_log_path(skill.name)
-        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log)
+        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+                              secrets=secrets)
 
         # -- Verify output --
         yield add("**Verifying output…**"), gr.update(interactive=False, value=None), gr.update()
 
         if skill.output.type == "directory":
             if not out_path.is_dir() or not any(out_path.iterdir()):
+                outcome(f"Error: the run did not finish successfully - no output was produced at {out_path}.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
                     f"was produced at {out_path}. Check the details below, fix "
@@ -1150,6 +1163,7 @@ def _make_run_handler(skill: SkillInfo):
                                           heading="Files written by this run")
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
+            outcome(f"Done. Output folder: {out_abs}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
                 f"### Done\n\n"
                 f"**Output folder:** {out_abs}\n\n"
@@ -1160,6 +1174,7 @@ def _make_run_handler(skill: SkillInfo):
             yield msg, gr.update(interactive=False, value=None), gr.update(value=out_abs)
         else:
             if not out_path.is_file():
+                outcome(f"Error: the run did not finish successfully - no output file was produced.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
                     f"file was produced, so there is nothing to download. "
@@ -1173,6 +1188,7 @@ def _make_run_handler(skill: SkillInfo):
             # withhold_primary) when the run found a blocking problem; the
             # file stays on disk but no button is enabled and no copy staged.
             if getattr(agent_reply, "withhold_primary", False):
+                outcome(f"Not ready to import: {out_path.name} was written but a problem must be fixed first; no download offered.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"### Not ready to import\n\n"
                     f"The run wrote `{out_path.name}` but found a problem that must be "
@@ -1193,6 +1209,7 @@ def _make_run_handler(skill: SkillInfo):
                 resolved = out_path.resolve()
                 expected_root = _config.output_dir().resolve()
                 if not resolved.is_relative_to(expected_root):
+                    outcome(f"Security error: output path {resolved} is outside the expected output directory.")
                     yield add(
                         f"Security error: output path {resolved} is outside "
                         f"the expected output directory ({expected_root}). "
@@ -1204,6 +1221,7 @@ def _make_run_handler(skill: SkillInfo):
                 shutil.copy2(out_path, served_path)
                 out_abs = str(served_path.resolve())
             except Exception as e:
+                outcome(f"Error: could not stage download file: {e}")
                 yield add(
                     f"Error: could not stage download file: {e}"
                 ), gr.update(interactive=False, value=None), gr.update()
@@ -1213,6 +1231,7 @@ def _make_run_handler(skill: SkillInfo):
             extras = _stage_extra_outputs(skill, agent_reply)
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
+            outcome(f"Done. File: {out_path.name}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
                 f"### Done\n\n"
                 f"**File:** {out_path.name}\n\n"
