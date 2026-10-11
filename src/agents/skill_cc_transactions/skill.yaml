@@ -15,6 +15,7 @@ entry_point: "agent:run"
 inputs:
   - name: "pdf_dir"
     type: "directory"
+    folders_from: "cc_sort_runs"
     label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)"
     required: true
   - name: "period"

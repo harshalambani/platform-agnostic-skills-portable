@@ -277,20 +277,45 @@ def _entity_initial_value(skill, entity_name):
 _NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
 
 
-def _newest_cc_sort_pdfs() -> str | None:
-    """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None.
-    Only a starting point for the CC Transactions picker when nothing is
-    remembered; it never fills the box by itself."""
+def _cc_sort_runs() -> list[tuple[str, str]]:
+    """UI-33: (label, path) for every CC-Sort run that has a
+    Decrypted_PDFs_Correct folder, newest run first. A run without that folder
+    is never offered. No runs (or no output dir) gives an empty list."""
     try:
         runs = sorted((d for d in _config.output_dir().glob("*-CC-Sort") if d.is_dir()),
                       key=lambda d: d.name, reverse=True)
-    except OSError:
-        return None
+    except Exception:
+        return []
+    out = []
     for d in runs:
         target = d / "Decrypted_PDFs_Correct"
         if target.is_dir():
-            return str(target)
-    return None
+            out.append((d.name, str(target)))
+    return out
+
+
+# Named folder sources for a directory input's `folders_from:` key.
+_FOLDER_SOURCES = {"cc_sort_runs": _cc_sort_runs}
+
+
+def _known_folders(source: str) -> list[tuple[str, str]]:
+    fn = _FOLDER_SOURCES.get(source)
+    return fn() if fn else []
+
+
+def _refresh_folder_choice(source: str, current):
+    """Refresh the choices; the value is kept as it is when there is one (a typed
+    or pasted path is never replaced), and is the newest run only when empty."""
+    choices = _known_folders(source)
+    if current:
+        return gr.update(choices=choices)
+    return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+
+def _newest_cc_sort_pdfs() -> str | None:
+    """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None."""
+    runs = _cc_sort_runs()
+    return runs[0][1] if runs else None
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -1323,6 +1348,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
+            folder_pickers = []   # (dropdown, refresh_btn, folders_from) UI-33
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             folder_buttons = []   # (button, textbox, input_def) for the native folder Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
@@ -1527,12 +1553,28 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     # UI-30: same row layout as the file boxes -- textbox plus a
                     # native "Browse..." button. Typing or pasting still works.
                     with gr.Row():
-                        comp = gr.Textbox(
-                            label=inp.label,
-                            placeholder="Browse... to a folder, or paste the full folder path",
-                            scale=5,
-                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
-                        )
+                        if inp.folders_from:
+                            # UI-33: known folders in a dropdown that still takes
+                            # a typed or pasted path; newest run preselected.
+                            _fch = _known_folders(inp.folders_from)
+                            comp = gr.Dropdown(
+                                label=inp.label,
+                                choices=_fch,
+                                value=(_fch[0][1] if _fch else None),
+                                allow_custom_value=True,
+                                interactive=True,
+                                scale=5,
+                                **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
+                            )
+                            _frbtn = gr.Button("↻", scale=0, min_width=40)
+                            folder_pickers.append((comp, _frbtn, inp.folders_from))
+                        else:
+                            comp = gr.Textbox(
+                                label=inp.label,
+                                placeholder="Browse... to a folder, or paste the full folder path",
+                                scale=5,
+                                **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                            )
                         _fbtn = gr.Button("Browse…", scale=0, min_width=110)
                     folder_buttons.append((_fbtn, comp, inp))
                 elif inp.type == "password":
@@ -1773,6 +1815,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             outputs=_comp,
         )
 
+    # UI-33: refresh button of each known-folders dropdown.
+    for _comp, _rbtn, _src in folder_pickers:
+        _rbtn.click(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
+                    inputs=[_comp], outputs=_comp)
+
     # Wire each parser picker's refresh button to re-scan the parser tree.
     for _comp, _pbtn in parser_pickers:
         _pbtn.click(
@@ -1843,10 +1890,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # UI-30: "Browse..." beside every folder box. Opens at the box's remembered
     # folder; a cancelled pick leaves whatever is typed there untouched.
     for _fbtn, _tcomp, _finp in folder_buttons:
-        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label):
+        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label,
+                           fsrc=_finp.folders_from):
             picked = _filedialog.pick_folder(
                 bk, title=f"Select folder - {label}",
-                fallback_dir=_newest_cc_sort_pdfs() if bk == "CC Transactions.pdf_dir" else None)
+                fallback_dir=(_newest_cc_sort_pdfs() if fsrc == "cc_sort_runs" else None))
             return gr.update(value=picked) if picked else gr.update()
 
         _fbtn.click(fn=_browse_folder, inputs=[_tcomp], outputs=[_tcomp])
@@ -1854,6 +1902,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.
     if container_tab is not None:
+        for _comp, _rbtn, _src in folder_pickers:
+            container_tab.select(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
+                                 inputs=[_comp], outputs=[_comp])
         for _comp, _rbtn, _match, _fts in output_pickers:
             def _rescan_newest(m=_match, f=_fts):
                 choices = _scan_output_files(m, f)
