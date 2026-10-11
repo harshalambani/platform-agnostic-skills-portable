@@ -21,7 +21,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 # Labels that were once used in prose but are not rendered anywhere.
-KNOWN_PHANTOMS = ["Partner Comp Recon", "26AS Journal", "ITR Mapping tab"]
+KNOWN_PHANTOMS = ["Partner Comp Recon", "26AS Journal", "ITR Mapping tab",
+                  "Banks > Convert to GnuCash", "Banks \"Convert to GnuCash\""]
 
 
 def _manifests():

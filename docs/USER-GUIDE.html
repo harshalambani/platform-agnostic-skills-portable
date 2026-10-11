@@ -47,12 +47,12 @@ padding-top:14px}
 <nav><h1>PA Skills — Help</h1>
 <input id="q" placeholder="Filter skills…" autocomplete="off">
 <a href="#skill_ais_reconcile">AIS Reconcile</a>
+<a href="#skill_gnucash_pipeline">Bank - Convert to GnuCash</a>
 <a href="#skill_bob">Bank of Baroda</a>
 <a href="#skill_csv_analyzer">CSV Data Analyzer</a>
 <a href="#skill_26as">Convert</a>
 <a href="#skill_krc">Convert</a>
 <a href="#skill_26as_journal">Convert to GnuCash</a>
-<a href="#skill_gnucash_pipeline">Convert to GnuCash</a>
 <a href="#skill_krc_gnucash">Convert to GnuCash</a>
 <a href="#skill_gnucash_coverage">Coverage Gap Detector</a>
 <a href="#skill_cc_spend_booking">Credit Card - Book Spends</a>
@@ -106,6 +106,86 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>&quot;ERROR: no entity ... has a PAN matching the masked prefix&quot;.</td><td>Add or correct the entity&#x27;s pan in entities.yaml, or confirm the AIS filename wasn&#x27;t renamed away from the portal&#x27;s own masked-PAN_FY_... convention.</td></tr>
 <tr><td>&quot;ERROR: could not decrypt ...&quot;.</td><td>The resolved entity&#x27;s dob/doi in entities.yaml doesn&#x27;t match what the portal used to encrypt this export -- double-check the date (ISO YYYY-MM-DD) on file.</td></tr>
 <tr><td>WARNING about the GnuCash book having no transactions in the AIS&#x27;s FY.</td><td>You picked the wrong .gnucash book (or the wrong-year one) -- re-run with the book covering the same financial year as the AIS export.</td></tr>
+</tbody></table>
+</section>
+<section id="skill_gnucash_pipeline" class="skill">
+<h2>Bank - Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when your goal is to get transactions into GnuCash. Use the individual bank skills (BoB, HDFC, etc.) instead only when you want the extracted CSV without account mapping.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Entity (optional) -- fills in the GnuCash book below from the registry</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
+<li><b>Bank</b> <em>(required)</em> <span class="pa-tip" data-tip="Which bank the statement is from — this picks the right extractor. ⚠️ Pick &#x27;Other Bank (CSV)&#x27; for any bank without a dedicated extractor; columns are normalised with LLM help.">ℹ️</span><br><span class="fmt">accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).</span></li>
+<li><b>Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak (HSBC also takes an already-enriched .xlsx); CSV or XLS/XLSX for HDFC / Other</b> <em>(required)</em> <span class="pa-tip" data-tip="The statement file(s), matching the bank you chose. ⚠️ File type must match the selected bank, or extraction will fail.">ℹ️</span><br><span class="fmt">accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill&#x27;s own output) instead of PDFs.</span></li>
+<li><b>Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Used for an HDFC PDF or an SBM xlsx that is itself password-protected. ⚠️ Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password — for HDFC this is often the Cust ID; for SBM it is the workbook&#x27;s open password.</span></li>
+<li><b>GnuCash book (.gnucash) — must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used to learn your accounts and map transactions. ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
+<li><b>Bank account (optional -- only if several of your accounts are at this bank and the statement does not say which)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Which of your accounts at this bank the statement is for. Leave blank unless the run stops and asks. ⚠️ Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing.">ℹ️</span><br><span class="fmt">accepts: One of the postable accounts at the chosen bank, listed from your book.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the entity (optional) — this fills in the GnuCash book for you.</li>
+<li>Choose the bank.</li>
+<li>Upload the matching statement file(s).</li>
+<li>Select your .gnucash book (closed in GnuCash), unless the entity already filled it in.</li>
+<li>Click Run, then import the resulting CSV via File &gt; Import in GnuCash.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</code><span class="pa-tip" data-tip="The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.">ℹ️</span> — The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.</li>
+</ul>
+<h3>Tips</h3><p>Account mapping learns from your existing GnuCash history, so the more you
+have categorised before, the better the auto-mapping. Review a few rows after
+import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export
+over a password-protected PDF when you have the choice — extraction is
+equally deterministic either way, but if HDFC ever hands you a PDF whose
+text layer is garbled (rare, seen on some re-downloaded statements), the
+skill auto-detects it and falls back to OCR, which is typically ~90%+
+accurate rather than exact; re-check the running/closing balance in that
+case.
+
+**Importing into GnuCash.** In File &gt; Import &gt; Import Transactions from CSV,
+map the columns of the `_GnuCash_import_ready.csv` like this:
+
+- Date -&gt; Date; Transaction ID -&gt; Number; Description -&gt; Description.
+- Account -&gt; Account; Transfer Account -&gt; Transfer Account.
+- &quot;Amount Negated (Deposit)&quot; -&gt; Amount (Negated); &quot;Amount (Withdrawal)&quot; -&gt; Amount.
+- Balance, Currency, Confidence and MatchReason -&gt; None.
+
+Why the deposit column is negated: the Account column is the CATEGORY the
+transaction is booked against (income or expense), not your bank, so a deposit
+must be imported as a negated amount for the bank to go up. Use the Amount and
+Amount (Negated) column types, not &quot;Transfer Amount&quot; - GnuCash 5&#x27;s importer
+needs an Amount column. Save the mapping as a preset in the importer so the
+next import is one click.
+
+**Closing-balance gate and the bank-base file (BNK-09).** Before anything is
+released the pipeline checks that the book would end at the statement closing
+balance (and at every month end). A statement row may be left out as &quot;already
+booked&quot; only when its twin is in THIS bank&#x27;s own account, same amount, within
+2 days; a same-amount entry in a shared account (Cash, Drawings, Credit Card
+Payment) booked from another bank never counts. If the gate fails, the import is
+BLOCKED and every explaining row is listed (date, description, amount, intended
+account, reason). Timing differences of 1-2 days that net to zero are shown for
+information and do not block.
+
+Import the file ending `_GnuCash_import_bank_base.csv`, not the `_import_ready`
+file. In it the BANK is the base Account and the category is the Transfer
+Account, so GnuCash&#x27;s duplicate check compares each row against this bank only.
+Create a second importer preset for it:
+
+- Date -&gt; Date; Transaction ID -&gt; Number; Description -&gt; Description.
+- Account -&gt; Account; Transfer Account -&gt; Transfer Account.
+- &quot;Amount (Deposit)&quot; -&gt; Amount; &quot;Amount Negated (Withdrawal)&quot; -&gt; Amount (Negated).
+- Balance, Currency, Confidence and MatchReason -&gt; None.
+
+On the Review tab, &quot;Check book after import (read-only)&quot; compares the bank&#x27;s
+daily book balance with the statement&#x27;s running balance, names the first day
+they drift apart and the closing difference, and writes a `_missing_rows` CSV of
+only the rows absent from this bank&#x27;s account. It never writes to the book.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
+<tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_bob" class="skill">
@@ -234,86 +314,6 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
 <tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
 <tr><td>s.194T reconciliation shows OPEN or VARIANCE.</td><td>OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal&#x27;s postings for those months before importing.</td></tr>
-</tbody></table>
-</section>
-<section id="skill_gnucash_pipeline" class="skill">
-<h2>Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when your goal is to get transactions into GnuCash. Use the individual bank skills (BoB, HDFC, etc.) instead only when you want the extracted CSV without account mapping.</p>
-<h3>Inputs</h3><ul class="inputs">
-<li><b>Entity (optional) -- fills in the GnuCash book below from the registry</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
-<li><b>Bank</b> <em>(required)</em> <span class="pa-tip" data-tip="Which bank the statement is from — this picks the right extractor. ⚠️ Pick &#x27;Other Bank (CSV)&#x27; for any bank without a dedicated extractor; columns are normalised with LLM help.">ℹ️</span><br><span class="fmt">accepts: One of: ICICI, Bank of Baroda, HSBC, HDFC, Kotak, Other Bank (CSV).</span></li>
-<li><b>Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak (HSBC also takes an already-enriched .xlsx); CSV or XLS/XLSX for HDFC / Other</b> <em>(required)</em> <span class="pa-tip" data-tip="The statement file(s), matching the bank you chose. ⚠️ File type must match the selected bank, or extraction will fail.">ℹ️</span><br><span class="fmt">accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill&#x27;s own output) instead of PDFs.</span></li>
-<li><b>Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Used for an HDFC PDF or an SBM xlsx that is itself password-protected. ⚠️ Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password — for HDFC this is often the Cust ID; for SBM it is the workbook&#x27;s open password.</span></li>
-<li><b>GnuCash book (.gnucash) — must be closed in GnuCash</b> <em>(required)</em> <span class="pa-tip" data-tip="Your GnuCash book — used to learn your accounts and map transactions. ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.">ℹ️</span><br><span class="fmt">accepts: GnuCash file (.gnucash).</span></li>
-<li><b>Bank account (optional -- only if several of your accounts are at this bank and the statement does not say which)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Which of your accounts at this bank the statement is for. Leave blank unless the run stops and asks. ⚠️ Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing.">ℹ️</span><br><span class="fmt">accepts: One of the postable accounts at the chosen bank, listed from your book.</span></li>
-</ul>
-<h3>How to run</h3><ol>
-<li>Pick the entity (optional) — this fills in the GnuCash book for you.</li>
-<li>Choose the bank.</li>
-<li>Upload the matching statement file(s).</li>
-<li>Select your .gnucash book (closed in GnuCash), unless the entity already filled it in.</li>
-<li>Click Run, then import the resulting CSV via File &gt; Import in GnuCash.</li>
-</ol>
-<h3>Output</h3>
-<p>Written to <code>Data/outputs/</code>:</p>
-<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</pre>
-<ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-GnuCash_import_ready.csv</code><span class="pa-tip" data-tip="The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.">ℹ️</span> — The statement converted to canonical columns AND mapped to your GnuCash accounts (based on your book&#x27;s history), ready to import directly — no manual categorising.</li>
-</ul>
-<h3>Tips</h3><p>Account mapping learns from your existing GnuCash history, so the more you
-have categorised before, the better the auto-mapping. Review a few rows after
-import the first time. For HDFC, prefer the plain PDF, XLS/XLSX, or CSV export
-over a password-protected PDF when you have the choice — extraction is
-equally deterministic either way, but if HDFC ever hands you a PDF whose
-text layer is garbled (rare, seen on some re-downloaded statements), the
-skill auto-detects it and falls back to OCR, which is typically ~90%+
-accurate rather than exact; re-check the running/closing balance in that
-case.
-
-**Importing into GnuCash.** In File &gt; Import &gt; Import Transactions from CSV,
-map the columns of the `_GnuCash_import_ready.csv` like this:
-
-- Date -&gt; Date; Transaction ID -&gt; Number; Description -&gt; Description.
-- Account -&gt; Account; Transfer Account -&gt; Transfer Account.
-- &quot;Amount Negated (Deposit)&quot; -&gt; Amount (Negated); &quot;Amount (Withdrawal)&quot; -&gt; Amount.
-- Balance, Currency, Confidence and MatchReason -&gt; None.
-
-Why the deposit column is negated: the Account column is the CATEGORY the
-transaction is booked against (income or expense), not your bank, so a deposit
-must be imported as a negated amount for the bank to go up. Use the Amount and
-Amount (Negated) column types, not &quot;Transfer Amount&quot; - GnuCash 5&#x27;s importer
-needs an Amount column. Save the mapping as a preset in the importer so the
-next import is one click.
-
-**Closing-balance gate and the bank-base file (BNK-09).** Before anything is
-released the pipeline checks that the book would end at the statement closing
-balance (and at every month end). A statement row may be left out as &quot;already
-booked&quot; only when its twin is in THIS bank&#x27;s own account, same amount, within
-2 days; a same-amount entry in a shared account (Cash, Drawings, Credit Card
-Payment) booked from another bank never counts. If the gate fails, the import is
-BLOCKED and every explaining row is listed (date, description, amount, intended
-account, reason). Timing differences of 1-2 days that net to zero are shown for
-information and do not block.
-
-Import the file ending `_GnuCash_import_bank_base.csv`, not the `_import_ready`
-file. In it the BANK is the base Account and the category is the Transfer
-Account, so GnuCash&#x27;s duplicate check compares each row against this bank only.
-Create a second importer preset for it:
-
-- Date -&gt; Date; Transaction ID -&gt; Number; Description -&gt; Description.
-- Account -&gt; Account; Transfer Account -&gt; Transfer Account.
-- &quot;Amount (Deposit)&quot; -&gt; Amount; &quot;Amount Negated (Withdrawal)&quot; -&gt; Amount (Negated).
-- Balance, Currency, Confidence and MatchReason -&gt; None.
-
-On the Review tab, &quot;Check book after import (read-only)&quot; compares the bank&#x27;s
-daily book balance with the statement&#x27;s running balance, names the first day
-they drift apart and the closing difference, and writes a `_missing_rows` CSV of
-only the rows absent from this bank&#x27;s account. It never writes to the book.</p>
-<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
-<tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
-<tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_krc_gnucash" class="skill">
@@ -518,9 +518,9 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <section id="skill_hsbc" class="skill">
 <h2>HSBC <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel workbook: it OCRs scanned pages (Tesseract + Poppler) while skipping pages that already have text, extracts the transaction ID, splits out the transaction date, scrubs the description, and adds an Extra Information column plus a Summary sheet.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks &gt; Convert to GnuCash and choose HSBC instead.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks &gt; Bank - Convert to GnuCash and choose HSBC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>Folder of HSBC statement PDFs, or a single PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing one or more HSBC statement PDFs, or a single PDF. ⚠️ Scanned PDFs are OCR&#x27;d, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build). This tab only OCRs PDFs — if you already have an enriched HSBC .xlsx/.xlsm workbook (this skill&#x27;s own output), there is nothing to OCR; use Banks &gt; Convert to GnuCash and choose HSBC to import it instead.">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC PDF statements, or a single HSBC statement PDF.</span></li>
+<li><b>Folder of HSBC statement PDFs, or a single PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing one or more HSBC statement PDFs, or a single PDF. ⚠️ Scanned PDFs are OCR&#x27;d, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build). This tab only OCRs PDFs — if you already have an enriched HSBC .xlsx/.xlsm workbook (this skill&#x27;s own output), there is nothing to OCR; use Banks &gt; Bank - Convert to GnuCash and choose HSBC to import it instead.">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC PDF statements, or a single HSBC statement PDF.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Put your HSBC PDFs in one folder (or use a single PDF).</li>
@@ -662,7 +662,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <section id="skill_kotak" class="skill">
 <h2>Kotak <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
 <p class="overview">Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV — one row per transaction. Runs fully offline (no LLM, no internet) and reads the statement&#x27;s ruled/bordered table structure directly, so a table that overflows from one page to the next (without repeating the column header) is still captured correctly, and the trailing abbreviation-legend page is excluded rather than mistaken for transaction rows.</p>
-<p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Convert to GnuCash&quot; pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
+<p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Bank - Convert to GnuCash&quot; pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Kotak statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Kotak statement PDF. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first, or the run will report the file could not be opened.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one statement per run.</span></li>
 </ul>

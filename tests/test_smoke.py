@@ -275,9 +275,9 @@ def test_every_registered_skill_gets_a_tab():
 def test_banks_tab_order_puts_coverage_gap_detector_last():
     from ui import webui
     before, after = webui._split_banks_tabs(
-        ["Coverage Gap Detector", "Convert to GnuCash"]
+        ["Coverage Gap Detector", "Bank - Convert to GnuCash"]
     )
-    assert before == ["Convert to GnuCash"]
+    assert before == ["Bank - Convert to GnuCash"]
     assert after == ["Coverage Gap Detector"]
 
 
@@ -289,7 +289,7 @@ def test_banks_tab_order_coverage_gap_detector_not_before_review():
     directly guards against the regression, not just the happy path."""
     from ui import webui
     before, _after = webui._split_banks_tabs(
-        ["Convert to GnuCash", "Coverage Gap Detector"]
+        ["Bank - Convert to GnuCash", "Coverage Gap Detector"]
     )
     assert "Coverage Gap Detector" not in before
 
@@ -300,7 +300,7 @@ def test_banks_tab_order_unknown_skill_defaults_before_review():
     that isn't explicitly pinned last."""
     from ui import webui
     before, after = webui._split_banks_tabs(
-        ["Convert to GnuCash", "Coverage Gap Detector", "Some Future Skill"]
+        ["Bank - Convert to GnuCash", "Coverage Gap Detector", "Some Future Skill"]
     )
     assert "Some Future Skill" in before
     assert after == ["Coverage Gap Detector"]

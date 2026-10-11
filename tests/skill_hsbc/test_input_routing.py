@@ -18,7 +18,7 @@ Covers (all offline, subprocess.run mocked -- OCR itself stays out of scope):
       (the parent-directory-substitution bug this task fixes) -- the staged
       directory handed to the pipeline contains exactly the one PDF.
     - An already-enriched .xlsx/.xlsm workbook is rejected with a message
-      pointing at Banks > Convert to GnuCash, and the OCR subprocess is
+      pointing at Banks > Bank - Convert to GnuCash, and the OCR subprocess is
       never invoked.
     - A directory with no PDFs (but an enriched workbook) is rejected the
       same way, without a subprocess call.
@@ -133,7 +133,7 @@ def test_enriched_workbook_is_rejected_with_convert_to_gnucash_pointer(monkeypat
         hsbc_run(str(wb), str(tmp_path / "work"), str(tmp_path / "out.xlsx"))
 
     msg = str(exc_info.value)
-    assert "Convert to GnuCash" in msg
+    assert "Bank - Convert to GnuCash" in msg
     assert "No PDFs found in" not in msg
     assert calls == []  # OCR subprocess never invoked
 
@@ -146,7 +146,7 @@ def test_xlsm_workbook_is_also_rejected(monkeypatch, tmp_path):
     with pytest.raises(ValueError) as exc_info:
         hsbc_run(str(wb), str(tmp_path / "work"), str(tmp_path / "out.xlsx"))
 
-    assert "Convert to GnuCash" in str(exc_info.value)
+    assert "Bank - Convert to GnuCash" in str(exc_info.value)
     assert calls == []
 
 
@@ -159,7 +159,7 @@ def test_directory_with_only_workbook_is_rejected_with_pointer(monkeypatch, tmp_
     with pytest.raises(ValueError) as exc_info:
         hsbc_run(str(stmt_dir), str(tmp_path / "work"), str(tmp_path / "out.xlsx"))
 
-    assert "Convert to GnuCash" in str(exc_info.value)
+    assert "Bank - Convert to GnuCash" in str(exc_info.value)
     assert calls == []
 
 
