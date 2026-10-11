@@ -61,3 +61,13 @@ def test_error_and_warning_boxes_also_release_following_lines():
 
 def test_plain_lines_pass_through_unchanged():
     assert _colorize_status("Some ordinary line\n\n- x") == "Some ordinary line\n\n- x"
+
+
+def test_a_result_saying_not_complete_is_never_green():                 # NEGATIVE
+    for line in (
+        "NOT complete: 3 rows were left out",
+        "Completed. The run is NOT complete",
+        "The statement set is NOT complete",
+        "### Done - NOT complete",
+    ):
+        assert not _green(line), line
