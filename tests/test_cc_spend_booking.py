@@ -764,7 +764,9 @@ def test_entity_keys_round_trip_and_stay_empty_when_absent(tmp_path):
 
 def test_entities_form_does_not_drop_the_new_keys():
     from ui.tabs import itr_entities
-    assert {"bank_service_charge_account", "card_emi_interest_account"} <= set(itr_entities._FORM_HIDDEN_FIELDS)
+    # UI-35: both now have a control on the form; an older caller (None) still keeps them
+    assert {"bank_service_charge_account", "card_emi_interest_account"} <= set(itr_entities._FORM_UI35_FIELDS)
+    assert "bank_service_charge_account" not in itr_entities._FORM_HIDDEN_FIELDS
 
 
 def test_manifest_shape():

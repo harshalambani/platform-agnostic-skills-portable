@@ -345,15 +345,240 @@ def _move_with_rollback(pairs: list[tuple[Path, Path]]) -> None:
 # ---------------------------------------------------------------------------
 
 # EntityProfile fields with no widget on this tab: a save must preserve them.
-_FORM_HIDDEN_FIELDS = (
-    "partner_comp_accounts", "foreign_dividends_in_book",
-    "foreign_dividends_in_book_by_ay",
-    "bank_service_charge_account", "card_emi_interest_account",   # CC-03: edited in entities.yaml
-    "partner_firm_pan",                                            # ITR-05: edited in entities.yaml
-)
-# MAP-34 / MAP-35: editable on this tab. A save that passes None for them (an
-# older caller) preserves the stored value; a string (even empty) replaces it.
+# UI-35: every field now has a control, so nothing is hidden any more. The
+# preserve loop in _save_entity stays, so a field added to EntityProfile later
+# and listed here is carried over until it gets a widget -- and the guard test
+# fails until it is listed in _FIELD_CONTROLS or here.
+_FORM_HIDDEN_FIELDS: tuple = ("partner_firm_pan",)  # ITR-05 field, rebased in; control added in a follow-up commit
+# MAP-34 / MAP-35 / UI-35: editable on this tab. A save that passes None for
+# them (an older caller) preserves the stored value; a value (even empty)
+# replaces it.
 _FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account", "reimbursement_markers")
+_FORM_UI35_FIELDS = (
+    "bank_service_charge_account", "card_emi_interest_account", "partner_comp_accounts",
+    "foreign_dividends_in_book", "foreign_dividends_in_book_by_ay",
+)
+
+#: UI-35: EntityProfile field -> a fragment of the label of the control that
+#: edits it. tests/test_ui35_entities_all_fields.py builds the tab and checks
+#: both directions, so a new field cannot be added without a control.
+_FIELD_CONTROLS = {
+    "key": "Entity key", "name": "Name", "pan": "PAN", "status": "Status", "residency": "Residency",
+    "dob": "Date of birth", "doi": "Date of incorporation", "address": "Address",
+    "father_name": "Father's name", "aadhaar": "Aadhaar", "business_subtree": "Business subtree",
+    "workbook_match": "Workbook match", "books": "Financial-year books",
+    "default_regime": "Default regime", "regime_by_ay": "Regime by AY",
+    "audit_case": "Extended due date --", "audit_case_by_ay": "Extended due date by AY",
+    "audit_case_basis": "Why 31 Oct applies",
+    "foreign_dividends_in_book": "Foreign dividends are already in the book",
+    "foreign_dividends_in_book_by_ay": "Foreign dividends already in the book by AY",
+    "extra_items": "B/f losses", "partner_comp_accounts": "Partner account: bank",
+    "drawings_accounts": "Drawings accounts", "reimbursement_markers": "Reimbursement markers",
+    "partner_admission_date": "Date admitted as partner",
+    "card_spend_default_account": "Card-spend default account",
+    "bank_service_charge_account": "Bank service charge account",
+    "card_emi_interest_account": "Card EMI interest account",
+}
+#: Fields intentionally without a control. Starts empty.
+_FIELD_CONTROL_ALLOW_LIST: tuple = ()
+
+#: The nine keys partner_comp_accounts carries (the eight required by the
+#: Partner Compensation skill plus the optional clearing account).
+_PARTNER_ACCOUNT_KEYS = (
+    "bank", "tds_expense", "interest_on_capital", "current_account",
+    "capital_contribution", "medical_expense", "remuneration_income",
+    "share_of_profit_income", "salary_clearing",
+)
+
+#: extra_items["partner_comp_drivers"][<FY>] -- the keys the Partner
+#: Compensation skill reads, and the type each must have.
+_DRIVER_RATE_KEYS = ("firms_tax_rate", "capital_rate", "capital_interest_rate",
+                     "capital_interest_tds_rate", "remuneration_tds_rate")
+_DRIVER_MONTH_KEYS = ("capital_months_total", "capital_months_achieved")
+_DRIVER_AMOUNT_KEYS = ("target_compensation",)
+_DRIVER_TEXT_KEYS = ("remuneration_tds_section",)
+_DRIVER_DATE_KEYS = ("remuneration_tds_start_date",)
+_DRIVER_DATEMAP_KEYS = ("capital_interest_from_date_overrides",)
+_DRIVER_KEYS = (_DRIVER_RATE_KEYS + _DRIVER_MONTH_KEYS + _DRIVER_AMOUNT_KEYS
+                + _DRIVER_TEXT_KEYS + _DRIVER_DATE_KEYS + _DRIVER_DATEMAP_KEYS)
+
+
+def _is_number(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _is_iso_date(v) -> bool:
+    if isinstance(v, datetime.date):
+        return True
+    if not isinstance(v, str):
+        return False
+    try:
+        datetime.date.fromisoformat(v.strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _format_drivers(drivers: dict | None) -> str:
+    if not drivers:
+        return ""
+    import yaml  # noqa: PLC0415
+    return yaml.safe_dump(drivers, sort_keys=True, default_flow_style=False, allow_unicode=True)
+
+
+def _parse_drivers(text: str) -> tuple[dict, list[str]]:
+    """UI-35: validate the per-FY partner-compensation drivers typed as YAML
+    ({FY: {driver: value}}). Returns (drivers, errors); on any error the caller
+    saves nothing."""
+    import yaml  # noqa: PLC0415
+    text = text or ""
+    if not text.strip():
+        return {}, []
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        return {}, [f"partner compensation drivers: not valid YAML ({str(exc).splitlines()[0] if str(exc) else exc})."]
+    if data is None:
+        return {}, []
+    if not isinstance(data, dict):
+        return {}, ["partner compensation drivers: expected 'YYYY-YY:' blocks of 'driver: value' lines."]
+    errors: list[str] = []
+    for fy, block in data.items():
+        if not isinstance(fy, str) or not _FY_KEY_RE.match(fy):
+            errors.append(f"partner compensation drivers: '{fy}' is not a valid financial year (expected YYYY-YY, e.g. 2025-26).")
+            continue
+        if not isinstance(block, dict):
+            errors.append(f"partner compensation drivers {fy}: expected 'driver: value' lines.")
+            continue
+        for k, v in block.items():
+            where = f"partner compensation drivers {fy}: '{k}'"
+            if k not in _DRIVER_KEYS:
+                errors.append(f"{where} is not a known driver (known: {', '.join(_DRIVER_KEYS)}).")
+            elif k in _DRIVER_RATE_KEYS:
+                if not _is_number(v) or not 0 <= v <= 1:
+                    errors.append(f"{where} must be a fraction between 0 and 1 (0.25 for 25%), got {v!r}.")
+            elif k in _DRIVER_MONTH_KEYS:
+                if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+                    errors.append(f"{where} must be a whole number of months, got {v!r}.")
+            elif k in _DRIVER_AMOUNT_KEYS:
+                if not _is_number(v) or v < 0:
+                    errors.append(f"{where} must be a number of rupees, got {v!r}.")
+            elif k in _DRIVER_TEXT_KEYS:
+                if not isinstance(v, str) or not v.strip():
+                    errors.append(f"{where} must be text such as 194T, got {v!r}.")
+            elif k in _DRIVER_DATE_KEYS:
+                if not _is_iso_date(v):
+                    errors.append(f"{where} must be a date as YYYY-MM-DD, got {v!r}.")
+            elif k in _DRIVER_DATEMAP_KEYS:
+                if not isinstance(v, dict) or not all(_is_iso_date(d) for d in v.values()):
+                    errors.append(f"{where} must be 'month: YYYY-MM-DD' lines, got {v!r}.")
+    return data, errors
+
+
+# ---------------------------------------------------------------------------
+# UI-35: account pick-lists read from the entity's own book (read-only).
+# ---------------------------------------------------------------------------
+
+_BOOK_CACHE: dict = {}
+
+
+def _newest_book(books: dict) -> tuple[str, Path] | None:
+    fys = sorted((k for k in (books or {}) if _FY_KEY_RE.match(str(k))), reverse=True)
+    if not fys:
+        return None
+    return fys[0], Path(str(books[fys[0]]))
+
+
+def _read_book(path: Path):
+    """(guard, postable account list) for a book, cached on file mtime/size.
+    The book is only read, never written. (None, []) when unreadable."""
+    try:
+        st = path.stat()
+    except OSError:
+        return None, []
+    sig = (str(path), st.st_mtime_ns, st.st_size)
+    if sig in _BOOK_CACHE:
+        return _BOOK_CACHE[sig]
+    try:
+        from agents import gnucash_accounts as G  # noqa: PLC0415
+        accs = G.load_accounts(path)
+        years, bal = G.read_account_activity(path)
+        out = (G.TargetGuard(accs, years, bal), G.postable_accounts(accs))
+    except Exception:  # noqa: BLE001
+        out = (None, [])
+    if out[0] is None or not out[0].known:
+        out = (None, [])
+    _BOOK_CACHE.clear()
+    _BOOK_CACHE[sig] = out
+    return out
+
+
+def _book_context(books: dict):
+    """(guard, accounts, fy, note). note says, in words, what the pick-lists are
+    built from or why they fall back to typing a path."""
+    nb = _newest_book(books)
+    if nb is None:
+        return None, [], "", "No book is registered for this entity, so account paths are typed in (not checked)."
+    fy, path = nb
+    guard, accs = _read_book(path)
+    if guard is None:
+        return None, [], fy, (f"The FY {fy} book could not be read at `{path}`, so account paths are typed in (not checked).")
+    return guard, accs, fy, f"Pick-lists come from the FY {fy} book. Hidden, placeholder and dormant accounts are not offered."
+
+
+def _fy_start(fy: str) -> int | None:
+    try:
+        return int(fy[:4])
+    except (ValueError, TypeError):
+        return None
+
+
+def _account_choices(books: dict) -> tuple[list[str], str]:
+    guard, accs, fy, note = _book_context(books)
+    if guard is None:
+        return [], note
+    start = _fy_start(fy)
+    paths = sorted({a.path for a in accs if a.path and guard.dormant_reason(a.path, start) is None})
+    return paths, note
+
+
+def _check_accounts(books: dict, fields: dict) -> tuple[list[str], list[str]]:
+    """(errors, warnings) for {label: path}. A hidden or placeholder account is
+    refused; a path the book does not have, or that looks dormant, only warns."""
+    fields = {k: str(v).strip() for k, v in fields.items() if v and str(v).strip()}
+    if not fields:
+        return [], []
+    guard, _accs, fy, note = _book_context(books)
+    if guard is None:
+        return [], [f"Account paths were not checked: {note}"]
+    errors: list[str] = []
+    warnings: list[str] = []
+    for label, path in fields.items():
+        reason = guard.blocked_target_reason(path)
+        if reason:
+            errors.append(f"{label}: '{path}' cannot be used -- {reason}.")
+        elif not guard.has_path(path):
+            warnings.append(f"{label}: '{path}' is not an account in the FY {fy} book (saved anyway).")
+        else:
+            dormant = guard.dormant_reason(path, _fy_start(fy))
+            if dormant:
+                warnings.append(f"{label}: '{path}' looks dormant ({dormant}); saved anyway.")
+    return errors, warnings
+
+
+def _entity_to_new_form(key: str, entities: dict) -> tuple:
+    """UI-35 form values: foreign-dividend switches, drivers, the two card
+    accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
+    e = entities.get(key)
+    if e is None:
+        return (False, "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)))
+    pa = e.partner_comp_accounts or {}
+    return (
+        bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
+        _format_drivers((e.extra_items or {}).get("partner_comp_drivers")),
+        e.bank_service_charge_account or "", e.card_emi_interest_account or "",
+        *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
+    )
 
 
 def _save_entity(
@@ -370,6 +595,13 @@ def _save_entity(
     card_spend_default_account: str | None = None,
     reimbursement_markers_text: str | None = None,
     partner_admission_date: str | None = None,
+    # UI-35: None == "an older caller that does not know this field": keep the stored value.
+    bank_service_charge_account: str | None = None,
+    card_emi_interest_account: str | None = None,
+    partner_comp_accounts: dict | None = None,
+    foreign_dividends_in_book: bool | None = None,
+    foreign_dividends_in_book_by_ay_text: str | None = None,
+    partner_comp_drivers_text: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -387,6 +619,29 @@ def _save_entity(
                 f"books: '{k}' is not a valid financial year (expected YYYY-YY, e.g. 2025-26)."
             )
     kv_errors = kv_errors_1 + kv_errors_2 + kv_errors_3
+
+    # UI-35: the new fields are validated here, before anything is written.
+    fdb_by_ay = None
+    if foreign_dividends_in_book_by_ay_text is not None:
+        fdb_by_ay, fdb_errors = _parse_kv_lines(foreign_dividends_in_book_by_ay_text, as_bool=True)
+        kv_errors += [f"foreign dividends by AY: {e}" for e in fdb_errors]
+    drivers = None
+    if partner_comp_drivers_text is not None:
+        drivers, driver_errors = _parse_drivers(partner_comp_drivers_text)
+        kv_errors += driver_errors
+    if partner_comp_accounts is not None:
+        for k in partner_comp_accounts:
+            if k not in _PARTNER_ACCOUNT_KEYS:
+                kv_errors.append(f"partner accounts: '{k}' is not a known account key.")
+    acct_fields = {}
+    if bank_service_charge_account is not None:
+        acct_fields["Bank service charge account"] = bank_service_charge_account
+    if card_emi_interest_account is not None:
+        acct_fields["Card EMI interest account"] = card_emi_interest_account
+    for k, v in (partner_comp_accounts or {}).items():
+        acct_fields[f"Partner account '{k}'"] = v
+    acct_errors, acct_warnings = _check_accounts(books, acct_fields)
+    kv_errors += acct_errors
 
     # The dropdown's blank sentinel is a UI affordance, not a stored value.
     audit_case_basis = (audit_case_basis or "").strip()
@@ -445,13 +700,23 @@ def _save_entity(
                 "manually before renaming; nothing was written."
             )
 
-    extra_items = {}
+    prior = entities.get(orig_key) if orig_key else None
+    # extra_items is only partly owned by this form: start from the stored dict
+    # and set or clear just the keys the form edits, so partner_comp_drivers
+    # and any key a later version adds survive a save untouched.
+    extra_items = copy.deepcopy(prior.extra_items) if prior is not None and prior.extra_items else {}
     bf_losses = _parse_list_lines(bf_losses_text)
     clubbing_notes = _parse_list_lines(clubbing_notes_text)
-    if bf_losses:
-        extra_items["bf_losses"] = bf_losses
-    if clubbing_notes:
-        extra_items["clubbing_notes"] = clubbing_notes
+    for _k, _v in (("bf_losses", bf_losses), ("clubbing_notes", clubbing_notes)):
+        if _v:
+            extra_items[_k] = _v
+        else:
+            extra_items.pop(_k, None)
+    if drivers is not None:
+        if drivers:
+            extra_items["partner_comp_drivers"] = drivers
+        else:
+            extra_items.pop("partner_comp_drivers", None)
 
     new_profile = configs.EntityProfile(
         key=new_key,
@@ -477,7 +742,6 @@ def _save_entity(
     # Fields this form does not expose are carried over from the stored
     # profile, never dropped (a save used to silently erase partner_comp_accounts,
     # foreign_dividends_in_book*, drawings_accounts, card_spend_default_account).
-    prior = entities.get(orig_key) if orig_key else None
     if prior is not None:
         for _f in _FORM_HIDDEN_FIELDS:
             setattr(new_profile, _f, copy.deepcopy(getattr(prior, _f)))
@@ -489,6 +753,8 @@ def _save_entity(
             new_profile.reimbursement_markers = copy.deepcopy(prior.reimbursement_markers)
         if partner_admission_date is None:
             new_profile.partner_admission_date = prior.partner_admission_date
+        for _f in _FORM_UI35_FIELDS:
+            setattr(new_profile, _f, copy.deepcopy(getattr(prior, _f)))
     if drawings_accounts_text is not None:
         new_profile.drawings_accounts = _parse_list_lines(drawings_accounts_text)
     if card_spend_default_account is not None:
@@ -497,6 +763,24 @@ def _save_entity(
         new_profile.reimbursement_markers = _parse_marker_text(reimbursement_markers_text)
     if partner_admission_date is not None:
         new_profile.partner_admission_date = (partner_admission_date or "").strip() or None
+    if bank_service_charge_account is not None:
+        new_profile.bank_service_charge_account = bank_service_charge_account.strip()
+    if card_emi_interest_account is not None:
+        new_profile.card_emi_interest_account = card_emi_interest_account.strip()
+    if partner_comp_accounts is not None:
+        # the form owns the nine known keys; any other stored key is kept
+        merged = dict(new_profile.partner_comp_accounts or {})
+        for k in _PARTNER_ACCOUNT_KEYS:
+            v = str(partner_comp_accounts.get(k) or "").strip()
+            if v:
+                merged[k] = v
+            else:
+                merged.pop(k, None)
+        new_profile.partner_comp_accounts = merged
+    if foreign_dividends_in_book is not None:
+        new_profile.foreign_dividends_in_book = bool(foreign_dividends_in_book)
+    if fdb_by_ay is not None:
+        new_profile.foreign_dividends_in_book_by_ay = fdb_by_ay
 
     entities[new_key] = new_profile
     if is_rename:
@@ -560,6 +844,7 @@ def _save_entity(
         else:
             lines.append("No filed-return files to cascade in Data/ITRFiled/.")
 
+    lines += [f"Warning: {w}" for w in acct_warnings]
     return "\n\n".join(lines)
 
 
@@ -889,6 +1174,46 @@ def render(container_tab=None) -> None:
                 label="Clubbing notes (one per line)", lines=3, interactive=True,
             )
 
+            with gr.Accordion("Foreign dividends", open=False):
+                fdb_cb = gr.Checkbox(
+                    label="Foreign dividends are already in the book",
+                    value=False,
+                    info="Off: the broker report's foreign dividends are ADDED to Other Sources. "
+                         "On: the book already records them, so they stay out of the total.",
+                )
+                fdb_by_ay_box = gr.Textbox(
+                    label="Foreign dividends already in the book by AY (one per line, 'AY = true|false')",
+                    placeholder="2026-27 = true", lines=2, interactive=True,
+                )
+            with gr.Accordion("Card accounts (card-spend booking)", open=False):
+                accounts_note_md = gr.Markdown("_Select an entity to load account pick-lists from its book._")
+                bank_charge_dd = gr.Dropdown(
+                    label="Bank service charge account", choices=[], value="",
+                    allow_custom_value=True, interactive=True,
+                    info="Card fees, interest and GST on fees. Blank = the card-spend booking stops with a named error when a fee row needs it.",
+                )
+                emi_interest_dd = gr.Dropdown(
+                    label="Card EMI interest account", choices=[], value="",
+                    allow_custom_value=True, interactive=True,
+                    info="Card EMI interest only; never the Bank service charge account.",
+                )
+            with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
+                partner_dds = [
+                    gr.Dropdown(
+                        label=f"Partner account: {k}", choices=[], value="",
+                        allow_custom_value=True, interactive=True,
+                    )
+                    for k in _PARTNER_ACCOUNT_KEYS
+                ]
+                drivers_box = gr.Textbox(
+                    label="Partner compensation drivers (YAML, one block per FY)",
+                    placeholder="2025-26:\n  firms_tax_rate: 0.25\n  target_compensation: 1200000\n  remuneration_tds_section: 194T",
+                    lines=6, interactive=True,
+                    info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
+                         "is refused and nothing is saved. Blank removes all drivers.",
+                )
+            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, *partner_dds]
+
             save_status = gr.Markdown("_Fill in the fields and click Save._")
             with gr.Row():
                 save_btn = gr.Button("Save Entity", variant="primary")
@@ -926,16 +1251,29 @@ def render(container_tab=None) -> None:
         outputs=[derived_match_md],
     )
 
+    def _new_form_updates(key):
+        """UI-35 values for the new controls; the account pick-lists are rebuilt
+        from the entity's newest registered book."""
+        entities = _load_entities()
+        fdb, fdb_ay, drv, bank, emi, *partner = _entity_to_new_form(key or "", entities)
+        books = dict(entities[key].books) if (key or "") in entities else {}
+        choices, note = _account_choices(books)
+        def dd(v):
+            return gr.update(choices=choices, value=v)
+        return (fdb, fdb_ay, drv, dd(bank), dd(emi), *[dd(v) for v in partner], "_" + note + "_")
+
+    _new_outputs = [*_new_inputs, accounts_note_md]
+
     def _on_select(key):
         entities = _load_entities()
         values = _entity_to_form(key or "", entities)
         status_msg = f"_Loaded `{key}`. Edit and Save, or Delete._" if key else "_New entity -- fill in the fields and Save._"
-        return (*values, key or "", status_msg)
+        return (*values, *_new_form_updates(key), key or "", status_msg)
 
     entity_dropdown.change(
         fn=_on_select,
         inputs=[entity_dropdown],
-        outputs=[*_form_outputs, orig_key_state, save_status],
+        outputs=[*_form_outputs, *_new_outputs, orig_key_state, save_status],
     )
 
     def _on_save(
@@ -945,6 +1283,7 @@ def render(container_tab=None) -> None:
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
         reimbursement_markers_text, partner_admission_date,
+        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, *partner_values,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -957,6 +1296,12 @@ def render(container_tab=None) -> None:
             card_spend_default_account=card_spend_default_account,
             reimbursement_markers_text=reimbursement_markers_text,
             partner_admission_date=partner_admission_date,
+            bank_service_charge_account=bank_charge or "",
+            card_emi_interest_account=emi_interest or "",
+            partner_comp_accounts=dict(zip(_PARTNER_ACCOUNT_KEYS, partner_values)),
+            foreign_dividends_in_book=bool(fdb),
+            foreign_dividends_in_book_by_ay_text=fdb_by_ay_text or "",
+            partner_comp_drivers_text=drivers_text or "",
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -970,7 +1315,7 @@ def render(container_tab=None) -> None:
                 audit_case_cb, audit_case_by_ay_box, audit_case_basis_dd,
                 bf_losses_box, clubbing_notes_box,
                 books_box, drawings_accounts_box, card_default_box, reimbursement_markers_box,
-                partner_admission_box],
+                partner_admission_box, *_new_inputs],
         outputs=[save_status, entity_dropdown, orig_key_state],
     )
 
@@ -982,13 +1327,13 @@ def render(container_tab=None) -> None:
         blanks = _entity_to_form(new_value, _load_entities())
         return (
             msg, gr.update(choices=new_choices, value=new_value), new_value,
-            *blanks, False, False,
+            *blanks, *_new_form_updates(new_value), False, False,
         )
 
     delete_btn.click(
         fn=_on_delete,
         inputs=[entity_dropdown, confirm_1_cb, confirm_2_cb],
-        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, confirm_1_cb, confirm_2_cb],
+        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs, confirm_1_cb, confirm_2_cb],
     )
 
     # --- Other dropdown data (read-only) -----------------------------------
