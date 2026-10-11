@@ -360,6 +360,13 @@ class TargetGuard:
         self._cache[key] = reason
         return reason
 
+    def account_type(self, path: str) -> Union[str, None]:
+        """The GnuCash account TYPE (ASSET, INCOME, EXPENSE, ...) of ``path``, or
+        None for a path the book does not know. Read from the book, never
+        guessed from the name or the path."""
+        acc = self._by_path.get(_strip_root((path or "").strip()))
+        return acc.type if acc is not None else None
+
     def is_blocked(self, path: str) -> bool:
         return self.blocked_target_reason(path) is not None
 

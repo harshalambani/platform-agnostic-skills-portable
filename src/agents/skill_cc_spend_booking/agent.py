@@ -44,6 +44,21 @@ def _cashback_row(r) -> bool:
     return r.kind == "cashback" and r.direction == "Cr"
 
 
+def _impossible_target(guard, j) -> str:
+    """CC-10: why journal ``j`` may not be READY on its mapped account, or "". The
+    type comes from the book (an EXPENSE account nested under an Income parent is
+    a legitimate spend target); an unknown type is never guessed."""
+    kind = getattr(guard, "account_type", lambda p: None)(j.account)
+    side = "credited" if j.side == "D" else "debited"
+    if kind == "INCOME":
+        return (f"{'a refund' if j.side == 'D' else 'a spend'} cannot be booked to an income account: "
+                f"{j.account} is an income account and would be {side}")
+    if kind == "ASSET" and j.confidence != "override":
+        return (f"{j.account} is an asset account and was reached by a {j.confidence or 'automatic'} match; "
+                f"only a saved rule of yours may put a card spend on an asset account")
+    return ""
+
+
 def _error(text: str):
     from agents.outputs import ReplyWithOutputs
     return ReplyWithOutputs(text, (), True)
@@ -343,11 +358,14 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 if j.kind == J.K_REFUND:
                     orig = by_desc.get((j.card, j.raw_description))
                     if orig is not None:
-                        j.account, j.confidence = orig.account, "high"
+                        # never labelled higher than the purchase it mirrors
+                        j.account, j.confidence = orig.account, orig.confidence
                         j.match_reason = "refund of an identical purchase in this run"
 
         _mark("map")
         # ---- guard on every account ------------------------------------------
+        suspense = next((p for p in sorted(view.paths) if p.rsplit(":", 1)[-1] == "Suspense"),
+                        J.SUSPENSE_DEFAULT)
         for j in journals:
             if j.status != J.ST_READY:
                 continue
@@ -361,6 +379,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             bad = _usable(j.account)
             if bad:
                 j.status, j.why = (J.ST_BLOCKED if "cannot be used" in bad else J.ST_NO_ACCOUNT), bad
+                continue
+            # CC-10: a card spend can never hit an income account, and only an explicit saved
+            # user rule may put one on an asset account. Read from the account TYPE in the book.
+            if j.needs_mapping:
+                kind_bad = _impossible_target(guard, j)
+                if kind_bad:
+                    was = j.account
+                    j.status, j.why = J.ST_REVIEW, kind_bad
+                    j.account, j.confidence = suspense, "suspense"
+                    j.match_reason = f"{j.match_reason} (was: {was})".strip()
 
         # ---- CCP tie-out -------------------------------------------------------
         before = round(sum(t.amount_on(CCP_PATH) for t in view.txns if start <= t.date <= end), 2)

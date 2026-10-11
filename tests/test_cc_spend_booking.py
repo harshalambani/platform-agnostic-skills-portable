@@ -71,9 +71,17 @@ def book_pay(guid, amount, d, desc="HDFC CC PAYMENT"):
 
 class Guard:
     blocked: dict = {}
+    types: dict = {}
 
     def blocked_target_reason(self, path):
         return self.blocked.get(path)
+
+    def account_type(self, path):
+        return self.types.get(path)
+
+
+# keyword in the description -> (account, confidence, reason): lets a test script the mapper
+MAP_OVERRIDE: dict = {}
 
 
 def fake_mapper_factory(calls):
@@ -84,6 +92,9 @@ def fake_mapper_factory(calls):
             d = r["Description"].upper()
             r["Account"] = SHOP if any(k in d for k in ("AMAZON", "PHONE", "RING", "TV")) else FOOD
             r["Confidence"], r["MatchReason"] = "high", "fake"
+            for k, (acct, conf, why) in MAP_OVERRIDE.items():
+                if k in d:
+                    r["Account"], r["Confidence"], r["MatchReason"] = acct, conf, why
         with open(cout, "w", newline="", encoding="utf-8") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()

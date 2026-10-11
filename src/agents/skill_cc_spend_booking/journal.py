@@ -43,6 +43,8 @@ ST_POSSIBLY = "POSSIBLY ALREADY BOOKED (withheld)"
 ST_EMI = "WITHHELD: original purchase of an EMI conversion"
 ST_BLOCKED = "WITHHELD: account is hidden or a placeholder"
 ST_NO_ACCOUNT = "WITHHELD: no account"
+ST_REVIEW = "NEEDS REVIEW"
+SUSPENSE_DEFAULT = "Liabilities:Suspense"
 
 EMI_UNBOOKED_TITLE = "EMI rows: not booked, awaiting decision"
 
