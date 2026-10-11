@@ -10,7 +10,8 @@ Every journal is two splits against the Credit Card Payment account (CCP):
   CRED overage   Dr CCP                     Cr Drawings
 
 EMI interest (to the entity's EMI interest account) and the EMI processing fee / GST
-(as fees) are journalled; EMI conversion, principal and unclassified rows are never journalled here. Nothing in this module reads
+(as fees) are journalled; HSBC instalment principal is journalled as a spend. EMI conversion credits, the
+instalment credit legs and unclassified rows are never journalled here. Nothing in this module reads
 or writes a file.
 """
 from __future__ import annotations
@@ -68,7 +69,8 @@ class Journal:
     note: str = ""
     paired_with: str = ""        # a fee reversal: the fee it reverses
     raw_description: str = ""    # the statement wording, without the date suffix (what the mapper reads)
-    emi: bool = False            # came from an emi_* row (booking is UNVALIDATED)
+    emi: bool = False            # came from an emi_* row
+    emi_validated: bool = False  # the EMI wording is the HSBC layout, checked against a real statement shape
     row_id: int = 0              # id() of the statement row it came from
 
     @property
@@ -123,10 +125,18 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
                               f"{r.description[:40]} {r.amount:,.2f}")
             continue
         emi_kind = None
+        hsbc = (r.bank or "").upper() == "HSBC"
         if r.kind.startswith("emi") or r.kind == "gst_on_emi":
-            # only interest (when its account is usable) and the processing fee / GST are booked;
-            # conversion, principal and unclassified rows are never booked
-            if r.kind == "emi_interest" and r.direction == "Dr" and book_interest:
+            # HSBC instalment rows: the Dr principal row is the spend (the original purchase is
+            # withheld), the Dr interest row is interest. The Cr legs only reverse the purchase /
+            # pre-conversion interest and are never booked. Conversion and unclassified rows are
+            # never booked either.
+            if r.instalment and r.direction == "Cr":
+                emi_rows.append(r)
+                continue
+            if r.instalment and r.kind == "emi_principal" and r.direction == "Dr":
+                emi_kind = K_SPEND
+            elif r.kind == "emi_interest" and r.direction == "Dr" and book_interest:
                 emi_kind = K_EMI_INT
             elif r.kind in EMI_FEE_KINDS and r.direction == "Dr":
                 emi_kind = K_FEE
@@ -138,6 +148,9 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
                           f"{r.description[:40]} {r.amount:,.2f}")
             continue
         real = _day(r.date)
+        shown = r.description
+        if r.instalment and emi_kind:
+            shown = f"{r.description} - EMI {r.instalment.title()}"
         if emi_kind:
             kind, side = emi_kind, "W"
         elif r.kind == "spend" and r.direction == "Dr":
@@ -162,14 +175,15 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
         j = Journal(
             num=make_num(r.card, target.label, kind, real, r.amount, r.description, occ),
             kind=kind, date=when, real_date=real,
-            description=_desc(r.description, real, moved, "spend" if kind == K_SPEND else KIND_LABEL[kind].lower()),
+            description=_desc(shown, real, moved, "spend" if kind == K_SPEND else KIND_LABEL[kind].lower()),
             amount=round(r.amount, 2), side=side, card=r.card, statement=target.label, source=target.source,
             needs_mapping=kind in (K_SPEND, K_REFUND), raw_description=" ".join(r.description.split()),
             emi=bool(emi_kind), row_id=id(r),
+            emi_validated=bool(emi_kind) and (bool(r.instalment) or (hsbc and r.kind in EMI_FEE_KINDS)),
         )
         if moved:
             j.note = f"dated {real:%d %b %Y}, before the financial year of the payment: booked on {when:%d %b %Y}"
-        if kind == K_SPEND and r.amount + 1e-9 >= large_threshold:
+        if kind == K_SPEND and not emi_kind and r.amount + 1e-9 >= large_threshold:
             j.flag = LARGE_SPEND_FLAG
         journals.append(j)
     return journals, emi_rows, issues
@@ -214,7 +228,7 @@ def withhold_emi_originals(journals: list, emi_rows: list) -> list:
     for c in emi_rows:
         if c.kind != "emi_conversion" or c.direction != "Cr":
             continue
-        hit = next((j for j in journals if j.kind == K_SPEND and j.status == ST_READY and j.card == c.card
+        hit = next((j for j in journals if j.kind == K_SPEND and not j.emi and j.status == ST_READY and j.card == c.card
                     and abs(j.amount - c.amount) <= 0.005 and (c.date is None or j.real_date <= _day(c.date))),
                    None)
         if hit is not None:
@@ -232,6 +246,8 @@ def emi_summary(emi_rows: list) -> dict:
     interest: dict = defaultdict(float)
     for r in emi_rows:
         if r.kind == "emi_interest" and r.date is not None:
+            if getattr(r, "instalment", "") and r.direction == "Cr":
+                continue          # the pre-conversion interest reversal leg is not interest paid
             fy = fy_start(_day(r.date)).year
             interest[(r.card, f"{fy}-{(fy + 1) % 100:02d}")] += r.amount if r.direction == "Dr" else -r.amount
     return {"rows": list(emi_rows), "interest": {k: round(v, 2) for k, v in sorted(interest.items())}}

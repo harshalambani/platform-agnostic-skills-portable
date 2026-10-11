@@ -152,7 +152,11 @@ def emi_block(rep: RunReport) -> str:
     booked = [j for j in rep.journals if j.emi and j.status == J.ST_READY]
     lines = []
     if booked:
-        lines.append(f"EMI ROWS BOOKED ({len(booked)}) - {J.EMI_UNVALIDATED}")
+        if all(j.emi_validated for j in booked):
+            lines.append(f"EMI ROWS BOOKED ({len(booked)}) - HSBC instalment rows: principal as spend, "
+                         f"interest to the EMI interest account, fee and GST as fees")
+        else:
+            lines.append(f"EMI ROWS BOOKED ({len(booked)}) - {J.EMI_UNVALIDATED}")
         for j in booked:
             lines.append(f"  {j.card} | {j.real_date:%d %b %Y} | {J.KIND_LABEL[j.kind]} | "
                          f"{j.raw_description[:50]} | {money(j.amount)} | {j.account}")
@@ -162,6 +166,10 @@ def emi_block(rep: RunReport) -> str:
         interest_lines.append("  EMI interest (its own subtotal, not a fee):")
         for (card, fy), v in interest.items():
             interest_lines.append(f"    {card} | FY {fy} | {money(v)}")
+    expl = (rep.emi or {}).get("explained") or 0
+    if expl:
+        interest_lines.append(f"  EMI offset legs (instalment credits, loan conversion credits): {expl} - "
+                              f"understood, never booked")
     if not rows:
         return "\n".join(lines + interest_lines)
     if rep.emi_interest_reason and any(r.kind == "emi_interest" for r in rows):
@@ -170,7 +178,8 @@ def emi_block(rep: RunReport) -> str:
     lines.append(f"{J.EMI_UNBOOKED_TITLE.upper()} ({len(rows)}):")
     for r in rows:
         when = r.date.strftime("%d %b %Y") if r.date else "undated"
-        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:50]} | "
+        extra = f" | {r.instalment}" if getattr(r, "instalment", "") else ""
+        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:50]}{extra} | "
                      f"{money(r.amount)} {r.direction}")
     return "\n".join(lines + interest_lines)
 

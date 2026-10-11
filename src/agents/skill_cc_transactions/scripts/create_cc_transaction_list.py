@@ -130,6 +130,25 @@ EMI_PATTERNS = [
 ]
 EMI_KINDS = tuple(k for k, _ in EMI_PATTERNS) + ("emi_unclassified",)
 
+# CC-06 addendum: EMI can turn up on ANY card, in wording we have not seen. A row
+# whose description (or HSBC continuation line) carries instalment / loan / EMI
+# wording and is not an explicit shape is "emi_unclassified": listed loudly,
+# never booked as a spend or a refund. Whole words only, so a merchant such as
+# "BALLOONS AND MORE" is untouched. Patterns:
+#   INSTAL+MENTS?          INSTALMENT / INSTALLMENT(S)
+#   N OF N counter        1ST OF 3, 2 OF 6 (digits on both sides of OF)
+#   LOAN                   whole word only
+#   EMI                    whole word only
+EMI_LIKE_RX = re.compile(
+    r"\bINSTAL+MENTS?\b|\b\d+(?:ST|ND|RD|TH)?\s+OF\s+\d+\b|\bLOAN\b|\bEMI\b", re.I)
+
+# HSBC prints the instalment kind on the line AFTER a row, e.g.
+# "1ST OF 3 INSTALLMENTS PRINCIPAL". Explicit HSBC shapes only.
+HSBC_INSTALMENT_RX = re.compile(
+    r"^(\d+)(?:ST|ND|RD|TH)\s+OF\s+(\d+)\s+INSTAL+MENTS?\s+(PRINCIPAL|INTEREST)\s*$", re.I)
+HSBC_INSTALMENT_LINE_RX = re.compile(r"\bOF\s+\d+\s+INSTAL+MENTS?\b", re.I)
+HSBC_FEE_RX = re.compile(r"\bINSTALLMENT\s+PROCESSING\s+FEE", re.I)   # no trailing \b: the card reference is glued on
+
 
 def explicit_emi_kind(description: str) -> str | None:
     d = squash(description)
@@ -147,7 +166,7 @@ def classify(description: str, direction: str) -> str:
     emi = explicit_emi_kind(d)
     if emi:
         return emi
-    if EMI_WORD_RX.search(d):
+    if EMI_LIKE_RX.search(d):
         return "emi_unclassified"
     if CASHBACK_RX.search(d):
         return "cashback"
@@ -176,6 +195,8 @@ class Row:
     statement: str = ""
     period: str = ""
     source: str = ""
+    instalment: str = ""      # HSBC: the continuation line ("1ST OF 3 INSTALLMENTS PRINCIPAL")
+    explained: bool = False   # an HSBC offset leg (instalment credit, loan conversion credit): never booked, understood
 
     @property
     def card(self) -> str:
@@ -188,6 +209,18 @@ class Row:
 
 
 @dataclass
+class Loan:
+    """One row of an HSBC "Loan Summary Table"."""
+    merchant: str
+    booked: date
+    principal: float
+    interest: float
+    instalment_amount: float
+    done: int
+    total: int
+
+
+@dataclass
 class Parsed:
     rows: list[Row] = field(default_factory=list)
     summary: dict = field(default_factory=dict)        # prev, ..., total (balances signed)
@@ -197,6 +230,8 @@ class Parsed:
     errors: list[str] = field(default_factory=list)    # unparsed lines, bad dates
     rows_net_expected: float | None = None             # printed (debits + fees - credits): rows must equal it exactly
     note: str = ""                                     # layout note carried into the tie-out note
+    loans: list = field(default_factory=list)          # HSBC Loan Summary Table rows (Loan)
+    outstanding_parts: tuple | None = None             # HSBC (TOTAL PURCHASE OUTSTANDING, TOTAL LOAN OUTSTANDING)
 
 
 @dataclass
@@ -447,14 +482,76 @@ def _hsbc_year(month: int, day: int, period: tuple[date, date] | None) -> int | 
     return end.year - 1 if (month, day) > (end.month, end.day) else end.year
 
 
+_LEGAL_WORDS = frozenset({"PVT", "PRIV", "PRIVATE", "LTD", "LIMITED", "LLP", "INDIA", "CO", "INC"})
+LOAN_ROW_RX = re.compile(
+    rf"^(.+?)\s+(\d{{1,2}})\s+({MON3})\s+(\d{{4}})\s+({AMT})\s+({AMT})\s+({AMT})\s+(\d+)\s*/\s*(\d+)\s*$", re.I)
+
+
+def _merchant_tokens(text: str) -> list:
+    """Significant upper-case words of a merchant name: the card reference
+    (CC + digits), punctuation and legal-form words are dropped."""
+    words = re.sub(r"[^A-Z0-9 ]+", " ", (text or "").upper()).split()
+    return [w for w in words if not re.fullmatch(r"CC\d+", w) and w not in _LEGAL_WORDS]
+
+
+def merchants_match(row_desc: str, loan_merchant: str) -> bool:
+    """The statement prints the merchant short on the purchase and in full on the
+    conversion credit. They match when the shorter list of significant words is a
+    prefix of the longer one (never on the amount alone)."""
+    a, b = _merchant_tokens(row_desc), _merchant_tokens(loan_merchant)
+    if not a or not b:
+        return False
+    n = min(len(a), len(b))
+    return a[:n] == b[:n]
+
+
+def hsbc_instalment_kind(instalment: str) -> str | None:
+    m = HSBC_INSTALMENT_RX.match(squash(instalment))
+    if not m:
+        return None
+    return "emi_principal" if m.group(3).upper() == "PRINCIPAL" else "emi_interest"
+
+
+def read_loan_summary(lines) -> list:
+    """The "Loan Summary Table" block: merchant, booking date, principal, total
+    interest, instalment amount and tenure done/total."""
+    loans, in_table = [], False
+    for raw in lines:
+        line = raw.strip()
+        if re.match(r"^Loan Summary Table\b", line, re.I):
+            in_table = True
+            continue
+        if not in_table:
+            continue
+        m = LOAN_ROW_RX.match(line)
+        if m:
+            try:
+                booked = date(int(m.group(4)), MONTHS[m.group(3).upper()], int(m.group(2)))
+            except ValueError:
+                continue
+            loans.append(Loan(squash(m.group(1)), booked, num(m.group(5)), num(m.group(6)),
+                              num(m.group(7)), int(m.group(8)), int(m.group(9))))
+    return loans
+
+
+def loans_booked_in_period(parsed: "Parsed", period) -> list:
+    if period is None:
+        return []
+    return [ln for ln in parsed.loans if period[0] <= ln.booked <= period[1]]
+
+
 def parse_hsbc(lines, bank, card, period) -> Parsed:
     p = Parsed()
     row_rx = re.compile(rf"^(\d\d)({MON3})\s+(.*?)\s+({AMT})(?:\s+(CR))?\s*$")
     net_rx = re.compile(rf"^\d\d(?:{MON3})\s+NET OUTSTANDING BALANCE\s+({AMT})(?:\s*(CR))?", re.I)
     open_rx = re.compile(rf"OPENING BALANCE\s+({AMT})(?:\s*(CR))?", re.I)
-    opening = total = None
+    tpo_rx = re.compile(rf"^TOTAL PURCHASE OUTSTANDING\s+({AMT})(?:\s*(CR))?", re.I)
+    tlo_rx = re.compile(rf"^TOTAL LOAN OUTSTANDING\s+({AMT})(?:\s*(CR))?", re.I)
+    opening = total = tpo = tlo = None
+    prev_was_row = False
     for line in lines:
         line = line.strip()
+        was_row, prev_was_row = prev_was_row, False
         n = net_rx.match(line)
         if n:
             total = signed(num(n.group(1)), n.group(2))
@@ -462,6 +559,22 @@ def parse_hsbc(lines, bank, card, period) -> Parsed:
         o = open_rx.search(line)
         if o and not DATE_START.match(line):
             opening = signed(num(o.group(1)), o.group(2))
+            continue
+        tp = tpo_rx.match(line)
+        if tp:
+            tpo = signed(num(tp.group(1)), tp.group(2))
+            continue
+        tl = tlo_rx.match(line)
+        if tl:
+            tlo = signed(num(tl.group(1)), tl.group(2))
+            continue
+        if was_row and HSBC_INSTALMENT_LINE_RX.search(line):
+            # the instalment text belongs to the row just above it
+            r = p.rows[-1]
+            r.instalment = squash(line)
+            kind = hsbc_instalment_kind(line)
+            r.kind = kind or "emi_unclassified"
+            r.explained = bool(kind) and r.direction == "Cr"
             continue
         m = row_rx.match(line)
         if m:
@@ -476,13 +589,31 @@ def parse_hsbc(lines, bank, card, period) -> Parsed:
             if when is None:
                 p.errors.append(f"unreadable date (year not found): {line[:70]}")
                 continue
-            p.rows.append(_mk_row(bank, card, when, m.group(3), num(m.group(4)), norm_dir(m.group(5))))
+            row = _mk_row(bank, card, when, m.group(3), num(m.group(4)), norm_dir(m.group(5)))
+            if row.direction == "Dr" and HSBC_FEE_RX.search(row.description):
+                row.kind = "emi_processing_fee"
+            p.rows.append(row)
+            prev_was_row = True
         elif _unparsed(line):
             p.errors.append(f"unparsed line: {line[:70]}")
     if opening is None or total is None:
         p.missing.append("opening/closing balance")
     else:
         p.summary = dict(prev=opening, total=total)
+    p.loans = read_loan_summary(lines)
+    if tpo is not None and tlo is not None:
+        p.outstanding_parts = (tpo, tlo)
+    # A credit is a conversion ONLY when it is a Loan Summary Table loan booked in
+    # this period: same principal AND the same merchant. Anything else stays as it was.
+    used: set = set()
+    for ln in loans_booked_in_period(p, period):
+        for k, r in enumerate(p.rows):
+            if (k not in used and r.direction == "Cr" and r.kind == "refund" and not r.instalment
+                    and abs(r.amount - ln.principal) <= 0.005 and merchants_match(r.description, ln.merchant)):
+                r.kind = "emi_conversion"
+                r.explained = True
+                used.add(k)
+                break
     return p
 
 
@@ -860,6 +991,10 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
     cred += round(sum(r.amount for r in rows if r.direction == "Cr" and r.kind in EMI_KINDS), 2)
     s = st.parsed.summary
     prev, total = s.get("prev"), s.get("total")
+    # HSBC: a loan booked in this period adds its whole principal + interest to the
+    # statement total with no row of its own.
+    new_loans = loans_booked_in_period(st.parsed, st.period)
+    loan_add = round(sum(ln.principal + ln.interest for ln in new_loans), 2)
     base = dict(card=st.card, period=st.label, source=st.source, payments=pay, credits=cred,
                 spends=spend, fees=fees, other=other)
     notes = []
@@ -883,7 +1018,7 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
             return TieOut(previous=None, computed=None, printed=total, difference=None,
                           result="NOT AVAILABLE (prior statement total not found)",
                           note="; ".join(notes + [f"prior statement {prior.source} has no printed total"]), **base)
-        computed = round(ptotal + sum(r.signed for r in rows), 2)
+        computed = round(ptotal + sum(r.signed for r in rows) + loan_add, 2)
         diff = round(computed - total, 2)
         ok = abs(diff) <= TOL_STRICT
         if not ok:
@@ -892,9 +1027,17 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
         return TieOut(previous=ptotal, computed=computed, printed=total, difference=diff,
                       result=RESULT_CHAINED if ok else "FAIL",
                       note="; ".join(notes + [f"chained to {prior.source}"]), **base)
-    computed = round(prev + sum(r.signed for r in rows), 2)
+    computed = round(prev + sum(r.signed for r in rows) + loan_add, 2)
     diff = round(computed - total, 2)
     ok = within(diff)
+    if new_loans:
+        notes.append(f"includes {len(new_loans)} new loan(s) booked in the period "
+                     f"(principal + interest {loan_add:,.2f})")
+    parts = st.parsed.outstanding_parts
+    if parts is not None and abs(round(total - (parts[0] + parts[1]), 2)) > TOL_STRICT:
+        ok = False
+        notes.append(f"net outstanding {total:,.2f} is not total purchase outstanding {parts[0]:,.2f} "
+                     f"+ total loan outstanding {parts[1]:,.2f}")
     if not ok:
         notes.append("parsed rows do not reproduce the printed total: a row is dropped, doubled or misread")
     if st.parsed.printed_closing is not None and not within(round(st.parsed.printed_closing - total, 2)):
@@ -1084,7 +1227,8 @@ def emi_block(emi_rows: list) -> str:
     lines = [f"EMI-LIKE ROWS ({len(emi_rows)}) - not treated as spends, awaiting a decision:"]
     for r in emi_rows:
         when = r.date.strftime("%d %b %Y") if r.date else "undated"
-        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:60]} | "
+        extra = f" | {r.instalment}" if r.instalment else ""
+        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:60]}{extra} | "
                      f"{_money(r.amount)} {r.direction}")
     return "\n".join(lines)
 

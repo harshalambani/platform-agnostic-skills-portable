@@ -6,7 +6,7 @@ and writes an import-ready journal CSV that books that statement's spends,
 refunds, cashback and fees against CCP. Read-only on the book.
 
 Nothing is guessed: a payment that matches no statement, an ambiguous payment,
-a statement that does not tie out, a part payment and every EMI conversion, principal and unclassified row are
+a statement that does not tie out, a part payment and every EMI conversion credit and unclassified row are
 reported and NOT booked. The run never says it completed successfully while
 any of those is open.
 """
@@ -222,7 +222,11 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         J.pair_fee_reversals(journals)
         booked_rows = {j.row_id for j in journals if j.emi}
         rep.emi = J.emi_summary(res.emi_rows)
-        rep.emi["rows"] = [r for r in res.emi_rows if id(r) not in booked_rows]
+        # an offset leg (instalment credit, loan conversion credit) is understood and never booked:
+        # it is counted, not listed as awaiting a decision
+        rep.emi["explained"] = sum(1 for r in res.emi_rows if getattr(r, "explained", False))
+        rep.emi["rows"] = [r for r in res.emi_rows
+                           if id(r) not in booked_rows and not getattr(r, "explained", False)]
         left = {id(r) for r in rep.emi["rows"]}
         for s in settlements:
             if s.status == M.S_SETTLED and any(id(r) in left for r in s.target.parsed.rows):
@@ -296,6 +300,10 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 continue
             if not j.account:
                 j.status, j.why = J.ST_NO_ACCOUNT, j.why or "the mapper found no account"
+                continue
+            if j.emi and j.kind == J.K_SPEND and emi_acct and j.account == emi_acct:
+                # principal is the item's cost, never the interest account
+                j.status, j.why = J.ST_NO_ACCOUNT, "the mapper chose the EMI interest account for EMI principal"
                 continue
             bad = _usable(j.account)
             if bad:
