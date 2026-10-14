@@ -357,7 +357,8 @@ _FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account", "reimb
 _FORM_UI35_FIELDS = (
     "bank_service_charge_account", "card_emi_interest_account", "partner_comp_accounts",
     "foreign_dividends_in_book", "foreign_dividends_in_book_by_ay", "partner_firm_pan",
-    "cc_large_spend_threshold",
+    "cc_large_spend_threshold", "foreign_dividend_cash_account", "foreign_dividend_tax_account",
+    "foreign_dividend_income_account",
 )
 
 #: UI-35: EntityProfile field -> a fragment of the label of the control that
@@ -381,6 +382,9 @@ _FIELD_CONTROLS = {
     "card_emi_interest_account": "Card EMI interest account",
     "partner_firm_pan": "Firm PAN",
     "cc_large_spend_threshold": "Large-spend limit",
+    "foreign_dividend_cash_account": "Foreign dividend cash account",
+    "foreign_dividend_tax_account": "Foreign dividend tax account",
+    "foreign_dividend_income_account": "Foreign dividend income account",
 }
 #: Fields intentionally without a control. Starts empty.
 _FIELD_CONTROL_ALLOW_LIST: tuple = ()
@@ -574,7 +578,7 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)))
+        return (False, "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
@@ -583,6 +587,8 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
         e.partner_firm_pan or "",
         ("" if e.cc_large_spend_threshold is None else f"{e.cc_large_spend_threshold:g}"),
         *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
+        e.foreign_dividend_cash_account or "", e.foreign_dividend_tax_account or "",
+        e.foreign_dividend_income_account or "",
     )
 
 
@@ -609,6 +615,9 @@ def _save_entity(
     partner_comp_drivers_text: str | None = None,
     partner_firm_pan: str | None = None,
     cc_large_spend_threshold: str | None = None,
+    foreign_dividend_cash_account: str | None = None,
+    foreign_dividend_tax_account: str | None = None,
+    foreign_dividend_income_account: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -664,6 +673,11 @@ def _save_entity(
         acct_fields["Bank service charge account"] = bank_service_charge_account
     if card_emi_interest_account is not None:
         acct_fields["Card EMI interest account"] = card_emi_interest_account
+    for _label, _val in (("Foreign dividend cash account", foreign_dividend_cash_account),
+                         ("Foreign dividend tax account", foreign_dividend_tax_account),
+                         ("Foreign dividend income account", foreign_dividend_income_account)):
+        if _val is not None:
+            acct_fields[_label] = _val
     for k, v in (partner_comp_accounts or {}).items():
         acct_fields[f"Partner account '{k}'"] = v
     acct_errors, acct_warnings = _check_accounts(books, acct_fields)
@@ -795,6 +809,12 @@ def _save_entity(
         new_profile.card_emi_interest_account = card_emi_interest_account.strip()
     if large_spend is not None:
         new_profile.cc_large_spend_threshold = None if large_spend == "" else float(large_spend)
+    if foreign_dividend_cash_account is not None:
+        new_profile.foreign_dividend_cash_account = foreign_dividend_cash_account.strip()
+    if foreign_dividend_tax_account is not None:
+        new_profile.foreign_dividend_tax_account = foreign_dividend_tax_account.strip()
+    if foreign_dividend_income_account is not None:
+        new_profile.foreign_dividend_income_account = foreign_dividend_income_account.strip()
     if partner_comp_accounts is not None:
         # the form owns the nine known keys; any other stored key is kept
         merged = dict(new_profile.partner_comp_accounts or {})
@@ -1215,6 +1235,21 @@ def render(container_tab=None) -> None:
                     label="Foreign dividends already in the book by AY (one per line, 'AY = true|false')",
                     placeholder="2026-27 = true", lines=2, interactive=True,
                 )
+                fd_cash_dd = gr.Dropdown(
+                    label="Foreign dividend cash account", choices=[], value="",
+                    allow_custom_value=True, interactive=True,
+                    info="Where the broker's net dividend cash sits. Needed for the foreign-dividend journal; blank = it stops and says so.",
+                )
+                fd_tax_dd = gr.Dropdown(
+                    label="Foreign dividend tax account", choices=[], value="",
+                    allow_custom_value=True, interactive=True,
+                    info="Receives the foreign tax withheld (debit).",
+                )
+                fd_income_dd = gr.Dropdown(
+                    label="Foreign dividend income account", choices=[], value="",
+                    allow_custom_value=True, interactive=True,
+                    info="Receives the gross foreign dividend (credit).",
+                )
             with gr.Accordion("Card accounts (card-spend booking)", open=False):
                 accounts_note_md = gr.Markdown("_Select an entity to load account pick-lists from its book._")
                 bank_charge_dd = gr.Dropdown(
@@ -1252,7 +1287,8 @@ def render(container_tab=None) -> None:
                     info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
                          "is refused and nothing is saved. Blank removes all drivers.",
                 )
-            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, *partner_dds]
+            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, *partner_dds,
+                           fd_cash_dd, fd_tax_dd, fd_income_dd]
 
             save_status = gr.Markdown("_Fill in the fields and click Save._")
             with gr.Row():
@@ -1338,7 +1374,10 @@ def render(container_tab=None) -> None:
             partner_admission_date=partner_admission_date,
             bank_service_charge_account=bank_charge or "",
             card_emi_interest_account=emi_interest or "",
-            partner_comp_accounts=dict(zip(_PARTNER_ACCOUNT_KEYS, partner_values)),
+            partner_comp_accounts=dict(zip(_PARTNER_ACCOUNT_KEYS, partner_values[:len(_PARTNER_ACCOUNT_KEYS)])),
+            foreign_dividend_cash_account=(partner_values[len(_PARTNER_ACCOUNT_KEYS)] or ""),
+            foreign_dividend_tax_account=(partner_values[len(_PARTNER_ACCOUNT_KEYS) + 1] or ""),
+            foreign_dividend_income_account=(partner_values[len(_PARTNER_ACCOUNT_KEYS) + 2] or ""),
             foreign_dividends_in_book=bool(fdb),
             foreign_dividends_in_book_by_ay_text=fdb_by_ay_text or "",
             partner_comp_drivers_text=drivers_text or "",

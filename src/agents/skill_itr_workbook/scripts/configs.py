@@ -178,6 +178,9 @@ class EntityProfile:
                                          # fees. Empty == the card-spend booking skill refuses (named error).
     card_emi_interest_account: str = ""  # CC-03: account path for card EMI interest only (never the
                                          # Bank Service Charge account). Empty == named error if needed.
+    foreign_dividend_cash_account: str = ""    # ITR-09: where the broker's net dividend cash sits
+    foreign_dividend_tax_account: str = ""     # ITR-09: foreign tax withheld (asset/expense per the book)
+    foreign_dividend_income_account: str = ""  # ITR-09: foreign dividend income (credited at gross)
     cc_large_spend_threshold: float | None = None  # CC-14: this entity's own large-spend (possible
                                          # asset) limit in rupees. None == use the global setting.
 
@@ -240,6 +243,9 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
             partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
             cc_large_spend_threshold=_parse_positive_amount(fields_.get("cc_large_spend_threshold")),
+            foreign_dividend_cash_account=str(fields_.get("foreign_dividend_cash_account") or "").strip(),
+            foreign_dividend_tax_account=str(fields_.get("foreign_dividend_tax_account") or "").strip(),
+            foreign_dividend_income_account=str(fields_.get("foreign_dividend_income_account") or "").strip(),
             partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
                                     if fields_.get("partner_admission_date") else None),
         )
@@ -334,6 +340,10 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["partner_firm_pan"] = e.partner_firm_pan
     if e.cc_large_spend_threshold is not None:
         d["cc_large_spend_threshold"] = float(e.cc_large_spend_threshold)
+    for _k in ("foreign_dividend_cash_account", "foreign_dividend_tax_account",
+               "foreign_dividend_income_account"):
+        if getattr(e, _k):
+            d[_k] = getattr(e, _k)
     if e.partner_admission_date:
         d["partner_admission_date"] = e.partner_admission_date
     return d

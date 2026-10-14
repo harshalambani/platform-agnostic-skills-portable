@@ -166,6 +166,11 @@ SYN-PARTNER:
   # mixed into the Bank Service Charge account).
   bank_service_charge_account: "Expenses:Bank Service Charge"
   card_emi_interest_account: "Expenses:Card EMI Interest"
+  # ITR-09: the three accounts the foreign-dividend journal posts to (cash Dr net, tax Dr withheld,
+  # income Cr gross). All three are required for the journal; none may be hidden or a placeholder.
+  foreign_dividend_cash_account: "Assets:Broker:Cash"
+  foreign_dividend_tax_account: "Assets:Foreign Tax Withheld"
+  foreign_dividend_income_account: "Income:Foreign Dividends"
   # CC-14: this entity's own large-spend (possible asset) limit in rupees; blank = the global setting.
   cc_large_spend_threshold: 15000
   # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
