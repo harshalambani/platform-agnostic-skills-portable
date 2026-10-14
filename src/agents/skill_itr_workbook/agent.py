@@ -94,6 +94,7 @@ import write_workbook  # noqa: E402
 import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
 import parse_foreign as foreign_engine  # noqa: E402
+import foreign_tax as foreign_tax_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
 _AS_OF_RE = re.compile(r"Balance Sheet \(eguile\)[^0-9]*(\d{2})-(\d{2})-(\d{4})")
@@ -604,13 +605,20 @@ def _build_and_write_workbook(
                 "Schedule FA falls back to the AL_FOREIGN book roll-up only."
             )
 
-    model = sch.build_all_schedules(
-        tree, result.resolved, book, form16_data, year_key, rules, regime,
-        entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
-        residency=entity.residency, audit_case=audit_case,
-        audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
-        foreign_dividends_in_book=foreign_dividends_in_book,
-    )
+    try:
+        model = sch.build_all_schedules(
+            tree, result.resolved, book, form16_data, year_key, rules, regime,
+            entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
+            residency=entity.residency, audit_case=audit_case,
+            audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
+            foreign_dividends_in_book=foreign_dividends_in_book,
+        )
+    except foreign_tax_engine.ForeignDoubleCountError as e:
+        # ITR-06: a LOUD stop. The same foreign dividends would be counted from
+        # the book and from the broker report; nothing is built.
+        msg = str(e)
+        _write_stub_workbook(output_path, msg)
+        return [msg]
 
     model.mapping_empty = not result.resolved
 
@@ -656,6 +664,20 @@ def _build_and_write_workbook(
         )
     lines.extend(as26_lines)
     lines.extend(foreign_lines)
+    ft = model.foreign_tax
+    if ft is not None and ft.active:
+        for w in ft.warnings:
+            lines.append(f"Foreign tax: {w}")
+        if ft.relief_claimed:
+            lines.append(
+                f"Foreign tax credit: relief Rs {ft.relief_total:,.2f} claimed (lower of foreign tax and "
+                "Indian tax, per country; see ForeignTax sheet). " + foreign_tax_engine.FORM_67_LINE
+            )
+        elif ft.book_foreign_tax or ft.report_foreign_tax:
+            lines.append(
+                "Foreign tax credit: foreign tax is present but NO relief is claimed (country unknown "
+                "or no Indian tax on that income). It is not treated as TDS."
+            )
     if model.taxes_paid.as26_available and not model.taxes_paid.tie_out_ok:
         for c in model.taxes_paid.tie_out_conflicts:
             lines.append(
@@ -975,6 +997,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(summary)
     exit_code = 0
+    if foreign_tax_engine.DOUBLE_COUNT_ERROR_MARKER in summary:
+        print(
+            f"{foreign_tax_engine.DOUBLE_COUNT_ERROR_MARKER} -- nothing was built; fix "
+            "foreign_dividends_in_book or the foreign flag on the book accounts.",
+            file=sys.stderr,
+        )
+        exit_code = 1
     if presentation.CG_RECONCILIATION_ERROR_MARKER in summary:
         print(
             f"{presentation.CG_RECONCILIATION_ERROR_MARKER} -- workbook was written but "

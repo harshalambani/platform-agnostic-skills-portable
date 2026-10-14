@@ -13,6 +13,7 @@ are not themselves formulas).
 from __future__ import annotations
 
 import csv
+import dataclasses
 import math
 import re
 from dataclasses import dataclass, field
@@ -21,6 +22,7 @@ from pathlib import Path
 
 import as26 as as26_engine
 import configs
+import foreign_tax as foreign_tax_engine
 import interest_234
 import lots as lots_engine
 import parse_eguile as pe
@@ -1384,6 +1386,9 @@ class ComputationSchedule:
                                            # items, taxed at the top slab rate (upper bound)
     worst_case_tax_liability: float = 0.0  # tax_block.tax_liability + worst_case_extra_tax;
                                              # == tax_block.tax_liability when nothing unclassified
+    #: ITR-06: relief for tax paid abroad, already subtracted inside
+    #: tax_block.tax_liability (0.0 when none is claimed).
+    foreign_tax_relief: float = 0.0
 
 
 def build_computation(
@@ -1392,6 +1397,7 @@ def build_computation(
     deductions: DeductionsSchedule, taxes_paid: TaxesPaidSchedule,
     rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
     unclassified: "UnclassifiedSchedule | None" = None, residency: str | None = None,
+    foreign_tax: "foreign_tax_engine.ForeignTaxSchedule | None" = None,
 ) -> ComputationSchedule:
     cg_cfg = rules.common["capital_gains"]
 
@@ -1430,6 +1436,19 @@ def build_computation(
         residency=residency,
     )
 
+    # ITR-06: relief for tax paid abroad (Form 67). Per country, the LOWER of
+    # the foreign tax and the Indian tax on that income; subtracted from the
+    # liability here, so 234B/C, the refund/payable and the Computation sheet
+    # all see the reduced figure. Foreign tax is never added to taxes_paid.
+    if foreign_tax is not None and foreign_tax.active:
+        before = tax_block.tax_liability
+        relief = foreign_tax_engine.apply_relief(foreign_tax, before, total_income_rounded)
+        if relief > 0:
+            tax_block = dataclasses.replace(
+                tax_block, tax_liability=max(0.0, before - relief), foreign_tax_relief=relief,
+                tax_liability_before_foreign_relief=before,
+            )
+
     refund_or_payable_raw = taxes_paid.total - tax_block.tax_liability
     nearest_tax = rules.common["rounding"]["tax_payable_refund"]["nearest"]
     refund_or_payable = round_288b(refund_or_payable_raw, nearest_tax)
@@ -1458,6 +1477,7 @@ def build_computation(
         unclassified_count=uncl.count, unclassified_total=uncl.total_amount,
         unclassified_income_type_total=uncl.income_type_total,
         worst_case_extra_tax=worst_case_extra_tax, worst_case_tax_liability=worst_case_tax_liability,
+        foreign_tax_relief=tax_block.foreign_tax_relief,
     )
 
 
@@ -1483,6 +1503,8 @@ class ITRModel:
     #: ITR-01: True when the mapping resolved ZERO accounts (empty/cold-start
     #: mapping). Set by agent.py; drives a loud "not fileable" banner.
     mapping_empty: bool = False
+    #: ITR-06: foreign tax credit schedule (None only for models built by hand).
+    foreign_tax: "foreign_tax_engine.ForeignTaxSchedule | None" = None
 
 
 def build_all_schedules(
@@ -1494,6 +1516,16 @@ def build_all_schedules(
     foreign_report=None, foreign_dividends_in_book: bool = False,
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
+    # ITR-06: never count the same foreign dividends from the book AND the
+    # broker report. A hard stop, not a warning.
+    _dup = foreign_tax_engine.double_count_error(
+        resolved, node_by_guid, foreign_dividends_in_book,
+        _series_gross(foreign_report.dividend.quarterly, _FOREIGN_DIVIDEND_SERIES_ORDINARY)
+        if foreign_report is not None and foreign_report.dividend is not None
+        and foreign_report.dividend.quarterly else None,
+    )
+    if _dup:
+        raise foreign_tax_engine.ForeignDoubleCountError(_dup)
     fy_end = fy_window(year_key)[1] if year_key else date.today()
     age_cls = rules_engine.resolve_age_class(status, dob, fy_end, residency=residency)
 
@@ -1516,9 +1548,11 @@ def build_all_schedules(
     deductions = build_deductions(
         resolved, node_by_guid, other_sources, rules, regime, status, agti_estimate, age_cls,
     )
+    foreign_tax = foreign_tax_engine.build_foreign_tax(resolved, node_by_guid, foreign_report)
     computation = build_computation(
         salary, business, house_property, other_sources, capital_gains, deductions, taxes_paid,
         rules, regime, status, dob, fy_end, unclassified, residency=residency,
+        foreign_tax=foreign_tax,
     )
     schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
     schedule_fa = build_schedule_fa(resolved, node_by_guid, foreign_report=foreign_report)
@@ -1531,5 +1565,5 @@ def build_all_schedules(
         salary=salary, business=business, house_property=house_property, other_sources=other_sources,
         capital_gains=capital_gains, exempt_income=exempt_income, taxes_paid=taxes_paid,
         deductions=deductions, schedule_al=schedule_al, schedule_fa=schedule_fa, computation=computation,
-        unclassified=unclassified, interest_234=interest,
+        unclassified=unclassified, interest_234=interest, foreign_tax=foreign_tax,
     )

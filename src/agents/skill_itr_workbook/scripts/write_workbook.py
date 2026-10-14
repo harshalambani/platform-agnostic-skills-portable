@@ -29,6 +29,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+import foreign_tax as foreign_tax_engine
 import presentation
 import rules as rules_engine
 import schedules as sch
@@ -72,6 +73,7 @@ _TAG_LINE_LABEL: dict[str, str] = {
     "TAXPAID_SAT": "Self-assessment tax",
     "TAXPAID_TDS_SALARY": "TDS on salary",
     "TAXPAID_TDS_INTEREST": "TDS on interest",
+    "TAXPAID_FOREIGN": "Foreign tax paid (not TDS; relief via Form 67)",
     "TAXPAID_TDS_DIVIDEND": "TDS on dividend",
     "TAXPAID_TCS": "TCS",
     "PERSONAL": "(non-deductible / non-taxable, shown for completeness only)",
@@ -583,6 +585,47 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     return layout
 
 
+def write_foreign_tax_sheet(wb: Workbook, ft) -> None:
+    """ITR-06: the foreign tax credit working. Written only when there is
+    foreign activity. The relief total is a value worked out in Python (lower
+    of foreign and Indian tax per country), so it does not recompute if the
+    regime is flipped in Excel -- the sheet says so."""
+    ws = wb.create_sheet("ForeignTax")
+    sw = _SheetWriter(ws)
+    sw.header("Foreign tax credit (s.90 / 90A / 91) -- Form 67")
+    sw.label_value(
+        "Not TDS", "Foreign tax is never added to Taxes Paid and never tied to 26AS; "
+        "it is relief against the tax liability.", number_format=None)
+    for h, col in (("Country", 1), ("Income (Rs)", 2), ("Foreign tax paid (Rs)", 3),
+                   ("Indian tax on that income (Rs)", 4), ("Relief = lower of the two (Rs)", 5),
+                   ("Source", 6), ("Note", 7)):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for r in ft.rows:
+        sw.cell(1, r.country, number_format=None)
+        sw.cell(2, r.income, number_format=INR_FORMAT)
+        sw.cell(3, r.foreign_tax, number_format=INR_FORMAT)
+        sw.cell(4, r.indian_tax, number_format=INR_FORMAT)
+        sw.cell(5, r.relief, number_format=INR_FORMAT)
+        sw.cell(6, r.source, number_format=None)
+        sw.cell(7, r.note, number_format=None)
+        sw.row += 1
+    sw.blank()
+    sw.cell(1, "Total relief claimed", bold=True)
+    c = sw.cell(2, ft.relief_total, number_format=INR_FORMAT, bold=True)
+    ft.relief_cell = c.coordinate if ft.relief_claimed else None
+    sw.row += 1
+    sw.label_value("Average rate of Indian tax used", ft.average_rate, number_format="0.00%")
+    sw.label_value(
+        "Basis", "Relief is computed for the regime selected when the workbook was built; "
+        "it does not recompute if the regime is changed in Excel. Foreign tax is not capped "
+        "at the DTAA rate here: check the DTAA article before filing.", number_format=None)
+    if ft.relief_claimed:
+        sw.label_value("FORM 67", foreign_tax_engine.FORM_67_LINE, number_format=None)
+    for w in ft.warnings:
+        sw.label_value("WARNING", w, number_format=None)
+
+
 def write_deductions_sheet(wb: Workbook, ded: sch.DeductionsSchedule) -> dict:
     ws = wb.create_sheet("Deductions")
     sw = _SheetWriter(ws)
@@ -1092,9 +1135,24 @@ def write_computation_tail(
         liability_label += " -- DRAFT (not filing-ready; see call-out below)"
         refund_label += " -- DRAFT (not filing-ready; see call-out below)"
 
-    sw.cell(1, liability_label)
-    selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
-    sw.row += 1
+    _ft = getattr(model, "foreign_tax", None)
+    _relief_claimed = bool(_ft is not None and _ft.relief_claimed and _ft.relief_cell)
+    if _relief_claimed:
+        # ITR-06: relief comes off the liability HERE, so the refund below,
+        # and everything that reads it, sees the reduced figure.
+        sw.cell(1, "Tax liability before foreign tax relief (selected regime)")
+        pre_relief_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, "Less - foreign tax relief (s.90/91) -- Form 67 must be filed")
+        relief_cell_c = sw.cell(2, f"='ForeignTax'!{_ft.relief_cell}", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=MAX(0,{pre_relief_cell}-{relief_cell_c})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+    else:
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
 
     taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
 
@@ -1436,6 +1494,8 @@ def write_workbook(
         write_schedule_fsi_sheet(wb, _rep.schedule_fsi, _rep.dividend, _rep.interest)
         write_form67_sheet(wb, _rep.form_67)
         write_schedule_tr_sheet(wb, _rep.schedule_tr)
+    if getattr(model, "foreign_tax", None) is not None and model.foreign_tax.active:
+        write_foreign_tax_sheet(wb, model.foreign_tax)
     os_layout = write_other_sources_sheet(wb, model.other_sources)
     cg_layout = write_capital_gains_sheet(wb, model.capital_gains, rules_layout)
     ei_layout = write_exempt_income_sheet(wb, model.exempt_income)

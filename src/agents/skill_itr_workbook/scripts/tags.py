@@ -78,6 +78,7 @@ TAGS: dict[str, TagMeta] = {
     "TAXPAID_TDS_INTEREST": TagMeta(RE, "TaxesPaid", "TDS on interest; sign-flipped, cross-checked against 26AS when supplied."),
     "TAXPAID_TDS_DIVIDEND": TagMeta(RE, "TaxesPaid", "TDS on dividend; sign-flipped, cross-checked against 26AS when supplied."),
     "TAXPAID_TCS": TagMeta(RE, "TaxesPaid", "Tax collected at source; sign-flipped, credited against total tax."),
+    "TAXPAID_FOREIGN": TagMeta(RE, "TaxesPaid", "Tax paid abroad; NOT TDS and not in the 26AS tie-out. Relief (lower of foreign and Indian tax, per country) is claimed on Form 67."),
 
     # --- Personal (either side) -------------------------------------------------
     "PERSONAL": TagMeta(EITHER, "Reconciliation", "Drawings/gifts/personal withdrawals; explicitly non-deductible, non-taxable."),
@@ -135,7 +136,10 @@ SECTION_ALLOWED_TAGS: dict[str, frozenset[str]] = {
 }
 
 # Boolean flags a mapping entry may attach to any tag.
-FLAGS = frozenset({"AL_FOREIGN"})
+# FOREIGN_INCOME marks an income account (e.g. OS_DIVIDEND) as foreign source
+# (ITR-06): it feeds Schedule FSI / Form 67 without pulling the account into
+# the Schedule FA asset roll-up the way AL_FOREIGN does.
+FLAGS = frozenset({"AL_FOREIGN", "FOREIGN_INCOME"})
 
 
 def is_valid_tag(tag: str) -> bool:
@@ -222,6 +226,7 @@ TAG_SYNONYMS: dict[str, tuple[str, ...]] = {
     "TAXPAID_TDS_PARTNER": ("partner", "firm", "llp", "194t", "partner remuneration tds"),
     "TAXPAID_TDS_SALARY": ("salary tds", "employer tds"),
     "TAXPAID_TDS_INTEREST": ("bank tds", "fd tds"),
+    "TAXPAID_FOREIGN": ("foreign tax", "withholding", "tax paid abroad", "form 67", "dtaa"),
     "TAXPAID_ADV": ("advance tax",),
     "TAXPAID_SAT": ("self assessment",),
     "OS_INTEREST_SB": ("savings interest",),

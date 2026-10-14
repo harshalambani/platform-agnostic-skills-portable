@@ -1233,6 +1233,15 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         ("Self-assessment Tax", "sat", tp.self_assessment_tax, None),
     )
 
+    def _foreign_relief_ref() -> str | None:
+        """ITR-06: the ForeignTax sheet cell holding the relief, only when
+        relief is actually claimed. None for every run with no foreign tax,
+        so those pages keep exactly their old rows."""
+        ft = getattr(model, "foreign_tax", None)
+        if ft is not None and ft.relief_claimed and ft.relief_cell:
+            return f"'ForeignTax'!{ft.relief_cell}"
+        return None
+
     def _predict_pre_workings_rows() -> int:
         """Deterministic row count from the body start row (right after the
         'Rs.' header rule) through the Refund line, both inclusive --
@@ -1265,6 +1274,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         # 234B/234C/aggregate liability), PLUS the one extra blank row the
         # aggregate line's `row += 2` (instead of `+= 1`) leaves behind.
         n += 12
+        if _foreign_relief_ref():
+            n += 1                              # ITR-06: foreign tax relief line
         n += 2 + max(sum(1 for _, _, v, _ in prepaid if v), 1)  # prepaid section (incl. close_section total)
         n += 1                                  # "Total prepaid taxes" line
         n += 1                                  # Refund Due / (Tax Payable)
@@ -1497,7 +1508,16 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row += 1
     line("Add - Health & Education Cess", SUB, tax_sel("cess"))
     row += 1
-    line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
+    _relief_ref = _foreign_relief_ref()
+    if _relief_ref:
+        # ITR-06: relief is claimed ONLY with Form 67 -- the label says so.
+        line("Less - Foreign tax relief (s.90/91) -- Form 67 must be filed", SUB, f"={_relief_ref}")
+        row += 1
+        line("Total tax liability", OUTER,
+             f"=MAX(0,{tax_sel('liability')[1:]}-{get_column_letter(SUB)}{row - 1})",
+             bold=True, rule=_TOP_RULE)
+    else:
+        line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
     total_liability_ref = f"{get_column_letter(OUTER)}{row}"
     row += 1
 
