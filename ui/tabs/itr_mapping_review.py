@@ -250,11 +250,41 @@ def _latest_proposed_mappings_path(
         reverse=True,
     )
     for p in candidates:
-        stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.stem
-        matched = _snippet_entity_key(stem, match_map)
-        if matched is not None and matched == entity_key:
+        if _snippet_is_for(p, entity_key, match_map):
             return p
     return None
+
+
+ENTITY_HEADER = "# entity:"
+
+
+def _snippet_recorded_entity(path: Path) -> str | None:
+    """ITR-04: the entity key the workbook recorded INSIDE the snippet (a
+    leading "# entity: KEY" comment), or None for an older snippet."""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.startswith(ENTITY_HEADER):
+                    return line[len(ENTITY_HEADER):].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _snippet_is_for(path: Path, entity_key: str, match_map: dict[str, str]) -> bool:
+    """Is this snippet attributable to `entity_key`? The key recorded inside
+    the snippet decides; a snippet that records a DIFFERENT entity is never
+    shown, whatever its filename contains. Only a snippet with no recorded
+    key falls back to the filename token (Layer A)."""
+    recorded = _snippet_recorded_entity(path)
+    if recorded is not None:
+        return recorded == entity_key
+    suffix = "-proposed-mappings.yaml"
+    stem = path.name[: -len(suffix)] if path.name.endswith(suffix) else path.stem
+    return _snippet_entity_key(stem, match_map) == entity_key
 
 
 def _entity_book_path(entity_key: str) -> Path | None:
@@ -269,7 +299,20 @@ def _entity_book_path(entity_key: str) -> Path | None:
     return _book_registry.resolve_book(entity_key)
 
 
-def _apply_book_validation(entity_key: str, snippet_rows: list[dict]) -> list[dict]:
+def _load_book_accounts(entity_key: str):
+    """(book path or None, accounts list or None). Loaded once per review and
+    shared by the validation, the leaf listing and the row-kind lookup."""
+    book_path = _entity_book_path(entity_key)
+    if book_path is None or not book_path.is_file():
+        return book_path, None
+    try:
+        from agents.gnucash_accounts import load_accounts  # noqa: PLC0415
+        return book_path, list(load_accounts(book_path))
+    except Exception:
+        return book_path, None
+
+
+def _apply_book_validation(entity_key: str, snippet_rows: list[dict], accounts=None) -> list[dict]:
     """Layer B (optional, graceful -- see the module docstring): when
     `entity_key` has a configured + readable `book:` in entities.yaml,
     cross-check every snippet row's GUID against that entity's OWN parsed
@@ -284,14 +327,11 @@ def _apply_book_validation(entity_key: str, snippet_rows: list[dict]) -> list[di
     No `book:` configured, the file is missing/unreadable, or it fails to
     parse -- Layer B is skipped silently and `snippet_rows` passes through
     unchanged (Layer A's result stands as-is)."""
-    book_path = _entity_book_path(entity_key)
-    if book_path is None or not book_path.is_file():
-        return snippet_rows
-    try:
-        from agents.gnucash_accounts import load_accounts  # noqa: PLC0415
-        accounts = {a.id: a for a in load_accounts(book_path)}
-    except Exception:
-        return snippet_rows
+    if accounts is None:
+        _bp, accounts = _load_book_accounts(entity_key)
+        if accounts is None:
+            return snippet_rows
+    accounts = {a.id: a for a in accounts}
     if not accounts:
         return snippet_rows
 
@@ -321,6 +361,48 @@ def _entity_choices() -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _load_review_rows(entity_key: str) -> list[dict]:
+    """Rows only -- see _collect_review()."""
+    return _collect_review(entity_key)[0]
+
+
+def _book_leaf_rows(entity_key: str, entries: dict, snippet_by_guid: dict,
+                    book=None) -> tuple[list[dict], Path | None]:
+    """ITR-04. When the entity has a registered book, list that book's own
+    leaf accounts that nothing maps yet. Hidden and placeholder accounts
+    (and anything under a hidden parent) are never offered. An account is
+    "mapped" when it, or any ancestor, has an entry in the mapping file --
+    mapped accounts are never listed as unmapped."""
+    book_path, accounts = book if book is not None else _load_book_accounts(entity_key)
+    if book_path is None or not book_path.is_file():
+        return [], None
+    if accounts is None:
+        return [], book_path
+    from agents.gnucash_accounts import postable_accounts  # noqa: PLC0415
+    by_id = {a.id: a for a in accounts}
+    parents = {a.parent_id for a in accounts if a.parent_id}
+    rows: list[dict] = []
+    for a in postable_accounts(accounts):
+        if a.id in parents or not a.path:
+            continue                     # not a leaf
+        mapped, cur, seen = False, a, set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if cur.id in entries:
+                mapped = True
+                break
+            cur = by_id.get(cur.parent_id)
+        if mapped:
+            continue
+        snip = snippet_by_guid.get(a.id) or {}
+        rows.append({
+            "guid": a.id, "path": a.path, "tag": None, "unmapped": True,
+            "needs_review": False, "suggested": snip.get("suggested"),
+            "note": snip.get("note") or "from the registered book",
+        })
+    return rows, book_path
+
+
+def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     """Build the review table rows for `entity_key`.
 
     Each row: {guid, path, tag, unmapped, needs_review, suggested, note}.
@@ -334,8 +416,10 @@ def _load_review_rows(entity_key: str) -> list[dict]:
     comes from the snippet) and correction (mapping file has entries;
     snippet supplies nothing new) cleanly.
     """
+    info: dict = {"entries": 0, "snippet": None, "snippet_rows": 0, "book": None, "book_rows": 0,
+                  "hidden": 0, "has_book": False}
     if not entity_key or not entity_key.strip():
-        return []
+        return [], info
     configs, _tag_vocab, _amc = _itr_modules()
 
     entries: dict = {}
@@ -348,21 +432,33 @@ def _load_review_rows(entity_key: str) -> list[dict]:
 
     rows: list[dict] = []
     for guid, entry in entries.items():
+        on_hold = entry.tag == _tag_vocab.HOLD
         rows.append({
             "guid": guid,
             "path": entry.path,
             "tag": entry.tag,
+            # ITR-07: a HOLD entry is unmapped for every purpose; it is shown
+            # as ON HOLD with its reason, never as a mapped/confirmed tag.
+            "held": on_hold,
+            "hold_reason": (entry.note or "held for review") if on_hold else "",
             "unmapped": False,
             # RAG confidence: an entry the LLM suggested that no human has
             # approved yet (suggested_by_llm still set) is "needs_review"
             # (amber); once a human has touched/approved it (cleared to
             # None -- see apply_corrections_map) it's "confirmed" (green).
-            "needs_review": bool(entry.suggested_by_llm),
+            "needs_review": bool(entry.suggested_by_llm) and not on_hold,
             "suggested": None,
             "note": entry.note or "",
+            # ITR-05: the foreign-held flag, shown and editable on asset tags.
+            "al_foreign": "AL_FOREIGN" if "AL_FOREIGN" in (entry.flags or []) else "",
         })
 
+    info["entries"] = len(entries)
+    book = _load_book_accounts(entity_key)
     snippet_path = _latest_proposed_mappings_path(entity_key)
+    info["snippet"] = snippet_path
+    snippet_by_guid: dict = {}
+    sections: dict = {}
     if snippet_path is not None:
         try:
             raw = yaml.safe_load(snippet_path.read_text(encoding="utf-8")) or []
@@ -379,8 +475,10 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                     # a stale/other-entity snippet entry never overrides it.
                     continue
                 suggested_tag = item.get("tag")
-                if suggested_tag == "REPLACE_ME":
+                if suggested_tag in ("REPLACE_ME", _tag_vocab.HOLD):
                     suggested_tag = None
+                if item.get("section"):
+                    sections[guid] = str(item["section"])
                 snippet_rows.append({
                     "guid": guid,
                     "path": item.get("path", ""),
@@ -390,10 +488,114 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                     "suggested": suggested_tag,
                     "note": item.get("note", ""),
                 })
-        rows.extend(_apply_book_validation(entity_key, snippet_rows))
+        snippet_rows = _apply_book_validation(entity_key, snippet_rows, accounts=book[1])
+        info["snippet_rows"] = len(snippet_rows)
+        snippet_by_guid = {r["guid"]: r for r in snippet_rows}
+        rows.extend(snippet_rows)
 
-    rows.sort(key=lambda r: (r["path"] or "", r["guid"]))
-    return rows
+    book_rows, book_path = _book_leaf_rows(entity_key, entries, snippet_by_guid, book=book)
+    info["book"] = book_path
+    have = {r["guid"] for r in rows}
+    added = [r for r in book_rows if r["guid"] not in have]
+    info["book_rows"] = len(added)
+    rows.extend(added)
+
+    by_id = {a.id: a for a in (book[1] or [])}
+    has_book = book[1] is not None
+    info["has_book"] = has_book
+    if has_book:
+        # ITR-07: hidden / placeholder accounts are never listed as work to do
+        # (counted, so the screen can say how many were left out).
+        from agents.gnucash_accounts import postable_accounts  # noqa: PLC0415
+        ok = {a.id for a in postable_accounts(book[1])}
+        parent_ids = {a.parent_id for a in book[1] if a.parent_id}
+        info["hidden"] = sum(1 for a in book[1]
+                             if not a.is_root and a.id not in parent_ids and a.id not in ok)
+        rows = [r for r in rows
+                if not (r.get("unmapped") and r["guid"] in by_id and r["guid"] not in ok)]
+    ts = _tag_suggest()
+    for r in rows:
+        r["kind"] = _row_kind(r, sections.get(r["guid"]), by_id.get(r["guid"]), _tag_vocab)
+        r.setdefault("held", False)
+        r.setdefault("hold_reason", "")
+        r.setdefault("al_foreign", "")
+        # ITR-07: a saved entry whose account is gone from the registered book.
+        r["_stale"] = bool(has_book and r["guid"] not in by_id)
+        segs = ts.split_path(r["path"])
+        r["_segs"] = segs
+        r["_pk"] = ":".join(s.lower() for s in segs[:-1])
+        r["_sg"] = {} if r["_stale"] else {
+            t: [round(sc, 6), h] for t, (sc, h) in ts.word_scores(r["path"], r["kind"]).items()}
+
+    # ITR-07: GnuCash tree order (segment by segment), not plain text order.
+    rows.sort(key=lambda r: (ts.book_key(r["path"]), r["guid"]))
+    for i, r in enumerate(rows):
+        r["_ord"] = i
+    return rows, info
+
+
+def _tag_suggest():
+    _itr_modules()
+    import tag_suggest  # noqa: PLC0415
+    return tag_suggest
+
+
+def _tree_config(info: dict) -> dict:
+    """Presentation data for the engine's tree mode (labels, groups, kinds)."""
+    ts = _tag_suggest()
+    _configs, tv, _amc = _itr_modules()
+    tag_meta = {t: {"label": ts.TAG_LABELS.get(t, t), "k": ts.kind(t), "tax": ts.affects_tax(t)}
+                for t in tv.TAGS}
+    return {
+        "tags": tag_meta,
+        "order": list(tv.TAGS),
+        "groups": [[name, list(tgs)] for name, tgs in ts.GROUPS],
+        "hold_group": ts.GROUPS[-1][0],
+        "hidden": int(info.get("hidden") or 0),
+        "has_book": bool(info.get("has_book")),
+        "min_score": ts.MIN_SCORE, "top_fraction": ts.TOP_FRACTION,
+        "max_suggestions": ts.MAX_SUGGESTIONS, "sibling_bonus": ts.SIBLING_BONUS,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ITR-07: which side of the return a row is on, and which tags it may take.
+# ---------------------------------------------------------------------------
+
+_TYPE_KIND = {
+    "INCOME": "Income/expense", "EXPENSE": "Income/expense",
+    "ASSET": "Asset", "BANK": "Asset", "CASH": "Asset", "STOCK": "Asset",
+    "MUTUAL": "Asset", "RECEIVABLE": "Asset", "CURRENCY": "Asset",
+    "LIABILITY": "Liability", "CREDIT": "Liability", "PAYABLE": "Liability",
+    "EQUITY": "Equity", "TRADING": "Trading",
+}
+_ROOT_KIND = {
+    "income": "Income/expense", "expenses": "Income/expense", "expense": "Income/expense",
+    "revenue": "Income/expense", "revenues": "Income/expense",
+    "assets": "Asset", "asset": "Asset",
+    "liabilities": "Liability", "liability": "Liability",
+    "equity": "Equity", "trading": "Trading",
+}
+
+
+def _row_kind(row: dict, section, acct, tag_vocab) -> str:
+    """The row's kind (tags.ROW_KINDS). Most reliable source first: the
+    workbook's own section for the account, the book's account type, the
+    path's root name, and last the kind a mapped row's current tag implies.
+    Nothing known -> "Unknown", which offers almost nothing (fail closed)."""
+    kind = tag_vocab.kind_from_section(section)
+    if kind is None and acct is not None:
+        kind = _TYPE_KIND.get(str(getattr(acct, "type", "") or "").upper())
+    if kind is None:
+        path = str(row.get("path") or "")
+        root = path.replace("/", ":").split(":", 1)[0].strip().lower()
+        kind = _ROOT_KIND.get(root)
+    if kind is None and row.get("tag") and row["tag"] != tag_vocab.HOLD:
+        implied = [k for k in tag_vocab.ROW_KINDS
+                   if k != tag_vocab.KIND_UNKNOWN and row["tag"] in tag_vocab.allowed_tags_for_kind(k)]
+        if len(implied) == 1:
+            kind = implied[0]
+    return kind or tag_vocab.KIND_UNKNOWN
 
 
 def _tag_options() -> list[dict]:
@@ -405,6 +607,30 @@ def _tag_options() -> list[dict]:
         {"tag": tag, "sheet": meta.sheet, "target": meta.target, "desc": meta.treatment}
         for tag, meta in sorted(tag_vocab.TAGS.items())
     ]
+
+
+HOLD_DESC = ("Not a tag. Keeps this account out of every schedule and keeps the workbook "
+             "NOT filing-ready until it gets a real tag. You are asked for a reason.")
+
+
+def _picker_items(tag_opts: list[dict]) -> list[PickerItem]:
+    """HOLD first, then every tag. Each item knows the row kinds it may go on
+    (tags.kinds_allowing) and carries its plain-word synonyms as search-only
+    keywords. The kind cut happens BEFORE the search in the engine, so a
+    synonym can never surface a tag a selected row's side forbids."""
+    _configs, tag_vocab, _amc = _itr_modules()
+    items = [PickerItem(
+        value=tag_vocab.HOLD, primary=tag_vocab.HOLD, secondary=HOLD_DESC,
+        kinds=tag_vocab.kinds_allowing(tag_vocab.HOLD),
+        keywords=" ".join(tag_vocab.synonyms_for(tag_vocab.HOLD)),
+    )]
+    for t in tag_opts:
+        items.append(PickerItem(
+            value=t["tag"], primary=t["tag"], secondary=t["desc"],
+            kinds=tag_vocab.kinds_allowing(t["tag"]),
+            keywords=" ".join(tag_vocab.synonyms_for(t["tag"])),
+        ))
+    return items
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +667,21 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
     suggested = row.get("suggested")
 
     badges: dict = {}
-    if unmapped:
+    if row.get("_stale"):
+        # ITR-07: the saved entry's account is not in the book any more.
+        tags = ["stale"]
+        rowclass = ""
+        badges[TARGET_COL] = {"text": "NOT IN BOOK", "cls": "grey",
+                              "title": "This saved entry's account is not in the registered book. "
+                                       "It cannot take a tag; remove it if it is obsolete."}
+    elif row.get("held"):
+        # ITR-07: on hold on purpose. Never green, never "confirmed".
+        tags = ["held", "unmapped"]
+        rowclass = "accent-orange"
+        badges[TARGET_COL] = {"text": "ON HOLD", "cls": "amber",
+                              "title": "Held: feeds no schedule, and the workbook is not filing-ready "
+                                       "until this gets a real tag. " + str(row.get("hold_reason") or "")}
+    elif unmapped:
         tags = ["unmapped"]
         rowclass = "accent-red"
         badges[TARGET_COL] = {"text": "UNMAPPED", "cls": "red"}
@@ -450,13 +690,24 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
         rowclass = "accent-amber"
         badges[TARGET_COL] = {"text": "NEEDS REVIEW", "cls": "amber", "title": _tag_title(tag, tag_desc)}
     else:
-        tags = ["confirmed", "mapped"]
-        rowclass = "accent-green"
-        badges[TARGET_COL] = {"text": "CONFIRMED", "cls": "green", "title": _tag_title(tag, tag_desc)}
+        # ITR-07: a mapped row is plain text -- no green badge, no green band.
+        # Its tax-kind stripe and pill are drawn by the screen itself.
+        tags = ["mapped"]
+        rowclass = ""
+        # Tooltip only: an empty badge is hidden by the tree CSS, the cell
+        # shows the tag as plain text and keeps its description on hover.
+        badges[TARGET_COL] = {"text": "", "cls": "plain", "title": _tag_title(tag, tag_desc)}
 
     if suggested:
         badges["suggested"] = {"text": "SUGGESTED", "cls": "blue", "title": _tag_title(suggested, tag_desc)}
 
+    # ITR-05: the foreign flag can be set only on a saved row whose tag is a
+    # Schedule AL asset tag.
+    try:
+        _flagok = (not unmapped) and bool(tag) and bool(row.get("guid")) and tag in _itr_modules()[1].AL_ASSET_TAGS
+    except Exception:
+        _flagok = False
+    row["_flagok"] = bool(_flagok)
     row["_tags"] = tags
     row["_rowclass"] = rowclass
     row["_badges"] = badges
@@ -487,8 +738,8 @@ def _build_glossary_html(tag_opts: list[dict]) -> str:
         'background:#161616;padding:6px 10px;color:#e0e0e0;'
         'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;">'
         f'<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#ccc;">'
-        f'Tag glossary ({len(tag_opts)} tags) -- search vocabulary via the "Assign tag" '
-        'box above</summary>'
+        f'Tag glossary ({len(tag_opts)} tags) -- search vocabulary in the "Find a tag" box on the right'
+        '</summary>'
         '<div style="max-height:240px;overflow-y:auto;margin-top:6px;">'
         f'<table style="width:100%;border-collapse:collapse;"><tbody>{rows_html}</tbody></table>'
         '</div></details>'
@@ -499,24 +750,31 @@ def _build_glossary_html(tag_opts: list[dict]) -> str:
 # Spec + load
 # ---------------------------------------------------------------------------
 
-def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -> ReviewSpec:
+def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str,
+          tree: dict | None = None) -> ReviewSpec:
     return ReviewSpec(
         app_id=APP_ID,
         columns=[
             Column("path", "Account path"),
             Column(TARGET_COL, "Current tag"),
             Column("suggested", "Suggested"),
+            Column("kind", "Side"),
+            Column("al_foreign", "Foreign (AL)"),
+            Column("hold_reason", "Hold reason"),
         ],
         target_col=TARGET_COL,
         payload_var=PAYLOAD_VAR,
-        picker_label="Assign tag:",
+        picker_label="",
         picker_placeholder="Type to search tags…",
         picker_items=picker_items,
         status_options=[
-            ("unmapped", "Unmapped only"),
+            ("unmapped", "Unmapped only (includes on hold)"),
+            ("held", "On hold only"),
+            ("changed", "Changed, not saved"),
             ("needs_review", "Needs review (LLM-suggested)"),
-            ("confirmed", "Confirmed only"),
-            ("mapped", "Mapped only (confirmed + needs review)"),
+            ("mapped", "Mapped only"),
+            ("tax", "Affects tax only"),
+            ("stale", "Not in book"),
         ],
         status_label="Show:",
         default_sort="path",
@@ -531,7 +789,63 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         # entity's mapping file is actually removed from it; an unmapped/
         # snippet-only row is view-only, nothing to persist).
         allow_delete=True,
+        # ITR-05: "Mark foreign" / "Clear foreign" for asset accounts held abroad.
+        flag_toggle=("al_foreign", "Mark foreign", "Clear foreign", "AL_FOREIGN"),
+        # ITR-04: an applied tag shows at once as changed-and-unsaved, never
+        # as UNMAPPED and never as saved/CONFIRMED.
+        # ITR-07: the picker offers, and Apply accepts, only tags valid for each
+        # row's side; HOLD asks for a reason and stores it with the entry.
+        kind_col="kind",
+        value_prompts={"HOLD": {"text": "Why is this account on hold? (kept with the entry)",
+                                "key": "hold_reason", "default": "held for review"}},
+        assigned_badge={"text": "CHANGED, NOT SAVED", "cls": "violet",
+                        "title": "Applied in this screen; not saved yet",
+                        "tag": "changed"},
+        tree=tree,
     )
+
+
+EXPLAINER_HTML = (
+    '<div style="margin:0 0 8px;padding:6px 10px;border:1px solid #333;border-radius:4px;'
+    'font-size:12px;color:#ccc;">'
+    "<strong>What happens to an account with no tag, or on HOLD:</strong> it feeds no schedule. "
+    "It is listed on the Unclassified sheet, the workbook still builds as a draft, and it is "
+    "<strong>NOT filing-ready</strong> until every such account has a real tag. "
+    "<strong>HOLD</strong> is not a tag: use it when you are not sure yet - it keeps the account "
+    "visibly unresolved, with your reason, instead of guessing. "
+    "The list offers only tags valid for each account's side (income/expense, asset, liability, "
+    "equity, trading); plain words such as <em>medical</em>, <em>school</em> or <em>partner</em> "
+    "find the right tag."
+    "</div>"
+)
+
+
+def _empty_state_html(entity_key: str, info: dict) -> str:
+    """ITR-04: say WHICH source was empty. Never tells the user to run the
+    workbook when a snippet attributable to this entity already exists."""
+    key = _html.escape(entity_key)
+    parts = [
+        "mapping file: "
+        + (f"{info['entries']} entries, all accounts mapped or none to show" if info["entries"]
+           else "no mapping entries saved yet"),
+    ]
+    if info["snippet"] is not None:
+        parts.append(
+            f"latest workbook run ({_html.escape(Path(info['snippet']).name)}): "
+            "attributable to this entity, but it lists no unmapped accounts"
+        )
+    else:
+        parts.append("workbook run: no proposed-mappings snippet is attributable to this entity")
+    parts.append(
+        "book: " + ("registered, but it has no unmapped leaf accounts" if info["book"] is not None
+                    else "no book registered for this entity")
+    )
+    advice = ""
+    if info["snippet"] is None and info["book"] is None and not info["entries"]:
+        advice = (" Run the ITR Workbook once for this entity (it records the entity in its "
+                  "proposed-mappings file), or register this entity's book.")
+    items = "".join(f"<li>{p}</li>" for p in parts)
+    return f"<p>No accounts to review for <strong>{key}</strong>.</p><ul>{items}</ul><p>{advice.strip()}</p>"
 
 
 def _load_review_data(entity_key: str) -> str:
@@ -540,24 +854,19 @@ def _load_review_data(entity_key: str) -> str:
     if not entity_key or not entity_key.strip():
         return "<p>Select an entity, then click Load.</p>"
 
-    rows = _load_review_rows(entity_key)
+    rows, info = _collect_review(entity_key)
     if not rows:
-        return (
-            f"<p>No accounts found for <strong>{entity_key}</strong>. "
-            "Run the ITR Workbook once for this entity to generate a "
-            "proposed-mappings snippet, or check "
-            "<code>Data/itr/mappings/&lt;entity&gt;.mapping.yaml</code>.</p>"
-        )
+        return _empty_state_html(entity_key, info)
 
     tag_opts = _tag_options()
     tag_desc = {t["tag"]: t["desc"] for t in tag_opts}
     for row in rows:
         _row_presentation(row, tag_desc)
 
-    picker_items = [PickerItem(value=t["tag"], primary=t["tag"], secondary=t["desc"]) for t in tag_opts]
+    picker_items = _picker_items(tag_opts)
     glossary_html = _build_glossary_html(tag_opts)
-    spec = _spec(picker_items, entity_key, glossary_html)
-    return payload_box_css(spec.payload_box_id) + build_html(spec, rows)
+    spec = _spec(picker_items, entity_key, glossary_html, _tree_config(info))
+    return payload_box_css(spec.payload_box_id) + EXPLAINER_HTML + build_html(spec, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -617,11 +926,14 @@ def _save_changes(changes_json: str) -> str:
     # snippet-only "remove from view" delete (guid was never persisted, so
     # there's nothing to delete server-side).
     existing_guids: set[str] = set()
+    existing_entries: dict = {}
     if mapping_file.is_file():
         try:
-            existing_guids = set(_configs.load_mapping(mapping_file).entries)
+            existing_entries = dict(_configs.load_mapping(mapping_file).entries)
+            existing_guids = set(existing_entries)
         except Exception:
             existing_guids = set()
+            existing_entries = {}
 
     backup_msg = "No existing mapping file -- nothing to back up (cold start)."
     if mapping_file.is_file():
@@ -632,7 +944,10 @@ def _save_changes(changes_json: str) -> str:
 
     corrections: dict[str, str] = {}
     paths: dict[str, str] = {}
+    row_kinds: dict[str, str] = {}
+    hold_reasons: dict[str, str] = {}
     deletions: set[str] = set()
+    flag_changes: dict[str, dict] = {}
     skipped_blank = 0
     for ch in changes:
         guid = ch.get("guid")
@@ -643,17 +958,38 @@ def _save_changes(changes_json: str) -> str:
             deletions.add(guid)
             continue
         tag = ch.get(TARGET_COL)
+        # ITR-05: a changed foreign flag on a saved row. A flag-only change
+        # never re-applies (and so never re-approves) the tag.
+        prior = existing_entries.get(guid)
+        if prior is not None and "al_foreign" in ch:
+            want = bool(str(ch.get("al_foreign") or "").strip())
+            if want != ("AL_FOREIGN" in (prior.flags or [])):
+                flag_changes[guid] = {"AL_FOREIGN": want}
+                if ch.get("path"):
+                    paths[guid] = ch["path"]
+                if str(tag or "").strip() == str(ch.get("_orig") or "").strip():
+                    continue
         if not tag or not str(tag).strip():
             skipped_blank += 1
             continue
         corrections[guid] = str(tag).strip()
         if ch.get("path"):
             paths[guid] = ch["path"]
+        # ITR-07: the row's side rides in the payload; a missing or unrecognised
+        # side is treated as Unknown, which accepts almost nothing (fail closed).
+        # A payload with no side at all (an older page) gets it from the path.
+        if "kind" in ch:
+            kind = str(ch.get("kind") or "").strip()
+        else:
+            kind = _row_kind({"path": ch.get("path") or ""}, None, None, _tag_vocab)
+        row_kinds[guid] = kind if kind in _tag_vocab.ROW_KINDS else _tag_vocab.KIND_UNKNOWN
+        if ch.get("hold_reason"):
+            hold_reasons[guid] = str(ch["hold_reason"]).strip()
 
     persisted_deletions = deletions & existing_guids
     view_only_deletions = deletions - existing_guids
 
-    if not corrections and not persisted_deletions:
+    if not corrections and not persisted_deletions and not flag_changes:
         if deletions:
             return (
                 f"Removed {len(view_only_deletions)} unmapped row(s) from view "
@@ -667,7 +1003,8 @@ def _save_changes(changes_json: str) -> str:
 
     applied, invalid = amc.apply_corrections_map(
         str(mapping_file), corrections, str(mapping_file), paths=paths,
-        deletions=persisted_deletions,
+        deletions=persisted_deletions, hold_reasons=hold_reasons, row_kinds=row_kinds,
+        flag_changes=flag_changes,
     )
 
     lines = [
@@ -687,9 +1024,18 @@ def _save_changes(changes_json: str) -> str:
     if skipped_blank:
         lines.append(f"Skipped {skipped_blank} row(s) with a blank tag selection.")
     if invalid:
-        lines.append(f"{len(invalid)} correction(s) NOT applied (unknown tag):")
+        lines.append(f"{len(invalid)} correction(s) NOT applied:")
         for path, guid, tag in invalid:
-            lines.append(f"  - {path} (guid {guid}): {tag!r} is not a valid tag")
+            if str(tag).startswith("flag:"):
+                lines.append(f"  - {path} (guid {guid}): the foreign flag applies only to a mapped "
+                             "Schedule AL asset account")
+            elif _tag_vocab.is_valid_entry_tag(tag):
+                side = row_kinds.get(guid, _tag_vocab.KIND_UNKNOWN)
+                lines.append(
+                    f"  - {path} (guid {guid}): {tag!r} is not valid for a {side} account "
+                    "-- pick a tag listed for that side, or HOLD")
+            else:
+                lines.append(f"  - {path} (guid {guid}): {tag!r} is not a valid tag")
     return "\n\n".join(lines)
 
 

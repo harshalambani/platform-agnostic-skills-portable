@@ -257,7 +257,7 @@ def test_cold_start_no_mapping_anywhere_builds_best_effort(tmp_path):
     assert "REVIEW ITEM(S)" in summary
     assert "STATUS: OK" not in summary
     assert "cold start" in summary
-    snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
+    snippet_path = fixture_gen.snippet_for(out_path)
     assert snippet_path.exists()
     assert "REPLACE_ME" in snippet_path.read_text(encoding="utf-8")
 

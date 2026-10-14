@@ -172,6 +172,9 @@ common:
     dividend: ["194", "194K"]
     interest: ["193", "194A"]
     salary: ["192", "192A"]
+    partner: ["194T"]                     # ITR-02: s.194T TDS on partner remuneration / interest
+                                          # (in force from 1-Apr-2025, so AY2026-27 onward). Its own
+                                          # category: never part of the interest/dividend tie-out.
 
   schedule_al:
     total_income_threshold: 10000000     # verify against notified AY2026-27 ITR instructions at review

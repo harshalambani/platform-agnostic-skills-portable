@@ -73,6 +73,11 @@ class UnmappedLeaf:
     guid: str | None
     path: str
     total: float | None
+    # ITR-07: True when the account was put on HOLD on purpose (as opposed to
+    # simply never mapped); `reason` is the note saved with the HOLD.
+    held: bool = False
+    reason: str | None = None
+    section: str | None = None   # eguile section, so Review Mapping knows the row's side
 
 
 @dataclass
@@ -124,21 +129,30 @@ def resolve_tree(tree: ParsedBalanceSheet, mapping: MappingLoadResult) -> Resolu
     unmapped: list[UnmappedLeaf] = []
     warnings: list[str] = list(mapping.warnings)
 
-    def _walk(nodes, inherited_tag, inherited_flags):
+    def _walk(nodes, inherited_tag, inherited_flags, inherited_note=None):
         for n in nodes:
             entry = mapping.entries.get(n.guid) if n.guid else None
             tag = entry.tag if entry else inherited_tag
             flags = entry.flags if entry else inherited_flags
+            note = entry.note if entry else inherited_note
 
             if not n.children:
                 if tag is None:
-                    unmapped.append(UnmappedLeaf(guid=n.guid, path=n.path or n.name, total=n.total))
+                    unmapped.append(UnmappedLeaf(guid=n.guid, path=n.path or n.name, total=n.total,
+                                                 section=n.section))
+                elif tag == tag_vocab.HOLD:
+                    # ITR-07: on HOLD on purpose. Unmapped for every downstream
+                    # purpose -- never resolved, never in a schedule, never
+                    # filing-ready -- but carrying the reason it was held.
+                    unmapped.append(UnmappedLeaf(
+                        guid=n.guid, path=n.path or n.name, total=n.total,
+                        held=True, reason=note or "held for review", section=n.section))
                 else:
                     _check_section_tag(n, tag)
                     if n.guid:
                         resolved[n.guid] = ResolvedLeaf(guid=n.guid, path=n.path or n.name, tag=tag, flags=flags)
             else:
-                _walk(n.children, tag, flags)
+                _walk(n.children, tag, flags, note)
 
     for roots in tree.section_roots.values():
         _walk(roots, None, [])
@@ -147,7 +161,21 @@ def resolve_tree(tree: ParsedBalanceSheet, mapping: MappingLoadResult) -> Resolu
     return ResolutionResult(resolved=resolved, unmapped=unmapped, warnings=warnings)
 
 
-def proposed_mapping_snippet(result: ResolutionResult, suggestions: dict | None = None) -> str:
+ENTITY_HEADER = "# entity:"
+
+
+def snippet_recorded_entity(text: str) -> str | None:
+    """The entity key recorded in a proposed-mappings snippet's header
+    (ITR-04), or None for an old snippet that has none."""
+    for line in (text or "").splitlines()[:5]:
+        if line.startswith(ENTITY_HEADER):
+            return line[len(ENTITY_HEADER):].strip() or None
+    return None
+
+
+def proposed_mapping_snippet(
+    result: ResolutionResult, suggestions: dict | None = None, entity_key: str | None = None,
+) -> str:
     """Build a <output>-proposed-mappings.yaml snippet (configs.py's list
     format) for every unmapped leaf, annotated with an LLM suggestion when
     one was found (suggest.py); ready to review and paste into the
@@ -167,7 +195,18 @@ def proposed_mapping_snippet(result: ResolutionResult, suggestions: dict | None 
             "tag": suggestion.tag if suggestion else "REPLACE_ME",
             "note": suggestion.rationale if suggestion else "unmapped -- needs review",
         }
+        if getattr(leaf, "section", None):
+            entry["section"] = leaf.section
+        if getattr(leaf, "held", False):
+            entry["tag"] = tag_vocab.HOLD
+            entry["note"] = leaf.reason or "held for review"
+
         if suggestion:
             entry["suggested_by_llm"] = today
         entries.append(entry)
-    return dump_mapping_entries(entries)
+    body = dump_mapping_entries(entries)
+    if entity_key:
+        # ITR-04: record which entity this snippet was written for. A YAML
+        # comment, so the file still loads as the plain list it always was.
+        return f"{ENTITY_HEADER} {entity_key}\n{body}"
+    return body

@@ -29,6 +29,7 @@ from pathlib import Path
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
 
+import foreign_tax as foreign_tax_engine
 import presentation
 import rules as rules_engine
 import schedules as sch
@@ -72,6 +73,9 @@ _TAG_LINE_LABEL: dict[str, str] = {
     "TAXPAID_SAT": "Self-assessment tax",
     "TAXPAID_TDS_SALARY": "TDS on salary",
     "TAXPAID_TDS_INTEREST": "TDS on interest",
+    "TAXPAID_TDS_PARTNER": "TDS on partner remuneration / interest (s.194T)",
+    "TAXPAID_TDS_OTHER": "TDS under other sections",
+    "TAXPAID_FOREIGN": "Foreign tax paid (not TDS; relief via Form 67)",
     "TAXPAID_TDS_DIVIDEND": "TDS on dividend",
     "TAXPAID_TCS": "TCS",
     "PERSONAL": "(non-deductible / non-taxable, shown for completeness only)",
@@ -481,11 +485,13 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
     sw.label_value("Reconciliation diff (lot sum - control)", cg.reconciliation_diff)
     if cg.unresolved_scrips:
         sw.label_value("Unresolved FMV scrips (fail-loud, review)", ", ".join(cg.unresolved_scrips), number_format=None)
+        for msg in cg.fmv_failures:
+            sw.label_value("  corporate action", msg, number_format=None)
     sw.blank()
 
     sw.header("Lot detail")
     lot_headers = ["Scrip", "Sale date", "Buy date", "Term", "Qty", "Cost", "Proceeds",
-                   "Booked gain", "Grandfathered", "FMV used", "Taxable gain", "Attribution"]
+                   "Booked gain", "Grandfathered", "FMV used", "Taxable gain", "Attribution", "FMV source"]
     for col, h in enumerate(lot_headers, start=1):
         sw.cell(col, h)
     sw.row += 1
@@ -506,6 +512,7 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
         sw.cell(10, lot.fmv_used)
         sw.cell(11, lot.taxable_gain, number_format=INR_FORMAT)
         sw.cell(12, lot.attribution)
+        sw.cell(13, lot.fmv_source)
         sw.row += 1
     return layout
 
@@ -536,6 +543,12 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     layout["tds_salary"] = sw.label_value("TDS on salary", tp.tds_salary)
     layout["tds_interest"] = sw.label_value("TDS on interest", tp.tds_interest)
     layout["tds_dividend"] = sw.label_value("TDS on dividend", tp.tds_dividend)
+    layout["tds_partner"] = sw.label_value("TDS on partner remuneration / interest (s.194T)", tp.tds_partner)
+    layout["tds_other"] = sw.label_value("TDS under other sections", tp.tds_other)
+    for it in tp.tds_other_items:
+        sw.label_value(f"  other TDS -- {it['path']} (section {it['section']})", it["amount"])
+    for w in tp.tds_other_warnings:
+        sw.label_value("WARNING", w, number_format=None)
     layout["tcs"] = sw.label_value("TCS", tp.tcs)
     layout["unclassified_rows"] = []   # populated below only when non-empty
     sw.blank()
@@ -545,6 +558,7 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     else:
         sw.label_value("26AS TDS on interest (194A)", tp.as26_tds_interest)
         sw.label_value("26AS TDS on dividend (194/194K)", tp.as26_tds_dividend)
+        sw.label_value("26AS TDS on partner remuneration (194T)", tp.as26_tds_partner)
         sw.label_value("Tie-out status", "OK" if tp.tie_out_ok else f"{len(tp.tie_out_conflicts)} CONFLICT(S)", number_format=None)
         for c in tp.tie_out_conflicts:
             sw.label_value(
@@ -583,6 +597,47 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     return layout
 
 
+def write_foreign_tax_sheet(wb: Workbook, ft) -> None:
+    """ITR-06: the foreign tax credit working. Written only when there is
+    foreign activity. The relief total is a value worked out in Python (lower
+    of foreign and Indian tax per country), so it does not recompute if the
+    regime is flipped in Excel -- the sheet says so."""
+    ws = wb.create_sheet("ForeignTax")
+    sw = _SheetWriter(ws)
+    sw.header("Foreign tax credit (s.90 / 90A / 91) -- Form 67")
+    sw.label_value(
+        "Not TDS", "Foreign tax is never added to Taxes Paid and never tied to 26AS; "
+        "it is relief against the tax liability.", number_format=None)
+    for h, col in (("Country", 1), ("Income (Rs)", 2), ("Foreign tax paid (Rs)", 3),
+                   ("Indian tax on that income (Rs)", 4), ("Relief = lower of the two (Rs)", 5),
+                   ("Source", 6), ("Note", 7)):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for r in ft.rows:
+        sw.cell(1, r.country, number_format=None)
+        sw.cell(2, r.income, number_format=INR_FORMAT)
+        sw.cell(3, r.foreign_tax, number_format=INR_FORMAT)
+        sw.cell(4, r.indian_tax, number_format=INR_FORMAT)
+        sw.cell(5, r.relief, number_format=INR_FORMAT)
+        sw.cell(6, r.source, number_format=None)
+        sw.cell(7, r.note, number_format=None)
+        sw.row += 1
+    sw.blank()
+    sw.cell(1, "Total relief claimed", bold=True)
+    c = sw.cell(2, ft.relief_total, number_format=INR_FORMAT, bold=True)
+    ft.relief_cell = c.coordinate if ft.relief_claimed else None
+    sw.row += 1
+    sw.label_value("Average rate of Indian tax used", ft.average_rate, number_format="0.00%")
+    sw.label_value(
+        "Basis", "Relief is computed for the regime selected when the workbook was built; "
+        "it does not recompute if the regime is changed in Excel. Foreign tax is not capped "
+        "at the DTAA rate here: check the DTAA article before filing.", number_format=None)
+    if ft.relief_claimed:
+        sw.label_value("FORM 67", foreign_tax_engine.FORM_67_LINE, number_format=None)
+    for w in ft.warnings:
+        sw.label_value("WARNING", w, number_format=None)
+
+
 def write_deductions_sheet(wb: Workbook, ded: sch.DeductionsSchedule) -> dict:
     ws = wb.create_sheet("Deductions")
     sw = _SheetWriter(ws)
@@ -611,6 +666,14 @@ def write_schedule_al_sheet(wb: Workbook, al: sch.ScheduleALSchedule) -> dict:
     sw.header(f"Schedule AL (required if Total Income > {al.threshold:,.2f}: {al.required})")
     for tag, total in al.buckets.items():
         sw.label_value(tag, total)
+    if al.firm_interest or al.firm_pan:
+        sw.header("Interest in firm / AOP (own line; never part of shares and securities)")
+        sw.label_value("Interest in firm / AOP (at cost)", al.firm_interest)
+        sw.label_value("PAN of the firm / AOP", al.firm_pan or "NOT SET", number_format=None)
+        if al.firm_pan_missing:
+            sw.label_value(
+                "WARNING", "Firm interest is mapped but the entity has no partner_firm_pan; "
+                "set it in entities.yaml before filing Schedule AL.", number_format=None)
     layout["total_assets"] = sw.label_value("Total assets (at cost)", al.total_assets)
     layout["total_liabilities"] = sw.label_value("Total liabilities", al.total_liabilities)
     layout["net"] = sw.label_value("Net", al.net)
@@ -872,19 +935,33 @@ def write_unclassified_sheet(wb: Workbook, uncl: sch.UnclassifiedSchedule) -> No
     )
     ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
     ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+    n_held = uncl.held_count
+    if n_held:
+        # ITR-07: accounts held on purpose are listed first, with the reason.
+        sw.label_value(
+            "HELD ON PURPOSE",
+            f"{n_held} account(s) put on HOLD -- they feed no schedule and keep this workbook "
+            "NOT filing-ready until each gets a real tag",
+            number_format=None,
+        )
     sw.blank()
 
     headers = ["Account path", "Amount", "Section", "Income-type (worst-case tax base)"]
+    if n_held:
+        headers.append("Held (reason)")
     for col, h in enumerate(headers, start=1):
         sw.cell(col, h, bold=True)
     sw.row += 1
-    for item in uncl.items:
+    ordered = sorted(uncl.items, key=lambda i: not i.held) if n_held else uncl.items
+    for item in ordered:
         row = sw.row
         sw.cell(1, item.path)
         sw.cell(2, item.amount, number_format=INR_FORMAT)
         sw.cell(3, item.section)
         sw.cell(4, item.is_income_type)
-        for col in range(1, 5):
+        if n_held:
+            sw.cell(5, f"HELD: {item.reason}" if item.held else "")
+        for col in range(1, 5 + (1 if n_held else 0)):
             ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
         sw.row += 1
 
@@ -1078,9 +1155,24 @@ def write_computation_tail(
         liability_label += " -- DRAFT (not filing-ready; see call-out below)"
         refund_label += " -- DRAFT (not filing-ready; see call-out below)"
 
-    sw.cell(1, liability_label)
-    selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
-    sw.row += 1
+    _ft = getattr(model, "foreign_tax", None)
+    _relief_claimed = bool(_ft is not None and _ft.relief_claimed and _ft.relief_cell)
+    if _relief_claimed:
+        # ITR-06: relief comes off the liability HERE, so the refund below,
+        # and everything that reads it, sees the reduced figure.
+        sw.cell(1, "Tax liability before foreign tax relief (selected regime)")
+        pre_relief_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, "Less - foreign tax relief (s.90/91) -- Form 67 must be filed")
+        relief_cell_c = sw.cell(2, f"='ForeignTax'!{_ft.relief_cell}", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=MAX(0,{pre_relief_cell}-{relief_cell_c})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+    else:
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
 
     taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
 
@@ -1248,7 +1340,8 @@ def write_reconciliation_sheet(
             number_format=None,
         )
     for leaf in unmapped:
-        sw.label_value(leaf.path, leaf.total)
+        held_mark = f"  [HELD: {leaf.reason}]" if getattr(leaf, "held", False) else ""
+        sw.label_value(leaf.path + held_mark, leaf.total)
     sw.blank()
 
     sw.label_value("Mapping version", mapping_version, number_format=None)
@@ -1352,10 +1445,12 @@ def write_mapping_review_sheet(
             row = sw.row
             sw.cell(1, leaf.path)
             sw.cell(2, leaf.total, number_format=INR_FORMAT)
-            sw.cell(3, "REPLACE_ME")
-            sw.cell(4, "(unresolved)")
-            sw.cell(5, "(unresolved -- pick a tag from tags.py)")
-            sw.cell(6, "unmapped")
+            is_held = getattr(leaf, "held", False)
+            sw.cell(3, "HOLD" if is_held else "REPLACE_ME")
+            sw.cell(4, "(on hold)" if is_held else "(unresolved)")
+            sw.cell(5, f"(held on purpose: {leaf.reason})" if is_held
+                    else "(unresolved -- pick a tag from tags.py)")
+            sw.cell(6, "held" if is_held else "unmapped")
             sw.cell(7, None)
             sw.cell(8, leaf.guid)
             for col in range(1, 9):
@@ -1419,6 +1514,8 @@ def write_workbook(
         write_schedule_fsi_sheet(wb, _rep.schedule_fsi, _rep.dividend, _rep.interest)
         write_form67_sheet(wb, _rep.form_67)
         write_schedule_tr_sheet(wb, _rep.schedule_tr)
+    if getattr(model, "foreign_tax", None) is not None and model.foreign_tax.active:
+        write_foreign_tax_sheet(wb, model.foreign_tax)
     os_layout = write_other_sources_sheet(wb, model.other_sources)
     cg_layout = write_capital_gains_sheet(wb, model.capital_gains, rules_layout)
     ei_layout = write_exempt_income_sheet(wb, model.exempt_income)

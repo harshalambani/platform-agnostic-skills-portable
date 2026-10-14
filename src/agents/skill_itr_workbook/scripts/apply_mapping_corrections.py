@@ -47,6 +47,7 @@ from configs import MappingEntry, dump_mapping_entries, load_mapping  # noqa: E4
 
 REVIEW_SHEET = "Mapping Review"
 _APPROVED_NOTE = "approved via Mapping Review sheet correction"
+_HOLD_NOTE = "held for review"
 
 
 def read_corrections(reviewed_xlsx: str) -> tuple[dict, list]:
@@ -80,7 +81,7 @@ def read_corrections(reviewed_xlsx: str) -> tuple[dict, list]:
         if not correction:
             continue
 
-        if tag_vocab.is_valid_tag(correction):
+        if tag_vocab.is_valid_entry_tag(correction):
             valid[guid] = (correction, str(path))
         else:
             invalid.append((path, guid, correction))
@@ -154,6 +155,9 @@ def apply_corrections_map(
     paths: dict | None = None,
     known_paths: dict | None = None,
     deletions: set | None = None,
+    hold_reasons: dict | None = None,
+    row_kinds: dict | None = None,
+    flag_changes: dict | None = None,
 ) -> tuple[int, list]:
     """Load `mapping_file` (an empty/missing file is treated as zero
     entries -- lets a true cold-start entity, which has no mapping file yet,
@@ -209,18 +213,53 @@ def apply_corrections_map(
             continue
         existing = entries.get(guid)
         path = paths.get(guid) or (existing.path if existing else "")
-        if not tag_vocab.is_valid_tag(tag):
+        if not tag_vocab.is_valid_entry_tag(tag):
             invalid.append((path, guid, tag))
             continue
+        # ITR-07: when the caller gives the row's kind (tags.ROW_KINDS), a tag
+        # that kind may not take -- a balance-sheet tag on an income/expense
+        # row, the reverse, or any tag outside the section's set -- is refused
+        # here as well as in the picker. HOLD is valid on any row.
+        if tag != tag_vocab.HOLD and row_kinds and guid in row_kinds:
+            if tag not in tag_vocab.allowed_tags_for_kind(row_kinds[guid]):
+                invalid.append((path, guid, tag))
+                continue
+        note = _APPROVED_NOTE
+        if tag == tag_vocab.HOLD:
+            note = (hold_reasons or {}).get(guid) or _HOLD_NOTE
         entries[guid] = MappingEntry(
             guid=guid,
             path=path,
             tag=tag,
             flags=existing.flags if existing else [],
-            note=_APPROVED_NOTE,
+            note=note,
             suggested_by_llm=None,
         )
         applied += 1
+
+    # ITR-05: flag changes ({guid: {flag: bool}}). A flag is set or cleared on an
+    # existing entry only; a tag change above never touches flags (it passes
+    # the existing ones through), and a flag change never touches the tag or
+    # the note. AL_FOREIGN is for balance-sheet asset tags only.
+    for guid, wanted in (flag_changes or {}).items():
+        entry = entries.get(guid)
+        for flag, on in (wanted or {}).items():
+            bad = ("flag:" + str(flag))
+            if entry is None or flag not in tag_vocab.FLAGS or (
+                    flag == "AL_FOREIGN" and not tag_vocab.is_al_foreign_capable(entry.tag)):
+                invalid.append(((entry.path if entry else paths.get(guid, "")), guid, bad))
+                continue
+            current = list(entry.flags or [])
+            if on and flag not in current:
+                current.append(flag)
+            elif not on and flag in current:
+                current.remove(flag)
+            else:
+                continue
+            entry = MappingEntry(guid=entry.guid, path=entry.path, tag=entry.tag, flags=current,
+                                 note=entry.note, suggested_by_llm=entry.suggested_by_llm)
+            entries[guid] = entry
+            applied += 1
 
     if deletions:
         for guid in deletions:

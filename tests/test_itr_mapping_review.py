@@ -102,7 +102,7 @@ def test_load_review_data_no_rows_reports_clearly(tmp_path):
     data_root = _setup_data_root(tmp_path)
     with patch("ui._config.data_root_dir", return_value=data_root):
         html = ui_mod._load_review_data("SYN-IND")
-    assert "No accounts found" in html
+    assert "No accounts to review" in html
 
 
 def test_load_review_data_glossary_in_extra_panel_not_hand_rolled_template(tmp_path):
@@ -150,12 +150,12 @@ def test_row_presentation_needs_review_is_amber_and_tagged_mapped_too():
     assert "OS_INTEREST_BANK --" in row["_badges"]["tag"]["title"]
 
 
-def test_row_presentation_confirmed_is_green_and_tagged_mapped_too():
+def test_row_presentation_mapped_is_plain_text_no_green_badge():
     row = {"unmapped": False, "needs_review": False, "tag": "AL_CASH_BANK", "suggested": None, "note": ""}
     ui_mod._row_presentation(row, _TAG_DESC)
-    assert row["_tags"] == ["confirmed", "mapped"]
-    assert row["_rowclass"] == "accent-green"
-    assert row["_badges"]["tag"]["text"] == "CONFIRMED"
+    assert row["_tags"] == ["mapped"]
+    assert row["_rowclass"] == ""
+    assert row["_badges"]["tag"]["text"] == ""   # tooltip only, nothing drawn
 
 
 def test_row_presentation_suggested_gets_blue_badge_on_suggested_column():

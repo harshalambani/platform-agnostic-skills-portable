@@ -235,7 +235,7 @@ def test_hard_error_unresolved_entity_still_fails_loud_with_stub(tmp_path):
 
 def test_proposed_mappings_snippet_still_written_when_built_with_review_items(tmp_path):
     summary, out_path = _run_partial(tmp_path)
-    snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
+    snippet_path = fixture_gen.snippet_for(out_path)
     assert snippet_path.exists()
     text = snippet_path.read_text(encoding="utf-8")
     assert "Assets/Misc Holding (unmapped)" in text

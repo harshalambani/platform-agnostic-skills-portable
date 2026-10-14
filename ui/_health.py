@@ -378,6 +378,8 @@ def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
             body = _get_json(url, timeout=2.0, api_key=key)
         else:
             body = _get_json(url, timeout=2.0)
+    except error.HTTPError as e:
+        return HealthResult(False, "unreachable", f"HTTP {e.code}: {e.reason}")
     except error.URLError as e:
         return HealthResult(False, "unreachable", f"{type(e).__name__}: {e.reason}")
     except TimeoutError:

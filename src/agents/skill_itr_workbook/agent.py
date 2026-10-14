@@ -94,6 +94,7 @@ import write_workbook  # noqa: E402
 import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
 import parse_foreign as foreign_engine  # noqa: E402
+import foreign_tax as foreign_tax_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
 _AS_OF_RE = re.compile(r"Balance Sheet \(eguile\)[^0-9]*(\d{2})-(\d{2})-(\d{4})")
@@ -104,6 +105,7 @@ BLOCKED_FOR_REVIEW = "BLOCKED-FOR-REVIEW"   # hard-error paths only (bad HTML, u
                                              # unmapped leaves no longer route here (2026-07-16
                                              # Part 1: best-effort build-with-call-outs instead).
 BUILT_WITH_REVIEW_PREFIX = "BUILT --"
+CANCELLED = "CANCELLED"   # user pressed Stop mid-run: no workbook is built (ITR-01)
 
 
 def _infer_year_key(bs_html: str) -> str | None:
@@ -151,12 +153,22 @@ def _provenance_summary_lines(tree, resolved: dict, mapping_entries: dict | None
     return lines
 
 
+def snippet_file_name(output_path: str, entity_key: str | None) -> str:
+    """ITR-04: the proposed-mappings snippet carries the entity it was
+    written for in its NAME (as well as inside the file). A run with no known
+    entity keeps the plain legacy name."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", entity_key or "")
+    infix = f"-{safe}" if safe else ""
+    return f"{output_path}{infix}-proposed-mappings.yaml"
+
+
 def _mapping_summary(
     tree,
     mapping_file: str | None,
     output_path: str,
     config_path: str,
     model_override: str | None,
+    entity_key: str | None = None,
 ):
     """Resolve every HTML leaf to a tag via the supplied mapping file (plan
     sections 3.1, 4.1). Returns (summary_lines, status, result_or_None).
@@ -175,7 +187,10 @@ def _mapping_summary(
     cross-checks) when resolution ran at all, else None. loaded_entries is
     the raw guid -> MappingEntry dict (Mapping Review sheet's Suggested-by
     column needs the note/suggested_by_llm fields that ResolvedLeaf doesn't
-    carry), or None when mapping_file is invalid."""
+    carry), or None when mapping_file is invalid. The 5th element is a list
+    of HEADLINE lines (ITR-01) that the caller puts at the very top of the
+    summary: an empty mapping, a stopped AI pass, a user Stop."""
+    headline: list[str] = []
     known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
     cold_start = not mapping_file
     if cold_start:
@@ -184,9 +199,25 @@ def _mapping_summary(
         try:
             loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
         except configs.MappingValidationError as e:
-            return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None
+            return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None, headline
 
     result = mapping_engine.resolve_tree(tree, loaded)
+    held = [leaf for leaf in result.unmapped if leaf.held]
+    if held:
+        # ITR-07: accounts put on HOLD on purpose are named at the TOP of the
+        # run. A held account is unmapped: it feeds no schedule and the
+        # workbook is not filing-ready while any remain.
+        headline.append(
+            f"HELD: {len(held)} account(s) are on HOLD and feed NO schedule -- the workbook is NOT "
+            "filing-ready until each gets a real tag: "
+            + "; ".join(f"{leaf.path} ({leaf.reason})" for leaf in held)
+        )
+    if not result.resolved:
+        headline.append(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER}: the mapping resolved 0 of "
+            f"{len(result.unmapped)} account(s). Nothing is classified -- do not file this workbook. "
+            "Assign tags in GnuCash > ITR > ITR Mapping, then run again."
+        )
     lines = [f"Mapping: {len(result.resolved)} leaf(ves) resolved, {len(result.unmapped)} unmapped."]
     for w in result.warnings:
         lines.append(f"  WARNING: {w}")
@@ -194,7 +225,7 @@ def _mapping_summary(
 
     if not result.blocked:
         lines.append("Mapping: OK -- every leaf resolved to a tag.")
-        return lines, OK, result, loaded.entries
+        return lines, OK, result, loaded.entries, headline
 
     if cold_start:
         lines.insert(
@@ -212,19 +243,39 @@ def _mapping_summary(
         "upper bound. Unmapped accounts:"
     )
     for leaf in result.unmapped:
-        lines.append(f"  - {leaf.path} (FY total {leaf.total})")
+        mark = f" [HELD: {leaf.reason}]" if leaf.held else ""
+        lines.append(f"  - {leaf.path} (FY total {leaf.total}){mark}")
 
-    suggestions = suggest.suggest_for_unmapped(result.unmapped, result.resolved, config_path, model_override)
-    snippet = mapping_engine.proposed_mapping_snippet(result, suggestions)
-    snippet_path = f"{output_path}-proposed-mappings.yaml"
+    suggest._emit("Mapping resolved. Starting AI tag suggestions for unmapped accounts.")
+    # A held account is never sent to the AI: someone chose to hold it.
+    sug_run = suggest.run_suggestions(
+        [leaf for leaf in result.unmapped if not leaf.held], result.resolved, config_path, model_override)
+    suggestions = sug_run.suggestions
+    if sug_run.cancelled:
+        headline.insert(
+            0,
+            "ERROR: the run was stopped by the user during the AI tag suggestions -- "
+            "NO workbook was built. Run again to get one.",
+        )
+        return lines, CANCELLED, result, loaded.entries, headline
+    snippet = mapping_engine.proposed_mapping_snippet(result, suggestions, entity_key=entity_key)
+    snippet_path = snippet_file_name(output_path, entity_key)
     Path(snippet_path).write_text(snippet, encoding="utf-8")
     lines.append(f"Proposed mappings written to {snippet_path} -- review and paste into the mapping file.")
+    if sug_run.stopped_reason:
+        headline.append(
+            f"WARNING: AI tag suggestions stopped after {sug_run.attempted} call(s): "
+            f"{sug_run.stopped_reason}. {sug_run.left_without} of {sug_run.total} unmapped "
+            "account(s) have no AI suggestion."
+        )
     if suggestions:
         lines.append(f"  ({len(suggestions)} of {n_unmapped} unmapped account(s) got an LLM suggestion.)")
+    elif sug_run.stopped_reason:
+        lines.append("  (No LLM suggestions -- the AI pass stopped, see the warning at the top.)")
     else:
-        lines.append("  (No LLM suggestions -- no endpoint configured, or the endpoint call failed.)")
+        lines.append("  (No LLM suggestions -- no endpoint configured, or the replies could not be used.)")
 
-    return lines, status, result, loaded.entries
+    return lines, status, result, loaded.entries, headline
 
 
 def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) -> list[str]:
@@ -294,6 +345,7 @@ def _verify_summary(
     output_path: str,
     config_path: str,
     model_override: str | None,
+    entity_key: str | None = None,
 ):
     """Returns (summary_text, tree, book, failures, book_cross_check_results,
     resolution_result_or_None, form16_data_or_None, year_key_or_None,
@@ -335,7 +387,9 @@ def _verify_summary(
             lines.append(f"[FY {year_key}] {book_verify.summarize(book_cross_check)}")
 
     lines.append("")
-    mapping_lines, status, result, mapping_entries = _mapping_summary(tree, mapping_file, output_path, config_path, model_override)
+    mapping_lines, status, result, mapping_entries, headline = _mapping_summary(
+        tree, mapping_file, output_path, config_path, model_override, entity_key,
+    )
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
 
@@ -355,6 +409,8 @@ def _verify_summary(
             form16_error = str(e)
     lines.extend(_form16_summary(tree, form16_data, form16_error, resolved))
 
+    if headline:
+        lines = headline + [""] + lines
     return "\n".join(lines), tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries
 
 
@@ -514,7 +570,8 @@ def _build_and_write_workbook(
     scrips = {}
     if Path(scrips_path).is_file():
         scrips = configs.load_scrips(scrips_path)
-    fmv_tables = sch.load_fmv_tables()
+    fmv_tables = sch.load_fmv_tables(
+        overlay_path=Path(scrips_path).parent / sch.CORPORATE_ACTIONS_OVERLAY_NAME)
 
     as26_data = None
     as26_lines: list[str] = []
@@ -549,13 +606,23 @@ def _build_and_write_workbook(
                 "Schedule FA falls back to the AL_FOREIGN book roll-up only."
             )
 
-    model = sch.build_all_schedules(
-        tree, result.resolved, book, form16_data, year_key, rules, regime,
-        entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
-        residency=entity.residency, audit_case=audit_case,
-        audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
-        foreign_dividends_in_book=foreign_dividends_in_book,
-    )
+    try:
+        model = sch.build_all_schedules(
+            tree, result.resolved, book, form16_data, year_key, rules, regime,
+            entity.status, entity.dob, scrips, fmv_tables, as26_data, result.unmapped,
+            residency=entity.residency, audit_case=audit_case,
+            audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
+            foreign_dividends_in_book=foreign_dividends_in_book,
+            firm_pan=getattr(entity, "partner_firm_pan", ""),
+        )
+    except foreign_tax_engine.ForeignDoubleCountError as e:
+        # ITR-06: a LOUD stop. The same foreign dividends would be counted from
+        # the book and from the broker report; nothing is built.
+        msg = str(e)
+        _write_stub_workbook(output_path, msg)
+        return [msg]
+
+    model.mapping_empty = not result.resolved
 
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
     # GAP B -- Form16<->26AS s.192 salary TDS cross-check: independent of the
@@ -584,6 +651,11 @@ def _build_and_write_workbook(
         f"written to {Path(output_path).name}.",
     ]
     lines.extend(regime_lines)
+    if model.mapping_empty:
+        lines.append(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER} -- workbook written but every figure is "
+            "unclassified; see the red banner on Statement of Income. DO NOT FILE."
+        )
     if result.unmapped:
         n = len(result.unmapped)
         total = sum(leaf.total or 0.0 for leaf in result.unmapped)
@@ -594,6 +666,20 @@ def _build_and_write_workbook(
         )
     lines.extend(as26_lines)
     lines.extend(foreign_lines)
+    ft = model.foreign_tax
+    if ft is not None and ft.active:
+        for w in ft.warnings:
+            lines.append(f"Foreign tax: {w}")
+        if ft.relief_claimed:
+            lines.append(
+                f"Foreign tax credit: relief Rs {ft.relief_total:,.2f} claimed (lower of foreign tax and "
+                "Indian tax, per country; see ForeignTax sheet). " + foreign_tax_engine.FORM_67_LINE
+            )
+        elif ft.book_foreign_tax or ft.report_foreign_tax:
+            lines.append(
+                "Foreign tax credit: foreign tax is present but NO relief is claimed (country unknown "
+                "or no Indian tax on that income). It is not treated as TDS."
+            )
     if model.taxes_paid.as26_available and not model.taxes_paid.tie_out_ok:
         for c in model.taxes_paid.tie_out_conflicts:
             lines.append(
@@ -605,6 +691,8 @@ def _build_and_write_workbook(
             "Workbook: FMV lookup FAILED for scrip(s) (fail-loud, review scrips.yaml): "
             + ", ".join(model.capital_gains.unresolved_scrips)
         )
+        for msg in model.capital_gains.fmv_failures:
+            lines.append(f"Workbook: FMV corporate action -- {msg}")
     if not model.capital_gains.reconciliation_ok:
         # "Banner, no abort" (2026-07-19 CG gain-split-vs-action fix): the
         # workbook above has ALREADY been written in full, with a matching
@@ -797,6 +885,22 @@ def run(
         _write_stub_workbook(output_path, summary)
         return summary
 
+    if mapping_file:
+        # ITR-08: another entity's mapping is never used for this entity.
+        try:
+            known = list(configs.load_entities(entities_path))
+        except Exception:  # noqa: BLE001 -- unreadable entities file is reported elsewhere
+            known = []
+        _src = str(Path(__file__).resolve().parents[2])
+        if _src not in sys.path:
+            sys.path.insert(0, _src)
+        from agents import entity_scope  # noqa: PLC0415
+        verdict, why = entity_scope.check_mapping_owner(mapping_file, entity.key, known)
+        if verdict == "mismatch":
+            summary = f"ERROR: {why}. Nothing was built; pick this entity's own mapping or leave the choice on the saved mapping."
+            _write_stub_workbook(output_path, summary)
+            return summary
+
     auto_derived_note: str | None = None
     if not mapping_file and entity_key:
         # B(i): the entity dropdown never auto-attached the entity's own
@@ -809,18 +913,24 @@ def run(
             mapping_file = str(candidate)
             auto_derived_note = (
                 f"Mapping: auto-derived {candidate.name} for entity {entity.key!r} "
-                "(Entity mapping box was empty)."
+                "(no override chosen)."
             )
 
     effective_form16_pan = form16_pan if form16_pan is not None else (entity.pan or None)
 
     summary, tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries = _verify_summary(
         bs_html, book_file, mapping_file, form16_pdf, effective_form16_pan, output_path, config_path, model_override,
+        entity_key=(entity.key if (entity_key or mapping_file) and entity.key != "UNKNOWN" else None),
     )
     if auto_derived_note:
         summary = auto_derived_note + "\n\n" + summary
 
     if tree is None:
+        _write_stub_workbook(output_path, summary)
+        return summary
+
+    if status == CANCELLED:
+        # Stop pressed mid-run: only a stub that SAYS it is not a workbook.
         _write_stub_workbook(output_path, summary)
         return summary
 
@@ -891,11 +1001,25 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(summary)
     exit_code = 0
+    if foreign_tax_engine.DOUBLE_COUNT_ERROR_MARKER in summary:
+        print(
+            f"{foreign_tax_engine.DOUBLE_COUNT_ERROR_MARKER} -- nothing was built; fix "
+            "foreign_dividends_in_book or the foreign flag on the book accounts.",
+            file=sys.stderr,
+        )
+        exit_code = 1
     if presentation.CG_RECONCILIATION_ERROR_MARKER in summary:
         print(
             f"{presentation.CG_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
             "MUST be reviewed before filing (see ERROR banner on CG / Statement of Income "
             "sheets).",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    if presentation.EMPTY_MAPPING_ERROR_MARKER in summary:
+        print(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER} -- the mapping resolved no account; "
+            "assign tags in the ITR Mapping tab before relying on this workbook.",
             file=sys.stderr,
         )
         exit_code = 1

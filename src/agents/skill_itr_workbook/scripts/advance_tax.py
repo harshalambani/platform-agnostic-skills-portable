@@ -237,7 +237,8 @@ def from_book(
             other_sources.refund_interest + other_sources.dividend_gross + other_sources.slbs
         ),
         capital_gains=capital_gains,
-        tds_to_date=taxes_paid.tds_salary + taxes_paid.tds_interest + taxes_paid.tds_dividend + taxes_paid.tcs,
+        tds_to_date=taxes_paid.tds_salary + taxes_paid.tds_interest + taxes_paid.tds_dividend
+        + taxes_paid.tds_partner + taxes_paid.tds_other + taxes_paid.tcs,
     )
 
 

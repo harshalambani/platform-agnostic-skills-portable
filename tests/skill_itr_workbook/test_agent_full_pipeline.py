@@ -130,7 +130,7 @@ def test_no_mapping_file_builds_cold_start_best_effort_workbook(tmp_path):
     assert "Workbook: full schedule model built" in summary
     wb = openpyxl.load_workbook(str(out_path))
     assert "Unclassified" in wb.sheetnames
-    assert Path(str(out_path) + "-proposed-mappings.yaml").exists()
+    assert fixture_gen.snippet_for(out_path).exists()
 
 
 def test_unknown_entity_key_fails_loud(tmp_path):

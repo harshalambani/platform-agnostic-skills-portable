@@ -29,7 +29,10 @@ _FY_RE = re.compile(r"Financial Year:\s*(\d{4}-\d{2})")
 _NAME_RE = re.compile(r"Assessee Name:\s*(.*?)\s*(?:\||$)")
 
 # `match` globs whose files carry a readable assessee identity.
-SCOPABLE_MATCHES = frozenset({"*-26AS.xlsx"})
+# ITR-08: the ITR Workbook's mapping picker is not a glob over outputs; this
+# token tells the UI to list the entity's own files in itr/mappings instead.
+MAPPING_MATCH = "itr:mappings"
+SCOPABLE_MATCHES = frozenset({"*-26AS.xlsx", MAPPING_MATCH})
 
 _cache: dict[tuple[str, float], dict | None] = {}
 
@@ -168,4 +171,68 @@ def check_26as_fy(xlsx_path: str | Path, fy: str | None) -> tuple[str, str]:
     wfy = (ident or {}).get("fy") or ""
     if wfy and wfy != fy:
         return "mismatch", f"the 26AS workbook is for FY {wfy}, not FY {fy}"
+    return "ok", ""
+
+
+# ---------------------------------------------------------------------------
+# ITR-08: whose mapping file is it?
+# ---------------------------------------------------------------------------
+
+_MAPPING_SUFFIX = ".mapping.yaml"
+_ENTITY_HEADER_RE = re.compile(r"^#\s*entity:\s*(\S+)", re.M)
+
+
+def mapping_files_for(entity_key: str | None, mappings_dir: str | Path) -> tuple[Path | None, list[Path]]:
+    """(the entity's saved mapping or None, its other override files).
+
+    The saved mapping is exactly `<KEY>.mapping.yaml`. Overrides are
+    `<KEY>.<variant>.mapping.yaml`. Another entity's file, and backups
+    (which do not end in .mapping.yaml), are never returned."""
+    d = Path(mappings_dir)
+    if not entity_key or not d.is_dir():
+        return None, []
+    canonical = d / f"{entity_key}{_MAPPING_SUFFIX}"
+    overrides = sorted(
+        p for p in d.glob(f"{entity_key}.*{_MAPPING_SUFFIX}")
+        if p.is_file() and p.name != canonical.name and p.name.startswith(f"{entity_key}.")
+    )
+    return (canonical if canonical.is_file() else None), overrides
+
+
+def mapping_summary(path: str | Path) -> tuple[int, str]:
+    """(number of tagged entries, 'YYYY-MM-DD HH:MM' last saved). (0, '') when unreadable."""
+    import datetime as _dt
+    p = Path(path)
+    try:
+        import yaml
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or []
+        n = sum(1 for e in data if isinstance(e, dict) and e.get("tag")) if isinstance(data, list) else 0
+        saved = _dt.datetime.fromtimestamp(p.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        return n, saved
+    except Exception:
+        return 0, ""
+
+
+def check_mapping_owner(mapping_path: str | Path, entity_key: str, known_keys) -> tuple[str, str]:
+    """Run-time guard: is this mapping file the selected entity's?
+
+    ("mismatch", message) when the file records another entity in a
+    `# entity:` header, or is named for another known entity; ("ok", "")
+    otherwise. A file named for nobody (a hand-made path) is not guessed at."""
+    p = Path(mapping_path)
+    sel = (entity_key or "").casefold()
+    try:
+        head = p.read_text(encoding="utf-8")[:2000]
+    except OSError:
+        head = ""
+    m = _ENTITY_HEADER_RE.search(head)
+    if m and m.group(1).casefold() != sel:
+        return "mismatch", (f"the mapping file {p.name} was saved for entity {m.group(1)}, "
+                            f"not for {entity_key}")
+    name = p.name
+    if name.endswith(_MAPPING_SUFFIX):
+        owner = name[: -len(_MAPPING_SUFFIX)].split(".")[0]
+        if owner.casefold() != sel and owner.casefold() in {str(k).casefold() for k in known_keys}:
+            return "mismatch", (f"the mapping file {p.name} belongs to entity {owner}, "
+                                f"not to {entity_key}")
     return "ok", ""

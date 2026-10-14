@@ -147,6 +147,40 @@ def reply_label(skill) -> str:
     return "Agent reply" if getattr(getattr(skill, "requires", None), "llm", True) else "Result"
 
 
+def llm_precheck_mode(skill) -> str:
+    """"stop" (default) or "warn": what a failed pre-run endpoint check does,
+    declared in skill.yaml (requires.llm_precheck). Never a skill name here."""
+    return getattr(getattr(skill, "requires", None), "llm_precheck", "stop") or "stop"
+
+
+def _redact_endpoint_secrets(text, ep: dict) -> str:
+    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
+    out = str(text or "")
+    raw = str((ep or {}).get("api_key") or "")
+    cands = {raw}
+    try:
+        if raw:
+            cands.add(str(_config.decrypt_api_key(raw)))
+    except Exception:  # noqa: BLE001 - an undecryptable key is simply not shown
+        pass
+    for c in cands:
+        for piece in {c, c.split(":", 1)[-1]}:
+            if len(piece) >= 6:
+                out = out.replace(piece, "[key hidden]")
+    return out
+
+
+def llm_precheck_warning(active: str, health, ep: dict) -> str:
+    """The loud line shown when a warn-mode pre-run check fails. It carries the
+    status / HTTP code the check saw, never the key."""
+    detail = _redact_endpoint_secrets(getattr(health, "detail", ""), ep)
+    return (
+        f"**WARNING: the AI endpoint '{active}' is {health.status}: {detail}.** "
+        "The run goes on without it. Accounts that still have no tag will get NO AI "
+        "suggestion; the result will say how many."
+    )
+
+
 def skill_uses_llm(skill_name: str) -> bool:
     """True when the named skill's manifest says it needs a model (requires.llm).
     Gates the LLM-endpoint health check on the custom tabs."""
@@ -173,6 +207,8 @@ def _scoped_picker_state(inp, entity_key, fy=None):
     to that year as well; blank means no year has been picked, so no filter.
     """
     from agents import entity_scope  # noqa: PLC0415
+    if inp.match == entity_scope.MAPPING_MATCH:
+        return _mapping_picker_state(entity_key)
     own = entity_scope.filter_choices(
         _scan_output_files(inp.match, tuple(inp.file_types)),
         entity_key, _entities_yaml_path(), fy=(fy or None),
@@ -187,6 +223,27 @@ def _scoped_picker_state(inp, entity_key, fy=None):
         f"No 26AS workbook for {entity_key}{for_fy} yet: run 26AS Convert on its PDF first "
         "(it only reads the PDF, it books nothing). Choose (none) to skip."
     )
+
+
+def _mapping_picker_state(entity_key):
+    """ITR-08: (choices, default value, message) for the ITR Workbook's mapping
+    input. There is no upload: the default ("" = the entity's saved mapping) is
+    resolved by the run itself, at run time, so it can never be older than the
+    latest Review Mapping save. The message is the read-only line; other files
+    are offered only as an override, and only this entity's own."""
+    from agents import entity_scope  # noqa: PLC0415
+    default = ("Saved mapping (default)", "")
+    if not entity_key:
+        return [default], "", "Pick an entity first: its saved mapping is used automatically."
+    mdir = _config.data_root_dir() / "itr" / "mappings"
+    canonical, overrides = entity_scope.mapping_files_for(entity_key, mdir)
+    choices = [default] + [(p.name, str(p)) for p in overrides]
+    if canonical is None:
+        return choices, "", (
+            f"No saved mapping for {entity_key} yet: the run starts cold and lists every "
+            "account for review (use Review Mapping to save one).")
+    n, saved = entity_scope.mapping_summary(canonical)
+    return choices, "", f"Using saved mapping for {entity_key} ({n} tags, saved {saved})."
 
 
 def _select_initial_value(skill, name):
@@ -880,17 +937,27 @@ def _make_run_handler(skill: SkillInfo):
             yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None), gr.update()
 
             health = _health.check(ep)
-            if not health.ok:
+            if not health.ok and llm_precheck_mode(skill) == "stop":
                 yield add(
-                    f"Error: endpoint '{active}' is {health.status}: {health.detail}. "
+                    f"Error: endpoint '{active}' is {health.status}: "
+                    f"{_redact_endpoint_secrets(health.detail, ep)}. "
                     "Fix in Data\\settings\\config.yaml and Refresh on the Home tab."
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
 
-            yield add(
-                f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
-                "First call may take 30–60s while the model loads."
-            ), gr.update(interactive=False, value=None), gr.update()
+            if not health.ok:
+                # requires.llm_precheck: warn -- the AI step is optional for this
+                # skill and it reports its own gap, so the run goes on.
+                yield add(llm_precheck_warning(active, health, ep)), \
+                    gr.update(interactive=False, value=None), gr.update()
+                yield add(
+                    "**Running** — continuing WITHOUT a working AI endpoint."
+                ), gr.update(interactive=False, value=None), gr.update()
+            else:
+                yield add(
+                    f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
+                    "First call may take 30–60s while the model loads."
+                ), gr.update(interactive=False, value=None), gr.update()
         else:
             # Deterministic skill — no LLM endpoint required; run fully offline.
             yield add(

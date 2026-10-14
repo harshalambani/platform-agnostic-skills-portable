@@ -134,6 +134,10 @@ class SkillRequires:
     llm: bool = True
     network: bool = False   # this skill makes outbound internet calls (surfaced
                               # as a distinct UI badge from the LLM badge)
+    # What the pre-run endpoint check does when it fails: "stop" (default) ends
+    # the run; "warn" prints a loud warning and lets the run go on. "warn" is for
+    # a skill whose AI step is optional and reports its own gap (ITR Workbook).
+    llm_precheck: str = "stop"
 
 
 @dataclass(frozen=True)
@@ -359,11 +363,17 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
     )
 
     req_raw = raw.get("requires") or {}
+    precheck = str(req_raw.get("llm_precheck", "stop")).strip().lower()
+    if precheck not in ("stop", "warn"):
+        raise ValueError(
+            f"skill.yaml error in '{path.parent.name}': requires.llm_precheck must be "
+            f"'stop' or 'warn', got {req_raw.get('llm_precheck')!r}.")
     requires = SkillRequires(
         native_binaries=tuple(req_raw.get("native_binaries") or ()),
         external_tools=tuple(req_raw.get("external_tools") or ()),
         llm=bool(req_raw.get("llm", True)),
         network=bool(req_raw.get("network", False)),
+        llm_precheck=precheck,
     )
 
     help_block = _parse_help(raw.get("help"))

@@ -33,6 +33,10 @@ class TaxBlock:
     tax_before_relief: float
     relief_89: float
     tax_liability: float
+    # ITR-06: relief for tax paid abroad (Form 67). Both default to "none", so
+    # a run with no foreign activity is byte-for-byte unchanged.
+    foreign_tax_relief: float = 0.0
+    tax_liability_before_foreign_relief: float = 0.0
 
 
 def _slab_tax(income: float, slabs: list) -> float:

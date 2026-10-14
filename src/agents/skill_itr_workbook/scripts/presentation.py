@@ -415,6 +415,30 @@ def _write_salary_error_banner(ws, row: int, salary_schedule, ncols: int) -> int
     return row + 2
 
 
+#: ITR-01: a mapping that resolved ZERO accounts. Every figure in such a
+#: workbook is in the UNCLASSIFIED bucket -- it must never read as a normal
+#: success. ERROR tier (red banner + exit-code flip in agent.main()).
+EMPTY_MAPPING_ERROR_MARKER = "ERROR: mapping empty - this workbook is not fileable"
+
+
+def empty_mapping_banner_text() -> str:
+    return (
+        f"*** {EMPTY_MAPPING_ERROR_MARKER}: no account resolved to a tag, so every figure is "
+        "unclassified. Assign tags in GnuCash > ITR > ITR Mapping, then run again. DO NOT FILE ***"
+    )
+
+
+def _write_empty_mapping_banner(ws, row: int, model, ncols: int) -> int:
+    if not getattr(model, "mapping_empty", False):
+        return row
+    c = ws.cell(row=row, column=1, value=empty_mapping_banner_text())
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
+
 #: Visible-but-non-fatal WARNING (2026-07-23 26AS unclassified-TDS-section
 #: fix; downgraded from ERROR/exit-1 to WARNING on 2026-07-24 -- see
 #: schedules.py's TaxesPaidSchedule.unclassified_sections docstring for why):
@@ -1035,6 +1059,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     # -- header block -------------------------------------------------------
     row = 1
+    row = _write_empty_mapping_banner(ws, row, model, OUTER)
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     row = _write_salary_error_banner(ws, row, model.salary, OUTER)
     row = _write_taxes_paid_unclassified_banner(ws, row, model.taxes_paid, OUTER)
@@ -1203,10 +1228,21 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         ("TDS on salary", "tds_salary", tp.tds_salary, "TDS"),
         ("TDS on interest", "tds_interest", tp.tds_interest, "TDS"),
         ("TDS on dividend", "tds_dividend", tp.tds_dividend, "TDS"),
+        ("TDS on partner remuneration (s.194T)", "tds_partner", tp.tds_partner, "TDS"),
+        ("TDS under other sections", "tds_other", tp.tds_other, "TDS"),
         ("TCS", "tcs", tp.tcs, "TDS"),
         ("Advance Tax", "advance", tp.advance_tax, None),
         ("Self-assessment Tax", "sat", tp.self_assessment_tax, None),
     )
+
+    def _foreign_relief_ref() -> str | None:
+        """ITR-06: the ForeignTax sheet cell holding the relief, only when
+        relief is actually claimed. None for every run with no foreign tax,
+        so those pages keep exactly their old rows."""
+        ft = getattr(model, "foreign_tax", None)
+        if ft is not None and ft.relief_claimed and ft.relief_cell:
+            return f"'ForeignTax'!{ft.relief_cell}"
+        return None
 
     def _predict_pre_workings_rows() -> int:
         """Deterministic row count from the body start row (right after the
@@ -1240,6 +1276,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         # 234B/234C/aggregate liability), PLUS the one extra blank row the
         # aggregate line's `row += 2` (instead of `+= 1`) leaves behind.
         n += 12
+        if _foreign_relief_ref():
+            n += 1                              # ITR-06: foreign tax relief line
         n += 2 + max(sum(1 for _, _, v, _ in prepaid if v), 1)  # prepaid section (incl. close_section total)
         n += 1                                  # "Total prepaid taxes" line
         n += 1                                  # Refund Due / (Tax Payable)
@@ -1472,7 +1510,16 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     row += 1
     line("Add - Health & Education Cess", SUB, tax_sel("cess"))
     row += 1
-    line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
+    _relief_ref = _foreign_relief_ref()
+    if _relief_ref:
+        # ITR-06: relief is claimed ONLY with Form 67 -- the label says so.
+        line("Less - Foreign tax relief (s.90/91) -- Form 67 must be filed", SUB, f"={_relief_ref}")
+        row += 1
+        line("Total tax liability", OUTER,
+             f"=MAX(0,{tax_sel('liability')[1:]}-{get_column_letter(SUB)}{row - 1})",
+             bold=True, rule=_TOP_RULE)
+    else:
+        line("Total tax liability", OUTER, tax_sel("liability"), bold=True, rule=_TOP_RULE)
     total_liability_ref = f"{get_column_letter(OUTER)}{row}"
     row += 1
 
@@ -2308,6 +2355,8 @@ _TDS_CATEGORIES = (
     ("TDS on Salary", "tds_salary"),
     ("TDS on Interest", "tds_interest"),
     ("TDS on Dividend", "tds_dividend"),
+    ("TDS on Partner Remuneration (s.194T)", "tds_partner"),
+    ("TDS under Other Sections", "tds_other"),
     ("TCS", "tcs"),
 )
 

@@ -371,7 +371,7 @@ def test_agent_run_ok_status_when_fully_mapped(tmp_path):
     out_path = tmp_path / "out.xlsx"
     summary = agent.run(str(html_path), str(out_path), mapping_file=str(SYN_IND_MAPPING))
     assert "STATUS: OK" in summary
-    assert not Path(str(out_path) + "-proposed-mappings.yaml").exists()
+    assert not fixture_gen.snippet_for(out_path).exists()
 
 
 def test_agent_run_summary_surfaces_heuristic_income_warning(tmp_path):
@@ -400,7 +400,7 @@ def test_agent_run_built_with_review_status_with_extra_unmapped_account(tmp_path
     summary = agent.run(str(html_path), str(out_path), mapping_file=str(SYN_IND_UNMAPPED_MAPPING))
     assert "STATUS: BUILT -- 1 REVIEW ITEM(S)" in summary
     assert "Misc Holding (unmapped)" in summary
-    snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
+    snippet_path = fixture_gen.snippet_for(out_path)
     assert snippet_path.exists()
     assert "REPLACE_ME" in snippet_path.read_text(encoding="utf-8")
 
@@ -418,7 +418,7 @@ def test_agent_run_built_cold_start_when_no_mapping_file_supplied(tmp_path):
     assert "STATUS: BUILT --" in summary
     assert "REVIEW ITEM(S)" in summary
     assert "cold start" in summary
-    snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
+    snippet_path = fixture_gen.snippet_for(out_path)
     assert snippet_path.exists()
     assert "REPLACE_ME" in snippet_path.read_text(encoding="utf-8")
 

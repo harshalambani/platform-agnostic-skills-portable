@@ -54,9 +54,10 @@ META_ROWCLASS = "_rowclass"
 META_BADGES = "_badges"
 META_LOCKED = "_locked"
 META_NOTE = "_note"
+META_FLAGOK = "_flagok"   # optional: row may take the spec.flag_toggle flag
 META_BAND = "_band"   # optional: one match-type band class, kept apart from _rowclass
 
-_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE, META_BAND)
+_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE, META_BAND, META_FLAGOK)
 
 
 @dataclass(frozen=True)
@@ -92,6 +93,11 @@ class PickerItem:
     value: str
     primary: str
     secondary: str = ""
+    # ITR-07. `kinds`: the row kinds (values of spec.kind_col) this item may be
+    # assigned to; empty = any row. `keywords`: extra words the search box
+    # matches but the list does not show (plain-word synonyms).
+    kinds: tuple = ()
+    keywords: str = ""
 
 
 @dataclass
@@ -128,6 +134,12 @@ class ReviewSpec:
     # byte-for-byte unchanged. See itr_mapping_review.py for the first
     # consumer (row-level "delete this mapping entry").
     allow_delete: bool = False
+    # ITR-05. Opt-in: (column key, "set" button label, "clear" button label,
+    # value written when set). Renders two toolbar buttons that set / clear a
+    # yes-or-blank value in that column on the selected rows that carry
+    # `_flagok` (loader-decided). Empty (default) renders nothing and adds no
+    # script, so every other screen is unchanged.
+    flag_toggle: tuple = ()
     # IMP-11. When True, renders "Don't import selected" / "Import selected"
     # toolbar buttons. Rows flagged `_excluded` (by the loader) start struck
     # through and are NOT in the payload's `all_rows`; they travel in
@@ -152,6 +164,27 @@ class ReviewSpec:
     # status_classes shows instead. The row's badges and tags are untouched, so
     # a transfer-check badge stays as a reminder. Default "" changes nothing.
     override_status: str = ""
+    # ITR-04. {"text", "cls", "title"?, "rowclass"?, "tag"?}. When set, assigning
+    # a row at once replaces its target-column badge with this one (shown as
+    # "changed, not saved"), swaps its row class and puts `tag` first in _tags,
+    # so a row never keeps the badge of the value it had BEFORE the assign.
+    # Empty (default) changes nothing for any other screen.
+    assigned_badge: dict[str, str] = field(default_factory=dict)
+    # ITR-07. Row key holding each row's "kind". With it set, a picker item that
+    # declares `kinds` is offered only for rows of a matching kind, and an apply
+    # that would put it on any other row is REFUSED with a message (nothing
+    # changes). Default "" = no restriction, every other screen unchanged.
+    kind_col: str = ""
+    # ITR-07. {picker value: {"text", "key", "default"}}. Assigning that value
+    # asks the person `text` (a prompt, pre-filled with `default`) and stores the
+    # answer in each row's `key`; assigning any other value clears that key.
+    # Cancel assigns nothing. Default {} changes nothing.
+    value_prompts: dict = field(default_factory=dict)
+    # ITR-07. Opt-in "tree + side panel" mode (see ui/_review_tree.py): a dict of
+    # presentation data (tag labels, groups, ...). None (the default) renders
+    # nothing extra: every hook in the template expands to its original text, so
+    # the other review tabs are byte-for-byte unchanged.
+    tree: dict | None = None
 
     @property
     def payload_box_id(self) -> str:
@@ -468,14 +501,14 @@ _BODY = r"""
 
   %%EXTRA_PANEL%%
 
-  <div class="scroll-wrapper">
+%%TREE_OPEN%%  <div class="scroll-wrapper">
     <table id="%%APP%%-table">
       <colgroup id="%%APP%%-cols"></colgroup>
       <thead id="%%APP%%-thead"><tr></tr></thead>
       <tbody id="%%APP%%-tbody"></tbody>
     </table>
   </div>
-</div>
+%%TREE_CLOSE%%</div>
 
 <script type="text/plain" id="%%APP%%-init-code">
 (function() {
@@ -492,6 +525,10 @@ _BODY = r"""
   const STATUS_COL = %%STATUS_COL_JSON%%;
   const STATUS_CLASSES = %%STATUS_CLASSES_JSON%%;
   const OVERRIDE_STATUS = %%OVERRIDE_STATUS_JSON%%;
+  const ASSIGNED_BADGE = %%ASSIGNED_BADGE_JSON%%;
+  const KIND_COL = %%KIND_COL_JSON%%;
+  const VALUE_PROMPTS = %%VALUE_PROMPTS_JSON%%;
+  const PROMPT_KEYS = Array.from(new Set(Object.keys(VALUE_PROMPTS).map(k => VALUE_PROMPTS[k].key)));
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -540,11 +577,26 @@ _BODY = r"""
     chosen = ''; pickSearch.value = ''; syncPickClear();
   }
 
+  // ITR-07: may this item go on this row? (no KIND_COL / no `kinds` = always)
+  function allowedFor(it, r) {
+    if (!KIND_COL || !it || !it.kinds || !it.kinds.length) return true;
+    return it.kinds.indexOf(r[KIND_COL]) >= 0;
+  }
+  let lastRefused = false;
+
   function renderPicker(q) {
     const ql = (q || '').toLowerCase();
+    // ITR-07: with rows selected, the list is cut down to what is valid for ALL
+    // of them FIRST; the search (synonyms included) only ever runs over that cut
+    // list, so a plain word can never surface a tag a selected row forbids.
+    let base = ITEMS;
+    if (KIND_COL && selected.size) {
+      const sel = rows.filter(r => selected.has(r._idx));
+      base = ITEMS.filter(it => sel.every(r => allowedFor(it, r)));
+    }
     const list = ql
-      ? ITEMS.filter(it => (it.primary + ' ' + it.secondary + ' ' + it.value).toLowerCase().includes(ql))
-      : ITEMS;
+      ? base.filter(it => (it.primary + ' ' + it.secondary + ' ' + it.value + ' ' + (it.keywords || '')).toLowerCase().includes(ql))
+      : base;
     pickDD.innerHTML = '';
     list.slice(0, 50).forEach(it => {
       const div = document.createElement('div');
@@ -587,12 +639,34 @@ _BODY = r"""
   });
 
   function assign(predicate, alsoSet) {
+    lastRefused = false;
     if (!chosen) { alert('Pick a value first.'); return 0; }
+    if (KIND_COL) {
+      // ITR-07: refuse the whole apply if any target row cannot take this value.
+      const item = ITEMS.find(it => it.value === chosen);
+      const bad = rows.filter(r => !r._locked && predicate(r) && !allowedFor(item, r));
+      if (bad.length) {
+        lastRefused = true;
+        alert('Not applied: ' + chosen + ' is not valid for ' + bad.length + ' of the selected row(s) (' +
+              bad.slice(0, 3).map(r => cellText(r, COLS[0].key)).join('; ') +
+              '). Nothing was changed. Pick a tag listed for their section, or HOLD.');
+        return 0;
+      }
+    }
+    const vp = VALUE_PROMPTS[chosen];
+    let promptVal = '';
+    if (vp) {
+      const ans = prompt(vp.text, vp.default || '');
+      if (ans === null || ans === undefined) { lastRefused = true; return 0; }
+      promptVal = String(ans).trim() || vp.default || '';
+    }
     let n = 0;
     rows.forEach(r => {
       if (r._locked) return;
       if (!predicate(r)) return;
       r[TARGET] = chosen;
+      PROMPT_KEYS.forEach(k => { r[k] = ''; });
+      if (vp) r[vp.key] = promptVal;
       for (const k in alsoSet) r[k] = alsoSet[k];
       if (STATUS_COL) {
         // UI-04: the badge described the old target -- drop it; keep the tags in step.
@@ -600,6 +674,14 @@ _BODY = r"""
         const st = cellText(r, STATUS_COL).toLowerCase();
         if (st && Array.isArray(r._tags) && r._tags.length) r._tags[0] = st;
         if (Object.keys(STATUS_CLASSES).length) r._band = STATUS_CLASSES[st] || '';
+      }
+      if (ASSIGNED_BADGE && ASSIGNED_BADGE.text) {
+        // ITR-04: the row now shows the value it was just given, as unsaved.
+        r._badges = r._badges || {};
+        r._badges[TARGET] = { text: ASSIGNED_BADGE.text, cls: ASSIGNED_BADGE.cls || 'grey',
+                              title: (ASSIGNED_BADGE.title || '') + ' (' + chosen + ')' };
+        if (ASSIGNED_BADGE.rowclass) r._rowclass = ASSIGNED_BADGE.rowclass;
+        if (ASSIGNED_BADGE.tag) r._tags = [ASSIGNED_BADGE.tag, 'mapped'];
       }
       r._changed = true;
       n++;
@@ -613,7 +695,7 @@ _BODY = r"""
   $('apply-sel').onclick = () => {
     if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
     const n = assign(r => selected.has(r._idx), ALSO_SET);
-    if (n === 0 && chosen) alert('Selected rows cannot be reassigned from here.');
+    if (n === 0 && chosen && !lastRefused) alert('Selected rows cannot be reassigned from here.');
   };
 
   const applyMatchBtn = $('apply-match');
@@ -925,7 +1007,7 @@ _BODY = r"""
     });
     thead.appendChild(fRow);
 
-    // Status filter matches against the loader-computed _tags list, so a row
+    %%TREE_PRE%%// Status filter matches against the loader-computed _tags list, so a row
     // can belong to several buckets at once (e.g. "suspense" AND "contra").
     let filtered = statusFilter
       ? rows.filter(r => (r._tags || []).indexOf(statusFilter) !== -1)
@@ -952,9 +1034,9 @@ _BODY = r"""
       return 0;
     });
 
-    tbody.innerHTML = '';
+    %%TREE_SEQ%%tbody.innerHTML = '';
     filtered.forEach(r => {
-      const tr = document.createElement('tr');
+      %%TREE_HEAD%%const tr = document.createElement('tr');
       // UI-14: an overridden row shows the override colour, not a flag tone.
       const overridden = !!(OVERRIDE_STATUS && STATUS_COL &&
         cellText(r, STATUS_COL).trim().toLowerCase() === OVERRIDE_STATUS);
@@ -963,7 +1045,7 @@ _BODY = r"""
       if (r._band) tr.classList.add(r._band);
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
-      if (r._deleted) tr.classList.add('row-deleted');
+      %%TREE_ROW%%if (r._deleted) tr.classList.add('row-deleted');
 %%EXCL_ROW_JS%%      tr.dataset.idx = r._idx;
       if (r._deleted) tr.title = 'Marked for deletion';
       else if (r._note) tr.title = r._note;
@@ -992,7 +1074,7 @@ _BODY = r"""
           html += '<span class="changed-marker">&#9998;</span>';
           td.title = 'Edited. Original: ' + orig;
         }
-        td.innerHTML = html;
+        %%TREE_CELL%%td.innerHTML = html;
         tr.appendChild(td);
       });
 
@@ -1000,8 +1082,8 @@ _BODY = r"""
       tbody.appendChild(tr);
     });
 
-    shownCount = filtered.length;
-    updateStats();
+    shownCount = filtered%%TREE_COUNT%%.length;
+    updateStats();%%TREE_AFTER%%
     if (clearAll) {
       const nf = Object.keys(colFilters).filter(k => colFilters[k]).length;
       clearAll.style.display = nf ? '' : 'none';
@@ -1079,7 +1161,7 @@ _BODY = r"""
   // replaces every td and Chromium then drops the dblclick of a double-click.
   function handleRowClick(idx, e) {
     if (e.shiftKey && lastClickIdx !== null) {
-      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx));
+      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx))%%TREE_NAN%%;
       const a = all.indexOf(lastClickIdx), b = all.indexOf(idx);
       if (a >= 0 && b >= 0) for (let i = Math.min(a,b); i <= Math.max(a,b); i++) selected.add(all[i]);
     } else if (e.ctrlKey || e.metaKey) {
@@ -1092,16 +1174,38 @@ _BODY = r"""
       if (selected.has(parseInt(tr.dataset.idx))) tr.classList.add('selected');
       else tr.classList.remove('selected');
     });
-    updateStats();
+    updateStats();%%TREE_SEL%%
   }
 
-  renderTable();
+%%TREE_JS%%  renderTable();
 })();
 </script>
 <img src="data:," onerror="eval(document.getElementById('%%APP%%-init-code').textContent)" style="display:none">
 """
 
 
+_FLAG_JS = """  // ── ITR-05: set / clear a yes-or-blank flag column on the selection ──
+  (function () {
+    const FCOL = %%FLAG_COL%%, FVAL = %%FLAG_VAL%%;
+    function flagSel(on) {
+      if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
+      let n = 0, skipped = 0;
+      rows.forEach(r => {
+        if (!selected.has(r._idx) || r._deleted) return;
+        if (r._locked || !r._flagok) { skipped++; return; }
+        const want = on ? FVAL : '';
+        if ((r[FCOL] || '') === want) return;
+        r[FCOL] = want; r._changed = true; n++;
+      });
+      if (skipped) alert(skipped + ' selected row(s) skipped: the flag applies only to mapped asset accounts.');
+      if (n) { markDirty(); syncPayload(); renderTable(); }
+    }
+    const a = $('flag-on'), b = $('flag-off');
+    if (a) a.onclick = () => flagSel(true);
+    if (b) b.onclick = () => flagSel(false);
+  })();
+
+""" 
 _EXCLUDE_JS = """
   // ── IMP-11: Don't import / Import selected (opt-in via spec.allow_exclude) ──
   let exclDirty = false;
@@ -1154,6 +1258,16 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         f'title="Mark selected rows for deletion">Remove selected</button>'
         if spec.allow_delete else ""
     )
+    flag_js = ""
+    if spec.flag_toggle:
+        _fcol, _fset, _fclear, _fval = spec.flag_toggle
+        delete_btn_html += (
+            f'<button id="{spec.app_id}-flag-on" title="Mark the selected asset accounts as held abroad">'
+            f'{_attr(_fset)}</button>'
+            f'<button id="{spec.app_id}-flag-off" title="Clear the flag on the selected accounts">'
+            f'{_attr(_fclear)}</button>'
+        )
+        flag_js = _FLAG_JS.replace("%%FLAG_COL%%", js_json(_fcol)).replace("%%FLAG_VAL%%", js_json(_fval))
 
     if spec.allow_exclude:
         exclude_btn_html = (
@@ -1182,11 +1296,20 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
     else:
         exclude_btn_html = exclude_css = exclude_js = excl_filter = ""
         excl_fields = excl_row_js = ""
+    exclude_js = exclude_js + flag_js
 
     default_sort = spec.default_sort or (spec.columns[0].key if spec.columns else "")
 
-    html = _CSS + _BODY
+    if spec.tree:
+        from . import _review_tree  # noqa: PLC0415 -- only for screens that opt in
+        tree_tokens = _review_tree.tokens(spec.tree, js_json)
+        html = _CSS + _review_tree.CSS + _BODY
+    else:
+        from . import _review_tree  # noqa: PLC0415
+        tree_tokens = _review_tree.NO_TOKENS
+        html = _CSS + _BODY
     for token, value in (
+        *tree_tokens.items(),
         ("%%STATUS_FILTER_HTML%%", status_html),
         ("%%APPLY_MATCH_HTML%%", apply_match_html),
         ("%%DELETE_BTN_HTML%%", delete_btn_html),
@@ -1215,6 +1338,9 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%STATUS_COL_JSON%%", js_json(spec.status_col)),
         ("%%STATUS_CLASSES_JSON%%", js_json(spec.status_classes)),
         ("%%OVERRIDE_STATUS_JSON%%", js_json(spec.override_status.strip().lower())),
+        ("%%ASSIGNED_BADGE_JSON%%", js_json(spec.assigned_badge)),
+        ("%%KIND_COL_JSON%%", js_json(spec.kind_col)),
+        ("%%VALUE_PROMPTS_JSON%%", js_json(spec.value_prompts)),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)
@@ -1231,7 +1357,12 @@ def _col_dict(c: Column) -> dict:
 
 
 def _item_dict(i: PickerItem) -> dict:
-    return {"value": i.value, "primary": i.primary, "secondary": i.secondary}
+    d = {"value": i.value, "primary": i.primary, "secondary": i.secondary}
+    if i.kinds:
+        d["kinds"] = list(i.kinds)
+    if i.keywords:
+        d["keywords"] = i.keywords
+    return d
 
 
 def _attr(s: str) -> str:
