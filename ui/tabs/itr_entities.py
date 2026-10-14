@@ -357,6 +357,7 @@ _FORM_MAPPER_FIELDS = ("drawings_accounts", "card_spend_default_account", "reimb
 _FORM_UI35_FIELDS = (
     "bank_service_charge_account", "card_emi_interest_account", "partner_comp_accounts",
     "foreign_dividends_in_book", "foreign_dividends_in_book_by_ay", "partner_firm_pan",
+    "cc_large_spend_threshold",
 )
 
 #: UI-35: EntityProfile field -> a fragment of the label of the control that
@@ -379,6 +380,7 @@ _FIELD_CONTROLS = {
     "bank_service_charge_account": "Bank service charge account",
     "card_emi_interest_account": "Card EMI interest account",
     "partner_firm_pan": "Firm PAN",
+    "cc_large_spend_threshold": "Large-spend limit",
 }
 #: Fields intentionally without a control. Starts empty.
 _FIELD_CONTROL_ALLOW_LIST: tuple = ()
@@ -572,13 +574,14 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)))
+        return (False, "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)))
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
         _format_drivers((e.extra_items or {}).get("partner_comp_drivers")),
         e.bank_service_charge_account or "", e.card_emi_interest_account or "",
         e.partner_firm_pan or "",
+        ("" if e.cc_large_spend_threshold is None else f"{e.cc_large_spend_threshold:g}"),
         *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
     )
 
@@ -605,6 +608,7 @@ def _save_entity(
     foreign_dividends_in_book_by_ay_text: str | None = None,
     partner_comp_drivers_text: str | None = None,
     partner_firm_pan: str | None = None,
+    cc_large_spend_threshold: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -643,6 +647,18 @@ def _save_entity(
             kv_errors.append(
                 f"Firm PAN {partner_firm_pan!r} is invalid -- expected format AAAAA0000A, or leave blank."
             )
+    large_spend = None   # None == keep the stored value; "" == clear (use the global setting)
+    if cc_large_spend_threshold is not None:
+        text = str(cc_large_spend_threshold).strip()
+        if text:
+            large_spend = _configs_mod()._parse_positive_amount(text)
+            if large_spend is None:
+                kv_errors.append(
+                    f"Large-spend limit {cc_large_spend_threshold!r} is not a positive number "
+                    "-- enter rupees (e.g. 20000), or leave blank to use the global setting."
+                )
+        else:
+            large_spend = ""
     acct_fields = {}
     if bank_service_charge_account is not None:
         acct_fields["Bank service charge account"] = bank_service_charge_account
@@ -777,6 +793,8 @@ def _save_entity(
         new_profile.bank_service_charge_account = bank_service_charge_account.strip()
     if card_emi_interest_account is not None:
         new_profile.card_emi_interest_account = card_emi_interest_account.strip()
+    if large_spend is not None:
+        new_profile.cc_large_spend_threshold = None if large_spend == "" else float(large_spend)
     if partner_comp_accounts is not None:
         # the form owns the nine known keys; any other stored key is kept
         merged = dict(new_profile.partner_comp_accounts or {})
@@ -1209,6 +1227,11 @@ def render(container_tab=None) -> None:
                     allow_custom_value=True, interactive=True,
                     info="Card EMI interest only; never the Bank service charge account.",
                 )
+                large_spend_box = gr.Textbox(
+                    label="Large-spend limit (rupees)", placeholder="20000", interactive=True,
+                    info="A card spend of this amount or more is flagged as a possible asset for THIS entity. "
+                         "Blank = use the global setting. Zero, negative or text is refused.",
+                )
             with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
                 firm_pan_box = gr.Textbox(
                     label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
@@ -1229,7 +1252,7 @@ def render(container_tab=None) -> None:
                     info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
                          "is refused and nothing is saved. Blank removes all drivers.",
                 )
-            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, *partner_dds]
+            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, *partner_dds]
 
             save_status = gr.Markdown("_Fill in the fields and click Save._")
             with gr.Row():
@@ -1272,12 +1295,12 @@ def render(container_tab=None) -> None:
         """UI-35 values for the new controls; the account pick-lists are rebuilt
         from the entity's newest registered book."""
         entities = _load_entities()
-        fdb, fdb_ay, drv, bank, emi, fpan, *partner = _entity_to_new_form(key or "", entities)
+        fdb, fdb_ay, drv, bank, emi, fpan, lsp, *partner = _entity_to_new_form(key or "", entities)
         books = dict(entities[key].books) if (key or "") in entities else {}
         choices, note = _account_choices(books)
         def dd(v):
             return gr.update(choices=choices, value=v)
-        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, *[dd(v) for v in partner], "_" + note + "_")
+        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, *[dd(v) for v in partner], "_" + note + "_")
 
     _new_outputs = [*_new_inputs, accounts_note_md]
 
@@ -1300,7 +1323,7 @@ def render(container_tab=None) -> None:
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
         reimbursement_markers_text, partner_admission_date,
-        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, *partner_values,
+        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, large_spend, *partner_values,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -1320,6 +1343,7 @@ def render(container_tab=None) -> None:
             foreign_dividends_in_book_by_ay_text=fdb_by_ay_text or "",
             partner_comp_drivers_text=drivers_text or "",
             partner_firm_pan=firm_pan or "",
+            cc_large_spend_threshold=large_spend or "",
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key

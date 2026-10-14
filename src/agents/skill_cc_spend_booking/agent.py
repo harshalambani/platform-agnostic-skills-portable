@@ -23,7 +23,7 @@ from . import journal as J
 from . import matcher as M
 from .bookio import CCP_PATH, read_book
 from .report import RunReport, build_message, write_workbook
-from .settings_io import read_large_spend_threshold
+from .settings_io import resolve_large_spend_threshold
 
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent
 _MAPPER_FEE_REASON = "Fixed account: card fee or fee reversal -> the entity's Bank Service Charge account"
@@ -224,8 +224,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
     if why:
         return _error(f"ERROR: {CCP_PATH} cannot be used: {why}. Nothing was booked.")
 
-    threshold = read_large_spend_threshold(settings_path)
-    rep = RunReport(label=label, threshold=threshold, ccp_path=CCP_PATH, entity=entity_key)
+    threshold, threshold_source = resolve_large_spend_threshold(ent, settings_path)
+    rep = RunReport(label=label, threshold=threshold, ccp_path=CCP_PATH, entity=entity_key,
+                    threshold_source=threshold_source)
 
     # ---- statements -------------------------------------------------------
     _t0 = time.perf_counter()

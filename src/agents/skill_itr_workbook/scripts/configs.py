@@ -178,9 +178,24 @@ class EntityProfile:
                                          # fees. Empty == the card-spend booking skill refuses (named error).
     card_emi_interest_account: str = ""  # CC-03: account path for card EMI interest only (never the
                                          # Bank Service Charge account). Empty == named error if needed.
+    cc_large_spend_threshold: float | None = None  # CC-14: this entity's own large-spend (possible
+                                         # asset) limit in rupees. None == use the global setting.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
+
+
+def _parse_positive_amount(value) -> float | None:
+    """CC-14: a positive finite number, or None (blank, text, zero, negative)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+    if out != out or out <= 0 or out == float("inf"):
+        return None
+    return out
 
 
 def load_entities(path: str | Path) -> dict[str, EntityProfile]:
@@ -224,6 +239,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             bank_service_charge_account=str(fields_.get("bank_service_charge_account") or "").strip(),
             card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
             partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
+            cc_large_spend_threshold=_parse_positive_amount(fields_.get("cc_large_spend_threshold")),
             partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
                                     if fields_.get("partner_admission_date") else None),
         )
@@ -316,6 +332,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["card_emi_interest_account"] = e.card_emi_interest_account
     if e.partner_firm_pan:
         d["partner_firm_pan"] = e.partner_firm_pan
+    if e.cc_large_spend_threshold is not None:
+        d["cc_large_spend_threshold"] = float(e.cc_large_spend_threshold)
     if e.partner_admission_date:
         d["partner_admission_date"] = e.partner_admission_date
     return d

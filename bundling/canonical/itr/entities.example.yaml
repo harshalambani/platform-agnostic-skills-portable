@@ -166,6 +166,8 @@ SYN-PARTNER:
   # mixed into the Bank Service Charge account).
   bank_service_charge_account: "Expenses:Bank Service Charge"
   card_emi_interest_account: "Expenses:Card EMI Interest"
+  # CC-14: this entity's own large-spend (possible asset) limit in rupees; blank = the global setting.
+  cc_large_spend_threshold: 15000
   # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
   partner_firm_pan: "FFFFF1234F"
   # Partner of a firm (Partner Compensation skill). Date admitted drives the

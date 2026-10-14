@@ -26,6 +26,7 @@ def money(v) -> str:
 class RunReport:
     label: str = ""
     threshold: float = 0.0
+    threshold_source: str = ""                                  # CC-14: which value applied
     ccp_path: str = ""
     entity: str = ""
     journals: list = field(default_factory=list)
@@ -235,6 +236,8 @@ def build_message(rep: RunReport) -> str:
     if tb:
         parts.append(tb)
     parts.append(f"Range run: {rep.label}" + (f" | entity {rep.entity}" if rep.entity else ""))
+    if rep.threshold_source:
+        parts.append(f"Large-spend limit: {money(rep.threshold)} (from {rep.threshold_source})")
     ready_n = n_ready
     booked_n = sum(1 for j in rep.journals if j.status == J.ST_BOOKED)
     parts.append(f"{ready_n} journal(s) ready to import" + (f", {booked_n} already booked" if booked_n else "")
