@@ -966,7 +966,7 @@ def _save_changes(changes_json: str) -> str:
             if want != ("AL_FOREIGN" in (prior.flags or [])):
                 flag_changes[guid] = {"AL_FOREIGN": want}
                 if ch.get("path"):
-                    paths[guid] = ch["path"]
+                    paths[guid] = _configs.canonical_account_path(ch["path"])
                 if str(tag or "").strip() == str(ch.get("_orig") or "").strip():
                     continue
         if not tag or not str(tag).strip():
@@ -974,7 +974,7 @@ def _save_changes(changes_json: str) -> str:
             continue
         corrections[guid] = str(tag).strip()
         if ch.get("path"):
-            paths[guid] = ch["path"]
+            paths[guid] = _configs.canonical_account_path(ch["path"])
         # ITR-07: the row's side rides in the payload; a missing or unrecognised
         # side is treated as Unknown, which accepts almost nothing (fail closed).
         # A payload with no side at all (an older page) gets it from the path.

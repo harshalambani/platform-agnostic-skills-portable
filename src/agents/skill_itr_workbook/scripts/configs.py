@@ -592,6 +592,21 @@ class MappingLoadResult:
     warnings: list          # human-readable strings (path drift, etc.)
 
 
+def canonical_account_path(path) -> str:
+    """ITR-10: one form for an account path. The tree and the mapping files use
+    "/" and the GnuCash reader uses ":"; both name the same account. Whitespace
+    around a separator and a leading "Root Account" are not part of the name."""
+    parts = [p.strip() for p in re.split(r"[:/]", str(path or ""))]
+    if parts and parts[0].lower() == "root account":
+        parts = parts[1:]
+    return "/".join(p for p in parts if p)
+
+
+def same_account_path(a, b) -> bool:
+    """ITR-10: True when two paths differ at most by separator style."""
+    return canonical_account_path(a) == canonical_account_path(b)
+
+
 def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLoadResult:
     """
     Load an <entity>.mapping.yaml file: a YAML list of entries (a list, not
@@ -648,7 +663,7 @@ def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLo
 
         if known_paths is not None:
             if guid in known_paths:
-                if known_paths[guid] != entries[guid].path:
+                if not same_account_path(known_paths[guid], entries[guid].path):
                     warnings.append(
                         f"GUID {guid} path drifted (benign rename, auto-fixable): mapping has "
                         f"{entries[guid].path!r}, tree now has {known_paths[guid]!r} -- the "
