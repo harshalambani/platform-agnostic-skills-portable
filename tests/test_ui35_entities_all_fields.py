@@ -321,3 +321,29 @@ def test_the_example_file_documents_every_entityprofile_field():
     prof = configs.load_entities(example)["SYN-PARTNER"]
     assert ui_mod._parse_drivers(ui_mod._format_drivers(prof.extra_items["partner_comp_drivers"]))[1] == []
     assert set(prof.partner_comp_accounts) == set(ui_mod._PARTNER_ACCOUNT_KEYS)
+
+
+# ---- partner_firm_pan (ITR-05 field) has its own control and survives a save ----
+
+def test_the_firm_pan_is_saved_upper_cased_and_kept_by_an_old_style_save(tmp_path):
+    root, p = _seed(tmp_path, {"SYN-P": _entity(partner_firm_pan="FFFFF1234F")})
+    assert _profiles(p)["SYN-P"].partner_firm_pan == "FFFFF1234F"
+    assert _call("SYN-P", root).startswith("**Saved**")                       # older caller: None
+    assert _profiles(p)["SYN-P"].partner_firm_pan == "FFFFF1234F"
+    assert _call("SYN-P", root, partner_firm_pan=" ggggg4321g ").startswith("**Saved**")
+    assert _profiles(p)["SYN-P"].partner_firm_pan == "GGGGG4321G"
+
+
+def test_a_malformed_firm_pan_is_refused_and_nothing_is_written(tmp_path):        # NEGATIVE
+    root, p = _seed(tmp_path, {"SYN-P": _entity(partner_firm_pan="FFFFF1234F")})
+    before = p.read_bytes()
+    msg = _call("SYN-P", root, partner_firm_pan="NOTAPAN")
+    assert msg.startswith("**Not saved") and "Firm PAN" in msg and p.read_bytes() == before
+
+
+def test_a_blank_firm_pan_clears_it_and_changes_no_other_entity(tmp_path):
+    root, p = _seed(tmp_path, {"SYN-P": _entity(partner_firm_pan="FFFFF1234F"),
+                               "SYN-O": _entity(name="Other", pan="BBBBB1111B", partner_firm_pan="HHHHH5555H")})
+    assert _call("SYN-P", root, partner_firm_pan="").startswith("**Saved**")
+    got = _profiles(p)
+    assert got["SYN-P"].partner_firm_pan == "" and got["SYN-O"].partner_firm_pan == "HHHHH5555H"

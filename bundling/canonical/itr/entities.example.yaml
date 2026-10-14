@@ -166,6 +166,8 @@ SYN-PARTNER:
   # mixed into the Bank Service Charge account).
   bank_service_charge_account: "Expenses:Bank Service Charge"
   card_emi_interest_account: "Expenses:Card EMI Interest"
+  # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
+  partner_firm_pan: "FFFFF1234F"
   # Partner of a firm (Partner Compensation skill). Date admitted drives the
   # capital rule (40% of target compensation over 48 months).
   partner_admission_date: "2020-04-01"
