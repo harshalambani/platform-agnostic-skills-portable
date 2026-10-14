@@ -549,6 +549,8 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
         sw.label_value(f"  other TDS -- {it['path']} (section {it['section']})", it["amount"])
     for w in tp.tds_other_warnings:
         sw.label_value("WARNING", w, number_format=None)
+    for w in tp.double_count_warnings:
+        sw.label_value("RED FLAG" if w.startswith("RED FLAG") else "WARNING", w, number_format=None)
     layout["tcs"] = sw.label_value("TCS", tp.tcs)
     layout["unclassified_rows"] = []   # populated below only when non-empty
     sw.blank()

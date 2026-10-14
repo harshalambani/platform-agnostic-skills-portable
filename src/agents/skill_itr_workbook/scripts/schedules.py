@@ -931,6 +931,12 @@ class TaxesPaidSchedule:
     tds_other_items: list = field(default_factory=list)      # [{path, section, amount}]
     tds_other_warnings: list = field(default_factory=list)
     as26_tds_partner: float = 0.0
+    as26_tds_salary: float = 0.0
+    #: ITR-12 RED FLAG: a book TDS bucket that is the SAME money as a 26AS line
+    #: already entering the credit (the s.194T partner TDS tagged as salary or
+    #: other TDS), or salary TDS with no 26AS s.192 behind it. Shown on the
+    #: TaxesPaid sheet and on the 234 credit; never silently netted.
+    double_count_warnings: list = field(default_factory=list)
     tcs: float = 0.0
     total: float = 0.0
     as26_available: bool = False               # CF5
@@ -1060,6 +1066,8 @@ def build_taxes_paid(
     as26_tds_int = 0.0
     as26_tds_div = 0.0
     as26_tds_partner = 0.0
+    as26_tds_salary = 0.0
+    double_count_warnings: list = []
     conflicts: list = []
     unclassified_sections: list = []
     if as26_data is not None and as26_data.transactions and rules is not None:
@@ -1077,7 +1085,8 @@ def build_taxes_paid(
                 # Recognised (e.g. "salary") but deliberately NOT part of
                 # this interest/dividend tie-out -- reconciled elsewhere
                 # (Form16 / Salary schedule). Accounted for; not unclassified.
-                pass
+                if category == "salary":
+                    as26_tds_salary += txn.tax_deducted
             elif txn.tax_deducted:
                 # Section code in NONE of the tds_sections categories,
                 # carrying real TDS -- warn loud (see
@@ -1111,6 +1120,25 @@ def build_taxes_paid(
                 "as26": as26_tds_partner, "diff": tds_partner - as26_tds_partner,
             })
 
+        # ITR-12: the 26AS 194T figure enters the credit on its own. If a book
+        # bucket that is ALSO added to the credit holds the same money, it is
+        # counted twice.
+        if "partner" in tds_sections and as26_tds_partner > _TIE_OUT_TOLERANCE:
+            for label, amt in (("salary TDS", tds_sal - as26_tds_salary), ("salary TDS", tds_sal),
+                               ("other-section TDS", tds_other)):
+                if amt > _TIE_OUT_TOLERANCE and abs(amt - as26_tds_partner) <= _TIE_OUT_TOLERANCE:
+                    msg = (f"RED FLAG: the book's {label} (Rs {amt:,.2f}) equals the 26AS s.194T partner TDS "
+                           f"(Rs {as26_tds_partner:,.2f}). It looks like partner TDS tagged as {label}; the "
+                           "credit would count it twice and understate 234B/234C interest. Retag the account "
+                           "as TAXPAID_TDS_PARTNER and re-run before filing.")
+                    if msg not in double_count_warnings and not any(
+                            w.startswith(f"RED FLAG: the book's {label}") for w in double_count_warnings):
+                        double_count_warnings.append(msg)
+        if tds_sal > _TIE_OUT_TOLERANCE and as26_tds_salary <= _TIE_OUT_TOLERANCE:
+            double_count_warnings.append(
+                f"WARNING: the book has salary TDS of Rs {tds_sal:,.2f} but 26AS shows no s.192 salary TDS "
+                "behind it. If this is really another kind of TDS (for example s.194T), it is mis-tagged.")
+
     adv_cumulative, adv_dated = build_advance_tax_cumulative(resolved, book, year_key)
 
     return TaxesPaidSchedule(
@@ -1118,6 +1146,7 @@ def build_taxes_paid(
         tds_interest=tds_int, tds_dividend=tds_div, tcs=tcs, total=total,
         tds_partner=tds_partner, tds_other=tds_other, tds_other_items=tds_other_items,
         tds_other_warnings=tds_other_warnings, as26_tds_partner=as26_tds_partner,
+        as26_tds_salary=as26_tds_salary, double_count_warnings=double_count_warnings,
         as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
         tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
         advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
@@ -1274,6 +1303,7 @@ def build_interest_234(
         book_tds=book_tds, as26_tds=as26_tds, as26_available=taxes_paid.as26_available,
         book_only=book_only, book_only_label=" + ".join(labels),
     )
+    credit.warnings = list(getattr(taxes_paid, "double_count_warnings", [])) + list(credit.warnings)
 
     # s.234C first proviso, computed from the lots' ACTUAL sale dates -- see
     # cg_proviso_exclusions. Direct attribute access, deliberately not
