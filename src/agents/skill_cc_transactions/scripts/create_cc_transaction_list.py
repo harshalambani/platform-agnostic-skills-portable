@@ -294,7 +294,10 @@ def parse_axis(lines, bank, card, period) -> Parsed:
     # and the total each carry Dr/Cr or no suffix at all (no suffix = debit). A
     # Cr previous balance is a NEGATIVE opening.
     sum_rx = re.compile(
-        rf"^({AMT})\s*(Dr|Cr)?\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s*(Dr|Cr)?\s*$", re.I)
+        rf"^({AMT})\s*(Dr|Cr)?\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s+({AMT})\s*(Dr|Cr)?(?:\s+[A-Za-z].*)?\s*$", re.I)
+    # CC-04: the values line can be followed by unrelated text from the page's right-hand
+    # column ("... 3,220.50 Dr Reward points ..."); the text must start with a letter, so a
+    # ninth number can never be swallowed.
     for line in lines:
         line = line.strip()
         if re.match(r"^\d\d/\d\d/\d{4}\s+-\s", line):
@@ -390,21 +393,22 @@ def parse_hdfc_new(lines, bank, card, period) -> Parsed:
             if re.search(AMT, line):
                 p.errors.append(f"unparsed line: {line[:70]}")
         elif not p.summary and "PREVIOUS STATEMENT" in line.upper():
-            comp = None
+            # CC-04: the lone total line can sit BEFORE or AFTER the four-value line.
+            comp = total = None
             for j in range(i + 1, min(i + 9, len(lines))):
                 nxt = lines[j].strip()
                 vals = re.findall(rf"{rupee}\s*({NUM})", nxt)
                 if comp is None and len(vals) >= 4:
                     comp = [num(v) for v in vals[:4]]
-                    continue
-                if comp is not None:
+                else:
                     tm = re.match(rf"^[_\-\u2013\u2014]?\s*{rupee}\s*({NUM})\s*$", nxt)
-                    if tm:
-                        prev, pay, purch, fin = comp
+                    if tm and total is None:
                         total = num(tm.group(1))
-                        p.summary = dict(prev=prev, payments=pay, purchases=purch, finance=fin, total=total)
-                        p.printed_closing = prev - pay + purch + fin
-                        break
+                if comp is not None and total is not None:
+                    prev, pay, purch, fin = comp
+                    p.summary = dict(prev=prev, payments=pay, purchases=purch, finance=fin, total=total)
+                    p.printed_closing = prev - pay + purch + fin
+                    break
     if not p.summary:
         p.missing.append("summary figures")
     return p
@@ -418,10 +422,16 @@ def parse_icici(lines, bank, card, period) -> Parsed:
     row_rx = re.compile(
         rf"^(\d\d/\d\d/\d{{4}})\s+\d+\s+(.*?)\s+(?:(-?\d+)\s+)?(?:`?({AMT})\s+[A-Z]{{3}}\s+)?`?({AMT})(?:\s+(CR))?\s*$",
         re.I)
+    # CC-04: a sidebar's text can be printed before the date on the same line. Accepted only
+    # with the row's own serial (8+ digits) straight after the date, so a line that merely
+    # mentions a date and an amount is never a row.
+    side_rx = re.compile(
+        rf"^\S.*?\s(\d\d/\d\d/\d{{4}})\s+\d{{8,}}\s+(.*?)\s+(?:(-?\d+)\s+)?(?:`?({AMT})\s+[A-Z]{{3}}\s+)?`?({AMT})(?:\s+(CR))?\s*$",
+        re.I)
     prev = purch = cash = pay = total = None
     for i, line in enumerate(lines):
         line = line.strip()
-        m = row_rx.match(line)
+        m = row_rx.match(line) or (None if DATE_START.match(line) else side_rx.match(line))
         if m:
             when = _dmy(m.group(1))
             if when is None:
@@ -617,6 +627,9 @@ def parse_hsbc(lines, bank, card, period) -> Parsed:
     return p
 
 
+SBM_DUE_RX = re.compile(r"^(?:TOTAL|MINIMUM)\s+AMOUNT\s+DUE\b|^PAYMENT\s+DUE\b|^DUE\s+DATE\b", re.I)
+
+
 def parse_sbm(lines, bank, card, period) -> Parsed:
     p = Parsed()
     amt = r"[\d,]+(?:\.\d+)?"
@@ -624,6 +637,9 @@ def parse_sbm(lines, bank, card, period) -> Parsed:
     row_rx = re.compile(rf"^(\d{{1,2}}-[A-Za-z]{{3,9}}-\d{{4}})\s+(.*?)\s+({amt}|-)\s+({amt}|-)\s*$")
     for i, line in enumerate(lines):
         line = line.strip()
+        dm = re.match(r"^\d{1,2}-[A-Za-z]{3,9}-\d{4}\s+(.*)$", line)
+        if dm and SBM_DUE_RX.match(dm.group(1)):
+            continue                      # CC-04: the payment-due line is a date + amounts, never a row
         m = row_rx.match(line)
         if m and (m.group(3) == "-") != (m.group(4) == "-"):
             d = parse_date(m.group(1), "%d-%b-%Y")      # tries %b then %B
@@ -651,8 +667,15 @@ def parse_sbm(lines, bank, card, period) -> Parsed:
                              "could not be proven by arithmetic")
         else:
             purch, pay, fin = roles
+            closing = opening + purch + fin - pay
+            if abs(total) <= TOL_STRICT and closing < -TOL_STRICT:
+                # CC-04: SBM prints a credit balance as 0.00. The arithmetic proves the credit
+                # (roles are only accepted when it does), so the balance is the proven credit.
+                total = round(closing, 2)
+                p.note = (f"SBM printed the credit balance as 0.00; the figures prove a credit balance of "
+                          f"{-total:,.2f}")
             p.summary = dict(prev=opening, purchases=purch, finance=fin, payments=pay, total=total)
-            p.printed_closing = opening + purch + fin - pay
+            p.printed_closing = closing
     if not p.summary and not p.missing:
         p.missing.append("summary line")
     return p
@@ -674,7 +697,9 @@ def resolve_sbm_roles(opening, middle, total, rows):
             continue
         seen.add(perm)
         purch, pay, fin = perm
-        if abs(opening + purch - pay + fin - total) <= TOL_STRICT + 1e-9:
+        got = opening + purch - pay + fin
+        # a printed 0.00 may stand for a credit balance (SBM does not print negatives)
+        if abs(got - total) <= TOL_STRICT + 1e-9 or (abs(total) <= TOL_STRICT and got < -TOL_STRICT):
             good.append(perm)
     if len(good) == 1:
         return good[0]
@@ -777,6 +802,9 @@ def parse_sbi(lines, bank, card, period) -> Parsed:
     return p
 
 
+YES_PERIOD_LINE_RX = re.compile(r"^\d\d/\d\d/\d{4}\s+(?:to|-)\s+\d\d/\d\d/\d{4}\b\s*", re.I)
+
+
 def parse_yes(lines, bank, card, period) -> Parsed:
     p = Parsed()
     row_rx = re.compile(rf"^(\d\d/\d\d/\d{{4}})\s+(.*?)\s+({AMT})\s+(Dr|Cr)\s*$", re.I)
@@ -799,7 +827,12 @@ def parse_yes(lines, bank, card, period) -> Parsed:
                 continue
             p.rows.append(_mk_row(bank, card, when, m.group(2), num(m.group(3)), norm_dir(m.group(4))))
             continue
-        if DATE_START.match(line):
+        pm = YES_PERIOD_LINE_RX.match(line)
+        if pm:
+            # CC-04: "01/09/2025 To 30/09/2025 <summary text>" is the period header, never a row
+            # and never an unparsed row; whatever follows it is read as summary text.
+            line = line[pm.end():].strip()
+        elif DATE_START.match(line):
             if _unparsed(line):
                 p.errors.append(f"unparsed line: {line[:70]}")
             continue
@@ -811,21 +844,25 @@ def parse_yes(lines, bank, card, period) -> Parsed:
             if lm:
                 found[key] = signed(num(lm.group(1)), lm.group(2)) if key in ("prev", "total") else num(lm.group(1))
                 matched_inline = True
-        if matched_inline:
+        if matched_inline or pm:
             continue
         # Interleaved layout: labels and values are on separate lines, in the
         # same order. A label line is money-wording ending in ":" with no digit
         # (date labels are skipped); a value line is just "Rs. 999.99 [Dr|Cr]".
         if (":" in line and not re.search(r"\d", line) and not re.search(r"date", line, re.I)
                 and re.search(MONEY_LABEL_WORDS, line, re.I)):
-            key = next((k for k, rx in labels.items() if re.search(rx, line, re.I)), None)
-            if key is None and re.search(r"Other Charges", line, re.I) and re.search(r"Purchases", line, re.I):
-                key = "purchases"
-            label_queue.append(key)
+            # CC-04: a two-column layout prints several "Label :" on one line; each colon ends
+            # one label, taken in order. An unknown label keeps its place as None.
+            for chunk in line.split(":")[:-1] if line.count(":") > 1 else [line]:
+                key = next((k for k, rx in labels.items() if re.search(rx, chunk, re.I)), None)
+                if key is None and re.search(r"Other Charges", chunk, re.I) and re.search(r"Purchases", chunk, re.I):
+                    key = "purchases"
+                label_queue.append(key)
             continue
-        vm = re.match(rf"^Rs\.?\s*({NUM})\s*(Cr|Dr)?\s*$", line, re.I)
-        if vm:
-            value_queue.append((num(vm.group(1)), vm.group(2)))
+        vtoks = list(re.finditer(rf"Rs\.?\s*({NUM})\s*(Cr|Dr)?", line, re.I))
+        if vtoks and not re.sub(rf"Rs\.?\s*{NUM}\s*(?:Cr|Dr)?", "", line, flags=re.I).strip():
+            for vm in vtoks:
+                value_queue.append((num(vm.group(1)), vm.group(2)))
     for key, val in zip(label_queue, value_queue):
         if key and key not in found:
             found[key] = signed(val[0], val[1]) if key in ("prev", "total") else val[0]
@@ -865,6 +902,9 @@ SBM_PERIOD_RX = re.compile(
     r"Statement\s+\w+\s*:\s*(\d{1,2}-[A-Za-z]{3,9}-\d{4})\s+to\s+(\d{1,2}-[A-Za-z]{3,9}-\d{4})", re.I)
 
 
+SBM_MONTH_RX = re.compile(r"Statement\s+Month\s*:?\s*([A-Za-z]{3,9})[\s,\-/]+(\d{4})", re.I)
+
+
 def detect_period(lines):
     """((start, end) | None, note). note is non-empty when only a statement date
     was printed (HDFC old, SBM): the period is then the month ending on that
@@ -877,6 +917,13 @@ def detect_period(lines):
         s, e = parse_date(sm.group(1), "%d-%b-%Y"), parse_date(sm.group(2), "%d-%b-%Y")
         if s and e and s <= e:
             return (s, e), ""
+    mm = SBM_MONTH_RX.search(text)
+    if mm:
+        # CC-04: older SBM statements print the month only; the period is that whole month.
+        first = parse_date(f"1-{mm.group(1)}-{mm.group(2)}", "%d-%b-%Y")
+        if first:
+            nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+            return (first, nxt - timedelta(days=1)), "statement month only"
     info = classify_text(text)
     if info is None:
         return None, ""
@@ -905,6 +952,13 @@ def non_statement_reason(lines, bank: str | None = None) -> str | None:
         has_txn_rows = any(is_sbi_row(ln) for ln in lines)
     if ("MOST IMPORTANT TERMS" in up or re.search(r"\bMITC\b", up)) and not has_txn_rows:
         return "Most Important Terms and Conditions"
+    # CC-04: a leaflet TITLED "Important Terms and Conditions" (no "Most"): the title is one of the
+    # first lines and is short. A statement that merely mentions it in a footer has rows or a
+    # period and is never skipped.
+    heads = [ln.strip().upper() for ln in lines if ln.strip()][:5]
+    if not has_txn_rows and any(len(h) <= 60 and re.search(r"\bIMPORTANT\s+TERMS\s+(?:AND|&)\s+CONDITIONS\b", h)
+                                for h in heads):
+        return "Important Terms and Conditions"
     if (re.search(r"YEAR\s+END\s+STATEMENT", up)
             or re.search(r"ACCOUNT\s+SUMMARY\s+FOR\s+THE\s+PERIOD\s+FROM", up)) \
             and classify_text(text) is None:
