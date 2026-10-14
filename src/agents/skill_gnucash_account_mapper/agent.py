@@ -673,6 +673,17 @@ HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION = 0.6
 # MAP-15: shortest plain token that may count as history evidence, and the
 # share of the book's distinct accounts a token may touch before it is treated
 # as too common to identify anything (derived from the book, not a word list).
+# MAP-36: (a) smoothing -- a token never seen with an account counts as mild
+# evidence AGAINST that account (p = SMOOTH / (total + SMOOTH)), so 48 rows of
+# "cred" on one account beat an 8-row "club" on another; (b) a token seen with
+# more than HISTORY_MAX_TOKEN_SPREAD accounts is discounted by
+# HISTORY_MAX_TOKEN_SPREAD / spread (a word common to many unrelated
+# merchants carries little); (c) a match resting on ONE token must have that
+# token's majority account hold HISTORY_SINGLE_TOKEN_MIN_SHARE of it.
+HISTORY_UNSEEN_SMOOTHING = 0.5
+HISTORY_MAX_SEEN_P = 0.99   # a token never proves an account outright, so a missing token can outweigh it
+HISTORY_SINGLE_TOKEN_MIN_SHARE = 0.8
+
 HISTORY_MIN_TOKEN_LEN = 3
 HISTORY_MAX_ACCOUNT_SHARE = 0.5
 HISTORY_MIN_ACCOUNTS_FOR_SHARE = 4
@@ -820,6 +831,7 @@ def _history_bayes_raw(
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
     contributing: Dict[str, set] = {}
+    used_tokens: list = []
     n_accounts = _model_account_count(model)
     raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
     for tok in tokens:
@@ -831,10 +843,12 @@ def _history_bayes_raw(
             continue  # MAP-15: touches most of the book -- identifies nothing
         total = sum(acct_counts.values())
         spread = len(acct_counts)
+        used_tokens.append((tok, acct_counts, total, spread))
         for acct, cnt in acct_counts.items():
-            p = min(max(cnt / total, 1e-6), 1 - 1e-6)
-            log_p[acct] = log_p.get(acct, 0.0) + math.log(p)
-            log_np[acct] = log_np.get(acct, 0.0) + math.log(1 - p)
+            p = min(max(cnt / total, 1e-6), HISTORY_MAX_SEEN_P)
+            wt = 1.0 if spread <= HISTORY_MAX_TOKEN_SPREAD else HISTORY_MAX_TOKEN_SPREAD / spread
+            log_p[acct] = log_p.get(acct, 0.0) + wt * math.log(p)
+            log_np[acct] = log_np.get(acct, 0.0) + wt * math.log(1 - p)
             contributing.setdefault(acct, set()).add(tok)
             # MAX, not sum: a single historical transaction contributes the
             # same frequency to every one of its own tokens, so summing
@@ -849,6 +863,16 @@ def _history_bayes_raw(
 
     if not log_p:
         return None
+
+    # MAP-36: a token that was never seen with a candidate account is evidence
+    # against it.
+    for tok, acct_counts, total, spread in used_tokens:
+        wt = 1.0 if spread <= HISTORY_MAX_TOKEN_SPREAD else HISTORY_MAX_TOKEN_SPREAD / spread
+        p = HISTORY_UNSEEN_SMOOTHING / (total + HISTORY_UNSEEN_SMOOTHING)
+        for acct in list(log_p):
+            if acct not in acct_counts:
+                log_p[acct] += wt * math.log(p)
+                log_np[acct] += wt * math.log(1 - p)
 
     # MAP-33: the gate is PER ACCOUNT. An account whose supporting tokens are all
     # generic (the tokens MatchReason would print, `discriminating`, or every
@@ -899,6 +923,13 @@ def _history_bayes_score(
         return None
     if len(discriminating.get(best_acct, ())) < HISTORY_MIN_DISCRIMINATING_TOKENS:
         return None
+    # MAP-36: a match resting on ONE token needs that token to lean strongly
+    # to the winner (a clear majority of its history, not a plurality).
+    backing = [t for t in tokens if (model.get(t) or {}).get(best_acct)]
+    if len(backing) == 1:
+        counts = model[backing[0]]
+        if counts[best_acct] / sum(counts.values()) < HISTORY_SINGLE_TOKEN_MIN_SHARE:
+            return None
 
     tokens_used = ', '.join(sorted(discriminating[best_acct])) or 'combined evidence'
     reason = f"History match ({tokens_used})"
