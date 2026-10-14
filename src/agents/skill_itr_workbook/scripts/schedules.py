@@ -1301,6 +1301,8 @@ class UnclassifiedItem:
     section: str
     is_income_type: bool   # True only for RetainedEarnings-Income leaves --
                             # drives the worst-case upper-bound tax base.
+    held: bool = False      # ITR-07: put on HOLD on purpose (still unclassified)
+    reason: str | None = None
 
 
 @dataclass
@@ -1309,6 +1311,10 @@ class UnclassifiedSchedule:
     count: int = 0
     total_amount: float = 0.0            # signed sum, every section (BS + P&L)
     income_type_total: float = 0.0       # signed sum, RetainedEarnings-Income leaves only
+
+    @property
+    def held_count(self) -> int:
+        return sum(1 for i in self.items if i.held)
 
 
 def build_unclassified(tree: pe.ParsedBalanceSheet, unmapped: list) -> UnclassifiedSchedule:
@@ -1330,6 +1336,7 @@ def build_unclassified(tree: pe.ParsedBalanceSheet, unmapped: list) -> Unclassif
         is_income = section == "RetainedEarnings-Income"
         items.append(UnclassifiedItem(
             path=leaf.path, guid=leaf.guid, amount=amount, section=section, is_income_type=is_income,
+            held=bool(getattr(leaf, "held", False)), reason=getattr(leaf, "reason", None),
         ))
         total += amount
         if is_income:

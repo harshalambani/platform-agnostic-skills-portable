@@ -92,6 +92,11 @@ class PickerItem:
     value: str
     primary: str
     secondary: str = ""
+    # ITR-07. `kinds`: the row kinds (values of spec.kind_col) this item may be
+    # assigned to; empty = any row. `keywords`: extra words the search box
+    # matches but the list does not show (plain-word synonyms).
+    kinds: tuple = ()
+    keywords: str = ""
 
 
 @dataclass
@@ -158,6 +163,16 @@ class ReviewSpec:
     # so a row never keeps the badge of the value it had BEFORE the assign.
     # Empty (default) changes nothing for any other screen.
     assigned_badge: dict[str, str] = field(default_factory=dict)
+    # ITR-07. Row key holding each row's "kind". With it set, a picker item that
+    # declares `kinds` is offered only for rows of a matching kind, and an apply
+    # that would put it on any other row is REFUSED with a message (nothing
+    # changes). Default "" = no restriction, every other screen unchanged.
+    kind_col: str = ""
+    # ITR-07. {picker value: {"text", "key", "default"}}. Assigning that value
+    # asks the person `text` (a prompt, pre-filled with `default`) and stores the
+    # answer in each row's `key`; assigning any other value clears that key.
+    # Cancel assigns nothing. Default {} changes nothing.
+    value_prompts: dict = field(default_factory=dict)
 
     @property
     def payload_box_id(self) -> str:
@@ -499,6 +514,9 @@ _BODY = r"""
   const STATUS_CLASSES = %%STATUS_CLASSES_JSON%%;
   const OVERRIDE_STATUS = %%OVERRIDE_STATUS_JSON%%;
   const ASSIGNED_BADGE = %%ASSIGNED_BADGE_JSON%%;
+  const KIND_COL = %%KIND_COL_JSON%%;
+  const VALUE_PROMPTS = %%VALUE_PROMPTS_JSON%%;
+  const PROMPT_KEYS = Array.from(new Set(Object.keys(VALUE_PROMPTS).map(k => VALUE_PROMPTS[k].key)));
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -547,11 +565,26 @@ _BODY = r"""
     chosen = ''; pickSearch.value = ''; syncPickClear();
   }
 
+  // ITR-07: may this item go on this row? (no KIND_COL / no `kinds` = always)
+  function allowedFor(it, r) {
+    if (!KIND_COL || !it || !it.kinds || !it.kinds.length) return true;
+    return it.kinds.indexOf(r[KIND_COL]) >= 0;
+  }
+  let lastRefused = false;
+
   function renderPicker(q) {
     const ql = (q || '').toLowerCase();
+    // ITR-07: with rows selected, the list is cut down to what is valid for ALL
+    // of them FIRST; the search (synonyms included) only ever runs over that cut
+    // list, so a plain word can never surface a tag a selected row forbids.
+    let base = ITEMS;
+    if (KIND_COL && selected.size) {
+      const sel = rows.filter(r => selected.has(r._idx));
+      base = ITEMS.filter(it => sel.every(r => allowedFor(it, r)));
+    }
     const list = ql
-      ? ITEMS.filter(it => (it.primary + ' ' + it.secondary + ' ' + it.value).toLowerCase().includes(ql))
-      : ITEMS;
+      ? base.filter(it => (it.primary + ' ' + it.secondary + ' ' + it.value + ' ' + (it.keywords || '')).toLowerCase().includes(ql))
+      : base;
     pickDD.innerHTML = '';
     list.slice(0, 50).forEach(it => {
       const div = document.createElement('div');
@@ -594,12 +627,34 @@ _BODY = r"""
   });
 
   function assign(predicate, alsoSet) {
+    lastRefused = false;
     if (!chosen) { alert('Pick a value first.'); return 0; }
+    if (KIND_COL) {
+      // ITR-07: refuse the whole apply if any target row cannot take this value.
+      const item = ITEMS.find(it => it.value === chosen);
+      const bad = rows.filter(r => !r._locked && predicate(r) && !allowedFor(item, r));
+      if (bad.length) {
+        lastRefused = true;
+        alert('Not applied: ' + chosen + ' is not valid for ' + bad.length + ' of the selected row(s) (' +
+              bad.slice(0, 3).map(r => cellText(r, COLS[0].key)).join('; ') +
+              '). Nothing was changed. Pick a tag listed for their section, or HOLD.');
+        return 0;
+      }
+    }
+    const vp = VALUE_PROMPTS[chosen];
+    let promptVal = '';
+    if (vp) {
+      const ans = prompt(vp.text, vp.default || '');
+      if (ans === null || ans === undefined) { lastRefused = true; return 0; }
+      promptVal = String(ans).trim() || vp.default || '';
+    }
     let n = 0;
     rows.forEach(r => {
       if (r._locked) return;
       if (!predicate(r)) return;
       r[TARGET] = chosen;
+      PROMPT_KEYS.forEach(k => { r[k] = ''; });
+      if (vp) r[vp.key] = promptVal;
       for (const k in alsoSet) r[k] = alsoSet[k];
       if (STATUS_COL) {
         // UI-04: the badge described the old target -- drop it; keep the tags in step.
@@ -628,7 +683,7 @@ _BODY = r"""
   $('apply-sel').onclick = () => {
     if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
     const n = assign(r => selected.has(r._idx), ALSO_SET);
-    if (n === 0 && chosen) alert('Selected rows cannot be reassigned from here.');
+    if (n === 0 && chosen && !lastRefused) alert('Selected rows cannot be reassigned from here.');
   };
 
   const applyMatchBtn = $('apply-match');
@@ -1231,6 +1286,8 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%STATUS_CLASSES_JSON%%", js_json(spec.status_classes)),
         ("%%OVERRIDE_STATUS_JSON%%", js_json(spec.override_status.strip().lower())),
         ("%%ASSIGNED_BADGE_JSON%%", js_json(spec.assigned_badge)),
+        ("%%KIND_COL_JSON%%", js_json(spec.kind_col)),
+        ("%%VALUE_PROMPTS_JSON%%", js_json(spec.value_prompts)),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)
@@ -1247,7 +1304,12 @@ def _col_dict(c: Column) -> dict:
 
 
 def _item_dict(i: PickerItem) -> dict:
-    return {"value": i.value, "primary": i.primary, "secondary": i.secondary}
+    d = {"value": i.value, "primary": i.primary, "secondary": i.secondary}
+    if i.kinds:
+        d["kinds"] = list(i.kinds)
+    if i.keywords:
+        d["keywords"] = i.keywords
+    return d
 
 
 def _attr(s: str) -> str:

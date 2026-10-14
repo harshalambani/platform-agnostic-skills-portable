@@ -201,6 +201,16 @@ def _mapping_summary(
             return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None, headline
 
     result = mapping_engine.resolve_tree(tree, loaded)
+    held = [leaf for leaf in result.unmapped if leaf.held]
+    if held:
+        # ITR-07: accounts put on HOLD on purpose are named at the TOP of the
+        # run. A held account is unmapped: it feeds no schedule and the
+        # workbook is not filing-ready while any remain.
+        headline.append(
+            f"HELD: {len(held)} account(s) are on HOLD and feed NO schedule -- the workbook is NOT "
+            "filing-ready until each gets a real tag: "
+            + "; ".join(f"{leaf.path} ({leaf.reason})" for leaf in held)
+        )
     if not result.resolved:
         headline.append(
             f"{presentation.EMPTY_MAPPING_ERROR_MARKER}: the mapping resolved 0 of "
@@ -232,10 +242,13 @@ def _mapping_summary(
         "upper bound. Unmapped accounts:"
     )
     for leaf in result.unmapped:
-        lines.append(f"  - {leaf.path} (FY total {leaf.total})")
+        mark = f" [HELD: {leaf.reason}]" if leaf.held else ""
+        lines.append(f"  - {leaf.path} (FY total {leaf.total}){mark}")
 
     suggest._emit("Mapping resolved. Starting AI tag suggestions for unmapped accounts.")
-    sug_run = suggest.run_suggestions(result.unmapped, result.resolved, config_path, model_override)
+    # A held account is never sent to the AI: someone chose to hold it.
+    sug_run = suggest.run_suggestions(
+        [leaf for leaf in result.unmapped if not leaf.held], result.resolved, config_path, model_override)
     suggestions = sug_run.suggestions
     if sug_run.cancelled:
         headline.insert(

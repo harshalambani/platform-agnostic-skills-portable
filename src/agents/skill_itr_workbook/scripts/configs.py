@@ -598,7 +598,7 @@ def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLo
             raise MappingValidationError(f"{p}: entry {i} missing 'guid'")
         if guid in entries:
             raise MappingValidationError(f"{p}: duplicate GUID {guid!r} (entry {i})")
-        if not tag_vocab.is_valid_tag(tag):
+        if not tag_vocab.is_valid_entry_tag(tag):
             raise MappingValidationError(f"{p}: entry {i} (guid {guid}) has unknown tag {tag!r}")
         for flag in item.get("flags") or []:
             if not tag_vocab.is_valid_flag(flag):

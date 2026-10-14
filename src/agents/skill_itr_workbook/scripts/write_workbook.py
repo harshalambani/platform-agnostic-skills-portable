@@ -872,19 +872,33 @@ def write_unclassified_sheet(wb: Workbook, uncl: sch.UnclassifiedSchedule) -> No
     )
     ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
     ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+    n_held = uncl.held_count
+    if n_held:
+        # ITR-07: accounts held on purpose are listed first, with the reason.
+        sw.label_value(
+            "HELD ON PURPOSE",
+            f"{n_held} account(s) put on HOLD -- they feed no schedule and keep this workbook "
+            "NOT filing-ready until each gets a real tag",
+            number_format=None,
+        )
     sw.blank()
 
     headers = ["Account path", "Amount", "Section", "Income-type (worst-case tax base)"]
+    if n_held:
+        headers.append("Held (reason)")
     for col, h in enumerate(headers, start=1):
         sw.cell(col, h, bold=True)
     sw.row += 1
-    for item in uncl.items:
+    ordered = sorted(uncl.items, key=lambda i: not i.held) if n_held else uncl.items
+    for item in ordered:
         row = sw.row
         sw.cell(1, item.path)
         sw.cell(2, item.amount, number_format=INR_FORMAT)
         sw.cell(3, item.section)
         sw.cell(4, item.is_income_type)
-        for col in range(1, 5):
+        if n_held:
+            sw.cell(5, f"HELD: {item.reason}" if item.held else "")
+        for col in range(1, 5 + (1 if n_held else 0)):
             ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
         sw.row += 1
 
@@ -1248,7 +1262,8 @@ def write_reconciliation_sheet(
             number_format=None,
         )
     for leaf in unmapped:
-        sw.label_value(leaf.path, leaf.total)
+        held_mark = f"  [HELD: {leaf.reason}]" if getattr(leaf, "held", False) else ""
+        sw.label_value(leaf.path + held_mark, leaf.total)
     sw.blank()
 
     sw.label_value("Mapping version", mapping_version, number_format=None)
@@ -1352,10 +1367,12 @@ def write_mapping_review_sheet(
             row = sw.row
             sw.cell(1, leaf.path)
             sw.cell(2, leaf.total, number_format=INR_FORMAT)
-            sw.cell(3, "REPLACE_ME")
-            sw.cell(4, "(unresolved)")
-            sw.cell(5, "(unresolved -- pick a tag from tags.py)")
-            sw.cell(6, "unmapped")
+            is_held = getattr(leaf, "held", False)
+            sw.cell(3, "HOLD" if is_held else "REPLACE_ME")
+            sw.cell(4, "(on hold)" if is_held else "(unresolved)")
+            sw.cell(5, f"(held on purpose: {leaf.reason})" if is_held
+                    else "(unresolved -- pick a tag from tags.py)")
+            sw.cell(6, "held" if is_held else "unmapped")
             sw.cell(7, None)
             sw.cell(8, leaf.guid)
             for col in range(1, 9):
