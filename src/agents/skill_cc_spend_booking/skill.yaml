@@ -5,8 +5,10 @@ display_name: "Credit Card - Book Spends"
 description: >
   Match each bank payment to a credit card to the statement it settles, and write an
   import-ready GnuCash journal that books that statement's spends, refunds, cashback and
-  fees against Expense:Withdrawals:Credit Card Payment. Nothing is guessed: unmatched
-  payments, statements that do not tie out, part payments and EMI rows are reported, not booked.
+  fees against Expense:Withdrawals:Credit Card Payment. Payments, tie-outs and EMI rows are never
+  guessed: unmatched payments, statements that do not tie out, part payments and EMI rows are
+  reported, not booked. The account for a spend is chosen by rules and history first, then by an AI
+  step for what is left, and every AI match passes the account guards.
 category: "gnucash"
 version: "0.1.0"
 
@@ -75,7 +77,7 @@ output:
 requires:
   native_binaries: []
   external_tools: []
-  llm: false
+  llm: true
 
 help:
   overview: >

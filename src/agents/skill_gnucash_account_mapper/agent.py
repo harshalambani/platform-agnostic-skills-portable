@@ -3682,8 +3682,9 @@ def run(
         gnucash_file:        Path to .gnucash book (gzipped XML format).
         canonical_csv:       Path to canonical 8-col CSV (from ICICI/HSBC/BoB/HDFC skills).
         output_path:         Path for the mapped output CSV.
-        config_path:         Unused (no LLM required).
-        model_override:      Unused (no LLM required).
+        config_path:         The portable config; with it the optional AI step may run on rows the
+                             rules and history leave open (CC-13: no longer 'no LLM').
+        model_override:      The model for that AI step (default: the endpoint's default model).
         drawings_accounts:   MAP-34: the entity's configured Drawings account paths
                              (money in to one is not a direction clash; a lone one
                              also takes employer reimbursement credits).

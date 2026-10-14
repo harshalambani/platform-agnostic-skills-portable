@@ -103,7 +103,7 @@ def fake_mapper_factory(calls):
 
 
 def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, threshold=None,
-       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None):
+       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None, model=None):
     book = tmp_path / "book.gnucash"
     book.write_text("x", encoding="utf-8")
     pdfs = tmp_path / "pdfs"
@@ -127,7 +127,8 @@ def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, th
     calls = []
     monkeypatch.setattr(ccsb, "_run_mapper", mapper or fake_mapper_factory(calls))
     out = tmp_path / "out" / "x_CC-Spend_GnuCash_import_ready.csv"
-    reply = ccsb.run(str(pdfs), "SYN", str(book), str(out), period, start, end, str(ents), str(settings))
+    reply = ccsb.run(str(pdfs), "SYN", str(book), str(out), period, start, end, str(ents), str(settings),
+                    model_override=model)
     rows = list(csv.DictReader(open(out, encoding="utf-8"))) if out.is_file() else []
     return reply, rows, calls, out
 

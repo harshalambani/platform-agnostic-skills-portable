@@ -88,7 +88,7 @@ def _extract(pdf_dir, xlsx, start, end, label):
     return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label)
 
 
-def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account):
+def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account, model=None):
     """The existing account mapper over the canonical CSV: history across ALL
     banks (decision 6.1), no bank account (Transfer Account is set here)."""
     if str(_AGENTS_ROOT) not in sys.path:
@@ -96,7 +96,8 @@ def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, def
     from skill_gnucash_account_mapper.agent import run as map_run
     return map_run(str(gnucash_path), str(canonical_csv), str(out_csv), config_path=config_path,
                    bank_name=None, gnucash_bank_account=None,
-                   drawings_accounts=list(drawings or []), card_default_account=default_account or None)
+                   drawings_accounts=list(drawings or []), card_default_account=default_account or None,
+                   model_override=model or None)
 
 
 _AI_STOP_MARKER = "AI pass stopped"       # same text the mapper puts in MatchReason (CC-11)
@@ -385,7 +386,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             _clear_mapper_ai_status()
             try:
                 _run_mapper(gnucash_path, cin, cout, config_path, [_strip_root(d) for d in ent.drawings_accounts],
-                            _strip_root(getattr(ent, "card_spend_default_account", "")))
+                            _strip_root(getattr(ent, "card_spend_default_account", "")), model_override)
                 with open(cout, newline="", encoding="utf-8") as f:
                     mapped = {r.get("Transaction ID", ""): r for r in csv.DictReader(f)}
             except Exception as e:  # noqa: BLE001

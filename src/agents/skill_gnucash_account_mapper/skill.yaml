@@ -5,6 +5,7 @@
 description: >
   Build account-mapping rules from your GnuCash book, then apply them to a canonical CSV.
   Chains: XML extraction → recency-weighted rule generation → account mapping.
-  No LLM required — fully deterministic.
+  Rules and history decide first; an optional AI step (when an endpoint is configured) takes
+  only the rows they leave open, and every AI match passes the same guards.
 category: "gnucash"
 version: "1.0.0"
