@@ -380,7 +380,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _mark("already-booked check")
 
         # ---- mapper for spends and refunds ---------------------------------
-        to_map = [j for j in journals if j.needs_mapping and j.status == J.ST_READY]
+        # CC-12: a row withheld as POSSIBLY ALREADY BOOKED is mapped too, so the report still shows
+        # the account and confidence the mapper chose; its status stays withheld.
+        to_map = [j for j in journals if j.needs_mapping and j.status in (J.ST_READY, J.ST_POSSIBLY)]
         if to_map:
             cin, cout = Path(tmp) / "cc_canonical.csv", Path(tmp) / "cc_mapped_GnuCash_import_ready.csv"
             _canonical_csv(to_map, cin)
@@ -453,8 +455,21 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                                for p in s.payments if p.in_range), 2)
         after = round(before + effect, 2)
         n_settled = sum(1 for s in settlements if s.status == M.S_SETTLED)
+        other = round(after - unmatched - not_booked, 2)
+        # CC-12: "Other" is listed, entry by entry: the book entries on CCP that are neither an
+        # unmatched payment nor a not-booked payment, this run's journals, and a balancing line
+        # for whatever is left (so the lines always add up to Other).
+        _skip = {p.guid for p, _r in rep.unmatched_payments}
+        _skip |= {p.guid for s in settlements if s.status == M.S_PARTLY for p in s.payments if p.in_range}
+        other_lines = [(t.date, t.description or "(no description)", t.amount_on(CCP_PATH))
+                       for t in sorted(view.txns, key=lambda x: (x.date, x.guid))
+                       if start <= t.date <= end and t.has_path(CCP_PATH) and t.guid not in _skip]
+        other_lines.append((None, "This run's journals (CCP effect)", effect))
+        rest = round(other - sum(a for _d, _x, a in other_lines), 2)
+        if abs(rest) >= 0.005:
+            other_lines.append((None, "Not attributable to one entry", rest))
         rep.tie = {"before": before, "effect": effect, "after": after, "unmatched": unmatched,
-                   "not_booked": not_booked, "other": round(after - unmatched - not_booked, 2),
+                   "not_booked": not_booked, "other": other, "other_lines": other_lines,
                    "tol": max(1.0, float(n_settled))}
 
         # ---- output ------------------------------------------------------------

@@ -17,6 +17,7 @@ or writes a file.
 from __future__ import annotations
 
 import hashlib
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -268,6 +269,27 @@ def fee_totals(journals: list) -> dict:
 # Already-booked check (RF-1)
 # ---------------------------------------------------------------------------
 
+_PAYEE_STOP = frozenset("""THE AND FOR PAYMENT PURCHASE CARD UPI POS ONLINE TXN REF PVT LTD LIMITED INDIA
+    BANGALORE BENGALURU MUMBAI DELHI GURGAON GURUGRAM CHENNAI PUNE HYDERABAD KOLKATA NOIDA""".split())
+
+
+def payee_words(text: str) -> set:
+    """Upper-case alphabetic words of 3+ letters, without generic wording and city names."""
+    return {w for w in re.findall(r"[A-Z]{3,}", (text or "").upper()) if w not in _PAYEE_STOP}
+
+
+def _same_payee(j, t) -> bool:
+    """CC-12: a hand entry only counts as the same spend when the payee wording agrees. Only spends
+    and refunds have a payee; when either side has no payee words at all the answer is YES (the
+    safe side: a withheld row is checked by a person, a missed duplicate is a double booking)."""
+    if j.kind not in (K_SPEND, K_REFUND):
+        return True
+    a, b = payee_words(j.raw_description or j.description), payee_words(t.description)
+    if not a or not b:
+        return True
+    return any(x == y or (min(len(x), len(y)) >= 4 and (x.startswith(y) or y.startswith(x))) for x in a for y in b)
+
+
 def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     """A book transaction whose Num equals the journal's Num means the journal is
     ALREADY BOOKED (definite). The fallback catches a hand-booked entry: a book
@@ -299,7 +321,7 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
         want = j.amount if j.side == "W" else -j.amount          # expense side: debit +, credit -
         for t in cands:
             dist = min(abs((t.date - j.real_date).days), abs((t.date - j.date).days))
-            if dist > ALREADY_BOOKED_WINDOW_DAYS:
+            if dist > ALREADY_BOOKED_WINDOW_DAYS or not _same_payee(j, t):
                 continue
             hit = next(((p, v) for p, v in t.splits
                         if p != ccp_path and p.startswith(EXPENSE_PREFIXES) and abs(v - want) <= 0.005), None)

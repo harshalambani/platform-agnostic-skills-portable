@@ -208,6 +208,9 @@ def tie_block(rep: RunReport) -> str:
              f"    of which payments with no statement: {money(t['unmatched'])}",
              f"    of which payments on statements not booked: {money(t['not_booked'])}",
              f"    other: {money(t['other'])}"]
+    for d, text, amt in t.get("other_lines") or []:
+        lines.append(f"      {d:%d %b %Y} " if d else "      ")
+        lines[-1] += f"{text[:60]}: {money(amt)}"
     return "\n".join(lines)
 
 
@@ -335,7 +338,9 @@ def write_workbook(rep: RunReport, path: str) -> str:
     sheet("CCP tie-out", ["Line", "Amount"],
           [("Before (book as it stands)", t.get("before")), ("These journals", t.get("effect")),
            ("After (residual)", t.get("after")), ("Payments with no statement", t.get("unmatched")),
-           ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))])
+           ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))]
+          + [(f"  Other: {d:%d %b %Y} {text}" if d else f"  Other: {text}", amt)
+             for d, text, amt in t.get("other_lines") or []])
     sheet("Issues", ["Issue"], ([(f"AI pass stopped: {rep.ai_stop}; {rep.ai_stop_suspense} row(s) in Suspense",)]
                                 if rep.ai_stop else []) + [(i,) for i in rep.issues])
     wb.save(path)
