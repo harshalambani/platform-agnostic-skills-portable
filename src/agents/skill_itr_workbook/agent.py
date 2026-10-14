@@ -859,6 +859,22 @@ def run(
         _write_stub_workbook(output_path, summary)
         return summary
 
+    if mapping_file:
+        # ITR-08: another entity's mapping is never used for this entity.
+        try:
+            known = list(configs.load_entities(entities_path))
+        except Exception:  # noqa: BLE001 -- unreadable entities file is reported elsewhere
+            known = []
+        _src = str(Path(__file__).resolve().parents[2])
+        if _src not in sys.path:
+            sys.path.insert(0, _src)
+        from agents import entity_scope  # noqa: PLC0415
+        verdict, why = entity_scope.check_mapping_owner(mapping_file, entity.key, known)
+        if verdict == "mismatch":
+            summary = f"ERROR: {why}. Nothing was built; pick this entity's own mapping or leave the choice on the saved mapping."
+            _write_stub_workbook(output_path, summary)
+            return summary
+
     auto_derived_note: str | None = None
     if not mapping_file and entity_key:
         # B(i): the entity dropdown never auto-attached the entity's own
@@ -871,7 +887,7 @@ def run(
             mapping_file = str(candidate)
             auto_derived_note = (
                 f"Mapping: auto-derived {candidate.name} for entity {entity.key!r} "
-                "(Entity mapping box was empty)."
+                "(no override chosen)."
             )
 
     effective_form16_pan = form16_pan if form16_pan is not None else (entity.pan or None)

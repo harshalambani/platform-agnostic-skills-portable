@@ -116,8 +116,10 @@ inputs:
     book_from: "entity"
     fy_from: "ay"
   - name: "mapping_file"
-    type: "file"
-    label: "Entity mapping (optional, enables the account-tag resolution + BLOCKED-FOR-REVIEW check)"
+    type: "output_file"
+    label: "Mapping used (default: the entity's saved mapping; pick another only to override)"
+    match: "itr:mappings"
+    entity_from: "entity"
     file_types: [".yaml"]
     required: false
   - name: "regime"

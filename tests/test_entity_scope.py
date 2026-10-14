@@ -190,6 +190,11 @@ def test_every_26as_picker_is_entity_scoped_and_every_other_match_is_listed():
         for i in s.inputs:
             if i.type != "output_file" or not i.match:
                 continue
+            if i.match == entity_scope.MAPPING_MATCH:
+                # ITR-08: the ITR Workbook's mapping picker is entity-scoped too
+                # (it lists itr/mappings, not 26AS workbooks).
+                assert i.entity_from, f"{folder}.{i.name} lists mappings without entity_from"
+                continue
             if i.match in entity_scope.SCOPABLE_MATCHES:
                 assert i.entity_from, f"{folder}.{i.name} lists 26AS workbooks without entity_from"
                 assert any(j.name == i.entity_from and j.type == "select" for j in s.inputs)
