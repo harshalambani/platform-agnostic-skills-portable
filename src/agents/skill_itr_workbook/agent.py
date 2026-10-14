@@ -152,12 +152,22 @@ def _provenance_summary_lines(tree, resolved: dict, mapping_entries: dict | None
     return lines
 
 
+def snippet_file_name(output_path: str, entity_key: str | None) -> str:
+    """ITR-04: the proposed-mappings snippet carries the entity it was
+    written for in its NAME (as well as inside the file). A run with no known
+    entity keeps the plain legacy name."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", entity_key or "")
+    infix = f"-{safe}" if safe else ""
+    return f"{output_path}{infix}-proposed-mappings.yaml"
+
+
 def _mapping_summary(
     tree,
     mapping_file: str | None,
     output_path: str,
     config_path: str,
     model_override: str | None,
+    entity_key: str | None = None,
 ):
     """Resolve every HTML leaf to a tag via the supplied mapping file (plan
     sections 3.1, 4.1). Returns (summary_lines, status, result_or_None).
@@ -234,8 +244,8 @@ def _mapping_summary(
             "NO workbook was built. Run again to get one.",
         )
         return lines, CANCELLED, result, loaded.entries, headline
-    snippet = mapping_engine.proposed_mapping_snippet(result, suggestions)
-    snippet_path = f"{output_path}-proposed-mappings.yaml"
+    snippet = mapping_engine.proposed_mapping_snippet(result, suggestions, entity_key=entity_key)
+    snippet_path = snippet_file_name(output_path, entity_key)
     Path(snippet_path).write_text(snippet, encoding="utf-8")
     lines.append(f"Proposed mappings written to {snippet_path} -- review and paste into the mapping file.")
     if sug_run.stopped_reason:
@@ -321,6 +331,7 @@ def _verify_summary(
     output_path: str,
     config_path: str,
     model_override: str | None,
+    entity_key: str | None = None,
 ):
     """Returns (summary_text, tree, book, failures, book_cross_check_results,
     resolution_result_or_None, form16_data_or_None, year_key_or_None,
@@ -363,7 +374,7 @@ def _verify_summary(
 
     lines.append("")
     mapping_lines, status, result, mapping_entries, headline = _mapping_summary(
-        tree, mapping_file, output_path, config_path, model_override,
+        tree, mapping_file, output_path, config_path, model_override, entity_key,
     )
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
@@ -854,6 +865,7 @@ def run(
 
     summary, tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries = _verify_summary(
         bs_html, book_file, mapping_file, form16_pdf, effective_form16_pan, output_path, config_path, model_override,
+        entity_key=(entity.key if (entity_key or mapping_file) and entity.key != "UNKNOWN" else None),
     )
     if auto_derived_note:
         summary = auto_derived_note + "\n\n" + summary

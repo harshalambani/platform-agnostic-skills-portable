@@ -352,7 +352,7 @@ def test_saved_correction_resolves_on_workbook_rerun(tmp_path):
         entity_key="SYN-IND", entities_path=str(entities_path),
     )
     assert "STATUS: BUILT -- 1 REVIEW ITEM(S)" in summary_before
-    snippet_path = Path(str(out_path) + "-proposed-mappings.yaml")
+    snippet_path = fixture_gen.snippet_for(out_path)
     assert snippet_path.exists()
 
     # UI: load rows, confirm the leaf shows up unmapped, then save a

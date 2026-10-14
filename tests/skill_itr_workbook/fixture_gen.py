@@ -946,3 +946,12 @@ if __name__ == "__main__":
         build_syn_ind_form16_pdf(multi_employer_certificates=True)
     )
     print("Wrote fixtures to", out_dir)
+
+
+def snippet_for(out_path):
+    """The proposed-mappings snippet written next to a workbook. Its name may
+    carry the entity key (ITR-04), so look it up instead of rebuilding it."""
+    from pathlib import Path
+    out_path = Path(out_path)
+    found = sorted(out_path.parent.glob(out_path.name + "*-proposed-mappings.yaml"))
+    return found[0] if found else Path(str(out_path) + "-proposed-mappings.yaml")

@@ -102,7 +102,7 @@ def test_load_review_data_no_rows_reports_clearly(tmp_path):
     data_root = _setup_data_root(tmp_path)
     with patch("ui._config.data_root_dir", return_value=data_root):
         html = ui_mod._load_review_data("SYN-IND")
-    assert "No accounts found" in html
+    assert "No accounts to review" in html
 
 
 def test_load_review_data_glossary_in_extra_panel_not_hand_rolled_template(tmp_path):

@@ -152,6 +152,12 @@ class ReviewSpec:
     # status_classes shows instead. The row's badges and tags are untouched, so
     # a transfer-check badge stays as a reminder. Default "" changes nothing.
     override_status: str = ""
+    # ITR-04. {"text", "cls", "title"?, "rowclass"?, "tag"?}. When set, assigning
+    # a row at once replaces its target-column badge with this one (shown as
+    # "changed, not saved"), swaps its row class and puts `tag` first in _tags,
+    # so a row never keeps the badge of the value it had BEFORE the assign.
+    # Empty (default) changes nothing for any other screen.
+    assigned_badge: dict[str, str] = field(default_factory=dict)
 
     @property
     def payload_box_id(self) -> str:
@@ -492,6 +498,7 @@ _BODY = r"""
   const STATUS_COL = %%STATUS_COL_JSON%%;
   const STATUS_CLASSES = %%STATUS_CLASSES_JSON%%;
   const OVERRIDE_STATUS = %%OVERRIDE_STATUS_JSON%%;
+  const ASSIGNED_BADGE = %%ASSIGNED_BADGE_JSON%%;
 
   const $ = (suffix) => document.getElementById(APP + '-' + suffix);
 
@@ -600,6 +607,14 @@ _BODY = r"""
         const st = cellText(r, STATUS_COL).toLowerCase();
         if (st && Array.isArray(r._tags) && r._tags.length) r._tags[0] = st;
         if (Object.keys(STATUS_CLASSES).length) r._band = STATUS_CLASSES[st] || '';
+      }
+      if (ASSIGNED_BADGE && ASSIGNED_BADGE.text) {
+        // ITR-04: the row now shows the value it was just given, as unsaved.
+        r._badges = r._badges || {};
+        r._badges[TARGET] = { text: ASSIGNED_BADGE.text, cls: ASSIGNED_BADGE.cls || 'grey',
+                              title: (ASSIGNED_BADGE.title || '') + ' (' + chosen + ')' };
+        if (ASSIGNED_BADGE.rowclass) r._rowclass = ASSIGNED_BADGE.rowclass;
+        if (ASSIGNED_BADGE.tag) r._tags = [ASSIGNED_BADGE.tag, 'mapped'];
       }
       r._changed = true;
       n++;
@@ -1215,6 +1230,7 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         ("%%STATUS_COL_JSON%%", js_json(spec.status_col)),
         ("%%STATUS_CLASSES_JSON%%", js_json(spec.status_classes)),
         ("%%OVERRIDE_STATUS_JSON%%", js_json(spec.override_status.strip().lower())),
+        ("%%ASSIGNED_BADGE_JSON%%", js_json(spec.assigned_badge)),
         ("%%DEFAULT_SORT_JSON%%", js_json(default_sort)),
     ):
         html = html.replace(token, value)

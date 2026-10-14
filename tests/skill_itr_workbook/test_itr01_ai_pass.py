@@ -187,7 +187,7 @@ def test_run_with_dead_key_reports_stop_at_top_and_hides_key(tmp_path, monkeypat
     first = summary.splitlines()[0]
     assert first.startswith("WARNING: AI tag suggestions stopped after 1 call(s)")
     assert "refused the key" in first and "3 of 3" in first
-    snippet = Path(f"{out}-proposed-mappings.yaml").read_text(encoding="utf-8")
+    snippet = next(out.parent.glob("out.xlsx*-proposed-mappings.yaml")).read_text(encoding="utf-8")
     for blob in (summary, snippet, caplog.text):
         assert FAKE_KEY not in blob
 
@@ -232,4 +232,4 @@ def test_stop_never_leaves_a_workbook_that_looks_complete(tmp_path, monkeypatch)
     assert summary.splitlines()[0].startswith("ERROR: the run was stopped by the user")
     assert "NO workbook was built" in summary.splitlines()[0]
     assert openpyxl.load_workbook(out).sheetnames == ["Reconciliation"]
-    assert not Path(f"{out}-proposed-mappings.yaml").exists()
+    assert not list(out.parent.glob("out.xlsx*-proposed-mappings.yaml"))

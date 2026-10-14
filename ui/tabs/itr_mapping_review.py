@@ -250,11 +250,41 @@ def _latest_proposed_mappings_path(
         reverse=True,
     )
     for p in candidates:
-        stem = p.name[: -len(suffix)] if p.name.endswith(suffix) else p.stem
-        matched = _snippet_entity_key(stem, match_map)
-        if matched is not None and matched == entity_key:
+        if _snippet_is_for(p, entity_key, match_map):
             return p
     return None
+
+
+ENTITY_HEADER = "# entity:"
+
+
+def _snippet_recorded_entity(path: Path) -> str | None:
+    """ITR-04: the entity key the workbook recorded INSIDE the snippet (a
+    leading "# entity: KEY" comment), or None for an older snippet."""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for _ in range(5):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.startswith(ENTITY_HEADER):
+                    return line[len(ENTITY_HEADER):].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _snippet_is_for(path: Path, entity_key: str, match_map: dict[str, str]) -> bool:
+    """Is this snippet attributable to `entity_key`? The key recorded inside
+    the snippet decides; a snippet that records a DIFFERENT entity is never
+    shown, whatever its filename contains. Only a snippet with no recorded
+    key falls back to the filename token (Layer A)."""
+    recorded = _snippet_recorded_entity(path)
+    if recorded is not None:
+        return recorded == entity_key
+    suffix = "-proposed-mappings.yaml"
+    stem = path.name[: -len(suffix)] if path.name.endswith(suffix) else path.stem
+    return _snippet_entity_key(stem, match_map) == entity_key
 
 
 def _entity_book_path(entity_key: str) -> Path | None:
@@ -321,6 +351,49 @@ def _entity_choices() -> list[tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _load_review_rows(entity_key: str) -> list[dict]:
+    """Rows only -- see _collect_review()."""
+    return _collect_review(entity_key)[0]
+
+
+def _book_leaf_rows(entity_key: str, entries: dict, snippet_by_guid: dict) -> tuple[list[dict], Path | None]:
+    """ITR-04. When the entity has a registered book, list that book's own
+    leaf accounts that nothing maps yet. Hidden and placeholder accounts
+    (and anything under a hidden parent) are never offered. An account is
+    "mapped" when it, or any ancestor, has an entry in the mapping file --
+    mapped accounts are never listed as unmapped."""
+    book_path = _entity_book_path(entity_key)
+    if book_path is None or not book_path.is_file():
+        return [], None
+    try:
+        from agents.gnucash_accounts import load_accounts, postable_accounts  # noqa: PLC0415
+        accounts = load_accounts(book_path)
+    except Exception:
+        return [], book_path
+    by_id = {a.id: a for a in accounts}
+    parents = {a.parent_id for a in accounts if a.parent_id}
+    rows: list[dict] = []
+    for a in postable_accounts(accounts):
+        if a.id in parents or not a.path:
+            continue                     # not a leaf
+        mapped, cur, seen = False, a, set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if cur.id in entries:
+                mapped = True
+                break
+            cur = by_id.get(cur.parent_id)
+        if mapped:
+            continue
+        snip = snippet_by_guid.get(a.id) or {}
+        rows.append({
+            "guid": a.id, "path": a.path, "tag": None, "unmapped": True,
+            "needs_review": False, "suggested": snip.get("suggested"),
+            "note": snip.get("note") or "from the registered book",
+        })
+    return rows, book_path
+
+
+def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     """Build the review table rows for `entity_key`.
 
     Each row: {guid, path, tag, unmapped, needs_review, suggested, note}.
@@ -334,8 +407,9 @@ def _load_review_rows(entity_key: str) -> list[dict]:
     comes from the snippet) and correction (mapping file has entries;
     snippet supplies nothing new) cleanly.
     """
+    info: dict = {"entries": 0, "snippet": None, "snippet_rows": 0, "book": None, "book_rows": 0}
     if not entity_key or not entity_key.strip():
-        return []
+        return [], info
     configs, _tag_vocab, _amc = _itr_modules()
 
     entries: dict = {}
@@ -362,7 +436,10 @@ def _load_review_rows(entity_key: str) -> list[dict]:
             "note": entry.note or "",
         })
 
+    info["entries"] = len(entries)
     snippet_path = _latest_proposed_mappings_path(entity_key)
+    info["snippet"] = snippet_path
+    snippet_by_guid: dict = {}
     if snippet_path is not None:
         try:
             raw = yaml.safe_load(snippet_path.read_text(encoding="utf-8")) or []
@@ -390,10 +467,20 @@ def _load_review_rows(entity_key: str) -> list[dict]:
                     "suggested": suggested_tag,
                     "note": item.get("note", ""),
                 })
-        rows.extend(_apply_book_validation(entity_key, snippet_rows))
+        snippet_rows = _apply_book_validation(entity_key, snippet_rows)
+        info["snippet_rows"] = len(snippet_rows)
+        snippet_by_guid = {r["guid"]: r for r in snippet_rows}
+        rows.extend(snippet_rows)
+
+    book_rows, book_path = _book_leaf_rows(entity_key, entries, snippet_by_guid)
+    info["book"] = book_path
+    have = {r["guid"] for r in rows}
+    added = [r for r in book_rows if r["guid"] not in have]
+    info["book_rows"] = len(added)
+    rows.extend(added)
 
     rows.sort(key=lambda r: (r["path"] or "", r["guid"]))
-    return rows
+    return rows, info
 
 
 def _tag_options() -> list[dict]:
@@ -514,6 +601,7 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         picker_items=picker_items,
         status_options=[
             ("unmapped", "Unmapped only"),
+            ("changed", "Changed, not saved"),
             ("needs_review", "Needs review (LLM-suggested)"),
             ("confirmed", "Confirmed only"),
             ("mapped", "Mapped only (confirmed + needs review)"),
@@ -531,7 +619,40 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         # entity's mapping file is actually removed from it; an unmapped/
         # snippet-only row is view-only, nothing to persist).
         allow_delete=True,
+        # ITR-04: an applied tag shows at once as changed-and-unsaved, never
+        # as UNMAPPED and never as saved/CONFIRMED.
+        assigned_badge={"text": "CHANGED, NOT SAVED", "cls": "violet",
+                        "title": "Applied in this screen; not saved yet",
+                        "rowclass": "accent-orange", "tag": "changed"},
     )
+
+
+def _empty_state_html(entity_key: str, info: dict) -> str:
+    """ITR-04: say WHICH source was empty. Never tells the user to run the
+    workbook when a snippet attributable to this entity already exists."""
+    key = _html.escape(entity_key)
+    parts = [
+        "mapping file: "
+        + (f"{info['entries']} entries, all accounts mapped or none to show" if info["entries"]
+           else "no mapping entries saved yet"),
+    ]
+    if info["snippet"] is not None:
+        parts.append(
+            f"latest workbook run ({_html.escape(Path(info['snippet']).name)}): "
+            "attributable to this entity, but it lists no unmapped accounts"
+        )
+    else:
+        parts.append("workbook run: no proposed-mappings snippet is attributable to this entity")
+    parts.append(
+        "book: " + ("registered, but it has no unmapped leaf accounts" if info["book"] is not None
+                    else "no book registered for this entity")
+    )
+    advice = ""
+    if info["snippet"] is None and info["book"] is None and not info["entries"]:
+        advice = (" Run the ITR Workbook once for this entity (it records the entity in its "
+                  "proposed-mappings file), or register this entity's book.")
+    items = "".join(f"<li>{p}</li>" for p in parts)
+    return f"<p>No accounts to review for <strong>{key}</strong>.</p><ul>{items}</ul><p>{advice.strip()}</p>"
 
 
 def _load_review_data(entity_key: str) -> str:
@@ -540,14 +661,9 @@ def _load_review_data(entity_key: str) -> str:
     if not entity_key or not entity_key.strip():
         return "<p>Select an entity, then click Load.</p>"
 
-    rows = _load_review_rows(entity_key)
+    rows, info = _collect_review(entity_key)
     if not rows:
-        return (
-            f"<p>No accounts found for <strong>{entity_key}</strong>. "
-            "Run the ITR Workbook once for this entity to generate a "
-            "proposed-mappings snippet, or check "
-            "<code>Data/itr/mappings/&lt;entity&gt;.mapping.yaml</code>.</p>"
-        )
+        return _empty_state_html(entity_key, info)
 
     tag_opts = _tag_options()
     tag_desc = {t["tag"]: t["desc"] for t in tag_opts}

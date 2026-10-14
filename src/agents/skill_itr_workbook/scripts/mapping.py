@@ -147,7 +147,21 @@ def resolve_tree(tree: ParsedBalanceSheet, mapping: MappingLoadResult) -> Resolu
     return ResolutionResult(resolved=resolved, unmapped=unmapped, warnings=warnings)
 
 
-def proposed_mapping_snippet(result: ResolutionResult, suggestions: dict | None = None) -> str:
+ENTITY_HEADER = "# entity:"
+
+
+def snippet_recorded_entity(text: str) -> str | None:
+    """The entity key recorded in a proposed-mappings snippet's header
+    (ITR-04), or None for an old snippet that has none."""
+    for line in (text or "").splitlines()[:5]:
+        if line.startswith(ENTITY_HEADER):
+            return line[len(ENTITY_HEADER):].strip() or None
+    return None
+
+
+def proposed_mapping_snippet(
+    result: ResolutionResult, suggestions: dict | None = None, entity_key: str | None = None,
+) -> str:
     """Build a <output>-proposed-mappings.yaml snippet (configs.py's list
     format) for every unmapped leaf, annotated with an LLM suggestion when
     one was found (suggest.py); ready to review and paste into the
@@ -170,4 +184,9 @@ def proposed_mapping_snippet(result: ResolutionResult, suggestions: dict | None 
         if suggestion:
             entry["suggested_by_llm"] = today
         entries.append(entry)
-    return dump_mapping_entries(entries)
+    body = dump_mapping_entries(entries)
+    if entity_key:
+        # ITR-04: record which entity this snippet was written for. A YAML
+        # comment, so the file still loads as the plain list it always was.
+        return f"{ENTITY_HEADER} {entity_key}\n{body}"
+    return body
