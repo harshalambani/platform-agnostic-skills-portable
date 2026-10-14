@@ -29,11 +29,16 @@ CSS = r"""
 <style>
 #%%APP%%-app .badge:empty { display: none; }
 #%%APP%%-app {
-  --inc: #34d399; --ded: #60a5fa; --paid: #c084fc; --rep: #9ca3af; --none: #6b7280;
-  --inc-soft: rgba(52,211,153,.16); --ded-soft: rgba(96,165,250,.16); --paid-soft: rgba(192,132,252,.16);
+  --inc: #f0a868; --ded: #6fd6cf; --paid: #b9a6f5; --rep: #9ca3af; --none: #6b7280;
+  --inc-soft: rgba(240,168,104,.16); --ded-soft: rgba(111,214,207,.16); --paid-soft: rgba(185,166,245,.16);
   --panel: #161616; --line: #333; --muted: #9ca3af; --text: #e0e0e0; --warn: #fbbf24; --ok: #4ade80;
 }
-/* the engine's own screens are dark-only, so these tokens are too */
+/* approved mockup values. The engine's own screens are dark-only, so dark is the
+   base; the light set applies only if a light theme is ever set on an ancestor. */
+:root[data-theme="light"] #%%APP%%-app, .light #%%APP%%-app {
+  --inc: #9a4d00; --ded: #0b6e69; --paid: #5b3fb0;
+  --inc-soft: rgba(154,77,0,.12); --ded-soft: rgba(11,110,105,.12); --paid-soft: rgba(91,63,176,.12);
+}
 /* the side panel replaces the top picker */
 #%%APP%%-app .picker, #%%APP%%-app #%%APP%%-apply-sel { display: none; }
 #%%APP%%-app .tbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 4px 0 8px; }
@@ -70,12 +75,12 @@ CSS = r"""
 #%%APP%%-app .scard, #%%APP%%-app .tagopt {
   border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; margin-bottom: 4px; cursor: pointer;
 }
-#%%APP%%-app .scard:hover, #%%APP%%-app .tagopt:hover { border-color: #60a5fa; }
+#%%APP%%-app .scard:hover, #%%APP%%-app .tagopt:hover { border-color: #3b82f6; }
 #%%APP%%-app .scard.chosen, #%%APP%%-app .tagopt.chosen { border-color: #2563eb; box-shadow: inset 0 0 0 1px #2563eb; }
 #%%APP%%-app .scard .why, #%%APP%%-app .tagopt .note { color: var(--muted); font-size: 11px; }
 #%%APP%%-app .chip { display: inline-block; border: 1px solid var(--line); border-radius: 10px; padding: 1px 8px;
   margin: 0 4px 4px 0; cursor: pointer; font-size: 11px; }
-#%%APP%%-app .chip:hover { border-color: #60a5fa; }
+#%%APP%%-app .chip:hover { border-color: #3b82f6; }
 #%%APP%%-app .covrow { display: flex; justify-content: space-between; padding: 2px 4px; border-radius: 3px; cursor: pointer; }
 #%%APP%%-app .covrow:hover { background: rgba(96,165,250,.14); }
 #%%APP%%-app .covrow.active { background: rgba(37,99,235,.28); }

@@ -334,3 +334,25 @@ def test_tax_filter_hides_non_tax_rows(tmp_path):
         return {all, tax: leaves().length};
     """)
     assert out["tax"] < out["all"]
+
+
+# --- approved colours (mockup values) ---------------------------------------------
+
+def test_tree_css_uses_the_approved_kind_colours_and_no_old_ones():
+    from ui import _review_tree as rt
+    css = rt.CSS.lower()
+    for v in ("#f0a868", "#6fd6cf", "#b9a6f5",      # dark
+              "#9a4d00", "#0b6e69", "#5b3fb0"):     # light
+        assert v in css
+    for old in ("#34d399", "#60a5fa", "#c084fc"):
+        assert old not in css
+    # the legend, the pills and the row markers all read the tokens
+    assert "var(--inc)" in css and "var(--ded)" in css and "var(--paid)" in css
+    html = _html_for_colours()
+    assert "#34d399" not in html.lower() and "#f0a868" in html.lower()
+
+
+def _html_for_colours():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        return _html(Path(d))
