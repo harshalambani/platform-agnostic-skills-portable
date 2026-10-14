@@ -152,6 +152,8 @@ def _run(monkeypatch, tmp_path, book_value):
         return "done"
 
     monkeypatch.setattr("agents.registry.load_run_function", lambda s: fake_run)
+    # the ITR Workbook now declares an AI pass, so the pre-run endpoint check runs; stub it
+    monkeypatch.setattr("ui.tabs._generic._health.check", lambda ep: type("H", (), {"ok": True, "status": "ok", "detail": ""})())
     monkeypatch.setattr("ui._config.output_dir", lambda: tmp_path / "out")
     (tmp_path / "out").mkdir(exist_ok=True)
     values = []
