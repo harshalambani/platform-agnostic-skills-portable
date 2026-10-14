@@ -157,6 +157,7 @@ def apply_corrections_map(
     deletions: set | None = None,
     hold_reasons: dict | None = None,
     row_kinds: dict | None = None,
+    flag_changes: dict | None = None,
 ) -> tuple[int, list]:
     """Load `mapping_file` (an empty/missing file is treated as zero
     entries -- lets a true cold-start entity, which has no mapping file yet,
@@ -235,6 +236,30 @@ def apply_corrections_map(
             suggested_by_llm=None,
         )
         applied += 1
+
+    # ITR-05: flag changes ({guid: {flag: bool}}). A flag is set or cleared on an
+    # existing entry only; a tag change above never touches flags (it passes
+    # the existing ones through), and a flag change never touches the tag or
+    # the note. AL_FOREIGN is for balance-sheet asset tags only.
+    for guid, wanted in (flag_changes or {}).items():
+        entry = entries.get(guid)
+        for flag, on in (wanted or {}).items():
+            bad = ("flag:" + str(flag))
+            if entry is None or flag not in tag_vocab.FLAGS or (
+                    flag == "AL_FOREIGN" and not tag_vocab.is_al_foreign_capable(entry.tag)):
+                invalid.append(((entry.path if entry else paths.get(guid, "")), guid, bad))
+                continue
+            current = list(entry.flags or [])
+            if on and flag not in current:
+                current.append(flag)
+            elif not on and flag in current:
+                current.remove(flag)
+            else:
+                continue
+            entry = MappingEntry(guid=entry.guid, path=entry.path, tag=entry.tag, flags=current,
+                                 note=entry.note, suggested_by_llm=entry.suggested_by_llm)
+            entries[guid] = entry
+            applied += 1
 
     if deletions:
         for guid in deletions:

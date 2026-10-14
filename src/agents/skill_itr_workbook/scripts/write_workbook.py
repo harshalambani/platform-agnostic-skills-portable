@@ -654,6 +654,14 @@ def write_schedule_al_sheet(wb: Workbook, al: sch.ScheduleALSchedule) -> dict:
     sw.header(f"Schedule AL (required if Total Income > {al.threshold:,.2f}: {al.required})")
     for tag, total in al.buckets.items():
         sw.label_value(tag, total)
+    if al.firm_interest or al.firm_pan:
+        sw.header("Interest in firm / AOP (own line; never part of shares and securities)")
+        sw.label_value("Interest in firm / AOP (at cost)", al.firm_interest)
+        sw.label_value("PAN of the firm / AOP", al.firm_pan or "NOT SET", number_format=None)
+        if al.firm_pan_missing:
+            sw.label_value(
+                "WARNING", "Firm interest is mapped but the entity has no partner_firm_pan; "
+                "set it in entities.yaml before filing Schedule AL.", number_format=None)
     layout["total_assets"] = sw.label_value("Total assets (at cost)", al.total_assets)
     layout["total_liabilities"] = sw.label_value("Total liabilities", al.total_liabilities)
     layout["net"] = sw.label_value("Net", al.net)

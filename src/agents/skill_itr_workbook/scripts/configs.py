@@ -165,6 +165,8 @@ class EntityProfile:
                                          # owner. Used by the MAP-34 rule only, per entity.
                                          # Blank entries are dropped. Empty (default) == the
                                          # reimbursement rule never fires for this entity.
+    partner_firm_pan: str = ""           # ITR-05: PAN of the firm/LLP/AOP this entity is a partner
+                                         # of (Schedule AL "interest in firm" PAN). Optional; AAAAA0000A.
     partner_admission_date: str | None = None  # H35-20: date admitted as a partner of
                                          # the firm (YYYY-MM-DD, optional). The partner skill
                                          # counts whole months from it to 31 March of each FY
@@ -221,6 +223,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             card_spend_default_account=str(fields_.get("card_spend_default_account") or "").strip(),
             bank_service_charge_account=str(fields_.get("bank_service_charge_account") or "").strip(),
             card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
+            partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
             partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
                                     if fields_.get("partner_admission_date") else None),
         )
@@ -311,6 +314,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["bank_service_charge_account"] = e.bank_service_charge_account
     if e.card_emi_interest_account:
         d["card_emi_interest_account"] = e.card_emi_interest_account
+    if e.partner_firm_pan:
+        d["partner_firm_pan"] = e.partner_firm_pan
     if e.partner_admission_date:
         d["partner_admission_date"] = e.partner_admission_date
     return d

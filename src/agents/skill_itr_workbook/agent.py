@@ -612,6 +612,7 @@ def _build_and_write_workbook(
             residency=entity.residency, audit_case=audit_case,
             audit_case_basis=entity.audit_case_basis, foreign_report=foreign_report,
             foreign_dividends_in_book=foreign_dividends_in_book,
+            firm_pan=getattr(entity, "partner_firm_pan", ""),
         )
     except foreign_tax_engine.ForeignDoubleCountError as e:
         # ITR-06: a LOUD stop. The same foreign dividends would be counted from

@@ -349,6 +349,7 @@ _FORM_HIDDEN_FIELDS = (
     "partner_comp_accounts", "foreign_dividends_in_book",
     "foreign_dividends_in_book_by_ay",
     "bank_service_charge_account", "card_emi_interest_account",   # CC-03: edited in entities.yaml
+    "partner_firm_pan",                                            # ITR-05: edited in entities.yaml
 )
 # MAP-34 / MAP-35: editable on this tab. A save that passes None for them (an
 # older caller) preserves the stored value; a string (even empty) replaces it.

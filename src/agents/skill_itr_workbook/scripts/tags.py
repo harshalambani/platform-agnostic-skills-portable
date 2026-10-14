@@ -96,6 +96,7 @@ TAGS: dict[str, TagMeta] = {
     "AL_INSURANCE_POLICY": TagMeta(BS, "ScheduleAL", "Insurance policies (cash value), rolled up at cost."),
     "AL_LOANS_GIVEN": TagMeta(BS, "ScheduleAL", "Loans and advances given, rolled up at cost."),
     "AL_CASH_BANK": TagMeta(BS, "ScheduleAL", "Cash and bank balances, rolled up at cost."),
+    "AL_FIRM_INTEREST": TagMeta(BS, "ScheduleAL", "Capital / interest held in a firm, LLP or AOP, rolled up at cost (firm PAN from the entity)."),
     "AL_LIABILITY": TagMeta(BS, "ScheduleAL", "Liabilities, netted against the AL asset total."),
 
     # --- Balancing figures (BS-side, excluded from all Schedule-AL roll-ups) -----
@@ -112,7 +113,7 @@ BS_TAGS = frozenset(name for name, meta in TAGS.items() if meta.sheet in (BS, EI
 # Schedule-AL asset buckets (Assets-section leaves only).
 AL_ASSET_TAGS = frozenset({
     "AL_IMMOVABLE", "AL_JEWELLERY", "AL_VEHICLE", "AL_SECURITIES",
-    "AL_INSURANCE_POLICY", "AL_LOANS_GIVEN", "AL_CASH_BANK",
+    "AL_INSURANCE_POLICY", "AL_LOANS_GIVEN", "AL_CASH_BANK", "AL_FIRM_INTEREST",
 })
 
 # Schedule-AL liability bucket (Liability-section leaves only).
@@ -140,6 +141,13 @@ SECTION_ALLOWED_TAGS: dict[str, frozenset[str]] = {
 # (ITR-06): it feeds Schedule FSI / Form 67 without pulling the account into
 # the Schedule FA asset roll-up the way AL_FOREIGN does.
 FLAGS = frozenset({"AL_FOREIGN", "FOREIGN_INCOME"})
+
+
+def is_al_foreign_capable(tag: str) -> bool:
+    """ITR-05: AL_FOREIGN marks a balance-sheet ASSET as held abroad (it feeds
+    Schedule FA). It is offered only on the AL asset tags; never on a
+    liability, an income/expense tag, PERSONAL or HOLD."""
+    return tag in AL_ASSET_TAGS
 
 
 def is_valid_tag(tag: str) -> bool:
@@ -237,6 +245,7 @@ TAG_SYNONYMS: dict[str, tuple[str, ...]] = {
     "AL_CASH_BANK": ("cash", "bank balance", "savings account"),
     "AL_SECURITIES": ("shares", "stocks", "mutual fund", "demat"),
     "AL_LOANS_GIVEN": ("loan given", "advance given"),
+    "AL_FIRM_INTEREST": ("partner capital", "capital in firm", "firm capital", "llp capital", "aop"),
     "AL_IMMOVABLE": ("property", "land", "flat"),
     "AL_VEHICLE": ("car", "vehicle", "bike"),
     "AL_LIABILITY": ("loan", "borrowing", "credit card"),

@@ -1241,9 +1241,19 @@ class ScheduleALSchedule:
     net: float = 0.0
     threshold: float = 0.0
     required: bool = False
+    firm_pan: str = ""                 # ITR-05: PAN of the firm/LLP/AOP (entity setting), "" when unset
+
+    @property
+    def firm_interest(self) -> float:
+        return self.buckets.get("AL_FIRM_INTEREST", 0.0)
+
+    @property
+    def firm_pan_missing(self) -> bool:
+        return bool(self.firm_interest) and not self.firm_pan
 
 
-def build_schedule_al(resolved: dict, node_by_guid: dict, rules: rules_engine.RulesConfig, total_income: float) -> ScheduleALSchedule:
+def build_schedule_al(resolved: dict, node_by_guid: dict, rules: rules_engine.RulesConfig, total_income: float,
+                      firm_pan: str = "") -> ScheduleALSchedule:
     import tags as tag_vocab
 
     buckets = {tag: _sum_tag(resolved, node_by_guid, tag) for tag in tag_vocab.AL_ASSET_TAGS}
@@ -1253,6 +1263,7 @@ def build_schedule_al(resolved: dict, node_by_guid: dict, rules: rules_engine.Ru
     return ScheduleALSchedule(
         buckets=buckets, total_assets=total_assets, total_liabilities=liabilities,
         net=total_assets - liabilities, threshold=threshold, required=total_income > threshold,
+        firm_pan=(firm_pan or "").strip().upper(),
     )
 
 
@@ -1513,7 +1524,7 @@ def build_all_schedules(
     scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
     residency: str | None = None, filing_date: date | None = None,
     audit_case: bool = False, audit_case_basis: str = "",
-    foreign_report=None, foreign_dividends_in_book: bool = False,
+    foreign_report=None, foreign_dividends_in_book: bool = False, firm_pan: str = "",
 ) -> ITRModel:
     node_by_guid = _node_by_guid(tree)
     # ITR-06: never count the same foreign dividends from the book AND the
@@ -1554,7 +1565,7 @@ def build_all_schedules(
         rules, regime, status, dob, fy_end, unclassified, residency=residency,
         foreign_tax=foreign_tax,
     )
-    schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded)
+    schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded, firm_pan=firm_pan)
     schedule_fa = build_schedule_fa(resolved, node_by_guid, foreign_report=foreign_report)
     interest = build_interest_234(
         computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,

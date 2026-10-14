@@ -448,6 +448,8 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
             "needs_review": bool(entry.suggested_by_llm) and not on_hold,
             "suggested": None,
             "note": entry.note or "",
+            # ITR-05: the foreign-held flag, shown and editable on asset tags.
+            "al_foreign": "AL_FOREIGN" if "AL_FOREIGN" in (entry.flags or []) else "",
         })
 
     info["entries"] = len(entries)
@@ -502,6 +504,7 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
         r["kind"] = _row_kind(r, sections.get(r["guid"]), by_id.get(r["guid"]), _tag_vocab)
         r.setdefault("held", False)
         r.setdefault("hold_reason", "")
+        r.setdefault("al_foreign", "")
 
     rows.sort(key=lambda r: (r["path"] or "", r["guid"]))
     return rows, info
@@ -639,6 +642,13 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
     if suggested:
         badges["suggested"] = {"text": "SUGGESTED", "cls": "blue", "title": _tag_title(suggested, tag_desc)}
 
+    # ITR-05: the foreign flag can be set only on a saved row whose tag is a
+    # Schedule AL asset tag.
+    try:
+        _flagok = (not unmapped) and bool(tag) and bool(row.get("guid")) and tag in _itr_modules()[1].AL_ASSET_TAGS
+    except Exception:
+        _flagok = False
+    row["_flagok"] = bool(_flagok)
     row["_tags"] = tags
     row["_rowclass"] = rowclass
     row["_badges"] = badges
@@ -689,6 +699,7 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
             Column(TARGET_COL, "Current tag"),
             Column("suggested", "Suggested"),
             Column("kind", "Side"),
+            Column("al_foreign", "Foreign (AL)"),
             Column("hold_reason", "Hold reason"),
         ],
         target_col=TARGET_COL,
@@ -717,6 +728,8 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         # entity's mapping file is actually removed from it; an unmapped/
         # snippet-only row is view-only, nothing to persist).
         allow_delete=True,
+        # ITR-05: "Mark foreign" / "Clear foreign" for asset accounts held abroad.
+        flag_toggle=("al_foreign", "Mark foreign", "Clear foreign", "AL_FOREIGN"),
         # ITR-04: an applied tag shows at once as changed-and-unsaved, never
         # as UNMAPPED and never as saved/CONFIRMED.
         # ITR-07: the picker offers, and Apply accepts, only tags valid for each
@@ -851,11 +864,14 @@ def _save_changes(changes_json: str) -> str:
     # snippet-only "remove from view" delete (guid was never persisted, so
     # there's nothing to delete server-side).
     existing_guids: set[str] = set()
+    existing_entries: dict = {}
     if mapping_file.is_file():
         try:
-            existing_guids = set(_configs.load_mapping(mapping_file).entries)
+            existing_entries = dict(_configs.load_mapping(mapping_file).entries)
+            existing_guids = set(existing_entries)
         except Exception:
             existing_guids = set()
+            existing_entries = {}
 
     backup_msg = "No existing mapping file -- nothing to back up (cold start)."
     if mapping_file.is_file():
@@ -869,6 +885,7 @@ def _save_changes(changes_json: str) -> str:
     row_kinds: dict[str, str] = {}
     hold_reasons: dict[str, str] = {}
     deletions: set[str] = set()
+    flag_changes: dict[str, dict] = {}
     skipped_blank = 0
     for ch in changes:
         guid = ch.get("guid")
@@ -879,6 +896,17 @@ def _save_changes(changes_json: str) -> str:
             deletions.add(guid)
             continue
         tag = ch.get(TARGET_COL)
+        # ITR-05: a changed foreign flag on a saved row. A flag-only change
+        # never re-applies (and so never re-approves) the tag.
+        prior = existing_entries.get(guid)
+        if prior is not None and "al_foreign" in ch:
+            want = bool(str(ch.get("al_foreign") or "").strip())
+            if want != ("AL_FOREIGN" in (prior.flags or [])):
+                flag_changes[guid] = {"AL_FOREIGN": want}
+                if ch.get("path"):
+                    paths[guid] = ch["path"]
+                if str(tag or "").strip() == str(ch.get("_orig") or "").strip():
+                    continue
         if not tag or not str(tag).strip():
             skipped_blank += 1
             continue
@@ -899,7 +927,7 @@ def _save_changes(changes_json: str) -> str:
     persisted_deletions = deletions & existing_guids
     view_only_deletions = deletions - existing_guids
 
-    if not corrections and not persisted_deletions:
+    if not corrections and not persisted_deletions and not flag_changes:
         if deletions:
             return (
                 f"Removed {len(view_only_deletions)} unmapped row(s) from view "
@@ -914,6 +942,7 @@ def _save_changes(changes_json: str) -> str:
     applied, invalid = amc.apply_corrections_map(
         str(mapping_file), corrections, str(mapping_file), paths=paths,
         deletions=persisted_deletions, hold_reasons=hold_reasons, row_kinds=row_kinds,
+        flag_changes=flag_changes,
     )
 
     lines = [
@@ -935,7 +964,10 @@ def _save_changes(changes_json: str) -> str:
     if invalid:
         lines.append(f"{len(invalid)} correction(s) NOT applied:")
         for path, guid, tag in invalid:
-            if _tag_vocab.is_valid_entry_tag(tag):
+            if str(tag).startswith("flag:"):
+                lines.append(f"  - {path} (guid {guid}): the foreign flag applies only to a mapped "
+                             "Schedule AL asset account")
+            elif _tag_vocab.is_valid_entry_tag(tag):
                 side = row_kinds.get(guid, _tag_vocab.KIND_UNKNOWN)
                 lines.append(
                     f"  - {path} (guid {guid}): {tag!r} is not valid for a {side} account "

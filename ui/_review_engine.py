@@ -54,9 +54,10 @@ META_ROWCLASS = "_rowclass"
 META_BADGES = "_badges"
 META_LOCKED = "_locked"
 META_NOTE = "_note"
+META_FLAGOK = "_flagok"   # optional: row may take the spec.flag_toggle flag
 META_BAND = "_band"   # optional: one match-type band class, kept apart from _rowclass
 
-_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE, META_BAND)
+_META_KEYS = (META_TAGS, META_ROWCLASS, META_BADGES, META_LOCKED, META_NOTE, META_BAND, META_FLAGOK)
 
 
 @dataclass(frozen=True)
@@ -133,6 +134,12 @@ class ReviewSpec:
     # byte-for-byte unchanged. See itr_mapping_review.py for the first
     # consumer (row-level "delete this mapping entry").
     allow_delete: bool = False
+    # ITR-05. Opt-in: (column key, "set" button label, "clear" button label,
+    # value written when set). Renders two toolbar buttons that set / clear a
+    # yes-or-blank value in that column on the selected rows that carry
+    # `_flagok` (loader-decided). Empty (default) renders nothing and adds no
+    # script, so every other screen is unchanged.
+    flag_toggle: tuple = ()
     # IMP-11. When True, renders "Don't import selected" / "Import selected"
     # toolbar buttons. Rows flagged `_excluded` (by the loader) start struck
     # through and are NOT in the payload's `all_rows`; they travel in
@@ -1172,6 +1179,28 @@ _BODY = r"""
 """
 
 
+_FLAG_JS = """  // ── ITR-05: set / clear a yes-or-blank flag column on the selection ──
+  (function () {
+    const FCOL = %%FLAG_COL%%, FVAL = %%FLAG_VAL%%;
+    function flagSel(on) {
+      if (selected.size === 0) { alert('Select rows first (click / shift-click / ctrl-click).'); return; }
+      let n = 0, skipped = 0;
+      rows.forEach(r => {
+        if (!selected.has(r._idx) || r._deleted) return;
+        if (r._locked || !r._flagok) { skipped++; return; }
+        const want = on ? FVAL : '';
+        if ((r[FCOL] || '') === want) return;
+        r[FCOL] = want; r._changed = true; n++;
+      });
+      if (skipped) alert(skipped + ' selected row(s) skipped: the flag applies only to mapped asset accounts.');
+      if (n) { markDirty(); syncPayload(); renderTable(); }
+    }
+    const a = $('flag-on'), b = $('flag-off');
+    if (a) a.onclick = () => flagSel(true);
+    if (b) b.onclick = () => flagSel(false);
+  })();
+
+""" 
 _EXCLUDE_JS = """
   // ── IMP-11: Don't import / Import selected (opt-in via spec.allow_exclude) ──
   let exclDirty = false;
@@ -1224,6 +1253,16 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         f'title="Mark selected rows for deletion">Remove selected</button>'
         if spec.allow_delete else ""
     )
+    flag_js = ""
+    if spec.flag_toggle:
+        _fcol, _fset, _fclear, _fval = spec.flag_toggle
+        delete_btn_html += (
+            f'<button id="{spec.app_id}-flag-on" title="Mark the selected asset accounts as held abroad">'
+            f'{_attr(_fset)}</button>'
+            f'<button id="{spec.app_id}-flag-off" title="Clear the flag on the selected accounts">'
+            f'{_attr(_fclear)}</button>'
+        )
+        flag_js = _FLAG_JS.replace("%%FLAG_COL%%", js_json(_fcol)).replace("%%FLAG_VAL%%", js_json(_fval))
 
     if spec.allow_exclude:
         exclude_btn_html = (
@@ -1252,6 +1291,7 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
     else:
         exclude_btn_html = exclude_css = exclude_js = excl_filter = ""
         excl_fields = excl_row_js = ""
+    exclude_js = exclude_js + flag_js
 
     default_sort = spec.default_sort or (spec.columns[0].key if spec.columns else "")
 
