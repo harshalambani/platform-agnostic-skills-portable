@@ -1228,6 +1228,8 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
         ("TDS on salary", "tds_salary", tp.tds_salary, "TDS"),
         ("TDS on interest", "tds_interest", tp.tds_interest, "TDS"),
         ("TDS on dividend", "tds_dividend", tp.tds_dividend, "TDS"),
+        ("TDS on partner remuneration (s.194T)", "tds_partner", tp.tds_partner, "TDS"),
+        ("TDS under other sections", "tds_other", tp.tds_other, "TDS"),
         ("TCS", "tcs", tp.tcs, "TDS"),
         ("Advance Tax", "advance", tp.advance_tax, None),
         ("Self-assessment Tax", "sat", tp.self_assessment_tax, None),
@@ -2353,6 +2355,8 @@ _TDS_CATEGORIES = (
     ("TDS on Salary", "tds_salary"),
     ("TDS on Interest", "tds_interest"),
     ("TDS on Dividend", "tds_dividend"),
+    ("TDS on Partner Remuneration (s.194T)", "tds_partner"),
+    ("TDS under Other Sections", "tds_other"),
     ("TCS", "tcs"),
 )
 

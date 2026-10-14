@@ -794,6 +794,11 @@ class TaxesPaidSchedule:
     tds_salary: float = 0.0
     tds_interest: float = 0.0
     tds_dividend: float = 0.0
+    tds_partner: float = 0.0                   # ITR-02: s.194T, own line
+    tds_other: float = 0.0                     # ITR-02: any other named section
+    tds_other_items: list = field(default_factory=list)      # [{path, section, amount}]
+    tds_other_warnings: list = field(default_factory=list)
+    as26_tds_partner: float = 0.0
     tcs: float = 0.0
     total: float = 0.0
     as26_available: bool = False               # CF5
@@ -882,6 +887,27 @@ def build_advance_tax_cumulative(
     return cumulative, running > 0
 
 
+_SECTION_RE = re.compile(r"\b(19\d[A-Z]{0,2}|206C[A-Z]{0,2})\b", re.IGNORECASE)
+
+
+def _tds_other_items(resolved: dict, node_by_guid: dict) -> tuple[list, list]:
+    """TAXPAID_TDS_OTHER leaves, each with the section named in its path
+    (e.g. "TDS 194J"). A leaf with no section named is still credited but
+    warned about -- the credit cannot be tied to a 26AS section otherwise."""
+    items, warnings = [], []
+    for leaf, node in _leaves_for_tag(resolved, node_by_guid, "TAXPAID_TDS_OTHER"):
+        amount = abs(node.total or 0.0)
+        m = _SECTION_RE.search(leaf.path or "")
+        section = m.group(1).upper() if m else "(section not named)"
+        items.append({"path": leaf.path, "section": section, "amount": amount})
+        if not m and amount:
+            warnings.append(
+                f"{leaf.path}: TDS credited under 'other sections' but no section is named in the "
+                "account name; rename it (e.g. 'TDS 194J') so it can be tied to 26AS."
+            )
+    return items, warnings
+
+
 def build_taxes_paid(
     resolved: dict, node_by_guid: dict,
     rules: rules_engine.RulesConfig | None = None, as26_data=None,
@@ -892,12 +918,16 @@ def build_taxes_paid(
     tds_sal = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_SALARY"))
     tds_int = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_INTEREST"))
     tds_div = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_DIVIDEND"))
+    tds_partner = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_PARTNER"))
     tcs = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TCS"))
-    total = adv + sat + tds_sal + tds_int + tds_div + tcs
+    tds_other_items, tds_other_warnings = _tds_other_items(resolved, node_by_guid)
+    tds_other = sum(i["amount"] for i in tds_other_items)
+    total = adv + sat + tds_sal + tds_int + tds_div + tds_partner + tds_other + tcs
 
     as26_available = False
     as26_tds_int = 0.0
     as26_tds_div = 0.0
+    as26_tds_partner = 0.0
     conflicts: list = []
     unclassified_sections: list = []
     if as26_data is not None and as26_data.transactions and rules is not None:
@@ -909,6 +939,8 @@ def build_taxes_paid(
                 as26_tds_int += txn.tax_deducted
             elif category == "dividend":
                 as26_tds_div += txn.tax_deducted
+            elif category == "partner":
+                as26_tds_partner += txn.tax_deducted
             elif category is not None:
                 # Recognised (e.g. "salary") but deliberately NOT part of
                 # this interest/dividend tie-out -- reconciled elsewhere
@@ -938,11 +970,22 @@ def build_taxes_paid(
                 "diff": tds_div - as26_tds_div,
             })
 
+        # ITR-02: partner TDS ties to 26AS section 194T -- only when the rules
+        # carry a "partner" category (AY2026-27 onward); on earlier years a
+        # 194T row stays unrecognised and nothing is compared.
+        if "partner" in tds_sections and abs(as26_tds_partner - tds_partner) > _TIE_OUT_TOLERANCE:
+            conflicts.append({
+                "category": "TDS on partner remuneration (194T)", "book": tds_partner,
+                "as26": as26_tds_partner, "diff": tds_partner - as26_tds_partner,
+            })
+
     adv_cumulative, adv_dated = build_advance_tax_cumulative(resolved, book, year_key)
 
     return TaxesPaidSchedule(
         advance_tax=adv, self_assessment_tax=sat, tds_salary=tds_sal,
         tds_interest=tds_int, tds_dividend=tds_div, tcs=tcs, total=total,
+        tds_partner=tds_partner, tds_other=tds_other, tds_other_items=tds_other_items,
+        tds_other_warnings=tds_other_warnings, as26_tds_partner=as26_tds_partner,
         as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
         tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
         advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
@@ -1077,16 +1120,22 @@ def build_interest_234(
     # present a book number as a 26AS-supported one.
     book_tds = (
         taxes_paid.tds_salary + taxes_paid.tds_interest
-        + taxes_paid.tds_dividend + taxes_paid.tcs
+        + taxes_paid.tds_dividend + taxes_paid.tds_partner + taxes_paid.tds_other
+        + taxes_paid.tcs
     )
-    book_only = taxes_paid.tds_salary + taxes_paid.tcs
+    # Partner TDS is corroborated by 26AS (194T) so it is NOT book-only; other
+    # sections are not read from 26AS and stay on their book figures.
+    book_only = taxes_paid.tds_salary + taxes_paid.tds_other + taxes_paid.tcs
     as26_tds = (
         taxes_paid.tds_salary + taxes_paid.as26_tds_interest
-        + taxes_paid.as26_tds_dividend + taxes_paid.tcs
+        + taxes_paid.as26_tds_dividend + taxes_paid.as26_tds_partner
+        + taxes_paid.tds_other + taxes_paid.tcs
     )
     labels = []
     if taxes_paid.tds_salary > 0:
         labels.append("salary TDS")
+    if taxes_paid.tds_other > 0:
+        labels.append("other-section TDS")
     if taxes_paid.tcs > 0:
         labels.append("TCS")
     credit = interest_234.resolve_tds_credit(

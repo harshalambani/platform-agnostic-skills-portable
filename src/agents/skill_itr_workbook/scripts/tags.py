@@ -77,6 +77,8 @@ TAGS: dict[str, TagMeta] = {
     "TAXPAID_TDS_SALARY": TagMeta(RE, "TaxesPaid", "TDS on salary; sign-flipped, cross-checked against Form 16."),
     "TAXPAID_TDS_INTEREST": TagMeta(RE, "TaxesPaid", "TDS on interest; sign-flipped, cross-checked against 26AS when supplied."),
     "TAXPAID_TDS_DIVIDEND": TagMeta(RE, "TaxesPaid", "TDS on dividend; sign-flipped, cross-checked against 26AS when supplied."),
+    "TAXPAID_TDS_PARTNER": TagMeta(RE, "TaxesPaid", "TDS u/s 194T on partner remuneration / interest; own line, ties to 26AS section 194T."),
+    "TAXPAID_TDS_OTHER": TagMeta(RE, "TaxesPaid", "TDS under any other section; name the section in the account name (e.g. 194J). Credited against tax."),
     "TAXPAID_TCS": TagMeta(RE, "TaxesPaid", "Tax collected at source; sign-flipped, credited against total tax."),
     "TAXPAID_FOREIGN": TagMeta(RE, "TaxesPaid", "Tax paid abroad; NOT TDS and not in the 26AS tie-out. Relief (lower of foreign and Indian tax, per country) is claimed on Form 67."),
 
@@ -233,6 +235,7 @@ TAG_SYNONYMS: dict[str, tuple[str, ...]] = {
     "DED_80G_CANDIDATE": ("donation", "charity"),
     "TAXPAID_TDS_PARTNER": ("partner", "firm", "llp", "194t", "partner remuneration tds"),
     "TAXPAID_TDS_SALARY": ("salary tds", "employer tds"),
+    "TAXPAID_TDS_OTHER": ("tds other", "194j", "194c", "194h", "194i", "professional fees tds", "contract tds", "commission tds", "rent tds"),
     "TAXPAID_TDS_INTEREST": ("bank tds", "fd tds"),
     "TAXPAID_FOREIGN": ("foreign tax", "withholding", "tax paid abroad", "form 67", "dtaa"),
     "TAXPAID_ADV": ("advance tax",),

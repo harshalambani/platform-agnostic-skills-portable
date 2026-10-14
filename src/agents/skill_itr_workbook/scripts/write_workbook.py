@@ -73,6 +73,8 @@ _TAG_LINE_LABEL: dict[str, str] = {
     "TAXPAID_SAT": "Self-assessment tax",
     "TAXPAID_TDS_SALARY": "TDS on salary",
     "TAXPAID_TDS_INTEREST": "TDS on interest",
+    "TAXPAID_TDS_PARTNER": "TDS on partner remuneration / interest (s.194T)",
+    "TAXPAID_TDS_OTHER": "TDS under other sections",
     "TAXPAID_FOREIGN": "Foreign tax paid (not TDS; relief via Form 67)",
     "TAXPAID_TDS_DIVIDEND": "TDS on dividend",
     "TAXPAID_TCS": "TCS",
@@ -538,6 +540,12 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     layout["tds_salary"] = sw.label_value("TDS on salary", tp.tds_salary)
     layout["tds_interest"] = sw.label_value("TDS on interest", tp.tds_interest)
     layout["tds_dividend"] = sw.label_value("TDS on dividend", tp.tds_dividend)
+    layout["tds_partner"] = sw.label_value("TDS on partner remuneration / interest (s.194T)", tp.tds_partner)
+    layout["tds_other"] = sw.label_value("TDS under other sections", tp.tds_other)
+    for it in tp.tds_other_items:
+        sw.label_value(f"  other TDS -- {it['path']} (section {it['section']})", it["amount"])
+    for w in tp.tds_other_warnings:
+        sw.label_value("WARNING", w, number_format=None)
     layout["tcs"] = sw.label_value("TCS", tp.tcs)
     layout["unclassified_rows"] = []   # populated below only when non-empty
     sw.blank()
@@ -547,6 +555,7 @@ def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
     else:
         sw.label_value("26AS TDS on interest (194A)", tp.as26_tds_interest)
         sw.label_value("26AS TDS on dividend (194/194K)", tp.as26_tds_dividend)
+        sw.label_value("26AS TDS on partner remuneration (194T)", tp.as26_tds_partner)
         sw.label_value("Tie-out status", "OK" if tp.tie_out_ok else f"{len(tp.tie_out_conflicts)} CONFLICT(S)", number_format=None)
         for c in tp.tie_out_conflicts:
             sw.label_value(

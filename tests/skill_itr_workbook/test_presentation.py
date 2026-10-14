@@ -910,6 +910,7 @@ _STUB_TP_LAYOUT = {
     # "no unclassified 26AS rows" branch).
     "tds_salary": _Coord("B2"), "tds_interest": _Coord("B3"),
     "tds_dividend": _Coord("B4"), "tcs": _Coord("B5"),
+    "tds_partner": _Coord("B6"), "tds_other": _Coord("B7"),   # ITR-02
     "unclassified_rows": [],
 }
 # 2026-07-26 Build B: `Interest Schedule` / `Dividend Schedule` are now
