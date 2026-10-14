@@ -1020,7 +1020,8 @@ class TieOut:
 
 def find_prior(st: Statement, pool: list) -> Statement | None:
     """The same card's statement that ends just before this one starts (at most
-    CHAIN_MAX_GAP_DAYS between them). None when there is none: a chained
+    CHAIN_MAX_GAP_DAYS between them; 0 is allowed: a cycle change starts the new
+    period on the day the old one ended, while a real overlap never chains). None when there is none: a chained
     tie-out then reports NOT AVAILABLE, it never guesses."""
     if st.period is None:
         return None
@@ -1029,7 +1030,7 @@ def find_prior(st: Statement, pool: list) -> Statement | None:
         if other is st or other.card != st.card or other.period is None:
             continue
         gap = (st.period[0] - other.period[1]).days
-        if 1 <= gap <= CHAIN_MAX_GAP_DAYS and (best is None or other.period[1] > best.period[1]):
+        if 0 <= gap <= CHAIN_MAX_GAP_DAYS and (best is None or other.period[1] > best.period[1]):
             best = other
     return best
 

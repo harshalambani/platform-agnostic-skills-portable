@@ -35,6 +35,7 @@ class RunReport:
     ambiguous: list = field(default_factory=list)
     lines_unmatched: list = field(default_factory=list)
     refused: list = field(default_factory=list)                 # [(Statement, TieOut)]
+    tie_results: dict = field(default_factory=dict)             # id(Statement) -> its real tie-out result
     awaiting: list = field(default_factory=list)                # Statements not yet paid (no later statement)
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
@@ -250,6 +251,33 @@ def build_message(rep: RunReport) -> str:
 # Excel
 # ---------------------------------------------------------------------------
 
+def statement_rows(rep: RunReport) -> list:
+    """CC-09: ONE row per statement, with its real tie-out result. A REFUSED statement is never
+    also listed as PASS (it used to appear once as refused and again, as a settled target, as PASS)."""
+    rows: dict = {}
+
+    def row(st):
+        r = rows.get(id(st))
+        if r is None:
+            res = rep.tie_results.get(id(st), "")
+            r = rows[id(st)] = [st.card, st.label, res, "", ""]
+        return r
+
+    for st, t in rep.refused:
+        r = row(st)
+        r[2], r[4] = t.result, t.gap or t.note
+    for s in rep.settlements:
+        if s.target:
+            r = row(s.target)
+            r[3], r[4] = s.status, "; ".join(x for x in (r[4], s.reason) if x)
+    for st in rep.awaiting:
+        row(st)[3] = "AWAITING PAYMENT"
+    for st in rep.unpaid:
+        r = row(st)
+        r[3], r[4] = "NOT SETTLED", "later statement shows no payment"
+    return [tuple(r) for r in rows.values()]
+
+
 def write_workbook(rep: RunReport, path: str) -> str:
     from openpyxl import Workbook
     from openpyxl.styles import Font
@@ -302,12 +330,7 @@ def write_workbook(rep: RunReport, path: str) -> str:
     sheet("EMI interest",
           ["Card", "Financial year", "EMI interest"],
           [(card, fy, v) for (card, fy), v in ((rep.emi or {}).get("interest") or {}).items()])
-    sheet("Statements",
-          ["Card", "Statement", "Tie-out", "Settlement", "Detail"],
-          [(st.card, st.label, t.result, "", t.gap or t.note) for st, t in rep.refused]
-          + [(s.target.card, s.target.label, "PASS", s.status, s.reason) for s in rep.settlements if s.target]
-          + [(st.card, st.label, "PASS", "AWAITING PAYMENT", "") for st in rep.awaiting]
-          + [(st.card, st.label, "PASS", "NOT SETTLED", "later statement shows no payment") for st in rep.unpaid])
+    sheet("Statements", ["Card", "Statement", "Tie-out", "Settlement", "Detail"], statement_rows(rep))
     t = rep.tie or {}
     sheet("CCP tie-out", ["Line", "Amount"],
           [("Before (book as it stands)", t.get("before")), ("These journals", t.get("effect")),

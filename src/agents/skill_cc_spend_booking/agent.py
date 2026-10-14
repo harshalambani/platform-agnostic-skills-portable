@@ -245,6 +245,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         rep.statements_read = len(res.statements)
         ties_by_id = {id(s): t for s, t in zip(res.statements, res.ties)}
         rep.refused = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
+        rep.tie_results = {id(s): t.result for s, t in zip(res.statements, res.ties)}
 
         _mark("parse")
         passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result)]
