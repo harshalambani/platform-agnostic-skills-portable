@@ -570,7 +570,8 @@ def _build_and_write_workbook(
     scrips = {}
     if Path(scrips_path).is_file():
         scrips = configs.load_scrips(scrips_path)
-    fmv_tables = sch.load_fmv_tables()
+    fmv_tables = sch.load_fmv_tables(
+        overlay_path=Path(scrips_path).parent / sch.CORPORATE_ACTIONS_OVERLAY_NAME)
 
     as26_data = None
     as26_lines: list[str] = []

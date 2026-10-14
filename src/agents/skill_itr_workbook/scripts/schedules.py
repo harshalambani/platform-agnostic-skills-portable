@@ -553,41 +553,68 @@ class CorporateActionsFileError(ValueError):
     """The bundled corporate-actions file is malformed (fail loud)."""
 
 
-def load_corporate_actions(path: str | Path) -> dict:
-    """Read the corporate-actions file. Lines starting with '#' are comments.
-    Every data row needs symbol, ex_date (ISO, AFTER 31-Jan-2018) and ratio
-    (new shares per old share, > 0); anything else raises -- a half-read file
-    must never quietly switch the protection off."""
-    p = Path(path)
+#: Name of the private overlay, looked up next to scrips.yaml (Data\itr\).
+CORPORATE_ACTIONS_OVERLAY_NAME = "corporate_actions_overlay.csv"
+
+
+def _read_corporate_action_rows(path: Path) -> dict:
+    """One file -> {(symbol, ex_date): entry}. Lines starting with '#' are
+    comments. Every data row needs symbol, ex_date (ISO, AFTER 31-Jan-2018) and
+    ratio (new shares per old share, > 0). Anything else raises, naming the file,
+    the row number and the symbol -- a half-read file must never quietly switch
+    the protection off. A symbol+ex_date given twice in ONE file is ambiguous
+    and raises as well."""
     out: dict = {}
-    if not p.is_file():
+    if not path.is_file():
         return out
-    with open(p, encoding="utf-8", newline="") as f:
+    with open(path, encoding="utf-8", newline="") as f:
         lines = [ln for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
     if not lines:
         return out
     reader = csv.DictReader(lines)
     if tuple(reader.fieldnames or ()) != _CA_HEADER:
         raise CorporateActionsFileError(
-            f"{p.name}: header must be {','.join(_CA_HEADER)} (got {','.join(reader.fieldnames or ())})")
+            f"{path.name}: header must be {','.join(_CA_HEADER)} (got {','.join(reader.fieldnames or ())})")
     for n, row in enumerate(reader, start=2):
         sym = (row["symbol"] or "").strip()
+        where = f"{path.name} row {n} ({sym or 'no symbol'})"
         try:
             ex = date.fromisoformat((row["ex_date"] or "").strip())
             ratio = float(row["ratio"])
         except (TypeError, ValueError) as exc:
-            raise CorporateActionsFileError(f"{p.name} row {n}: bad ex_date or ratio ({exc})") from exc
-        if not sym or ratio <= 0 or ex <= FMV_REFERENCE_DATE:
+            raise CorporateActionsFileError(f"{where}: bad ex_date or ratio ({exc})") from exc
+        if not sym or not ratio > 0 or ratio != ratio or ex <= FMV_REFERENCE_DATE:
             raise CorporateActionsFileError(
-                f"{p.name} row {n}: needs a symbol, a ratio > 0 and an ex_date after 31-Jan-2018")
-        out.setdefault(sym, []).append({
+                f"{where}: needs a symbol, a ratio > 0 and an ex_date after 31-Jan-2018")
+        if (sym, ex) in out:
+            raise CorporateActionsFileError(
+                f"{where}: {sym} on {ex.isoformat()} is listed twice in the same file")
+        out[(sym, ex)] = {
             "ex_date": ex, "ratio": ratio, "old_isin": (row["old_isin"] or "").strip(),
             "new_isin": (row["new_isin"] or "").strip(), "note": (row["note"] or "").strip(),
-        })
+        }
     return out
 
 
-def load_fmv_tables(data_dir: str | Path = DATA_DIR) -> FmvTables:
+def _by_symbol(entries: dict) -> dict:
+    out: dict = {}
+    for (sym, _ex), entry in sorted(entries.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        out.setdefault(sym, []).append(entry)
+    return out
+
+
+def load_corporate_actions(path: str | Path, overlay_path: str | Path | None = None) -> dict:
+    """Read the corporate-actions file (and, when given, the private overlay),
+    returned as symbol -> list of actions. The overlay wins on the same
+    symbol + ex_date; an action present in both is applied ONCE. A missing
+    overlay is fine; a malformed one raises."""
+    merged = _read_corporate_action_rows(Path(path))
+    if overlay_path is not None:
+        merged.update(_read_corporate_action_rows(Path(overlay_path)))
+    return _by_symbol(merged)
+
+
+def load_fmv_tables(data_dir: str | Path = DATA_DIR, overlay_path: str | Path | None = None) -> FmvTables:
     data_dir = Path(data_dir)
     nse: dict = {}
     nse_path = data_dir / "nse_bhavcopy_31jan2018.csv"
@@ -604,7 +631,7 @@ def load_fmv_tables(data_dir: str | Path = DATA_DIR) -> FmvTables:
         with open(mf_path, encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
                 mf[row["scheme_name"]] = float(row["fmv_31jan2018"]) if row["fmv_31jan2018"] else None
-    actions = load_corporate_actions(data_dir / "corporate_actions_after_31jan2018.csv")
+    actions = load_corporate_actions(data_dir / "corporate_actions_after_31jan2018.csv", overlay_path)
     return FmvTables(nse=nse, mf=mf, actions=actions)
 
 

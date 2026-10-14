@@ -103,12 +103,14 @@ def test_scrip_without_corporate_action_is_unaffected_by_other_scrips_actions():
 
 # --- the corporate-actions file -------------------------------------------------
 
-def test_bundled_file_ships_with_header_and_no_rows():
+def test_bundled_file_has_the_header_and_loads_cleanly():
     path = SCRIPTS.parent / "data" / "corporate_actions_after_31jan2018.csv"
     assert path.is_file()
-    assert sch.load_corporate_actions(path) == {}
-    assert "symbol,ex_date,ratio,old_isin,new_isin,note" in path.read_text(encoding="utf-8")
-    assert sch.load_fmv_tables().actions == {}
+    text = path.read_text(encoding="utf-8")
+    assert "symbol,ex_date,ratio,old_isin,new_isin,note" in text
+    assert "add the scrips you actually hold" not in text
+    assert sch.load_corporate_actions(path)        # ships WITH rows (see test_itr03_corporate_actions_list.py)
+    assert sch.load_fmv_tables().actions
 
 
 def test_loader_reads_rows(tmp_path):

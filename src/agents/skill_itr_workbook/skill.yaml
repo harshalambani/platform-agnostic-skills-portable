@@ -255,7 +255,14 @@ help:
     instructional prose is rendered as an explicit flagged string, never
     left blank or coerced to zero. If the Entity/Assessment Year dropdowns
     look stale after editing entities.yaml or the rules config, use the
-    refresh button beside them.
+    refresh button beside them. The 31-Jan-2018 price table is never used
+    for a scrip that split or issued bonus shares after that date (the run
+    asks for a scrips.yaml override on today's share basis). The app ships
+    the list of NSE splits and bonus issues; to add or correct an action,
+    put rows in the private overlay Data/itr/corporate_actions_overlay.csv
+    (header symbol,ex_date,ratio,old_isin,new_isin,note; ratio is new shares
+    per old share; the overlay wins on the same symbol and ex-date; a
+    missing overlay is fine, a malformed row stops the run and names it).
   troubleshooting:
     - problem: "\"file truncated -- re-export\" error."
       fix: "The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash."
