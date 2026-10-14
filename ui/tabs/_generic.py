@@ -153,9 +153,9 @@ def llm_precheck_mode(skill) -> str:
     return getattr(getattr(skill, "requires", None), "llm_precheck", "stop") or "stop"
 
 
-def _redact_endpoint_secrets(text, ep: dict) -> str:
-    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
-    out = str(text or "")
+def _endpoint_secret_values(ep: dict) -> list:
+    """The endpoint's API key in every form it may appear (stored, decrypted,
+    and the part after a "scheme:" prefix); only values of 6+ characters."""
     raw = str((ep or {}).get("api_key") or "")
     cands = {raw}
     try:
@@ -163,11 +163,33 @@ def _redact_endpoint_secrets(text, ep: dict) -> str:
             cands.add(str(_config.decrypt_api_key(raw)))
     except Exception:  # noqa: BLE001 - an undecryptable key is simply not shown
         pass
+    pieces = set()
     for c in cands:
         for piece in {c, c.split(":", 1)[-1]}:
             if len(piece) >= 6:
-                out = out.replace(piece, "[key hidden]")
+                pieces.add(piece)
+    return sorted(pieces, key=len, reverse=True)
+
+
+def _redact_endpoint_secrets(text, ep: dict) -> str:
+    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
+    out = str(text or "")
+    for piece in _endpoint_secret_values(ep):
+        out = out.replace(piece, "[key hidden]")
     return out
+
+
+_OWN_ELAPSED_PREFIX = "**Running** — still working"
+
+
+def tick_log(log: list, line: str) -> None:
+    """UI-36: a tick updates only the previous elapsed-time line. Any other
+    status line (the endpoint-check result, a warning) is kept and the tick is
+    added after it."""
+    if log and log[-1].startswith(_OWN_ELAPSED_PREFIX):
+        log[-1] = line
+    else:
+        log.append(line)
 
 
 def llm_precheck_warning(active: str, health, ep: dict) -> str:
@@ -837,10 +859,7 @@ def _make_run_handler(skill: SkillInfo):
             return _colorize_status("\n\n".join(log))
 
         def tick(line: str) -> str:
-            if log and log[-1].startswith("**Running** —"):
-                log[-1] = line
-            else:
-                log.append(line)
+            tick_log(log, line)
             return _colorize_status("\n\n".join(log))
 
         # -- Step 1: validate inputs --
@@ -1074,6 +1093,11 @@ def _make_run_handler(skill: SkillInfo):
         # CC-08: password inputs are never written to the run log.
         secrets = [str(input_map.get(i.name) or "") for i in skill.inputs
                    if getattr(i, "type", "") == "password"]
+        # UI-36: the endpoint key never reaches the saved log either.
+        secrets += _endpoint_secret_values(ep)
+        # UI-36: ONE log file per run, allocated once; every exit path that
+        # saves writes to this same path.
+        log_path = _runlog.new_log_path(skill.name)
 
         def outcome(text):
             # the final error / result text also goes in the "Full log" file
@@ -1104,7 +1128,6 @@ def _make_run_handler(skill: SkillInfo):
                 agent_reply = yield from _runner.run_with_progress(work, tick_factory)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
-            log_path = _runlog.new_log_path(skill.name)
             _runlog.write_run_log(
                 log_path, skill_name=skill.name, run_log_lines=log, traceback_text=tb,
                 secrets=secrets,
@@ -1119,14 +1142,17 @@ def _make_run_handler(skill: SkillInfo):
 
         # -- Handle cancellation --
         if agent_reply == "__CANCELLED__":
-            yield add("**Cancelled** — run was stopped by user."), gr.update(interactive=False, value=None), gr.update()
+            msg = add("**Cancelled** — run was stopped by user.")
+            _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+                                  secrets=secrets)
+            outcome("Cancelled: the run was stopped by the user.")
+            yield msg, gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Log this run (agent-mode: `log` also carries the tool-call
         #    transcript) regardless of outcome, so a silently-absorbed tool
         #    failure inside a successful-looking agent reply still leaves a
         #    trace on disk. --
-        log_path = _runlog.new_log_path(skill.name)
         _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
                               secrets=secrets)
 
