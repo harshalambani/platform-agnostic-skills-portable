@@ -416,7 +416,8 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     comes from the snippet) and correction (mapping file has entries;
     snippet supplies nothing new) cleanly.
     """
-    info: dict = {"entries": 0, "snippet": None, "snippet_rows": 0, "book": None, "book_rows": 0}
+    info: dict = {"entries": 0, "snippet": None, "snippet_rows": 0, "book": None, "book_rows": 0,
+                  "hidden": 0, "has_book": False}
     if not entity_key or not entity_key.strip():
         return [], info
     configs, _tag_vocab, _amc = _itr_modules()
@@ -500,14 +501,61 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     rows.extend(added)
 
     by_id = {a.id: a for a in (book[1] or [])}
+    has_book = book[1] is not None
+    info["has_book"] = has_book
+    if has_book:
+        # ITR-07: hidden / placeholder accounts are never listed as work to do
+        # (counted, so the screen can say how many were left out).
+        from agents.gnucash_accounts import postable_accounts  # noqa: PLC0415
+        ok = {a.id for a in postable_accounts(book[1])}
+        parent_ids = {a.parent_id for a in book[1] if a.parent_id}
+        info["hidden"] = sum(1 for a in book[1]
+                             if not a.is_root and a.id not in parent_ids and a.id not in ok)
+        rows = [r for r in rows
+                if not (r.get("unmapped") and r["guid"] in by_id and r["guid"] not in ok)]
+    ts = _tag_suggest()
     for r in rows:
         r["kind"] = _row_kind(r, sections.get(r["guid"]), by_id.get(r["guid"]), _tag_vocab)
         r.setdefault("held", False)
         r.setdefault("hold_reason", "")
         r.setdefault("al_foreign", "")
+        # ITR-07: a saved entry whose account is gone from the registered book.
+        r["_stale"] = bool(has_book and r["guid"] not in by_id)
+        segs = ts.split_path(r["path"])
+        r["_segs"] = segs
+        r["_pk"] = ":".join(s.lower() for s in segs[:-1])
+        r["_sg"] = {} if r["_stale"] else {
+            t: [round(sc, 6), h] for t, (sc, h) in ts.word_scores(r["path"], r["kind"]).items()}
 
-    rows.sort(key=lambda r: (r["path"] or "", r["guid"]))
+    # ITR-07: GnuCash tree order (segment by segment), not plain text order.
+    rows.sort(key=lambda r: (ts.book_key(r["path"]), r["guid"]))
+    for i, r in enumerate(rows):
+        r["_ord"] = i
     return rows, info
+
+
+def _tag_suggest():
+    _itr_modules()
+    import tag_suggest  # noqa: PLC0415
+    return tag_suggest
+
+
+def _tree_config(info: dict) -> dict:
+    """Presentation data for the engine's tree mode (labels, groups, kinds)."""
+    ts = _tag_suggest()
+    _configs, tv, _amc = _itr_modules()
+    tag_meta = {t: {"label": ts.TAG_LABELS.get(t, t), "k": ts.kind(t), "tax": ts.affects_tax(t)}
+                for t in tv.TAGS}
+    return {
+        "tags": tag_meta,
+        "order": list(tv.TAGS),
+        "groups": [[name, list(tgs)] for name, tgs in ts.GROUPS],
+        "hold_group": ts.GROUPS[-1][0],
+        "hidden": int(info.get("hidden") or 0),
+        "has_book": bool(info.get("has_book")),
+        "min_score": ts.MIN_SCORE, "top_fraction": ts.TOP_FRACTION,
+        "max_suggestions": ts.MAX_SUGGESTIONS, "sibling_bonus": ts.SIBLING_BONUS,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +667,14 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
     suggested = row.get("suggested")
 
     badges: dict = {}
-    if row.get("held"):
+    if row.get("_stale"):
+        # ITR-07: the saved entry's account is not in the book any more.
+        tags = ["stale"]
+        rowclass = ""
+        badges[TARGET_COL] = {"text": "NOT IN BOOK", "cls": "grey",
+                              "title": "This saved entry's account is not in the registered book. "
+                                       "It cannot take a tag; remove it if it is obsolete."}
+    elif row.get("held"):
         # ITR-07: on hold on purpose. Never green, never "confirmed".
         tags = ["held", "unmapped"]
         rowclass = "accent-orange"
@@ -635,9 +690,13 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
         rowclass = "accent-amber"
         badges[TARGET_COL] = {"text": "NEEDS REVIEW", "cls": "amber", "title": _tag_title(tag, tag_desc)}
     else:
-        tags = ["confirmed", "mapped"]
-        rowclass = "accent-green"
-        badges[TARGET_COL] = {"text": "CONFIRMED", "cls": "green", "title": _tag_title(tag, tag_desc)}
+        # ITR-07: a mapped row is plain text -- no green badge, no green band.
+        # Its tax-kind stripe and pill are drawn by the screen itself.
+        tags = ["mapped"]
+        rowclass = ""
+        # Tooltip only: an empty badge is hidden by the tree CSS, the cell
+        # shows the tag as plain text and keeps its description on hover.
+        badges[TARGET_COL] = {"text": "", "cls": "plain", "title": _tag_title(tag, tag_desc)}
 
     if suggested:
         badges["suggested"] = {"text": "SUGGESTED", "cls": "blue", "title": _tag_title(suggested, tag_desc)}
@@ -679,8 +738,8 @@ def _build_glossary_html(tag_opts: list[dict]) -> str:
         'background:#161616;padding:6px 10px;color:#e0e0e0;'
         'font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,sans-serif;">'
         f'<summary style="cursor:pointer;font-weight:600;font-size:12px;color:#ccc;">'
-        f'Tag glossary ({len(tag_opts)} tags) -- search vocabulary via the "Assign tag" '
-        'box above</summary>'
+        f'Tag glossary ({len(tag_opts)} tags) -- search vocabulary in the "Find a tag" box on the right'
+        '</summary>'
         '<div style="max-height:240px;overflow-y:auto;margin-top:6px;">'
         f'<table style="width:100%;border-collapse:collapse;"><tbody>{rows_html}</tbody></table>'
         '</div></details>'
@@ -691,7 +750,8 @@ def _build_glossary_html(tag_opts: list[dict]) -> str:
 # Spec + load
 # ---------------------------------------------------------------------------
 
-def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -> ReviewSpec:
+def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str,
+          tree: dict | None = None) -> ReviewSpec:
     return ReviewSpec(
         app_id=APP_ID,
         columns=[
@@ -704,7 +764,7 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
         ],
         target_col=TARGET_COL,
         payload_var=PAYLOAD_VAR,
-        picker_label="Assign tag:",
+        picker_label="",
         picker_placeholder="Type to search tags…",
         picker_items=picker_items,
         status_options=[
@@ -712,8 +772,9 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
             ("held", "On hold only"),
             ("changed", "Changed, not saved"),
             ("needs_review", "Needs review (LLM-suggested)"),
-            ("confirmed", "Confirmed only"),
-            ("mapped", "Mapped only (confirmed + needs review)"),
+            ("mapped", "Mapped only"),
+            ("tax", "Affects tax only"),
+            ("stale", "Not in book"),
         ],
         status_label="Show:",
         default_sort="path",
@@ -739,7 +800,8 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str) -
                                 "key": "hold_reason", "default": "held for review"}},
         assigned_badge={"text": "CHANGED, NOT SAVED", "cls": "violet",
                         "title": "Applied in this screen; not saved yet",
-                        "rowclass": "accent-orange", "tag": "changed"},
+                        "tag": "changed"},
+        tree=tree,
     )
 
 
@@ -803,7 +865,7 @@ def _load_review_data(entity_key: str) -> str:
 
     picker_items = _picker_items(tag_opts)
     glossary_html = _build_glossary_html(tag_opts)
-    spec = _spec(picker_items, entity_key, glossary_html)
+    spec = _spec(picker_items, entity_key, glossary_html, _tree_config(info))
     return payload_box_css(spec.payload_box_id) + EXPLAINER_HTML + build_html(spec, rows)
 
 

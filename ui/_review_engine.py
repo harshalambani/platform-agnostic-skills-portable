@@ -180,6 +180,11 @@ class ReviewSpec:
     # answer in each row's `key`; assigning any other value clears that key.
     # Cancel assigns nothing. Default {} changes nothing.
     value_prompts: dict = field(default_factory=dict)
+    # ITR-07. Opt-in "tree + side panel" mode (see ui/_review_tree.py): a dict of
+    # presentation data (tag labels, groups, ...). None (the default) renders
+    # nothing extra: every hook in the template expands to its original text, so
+    # the other review tabs are byte-for-byte unchanged.
+    tree: dict | None = None
 
     @property
     def payload_box_id(self) -> str:
@@ -496,14 +501,14 @@ _BODY = r"""
 
   %%EXTRA_PANEL%%
 
-  <div class="scroll-wrapper">
+%%TREE_OPEN%%  <div class="scroll-wrapper">
     <table id="%%APP%%-table">
       <colgroup id="%%APP%%-cols"></colgroup>
       <thead id="%%APP%%-thead"><tr></tr></thead>
       <tbody id="%%APP%%-tbody"></tbody>
     </table>
   </div>
-</div>
+%%TREE_CLOSE%%</div>
 
 <script type="text/plain" id="%%APP%%-init-code">
 (function() {
@@ -1002,7 +1007,7 @@ _BODY = r"""
     });
     thead.appendChild(fRow);
 
-    // Status filter matches against the loader-computed _tags list, so a row
+    %%TREE_PRE%%// Status filter matches against the loader-computed _tags list, so a row
     // can belong to several buckets at once (e.g. "suspense" AND "contra").
     let filtered = statusFilter
       ? rows.filter(r => (r._tags || []).indexOf(statusFilter) !== -1)
@@ -1029,9 +1034,9 @@ _BODY = r"""
       return 0;
     });
 
-    tbody.innerHTML = '';
+    %%TREE_SEQ%%tbody.innerHTML = '';
     filtered.forEach(r => {
-      const tr = document.createElement('tr');
+      %%TREE_HEAD%%const tr = document.createElement('tr');
       // UI-14: an overridden row shows the override colour, not a flag tone.
       const overridden = !!(OVERRIDE_STATUS && STATUS_COL &&
         cellText(r, STATUS_COL).trim().toLowerCase() === OVERRIDE_STATUS);
@@ -1040,7 +1045,7 @@ _BODY = r"""
       if (r._band) tr.classList.add(r._band);
       if (selected.has(r._idx)) tr.classList.add('selected');
       if (r._locked) tr.classList.add('locked');
-      if (r._deleted) tr.classList.add('row-deleted');
+      %%TREE_ROW%%if (r._deleted) tr.classList.add('row-deleted');
 %%EXCL_ROW_JS%%      tr.dataset.idx = r._idx;
       if (r._deleted) tr.title = 'Marked for deletion';
       else if (r._note) tr.title = r._note;
@@ -1069,7 +1074,7 @@ _BODY = r"""
           html += '<span class="changed-marker">&#9998;</span>';
           td.title = 'Edited. Original: ' + orig;
         }
-        td.innerHTML = html;
+        %%TREE_CELL%%td.innerHTML = html;
         tr.appendChild(td);
       });
 
@@ -1077,8 +1082,8 @@ _BODY = r"""
       tbody.appendChild(tr);
     });
 
-    shownCount = filtered.length;
-    updateStats();
+    shownCount = filtered%%TREE_COUNT%%.length;
+    updateStats();%%TREE_AFTER%%
     if (clearAll) {
       const nf = Object.keys(colFilters).filter(k => colFilters[k]).length;
       clearAll.style.display = nf ? '' : 'none';
@@ -1156,7 +1161,7 @@ _BODY = r"""
   // replaces every td and Chromium then drops the dblclick of a double-click.
   function handleRowClick(idx, e) {
     if (e.shiftKey && lastClickIdx !== null) {
-      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx));
+      const all = Array.prototype.map.call($('tbody').children, tr => parseInt(tr.dataset.idx))%%TREE_NAN%%;
       const a = all.indexOf(lastClickIdx), b = all.indexOf(idx);
       if (a >= 0 && b >= 0) for (let i = Math.min(a,b); i <= Math.max(a,b); i++) selected.add(all[i]);
     } else if (e.ctrlKey || e.metaKey) {
@@ -1169,10 +1174,10 @@ _BODY = r"""
       if (selected.has(parseInt(tr.dataset.idx))) tr.classList.add('selected');
       else tr.classList.remove('selected');
     });
-    updateStats();
+    updateStats();%%TREE_SEL%%
   }
 
-  renderTable();
+%%TREE_JS%%  renderTable();
 })();
 </script>
 <img src="data:," onerror="eval(document.getElementById('%%APP%%-init-code').textContent)" style="display:none">
@@ -1295,8 +1300,16 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
 
     default_sort = spec.default_sort or (spec.columns[0].key if spec.columns else "")
 
-    html = _CSS + _BODY
+    if spec.tree:
+        from . import _review_tree  # noqa: PLC0415 -- only for screens that opt in
+        tree_tokens = _review_tree.tokens(spec.tree, js_json)
+        html = _CSS + _review_tree.CSS + _BODY
+    else:
+        from . import _review_tree  # noqa: PLC0415
+        tree_tokens = _review_tree.NO_TOKENS
+        html = _CSS + _BODY
     for token, value in (
+        *tree_tokens.items(),
         ("%%STATUS_FILTER_HTML%%", status_html),
         ("%%APPLY_MATCH_HTML%%", apply_match_html),
         ("%%DELETE_BTN_HTML%%", delete_btn_html),

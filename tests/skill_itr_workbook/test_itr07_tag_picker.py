@@ -480,7 +480,7 @@ def test_apply_of_wrong_side_tag_is_refused_and_changes_nothing(tmp_path):
         pick(APP, k);
         const tr = $id(APP + '-tbody').children.find(t => Number(t.dataset.idx) === inc);
         tr.onclick({ shiftKey: false, ctrlKey: true, metaKey: false });
-        const mid = view(APP).map(r => r.cls.includes('selected'));
+        const mid = view(APP).filter(r => !Number.isNaN(r.idx)).map(r => r.cls.includes('selected'));
         applySel(APP);
         return {mid, alerts: __alerts, before, after: view(APP), p: payload(%s)};
     """ % json.dumps(ui_mod.PAYLOAD_VAR), tmp_path, PRE)
