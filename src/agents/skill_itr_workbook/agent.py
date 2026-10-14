@@ -690,6 +690,8 @@ def _build_and_write_workbook(
             "Workbook: FMV lookup FAILED for scrip(s) (fail-loud, review scrips.yaml): "
             + ", ".join(model.capital_gains.unresolved_scrips)
         )
+        for msg in model.capital_gains.fmv_failures:
+            lines.append(f"Workbook: FMV corporate action -- {msg}")
     if not model.capital_gains.reconciliation_ok:
         # "Banner, no abort" (2026-07-19 CG gain-split-vs-action fix): the
         # workbook above has ALREADY been written in full, with a matching

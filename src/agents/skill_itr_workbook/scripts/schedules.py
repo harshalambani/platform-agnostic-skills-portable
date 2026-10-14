@@ -533,6 +533,58 @@ def build_other_sources(
 class FmvTables:
     nse: dict            # symbol -> {isin, fmv_31jan2018}
     mf: dict              # scheme_name -> fmv_31jan2018
+    #: ITR-03: corporate actions (split / bonus / ...) with an ex-date AFTER
+    #: 31-Jan-2018, from data/corporate_actions_after_31jan2018.csv.
+    #: symbol -> list of {ex_date, ratio, old_isin, new_isin, note}.
+    actions: dict = field(default_factory=dict)
+
+
+#: Where a lot's FMV came from (the CG schedule's "FMV source" column).
+FMV_SOURCE_OVERRIDE = "override (scrips.yaml)"
+FMV_SOURCE_TABLE = "bundled table"
+FMV_SOURCE_CA_ADJUSTED = "corporate-action adjusted"
+
+#: Grandfathering reference date; a corporate action must fall after it.
+FMV_REFERENCE_DATE = date(2018, 1, 31)
+_CA_HEADER = ("symbol", "ex_date", "ratio", "old_isin", "new_isin", "note")
+
+
+class CorporateActionsFileError(ValueError):
+    """The bundled corporate-actions file is malformed (fail loud)."""
+
+
+def load_corporate_actions(path: str | Path) -> dict:
+    """Read the corporate-actions file. Lines starting with '#' are comments.
+    Every data row needs symbol, ex_date (ISO, AFTER 31-Jan-2018) and ratio
+    (new shares per old share, > 0); anything else raises -- a half-read file
+    must never quietly switch the protection off."""
+    p = Path(path)
+    out: dict = {}
+    if not p.is_file():
+        return out
+    with open(p, encoding="utf-8", newline="") as f:
+        lines = [ln for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    if not lines:
+        return out
+    reader = csv.DictReader(lines)
+    if tuple(reader.fieldnames or ()) != _CA_HEADER:
+        raise CorporateActionsFileError(
+            f"{p.name}: header must be {','.join(_CA_HEADER)} (got {','.join(reader.fieldnames or ())})")
+    for n, row in enumerate(reader, start=2):
+        sym = (row["symbol"] or "").strip()
+        try:
+            ex = date.fromisoformat((row["ex_date"] or "").strip())
+            ratio = float(row["ratio"])
+        except (TypeError, ValueError) as exc:
+            raise CorporateActionsFileError(f"{p.name} row {n}: bad ex_date or ratio ({exc})") from exc
+        if not sym or ratio <= 0 or ex <= FMV_REFERENCE_DATE:
+            raise CorporateActionsFileError(
+                f"{p.name} row {n}: needs a symbol, a ratio > 0 and an ex_date after 31-Jan-2018")
+        out.setdefault(sym, []).append({
+            "ex_date": ex, "ratio": ratio, "old_isin": (row["old_isin"] or "").strip(),
+            "new_isin": (row["new_isin"] or "").strip(), "note": (row["note"] or "").strip(),
+        })
+    return out
 
 
 def load_fmv_tables(data_dir: str | Path = DATA_DIR) -> FmvTables:
@@ -552,7 +604,8 @@ def load_fmv_tables(data_dir: str | Path = DATA_DIR) -> FmvTables:
         with open(mf_path, encoding="utf-8", newline="") as f:
             for row in csv.DictReader(f):
                 mf[row["scheme_name"]] = float(row["fmv_31jan2018"]) if row["fmv_31jan2018"] else None
-    return FmvTables(nse=nse, mf=mf)
+    actions = load_corporate_actions(data_dir / "corporate_actions_after_31jan2018.csv")
+    return FmvTables(nse=nse, mf=mf, actions=actions)
 
 
 class FmvNotFoundError(Exception):
@@ -560,32 +613,78 @@ class FmvNotFoundError(Exception):
     and no bundled NSE/MF row -- e.g. a BSE-only grandfathered scrip."""
 
 
-def resolve_fmv(symbol: str, scrips: dict, fmv_tables: FmvTables) -> float:
+class FmvCorporateActionError(FmvNotFoundError):
+    """A table value exists but the scrip had a corporate action after
+    31-Jan-2018: the table price is on a different share basis from the lot's
+    quantity, so using it would silently mis-state the grandfathered cost."""
+
+
+def _strip_exchange_suffix(symbol: str) -> str:
+    """'ABC.NS' -> 'ABC'. Only the NSE suffix: a '.BO' (BSE) symbol is never
+    assumed to be the NSE-listed share of the same name."""
+    return symbol[:-3] if symbol.upper().endswith(".NS") else symbol
+
+
+def _corporate_actions_for(symbols: tuple, isin: str | None, fmv_tables: FmvTables) -> list:
+    hits = []
+    for s in symbols:
+        hits.extend(fmv_tables.actions.get(s, []))
+    if isin:
+        for acts in fmv_tables.actions.values():
+            hits.extend(a for a in acts if a["old_isin"] == isin and a not in hits)
+    return hits
+
+
+def resolve_fmv_with_source(symbol: str, scrips: dict, fmv_tables: FmvTables) -> tuple[float, str]:
     """Resolve FMV as at 31-01-2018 for `symbol` (a GnuCash commodity id, e.g.
-    'SYNCORP.NS'): scrips.yaml override (fmv_31jan2018 or table_ref) first,
-    else direct NSE bhavcopy match, else MF NAV match by scheme_name alias.
+    'SYNCORP.NS') and say where it came from.
+
+    Order: scrips.yaml override (keyed as given OR with the .NS suffix
+    stripped; used as-is, never adjusted) first, else the bundled NSE table
+    (looked up as given, then stripped), else the MF NAV table. A table value
+    for a scrip with a corporate action after 31-Jan-2018 is NEVER returned:
+    it raises FmvCorporateActionError asking for a scrips.yaml override.
     Fails loud (FmvNotFoundError) when nothing matches -- never fuzzy-matched
     into a tax figure (plan D14a)."""
+    bare = _strip_exchange_suffix(symbol)
     ref = scrips.get(symbol)
+    if ref is None and bare != symbol:
+        ref = scrips.get(bare)
     if ref is not None and ref.fmv_31jan2018 is not None:
-        return ref.fmv_31jan2018
+        return ref.fmv_31jan2018, FMV_SOURCE_OVERRIDE
     table_ref = ref.table_ref if ref is not None else None
 
     nse_key = symbol
     if table_ref and table_ref.startswith("bundled-fmv-table:"):
         nse_key = table_ref.split(":", 1)[1]
-    nse_row = fmv_tables.nse.get(nse_key) or fmv_tables.nse.get(symbol)
+    nse_row = (fmv_tables.nse.get(nse_key) or fmv_tables.nse.get(symbol)
+               or fmv_tables.nse.get(_strip_exchange_suffix(nse_key)) or fmv_tables.nse.get(bare))
     if nse_row is not None and nse_row["fmv_31jan2018"] is not None:
-        return nse_row["fmv_31jan2018"]
+        acts = _corporate_actions_for(
+            tuple({symbol, bare, nse_key, _strip_exchange_suffix(nse_key)}), nse_row.get("isin"), fmv_tables)
+        if acts:
+            first = min(acts, key=lambda a: a["ex_date"])
+            raise FmvCorporateActionError(
+                f"the bundled 31-01-2018 price for {symbol!r} is on the pre-corporate-action share basis "
+                f"(ex-date {first['ex_date'].isoformat()}, ratio {first['ratio']:g}); it is not used "
+                f"silently. Add a scrips.yaml entry for {symbol!r} with fmv_31jan2018 stated on the "
+                "basis of the shares you hold today."
+            )
+        return nse_row["fmv_31jan2018"], FMV_SOURCE_TABLE
 
     mf_key = table_ref.split(":", 1)[1] if table_ref else symbol
     if mf_key in fmv_tables.mf and fmv_tables.mf[mf_key] is not None:
-        return fmv_tables.mf[mf_key]
+        return fmv_tables.mf[mf_key], FMV_SOURCE_TABLE
 
     raise FmvNotFoundError(
         f"no FMV-31-01-2018 found for {symbol!r} -- add an override to scrips.yaml "
         f"(NSE-only bundled coverage; BSE-only scrips need manual FMV)"
     )
+
+
+def resolve_fmv(symbol: str, scrips: dict, fmv_tables: FmvTables) -> float:
+    """The FMV alone; see resolve_fmv_with_source."""
+    return resolve_fmv_with_source(symbol, scrips, fmv_tables)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +705,7 @@ class CGLotRow:
     fmv_used: float | None
     taxable_gain: float
     attribution: str
+    fmv_source: str = ""        # ITR-03: override / bundled table / corporate-action adjusted
 
 
 @dataclass
@@ -623,6 +723,7 @@ class CapitalGainsSchedule:
     reconciliation_ok: bool = True
     reconciliation_diff: float = 0.0
     unresolved_scrips: list = field(default_factory=list)  # symbols with no FMV
+    fmv_failures: list = field(default_factory=list)       # ITR-03: reason text per failed scrip
     split_year_exemption_prorated: bool = False   # CF4: True when the 112A
                                                     # exemption was allocated
                                                     # pro-rata across the
@@ -685,15 +786,19 @@ def build_capital_gains(
             term = _term(lot, book)
             grandfathered = False
             fmv_used = None
+            fmv_source = ""
             taxable = lot.gain
 
             if term == "LT" and lot.buy_date is not None and lot.buy_date <= cutoff:
                 grandfathered = True
                 symbol = book.accounts[lot.account_guid].commodity_id or lot.scrip
                 try:
-                    fmv = resolve_fmv(symbol, scrips, fmv_tables)
-                except FmvNotFoundError:
-                    unresolved.append(symbol)
+                    fmv, fmv_source = resolve_fmv_with_source(symbol, scrips, fmv_tables)
+                except FmvNotFoundError as exc:
+                    if symbol not in unresolved:
+                        unresolved.append(symbol)
+                        if isinstance(exc, FmvCorporateActionError):
+                            sched.fmv_failures.append(f"{symbol}: {exc}")
                     fmv = None
                 if fmv is not None:
                     fmv_used = fmv
@@ -704,7 +809,7 @@ def build_capital_gains(
                 scrip=lot.scrip, sale_date=lot.sale_date, buy_date=lot.buy_date, term=term,
                 qty=lot.qty, cost=lot.cost, proceeds=lot.proceeds, booked_gain=lot.gain,
                 grandfathered=grandfathered, fmv_used=fmv_used, taxable_gain=taxable,
-                attribution=lot.attribution,
+                attribution=lot.attribution, fmv_source=fmv_source,
             ))
 
             if term == "LT":

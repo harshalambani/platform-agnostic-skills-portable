@@ -1,0 +1,8 @@
+# Corporate actions with an ex-date AFTER 31-Jan-2018 (splits, bonus issues, ...).
+# A scrip listed here (by symbol, or by old_isin matching the bundled table's ISIN)
+# is never given its bundled 31-01-2018 price silently: the run fails loud and asks
+# for a scrips.yaml fmv_31jan2018 override stated on today's share basis.
+# ratio = new shares received per 1 old share (a 1:5 split is 5; a 1:1 bonus is 2).
+# ex_date is ISO (YYYY-MM-DD) and must be after 2018-01-31.
+# This file ships WITHOUT rows: add the scrips you actually hold.
+symbol,ex_date,ratio,old_isin,new_isin,note

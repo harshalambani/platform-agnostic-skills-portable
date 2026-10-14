@@ -485,11 +485,13 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
     sw.label_value("Reconciliation diff (lot sum - control)", cg.reconciliation_diff)
     if cg.unresolved_scrips:
         sw.label_value("Unresolved FMV scrips (fail-loud, review)", ", ".join(cg.unresolved_scrips), number_format=None)
+        for msg in cg.fmv_failures:
+            sw.label_value("  corporate action", msg, number_format=None)
     sw.blank()
 
     sw.header("Lot detail")
     lot_headers = ["Scrip", "Sale date", "Buy date", "Term", "Qty", "Cost", "Proceeds",
-                   "Booked gain", "Grandfathered", "FMV used", "Taxable gain", "Attribution"]
+                   "Booked gain", "Grandfathered", "FMV used", "Taxable gain", "Attribution", "FMV source"]
     for col, h in enumerate(lot_headers, start=1):
         sw.cell(col, h)
     sw.row += 1
@@ -510,6 +512,7 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
         sw.cell(10, lot.fmv_used)
         sw.cell(11, lot.taxable_gain, number_format=INR_FORMAT)
         sw.cell(12, lot.attribution)
+        sw.cell(13, lot.fmv_source)
         sw.row += 1
     return layout
 
