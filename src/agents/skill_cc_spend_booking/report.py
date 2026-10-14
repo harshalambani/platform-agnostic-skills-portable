@@ -1,6 +1,7 @@
 """The run result text and the Excel workbook for the card-spend booking skill.
 
-Block order in the text (decision: payments without a statement first):
+Block order in the text (decision: payments without a statement first;
+  a stopped AI pass, with its Suspense count, comes before all of them):
   1. RED FLAG: bank payments to Credit Card Payment that match no statement
   2. fees booked
   3. large spends (possible assets)
@@ -47,6 +48,8 @@ class RunReport:
     output_csv: str = ""
     output_xlsx: str = ""
     errors: list = field(default_factory=list)
+    ai_stop: str = ""                    # CC-11: why the mapper's AI pass stopped ("" = it did not)
+    ai_stop_suspense: int = 0            # rows that went to Suspense because it stopped
 
     @property
     def ready(self) -> list:
@@ -63,7 +66,7 @@ class RunReport:
     @property
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
-        return bool(self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
+        return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
                     or self.refused or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
@@ -80,6 +83,15 @@ def red_flag_block(rep: RunReport) -> str:
         lines.append(f"  {p.date:%d %b %Y} | {p.bank_account or 'bank account not found'} | {money(p.amount)} | "
                      f"{'CRED' if p.cred else 'direct'} | {reason}")
     return "\n".join(lines)
+
+
+def ai_stop_block(rep: RunReport) -> str:
+    """CC-11: a stopped AI pass is the first thing the reader sees, with its Suspense count."""
+    if not rep.ai_stop:
+        return ""
+    return (f"RED FLAG: the AI pass stopped - {rep.ai_stop}. {rep.ai_stop_suspense} row(s) went to Suspense "
+            f"instead of an account. What was mapped before it stopped is kept. Fix the cause (see the reason), "
+            f"then run again; this result is NOT a plain success.")
 
 
 def fee_block(rep: RunReport) -> str:
@@ -200,7 +212,7 @@ def tie_block(rep: RunReport) -> str:
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)
@@ -208,7 +220,7 @@ def build_message(rep: RunReport) -> str:
         parts.append("Issues:\n" + "\n".join(f"  - {i}" for i in rep.issues))
     n_ready = len(rep.ready)
     if rep.open_items:
-        n = len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
+        n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
             + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)
         n += sum(1 for s in rep.settlements if s.status != "SETTLED")
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
@@ -301,6 +313,7 @@ def write_workbook(rep: RunReport, path: str) -> str:
           [("Before (book as it stands)", t.get("before")), ("These journals", t.get("effect")),
            ("After (residual)", t.get("after")), ("Payments with no statement", t.get("unmatched")),
            ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))])
-    sheet("Issues", ["Issue"], [(i,) for i in rep.issues])
+    sheet("Issues", ["Issue"], ([(f"AI pass stopped: {rep.ai_stop}; {rep.ai_stop_suspense} row(s) in Suspense",)]
+                                if rep.ai_stop else []) + [(i,) for i in rep.issues])
     wb.save(path)
     return path

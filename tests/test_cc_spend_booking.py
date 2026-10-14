@@ -85,7 +85,7 @@ MAP_OVERRIDE: dict = {}
 
 
 def fake_mapper_factory(calls):
-    def fake(gnucash, cin, cout, config, drawings, default):
+    def fake(gnucash, cin, cout, config, drawings, default, model=None):
         rows = list(csv.DictReader(open(cin, encoding="utf-8")))
         calls.append([r["Description"] for r in rows])
         for r in rows:
@@ -103,7 +103,7 @@ def fake_mapper_factory(calls):
 
 
 def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, threshold=None,
-       period="Custom date range", start="2025-04-01", end="2025-05-31"):
+       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None):
     book = tmp_path / "book.gnucash"
     book.write_text("x", encoding="utf-8")
     pdfs = tmp_path / "pdfs"
@@ -125,7 +125,7 @@ def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, th
     from agents.gnucash_accounts import TargetGuard
     monkeypatch.setattr(TargetGuard, "from_book", classmethod(lambda cls, p: Guard()))
     calls = []
-    monkeypatch.setattr(ccsb, "_run_mapper", fake_mapper_factory(calls))
+    monkeypatch.setattr(ccsb, "_run_mapper", mapper or fake_mapper_factory(calls))
     out = tmp_path / "out" / "x_CC-Spend_GnuCash_import_ready.csv"
     reply = ccsb.run(str(pdfs), "SYN", str(book), str(out), period, start, end, str(ents), str(settings))
     rows = list(csv.DictReader(open(out, encoding="utf-8"))) if out.is_file() else []
@@ -793,3 +793,54 @@ def test_manifest_shape():
     params = set(inspect.signature(ccsb.run).parameters)
     for k in sk["run_args"]:
         assert k in params, k
+
+
+# ---- CC-11: a stopped AI pass is first in the result, counted, logged, never a plain success ----
+
+def _stopped_mapper(reason, only=None):
+    def fake(gnucash, cin, cout, config, drawings, default, model=None):
+        rows = list(csv.DictReader(open(cin, encoding="utf-8")))
+        for r in rows:
+            if only is None or only in r["Description"].upper():
+                r["Account"], r["Confidence"] = "Suspense", "suspense"
+                r["MatchReason"] = f"Suspense - AI pass stopped: {reason}; review and reassign"
+            else:
+                r["Account"], r["Confidence"], r["MatchReason"] = FOOD, "high", "fake"
+        with open(cout, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+            w.writeheader()
+            w.writerows(rows)
+    return fake
+
+
+def test_cc11_a_stopped_ai_pass_is_the_first_block_with_the_suspense_count(tmp_path, monkeypatch, capsys):
+    s1, s2 = stmt(APR, april_rows()), stmt(MAY, may_rows())
+    reply, rows, calls, _ = go(tmp_path, monkeypatch, [s1, s2], [tie(s1, printed=1900.0), tie(s2, printed=300.0)],
+                               [book_pay("p1", 1900, date(2025, 5, 12))],
+                               mapper=_stopped_mapper("the AI service refused the API key (HTTP 401)"))
+    assert reply.startswith("RED FLAG: the AI pass stopped - the AI service refused the API key (HTTP 401)")
+    assert "3 row(s) went to Suspense" in reply.split("\n\n")[0]
+    assert "completed successfully" not in reply and "NOT complete" in reply
+    log = capsys.readouterr().out
+    assert "AI pass stopped - the AI service refused the API key" in log and "NOT complete" in log
+
+
+def test_cc11_a_run_whose_ai_pass_did_not_stop_has_no_such_block(tmp_path, monkeypatch):      # NEGATIVE
+    reply, *_ = basic(tmp_path, monkeypatch)
+    assert "AI pass stopped" not in reply and "completed successfully" in reply
+
+
+def test_cc11_only_the_rows_the_stopped_pass_never_reached_are_counted(tmp_path, monkeypatch):    # NEGATIVE
+    s1, s2 = stmt(APR, april_rows()), stmt(MAY, may_rows())
+    reply, *_ = go(tmp_path, monkeypatch, [s1, s2], [tie(s1, printed=1900.0), tie(s2, printed=300.0)],
+                   [book_pay("p1", 1900, date(2025, 5, 12))], mapper=_stopped_mapper("timed out", only="SWIGGY"))
+    assert "1 row(s) went to Suspense" in reply
+
+
+def test_cc11_a_stopped_pass_is_in_the_workbook_issues(tmp_path, monkeypatch):
+    from openpyxl import load_workbook
+    s1, s2 = stmt(APR, april_rows()), stmt(MAY, may_rows())
+    reply, _rows, _c, out = go(tmp_path, monkeypatch, [s1, s2], [tie(s1, printed=1900.0), tie(s2, printed=300.0)],
+                               [book_pay("p1", 1900, date(2025, 5, 12))], mapper=_stopped_mapper("no answer"))
+    wb = load_workbook(out.with_name(out.stem + "_report.xlsx"))
+    assert any("AI pass stopped: no answer" in str(c.value) for r in wb["Issues"].iter_rows() for c in r)

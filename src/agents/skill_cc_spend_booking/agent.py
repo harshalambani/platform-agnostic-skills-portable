@@ -59,6 +59,18 @@ def _impossible_target(guard, j) -> str:
     return ""
 
 
+def _log_line(text: str) -> None:
+    """One line into the run log: the progress stream the UI writes to the Full log file."""
+    try:
+        from agents.base_agent import get_progress_queue
+        q = get_progress_queue()
+        if q is not None:
+            q.put({"step": 5, "type": "pipeline", "snippet": f"cc-spend: {text}"})
+    except Exception:  # noqa: BLE001
+        pass
+    print(f"[cc-spend] {text}")
+
+
 def _error(text: str):
     from agents.outputs import ReplyWithOutputs
     return ReplyWithOutputs(text, (), True)
@@ -85,6 +97,40 @@ def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, def
     return map_run(str(gnucash_path), str(canonical_csv), str(out_csv), config_path=config_path,
                    bank_name=None, gnucash_bank_account=None,
                    drawings_accounts=list(drawings or []), card_default_account=default_account or None)
+
+
+_AI_STOP_MARKER = "AI pass stopped"       # same text the mapper puts in MatchReason (CC-11)
+
+
+def _mapper_ai_status() -> dict:
+    """The mapper's own record of its last AI pass ({} when the module is not loaded)."""
+    mod = sys.modules.get("skill_gnucash_account_mapper.agent")
+    return dict(getattr(mod, "_LLM_RUN_STATUS", {}) or {}) if mod is not None else {}
+
+
+def _clear_mapper_ai_status() -> None:
+    mod = sys.modules.get("skill_gnucash_account_mapper.agent")
+    status = getattr(mod, "_LLM_RUN_STATUS", None) if mod is not None else None
+    if isinstance(status, dict):
+        status.clear()
+
+
+def _ai_stop_from(mapped: dict) -> tuple:
+    """CC-11: (reason, suspense_count) when the mapper's AI pass stopped, else ("", 0).
+    Read from the rows themselves (the rows the stopped pass never reached say so in
+    MatchReason) and from the mapper's run status; either one is enough."""
+    reason, n = "", 0
+    for r in mapped.values():
+        why = r.get("MatchReason", "") or ""
+        if _AI_STOP_MARKER in why and (r.get("Confidence", "") or "") == "suspense":
+            n += 1
+            if not reason:
+                tail = why.split(_AI_STOP_MARKER + ":", 1)[-1] if (_AI_STOP_MARKER + ":") in why else ""
+                reason = tail.split("; review", 1)[0].strip()
+    status = _mapper_ai_status()
+    if status.get("stopped"):
+        reason = reason or str(status.get("reason") or "the AI pass stopped")
+    return reason, n
 
 
 def _payment_pool(view, start: date, end: date) -> list:
@@ -336,6 +382,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         if to_map:
             cin, cout = Path(tmp) / "cc_canonical.csv", Path(tmp) / "cc_mapped_GnuCash_import_ready.csv"
             _canonical_csv(to_map, cin)
+            _clear_mapper_ai_status()
             try:
                 _run_mapper(gnucash_path, cin, cout, config_path, [_strip_root(d) for d in ent.drawings_accounts],
                             _strip_root(getattr(ent, "card_spend_default_account", "")))
@@ -345,6 +392,11 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 mapped = {}
                 rep.issues.append(f"the account mapper failed ({type(e).__name__}: {e}); spends and refunds are "
                                   f"withheld, nothing was guessed")
+            rep.ai_stop, rep.ai_stop_suspense = _ai_stop_from(mapped)
+            if rep.ai_stop:
+                # written to the run log as well as the result
+                _log_line(f"WARNING: AI pass stopped - {rep.ai_stop}. {rep.ai_stop_suspense} row(s) went to Suspense; "
+                          f"the result is NOT complete.")
             for j in to_map:
                 row = mapped.get(j.num)
                 if row:
