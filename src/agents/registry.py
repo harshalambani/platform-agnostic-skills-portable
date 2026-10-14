@@ -87,6 +87,12 @@ class SkillInput:
                               # under this input. Empty = no such panel. A name that
                               # is not an input refuses the manifest at load.
     gather_samples_title: str = ""  # title of that gathered panel
+    folders_from: str = ""  # (UI-33, directory inputs only, optional) named source of
+                              # known folders the UI offers in a dropdown that still
+                              # accepts a typed or pasted path. Known source:
+                              # "cc_sort_runs" = each Credit Card - Sort PDFs run's
+                              # Decrypted_PDFs_Correct folder, newest run first.
+                              # Empty = a plain path box.
 
 
 @dataclass(frozen=True)
@@ -337,6 +343,7 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             group=str(inp.get("group") or "").strip(),
             gather_samples=tuple(str(x) for x in (inp.get("gather_samples") or ())),
             gather_samples_title=str(inp.get("gather_samples_title") or "").strip(),
+            folders_from=str(inp.get("folders_from") or "").strip(),
         ))
 
     groups = tuple(

@@ -143,3 +143,72 @@ SYN-IND-NR:
   # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)
   # bank_service_charge_account: "Expenses:Bank Service Charge"  # CC-03: card fees, interest and GST on fees. Missing = the card-spend booking skill stops with a named error.
   # card_emi_interest_account: "Expenses:Card EMI Interest"  # CC-03: card EMI interest only (never mixed into Bank Service Charge)
+
+SYN-PARTNER:
+  # UI-35: ONE entity that spells out every remaining field, with synthetic
+  # values, so this file documents every EntityProfile field (the Entities tab
+  # has a control for each; tests/test_ui35_entities_all_fields.py checks both).
+  name: "Synthetic Partner"
+  pan: "EEEEE4444E"
+  status: "Individual"
+  residency: "Resident"
+  default_regime: "new"
+  books:
+    "2025-26": "C:/Example/Books/SynPartner2526.gnucash"
+  # Money IN to these is not a direction clash; an employer reimbursement
+  # credit goes here when exactly one is listed.
+  drawings_accounts:
+    - "Equity:Drawings"
+  reimbursement_markers:
+    - "ABCD"
+  card_spend_default_account: "Equity:Drawings"
+  # CC-03: card fees, interest and GST on fees / card EMI interest only (never
+  # mixed into the Bank Service Charge account).
+  bank_service_charge_account: "Expenses:Bank Service Charge"
+  card_emi_interest_account: "Expenses:Card EMI Interest"
+  # ITR-09: the three accounts the foreign-dividend journal posts to (cash Dr net, tax Dr withheld,
+  # income Cr gross). All three are required for the journal; none may be hidden or a placeholder.
+  foreign_dividend_cash_account: "Assets:Broker:Cash"
+  foreign_dividend_tax_account: "Assets:Foreign Tax Withheld"
+  foreign_dividend_income_account: "Income:Foreign Dividends"
+  # CC-14: this entity's own large-spend (possible asset) limit in rupees; blank = the global setting.
+  cc_large_spend_threshold: 15000
+  # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
+  partner_firm_pan: "FFFFF1234F"
+  # Partner of a firm (Partner Compensation skill). Date admitted drives the
+  # capital rule (40% of target compensation over 48 months).
+  partner_admission_date: "2020-04-01"
+  # The nine account keys: eight required plus the optional salary_clearing
+  # (takes the year-end rounding line). Full colon paths, no "Root Account:".
+  partner_comp_accounts:
+    bank: "Assets:Bank:Firm Account"
+    tds_expense: "Expenses:Tax:TDS"
+    interest_on_capital: "Income:Firm:Interest on Capital"
+    current_account: "Assets:Firm:Current Account"
+    capital_contribution: "Assets:Firm:Capital"
+    medical_expense: "Expenses:Medical"
+    remuneration_income: "Income:Firm:Remuneration"
+    share_of_profit_income: "Income:Firm:Share of Profit"
+    salary_clearing: "Assets:Firm:Salary Clearing"
+  # Foreign broker dividends already recorded in the book? false = the broker
+  # report's figures are ADDED to Other Sources; true = they stay out of the
+  # total. The per-AY switch overrides the default for one year.
+  foreign_dividends_in_book: false
+  foreign_dividends_in_book_by_ay:
+    "2026-27": true
+  extra_items:
+    bf_losses:
+      - "example: brought-forward business loss, illustrative only"
+    clubbing_notes: []
+    # Per-FY drivers for the Partner Compensation skill. Known keys:
+    # firms_tax_rate, capital_rate, capital_interest_rate, capital_interest_tds_rate,
+    # remuneration_tds_rate (fractions, 0.25 = 25%); capital_months_total,
+    # capital_months_achieved (whole months); target_compensation (rupees);
+    # remuneration_tds_section (text); remuneration_tds_start_date (YYYY-MM-DD);
+    # capital_interest_from_date_overrides ({month: YYYY-MM-DD}).
+    partner_comp_drivers:
+      "2025-26":
+        firms_tax_rate: 0.25
+        target_compensation: 1200000
+        remuneration_tds_section: "194T"
+        remuneration_tds_start_date: "2024-04-01"

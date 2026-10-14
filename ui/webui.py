@@ -458,7 +458,7 @@ def _setup_warning_log() -> Path | None:
 # diagnostic you run before/after an import, not a step in the import
 # workflow, so it is pinned last. Unknown/future skills default to rank 0
 # and keep landing before Review, matching the pre-existing behaviour.
-_BANKS_TAB_ORDER = {"Coverage Gap Detector": 50}
+_BANKS_TAB_ORDER = {"Bank - Convert to GnuCash": -10, "Coverage Gap Detector": 50}
 
 
 def _banks_tab_rank(display_name: str) -> int:

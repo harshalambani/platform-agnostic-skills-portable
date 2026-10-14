@@ -178,9 +178,27 @@ class EntityProfile:
                                          # fees. Empty == the card-spend booking skill refuses (named error).
     card_emi_interest_account: str = ""  # CC-03: account path for card EMI interest only (never the
                                          # Bank Service Charge account). Empty == named error if needed.
+    foreign_dividend_cash_account: str = ""    # ITR-09: where the broker's net dividend cash sits
+    foreign_dividend_tax_account: str = ""     # ITR-09: foreign tax withheld (asset/expense per the book)
+    foreign_dividend_income_account: str = ""  # ITR-09: foreign dividend income (credited at gross)
+    cc_large_spend_threshold: float | None = None  # CC-14: this entity's own large-spend (possible
+                                         # asset) limit in rupees. None == use the global setting.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
+
+
+def _parse_positive_amount(value) -> float | None:
+    """CC-14: a positive finite number, or None (blank, text, zero, negative)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+    if out != out or out <= 0 or out == float("inf"):
+        return None
+    return out
 
 
 def load_entities(path: str | Path) -> dict[str, EntityProfile]:
@@ -224,6 +242,10 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             bank_service_charge_account=str(fields_.get("bank_service_charge_account") or "").strip(),
             card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
             partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
+            cc_large_spend_threshold=_parse_positive_amount(fields_.get("cc_large_spend_threshold")),
+            foreign_dividend_cash_account=str(fields_.get("foreign_dividend_cash_account") or "").strip(),
+            foreign_dividend_tax_account=str(fields_.get("foreign_dividend_tax_account") or "").strip(),
+            foreign_dividend_income_account=str(fields_.get("foreign_dividend_income_account") or "").strip(),
             partner_admission_date=(str(fields_.get("partner_admission_date")).strip()
                                     if fields_.get("partner_admission_date") else None),
         )
@@ -316,6 +338,12 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["card_emi_interest_account"] = e.card_emi_interest_account
     if e.partner_firm_pan:
         d["partner_firm_pan"] = e.partner_firm_pan
+    if e.cc_large_spend_threshold is not None:
+        d["cc_large_spend_threshold"] = float(e.cc_large_spend_threshold)
+    for _k in ("foreign_dividend_cash_account", "foreign_dividend_tax_account",
+               "foreign_dividend_income_account"):
+        if getattr(e, _k):
+            d[_k] = getattr(e, _k)
     if e.partner_admission_date:
         d["partner_admission_date"] = e.partner_admission_date
     return d
@@ -564,6 +592,21 @@ class MappingLoadResult:
     warnings: list          # human-readable strings (path drift, etc.)
 
 
+def canonical_account_path(path) -> str:
+    """ITR-10: one form for an account path. The tree and the mapping files use
+    "/" and the GnuCash reader uses ":"; both name the same account. Whitespace
+    around a separator and a leading "Root Account" are not part of the name."""
+    parts = [p.strip() for p in re.split(r"[:/]", str(path or ""))]
+    if parts and parts[0].lower() == "root account":
+        parts = parts[1:]
+    return "/".join(p for p in parts if p)
+
+
+def same_account_path(a, b) -> bool:
+    """ITR-10: True when two paths differ at most by separator style."""
+    return canonical_account_path(a) == canonical_account_path(b)
+
+
 def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLoadResult:
     """
     Load an <entity>.mapping.yaml file: a YAML list of entries (a list, not
@@ -620,7 +663,7 @@ def load_mapping(path: str | Path, known_paths: dict | None = None) -> MappingLo
 
         if known_paths is not None:
             if guid in known_paths:
-                if known_paths[guid] != entries[guid].path:
+                if not same_account_path(known_paths[guid], entries[guid].path):
                     warnings.append(
                         f"GUID {guid} path drifted (benign rename, auto-fixable): mapping has "
                         f"{entries[guid].path!r}, tree now has {known_paths[guid]!r} -- the "

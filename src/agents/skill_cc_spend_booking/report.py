@@ -1,6 +1,7 @@
 """The run result text and the Excel workbook for the card-spend booking skill.
 
-Block order in the text (decision: payments without a statement first):
+Block order in the text (decision: payments without a statement first;
+  a stopped AI pass, with its Suspense count, comes before all of them):
   1. RED FLAG: bank payments to Credit Card Payment that match no statement
   2. fees booked
   3. large spends (possible assets)
@@ -25,6 +26,7 @@ def money(v) -> str:
 class RunReport:
     label: str = ""
     threshold: float = 0.0
+    threshold_source: str = ""                                  # CC-14: which value applied
     ccp_path: str = ""
     entity: str = ""
     journals: list = field(default_factory=list)
@@ -34,6 +36,7 @@ class RunReport:
     ambiguous: list = field(default_factory=list)
     lines_unmatched: list = field(default_factory=list)
     refused: list = field(default_factory=list)                 # [(Statement, TieOut)]
+    tie_results: dict = field(default_factory=dict)             # id(Statement) -> its real tie-out result
     awaiting: list = field(default_factory=list)                # Statements not yet paid (no later statement)
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
@@ -47,6 +50,8 @@ class RunReport:
     output_csv: str = ""
     output_xlsx: str = ""
     errors: list = field(default_factory=list)
+    ai_stop: str = ""                    # CC-11: why the mapper's AI pass stopped ("" = it did not)
+    ai_stop_suspense: int = 0            # rows that went to Suspense because it stopped
 
     @property
     def ready(self) -> list:
@@ -63,7 +68,7 @@ class RunReport:
     @property
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
-        return bool(self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
+        return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
                     or self.refused or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
@@ -80,6 +85,15 @@ def red_flag_block(rep: RunReport) -> str:
         lines.append(f"  {p.date:%d %b %Y} | {p.bank_account or 'bank account not found'} | {money(p.amount)} | "
                      f"{'CRED' if p.cred else 'direct'} | {reason}")
     return "\n".join(lines)
+
+
+def ai_stop_block(rep: RunReport) -> str:
+    """CC-11: a stopped AI pass is the first thing the reader sees, with its Suspense count."""
+    if not rep.ai_stop:
+        return ""
+    return (f"RED FLAG: the AI pass stopped - {rep.ai_stop}. {rep.ai_stop_suspense} row(s) went to Suspense "
+            f"instead of an account. What was mapped before it stopped is kept. Fix the cause (see the reason), "
+            f"then run again; this result is NOT a plain success.")
 
 
 def fee_block(rep: RunReport) -> str:
@@ -152,7 +166,11 @@ def emi_block(rep: RunReport) -> str:
     booked = [j for j in rep.journals if j.emi and j.status == J.ST_READY]
     lines = []
     if booked:
-        lines.append(f"EMI ROWS BOOKED ({len(booked)}) - {J.EMI_UNVALIDATED}")
+        if all(j.emi_validated for j in booked):
+            lines.append(f"EMI ROWS BOOKED ({len(booked)}) - HSBC instalment rows: principal as spend, "
+                         f"interest to the EMI interest account, fee and GST as fees")
+        else:
+            lines.append(f"EMI ROWS BOOKED ({len(booked)}) - {J.EMI_UNVALIDATED}")
         for j in booked:
             lines.append(f"  {j.card} | {j.real_date:%d %b %Y} | {J.KIND_LABEL[j.kind]} | "
                          f"{j.raw_description[:50]} | {money(j.amount)} | {j.account}")
@@ -162,6 +180,10 @@ def emi_block(rep: RunReport) -> str:
         interest_lines.append("  EMI interest (its own subtotal, not a fee):")
         for (card, fy), v in interest.items():
             interest_lines.append(f"    {card} | FY {fy} | {money(v)}")
+    expl = (rep.emi or {}).get("explained") or 0
+    if expl:
+        interest_lines.append(f"  EMI offset legs (instalment credits, loan conversion credits): {expl} - "
+                              f"understood, never booked")
     if not rows:
         return "\n".join(lines + interest_lines)
     if rep.emi_interest_reason and any(r.kind == "emi_interest" for r in rows):
@@ -170,7 +192,8 @@ def emi_block(rep: RunReport) -> str:
     lines.append(f"{J.EMI_UNBOOKED_TITLE.upper()} ({len(rows)}):")
     for r in rows:
         when = r.date.strftime("%d %b %Y") if r.date else "undated"
-        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:50]} | "
+        extra = f" | {r.instalment}" if getattr(r, "instalment", "") else ""
+        lines.append(f"  {r.card} | {r.period} | {when} | {r.kind} | {r.description[:50]}{extra} | "
                      f"{money(r.amount)} {r.direction}")
     return "\n".join(lines + interest_lines)
 
@@ -186,12 +209,15 @@ def tie_block(rep: RunReport) -> str:
              f"    of which payments with no statement: {money(t['unmatched'])}",
              f"    of which payments on statements not booked: {money(t['not_booked'])}",
              f"    other: {money(t['other'])}"]
+    for d, text, amt in t.get("other_lines") or []:
+        lines.append(f"      {d:%d %b %Y} " if d else "      ")
+        lines[-1] += f"{text[:60]}: {money(amt)}"
     return "\n".join(lines)
 
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)
@@ -199,7 +225,7 @@ def build_message(rep: RunReport) -> str:
         parts.append("Issues:\n" + "\n".join(f"  - {i}" for i in rep.issues))
     n_ready = len(rep.ready)
     if rep.open_items:
-        n = len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
+        n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
             + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)
         n += sum(1 for s in rep.settlements if s.status != "SETTLED")
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
@@ -210,6 +236,8 @@ def build_message(rep: RunReport) -> str:
     if tb:
         parts.append(tb)
     parts.append(f"Range run: {rep.label}" + (f" | entity {rep.entity}" if rep.entity else ""))
+    if rep.threshold_source:
+        parts.append(f"Large-spend limit: {money(rep.threshold)} (from {rep.threshold_source})")
     ready_n = n_ready
     booked_n = sum(1 for j in rep.journals if j.status == J.ST_BOOKED)
     parts.append(f"{ready_n} journal(s) ready to import" + (f", {booked_n} already booked" if booked_n else "")
@@ -228,6 +256,33 @@ def build_message(rep: RunReport) -> str:
 # ---------------------------------------------------------------------------
 # Excel
 # ---------------------------------------------------------------------------
+
+def statement_rows(rep: RunReport) -> list:
+    """CC-09: ONE row per statement, with its real tie-out result. A REFUSED statement is never
+    also listed as PASS (it used to appear once as refused and again, as a settled target, as PASS)."""
+    rows: dict = {}
+
+    def row(st):
+        r = rows.get(id(st))
+        if r is None:
+            res = rep.tie_results.get(id(st), "")
+            r = rows[id(st)] = [st.card, st.label, res, "", ""]
+        return r
+
+    for st, t in rep.refused:
+        r = row(st)
+        r[2], r[4] = t.result, t.gap or t.note
+    for s in rep.settlements:
+        if s.target:
+            r = row(s.target)
+            r[3], r[4] = s.status, "; ".join(x for x in (r[4], s.reason) if x)
+    for st in rep.awaiting:
+        row(st)[3] = "AWAITING PAYMENT"
+    for st in rep.unpaid:
+        r = row(st)
+        r[3], r[4] = "NOT SETTLED", "later statement shows no payment"
+    return [tuple(r) for r in rows.values()]
+
 
 def write_workbook(rep: RunReport, path: str) -> str:
     from openpyxl import Workbook
@@ -281,17 +336,15 @@ def write_workbook(rep: RunReport, path: str) -> str:
     sheet("EMI interest",
           ["Card", "Financial year", "EMI interest"],
           [(card, fy, v) for (card, fy), v in ((rep.emi or {}).get("interest") or {}).items()])
-    sheet("Statements",
-          ["Card", "Statement", "Tie-out", "Settlement", "Detail"],
-          [(st.card, st.label, t.result, "", t.gap or t.note) for st, t in rep.refused]
-          + [(s.target.card, s.target.label, "PASS", s.status, s.reason) for s in rep.settlements if s.target]
-          + [(st.card, st.label, "PASS", "AWAITING PAYMENT", "") for st in rep.awaiting]
-          + [(st.card, st.label, "PASS", "NOT SETTLED", "later statement shows no payment") for st in rep.unpaid])
+    sheet("Statements", ["Card", "Statement", "Tie-out", "Settlement", "Detail"], statement_rows(rep))
     t = rep.tie or {}
     sheet("CCP tie-out", ["Line", "Amount"],
           [("Before (book as it stands)", t.get("before")), ("These journals", t.get("effect")),
            ("After (residual)", t.get("after")), ("Payments with no statement", t.get("unmatched")),
-           ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))])
-    sheet("Issues", ["Issue"], [(i,) for i in rep.issues])
+           ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))]
+          + [(f"  Other: {d:%d %b %Y} {text}" if d else f"  Other: {text}", amt)
+             for d, text, amt in t.get("other_lines") or []])
+    sheet("Issues", ["Issue"], ([(f"AI pass stopped: {rep.ai_stop}; {rep.ai_stop_suspense} row(s) in Suspense",)]
+                                if rep.ai_stop else []) + [(i,) for i in rep.issues])
     wb.save(path)
     return path

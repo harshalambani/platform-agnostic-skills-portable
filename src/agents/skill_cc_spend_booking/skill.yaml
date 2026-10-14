@@ -5,8 +5,10 @@ display_name: "Credit Card - Book Spends"
 description: >
   Match each bank payment to a credit card to the statement it settles, and write an
   import-ready GnuCash journal that books that statement's spends, refunds, cashback and
-  fees against Expense:Withdrawals:Credit Card Payment. Nothing is guessed: unmatched
-  payments, statements that do not tie out, part payments and EMI rows are reported, not booked.
+  fees against Expense:Withdrawals:Credit Card Payment. Payments, tie-outs and EMI rows are never
+  guessed: unmatched payments, statements that do not tie out, part payments and EMI rows are
+  reported, not booked. The account for a spend is chosen by rules and history first, then by an AI
+  step for what is left, and every AI match passes the account guards.
 category: "gnucash"
 version: "0.1.0"
 
@@ -33,6 +35,7 @@ inputs:
     fy_from: "fy"
   - name: "pdf_dir"
     type: "directory"
+    folders_from: "cc_sort_runs"
     label: "Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card - Sort PDFs)"
     required: true
   - name: "period"
@@ -74,7 +77,7 @@ output:
 requires:
   native_binaries: []
   external_tools: []
-  llm: false
+  llm: true
 
 help:
   overview: >
@@ -84,7 +87,7 @@ help:
     within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly
     matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and
     fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS
-    are booked. EMI interest is booked to the entity card_emi_interest_account, the EMI processing fee and GST to Bank Service Charge (EMI wording is UNVALIDATED); conversion, principal and unclassified EMI rows are listed for a decision, never booked.
+    are booked. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
   when_to_use: >
     After the bank statements are imported and the card statements are sorted, when you want the
     card spends booked to their expense accounts.

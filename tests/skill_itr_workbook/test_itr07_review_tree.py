@@ -24,6 +24,7 @@ for p in (str(ROOT), str(SRC), str(SCRIPTS), str(SRC / "agents" / "skill_itr_wor
         sys.path.insert(0, p)
 
 import _review_js as js  # noqa: E402
+import run_sidecar  # noqa: E402
 import tag_suggest  # noqa: E402
 import tags  # noqa: E402
 from agents.gnucash_accounts import GncAccount  # noqa: E402
@@ -56,7 +57,8 @@ def _book():
         _acct("sav", "Assets:Bank:Savings", "BANK", "AB"),
         _acct("cur", "Assets:Bank:Current", "BANK", "AB"),
         _acct("ins", "Assets:Car Insurance", "ASSET", "A"),
-        _acct("car", "Assets:Car:Fuel", "ASSET", "A"),
+        _acct("carp", "Assets:Car", "ASSET", "A"),
+        _acct("car", "Assets:Car:Fuel", "ASSET", "carp"),
         _acct("I", "Income", "INCOME"),
         _acct("ID", "Income:Dividends", "INCOME", "I"),
         _acct("acme", "Income:Dividends:Acme", "INCOME", "ID"),
@@ -78,6 +80,8 @@ def _setup(tmp_path, with_book=True):
         {"guid": "beta", "path": "Income:Dividends:Beta", "tag": "HOLD", "note": "ask CA"},
         {"guid": "gone", "path": "Assets:Gone", "tag": "AL_CASH_BANK", "note": "n"},
     ]), encoding="utf-8")
+    # ITR-14: the run's own account list decides what is listed.
+    run_sidecar.write_run(root, "ONE", unmapped=run_sidecar.leaves_of(_book()))
     return root, ((Path(__file__), _book()) if with_book else (None, None))
 
 
@@ -372,6 +376,7 @@ def _deep_book():
 
 def _run_deep(tmp_path, scenario):
     root, _b = _setup(tmp_path)
+    run_sidecar.write_run(root, "ONE", unmapped=run_sidecar.leaves_of(_deep_book()))
     with patch("ui._config.data_root_dir", return_value=root), \
             patch.object(ui_mod, "_load_book_accounts", return_value=(Path(__file__), _deep_book())):
         html = ui_mod._load_review_data("ONE")

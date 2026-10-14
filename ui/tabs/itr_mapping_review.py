@@ -365,17 +365,74 @@ def _load_review_rows(entity_key: str) -> list[dict]:
     return _collect_review(entity_key)[0]
 
 
+def _latest_run_accounts(entity_key: str):
+    """ITR-14. (sidecar path, data) for the newest ITR Workbook run recorded for
+    `entity_key`, or None. Only a sidecar that records THIS entity is used; when
+    the entity has registered books, only one recorded for the newest
+    registered FY. A run for another entity or FY is never used."""
+    out_dir = _outputs_dir()
+    if not out_dir.is_dir() or not entity_key:
+        return None
+    _itr_modules()
+    import run_accounts  # noqa: PLC0415
+    want_fy = None
+    try:
+        from .. import _book_registry  # noqa: PLC0415
+        books = _book_registry.list_books(entity_key)
+        if books:
+            want_fy = sorted(books.keys(), reverse=True)[0]
+    except Exception:
+        want_fy = None
+    cands = sorted(out_dir.glob("*" + run_accounts.SUFFIX), key=lambda p: p.stat().st_mtime, reverse=True)
+    for p in cands:
+        data = run_accounts.read(p)
+        if data is None or data.get("entity") != entity_key:
+            continue
+        if want_fy and data.get("fy") and data.get("fy") != want_fy:
+            continue
+        return p, data
+    return None
+
+
+def _run_unmapped(run) -> dict:
+    """{guid: sidecar account} for the accounts the run did NOT resolve."""
+    if run is None:
+        return {}
+    return {a["guid"]: a for a in run[1].get("accounts", [])
+            if isinstance(a, dict) and a.get("guid") and a.get("state") != "resolved"}
+
+
+def _book_segments(accounts) -> dict:
+    """ITR-11. {account id: [name, ...]} built from the book's REAL parent ids,
+    root left out. A "/" or ":" inside a name stays inside that one segment."""
+    by_id = {a.id: a for a in accounts}
+    out: dict = {}
+    for a in accounts:
+        names, cur, seen = [], a, set()
+        while cur is not None and cur.id not in seen:
+            seen.add(cur.id)
+            if not cur.is_root:
+                names.append(cur.name.strip())
+            cur = by_id.get(cur.parent_id)
+        out[a.id] = list(reversed(names))
+    return out
+
+
 def _book_leaf_rows(entity_key: str, entries: dict, snippet_by_guid: dict,
-                    book=None) -> tuple[list[dict], Path | None]:
-    """ITR-04. When the entity has a registered book, list that book's own
-    leaf accounts that nothing maps yet. Hidden and placeholder accounts
-    (and anything under a hidden parent) are never offered. An account is
-    "mapped" when it, or any ancestor, has an entry in the mapping file --
-    mapped accounts are never listed as unmapped."""
+                    book=None, run=None) -> tuple[list[dict], Path | None]:
+    """ITR-04 / ITR-14. List the book's leaf accounts that nothing maps yet, but
+    ONLY the ones the entity's latest ITR Workbook run reported as needing a tag
+    (`run`, from _latest_run_accounts). With no run on record nothing is listed
+    from the book. Hidden and placeholder accounts (and anything under a hidden
+    parent) are never offered. An account is "mapped" when it, or any ancestor,
+    has an entry in the mapping file."""
     book_path, accounts = book if book is not None else _load_book_accounts(entity_key)
     if book_path is None or not book_path.is_file():
         return [], None
     if accounts is None:
+        return [], book_path
+    wanted = _run_unmapped(run)
+    if not wanted:
         return [], book_path
     from agents.gnucash_accounts import postable_accounts  # noqa: PLC0415
     by_id = {a.id: a for a in accounts}
@@ -384,6 +441,8 @@ def _book_leaf_rows(entity_key: str, entries: dict, snippet_by_guid: dict,
     for a in postable_accounts(accounts):
         if a.id in parents or not a.path:
             continue                     # not a leaf
+        if a.id not in wanted:
+            continue                     # ITR-14: not in the run's list
         mapped, cur, seen = False, a, set()
         while cur is not None and cur.id not in seen:
             seen.add(cur.id)
@@ -417,7 +476,7 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     snippet supplies nothing new) cleanly.
     """
     info: dict = {"entries": 0, "snippet": None, "snippet_rows": 0, "book": None, "book_rows": 0,
-                  "hidden": 0, "has_book": False}
+                  "hidden": 0, "has_book": False, "run": None, "no_run": False}
     if not entity_key or not entity_key.strip():
         return [], info
     configs, _tag_vocab, _amc = _itr_modules()
@@ -457,6 +516,11 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
     book = _load_book_accounts(entity_key)
     snippet_path = _latest_proposed_mappings_path(entity_key)
     info["snippet"] = snippet_path
+    run = _latest_run_accounts(entity_key)
+    info["run"] = run[0] if run else None
+    # ITR-14: no run on record at all -> mapping-file entries only, plus a plain line.
+    info["no_run"] = run is None and snippet_path is None
+    run_unmapped = _run_unmapped(run)
     snippet_by_guid: dict = {}
     sections: dict = {}
     if snippet_path is not None:
@@ -470,7 +534,7 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
                 if not isinstance(item, dict):
                     continue
                 guid = item.get("guid")
-                if not guid or guid in entries:
+                if not guid or guid in entries or (run is not None and guid not in run_unmapped):
                     # Already resolved in the entity's own mapping file --
                     # a stale/other-entity snippet entry never overrides it.
                     continue
@@ -493,7 +557,14 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
         snippet_by_guid = {r["guid"]: r for r in snippet_rows}
         rows.extend(snippet_rows)
 
-    book_rows, book_path = _book_leaf_rows(entity_key, entries, snippet_by_guid, book=book)
+    book_rows, book_path = _book_leaf_rows(entity_key, entries, snippet_by_guid, book=book, run=run)
+    if run is not None and book[1] is None:
+        # No readable book: the run's own list stands in for it.
+        for g, a in run_unmapped.items():
+            if g not in entries and g not in snippet_by_guid:
+                book_rows.append({"guid": g, "path": a.get("path", ""), "tag": None, "unmapped": True,
+                                  "needs_review": False, "suggested": None,
+                                  "note": "from the latest ITR Workbook run"})
     info["book"] = book_path
     have = {r["guid"] for r in rows}
     added = [r for r in book_rows if r["guid"] not in have]
@@ -514,6 +585,7 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
         rows = [r for r in rows
                 if not (r.get("unmapped") and r["guid"] in by_id and r["guid"] not in ok)]
     ts = _tag_suggest()
+    book_segs = _book_segments(book[1]) if book[1] else {}
     for r in rows:
         r["kind"] = _row_kind(r, sections.get(r["guid"]), by_id.get(r["guid"]), _tag_vocab)
         r.setdefault("held", False)
@@ -521,14 +593,16 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
         r.setdefault("al_foreign", "")
         # ITR-07: a saved entry whose account is gone from the registered book.
         r["_stale"] = bool(has_book and r["guid"] not in by_id)
-        segs = ts.split_path(r["path"])
+        # ITR-11: the groups come from the book's real parent ids, never from
+        # splitting the path text (a "/" in an account NAME is not a level).
+        segs = book_segs.get(r["guid"]) or ts.split_path(r["path"])
         r["_segs"] = segs
         r["_pk"] = ":".join(s.lower() for s in segs[:-1])
         r["_sg"] = {} if r["_stale"] else {
-            t: [round(sc, 6), h] for t, (sc, h) in ts.word_scores(r["path"], r["kind"]).items()}
+            t: [round(sc, 6), h] for t, (sc, h) in ts.word_scores(r["path"], r["kind"], segs=segs).items()}
 
     # ITR-07: GnuCash tree order (segment by segment), not plain text order.
-    rows.sort(key=lambda r: (ts.book_key(r["path"]), r["guid"]))
+    rows.sort(key=lambda r: (ts.book_key(r["path"], r["_segs"]), r["guid"]))
     for i, r in enumerate(rows):
         r["_ord"] = i
     return rows, info
@@ -820,6 +894,9 @@ EXPLAINER_HTML = (
 )
 
 
+NO_RUN_LINE = "Run the ITR Workbook to list the accounts it needs."
+
+
 def _empty_state_html(entity_key: str, info: dict) -> str:
     """ITR-04: say WHICH source was empty. Never tells the user to run the
     workbook when a snippet attributable to this entity already exists."""
@@ -829,7 +906,12 @@ def _empty_state_html(entity_key: str, info: dict) -> str:
         + (f"{info['entries']} entries, all accounts mapped or none to show" if info["entries"]
            else "no mapping entries saved yet"),
     ]
-    if info["snippet"] is not None:
+    if info.get("run") is not None:
+        parts.append(
+            f"latest workbook run ({_html.escape(Path(info['run']).name)}): "
+            "it lists no account that still needs a tag"
+        )
+    elif info["snippet"] is not None:
         parts.append(
             f"latest workbook run ({_html.escape(Path(info['snippet']).name)}): "
             "attributable to this entity, but it lists no unmapped accounts"
@@ -841,9 +923,8 @@ def _empty_state_html(entity_key: str, info: dict) -> str:
                     else "no book registered for this entity")
     )
     advice = ""
-    if info["snippet"] is None and info["book"] is None and not info["entries"]:
-        advice = (" Run the ITR Workbook once for this entity (it records the entity in its "
-                  "proposed-mappings file), or register this entity's book.")
+    if info.get("no_run"):
+        advice = " " + NO_RUN_LINE
     items = "".join(f"<li>{p}</li>" for p in parts)
     return f"<p>No accounts to review for <strong>{key}</strong>.</p><ul>{items}</ul><p>{advice.strip()}</p>"
 
@@ -866,7 +947,8 @@ def _load_review_data(entity_key: str) -> str:
     picker_items = _picker_items(tag_opts)
     glossary_html = _build_glossary_html(tag_opts)
     spec = _spec(picker_items, entity_key, glossary_html, _tree_config(info))
-    return payload_box_css(spec.payload_box_id) + EXPLAINER_HTML + build_html(spec, rows)
+    note = f"<p>{NO_RUN_LINE}</p>" if info.get("no_run") else ""
+    return payload_box_css(spec.payload_box_id) + note + EXPLAINER_HTML + build_html(spec, rows)
 
 
 # ---------------------------------------------------------------------------
@@ -966,7 +1048,7 @@ def _save_changes(changes_json: str) -> str:
             if want != ("AL_FOREIGN" in (prior.flags or [])):
                 flag_changes[guid] = {"AL_FOREIGN": want}
                 if ch.get("path"):
-                    paths[guid] = ch["path"]
+                    paths[guid] = _configs.canonical_account_path(ch["path"])
                 if str(tag or "").strip() == str(ch.get("_orig") or "").strip():
                     continue
         if not tag or not str(tag).strip():
@@ -974,7 +1056,7 @@ def _save_changes(changes_json: str) -> str:
             continue
         corrections[guid] = str(tag).strip()
         if ch.get("path"):
-            paths[guid] = ch["path"]
+            paths[guid] = _configs.canonical_account_path(ch["path"])
         # ITR-07: the row's side rides in the payload; a missing or unrecognised
         # side is treated as Unknown, which accepts almost nothing (fail closed).
         # A payload with no side at all (an older page) gets it from the path.

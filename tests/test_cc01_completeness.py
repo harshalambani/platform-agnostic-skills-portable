@@ -173,7 +173,7 @@ def test_clean_run_report(tmp_path):
     root = _tree(tmp_path, [f"Synth-Gold/{n}" for n in FULL])
     rep = C.check_folder(root / "Decrypted_PDFs_Correct", PERIOD, reader=_reader_from(FULL))
     assert rep.issues == []
-    assert "Synth-Gold: covered 1 Apr 2025 - 31 Mar 2026; gaps: none" in rep.text()
+    assert "Synth-Gold: 12 statement(s) found, covered 1 Apr 2025 - 31 Mar 2026; missing: none" in rep.text()
 
 
 def _run_agent(tmp_path, monkeypatch, files, texts, failed=()):
@@ -195,13 +195,13 @@ def test_agent_decrypt_failure_never_says_successfully(tmp_path, monkeypatch):
     msg = _run_agent(tmp_path, monkeypatch, [f"Synth-Gold/{n}" for n in FULL], FULL,
                      failed=["locked.pdf"])
     assert "completed successfully" not in msg
-    assert "completed with 1 issue" in msg and "locked.pdf" in msg
+    assert "completed with 1 issue" in msg and "locked.pdf" not in msg  # CC-07: counts only
 
 
 def test_agent_unknown_file_never_says_successfully(tmp_path, monkeypatch):
     msg = _run_agent(tmp_path, monkeypatch,
                      [f"Synth-Gold/{n}" for n in FULL] + ["Unknown-Unknown/odd.pdf"], FULL)
-    assert "completed successfully" not in msg and "odd.pdf" in msg
+    assert "completed successfully" not in msg and "Unknown-Unknown" in msg
 
 
 def test_agent_gap_never_says_successfully_and_lists_it(tmp_path, monkeypatch):

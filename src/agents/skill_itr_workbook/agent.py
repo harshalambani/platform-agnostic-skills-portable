@@ -94,6 +94,8 @@ import write_workbook  # noqa: E402
 import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
 import parse_foreign as foreign_engine  # noqa: E402
+import foreign_dividend_journal as fdj  # noqa: E402
+import run_accounts  # noqa: E402
 import foreign_tax as foreign_tax_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
@@ -390,6 +392,10 @@ def _verify_summary(
     mapping_lines, status, result, mapping_entries, headline = _mapping_summary(
         tree, mapping_file, output_path, config_path, model_override, entity_key,
     )
+    # ITR-14: the accounts this run needed, written on EVERY run (a fully mapped
+    # one too) so Review Mapping lists exactly these and nothing else.
+    if status != CANCELLED:
+        run_accounts.write(result, output_path, entity_key, year_key)
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
 
@@ -532,6 +538,7 @@ def _build_and_write_workbook(
     rules_dir: str, scrips_path: str, as26_workbook: str | None = None,
     regime_override: str | None = None, mapping_entries: dict | None = None,
     foreign_report_xlsx: str | None = None,
+    book_file: str | None = None,
 ) -> list[str]:
     """Builds the full schedule model + formula-driven workbook (plan
     sections 2.2/3) whenever mapping resolution ran at all. Returns extra
@@ -666,6 +673,9 @@ def _build_and_write_workbook(
         )
     lines.extend(as26_lines)
     lines.extend(foreign_lines)
+    if foreign_report is not None and not foreign_dividends_in_book:
+        # ITR-09: an importable journal for the report's foreign dividends.
+        lines.extend(fdj.run_for_workbook(entity, foreign_report, book, book_file, output_path))
     ft = model.foreign_tax
     if ft is not None and ft.active:
         for w in ft.warnings:
@@ -947,7 +957,7 @@ def run(
     extra_lines = _build_and_write_workbook(
         tree, book, result, form16_data, year_key, failures, book_cross_check, output_path,
         mapping_file, entity, rules_dir, scrips_path, as26_workbook, regime_override, mapping_entries,
-        foreign_report_xlsx=foreign_report_xlsx,
+        foreign_report_xlsx=foreign_report_xlsx, book_file=book_file,
     )
     if extra_lines:
         summary = summary + "\n\n" + "\n".join(extra_lines)

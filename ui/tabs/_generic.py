@@ -153,9 +153,9 @@ def llm_precheck_mode(skill) -> str:
     return getattr(getattr(skill, "requires", None), "llm_precheck", "stop") or "stop"
 
 
-def _redact_endpoint_secrets(text, ep: dict) -> str:
-    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
-    out = str(text or "")
+def _endpoint_secret_values(ep: dict) -> list:
+    """The endpoint's API key in every form it may appear (stored, decrypted,
+    and the part after a "scheme:" prefix); only values of 6+ characters."""
     raw = str((ep or {}).get("api_key") or "")
     cands = {raw}
     try:
@@ -163,11 +163,33 @@ def _redact_endpoint_secrets(text, ep: dict) -> str:
             cands.add(str(_config.decrypt_api_key(raw)))
     except Exception:  # noqa: BLE001 - an undecryptable key is simply not shown
         pass
+    pieces = set()
     for c in cands:
         for piece in {c, c.split(":", 1)[-1]}:
             if len(piece) >= 6:
-                out = out.replace(piece, "[key hidden]")
+                pieces.add(piece)
+    return sorted(pieces, key=len, reverse=True)
+
+
+def _redact_endpoint_secrets(text, ep: dict) -> str:
+    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
+    out = str(text or "")
+    for piece in _endpoint_secret_values(ep):
+        out = out.replace(piece, "[key hidden]")
     return out
+
+
+_OWN_ELAPSED_PREFIX = "**Running** — still working"
+
+
+def tick_log(log: list, line: str) -> None:
+    """UI-36: a tick updates only the previous elapsed-time line. Any other
+    status line (the endpoint-check result, a warning) is kept and the tick is
+    added after it."""
+    if log and log[-1].startswith(_OWN_ELAPSED_PREFIX):
+        log[-1] = line
+    else:
+        log.append(line)
 
 
 def llm_precheck_warning(active: str, health, ep: dict) -> str:
@@ -277,20 +299,45 @@ def _entity_initial_value(skill, entity_name):
 _NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
 
 
-def _newest_cc_sort_pdfs() -> str | None:
-    """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None.
-    Only a starting point for the CC Transactions picker when nothing is
-    remembered; it never fills the box by itself."""
+def _cc_sort_runs() -> list[tuple[str, str]]:
+    """UI-33: (label, path) for every CC-Sort run that has a
+    Decrypted_PDFs_Correct folder, newest run first. A run without that folder
+    is never offered. No runs (or no output dir) gives an empty list."""
     try:
         runs = sorted((d for d in _config.output_dir().glob("*-CC-Sort") if d.is_dir()),
                       key=lambda d: d.name, reverse=True)
-    except OSError:
-        return None
+    except Exception:
+        return []
+    out = []
     for d in runs:
         target = d / "Decrypted_PDFs_Correct"
         if target.is_dir():
-            return str(target)
-    return None
+            out.append((d.name, str(target)))
+    return out
+
+
+# Named folder sources for a directory input's `folders_from:` key.
+_FOLDER_SOURCES = {"cc_sort_runs": _cc_sort_runs}
+
+
+def _known_folders(source: str) -> list[tuple[str, str]]:
+    fn = _FOLDER_SOURCES.get(source)
+    return fn() if fn else []
+
+
+def _refresh_folder_choice(source: str, current):
+    """Refresh the choices; the value is kept as it is when there is one (a typed
+    or pasted path is never replaced), and is the newest run only when empty."""
+    choices = _known_folders(source)
+    if current:
+        return gr.update(choices=choices)
+    return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+
+def _newest_cc_sort_pdfs() -> str | None:
+    """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None."""
+    runs = _cc_sort_runs()
+    return runs[0][1] if runs else None
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -664,7 +711,32 @@ def _check_external_tools(skill: SkillInfo) -> str | None:
 # tab via add()/tick() in the run handler.
 # ---------------------------------------------------------------------------
 
+_OK_BLOCK_RX = re.compile(
+    r"\b(?:issues?|incomplete|not|cannot|unable|fail(?:s|ed|ure|ures)?|errors?|"
+    r"red\s+flag|without)\b|n't\b",
+    re.IGNORECASE,
+)
+_OK_WORD_RX = re.compile(r"\bcomplete(?:d)?\b|\ball balanced\b", re.IGNORECASE)
+
+
+def _is_success_line(s: str, low: str) -> bool:
+    """UI-32: a line is green only when it really reports success.
+
+    Whole words only (so "incomplete" never matches "complete"), and any
+    wording of failure, doubt or a count of issues vetoes the green box.
+    """
+    if _OK_BLOCK_RX.search(s) or "⛔" in s or "⚠" in s:
+        return False
+    if (s.startswith("### Done") or s.startswith("### ✓") or s.startswith("✓")
+            or low.startswith("ok —") or low.startswith("ok -")):
+        return True
+    return bool(_OK_WORD_RX.search(s))
+
+
 def _colorize_status(md: str) -> str:
+    # Each box is followed by a blank line: a raw HTML block runs to the next
+    # blank line in Markdown, so without it every following line (bullets,
+    # tables) is swallowed into the block and collapses into one paragraph.
     out: list[str] = []
     for ln in md.split("\n"):
         s = ln.strip()
@@ -673,18 +745,16 @@ def _colorize_status(md: str) -> str:
             out.append(ln)
             continue
         if low.startswith("error:") or low.startswith("security error:"):
-            out.append(f'<div class="rag-error">⛔ {s}</div>')
+            out.append(f'<div class="rag-error">⛔ {s}</div>\n')
         elif low.startswith("warning:"):
-            out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>')
+            out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>\n')
         elif "**cancelled**" in low or low.startswith("cancelled"):
-            out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>')
-        elif (s.startswith("### Done") or s.startswith("### ✓") or s.startswith("✓")
-              or low.startswith("ok —") or low.startswith("ok -")
-              or "all balanced" in low or "complete" in low):
+            out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>\n')
+        elif _is_success_line(s, low):
             txt = s.lstrip("#").replace("**", "").strip()
             if txt.startswith("✓"):
                 txt = txt[1:].strip()
-            out.append(f'<div class="rag-ok">✅ {txt}</div>')
+            out.append(f'<div class="rag-ok">✅ {txt}</div>\n')
         else:
             out.append(ln)
     return "\n".join(out)
@@ -789,10 +859,7 @@ def _make_run_handler(skill: SkillInfo):
             return _colorize_status("\n\n".join(log))
 
         def tick(line: str) -> str:
-            if log and log[-1].startswith("**Running** —"):
-                log[-1] = line
-            else:
-                log.append(line)
+            tick_log(log, line)
             return _colorize_status("\n\n".join(log))
 
         # -- Step 1: validate inputs --
@@ -1023,6 +1090,20 @@ def _make_run_handler(skill: SkillInfo):
         work_dir = tempfile.mkdtemp(prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-")
         kwargs = build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir)
 
+        # CC-08: password inputs are never written to the run log.
+        secrets = [str(input_map.get(i.name) or "") for i in skill.inputs
+                   if getattr(i, "type", "") == "password"]
+        # UI-36: the endpoint key never reaches the saved log either.
+        secrets += _endpoint_secret_values(ep)
+        # UI-36: ONE log file per run, allocated once; every exit path that
+        # saves writes to this same path.
+        log_path = _runlog.new_log_path(skill.name)
+
+        def outcome(text):
+            # the final error / result text also goes in the "Full log" file
+            _runlog.append_outcome(log_path, text, secrets=secrets)
+            return text
+
         # -- Execute --
         def work():
             return run_fn(**kwargs)
@@ -1047,10 +1128,11 @@ def _make_run_handler(skill: SkillInfo):
                 agent_reply = yield from _runner.run_with_progress(work, tick_factory)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
-            log_path = _runlog.new_log_path(skill.name)
             _runlog.write_run_log(
                 log_path, skill_name=skill.name, run_log_lines=log, traceback_text=tb,
+                secrets=secrets,
             )
+            outcome(f"Error: run failed: {e}")
             yield add(
                 f"Error: run failed: {e}\n\n"
                 f"Full log: `{log_path}`\n\n"
@@ -1060,21 +1142,26 @@ def _make_run_handler(skill: SkillInfo):
 
         # -- Handle cancellation --
         if agent_reply == "__CANCELLED__":
-            yield add("**Cancelled** — run was stopped by user."), gr.update(interactive=False, value=None), gr.update()
+            msg = add("**Cancelled** — run was stopped by user.")
+            _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+                                  secrets=secrets)
+            outcome("Cancelled: the run was stopped by the user.")
+            yield msg, gr.update(interactive=False, value=None), gr.update()
             return
 
         # -- Log this run (agent-mode: `log` also carries the tool-call
         #    transcript) regardless of outcome, so a silently-absorbed tool
         #    failure inside a successful-looking agent reply still leaves a
         #    trace on disk. --
-        log_path = _runlog.new_log_path(skill.name)
-        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log)
+        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+                              secrets=secrets)
 
         # -- Verify output --
         yield add("**Verifying output…**"), gr.update(interactive=False, value=None), gr.update()
 
         if skill.output.type == "directory":
             if not out_path.is_dir() or not any(out_path.iterdir()):
+                outcome(f"Error: the run did not finish successfully - no output was produced at {out_path}.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
                     f"was produced at {out_path}. Check the details below, fix "
@@ -1102,6 +1189,7 @@ def _make_run_handler(skill: SkillInfo):
                                           heading="Files written by this run")
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
+            outcome(f"Done. Output folder: {out_abs}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
                 f"### Done\n\n"
                 f"**Output folder:** {out_abs}\n\n"
@@ -1112,6 +1200,7 @@ def _make_run_handler(skill: SkillInfo):
             yield msg, gr.update(interactive=False, value=None), gr.update(value=out_abs)
         else:
             if not out_path.is_file():
+                outcome(f"Error: the run did not finish successfully - no output file was produced.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
                     f"file was produced, so there is nothing to download. "
@@ -1125,6 +1214,7 @@ def _make_run_handler(skill: SkillInfo):
             # withhold_primary) when the run found a blocking problem; the
             # file stays on disk but no button is enabled and no copy staged.
             if getattr(agent_reply, "withhold_primary", False):
+                outcome(f"Not ready to import: {out_path.name} was written but a problem must be fixed first; no download offered.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"### Not ready to import\n\n"
                     f"The run wrote `{out_path.name}` but found a problem that must be "
@@ -1145,6 +1235,7 @@ def _make_run_handler(skill: SkillInfo):
                 resolved = out_path.resolve()
                 expected_root = _config.output_dir().resolve()
                 if not resolved.is_relative_to(expected_root):
+                    outcome(f"Security error: output path {resolved} is outside the expected output directory.")
                     yield add(
                         f"Security error: output path {resolved} is outside "
                         f"the expected output directory ({expected_root}). "
@@ -1156,6 +1247,7 @@ def _make_run_handler(skill: SkillInfo):
                 shutil.copy2(out_path, served_path)
                 out_abs = str(served_path.resolve())
             except Exception as e:
+                outcome(f"Error: could not stage download file: {e}")
                 yield add(
                     f"Error: could not stage download file: {e}"
                 ), gr.update(interactive=False, value=None), gr.update()
@@ -1165,6 +1257,7 @@ def _make_run_handler(skill: SkillInfo):
             extras = _stage_extra_outputs(skill, agent_reply)
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
+            outcome(f"Done. File: {out_path.name}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
                 f"### Done\n\n"
                 f"**File:** {out_path.name}\n\n"
@@ -1300,6 +1393,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
+            folder_pickers = []   # (dropdown, refresh_btn, folders_from) UI-33
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             folder_buttons = []   # (button, textbox, input_def) for the native folder Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
@@ -1504,12 +1598,28 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     # UI-30: same row layout as the file boxes -- textbox plus a
                     # native "Browse..." button. Typing or pasting still works.
                     with gr.Row():
-                        comp = gr.Textbox(
-                            label=inp.label,
-                            placeholder="Browse... to a folder, or paste the full folder path",
-                            scale=5,
-                            **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
-                        )
+                        if getattr(inp, "folders_from", ""):
+                            # UI-33: known folders in a dropdown that still takes
+                            # a typed or pasted path; newest run preselected.
+                            _fch = _known_folders(inp.folders_from)
+                            comp = gr.Dropdown(
+                                label=inp.label,
+                                choices=_fch,
+                                value=(_fch[0][1] if _fch else None),
+                                allow_custom_value=True,
+                                interactive=True,
+                                scale=5,
+                                **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
+                            )
+                            _frbtn = gr.Button("↻", scale=0, min_width=40)
+                            folder_pickers.append((comp, _frbtn, inp.folders_from))
+                        else:
+                            comp = gr.Textbox(
+                                label=inp.label,
+                                placeholder="Browse... to a folder, or paste the full folder path",
+                                scale=5,
+                                **_help.maybe_info(gr.Textbox, _info.get(inp.name)),
+                            )
                         _fbtn = gr.Button("Browse…", scale=0, min_width=110)
                     folder_buttons.append((_fbtn, comp, inp))
                 elif inp.type == "password":
@@ -1750,6 +1860,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             outputs=_comp,
         )
 
+    # UI-33: refresh button of each known-folders dropdown.
+    for _comp, _rbtn, _src in folder_pickers:
+        _rbtn.click(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
+                    inputs=[_comp], outputs=_comp)
+
     # Wire each parser picker's refresh button to re-scan the parser tree.
     for _comp, _pbtn in parser_pickers:
         _pbtn.click(
@@ -1820,10 +1935,11 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # UI-30: "Browse..." beside every folder box. Opens at the box's remembered
     # folder; a cancelled pick leaves whatever is typed there untouched.
     for _fbtn, _tcomp, _finp in folder_buttons:
-        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label):
+        def _browse_folder(current=None, bk=f"{skill.name}.{_finp.name}", label=_finp.label,
+                           fsrc=getattr(_finp, "folders_from", "")):
             picked = _filedialog.pick_folder(
                 bk, title=f"Select folder - {label}",
-                fallback_dir=_newest_cc_sort_pdfs() if bk == "CC Transactions.pdf_dir" else None)
+                fallback_dir=(_newest_cc_sort_pdfs() if fsrc == "cc_sort_runs" else None))
             return gr.update(value=picked) if picked else gr.update()
 
         _fbtn.click(fn=_browse_folder, inputs=[_tcomp], outputs=[_tcomp])
@@ -1831,6 +1947,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.
     if container_tab is not None:
+        for _comp, _rbtn, _src in folder_pickers:
+            container_tab.select(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
+                                 inputs=[_comp], outputs=[_comp])
         for _comp, _rbtn, _match, _fts in output_pickers:
             def _rescan_newest(m=_match, f=_fts):
                 choices = _scan_output_files(m, f)

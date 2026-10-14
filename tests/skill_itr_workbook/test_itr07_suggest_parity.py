@@ -35,6 +35,7 @@ import tag_suggest  # noqa: E402
 import tags  # noqa: E402
 from agents.gnucash_accounts import GncAccount  # noqa: E402
 from ui.tabs import itr_mapping_review as ui_mod  # noqa: E402
+import run_sidecar  # noqa: E402
 
 
 def _need_node():
@@ -115,6 +116,7 @@ def _html_and_rows(tmp_path):
                  "default_regime": "new"}}), encoding="utf-8")
     saved = [{"guid": ids[p], "path": p, "tag": t, "note": "n"} for p, _ty, t in CASES if t]
     (root / "itr" / "mappings" / "ONE.mapping.yaml").write_text(yaml.safe_dump(saved), encoding="utf-8")
+    run_sidecar.write_run(root, "ONE", unmapped=run_sidecar.leaves_of(book))
     with patch("ui._config.data_root_dir", return_value=root), \
             patch.object(ui_mod, "_load_book_accounts", return_value=(Path(__file__), book)):
         html = ui_mod._load_review_data("ONE")

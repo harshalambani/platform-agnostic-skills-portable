@@ -25,6 +25,24 @@ def parse_threshold(value) -> float | None:
     return out
 
 
+def resolve_large_spend_threshold(entity, settings_path) -> tuple:
+    """CC-14: (value, source). The entity's own value when it has one, else the
+    global setting, else the default. ``source`` names which one applied."""
+    own = parse_threshold(getattr(entity, "cc_large_spend_threshold", None))
+    if own is not None:
+        return own, "this entity's own setting"
+    value = read_large_spend_threshold(settings_path)
+    try:
+        import yaml
+        p = Path(settings_path) if settings_path else None
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) if p and p.is_file() else None
+        if isinstance(data, dict) and parse_threshold(data.get(THRESHOLD_KEY)) is not None:
+            return value, "the global setting"
+    except Exception:
+        pass
+    return value, "the default"
+
+
 def read_large_spend_threshold(settings_path: str | Path | None) -> float:
     """The configured threshold; the default when the file, the key or a valid
     value is absent. Never raises."""

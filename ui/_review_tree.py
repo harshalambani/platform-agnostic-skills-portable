@@ -110,6 +110,14 @@ CSS = r"""
 #%%APP%%-app tbody tr.sech .caret { cursor: pointer; display: inline-block; width: 14px; }
 #%%APP%%-app tbody tr.sech input { margin-right: 6px; vertical-align: middle; }
 #%%APP%%-app tbody tr.sech .cnt { color: var(--muted); font-weight: 400; margin-left: 6px; }
+/* ITR-13: every element INSIDE a selected row takes dark text, pills on a white chip;
+   their light-on-dark colours are unreadable on the light selected cell. */
+#%%APP%%-app tbody tr.selected td { color: #0b1220 !important; }
+#%%APP%%-app tbody tr.selected td * { color: #0b1220 !important; }
+#%%APP%%-app tbody tr.selected td .tp,
+#%%APP%%-app tbody tr.selected td .badge,
+#%%APP%%-app tbody tr.selected td .cur,
+#%%APP%%-app tbody tr.selected td .chip { background: #ffffff !important; border-color: #0b1220 !important; }
 </style>
 """
 

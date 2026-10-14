@@ -212,7 +212,7 @@ def test_reverse_real_token_account_keeps_mains_exact_score():
     for t in toks:
         b = model[t]
         p = b["Expenses:Travel Fares"] / sum(b.values())
-        p = min(max(p, 1e-6), 1 - 1e-6)
+        p = min(max(p, 1e-6), m.HISTORY_MAX_SEEN_P)   # MAP-36: a token never proves an account outright
         lp += math.log(p)
         ln += math.log(1 - p)
     assert abs(top - 1.0 / (1.0 + math.exp(ln - lp))) < 1e-12

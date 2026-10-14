@@ -98,7 +98,7 @@ def run(
     issues = report.issues
     body = report.text()
     try:
-        (out_dir / "completeness_report.txt").write_text(body + "\n", encoding="utf-8")
+        (out_dir / "completeness_report.txt").write_text(report.full_text() + "\n", encoding="utf-8")
     except OSError:
         pass
 

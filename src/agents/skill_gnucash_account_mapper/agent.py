@@ -673,6 +673,17 @@ HISTORY_SELF_TRANSFER_MIN_ASSET_FRACTION = 0.6
 # MAP-15: shortest plain token that may count as history evidence, and the
 # share of the book's distinct accounts a token may touch before it is treated
 # as too common to identify anything (derived from the book, not a word list).
+# MAP-36: (a) smoothing -- a token never seen with an account counts as mild
+# evidence AGAINST that account (p = SMOOTH / (total + SMOOTH)), so 48 rows of
+# "cred" on one account beat an 8-row "club" on another; (b) a token seen with
+# more than HISTORY_MAX_TOKEN_SPREAD accounts is discounted by
+# HISTORY_MAX_TOKEN_SPREAD / spread (a word common to many unrelated
+# merchants carries little); (c) a match resting on ONE token must have that
+# token's majority account hold HISTORY_SINGLE_TOKEN_MIN_SHARE of it.
+HISTORY_UNSEEN_SMOOTHING = 0.5
+HISTORY_MAX_SEEN_P = 0.99   # a token never proves an account outright, so a missing token can outweigh it
+HISTORY_SINGLE_TOKEN_MIN_SHARE = 0.8
+
 HISTORY_MIN_TOKEN_LEN = 3
 HISTORY_MAX_ACCOUNT_SHARE = 0.5
 HISTORY_MIN_ACCOUNTS_FOR_SHARE = 4
@@ -820,6 +831,7 @@ def _history_bayes_raw(
     support: Dict[str, int] = {}
     discriminating: Dict[str, set] = {}
     contributing: Dict[str, set] = {}
+    used_tokens: list = []
     n_accounts = _model_account_count(model)
     raw_model = getattr(model, 'raw', None) or model   # MAP-31: support stays on RAW counts
     for tok in tokens:
@@ -831,10 +843,12 @@ def _history_bayes_raw(
             continue  # MAP-15: touches most of the book -- identifies nothing
         total = sum(acct_counts.values())
         spread = len(acct_counts)
+        used_tokens.append((tok, acct_counts, total, spread))
         for acct, cnt in acct_counts.items():
-            p = min(max(cnt / total, 1e-6), 1 - 1e-6)
-            log_p[acct] = log_p.get(acct, 0.0) + math.log(p)
-            log_np[acct] = log_np.get(acct, 0.0) + math.log(1 - p)
+            p = min(max(cnt / total, 1e-6), HISTORY_MAX_SEEN_P)
+            wt = 1.0 if spread <= HISTORY_MAX_TOKEN_SPREAD else HISTORY_MAX_TOKEN_SPREAD / spread
+            log_p[acct] = log_p.get(acct, 0.0) + wt * math.log(p)
+            log_np[acct] = log_np.get(acct, 0.0) + wt * math.log(1 - p)
             contributing.setdefault(acct, set()).add(tok)
             # MAX, not sum: a single historical transaction contributes the
             # same frequency to every one of its own tokens, so summing
@@ -849,6 +863,16 @@ def _history_bayes_raw(
 
     if not log_p:
         return None
+
+    # MAP-36: a token that was never seen with a candidate account is evidence
+    # against it.
+    for tok, acct_counts, total, spread in used_tokens:
+        wt = 1.0 if spread <= HISTORY_MAX_TOKEN_SPREAD else HISTORY_MAX_TOKEN_SPREAD / spread
+        p = HISTORY_UNSEEN_SMOOTHING / (total + HISTORY_UNSEEN_SMOOTHING)
+        for acct in list(log_p):
+            if acct not in acct_counts:
+                log_p[acct] += wt * math.log(p)
+                log_np[acct] += wt * math.log(1 - p)
 
     # MAP-33: the gate is PER ACCOUNT. An account whose supporting tokens are all
     # generic (the tokens MatchReason would print, `discriminating`, or every
@@ -899,6 +923,13 @@ def _history_bayes_score(
         return None
     if len(discriminating.get(best_acct, ())) < HISTORY_MIN_DISCRIMINATING_TOKENS:
         return None
+    # MAP-36: a match resting on ONE token needs that token to lean strongly
+    # to the winner (a clear majority of its history, not a plurality).
+    backing = [t for t in tokens if (model.get(t) or {}).get(best_acct)]
+    if len(backing) == 1:
+        counts = model[backing[0]]
+        if counts[best_acct] / sum(counts.values()) < HISTORY_SINGLE_TOKEN_MIN_SHARE:
+            return None
 
     tokens_used = ', '.join(sorted(discriminating[best_acct])) or 'combined evidence'
     reason = f"History match ({tokens_used})"
@@ -2064,6 +2095,75 @@ _LLM_RUN_STATUS: Dict = {}
 _LLM_STOPPED_MARKER = "AI pass stopped"   # in MatchReason of rows the stopped pass never reached
 
 
+# CC-11: why the last AI call failed (HTTP status + the provider's own message),
+# filled by the two chat functions and read once by _LLMGuard.ask. The API key and
+# the Authorization header are never put in here.
+_LLM_LAST_ERROR: Dict = {}
+
+_SECRET_LIKE_RX = re.compile(r"(?i)\bBearer\s+\S+|\b(?:sk|key|tok)[-_][A-Za-z0-9_\-]{8,}")
+
+
+def _redact_llm_text(text, api_key=None) -> str:
+    s = str(text or "")
+    if api_key:
+        s = s.replace(str(api_key), "***")
+    return _SECRET_LIKE_RX.sub("***", s)
+
+
+def _provider_message(err, api_key=None) -> str:
+    """The provider's own error text from an HTTPError body (OpenAI style
+    {"error": {"message": ...}}), redacted and capped. "" when there is none."""
+    try:
+        raw = err.read().decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return ""
+    msg = ""
+    try:
+        body = json.loads(raw)
+        e = body.get("error") if isinstance(body, dict) else None
+        msg = (e.get("message") if isinstance(e, dict) else e) or (body.get("message") if isinstance(body, dict) else "") or ""
+    except Exception:  # noqa: BLE001
+        msg = raw if len(raw) < 200 else ""
+    return _redact_llm_text(str(msg).strip(), api_key)[:200]
+
+
+def _note_llm_error(exc, base_url: str, model: str, timeout, api_key=None) -> None:
+    """Record, in plain words, why an AI call failed. `fatal` means retrying
+    cannot help (the key or the model is refused), so the pass stops at once."""
+    from urllib.parse import urlparse  # noqa: PLC0415
+    host = urlparse(str(base_url or "")).netloc or str(base_url or "the AI service")
+    fatal = False
+    if isinstance(exc, _HTTPError):
+        code = exc.code
+        pmsg = _provider_message(exc, api_key)
+        low = pmsg.lower()
+        shown = f"HTTP {code}: {pmsg}" if pmsg else f"HTTP {code}"
+        if code in (401, 403):
+            reason = f"the AI service refused the API key ({shown}) - update the key in Settings"
+            fatal = True
+        elif code == 404 or ("model" in low and any(k in low for k in ("not found", "does not exist", "not exist", "unknown", "unsupported"))):
+            reason = f"the AI service does not offer model {model} ({shown})"
+            fatal = True
+        else:
+            reason = f"the AI service answered {shown}"
+    elif isinstance(exc, (TimeoutError,)) or "timed out" in str(exc).lower():
+        reason = f"no answer from {host} within {int(timeout) if timeout else '?'}s"
+    else:
+        inner = getattr(exc, "reason", None)
+        if isinstance(inner, TimeoutError) or "timed out" in str(inner).lower():
+            reason = f"no answer from {host} within {int(timeout) if timeout else '?'}s"
+        else:
+            reason = f"could not reach {host} ({type(exc).__name__})"
+    _LLM_LAST_ERROR.clear()
+    _LLM_LAST_ERROR.update({"reason": reason, "fatal": fatal})
+
+
+def _take_llm_error() -> Dict:
+    err = dict(_LLM_LAST_ERROR)
+    _LLM_LAST_ERROR.clear()
+    return err
+
+
 class _LLMRateLimited(Exception):
     """The provider answered HTTP 429. `retry_after` is the seconds the server
     asked for (None if it sent no usable Retry-After)."""
@@ -2118,6 +2218,7 @@ class _LLMGuard:
         self.invalid = 0
         self.stopped = False
         self.reason = ""
+        self.last_error = ""      # CC-11: why the most recent failed call failed
 
     def _stop(self, reason: str) -> None:
         self.stopped = True
@@ -2128,6 +2229,7 @@ class _LLMGuard:
         """Returns the reply, or None on failure / when the pass has stopped."""
         rate_limited = 0
         while not self.stopped:
+            _LLM_LAST_ERROR.clear()
             try:
                 reply = _llm_chat(provider, base_url, model, system, user,
                                   api_key=api_key, timeout=timeout)
@@ -2148,9 +2250,17 @@ class _LLMGuard:
                 continue
             if reply is None:
                 self.consecutive_failures += 1
+                err = _take_llm_error()
+                if err.get("reason"):
+                    self.last_error = err["reason"]
+                if err.get("fatal"):
+                    # the key or the model is refused: more calls cannot help
+                    self._stop(err["reason"])
+                    return None
                 if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
                     self._stop(f"the provider kept failing ({self.consecutive_failures} "
-                               f"calls in a row without a reply)")
+                               f"calls in a row without a reply)"
+                               + (f": {self.last_error}" if self.last_error else ""))
                 return None
             self.consecutive_failures = 0
             return reply
@@ -2385,10 +2495,12 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _emit_mapper_progress(f"  Ollama error: {e}")
+        _note_llm_error(e, base_url, model, timeout)
+        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
     except Exception as e:  # noqa: BLE001
-        _emit_mapper_progress(f"  Ollama error: {e}")
+        _note_llm_error(e, base_url, model, timeout)
+        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
 
 
@@ -2444,10 +2556,12 @@ def _openai_compatible_chat(
     except _HTTPError as e:
         if e.code == 429:
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        _note_llm_error(e, base_url, model, timeout, api_key)
+        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
     except Exception as e:  # noqa: BLE001
-        _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+        _note_llm_error(e, base_url, model, timeout, api_key)
+        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
         return None
 
 
@@ -2820,7 +2934,7 @@ def llm_fallback_mapping(
         _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
         _LLM_RUN_STATUS.update({
             'stopped': True,
-            'reason': guard.reason or "the AI model did not answer the warm-up call",
+            'reason': guard.reason or guard.last_error or "the AI model did not answer the warm-up call",
             'unattempted_rows': [r["row"] for r in unmatched_rows],
         })
         return {}
@@ -3599,8 +3713,9 @@ def run(
         gnucash_file:        Path to .gnucash book (gzipped XML format).
         canonical_csv:       Path to canonical 8-col CSV (from ICICI/HSBC/BoB/HDFC skills).
         output_path:         Path for the mapped output CSV.
-        config_path:         Unused (no LLM required).
-        model_override:      Unused (no LLM required).
+        config_path:         The portable config; with it the optional AI step may run on rows the
+                             rules and history leave open (CC-13: no longer 'no LLM').
+        model_override:      The model for that AI step (default: the endpoint's default model).
         drawings_accounts:   MAP-34: the entity's configured Drawings account paths
                              (money in to one is not a direction clash; a lone one
                              also takes employer reimbursement credits).

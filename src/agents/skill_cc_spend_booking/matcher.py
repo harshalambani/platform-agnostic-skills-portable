@@ -131,7 +131,34 @@ def match_payments(lines: list, payments: list) -> MatchOutcome:
 
     used: set = set()           # payment guids paired or involved in an ambiguity
     done_lines: set = set()
+    # CC-09: the statement has exactly as many payment lines of an amount as the bank has payments
+    # of it (and nothing else could fit them): pair them one-to-one by date. Unequal counts, or any
+    # line/payment that also fits something outside the group, stay ambiguous below.
+    by_amt_l: dict = {}
+    by_amt_p: dict = {}
     for i, ln in enumerate(lines):
+        by_amt_l.setdefault(ln.amount, []).append(i)
+    for p in payments:
+        by_amt_p.setdefault(round(p.amount, 2), []).append(p)
+    for amt, idxs in by_amt_l.items():
+        ps = by_amt_p.get(amt, [])
+        if len(idxs) < 2 or len(idxs) != len(ps):
+            continue
+        guids = {p.guid for p in ps}
+        if any(not {q.guid for q in cand[i]} <= guids for i in idxs):
+            continue
+        if any(not set(back[g]) <= set(idxs) for g in guids):
+            continue
+        pairs = list(zip(sorted(idxs, key=lambda i: (lines[i].date, i)), sorted(ps, key=lambda p: (p.date, p.guid))))
+        if any(single_fit(lines[i], p) != "exact" for i, p in pairs):
+            continue
+        for i, p in pairs:
+            out.pairings.append(Pairing(lines[i], (p,), "exact", 0.0))
+            used.add(p.guid)
+            done_lines.add(i)
+    for i, ln in enumerate(lines):
+        if i in done_lines:
+            continue
         cs = cand[i]
         if len(cs) == 1 and len(back[cs[0].guid]) == 1:
             p = cs[0]
@@ -141,8 +168,14 @@ def match_payments(lines: list, payments: list) -> MatchOutcome:
             used.add(p.guid)
             done_lines.add(i)
         elif cs:
-            out.ambiguous.append({"line": ln, "payments": list(cs),
-                                  "reason": f"the statement line could be {len(cs)} bank payments"})
+            n_lines = len(by_amt_l.get(ln.amount, []))
+            n_pay = len(by_amt_p.get(round(ln.amount, 2), []))
+            why = f"the statement line could be {len(cs)} bank payments"
+            if n_lines != n_pay:
+                # CC-09: say why they were not paired one-to-one
+                why += (f" ({n_lines} statement payment line(s) of {ln.amount:,.2f} against {n_pay} bank "
+                        f"payment(s) of it: the counts differ, so they were not paired by date)")
+            out.ambiguous.append({"line": ln, "payments": list(cs), "reason": why})
             used.update(p.guid for p in cs)
             done_lines.add(i)
     # a payment that fits several lines is ambiguous even when one of them had a single candidate

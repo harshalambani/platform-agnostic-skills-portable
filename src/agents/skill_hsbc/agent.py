@@ -81,7 +81,7 @@ def run(
             raise ValueError(
                 f"`{src.name}` is an already-enriched HSBC workbook (this "
                 "skill's own output), so there is nothing to OCR. To import "
-                "it, go to Banks > Convert to GnuCash, choose HSBC, and "
+                "it, go to Banks > Bank - Convert to GnuCash, choose HSBC, and "
                 "upload the workbook."
             )
         else:
@@ -95,7 +95,7 @@ def run(
                 raise ValueError(
                     f"`{src}` contains no PDF statements, only an "
                     "already-enriched HSBC workbook. To import it, go to "
-                    "Banks > Convert to GnuCash, choose HSBC, and upload "
+                    "Banks > Bank - Convert to GnuCash, choose HSBC, and upload "
                     "the workbook."
                 )
             raise ValueError(f"No PDF statements found in: {src}")

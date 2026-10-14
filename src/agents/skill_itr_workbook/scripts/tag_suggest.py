@@ -227,22 +227,25 @@ def split_path(path: str | None) -> list[str]:
     return [s.strip() for s in str(path or "").replace("/", ":").split(":") if s.strip()]
 
 
-def book_key(path: str | None) -> tuple[str, ...]:
+def book_key(path: str | None, segs=None) -> tuple[str, ...]:
     """Sort key giving GnuCash tree order: segment by segment, case-insensitive,
     a parent before its children. Plain text order is wrong because a space
     sorts before ':' (so 'Car Insurance' lands between 'Car' and 'Car:Fuel')."""
-    return tuple(s.lower() for s in split_path(path))
+    # ITR-11: `segs` are the account's real name chain from the book; passing
+    # them stops a "/" inside a name from being read as a level.
+    return tuple(s.lower() for s in (segs if segs is not None else split_path(path)))
 
 
 # ---------------------------------------------------------------------------
 # Scoring
 # ---------------------------------------------------------------------------
 
-def word_scores(path: str | None, kind_name: str | None = None) -> dict[str, tuple[float, list[str]]]:
+def word_scores(path: str | None, kind_name: str | None = None,
+                segs=None) -> dict[str, tuple[float, list[str]]]:
     """{tag: (score, matched words)} for the words of the account's own name and
     its parents, restricted to the tags valid for `kind_name` (None = no
     restriction). Zero scores are omitted. HOLD never appears."""
-    segs = split_path(path)
+    segs = list(segs) if segs is not None else split_path(path)
     if not segs:
         return {}
     leaf, parents = segs[-1], segs[1:-1]

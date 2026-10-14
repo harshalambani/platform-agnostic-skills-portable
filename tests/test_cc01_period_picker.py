@@ -221,7 +221,7 @@ def test_agent_no_card_folders_is_an_issue(tmp_path, monkeypatch):
 def test_agent_only_unknown_folder_is_an_issue(tmp_path, monkeypatch):
     root = _env(tmp_path, monkeypatch, ["Unknown-Unknown/odd.pdf"], {})
     msg = cc_agent.run("in", str(root), "pw", "FY 2025-26")
-    assert "completed successfully" not in msg and "no card folders" in msg and "odd.pdf" in msg
+    assert "completed successfully" not in msg and "no card folders" in msg and "Unknown-Unknown" in msg and "odd.pdf" not in msg  # CC-07: names go to the saved report only
 
 
 def test_agent_card_folder_with_no_statements_is_an_issue(tmp_path, monkeypatch):

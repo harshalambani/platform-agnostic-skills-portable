@@ -397,6 +397,24 @@ def extract_bank_and_card_type(filename):
 
     return None, None
 
+def choose_folder(original_name, decrypted_pdf):
+    """(bank, card_type) for the destination folder <bank>-<card_type>.
+
+    CC-07: a file whose bank/card is not recognised is checked against the
+    shared "not a statement" rule (Credit Card Transactions' non_statement_reason:
+    terms leaflets, year-end summaries). Those go to Not-A-Statement, never to
+    Unknown-Unknown, so they are not reported as "bank not recognised"."""
+    bank, card_type = extract_bank_and_card_type(original_name)
+    if bank and card_type:
+        return bank, card_type
+    try:
+        from agents.skill_cc_sort.completeness import non_statement_title
+        if non_statement_title(decrypted_pdf):
+            return 'Not', 'A-Statement'
+    except Exception:
+        pass
+    return 'Unknown', 'Unknown'
+
 def decrypt_pdf(pdf_path, passwords, output_path):
     """
     Decrypt PDF using qpdf, trying each password in the list until one succeeds.
@@ -591,9 +609,7 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
         file_hash = calculate_md5(str(decrypted_pdf))
 
         # Extract bank and card type
-        bank, card_type = extract_bank_and_card_type(original_pdf.name)
-        if not bank or not card_type:
-            bank, card_type = 'Unknown', 'Unknown'
+        bank, card_type = choose_folder(original_pdf.name, decrypted_pdf)
 
         bank_folder = decrypted_dir / f"{bank}-{card_type}"
         bank_folder.mkdir(parents=True, exist_ok=True)

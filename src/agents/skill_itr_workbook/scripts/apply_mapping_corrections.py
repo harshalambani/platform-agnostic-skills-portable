@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import openpyxl  # noqa: E402
 
 import tags as tag_vocab  # noqa: E402
-from configs import MappingEntry, dump_mapping_entries, load_mapping  # noqa: E402
+from configs import MappingEntry, dump_mapping_entries, load_mapping, same_account_path  # noqa: E402
 
 REVIEW_SHEET = "Mapping Review"
 _APPROVED_NOTE = "approved via Mapping Review sheet correction"
@@ -135,7 +135,7 @@ def refresh_drifted_paths(entries: dict, known_paths: dict) -> tuple[dict, int]:
     count = 0
     for guid, entry in entries.items():
         new_path = known_paths.get(guid)
-        if new_path is not None and new_path != entry.path:
+        if new_path is not None and not same_account_path(new_path, entry.path):
             refreshed[guid] = MappingEntry(
                 guid=entry.guid,
                 path=new_path,
