@@ -1473,6 +1473,9 @@ class ITRModel:
     computation: ComputationSchedule
     unclassified: UnclassifiedSchedule = field(default_factory=UnclassifiedSchedule)
     interest_234: Interest234Schedule = field(default_factory=Interest234Schedule)
+    #: ITR-01: True when the mapping resolved ZERO accounts (empty/cold-start
+    #: mapping). Set by agent.py; drives a loud "not fileable" banner.
+    mapping_empty: bool = False
 
 
 def build_all_schedules(

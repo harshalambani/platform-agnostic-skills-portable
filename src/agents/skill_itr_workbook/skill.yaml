@@ -156,7 +156,7 @@ output:
 requires:
   native_binaries: []
   external_tools: []
-  llm: false
+  llm: true   # ITR-01: unmapped accounts get an AI tag suggestion (capped, stops on first failure)
   network: false
 
 help:

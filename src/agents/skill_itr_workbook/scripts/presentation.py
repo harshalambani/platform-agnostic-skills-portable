@@ -415,6 +415,30 @@ def _write_salary_error_banner(ws, row: int, salary_schedule, ncols: int) -> int
     return row + 2
 
 
+#: ITR-01: a mapping that resolved ZERO accounts. Every figure in such a
+#: workbook is in the UNCLASSIFIED bucket -- it must never read as a normal
+#: success. ERROR tier (red banner + exit-code flip in agent.main()).
+EMPTY_MAPPING_ERROR_MARKER = "ERROR: mapping empty - this workbook is not fileable"
+
+
+def empty_mapping_banner_text() -> str:
+    return (
+        f"*** {EMPTY_MAPPING_ERROR_MARKER}: no account resolved to a tag, so every figure is "
+        "unclassified. Assign tags in GnuCash > ITR > ITR Mapping, then run again. DO NOT FILE ***"
+    )
+
+
+def _write_empty_mapping_banner(ws, row: int, model, ncols: int) -> int:
+    if not getattr(model, "mapping_empty", False):
+        return row
+    c = ws.cell(row=row, column=1, value=empty_mapping_banner_text())
+    c.font = Font(name=FONT_NAME, size=11, bold=True, color=_CG_ERROR_FONT_COLOR)
+    c.fill = _CG_ERROR_FILL
+    c.alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=max(ncols, 1))
+    return row + 2
+
+
 #: Visible-but-non-fatal WARNING (2026-07-23 26AS unclassified-TDS-section
 #: fix; downgraded from ERROR/exit-1 to WARNING on 2026-07-24 -- see
 #: schedules.py's TaxesPaidSchedule.unclassified_sections docstring for why):
@@ -1035,6 +1059,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
 
     # -- header block -------------------------------------------------------
     row = 1
+    row = _write_empty_mapping_banner(ws, row, model, OUTER)
     row = _write_cg_error_banner(ws, row, model.capital_gains, OUTER)
     row = _write_salary_error_banner(ws, row, model.salary, OUTER)
     row = _write_taxes_paid_unclassified_banner(ws, row, model.taxes_paid, OUTER)

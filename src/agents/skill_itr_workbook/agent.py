@@ -104,6 +104,7 @@ BLOCKED_FOR_REVIEW = "BLOCKED-FOR-REVIEW"   # hard-error paths only (bad HTML, u
                                              # unmapped leaves no longer route here (2026-07-16
                                              # Part 1: best-effort build-with-call-outs instead).
 BUILT_WITH_REVIEW_PREFIX = "BUILT --"
+CANCELLED = "CANCELLED"   # user pressed Stop mid-run: no workbook is built (ITR-01)
 
 
 def _infer_year_key(bs_html: str) -> str | None:
@@ -175,7 +176,10 @@ def _mapping_summary(
     cross-checks) when resolution ran at all, else None. loaded_entries is
     the raw guid -> MappingEntry dict (Mapping Review sheet's Suggested-by
     column needs the note/suggested_by_llm fields that ResolvedLeaf doesn't
-    carry), or None when mapping_file is invalid."""
+    carry), or None when mapping_file is invalid. The 5th element is a list
+    of HEADLINE lines (ITR-01) that the caller puts at the very top of the
+    summary: an empty mapping, a stopped AI pass, a user Stop."""
+    headline: list[str] = []
     known_paths = {n.guid: n.path for n in tree.all_nodes() if n.guid}
     cold_start = not mapping_file
     if cold_start:
@@ -184,9 +188,15 @@ def _mapping_summary(
         try:
             loaded = configs.load_mapping(mapping_file, known_paths=known_paths)
         except configs.MappingValidationError as e:
-            return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None
+            return [f"Mapping: VALIDATION ERROR: {e}"], BLOCKED_FOR_REVIEW, None, None, headline
 
     result = mapping_engine.resolve_tree(tree, loaded)
+    if not result.resolved:
+        headline.append(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER}: the mapping resolved 0 of "
+            f"{len(result.unmapped)} account(s). Nothing is classified -- do not file this workbook. "
+            "Assign tags in GnuCash > ITR > ITR Mapping, then run again."
+        )
     lines = [f"Mapping: {len(result.resolved)} leaf(ves) resolved, {len(result.unmapped)} unmapped."]
     for w in result.warnings:
         lines.append(f"  WARNING: {w}")
@@ -194,7 +204,7 @@ def _mapping_summary(
 
     if not result.blocked:
         lines.append("Mapping: OK -- every leaf resolved to a tag.")
-        return lines, OK, result, loaded.entries
+        return lines, OK, result, loaded.entries, headline
 
     if cold_start:
         lines.insert(
@@ -214,17 +224,34 @@ def _mapping_summary(
     for leaf in result.unmapped:
         lines.append(f"  - {leaf.path} (FY total {leaf.total})")
 
-    suggestions = suggest.suggest_for_unmapped(result.unmapped, result.resolved, config_path, model_override)
+    suggest._emit("Mapping resolved. Starting AI tag suggestions for unmapped accounts.")
+    sug_run = suggest.run_suggestions(result.unmapped, result.resolved, config_path, model_override)
+    suggestions = sug_run.suggestions
+    if sug_run.cancelled:
+        headline.insert(
+            0,
+            "ERROR: the run was stopped by the user during the AI tag suggestions -- "
+            "NO workbook was built. Run again to get one.",
+        )
+        return lines, CANCELLED, result, loaded.entries, headline
     snippet = mapping_engine.proposed_mapping_snippet(result, suggestions)
     snippet_path = f"{output_path}-proposed-mappings.yaml"
     Path(snippet_path).write_text(snippet, encoding="utf-8")
     lines.append(f"Proposed mappings written to {snippet_path} -- review and paste into the mapping file.")
+    if sug_run.stopped_reason:
+        headline.append(
+            f"WARNING: AI tag suggestions stopped after {sug_run.attempted} call(s): "
+            f"{sug_run.stopped_reason}. {sug_run.left_without} of {sug_run.total} unmapped "
+            "account(s) have no AI suggestion."
+        )
     if suggestions:
         lines.append(f"  ({len(suggestions)} of {n_unmapped} unmapped account(s) got an LLM suggestion.)")
+    elif sug_run.stopped_reason:
+        lines.append("  (No LLM suggestions -- the AI pass stopped, see the warning at the top.)")
     else:
-        lines.append("  (No LLM suggestions -- no endpoint configured, or the endpoint call failed.)")
+        lines.append("  (No LLM suggestions -- no endpoint configured, or the replies could not be used.)")
 
-    return lines, status, result, loaded.entries
+    return lines, status, result, loaded.entries, headline
 
 
 def _form16_summary(tree, data, parse_error: str | None, resolved: dict | None) -> list[str]:
@@ -335,7 +362,9 @@ def _verify_summary(
             lines.append(f"[FY {year_key}] {book_verify.summarize(book_cross_check)}")
 
     lines.append("")
-    mapping_lines, status, result, mapping_entries = _mapping_summary(tree, mapping_file, output_path, config_path, model_override)
+    mapping_lines, status, result, mapping_entries, headline = _mapping_summary(
+        tree, mapping_file, output_path, config_path, model_override,
+    )
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
 
@@ -355,6 +384,8 @@ def _verify_summary(
             form16_error = str(e)
     lines.extend(_form16_summary(tree, form16_data, form16_error, resolved))
 
+    if headline:
+        lines = headline + [""] + lines
     return "\n".join(lines), tree, book, failures, book_cross_check, result, form16_data, year_key, status, mapping_entries
 
 
@@ -557,6 +588,8 @@ def _build_and_write_workbook(
         foreign_dividends_in_book=foreign_dividends_in_book,
     )
 
+    model.mapping_empty = not result.resolved
+
     form16_cross_check = book_verify.cross_check_form16(tree, result.resolved, form16_data) if form16_data else []
     # GAP B -- Form16<->26AS s.192 salary TDS cross-check: independent of the
     # Book<->Form16 check above (a mismatch here means Form16 and 26AS
@@ -584,6 +617,11 @@ def _build_and_write_workbook(
         f"written to {Path(output_path).name}.",
     ]
     lines.extend(regime_lines)
+    if model.mapping_empty:
+        lines.append(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER} -- workbook written but every figure is "
+            "unclassified; see the red banner on Statement of Income. DO NOT FILE."
+        )
     if result.unmapped:
         n = len(result.unmapped)
         total = sum(leaf.total or 0.0 for leaf in result.unmapped)
@@ -824,6 +862,11 @@ def run(
         _write_stub_workbook(output_path, summary)
         return summary
 
+    if status == CANCELLED:
+        # Stop pressed mid-run: only a stub that SAYS it is not a workbook.
+        _write_stub_workbook(output_path, summary)
+        return summary
+
     if ay and year_key and ay != year_key:
         summary = summary + "\n\n" + (
             f"ERROR: selected Assessment Year does not match the Balance Sheet HTML -- "
@@ -896,6 +939,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{presentation.CG_RECONCILIATION_ERROR_MARKER} -- workbook was written but "
             "MUST be reviewed before filing (see ERROR banner on CG / Statement of Income "
             "sheets).",
+            file=sys.stderr,
+        )
+        exit_code = 1
+    if presentation.EMPTY_MAPPING_ERROR_MARKER in summary:
+        print(
+            f"{presentation.EMPTY_MAPPING_ERROR_MARKER} -- the mapping resolved no account; "
+            "assign tags in the ITR Mapping tab before relying on this workbook.",
             file=sys.stderr,
         )
         exit_code = 1
