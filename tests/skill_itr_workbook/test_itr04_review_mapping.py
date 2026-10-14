@@ -24,6 +24,7 @@ for p in (str(ROOT), str(SRC), str(SCRIPTS), str(SRC / "agents" / "skill_itr_wor
 import agent  # noqa: E402
 import fixture_gen  # noqa: E402
 import mapping  # noqa: E402
+import run_sidecar  # noqa: E402
 from agents.gnucash_accounts import GncAccount  # noqa: E402
 from ui import _review_engine  # noqa: E402
 from ui.tabs import itr_mapping_review as ui_mod  # noqa: E402
@@ -120,13 +121,14 @@ def _book(tmp_path, monkeypatch, accounts):
     monkeypatch.setattr(ga, "load_accounts", lambda p: accounts)
 
 
-def test_book_leaves_listed_when_no_snippet_and_no_mapping(tmp_path, monkeypatch):
+def test_run_listed_book_leaves_shown_when_no_snippet_and_no_mapping(tmp_path, monkeypatch):
     root = _root(tmp_path)
     _book(tmp_path, monkeypatch, [
         _acct("p", "Assets", flags=("placeholder",)),
         _acct("l1", "Bank", "p", "Assets:Bank"),
         _acct("h", "Old", "p", "Assets:Old", flags=("hidden",)),
     ])
+    run_sidecar.write_run(root, "ONE", unmapped=["l1", "h"])      # ITR-14: the run lists them
     rows, info = _load(root, "ONE")
     assert [r["guid"] for r in rows] == ["l1"]                # hidden/placeholder never offered
     assert all(r["unmapped"] for r in rows) and info["book"] is not None
@@ -144,6 +146,7 @@ def test_mapped_account_or_mapped_ancestor_never_listed_as_unmapped(tmp_path, mo
         _acct("own", "Bank", path="Assets:Bank"),
         _acct("free", "Cash", path="Assets:Cash"),
     ])
+    run_sidecar.write_run(root, "ONE", unmapped=["kid", "own", "free"])
     rows, _ = _load(root, "ONE")
     unmapped = {r["guid"] for r in rows if r["unmapped"]}
     assert unmapped == {"free"}

@@ -95,6 +95,7 @@ import presentation  # noqa: E402
 import as26 as as26_engine  # noqa: E402
 import parse_foreign as foreign_engine  # noqa: E402
 import foreign_dividend_journal as fdj  # noqa: E402
+import run_accounts  # noqa: E402
 import foreign_tax as foreign_tax_engine  # noqa: E402
 from openpyxl.utils.exceptions import InvalidFileException  # noqa: E402
 
@@ -391,6 +392,10 @@ def _verify_summary(
     mapping_lines, status, result, mapping_entries, headline = _mapping_summary(
         tree, mapping_file, output_path, config_path, model_override, entity_key,
     )
+    # ITR-14: the accounts this run needed, written on EVERY run (a fully mapped
+    # one too) so Review Mapping lists exactly these and nothing else.
+    if status != CANCELLED:
+        run_accounts.write(result, output_path, entity_key, year_key)
     lines.append(f"STATUS: {status}")
     lines.extend(mapping_lines)
 
