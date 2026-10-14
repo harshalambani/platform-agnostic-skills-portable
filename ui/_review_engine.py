@@ -407,10 +407,19 @@ _CSS = r"""
    override rows) and does not rely on hue. Declared after the tint, equal or
    higher specificity, so it always wins. */
 #%%APP%%-app tbody tr.selected td {
-  background-color: #dbe7ff; background-image: none; color: #0b1220;
+  background-color: #dbe7ff; background-image: none; color: #0b1220 !important;
   box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff;
 }
 #%%APP%%-app tbody tr.selected:hover td { background-color: #c3d6ff; }
+/* ITR-13: every element INSIDE a selected row (indent span, labels, tag pills,
+   badges, chips) takes dark text on a white chip -- the light-on-dark colours they
+   carry on an unselected row are unreadable on the light selected cell.
+   !important because the tree stylesheet is appended after this one. */
+#%%APP%%-app tbody tr.selected td * { color: #0b1220 !important; }
+#%%APP%%-app tbody tr.selected td .tp,
+#%%APP%%-app tbody tr.selected td .badge,
+#%%APP%%-app tbody tr.selected td .cur,
+#%%APP%%-app tbody tr.selected td .chip { background: #ffffff !important; border-color: #0b1220 !important; }
 #%%APP%%-app tbody tr.selected td:first-child { box-shadow: inset 0 2px 0 #ffffff, inset 0 -2px 0 #ffffff, inset 5px 0 0 #1e3a8a; }
 
 /* Badge + confidence colours — bright on dark, WCAG AA at 12px. */
