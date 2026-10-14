@@ -147,6 +147,40 @@ def reply_label(skill) -> str:
     return "Agent reply" if getattr(getattr(skill, "requires", None), "llm", True) else "Result"
 
 
+def llm_precheck_mode(skill) -> str:
+    """"stop" (default) or "warn": what a failed pre-run endpoint check does,
+    declared in skill.yaml (requires.llm_precheck). Never a skill name here."""
+    return getattr(getattr(skill, "requires", None), "llm_precheck", "stop") or "stop"
+
+
+def _redact_endpoint_secrets(text, ep: dict) -> str:
+    """Remove the endpoint's API key (stored and decrypted forms) from a line."""
+    out = str(text or "")
+    raw = str((ep or {}).get("api_key") or "")
+    cands = {raw}
+    try:
+        if raw:
+            cands.add(str(_config.decrypt_api_key(raw)))
+    except Exception:  # noqa: BLE001 - an undecryptable key is simply not shown
+        pass
+    for c in cands:
+        for piece in {c, c.split(":", 1)[-1]}:
+            if len(piece) >= 6:
+                out = out.replace(piece, "[key hidden]")
+    return out
+
+
+def llm_precheck_warning(active: str, health, ep: dict) -> str:
+    """The loud line shown when a warn-mode pre-run check fails. It carries the
+    status / HTTP code the check saw, never the key."""
+    detail = _redact_endpoint_secrets(getattr(health, "detail", ""), ep)
+    return (
+        f"**WARNING: the AI endpoint '{active}' is {health.status}: {detail}.** "
+        "The run goes on without it. Accounts that still have no tag will get NO AI "
+        "suggestion; the result will say how many."
+    )
+
+
 def skill_uses_llm(skill_name: str) -> bool:
     """True when the named skill's manifest says it needs a model (requires.llm).
     Gates the LLM-endpoint health check on the custom tabs."""
@@ -903,17 +937,27 @@ def _make_run_handler(skill: SkillInfo):
             yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None), gr.update()
 
             health = _health.check(ep)
-            if not health.ok:
+            if not health.ok and llm_precheck_mode(skill) == "stop":
                 yield add(
-                    f"Error: endpoint '{active}' is {health.status}: {health.detail}. "
+                    f"Error: endpoint '{active}' is {health.status}: "
+                    f"{_redact_endpoint_secrets(health.detail, ep)}. "
                     "Fix in Data\\settings\\config.yaml and Refresh on the Home tab."
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
 
-            yield add(
-                f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
-                "First call may take 30–60s while the model loads."
-            ), gr.update(interactive=False, value=None), gr.update()
+            if not health.ok:
+                # requires.llm_precheck: warn -- the AI step is optional for this
+                # skill and it reports its own gap, so the run goes on.
+                yield add(llm_precheck_warning(active, health, ep)), \
+                    gr.update(interactive=False, value=None), gr.update()
+                yield add(
+                    "**Running** — continuing WITHOUT a working AI endpoint."
+                ), gr.update(interactive=False, value=None), gr.update()
+            else:
+                yield add(
+                    f"**Running** — endpoint OK ({ep.get('base_url', '?')}, model: {model_choice}). "
+                    "First call may take 30–60s while the model loads."
+                ), gr.update(interactive=False, value=None), gr.update()
         else:
             # Deterministic skill — no LLM endpoint required; run fully offline.
             yield add(
