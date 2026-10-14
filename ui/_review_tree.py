@@ -57,6 +57,7 @@ CSS = r"""
 #%%APP%%-app .tlegend .sw.ded { background: var(--ded); }
 #%%APP%%-app .tlegend .sw.paid { background: var(--paid); }
 #%%APP%%-app .tlegend .sw.rep { background: var(--rep); }
+#%%APP%%-app .ind { display: inline-block; box-sizing: border-box; max-width: 100%; }
 #%%APP%%-app .tmain { display: flex; gap: 12px; align-items: flex-start; }
 #%%APP%%-app .tleft { flex: 1 1 auto; min-width: 0; }
 #%%APP%%-app .tside {
@@ -295,7 +296,7 @@ JS = r"""  // ── ITR-07: tree + side panel (opt-in via spec.tree) ──
     tr.classList.add('sech');
     const td = document.createElement('td');
     td.colSpan = COLS.length;
-    td.style.paddingLeft = (8 + h._depth * 16) + 'px';
+    td.style.paddingLeft = (0.5 + indentLevel(h._depth)) + 'em';
     const live = leavesOf(h);
     const box = document.createElement('input');
     box.type = 'checkbox';
@@ -334,7 +335,16 @@ JS = r"""  // ── ITR-07: tree + side panel (opt-in via spec.tree) ──
     const h = hintOf(r);
     if (h && kindOf(h.tag)) tr.classList.add('lr-' + kindOf(h.tag));
   }
+  // Depth indent for the grouped view: one em per account level, capped so a deep
+  // tree stays readable at phone width. The flat view carries no indent at all.
+  const INDENT_CAP = 6;
+  function indentLevel(depth) { return Math.min(Math.max(depth, 0), INDENT_CAP); }
+  function groupedNow() { return treeGrouped && sortCol === 'path' && sortAsc; }
   function treeCell(r, c, html) {
+    if (c.key === COLS[0].key && groupedNow()) {
+      const lv = indentLevel((r._segs || []).length - 1);
+      if (lv > 0) html = '<span class="ind" data-depth="' + lv + '" style="padding-left:' + lv + 'em">' + html + '</span>';
+    }
     if (c.key !== TARGET || r._stale || r._deleted) return html;
     const t = effTag(r);
     if (isReal(t)) {

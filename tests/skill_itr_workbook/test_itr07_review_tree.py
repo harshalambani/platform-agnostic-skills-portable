@@ -356,3 +356,59 @@ def _html_for_colours():
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         return _html(Path(d))
+
+
+# --- depth indent in the grouped view ----------------------------------------------
+
+def _deep_book():
+    segs = ["Assets", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "Deep Leaf"]
+    out, parent = [], None
+    for i in range(len(segs)):
+        path = ":".join(segs[:i + 1])
+        out.append(_acct("d%d" % i, path, "ASSET", parent))
+        parent = "d%d" % i
+    return out + _book()
+
+
+def _run_deep(tmp_path, scenario):
+    root, _b = _setup(tmp_path)
+    with patch("ui._config.data_root_dir", return_value=root), \
+            patch.object(ui_mod, "_load_book_accounts", return_value=(Path(__file__), _deep_book())):
+        html = ui_mod._load_review_data("ONE")
+    return js.run_js(html, "itrmap", HELP + scenario, tmp_path, PRE)
+
+
+@needs_node
+def test_grouped_rows_are_indented_by_depth_and_capped(tmp_path):
+    out = _run_deep(tmp_path, """
+        const lv = (x) => { const m = /data-depth="([0-9]+)"/.exec(x.cells[0]); return m ? Number(m[1]) : 0; };
+        const g = leaves();
+        const deep = g.find(x => x.cells[0].includes('Deep Leaf'));
+        const shallow = g.find(x => x.cells[0].includes('Assets:Bank:Savings'));
+        const heads = $id(APP + '-tbody').children.filter(t => t.classList._s.has('sech'))
+                         .map(t => t.children[0].style.paddingLeft);
+        return {deep: lv(deep), shallow: lv(shallow), heads};
+    """)
+    assert out["shallow"] == 2          # Assets > Bank > Savings
+    assert out["deep"] == 6             # nine levels deep, capped
+    assert all(h.endswith("em") for h in out["heads"])
+    assert max(float(h[:-2]) for h in out["heads"]) <= 6.5 + 1e-9
+
+
+@needs_node
+def test_flat_view_rows_carry_no_depth_indent(tmp_path):
+    out = _run_deep(tmp_path, """
+        $id(APP + '-v-flat').onclick();
+        return {cells: leaves().map(x => x.cells[0]), heads: view(APP).filter(isHead).length};
+    """)
+    assert out["cells"] and out["heads"] == 0
+    assert not any('class="ind"' in c or "data-depth" in c for c in out["cells"])
+
+
+def test_other_review_tabs_get_no_indent_code():
+    from ui import _review_tree as rt
+    out = "".join(eng.build_html(eng.ReviewSpec(app_id="g1", columns=[eng.Column("a", "A")],
+                                               target_col="a", payload_var="pv"),
+                                [{"a": "x", "guid": "1"}]) for _ in range(1))
+    assert "data-depth" not in out and "indentLevel" not in out and ".ind " not in out
+    assert rt.NO_TOKENS["%%TREE_CELL%%"] == ""
