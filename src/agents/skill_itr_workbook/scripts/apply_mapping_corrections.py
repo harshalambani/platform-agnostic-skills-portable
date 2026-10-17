@@ -245,8 +245,11 @@ def apply_corrections_map(
         entry = entries.get(guid)
         for flag, on in (wanted or {}).items():
             bad = ("flag:" + str(flag))
+            # ITR-16: FOREIGN_INCOME is for foreign-source income tags only. Clearing
+            # is always allowed, so a stale flag on a re-tagged row can be removed.
             if entry is None or flag not in tag_vocab.FLAGS or (
-                    flag == "AL_FOREIGN" and not tag_vocab.is_al_foreign_capable(entry.tag)):
+                    flag == "AL_FOREIGN" and not tag_vocab.is_al_foreign_capable(entry.tag)) or (
+                    flag == "FOREIGN_INCOME" and on and not tag_vocab.is_foreign_income_capable(entry.tag)):
                 invalid.append(((entry.path if entry else paths.get(guid, "")), guid, bad))
                 continue
             current = list(entry.flags or [])

@@ -140,6 +140,10 @@ class ReviewSpec:
     # `_flagok` (loader-decided). Empty (default) renders nothing and adds no
     # script, so every other screen is unchanged.
     flag_toggle: tuple = ()
+    # ITR-16. Further toggles of the same kind, each (column key, "set" label,
+    # "clear" label, value when set, row key that says the row may take it).
+    # Empty (default) adds nothing, so every other screen is unchanged.
+    extra_flag_toggles: tuple = ()
     # IMP-11. When True, renders "Don't import selected" / "Import selected"
     # toolbar buttons. Rows flagged `_excluded` (by the loader) start struck
     # through and are NOT in the payload's `all_rows`; they travel in
@@ -1192,15 +1196,15 @@ _FLAG_JS = """  // ── ITR-05: set / clear a yes-or-blank flag column on the 
       let n = 0, skipped = 0;
       rows.forEach(r => {
         if (!selected.has(r._idx) || r._deleted) return;
-        if (r._locked || !r._flagok) { skipped++; return; }
+        if (r._locked || !r.%%FLAG_OK%%) { skipped++; return; }
         const want = on ? FVAL : '';
         if ((r[FCOL] || '') === want) return;
         r[FCOL] = want; r._changed = true; n++;
       });
-      if (skipped) alert(skipped + ' selected row(s) skipped: the flag applies only to mapped asset accounts.');
+      if (skipped) alert(skipped + ' selected row(s) skipped: %%FLAG_MSG%%');
       if (n) { markDirty(); syncPayload(); renderTable(); }
     }
-    const a = $('flag-on'), b = $('flag-off');
+    const a = $('%%FLAG_ON%%'), b = $('%%FLAG_OFF%%');
     if (a) a.onclick = () => flagSel(true);
     if (b) b.onclick = () => flagSel(false);
   })();
@@ -1259,15 +1263,27 @@ def build_html(spec: ReviewSpec, rows: list[dict]) -> str:
         if spec.allow_delete else ""
     )
     flag_js = ""
+    _toggles = []
     if spec.flag_toggle:
-        _fcol, _fset, _fclear, _fval = spec.flag_toggle
+        _toggles.append((*spec.flag_toggle, "_flagok", "flag-on", "flag-off",
+                         "Mark the selected asset accounts as held abroad",
+                         "Clear the flag on the selected accounts",
+                         "the flag applies only to mapped asset accounts."))
+    for _i, _t in enumerate(spec.extra_flag_toggles):
+        _toggles.append((*_t, f"flag{_i + 2}-on", f"flag{_i + 2}-off",
+                         "Mark the selected income accounts as foreign source",
+                         "Clear the foreign-income mark on the selected accounts",
+                         "the mark applies only to mapped dividend income accounts."))
+    for (_fcol, _fset, _fclear, _fval, _fok, _idon, _idoff, _tton, _ttoff, _msg) in _toggles:
         delete_btn_html += (
-            f'<button id="{spec.app_id}-flag-on" title="Mark the selected asset accounts as held abroad">'
+            f'<button id="{spec.app_id}-{_idon}" title="{_attr(_tton)}">'
             f'{_attr(_fset)}</button>'
-            f'<button id="{spec.app_id}-flag-off" title="Clear the flag on the selected accounts">'
+            f'<button id="{spec.app_id}-{_idoff}" title="{_attr(_ttoff)}">'
             f'{_attr(_fclear)}</button>'
         )
-        flag_js = _FLAG_JS.replace("%%FLAG_COL%%", js_json(_fcol)).replace("%%FLAG_VAL%%", js_json(_fval))
+        flag_js += (_FLAG_JS.replace("%%FLAG_COL%%", js_json(_fcol)).replace("%%FLAG_VAL%%", js_json(_fval))
+                    .replace("%%FLAG_OK%%", _fok).replace("%%FLAG_MSG%%", _msg)
+                    .replace("%%FLAG_ON%%", _idon).replace("%%FLAG_OFF%%", _idoff))
 
     if spec.allow_exclude:
         exclude_btn_html = (

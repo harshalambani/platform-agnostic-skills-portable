@@ -510,6 +510,8 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
             "note": entry.note or "",
             # ITR-05: the foreign-held flag, shown and editable on asset tags.
             "al_foreign": "AL_FOREIGN" if "AL_FOREIGN" in (entry.flags or []) else "",
+            # ITR-16: the foreign-source INCOME mark, shown and editable on dividend income tags.
+            "foreign_income": "FOREIGN_INCOME" if "FOREIGN_INCOME" in (entry.flags or []) else "",
         })
 
     info["entries"] = len(entries)
@@ -591,6 +593,7 @@ def _collect_review(entity_key: str) -> tuple[list[dict], dict]:
         r.setdefault("held", False)
         r.setdefault("hold_reason", "")
         r.setdefault("al_foreign", "")
+        r.setdefault("foreign_income", "")
         # ITR-07: a saved entry whose account is gone from the registered book.
         r["_stale"] = bool(has_book and r["guid"] not in by_id)
         # ITR-11: the groups come from the book's real parent ids, never from
@@ -782,6 +785,13 @@ def _row_presentation(row: dict, tag_desc: dict[str, str]) -> None:
     except Exception:
         _flagok = False
     row["_flagok"] = bool(_flagok)
+    # ITR-16: the foreign-income mark can be set only on a saved row whose tag can
+    # be foreign-source income (a dividend tag); never an asset, expense, PERSONAL or HOLD row.
+    try:
+        _fiok = (not unmapped) and bool(tag) and bool(row.get("guid"))             and _itr_modules()[1].is_foreign_income_capable(tag)
+    except Exception:
+        _fiok = False
+    row["_flagok_fi"] = bool(_fiok)
     row["_tags"] = tags
     row["_rowclass"] = rowclass
     row["_badges"] = badges
@@ -834,6 +844,7 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str,
             Column("suggested", "Suggested"),
             Column("kind", "Side"),
             Column("al_foreign", "Foreign (AL)"),
+            Column("foreign_income", "Foreign income"),
             Column("hold_reason", "Hold reason"),
         ],
         target_col=TARGET_COL,
@@ -865,6 +876,9 @@ def _spec(picker_items: list[PickerItem], entity_key: str, glossary_html: str,
         allow_delete=True,
         # ITR-05: "Mark foreign" / "Clear foreign" for asset accounts held abroad.
         flag_toggle=("al_foreign", "Mark foreign", "Clear foreign", "AL_FOREIGN"),
+        # ITR-16: "Mark foreign income" / "Clear foreign income" for dividend income accounts.
+        extra_flag_toggles=(("foreign_income", "Mark foreign income", "Clear foreign income",
+                             "FOREIGN_INCOME", "_flagok_fi"),),
         # ITR-04: an applied tag shows at once as changed-and-unsaved, never
         # as UNMAPPED and never as saved/CONFIRMED.
         # ITR-07: the picker offers, and Apply accepts, only tags valid for each
@@ -1043,10 +1057,15 @@ def _save_changes(changes_json: str) -> str:
         # ITR-05: a changed foreign flag on a saved row. A flag-only change
         # never re-applies (and so never re-approves) the tag.
         prior = existing_entries.get(guid)
-        if prior is not None and "al_foreign" in ch:
-            want = bool(str(ch.get("al_foreign") or "").strip())
-            if want != ("AL_FOREIGN" in (prior.flags or [])):
-                flag_changes[guid] = {"AL_FOREIGN": want}
+        if prior is not None:
+            flag_hit = False
+            for col, flag in (("al_foreign", "AL_FOREIGN"), ("foreign_income", "FOREIGN_INCOME")):
+                if col in ch:
+                    want = bool(str(ch.get(col) or "").strip())
+                    if want != (flag in (prior.flags or [])):
+                        flag_changes.setdefault(guid, {})[flag] = want
+                        flag_hit = True
+            if flag_hit:
                 if ch.get("path"):
                     paths[guid] = _configs.canonical_account_path(ch["path"])
                 if str(tag or "").strip() == str(ch.get("_orig") or "").strip():
@@ -1108,7 +1127,10 @@ def _save_changes(changes_json: str) -> str:
     if invalid:
         lines.append(f"{len(invalid)} correction(s) NOT applied:")
         for path, guid, tag in invalid:
-            if str(tag).startswith("flag:"):
+            if str(tag) == "flag:FOREIGN_INCOME":
+                lines.append(f"  - {path} (guid {guid}): the foreign-income mark applies only to a mapped "
+                             "dividend income account")
+            elif str(tag).startswith("flag:"):
                 lines.append(f"  - {path} (guid {guid}): the foreign flag applies only to a mapped "
                              "Schedule AL asset account")
             elif _tag_vocab.is_valid_entry_tag(tag):

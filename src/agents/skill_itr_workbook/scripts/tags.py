@@ -152,6 +152,21 @@ def is_al_foreign_capable(tag: str) -> bool:
     return tag in AL_ASSET_TAGS
 
 
+#: ITR-16: income tags that can be foreign source. Only OS_DIVIDEND qualifies:
+#: it is the one income tag the foreign-tax engine reads FOREIGN_INCOME from
+#: (foreign_tax.foreign_dividend_leaves). The OS_INTEREST_* tags are not
+#: offered: nothing would consume the flag there, and a flag the workbook
+#: silently ignores would only suggest a protection that is not there.
+FOREIGN_INCOME_TAGS = frozenset({"OS_DIVIDEND"})
+
+
+def is_foreign_income_capable(tag: str) -> bool:
+    """ITR-16: FOREIGN_INCOME marks a foreign-source INCOME account. Offered, and
+    accepted, only on FOREIGN_INCOME_TAGS; never on an asset, liability,
+    expense, PERSONAL or HOLD row."""
+    return tag in FOREIGN_INCOME_TAGS
+
+
 def is_valid_tag(tag: str) -> bool:
     return tag in TAGS
 
