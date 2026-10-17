@@ -41,6 +41,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 # check are shared rather than copied.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from agents.skill_cc_sort.completeness import _month_back, classify_text, parse_date  # noqa: E402
+from agents.skill_cc_sort.icici_csv import CsvRefused, identify_card, parse_icici_csv  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Numbers and small helpers
@@ -202,6 +203,7 @@ class Row:
     source: str = ""
     instalment: str = ""      # HSBC: the continuation line ("1ST OF 3 INSTALLMENTS PRINCIPAL")
     explained: bool = False   # an HSBC offset leg (instalment credit, loan conversion credit): never booked, understood
+    network: str = ""         # CC-22: ICICI CSV only (Amex / Mastercard on one Sapphiro account); blank for PDFs
 
     @property
     def card(self) -> str:
@@ -1498,6 +1500,57 @@ class Result:
     statements: list = field(default_factory=list)         # the Statement objects behind ties (same order)
     emi_rows: list = field(default_factory=list)
     pool: list = field(default_factory=list)               # every distinct statement parsed (prior-statement lookups)
+    csv_statements: list = field(default_factory=list)     # CC-22: ICICI CSV exports read (rows kept after overlap removal)
+    csv_ties: list = field(default_factory=list)           # CC-22: one coverage line per CSV (no totals, so no tie-out)
+
+
+CSV_NO_TOTALS = "NO TOTALS (CSV export)"
+
+
+def _csv_key(r: Row) -> tuple:
+    return (r.card, r.date.date() if r.date else None, round(r.amount, 2), r.direction)
+
+
+def read_icici_csv(path: Path, bank: str, card: str) -> tuple[Statement | None, str]:
+    """CC-22: (Statement, "") or (None, why it was refused). The period is the first to the last
+    transaction date: the export prints no statement period and no totals."""
+    try:
+        parsed = parse_icici_csv(path)
+    except CsvRefused as e:
+        return None, f"refused - {e}"
+    ctype, why = identify_card(parsed.masks)
+    if ctype is None:
+        return None, f"refused - cannot tell which card this is ({why}); not read"
+    if ctype.lower() != card.lower():
+        return None, (f"refused - the card numbers in the file say ICICI-{ctype} but it sits in "
+                      f"{bank}-{card}; not read")
+    rows = []
+    for cr in parsed.rows:
+        r = _mk_row(bank, card, datetime(cr.when.year, cr.when.month, cr.when.day),
+                    cr.description, cr.amount, cr.direction)
+        r.network = cr.network
+        rows.append(r)
+    period = (parsed.first, parsed.last) if parsed.rows else None
+    st = Statement(bank, card, path.name, period,
+                   "CSV export: period is the first to the last transaction date", Parsed(rows=rows))
+    for r in rows:
+        r.period = st.label
+        r.statement = f"{st.card} | CSV | {st.label}"
+        r.source = path.name
+    return st, ""
+
+
+def csv_coverage_tie(st: Statement, dropped: int) -> TieOut:
+    rows = st.parsed.rows
+    debits = sum(1 for r in rows if r.direction == "Dr")
+    credits = len(rows) - debits
+    note = (f"CSV export carries no statement totals, so there is no balance tie-out. "
+            f"Coverage {st.label}; {debits} debit(s), {credits} credit(s)")
+    if dropped:
+        note += f"; {dropped} row(s) already in another statement not counted again"
+    return TieOut(card=st.card, period=st.label, source=st.source, previous=None, payments=0.0,
+                  credits=0.0, spends=0.0, fees=0.0, other=0.0, computed=None, printed=None,
+                  difference=None, result=CSV_NO_TOTALS, note=note)
 
 
 def _overlaps(period, start, end) -> bool:
@@ -1561,7 +1614,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     outside: list[str] = []
     seen_keys: dict = {}
 
-    if not pdfs:
+    if not pdfs and not (list(pdf_dir.rglob("*.csv")) + list(pdf_dir.rglob("*.CSV"))):
         issues.append(f"no PDFs found under {pdf_dir}")
 
     for pdf in pdfs:
@@ -1599,12 +1652,79 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         if not st.parsed.rows:
             if no_activity(st):
                 issues.append(f"{pdf.name}: no activity (every printed figure is zero)")
+            elif not st.parsed.summary:
+                # CC-22: 0 rows AND no statement summary to say why: never clean.
+                issues.append(f"{pdf.name}: no transactions parsed (0 rows and no statement summary found) - NOT clean; "
+                              "the statement was not understood (a CSV export of the same card may carry its rows)")
             else:
                 issues.append(f"{pdf.name}: no transactions parsed")
         for e in st.parsed.errors:
             issues.append(f"{pdf.name}: {e}")
 
-    rows = [r for st in statements for r in st.parsed.rows]
+    # CC-22: ICICI CSV exports. A row already booked from a PDF statement (or an earlier CSV)
+    # is counted once: rows match on card + date + amount + direction, with multiplicity, and the
+    # PDF row wins. A CSV has no totals, so it gets a coverage line instead of a tie-out.
+    csv_seen, csv_files = set(), []
+    for p in sorted(pdf_dir.rglob("*.csv")) + sorted(pdf_dir.rglob("*.CSV")):
+        k = (p.parent.name, p.name.lower())
+        if k not in csv_seen:
+            csv_seen.add(k)
+            csv_files.append(p)
+    csv_statements: list[Statement] = []
+    csv_ties: list[TieOut] = []
+    booked: dict = defaultdict(int)
+    for st in statements:
+        for r in st.parsed.rows:
+            booked[_csv_key(r)] += 1
+    pdf_periods = [(st.card, st.period) for st in statements if st.period and st.parsed.rows]
+    csv_keys_seen: dict = {}
+    for cpath in csv_files:
+        bank, card = get_bank_and_card_type(cpath)
+        if bank.lower() != "icici":
+            skipped.append(f"{cpath.name} (a CSV statement is only read for ICICI)")
+            continue
+        cst, why = read_icici_csv(cpath, bank, card)
+        if cst is None:
+            issues.append(f"{cpath.name}: {why}")
+            continue
+        if cst.key in csv_keys_seen:
+            first_name, first = csv_keys_seen[cst.key]
+            if row_signature(cst) == row_signature(first):
+                duplicates.append(f"{cst.card} {cst.label}: {cpath.name} - Duplicate of {first_name} (counted once)")
+            else:
+                issues.append(f"{cpath.name}: same card and coverage as {first_name} but different rows; "
+                              f"only {first_name} is used - check which one is right")
+            continue
+        csv_keys_seen[cst.key] = (cpath.name, cst)
+        if not cst.parsed.rows:
+            issues.append(f"{cpath.name}: CSV read but holds no transactions - NOT clean")
+            continue
+        if not _overlaps(cst.period, start, end):
+            outside.append(cpath.name)
+            continue
+        in_range = [r for r in cst.parsed.rows
+                    if (start is None or r.date.date() >= start) and (end is None or r.date.date() <= end)]
+        groups: dict = defaultdict(list)
+        for r in in_range:
+            groups[_csv_key(r)].append(r)
+        kept, extra = [], []
+        for key, grp in groups.items():
+            take = max(0, len(grp) - booked[key])
+            kept += grp[:take]
+            booked[key] += take
+            if take and any(c == key[0] and ps[0] <= key[1] <= ps[1] for c, ps in pdf_periods):
+                extra += grp[:take]
+        dropped = len(in_range) - len(kept)
+        if extra:
+            issues.append(f"{cpath.name}: {len(extra)} CSV row(s) fall inside a PDF statement of the same "
+                          "card but are not in it (booked once, from the CSV): "
+                          + "; ".join(f"{r.date:%d %b %Y} {_money(r.amount)} {r.direction}" for r in extra[:5]))
+        out_st = Statement(cst.bank, cst.card_type, cst.source, cst.period, cst.period_note,
+                           Parsed(rows=kept))
+        csv_statements.append(out_st)
+        csv_ties.append(csv_coverage_tie(out_st, dropped))
+
+    rows = [r for st in statements for r in st.parsed.rows] + [r for st in csv_statements for r in st.parsed.rows]
     undated = [r for r in rows if r.date is None]
     if undated:
         issues.append(f"{len(undated)} row(s) without a date")
@@ -1617,7 +1737,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
                           + (f" - {t.note}" if t.note else "")
                           + (f"; difference {_money(t.difference)}" if t.difference else ""))
             gap_lines.append(f"{t.card} {t.period} ({t.source}): {t.gap}")
-    fees = collect_fees(statements)
+    fees = collect_fees(statements + csv_statements)
     # CC-20: the fee lines print once, in the fee block. The issues list carries one pointer for
     # the fees that were NOT reversed (a reversed fee is resolved and is not an issue).
     unreversed = [f for f in fees if f.reversed_by is None]
@@ -1631,7 +1751,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
 
     out = ""
     if rows:
-        write_excel(rows, ties, fees, duplicates, issues, label, output_excel, skipped)
+        write_excel(rows, ties + csv_ties, fees, duplicates, issues, label, output_excel, skipped)
         out = str(output_excel)
 
     by_card: dict[str, int] = defaultdict(int)
@@ -1653,7 +1773,11 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         parts.append("Gap report (statements that did not tie out):\n\n" + "\n".join(f"- {g}" for g in gap_lines))
     parts.append(f"Range run: {label}")
     parts.append(f"{len(rows)} transactions from {len(statements)} statement(s)"
+                 + (f" and {len(csv_statements)} CSV export(s)" if csv_statements else "")
                  + (f"; {len(outside)} statement(s) outside the range skipped" if outside else ""))
+    if csv_ties:
+        parts.append("CSV exports (no statement totals, so no balance tie-out; coverage and counts instead):\n\n"
+                     + "\n".join(f"- {t.card} {t.source}: {t.note}" for t in csv_ties))
     if by_card:
         parts.append("By card:\n\n" + "\n".join(f"- {k}: {by_card[k]}" for k in sorted(by_card)))
     passed = sum(1 for t in ties if is_pass(t.result))
@@ -1664,7 +1788,8 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         parts.append("Duplicate statements:\n\n" + "\n".join(f"- {d}" for d in duplicates))
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
-                  skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool)
+                  skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool,
+                  csv_statements=csv_statements, csv_ties=csv_ties)
 
 
 # ---------------------------------------------------------------------------
@@ -1693,14 +1818,14 @@ def write_excel(rows, ties, fees, duplicates, issues, label, output_path, skippe
     ws = wb.active
     ws.title = "Transactions"
     ws.append(["Bank", "Card Type", "Date", "Description", "Amount", "Direction",
-               "Kind", "Statement", "Source file"])
+               "Kind", "Statement", "Source file", "Network"])
     _style_header(ws)
     for r in sorted(rows, key=lambda x: x.date or datetime.min, reverse=True):
         ws.append([r.bank, r.card_type, r.date, r.description, r.amount, r.direction,
-                   r.kind, r.statement, r.source])
+                   r.kind, r.statement, r.source, r.network])
     _fmt_cols(ws, (3, 3), "dd-mmm-yyyy")
     _fmt_cols(ws, (5, 5), "#,##0.00")
-    for col, w in zip("ABCDEFGHI", (12, 20, 14, 55, 14, 10, 10, 50, 40)):
+    for col, w in zip("ABCDEFGHIJ", (12, 20, 14, 55, 14, 10, 10, 50, 40, 12)):
         ws.column_dimensions[col].width = w
 
     summary = wb.create_sheet("Summary")

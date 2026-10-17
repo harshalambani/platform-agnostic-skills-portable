@@ -71,6 +71,11 @@ The script detects bank and card type from the PDF filename:
 - ICICI + Sapphiro         -> ICICI-Sapphiro
 - No match                 -> Unknown-Unknown
 
+ICICI statement CSV exports (not encrypted) are routed by the masked card numbers inside the
+file, never by file name or row count: two cards on two networks (Amex + Mastercard) ->
+ICICI-Sapphiro (one account, one bill); one card -> ICICI-Amazon. A CSV whose header does not
+match is not read and lands in Unknown-Unknown.
+
 ## Output Structure
 
 output_folder/

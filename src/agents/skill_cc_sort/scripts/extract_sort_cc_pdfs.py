@@ -52,6 +52,9 @@ def detect_input_type(input_path):
 
     msg_count = len(list(input_path.rglob('*.msg')))
     pdf_count = len(list(input_path.rglob('*.pdf')))
+    csv_count = len(list(input_path.rglob('*.csv')))
+    if csv_count > 0 and msg_count == 0 and pdf_count == 0:
+        return 'csv'   # CC-22: ICICI statement CSV exports only
 
     if msg_count > 0 and pdf_count == 0:
         return 'msg'
@@ -415,6 +418,14 @@ def choose_folder(original_name, decrypted_pdf):
         pass
     return 'Unknown', 'Unknown'
 
+def find_statement_csvs(input_path):
+    """CC-22: ICICI statement CSV exports under the input folder. A CSV is not encrypted, so it is
+    copied, not decrypted. A file that merely looks like one is still taken (Credit Card
+    Transactions refuses it later with a reason); a CSV that is not one is ignored."""
+    from agents.skill_cc_sort.icici_csv import looks_like_icici_csv
+    return [p for p in sorted(Path(input_path).rglob('*.csv')) if looks_like_icici_csv(p)]
+
+
 def decrypt_pdf(pdf_path, passwords, output_path):
     """
     Decrypt PDF using qpdf, trying each password in the list until one succeeds.
@@ -552,11 +563,17 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
     decrypted_dir.mkdir(parents=True, exist_ok=True)
     duplicates_dir.mkdir(parents=True, exist_ok=True)
 
+    csv_files = find_statement_csvs(input_path)
+    results['csv_files'] = len(csv_files)
     results['total_analyzed'] = len(pdf_files)
     print(f"\nProcessing {len(pdf_files)} PDFs...")
+    if csv_files:
+        print(f"Found {len(csv_files)} ICICI statement CSV export(s) (no decryption needed).")
 
     # Build password list
-    if password:
+    if not pdf_files:
+        passwords = []     # CC-22: CSV-only input needs no password
+    elif password:
         # Password(s) passed via CLI: allow comma-separated or single value
         passwords = [p.strip() for p in password.split(',') if p.strip()]
     else:
@@ -568,7 +585,8 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
                 "  2. Create a 'passwords.txt' file in the input folder with one password per line"
             )
 
-    print(f"Will try {len(passwords)} password(s) per PDF.")
+    if pdf_files:
+        print(f"Will try {len(passwords)} password(s) per PDF.")
 
     # Create temporary decrypted folder — always start fresh to avoid stale-file collisions
     temp_decrypted = output_path / '_temp_decrypted'
@@ -639,6 +657,28 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
 
         results['organization'][f"{bank}-{card_type}"] += 1
         results['checksums'][str(decrypted_pdf.relative_to(output_path))] = file_hash
+
+    # CC-22: route each CSV by the masked card numbers inside it (never by name or row count).
+    from agents.skill_cc_sort.icici_csv import card_folder
+    csv_hashes = set()
+    for csv_path in csv_files:
+        file_hash = calculate_md5(str(csv_path))
+        bank, card_type = card_folder(csv_path)
+        if file_hash in csv_hashes:
+            dup_folder = duplicates_dir / f"{bank}-{card_type}"
+            dup_folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(csv_path), str(dup_folder / csv_path.name))
+            results['duplicates_removed'] += 1
+            continue
+        csv_hashes.add(file_hash)
+        bank_folder = decrypted_dir / f"{bank}-{card_type}"
+        bank_folder.mkdir(parents=True, exist_ok=True)
+        target = bank_folder / csv_path.name
+        if target.exists():
+            target = bank_folder / f"{csv_path.parent.name}__{csv_path.name}"
+        shutil.copy2(str(csv_path), str(target))
+        results['organization'][f"{bank}-{card_type}"] += 1
+        results['checksums'][str(target.relative_to(output_path))] = file_hash
 
     # Cleanup temp folders
     shutil.rmtree(temp_decrypted, ignore_errors=True)
