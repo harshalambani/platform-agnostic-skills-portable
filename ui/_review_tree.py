@@ -73,9 +73,10 @@ CSS = r"""
 }
 #%%APP%%-app .tside .apply { width: 100%; padding: 7px; font-size: 12px; font-weight: 700; border-radius: 4px;
   border: none; background: #2563eb; color: #fff; cursor: pointer; }
-/* UI-37: Apply, and the tag it will apply, stay in view at the foot of the panel. */
+/* UI-37: Apply, and the tag it will apply, stay in view at the foot of the panel. bottom:-8px cancels
+   the panel's 8px padding so the bar sits flush on the panel edge and no tag can show below it. */
 #%%APP%%-app .tside .applybar {
-  position: sticky; bottom: 0; z-index: 2; margin: 8px -8px -8px; padding: 8px;
+  position: sticky; bottom: -8px; z-index: 2; margin: 8px -8px -8px; padding: 8px;
   background: var(--panel); border-top: 1px solid var(--line);
 }
 #%%APP%%-app .tside .apply[disabled] { background: var(--line); color: var(--muted); cursor: not-allowed; }
