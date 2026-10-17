@@ -96,22 +96,23 @@ def run(
     except ValueError as e:
         return f"ERROR: {e}"
     issues = report.issues
-    body = report.text()
+    body = report.panel_text()
     try:
         (out_dir / "completeness_report.txt").write_text(report.full_text() + "\n", encoding="utf-8")
     except OSError:
         pass
 
     if issues:
-        head = (f"Sort completed with {len(issues)} issue(s):\n"
-                + "\n".join(f"  - {i}" for i in issues))
+        head = (f"Sort completed with {len(issues)} issue(s):\n\n"
+                + "\n".join(f"- {i}" for i in issues))
     else:
         head = "Sort completed successfully."
+    # UI-39: every line is its own Markdown list item, so none runs into the next in the panel.
     msg = (
-        f"{head}\n"
-        f"Input:  {input_folder}\n"
-        f"Output: {output_folder}\n"
-        f"Check the Decrypted_PDFs_Correct/ folder in the output location.\n\n"
+        f"{head}\n\n"
+        f"- Input:  {input_folder}\n"
+        f"- Output: {output_folder}\n"
+        f"- Check the Decrypted_PDFs_Correct/ folder in the output location.\n\n"
         f"{body}"
     )
     if notes:

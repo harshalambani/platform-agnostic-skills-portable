@@ -1515,6 +1515,16 @@ def emi_block(emi_rows: list) -> str:
     return "\n".join(lines)
 
 
+def md_list(text: str) -> str:
+    """UI-39: the result panel is Markdown without line breaks, so indented single-newline lines run
+    together. Keep the first line as the heading and make every following line its own list item.
+    Only the panel message uses this; the Excel and the issues list are untouched."""
+    head, *rest = text.split("\n")
+    if not rest:
+        return text
+    return head + "\n\n" + "\n".join(f"- {ln.strip()}" for ln in rest if ln.strip())
+
+
 def no_activity(st: Statement) -> bool:
     """CC-19: a statement with no rows whose printed summary figures are ALL zero
     (within the tie-out tolerance) had no activity. Any non-zero printed figure,
@@ -1621,28 +1631,28 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     parts = []
     block = fee_block(fees)
     if block:
-        parts.append(block)
+        parts.append(md_list(block))
     eb = emi_block(emi_rows)
     if eb:
-        parts.append(eb)
+        parts.append(md_list(eb))
     if issues:
-        parts.append(f"Credit card transactions completed with {len(issues)} issue(s):\n"
-                     + "\n".join(f"  - {i}" for i in issues))
+        parts.append(f"Credit card transactions completed with {len(issues)} issue(s):\n\n"
+                     + "\n".join(f"- {i}" for i in issues))
     else:
         parts.append("Credit card transactions completed successfully.")
     if gap_lines:
-        parts.append("Gap report (statements that did not tie out):\n" + "\n".join(f"  {g}" for g in gap_lines))
+        parts.append("Gap report (statements that did not tie out):\n\n" + "\n".join(f"- {g}" for g in gap_lines))
     parts.append(f"Range run: {label}")
     parts.append(f"{len(rows)} transactions from {len(statements)} statement(s)"
                  + (f"; {len(outside)} statement(s) outside the range skipped" if outside else ""))
     if by_card:
-        parts.append("By card:\n" + "\n".join(f"  {k}: {by_card[k]}" for k in sorted(by_card)))
+        parts.append("By card:\n\n" + "\n".join(f"- {k}: {by_card[k]}" for k in sorted(by_card)))
     passed = sum(1 for t in ties if is_pass(t.result))
     parts.append(f"Tie-out: {passed} of {len(ties)} statement(s) PASS (see the Tie-out sheet)")
     if skipped:
-        parts.append(f"Skipped: not a statement ({len(skipped)}):\n" + "\n".join(f"  {d}" for d in skipped))
+        parts.append(f"Skipped: not a statement ({len(skipped)}):\n\n" + "\n".join(f"- {d}" for d in skipped))
     if duplicates:
-        parts.append("Duplicate statements:\n" + "\n".join(f"  {d}" for d in duplicates))
+        parts.append("Duplicate statements:\n\n" + "\n".join(f"- {d}" for d in duplicates))
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
                   skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool)
