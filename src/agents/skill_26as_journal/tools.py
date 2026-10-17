@@ -275,15 +275,10 @@ def final_summary(output_path: str, gnucash_path: str = "",
         lines.append("- NOT CHECKED - the already-posted check did not run: "
                      + posted["error"])
     if posted.get("nothing_to_import"):
-        _ap = posted.get("already_posted") or []
-        _mm = posted.get("mismatched") or []
-        if _mm:
-            lines.append(f"**Nothing to import** - {len(_ap)} already posted; {len(_mm)} "
-                         "left out because the book has the same Num with different "
-                         "amounts (RED FLAG above). No CSV was written.")
-        else:
-            lines.append("**Nothing to import** - every journal is already in the book "
-                         "(" + ", ".join(_ap) + "). No CSV was written.")
+        _txt = _BTJ.nothing_to_import_text(posted.get("already_posted") or [],
+                                           posted.get("mismatched") or [])
+        lines.append(_txt.replace("Nothing to import", "**Nothing to import**", 1)
+                     + " No CSV was written.")
         return chr(10).join(lines)
     if posted.get("already_posted"):
         lines.append("- ALREADY POSTED (left out of the import file): "

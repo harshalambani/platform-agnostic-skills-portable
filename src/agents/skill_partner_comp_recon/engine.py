@@ -1684,7 +1684,13 @@ def build_report(data: dict) -> Report:
             # branch). When Booked (monthly) agrees on its own the accrual is
             # not part of this row's comparison, so no sum is printed.
             accr = (pending_journal or {}).get("amount") or 0.0
-            used = PENDING_JOURNAL_VERDICT in (row.note or "") or                 "Genuine residual after posting" in (row.note or "")
+            # No flag is returned by statement_reference_row, so match its
+            # fixed wording; tests pin both branches so a wording change
+            # cannot silently drop the sum.
+            used = (
+                PENDING_JOURNAL_VERDICT in (row.note or "")
+                or "Genuine residual after posting" in (row.note or "")
+            )
             if used:
                 extra = (f"Booked (monthly) {booked:,.2f}; year-end accrual "
                          f"{accr:,.2f}; sum {booked + accr:,.2f}.")

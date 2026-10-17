@@ -1841,6 +1841,24 @@ def _account_diff_text(book: dict, mine: dict) -> str:
             f"{', '.join(sorted(only_m)) or 'none'}")
 
 
+def nothing_to_import_text(already_posted: list, mismatches: list) -> str:
+    """The 'Nothing to import' sentence, counted by mismatch kind. 'Every journal
+    is already in the book' only when there is no mismatch of either kind."""
+    if not mismatches:
+        return ("Nothing to import: every journal is already in the book"
+                + (f" ({', '.join(already_posted)})." if already_posted else "."))
+    n_acct = sum(1 for m in mismatches if m.get("kind") == POSTED_ACCOUNT_MISMATCH)
+    n_amt = len(mismatches) - n_acct
+    parts = [f"{len(already_posted)} already posted"]
+    if n_acct:
+        parts.append(f"{n_acct} left out because the book has the same Num and amounts "
+                     "but a different account")
+    if n_amt:
+        parts.append(f"{n_amt} left out because the book has the same Num with "
+                     "different amounts")
+    return "Nothing to import - " + "; ".join(parts) + " (RED FLAG above)."
+
+
 def mismatch_red_flag(m: dict) -> str:
     """The RED FLAG sentence for one mismatch entry {id, detail, kind}."""
     if m.get("kind") == POSTED_ACCOUNT_MISMATCH:
@@ -2201,13 +2219,8 @@ def main(argv: list[str]) -> int:
         print("ALREADY POSTED (left out of the import file): "
               + ", ".join(stats["already_posted"]))
     if stats.get("nothing_to_import"):
-        _n_mm = len(stats.get("posted_mismatches") or [])
-        if _n_mm:
-            print(f"Nothing to import - {len(stats.get('already_posted') or [])} already posted; "
-                  f"{_n_mm} left out because the book has the same Num with different "
-                  "amounts (RED FLAG above).")
-        else:
-            print("Nothing to import: every journal is already in the book.")
+        print(nothing_to_import_text(stats.get("already_posted") or [],
+                                     stats.get("posted_mismatches") or []))
     for line in format_preflight(stats.get("preflight_issues") or []):
         print(line)
     if stats.get("preflight_error"):

@@ -36,8 +36,10 @@ AMOUNT_RX = re.compile(r"^-?\d{1,3}(?:,\d{3})*\.\d{2}$|^-?\d+\.\d{2}$")
 INT_RX = re.compile(r"^-?\d+$")
 
 # Sapphiro is two cards (one Amex, one Mastercard) on one account and one bill.
-# These digit groups mark a Sapphiro card when a file carries only one of them.
-SAPPHIRO_DIGITS = ("4315", "3747")
+# The first digit group below marks a Sapphiro card when a file carries only one
+# card. 3747 is the Sapphiro Amex. 4315 is the Amazon Visa, NOT Sapphiro, so it
+# must never be listed here.
+SAPPHIRO_DIGITS = ("3747",)
 
 
 class CsvRefused(ValueError):
@@ -233,7 +235,7 @@ def identify_card(masks: list[str]) -> tuple[str | None, str]:
         return None, "two card numbers but not on two different networks"
     if len(masks) == 1:
         m = MASK_RX.match(masks[0])
-        if m and (m.group(1) in SAPPHIRO_DIGITS or m.group(4) in SAPPHIRO_DIGITS):
+        if m and m.group(1) in SAPPHIRO_DIGITS:
             return "Sapphiro", ""
         return "Amazon", ""
     return None, f"{len(masks)} card numbers in one file"

@@ -255,3 +255,50 @@ def test_different_account_journal_is_never_posted_and_never_reoffered(tmp_path)
     summ = tl.final_summary(str(out), str(book))
     assert summ.startswith("**RED FLAG")
     assert "every journal is already in the book" not in summ
+
+
+# ---- "Nothing to import" wording counted by mismatch kind ----
+
+def _kinds(n_acct, n_amt):
+    return ([{"id": f"A{i}", "detail": "x", "kind": m.POSTED_ACCOUNT_MISMATCH} for i in range(n_acct)]
+            + [{"id": f"B{i}", "detail": "x", "kind": m.POSTED_MISMATCH} for i in range(n_amt)])
+
+
+def _summary_for(tmp_path, posted_ids, mism):
+    import json
+    from agents.skill_26as_journal import tools as tl
+    out = tmp_path / "o.csv"
+    m.posted_sidecar_path(out).write_text(json.dumps({
+        "already_posted": posted_ids, "mismatched": mism,
+        "nothing_to_import": True, "error": ""}), encoding="utf-8")
+    return tl.final_summary(str(out), "")
+
+
+def test_all_account_mismatches_never_say_different_amounts(tmp_path):
+    t = m.nothing_to_import_text(["P1", "P2", "P3", "P4"], _kinds(3, 0))
+    s = _summary_for(tmp_path, ["P1", "P2", "P3", "P4"], _kinds(3, 0))
+    assert "different amounts" not in t and "different account" in t
+    assert "4 already posted; 3 left out" in t and "every journal" not in t
+    line = [l for l in s.splitlines() if "Nothing to import" in l][0]
+    assert "different amounts" not in line and "different account" in line
+
+
+def test_all_amount_mismatches_never_say_different_account(tmp_path):
+    t = m.nothing_to_import_text(["P1"], _kinds(0, 2))
+    s = _summary_for(tmp_path, ["P1"], _kinds(0, 2))
+    line = [l for l in s.splitlines() if "Nothing to import" in l][0]
+    assert "different account" not in t and "different account" not in line
+    assert "2 left out because the book has the same Num with different amounts" in t
+
+
+def test_mixed_mismatches_show_both_parts_with_counts(tmp_path):
+    t = m.nothing_to_import_text(["P1"], _kinds(3, 1))
+    assert "3 left out because the book has the same Num and amounts but a different account" in t
+    assert "1 left out because the book has the same Num with different amounts" in t
+    s = _summary_for(tmp_path, ["P1"], _kinds(3, 1))
+    assert "Nothing to import" in s and "every journal is already in the book" not in s
+
+
+def test_no_mismatch_control_keeps_every_journal_wording(tmp_path):
+    assert "every journal is already in the book" in m.nothing_to_import_text(["P1"], [])
+    assert "every journal is already in the book" in _summary_for(tmp_path, ["P1"], [])

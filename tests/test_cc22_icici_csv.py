@@ -409,3 +409,32 @@ def test_exact_header_only_after_dated_rows_is_refused(tmp_path):
     with pytest.raises(ic.CsvRefused) as e:
         ic.parse_icici_csv(p)
     assert "before any statement header" in str(e.value)
+
+
+# ---- one-card identity: Amazon Visa 4315 is never Sapphiro ----
+
+def test_one_card_visa_4315_is_amazon_never_sapphiro(tmp_path):
+    visa = "4315 XXXX XXXX 0000"
+    assert ic.identify_card([visa]) == ("Amazon", "")
+    assert ic.identify_card([visa])[0] != "Sapphiro"                  # NEGATIVE
+    p = _write(tmp_path, "x", "v.csv", _csv([(visa, [("05-Apr-25", "SHOP", "10.00")])]))
+    assert ic.card_folder(p) == ("ICICI", "Amazon")
+
+
+def test_one_card_amex_3747_is_sapphiro(tmp_path):
+    amex = "3747 XXXX XXXX 000"
+    assert ic.identify_card([amex])[0] == "Sapphiro"
+    p = _write(tmp_path, "x", "a.csv", _csv([(amex, [("05-Apr-25", "SHOP", "10.00")])]))
+    assert ic.card_folder(p) == ("ICICI", "Sapphiro")
+
+
+def test_amex_plus_mastercard_is_still_sapphiro():
+    assert ic.identify_card([MC, AMEX])[0] == "Sapphiro"
+
+
+def test_no_visa_first_group_is_in_the_sapphiro_digit_set():          # NEGATIVE guard
+    assert ic.SAPPHIRO_DIGITS == ("3747",)
+    assert "4315" not in ic.SAPPHIRO_DIGITS
+    assert all(not d.startswith("4") for d in ic.SAPPHIRO_DIGITS)
+    # a last group equal to a Sapphiro digit group does not make a card Sapphiro
+    assert ic.identify_card(["4000 XXXX XXXX 3747"])[0] == "Amazon"
