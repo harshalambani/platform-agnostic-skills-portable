@@ -232,6 +232,7 @@ class Parsed:
     note: str = ""                                     # layout note carried into the tie-out note
     loans: list = field(default_factory=list)          # HSBC Loan Summary Table rows (Loan)
     outstanding_parts: tuple | None = None             # HSBC (TOTAL PURCHASE OUTSTANDING, TOTAL LOAN OUTSTANDING)
+    proof_failed: str = ""                             # a layout read by arithmetic proof: why the proof did not hold
 
 
 @dataclass
@@ -629,14 +630,126 @@ def parse_hsbc(lines, bank, card, period) -> Parsed:
 
 SBM_DUE_RX = re.compile(r"^(?:TOTAL|MINIMUM)\s+AMOUNT\s+DUE\b|^PAYMENT\s+DUE\b|^DUE\s+DATE\b", re.I)
 
+RUPEE = "\u20b9"
+_SBM_AMT = r"[\d,]+(?:\.\d+)?"
+SBM_DUE_VALUES_RX = re.compile(
+    rf"^\d{{1,2}}-[A-Za-z]{{3,9}}-\d{{4}}\s+(?:{RUPEE}\s*)?{_SBM_AMT}\s+(?:{RUPEE}\s*)?{_SBM_AMT}\s*$")
+
+
+def sbm_due_value_indexes(lines) -> set:
+    """CC-19: indexes of the payment-due VALUES line ("16-May-2025 120.00 20.00",
+    or the same with a rupee sign before each amount in the older layout). It is
+    a date plus two amounts and is never a transaction. It is recognised by what
+    it follows: the "Payment Due Date / Total Amount Due / Minimum Amount Due"
+    header line (or, failing that, two rupee-marked amounts straight after the
+    date). A date-led line with a description is never taken for it."""
+    out = set()
+    prev = ""
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line:
+            continue
+        if SBM_DUE_VALUES_RX.match(line):
+            two_rupees = line.count(RUPEE) == 2 and re.match(rf"^\S+\s+{RUPEE}", line)
+            if SBM_DUE_RX.match(prev) or two_rupees:
+                out.add(i)
+        prev = line
+    return out
+
+
+# CC-16: the older SBM layout. The statement date is month-year only
+# ("Statement Date : April-2025"), the five summary figures sit on one line under
+# one label line, and each row carries a single rupee amount with no "-" marker:
+# the direction is read from the wording.
+SBM_OLD_DATE_RX = re.compile(r"^Statement\s+Date\s*:\s*([A-Za-z]{3,9})\s*-\s*(\d{4})\s*$", re.I)
+SBM_OLD_ROW_RX = re.compile(
+    rf"^(\d{{1,2}}-[A-Za-z]{{3,9}}-\d{{4}})\s+([^{RUPEE}]*?\S)\s+{RUPEE}\s*({_SBM_AMT})\s*$")
+SBM_OLD_CREDIT_RX = re.compile(
+    r"\b(?:REPAYMENT|PAYMENT|REFUND(?:ED)?|REVERSAL|REVERSED|CREDIT|CASHBACK|CASH\s+BACK|WAIVER|WAIVED)\b", re.I)
+
+
+def is_sbm_older_layout(lines) -> bool:
+    has_date = any(SBM_OLD_DATE_RX.match(ln.strip()) for ln in lines)
+    return has_date and any(RUPEE in ln for ln in lines)
+
+
+def sbm_older_row_dates(lines) -> list:
+    out = []
+    for ln in lines:
+        m = SBM_OLD_ROW_RX.match(ln.strip())
+        if m:
+            d = parse_date(m.group(1), "%d-%b-%Y")
+            if d:
+                out.append(d)
+    return out
+
+
+def parse_sbm_older(lines, bank, card, period) -> Parsed:
+    """The older SBM layout, read by label order and PROVEN by arithmetic:
+      - debit rows (everything not worded as a credit) sum to Purchase/Debits +
+        Finance Charges (finance charges are rows of the statement);
+      - credit rows (Repayment, Payment, Refund, Reversal, Credit, Cashback,
+        Waiver) sum to Payment/Credit;
+      - Opening + Purchase/Debits + Finance Charges - Payment/Credit = Total Due.
+    Wording that is not a credit word is a debit, never a silent credit; a row
+    of unknown wording that is really a credit makes the proof fail."""
+    p = Parsed()
+    due = sbm_due_value_indexes(lines)
+    figures = None
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if i in due:
+            continue
+        m = SBM_OLD_ROW_RX.match(line)
+        if m:
+            d = parse_date(m.group(1), "%d-%b-%Y")
+            if d is None:
+                p.errors.append(f"unreadable date: {line[:70]}")
+                continue
+            direction = "Cr" if SBM_OLD_CREDIT_RX.search(m.group(2)) else "Dr"
+            p.rows.append(_mk_row(bank, card, datetime(d.year, d.month, d.day), m.group(2),
+                                  num(m.group(3)), direction))
+        elif DATE_START.match(line) and re.search(AMT, line):
+            p.errors.append(f"unparsed line: {line[:70]}")
+        elif figures is None and i > 0:
+            bare = line.replace(RUPEE, " ")
+            nums = re.findall(_SBM_AMT, bare)
+            rest = re.sub(_SBM_AMT, "", bare).strip()
+            label = " ".join(lines[i - 1].upper().split())
+            if len(nums) == 5 and not rest and "OPENING BALANCE" in label and "TOTAL AMOUNT DUE" in label:
+                figures = [num(x) for x in nums]
+    if figures is None:
+        p.missing.append("summary line")
+        return p
+    opening, purch, fin, pay, total = figures
+    p.summary = dict(prev=opening, purchases=purch, finance=fin, payments=pay, total=total)
+    p.printed_closing = round(opening + purch + fin - pay, 2)
+    p.rows_net_expected = round(purch + fin - pay, 2)
+    debits = round(sum(r.amount for r in p.rows if r.direction == "Dr"), 2)
+    credits = round(sum(r.amount for r in p.rows if r.direction == "Cr"), 2)
+    why = []
+    if abs(debits - (purch + fin)) > TOL_STRICT + 1e-9:
+        why.append(f"debit rows total {debits:,.2f} but Purchase/Debits + Finance Charges is {purch + fin:,.2f}")
+    if abs(credits - pay) > TOL_STRICT + 1e-9:
+        why.append(f"credit rows total {credits:,.2f} but Payment/Credit is {pay:,.2f}")
+    if why:
+        p.proof_failed = "older SBM layout not proven by arithmetic: " + "; ".join(why)
+    p.note = "older SBM layout: rows read as debit or credit by wording, proven against the printed figures"
+    return p
+
 
 def parse_sbm(lines, bank, card, period) -> Parsed:
+    if is_sbm_older_layout(lines):
+        return parse_sbm_older(lines, bank, card, period)
     p = Parsed()
+    due_values = sbm_due_value_indexes(lines)
     amt = r"[\d,]+(?:\.\d+)?"
     sbm_values: list = []
     row_rx = re.compile(rf"^(\d{{1,2}}-[A-Za-z]{{3,9}}-\d{{4}})\s+(.*?)\s+({amt}|-)\s+({amt}|-)\s*$")
     for i, line in enumerate(lines):
         line = line.strip()
+        if i in due_values:
+            continue                      # CC-19: the due-values line under the due header
         dm = re.match(r"^\d{1,2}-[A-Za-z]{3,9}-\d{4}\s+(.*)$", line)
         if dm and SBM_DUE_RX.match(dm.group(1)):
             continue                      # CC-04: the payment-due line is a date + amounts, never a row
@@ -917,6 +1030,16 @@ def detect_period(lines):
         s, e = parse_date(sm.group(1), "%d-%b-%Y"), parse_date(sm.group(2), "%d-%b-%Y")
         if s and e and s <= e:
             return (s, e), ""
+    if is_sbm_older_layout(lines):
+        for ln in lines:
+            om = SBM_OLD_DATE_RX.match(ln.strip())
+            first = parse_date(f"1-{om.group(1)}-{om.group(2)}", "%d-%b-%Y") if om else None
+            if first:
+                nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+                start = min([first] + sbm_older_row_dates(lines))
+                return (start, nxt - timedelta(days=1)), (
+                    "period derived: the statement prints the month only; it runs from the earlier of "
+                    "the month start and the first row date to the end of that month")
     mm = SBM_MONTH_RX.search(text)
     if mm:
         # CC-04: older SBM statements print the month only; the period is that whole month.
@@ -1104,6 +1227,9 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
         ok = False
         notes.append(f"parsed rows net {sum(r.signed for r in rows):,.2f} but the printed summary implies {exp:,.2f}: "
                      "a row is dropped, doubled or misread")
+    if st.parsed.proof_failed:
+        ok = False
+        notes.append(st.parsed.proof_failed)
     if st.parsed.note:
         notes.append(st.parsed.note)
     return TieOut(previous=prev, computed=computed, printed=total, difference=diff,
@@ -1131,8 +1257,11 @@ def unparsed_date_lines(st: Statement) -> list:
     has an amount that appears on it."""
     used: set = set()
     left = []
-    for raw in st.lines:
+    due = sbm_due_value_indexes(st.lines) if st.bank.lower() == "sbm" else set()
+    for idx, raw in enumerate(st.lines):
         line = raw.strip()
+        if idx in due:
+            continue
         if not (DATE_START.match(line) or re.match(r"^\d\d/\d\d/\d{4}\|", line)):
             continue
         if _is_header_date_line(line):
