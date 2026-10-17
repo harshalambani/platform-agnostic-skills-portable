@@ -417,3 +417,49 @@ def test_other_review_tabs_get_no_indent_code():
                                 [{"a": "x", "guid": "1"}]) for _ in range(1))
     assert "data-depth" not in out and "indentLevel" not in out and ".ind " not in out
     assert rt.NO_TOKENS["%%TREE_CELL%%"] == ""
+
+
+# --- UI-37: Apply stays in view -----------------------------------------------------
+
+def test_ui37_apply_sits_in_a_sticky_bar_and_panel_is_sticky(tmp_path):
+    html = _html(tmp_path)
+    assert 'class="applybar"' in html and "position: sticky; bottom: 0" in html
+    bar = html.index('class="applybar"')
+    assert bar < html.index("itrmap-side-apply") < html.index("</div>", bar)
+    assert "position: sticky; top: 8px" in html
+
+
+@needs_node
+def test_ui37_apply_disabled_with_nothing_selected_and_label_names_tag(tmp_path):
+    out = _run(tmp_path, """
+        const none = $id(APP + '-side-apply').disabled;
+        select(APP, idxOf('Current'));
+        const sug = $id(APP + '-side-sug')._h || '';
+        const tag = sug.match(/data-pick="([A-Z_]+)"/)[1];
+        $id(APP + '-side').onclick({ target: { dataset: { pick: tag }, parentNode: null } });
+        const btn = $id(APP + '-side-apply');
+        const label = btn.textContent;
+        btn.onclick();
+        return {none, tag, label, p: payload(%s)};
+    """ % PV)
+    assert out["none"] is True
+    assert tag_suggest.TAG_LABELS[out["tag"]] in out["label"]
+    assert [c["tag"] for c in out["p"]["changes"]] == [out["tag"]]
+
+
+@needs_node
+def test_ui37_apply_never_applies_a_tag_other_than_the_one_shown(tmp_path):
+    out = _run(tmp_path, """
+        select(APP, idxOf('Current'));
+        const picks = ($id(APP + '-side-sug')._h.match(/data-pick="([A-Z_]+)"/g) || []).map(s => s.slice(11, -1));
+        $id(APP + '-side').onclick({ target: { dataset: { pick: picks[0] }, parentNode: null } });
+        const shown = $id(APP + '-side-apply').textContent;
+        $id(APP + '-side-apply').onclick();
+        return {picks, shown, p: payload(%s)};
+    """ % PV)
+    applied = {c["tag"] for c in out["p"]["changes"]}
+    assert applied == {out["picks"][0]}
+    assert tag_suggest.TAG_LABELS[out["picks"][0]] in out["shown"]
+    for other in out["picks"][1:]:
+        if other != out["picks"][0] and tag_suggest.TAG_LABELS[other] not in tag_suggest.TAG_LABELS[out["picks"][0]]:
+            assert tag_suggest.TAG_LABELS[other] not in out["shown"]
