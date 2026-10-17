@@ -689,6 +689,20 @@ def sbm_older_row_dates(lines) -> list:
     return out
 
 
+def sbm_older_period(lines):
+    """(start, end) of an older-layout SBM statement, or None: the earlier of the month start and
+    the first row date, to the end of the printed month. CC Sort (CC-21) uses this too."""
+    if not is_sbm_older_layout(lines):
+        return None
+    for ln in lines:
+        om = SBM_OLD_DATE_RX.match(ln.strip())
+        first = parse_date(f"1-{om.group(1)}-{om.group(2)}", "%d-%b-%Y") if om else None
+        if first:
+            nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
+            return min([first] + sbm_older_row_dates(lines)), nxt - timedelta(days=1)
+    return None
+
+
 def parse_sbm_older(lines, bank, card, period) -> Parsed:
     """The older SBM layout, read by label order and PROVEN by arithmetic:
       - debit rows (everything not worded as a credit) sum to Purchase/Debits +
@@ -1106,16 +1120,11 @@ def detect_period(lines):
         s, e = parse_date(sm.group(1), "%d-%b-%Y"), parse_date(sm.group(2), "%d-%b-%Y")
         if s and e and s <= e:
             return (s, e), ""
-    if is_sbm_older_layout(lines):
-        for ln in lines:
-            om = SBM_OLD_DATE_RX.match(ln.strip())
-            first = parse_date(f"1-{om.group(1)}-{om.group(2)}", "%d-%b-%Y") if om else None
-            if first:
-                nxt = (first.replace(day=28) + timedelta(days=4)).replace(day=1)
-                start = min([first] + sbm_older_row_dates(lines))
-                return (start, nxt - timedelta(days=1)), (
-                    "period derived: the statement prints the month only; it runs from the earlier of "
-                    "the month start and the first row date to the end of that month")
+    older = sbm_older_period(lines)
+    if older:
+        return older, (
+            "period derived: the statement prints the month only; it runs from the earlier of "
+            "the month start and the first row date to the end of that month")
     mm = SBM_MONTH_RX.search(text)
     if mm:
         # CC-04: older SBM statements print the month only; the period is that whole month.

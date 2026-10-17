@@ -61,6 +61,7 @@ def run_with_progress(
     tick_factory: Callable[[int], tuple],
     *,
     poll_interval: float = 2.0,
+    on_event: Callable[[dict, int], None] | None = None,
 ):
     """
     Background-thread + poll runner. Yields whatever `tick_factory(elapsed)`
@@ -75,14 +76,37 @@ def run_with_progress(
                       Typical use: builds the (markdown, download_update) tuple
                       with elapsed time interpolated.
         poll_interval: seconds between ticks.
+        on_event:     UI-42. f(event, elapsed_seconds), called for every progress event the
+                      work puts on the progress queue (the mapper's "AI row n of N", the
+                      skill's own log lines). Without it no queue is installed, so those events
+                      go nowhere and a long direct-mode run shows only the elapsed time.
     """
     result: dict[str, Any] = {}
+    progress_q: queue.Queue | None = queue.Queue() if on_event is not None else None
 
     def _runner() -> None:
+        if progress_q is not None:
+            from agents.base_agent import set_progress_queue
+            set_progress_queue(progress_q)
         try:
             result["value"] = work()
         except BaseException as e:  # noqa: BLE001
             result["error"] = e
+        finally:
+            if progress_q is not None:
+                set_progress_queue(None)
+
+    def _drain(elapsed: int) -> None:
+        while progress_q is not None:
+            try:
+                event = progress_q.get_nowait()
+            except queue.Empty:
+                return
+            if event is not None:
+                try:
+                    on_event(event, elapsed)
+                except Exception:  # noqa: BLE001 - a display problem must not stop the run
+                    pass
 
     t = threading.Thread(target=_runner, daemon=True)
     start = time.monotonic()
@@ -90,7 +114,9 @@ def run_with_progress(
 
     while True:
         t.join(timeout=poll_interval)
+        _drain(int(time.monotonic() - start))
         if not t.is_alive():
+            _drain(int(time.monotonic() - start))
             break
         elapsed = int(time.monotonic() - start)
         yield tick_factory(elapsed)
