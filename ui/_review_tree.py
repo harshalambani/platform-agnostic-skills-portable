@@ -61,7 +61,7 @@ CSS = r"""
 #%%APP%%-app .tmain { display: flex; gap: 12px; align-items: flex-start; }
 #%%APP%%-app .tleft { flex: 1 1 auto; min-width: 0; }
 #%%APP%%-app .tside {
-  flex: 0 0 340px; max-height: 75vh; overflow-y: auto; border: 1px solid var(--line);
+  flex: 0 0 340px; max-height: 75vh; overflow-y: auto; position: sticky; top: 8px; border: 1px solid var(--line);
   border-radius: 4px; background: var(--panel); padding: 8px; font-size: 12px; color: var(--text);
 }
 #%%APP%%-app .tside .sbox { margin-bottom: 10px; }
@@ -72,6 +72,11 @@ CSS = r"""
 }
 #%%APP%%-app .tside .apply { width: 100%; padding: 7px; font-size: 12px; font-weight: 700; border-radius: 4px;
   border: none; background: #2563eb; color: #fff; cursor: pointer; }
+/* UI-37: Apply, and the tag it will apply, stay in view at the foot of the panel. */
+#%%APP%%-app .tside .applybar {
+  position: sticky; bottom: 0; z-index: 2; margin: 8px -8px -8px; padding: 8px;
+  background: var(--panel); border-top: 1px solid var(--line);
+}
 #%%APP%%-app .tside .apply[disabled] { background: var(--line); color: var(--muted); cursor: not-allowed; }
 #%%APP%%-app .scard, #%%APP%%-app .tagopt {
   border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; margin-bottom: 4px; cursor: pointer;
@@ -152,7 +157,7 @@ CLOSE_HTML = r"""  </div>
     <div class="sbox"><div class="sh">Find a tag</div>
       <input type="text" id="%%APP%%-side-q" placeholder="Type plain words: medical, school, rent..." autocomplete="off">
       <div id="%%APP%%-side-list" style="margin-top:6px"></div></div>
-    <button type="button" class="apply" id="%%APP%%-side-apply" disabled>Apply</button>
+    <div class="applybar"><button type="button" class="apply" id="%%APP%%-side-apply" disabled>Apply</button></div>
   </aside></div>
 """
 
