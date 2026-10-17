@@ -115,6 +115,11 @@ FEE_RX = re.compile(
 FEE_REVERSAL_RX = re.compile(FEE_RX.pattern + r"|WAIVER|WAIVED|REVERSAL", re.I)
 
 
+# CC-18: Axis prints reward redemptions ("SMS BASED REDEMPTION/...") as credit rows but leaves
+# them out of the summary's Credits figure.
+REDEMPTION_RX = re.compile(r"\bREDEMPTION\b", re.I)
+
+
 # EMI wording (J). UNVALIDATED against a real statement: no real EMI specimen
 # was available when these were written. TODO(CC-04 follow-up): confirm each
 # pattern against a real EMI statement before relying on it. Only EXPLICIT
@@ -1290,9 +1295,17 @@ def tie_out(st: Statement, prior: Statement | None = None) -> TieOut:
     if not ok:
         notes.append("parsed rows do not reproduce the printed total: a row is dropped, doubled or misread")
     if st.parsed.printed_closing is not None and not within(round(st.parsed.printed_closing - total, 2)):
-        ok = False
-        notes.append("printed summary figures do not add up to the printed total "
-                     "(the summary line may be misread)")
+        # CC-18: Axis leaves reward redemption credits out of the summary's Credits. That explains
+        # the mismatch only when it equals EXACTLY the sum of those rows; anything else still fails.
+        redeemed = [r for r in rows if r.direction == "Cr" and REDEMPTION_RX.search(r.description)]
+        gap = round(st.parsed.printed_closing - total, 2)
+        if (st.bank.lower() == "axis" and redeemed
+                and abs(gap - round(sum(r.amount for r in redeemed), 2)) <= TOL_STRICT + 1e-9):
+            notes.append(f"the bank's summary leaves {len(redeemed)} reward redemption credit(s) out of Credits")
+        else:
+            ok = False
+            notes.append("printed summary figures do not add up to the printed total "
+                         "(the summary line may be misread)")
     exp = st.parsed.rows_net_expected
     if exp is not None and abs(round(sum(r.signed for r in rows) - exp, 2)) > TOL_STRICT:
         ok = False
