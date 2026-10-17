@@ -1678,15 +1678,23 @@ def build_report(data: dict) -> Report:
             pending_journal=pending_journal,
         )
         if show_accrual and booked is not None:
-            # H35-24 B: spell out monthly + year-end accrual = sum, so an
-            # AGREE (or a disagreement) can be followed. Display only: the
-            # verdict above was already decided and is not touched.
+            # H35-24 B (display only; verdict already decided). Print the
+            # monthly + accrual = sum breakdown ONLY when the verdict used the
+            # pending accrual (closure, rounding closure, or the residual
+            # branch). When Booked (monthly) agrees on its own the accrual is
+            # not part of this row's comparison, so no sum is printed.
             accr = (pending_journal or {}).get("amount") or 0.0
-            row.note = (
-                (row.note + " " if row.note else "")
-                + f"Booked (monthly) {booked:,.2f}; year-end accrual "
-                  f"{accr:,.2f}; sum {booked + accr:,.2f}."
-            )
+            used = PENDING_JOURNAL_VERDICT in (row.note or "") or                 "Genuine residual after posting" in (row.note or "")
+            if used:
+                extra = (f"Booked (monthly) {booked:,.2f}; year-end accrual "
+                         f"{accr:,.2f}; sum {booked + accr:,.2f}.")
+            elif accr:
+                extra = (f"The year-end accrual ({accr:,.2f}) is not part of this "
+                         "row's comparison.")
+            else:
+                extra = ""
+            if extra:
+                row.note = (row.note + " " if row.note else "") + extra
         return row
 
     # H35-04 item A (sweep, current-account-closing row): of the three L5

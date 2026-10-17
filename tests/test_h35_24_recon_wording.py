@@ -66,3 +66,23 @@ def test_breakdown_does_not_change_verdicts():                        # NEGATIVE
     assert ok.agree is True
     assert bad.agree is False and bad.note.startswith("STATEMENT DISAGREES")
     assert "sum 450,000.00" in bad.note
+
+
+# ---- review fix: print the sum only when the verdict used the accrual ----
+
+def test_row_agreeing_without_accrual_prints_no_sum():                # NEGATIVE
+    row = _row(build_report(_data(400000)), CURRENT)
+    assert row.agree is True
+    assert "sum" not in row.note.lower()
+    assert "not part of this row's comparison" in row.note
+
+
+def test_any_printed_sum_equals_statement_figure_on_closure_rows():
+    row = _row(build_report(_data(450000)), CURRENT)
+    assert row.agree is True and "sum 450,000.00" in row.note
+    assert row.sources["LLP Statement (L5)"] == 450000
+
+
+def test_display_never_changes_verdict_for_no_accrual_row():          # NEGATIVE
+    row = _row(build_report(_data(400000)), CURRENT)
+    assert row.agree is True and not row.note.startswith("STATEMENT DISAGREES")

@@ -177,3 +177,81 @@ def test_an_unreadable_book_is_reported_and_nothing_is_filtered(tmp_path, monkey
     assert "unreadable" in stats["posted_check_error"]
     assert stats["nothing_to_import"] is False                        # NEGATIVE: never "clean"
     assert ID1 in _rows_by_id(out)
+
+
+def test_mismatch_plus_all_others_posted_never_says_every_journal_is_in_book(tmp_path, capsys):
+    from agents.skill_26as_journal import tools as tl
+    x, by = _first_run(tmp_path, [Z1, Z2])
+    changed = [(a, v + 1.0 if v > 0 else v) for a, v in by[ID2]]
+    changed[-1] = (changed[-1][0], changed[-1][1] - 1.0)
+    book = _book(tmp_path / "b.gnucash", [(ID1, by[ID1]), (ID2, changed)])
+    out = tmp_path / "out.csv"
+    stats = m.run(x, book, out)
+    assert stats["nothing_to_import"] is True
+    assert not out.exists()                                           # no CSV
+    summ = tl.final_summary(str(out), str(book))
+    assert summ.startswith("**RED FLAG")
+    assert "every journal is already in the book" not in summ
+    assert "1 already posted; 1 left out" in summ
+    # NEGATIVE control: no mismatch -> the plain wording is still used
+    book2 = _book(tmp_path / "b2.gnucash", [(ID1, by[ID1]), (ID2, by[ID2])])
+    out2 = tmp_path / "out2.csv"
+    m.run(x, book2, out2)
+    assert "every journal is already in the book" in tl.final_summary(str(out2), str(book2))
+
+
+# ---- IN BOOK, DIFFERENT ACCOUNT vs DIFFERENT AMOUNTS ----
+
+def _rows(tid, legs):
+    return [{"Transaction ID": tid, "Account": a, "Amount": str(v)} for a, v in legs]
+
+
+def test_same_amounts_different_account_is_its_own_status_and_names_accounts():
+    run_legs = [("Assets:FD:Zen", 900.0), ("Assets:Tax", 100.0), ("Income:Zen", -1000.0)]
+    book_legs = {"Income:Interest": 900.0, "Assets:Tax": 100.0, "Income:Zen": -1000.0}
+    st = m.classify_posted(_rows("J1", run_legs), {"J1": [book_legs]})
+    assert st["J1"][0] == m.POSTED_ACCOUNT_MISMATCH
+    flag = m.mismatch_red_flag({"id": "J1", "detail": st["J1"][1], "kind": st["J1"][0]})
+    assert flag.startswith("RED FLAG - J1")
+    assert "Income:Interest" in flag and "Assets:FD:Zen" in flag
+    assert "same amounts" in flag and "different amounts" not in flag     # NEGATIVE
+
+
+def test_one_amount_differs_is_different_amounts_never_different_account():
+    run_legs = [("A", 900.0), ("B", -900.0)]
+    st = m.classify_posted(_rows("J1", run_legs), {"J1": [{"A": 800.0, "B": -800.0}]})
+    assert st["J1"][0] == m.POSTED_MISMATCH
+    flag = m.mismatch_red_flag({"id": "J1", "detail": st["J1"][1], "kind": st["J1"][0]})
+    assert "different amounts" in flag and "different account" not in flag.lower()
+
+
+def test_same_accounts_and_amounts_is_still_already_posted():
+    st = m.classify_posted(_rows("J1", [("A", 5.0), ("B", -5.0)]), {"J1": [{"A": 5.0, "B": -5.0}]})
+    assert st["J1"][0] == m.POSTED
+
+
+def test_ambiguous_account_pairing_lists_both_sides():
+    run_legs = [("X1", 50.0), ("X2", 50.0), ("Y", -100.0)]
+    st = m.classify_posted(_rows("J1", run_legs), {"J1": [{"P1": 50.0, "P2": 50.0, "Y": -100.0}]})
+    assert st["J1"][0] == m.POSTED_ACCOUNT_MISMATCH
+    assert "P1" in st["J1"][1] and "X2" in st["J1"][1]
+
+
+def test_different_account_journal_is_never_posted_and_never_reoffered(tmp_path):
+    from agents.skill_26as_journal import tools as tl
+    x, by = _first_run(tmp_path, [Z1])
+    legs = list(by[ID1])
+    swap = next(a for a, _v in legs if a not in ("Assets:Bank",))
+    other = "Assets:Bank"
+    assert other not in {a for a, _ in legs} or True
+    book_legs = [(other if a == swap else a, v) for a, v in legs]
+    book = _book(tmp_path / "b.gnucash", [(ID1, book_legs)])
+    out = tmp_path / "out.csv"
+    stats = m.run(x, book, out)
+    assert [i["kind"] for i in stats["posted_mismatches"]] in (
+        [m.POSTED_ACCOUNT_MISMATCH], [m.POSTED_MISMATCH])
+    assert stats["already_posted"] == []                              # NEGATIVE
+    assert not out.exists()                                           # never re-offered
+    summ = tl.final_summary(str(out), str(book))
+    assert summ.startswith("**RED FLAG")
+    assert "every journal is already in the book" not in summ

@@ -141,17 +141,27 @@ def parse_icici_csv(path) -> CsvStatement:
     text = _text(path)
     cells_by_line = list(csv.reader(io.StringIO(text)))
     header_at = None
+    near_miss = None
+    early_dated = None
+    want = [h.lower() for h in HEADER]
     for i, cells in enumerate(cells_by_line):
-        if not _header_like(cells):
-            continue
-        if [c.lower() for c in _norm(cells)] != [h.lower() for h in HEADER]:
-            raise CsvRefused(
-                f"line {i + 1}: the header does not match the ICICI statement export "
-                f"(expected {len(HEADER)} columns: {', '.join(HEADER)}); the file was not read")
-        header_at = i
-        break
+        norm = _norm(cells)
+        if [c.lower() for c in norm] == want:
+            header_at = i
+            break
+        if early_dated is None and len(norm) == len(HEADER) and _try_date(norm[0]) is not None:
+            early_dated = i + 1
+        if near_miss is None and _header_like(cells):
+            near_miss = i + 1             # preamble lines such as "Transaction Details:" are skipped
     if header_at is None:
+        if near_miss is not None:
+            raise CsvRefused(
+                f"line {near_miss}: the header does not match the ICICI statement export "
+                f"(expected {len(HEADER)} columns: {', '.join(HEADER)}); the file was not read")
         raise CsvRefused("no ICICI statement header found; the file was not read")
+    if early_dated is not None:
+        raise CsvRefused(f"line {early_dated}: a dated row before any statement header; "
+                         "the file was not read")
 
     out = CsvStatement()
     card: str | None = None

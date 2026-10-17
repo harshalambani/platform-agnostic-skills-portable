@@ -270,17 +270,20 @@ def final_summary(output_path: str, gnucash_path: str = "",
     # TDS-18: the already-posted check (written by the build next to the CSV).
     posted = posted_info(output_path)
     for m in posted.get("mismatched") or []:
-        lines.append(
-            f"**RED FLAG - {m['id']} is already in the book under the same Num but "
-            f"with different amounts ({m.get('detail', '')}). It is left out of the "
-            f"import file; check the book before posting anything for it.**")
+        lines.append("**" + _BTJ.mismatch_red_flag(m) + "**")
     if posted.get("error"):
         lines.append("- NOT CHECKED - the already-posted check did not run: "
                      + posted["error"])
     if posted.get("nothing_to_import"):
-        lines.append("**Nothing to import** - every journal is already in the book "
-                     "(" + ", ".join(posted.get("already_posted") or []) + "). "
-                     "No CSV was written.")
+        _ap = posted.get("already_posted") or []
+        _mm = posted.get("mismatched") or []
+        if _mm:
+            lines.append(f"**Nothing to import** - {len(_ap)} already posted; {len(_mm)} "
+                         "left out because the book has the same Num with different "
+                         "amounts (RED FLAG above). No CSV was written.")
+        else:
+            lines.append("**Nothing to import** - every journal is already in the book "
+                         "(" + ", ".join(_ap) + "). No CSV was written.")
         return chr(10).join(lines)
     if posted.get("already_posted"):
         lines.append("- ALREADY POSTED (left out of the import file): "

@@ -356,3 +356,56 @@ def test_sort_routes_csv_by_card_numbers(tmp_path):
     assert (out / "Decrypted_PDFs_Correct" / "ICICI-Sapphiro" / "random_name.csv").exists()
     assert res["organization"] == {"ICICI-Sapphiro": 1}
     assert not (out / "Decrypted_PDFs_Correct" / "Unknown-Unknown").exists()
+
+
+# ---- real-export preamble (single-cell "Transaction Details:" line) ----
+
+def _real_shape(header=HEADER, body_blocks=SAPPH, eol="\n", rows_before_header=False):
+    base = _csv(body_blocks, header=header)
+    lines = base.split("\n")
+    i = lines.index(header)
+    pre = lines[:i] + ['"Transaction Details:"']
+    if rows_before_header:
+        pre.append('01-Apr-25,1,EARLY ROW,5,0.00,"10.00","10.00"')
+    return eol.join(pre + lines[i:])
+
+
+def test_single_cell_transaction_details_preamble_parses(tmp_path):
+    p = _write(tmp_path, "a", "a.csv", _real_shape())
+    st = ic.parse_icici_csv(p)
+    assert len(st.rows) == 3 and len(st.masks) == 2
+
+
+def test_crlf_no_bom_with_preamble_parses(tmp_path):
+    d = Path(tmp_path) / "a"
+    d.mkdir()
+    p = d / "a.csv"
+    p.write_bytes(_real_shape(eol="\r\n").encode("utf-8"))
+    assert not p.read_bytes().startswith(b"\xef\xbb\xbf")
+    st = ic.parse_icici_csv(p)
+    assert len(st.rows) == 3 and len(st.masks) == 2
+
+
+def test_near_miss_only_is_refused_naming_the_line(tmp_path):
+    six = ",".join(HEADER.split(",")[:6])
+    text = _real_shape(header=six)
+    with pytest.raises(ic.CsvRefused) as e:
+        ic.parse_icici_csv(_write(tmp_path, "a", "a.csv", text))
+    assert "expected 7 columns" in str(e.value)
+    assert f"line {text.split(chr(10)).index('\"Transaction Details:\"') + 1}:" in str(e.value)
+
+
+def test_preamble_then_renamed_header_is_refused_with_no_rows(tmp_path):
+    bad = HEADER.replace("BillingAmountSign", "Sign")
+    p = _write(tmp_path, "a", "a.csv", _real_shape(header=bad))
+    with pytest.raises(ic.CsvRefused):
+        ic.parse_icici_csv(p)
+    r = _run(tmp_path)
+    assert not any(getattr(x, "desc", "") == "SHOP ONE MUMBAI" for x in r.rows)
+
+
+def test_exact_header_only_after_dated_rows_is_refused(tmp_path):
+    p = _write(tmp_path, "a", "a.csv", _real_shape(rows_before_header=True))
+    with pytest.raises(ic.CsvRefused) as e:
+        ic.parse_icici_csv(p)
+    assert "before any statement header" in str(e.value)

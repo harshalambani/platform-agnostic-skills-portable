@@ -1821,6 +1821,35 @@ def preflight_for_csv(journal_csv: Path, gnucash_path: Path,
 
 POSTED = "ALREADY POSTED"
 POSTED_MISMATCH = "IN BOOK, DIFFERENT AMOUNTS"
+POSTED_ACCOUNT_MISMATCH = "IN BOOK, DIFFERENT ACCOUNT"
+MISMATCH_STATUSES = (POSTED_MISMATCH, POSTED_ACCOUNT_MISMATCH)
+
+
+def _account_diff_text(book: dict, mine: dict) -> str:
+    """Name the accounts that differ. Legs are paired by amount; if the pairing
+    is ambiguous both sides are listed."""
+    only_b = {a: v for a, v in book.items() if a not in mine}
+    only_m = {a: v for a, v in mine.items() if a not in book}
+    vb = sorted(round(v, 2) for v in only_b.values())
+    vm = sorted(round(v, 2) for v in only_m.values())
+    if len(set(vb)) == len(vb) and vb == vm:
+        by_amt = {round(v, 2): a for a, v in only_m.items()}
+        return "; ".join(
+            f"posted to {a} where this run would use {by_amt[round(v, 2)]}"
+            for a, v in sorted(only_b.items()))
+    return (f"the book has {', '.join(sorted(only_b)) or 'none'} where this run has "
+            f"{', '.join(sorted(only_m)) or 'none'}")
+
+
+def mismatch_red_flag(m: dict) -> str:
+    """The RED FLAG sentence for one mismatch entry {id, detail, kind}."""
+    if m.get("kind") == POSTED_ACCOUNT_MISMATCH:
+        return (f"RED FLAG - {m['id']} is already in the book under the same Num with the "
+                f"same amounts, but {m.get('detail', '')}. It is left out of the import "
+                "file; check which account is right before changing anything.")
+    return (f"RED FLAG - {m['id']} is already in the book under the same Num but with "
+            f"different amounts ({m.get('detail', '')}). It is left out of the import "
+            "file; check the book before posting anything for it.")
 NOT_POSTED = "NOT POSTED"
 
 
@@ -1909,6 +1938,12 @@ def classify_posted(rows: list[dict], book_by_num: dict) -> dict:
                 break
         else:
             first = candidates[0]
+            fb = {a: v for a, v in first.items() if abs(v) >= 0.005}
+            vb = sorted(fb.values())
+            vm = sorted(mine.values())
+            if len(vb) == len(vm) and all(abs(x - y) < 0.01 for x, y in zip(vb, vm)):
+                out[tid] = (POSTED_ACCOUNT_MISMATCH, _account_diff_text(fb, mine))
+                continue
             diffs = []
             for a in sorted(set(first) | set(mine)):
                 if abs(first.get(a, 0.0) - mine.get(a, 0.0)) >= 0.01:
@@ -1968,8 +2003,9 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
                                      (NOT_POSTED, ""))[0] == NOT_POSTED]
     nothing_to_import = bool(all_rows) and not csv_rows and not posted_error
     posted_ids = sorted(t for t, (st, _d) in posted_status.items() if st == POSTED)
-    mismatches = [{"id": t, "detail": d} for t, (st, d) in sorted(posted_status.items())
-                  if st == POSTED_MISMATCH]
+    mismatches = [{"id": t, "detail": d, "kind": st}
+                  for t, (st, d) in sorted(posted_status.items())
+                  if st in MISMATCH_STATUSES]
     if csv_rows:
         write_rows_csv(csv_rows, out_path)
     elif out_path.exists():
@@ -2158,16 +2194,20 @@ def main(argv: list[str]) -> int:
                partner_comp_configured=partner_comp_configured,
                tds_expense_account=tds_expense_account)
     for m in stats.get("posted_mismatches") or []:
-        print(f"RED FLAG - {m['id']} is already in the book under the same Num but with "
-              f"different amounts ({m['detail']}). It is left out of the import file; "
-              "check the book before posting anything for it.")
+        print(mismatch_red_flag(m))
     if stats.get("posted_check_error"):
         print("NOTE - already-posted check NOT run: " + stats["posted_check_error"])
     if stats.get("already_posted"):
         print("ALREADY POSTED (left out of the import file): "
               + ", ".join(stats["already_posted"]))
     if stats.get("nothing_to_import"):
-        print("Nothing to import: every journal is already in the book.")
+        _n_mm = len(stats.get("posted_mismatches") or [])
+        if _n_mm:
+            print(f"Nothing to import - {len(stats.get('already_posted') or [])} already posted; "
+                  f"{_n_mm} left out because the book has the same Num with different "
+                  "amounts (RED FLAG above).")
+        else:
+            print("Nothing to import: every journal is already in the book.")
     for line in format_preflight(stats.get("preflight_issues") or []):
         print(line)
     if stats.get("preflight_error"):
