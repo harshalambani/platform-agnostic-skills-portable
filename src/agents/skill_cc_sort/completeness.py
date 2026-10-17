@@ -156,6 +156,19 @@ def classify_text(text: str | None) -> StatementInfo | None:
     return _older_sbm_info(text)
 
 
+def csv_info(path) -> "StatementInfo | None":
+    """CC-22: an ICICI statement CSV covers its first to its last transaction date. None when the
+    file is refused or holds no rows (listed as not a statement, never as coverage)."""
+    try:
+        from agents.skill_cc_sort.icici_csv import CsvRefused, parse_icici_csv
+        parsed = parse_icici_csv(path)
+    except Exception:
+        return None
+    if not parsed.rows:
+        return None
+    return StatementInfo("period", parsed.first, parsed.last, "icici-csv")
+
+
 def read_page1_text(pdf_path) -> str | None:
     """Page 1 text via pdfplumber; None when it cannot be read."""
     try:
@@ -445,14 +458,16 @@ def check_folder(decrypted_dir, period, failed_decryption=(), reader=None,
     non_statements: list[str] = []
     if root.is_dir():
         for folder in sorted(p for p in root.iterdir() if p.is_dir()):
-            pdfs = sorted(p for p in folder.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+            pdfs = sorted(p for p in folder.iterdir()
+                          if p.is_file() and p.suffix.lower() in (".pdf", ".csv"))
             if folder.name == UNKNOWN_FOLDER:
                 unknown += [p.name for p in pdfs]   # never counts toward any card
                 continue
             if folder.name == NOT_STATEMENT_FOLDER:
                 non_statements += [p.name for p in pdfs]   # never an issue, never a card
                 continue
-            entries = [(p.name, classify_text(reader(p))) for p in pdfs]
+            entries = [(p.name, csv_info(p) if p.suffix.lower() == ".csv" else classify_text(reader(p)))
+                       for p in pdfs]
             cards.append(check_card(folder.name, entries, fy_start, fy_end))
     return CompletenessReport(label, cards, unknown, list(failed_decryption),
                               results_unreadable, len(cards), non_statements)

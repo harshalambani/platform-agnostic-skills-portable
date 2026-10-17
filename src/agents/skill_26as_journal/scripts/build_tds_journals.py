@@ -1631,6 +1631,11 @@ def write_part_i_split(rows: list[dict], out_path: Path) -> tuple[Optional[str],
     return str(part_i_path), problems
 
 
+def posted_sidecar_path(out_path: Path) -> Path:
+    """<stem>-tds-journals.csv -> <stem>-posted.json (the already-posted check)."""
+    return out_path.with_name(out_path.stem + "-posted.json")
+
+
 def journal_id(j: Journal) -> str:
     """TDS-05: 'TDSJ2' / '15GJ2' / 'TCSJ2' -- unique across Parts, unlike Sr."""
     return f"{series_for_category(j.category)}{j.sr}"
@@ -1812,6 +1817,159 @@ def preflight_for_csv(journal_csv: Path, gnucash_path: Path,
     return issues, ""
 
 
+# -------------------- already-posted check (TDS-18) --------------------
+
+POSTED = "ALREADY POSTED"
+POSTED_MISMATCH = "IN BOOK, DIFFERENT AMOUNTS"
+POSTED_ACCOUNT_MISMATCH = "IN BOOK, DIFFERENT ACCOUNT"
+MISMATCH_STATUSES = (POSTED_MISMATCH, POSTED_ACCOUNT_MISMATCH)
+
+
+def _account_diff_text(book: dict, mine: dict) -> str:
+    """Name the accounts that differ. Legs are paired by amount; if the pairing
+    is ambiguous both sides are listed."""
+    only_b = {a: v for a, v in book.items() if a not in mine}
+    only_m = {a: v for a, v in mine.items() if a not in book}
+    vb = sorted(round(v, 2) for v in only_b.values())
+    vm = sorted(round(v, 2) for v in only_m.values())
+    if len(set(vb)) == len(vb) and vb == vm:
+        by_amt = {round(v, 2): a for a, v in only_m.items()}
+        return "; ".join(
+            f"posted to {a} where this run would use {by_amt[round(v, 2)]}"
+            for a, v in sorted(only_b.items()))
+    return (f"the book has {', '.join(sorted(only_b)) or 'none'} where this run has "
+            f"{', '.join(sorted(only_m)) or 'none'}")
+
+
+def nothing_to_import_text(already_posted: list, mismatches: list) -> str:
+    """The 'Nothing to import' sentence, counted by mismatch kind. 'Every journal
+    is already in the book' only when there is no mismatch of either kind."""
+    if not mismatches:
+        return ("Nothing to import: every journal is already in the book"
+                + (f" ({', '.join(already_posted)})." if already_posted else "."))
+    n_acct = sum(1 for m in mismatches if m.get("kind") == POSTED_ACCOUNT_MISMATCH)
+    n_amt = len(mismatches) - n_acct
+    parts = [f"{len(already_posted)} already posted"]
+    if n_acct:
+        parts.append(f"{n_acct} left out because the book has the same Num and amounts "
+                     "but a different account")
+    if n_amt:
+        parts.append(f"{n_amt} left out because the book has the same Num with "
+                     "different amounts")
+    return "Nothing to import - " + "; ".join(parts) + " (RED FLAG above)."
+
+
+def mismatch_red_flag(m: dict) -> str:
+    """The RED FLAG sentence for one mismatch entry {id, detail, kind}."""
+    if m.get("kind") == POSTED_ACCOUNT_MISMATCH:
+        return (f"RED FLAG - {m['id']} is already in the book under the same Num with the "
+                f"same amounts, but {m.get('detail', '')}. It is left out of the import "
+                "file; check which account is right before changing anything.")
+    return (f"RED FLAG - {m['id']} is already in the book under the same Num but with "
+            f"different amounts ({m.get('detail', '')}). It is left out of the import "
+            "file; check the book before posting anything for it.")
+NOT_POSTED = "NOT POSTED"
+
+
+def load_book_journals_by_num(gnucash_path: Path) -> dict:
+    """Read-only: {Num -> [ {account path -> summed split value}, ... ]} for
+    every transaction in the book that carries a Num. Same matching key as the
+    Partner Comp posted check (Transaction ID == Num). The book is only read
+    (read_bytes), never opened for write."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    by_id: dict = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    paths = {aid: full_path(aid) for aid in by_id}
+    out: dict = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        num_el = trn.find(f"{_TRN_NS}num")
+        num = (num_el.text or "").strip() if num_el is not None else ""
+        by_acct: dict = {}
+        actions = set()
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            path = paths[acc.text]
+            by_acct[path] = by_acct.get(path, 0.0) + _parse_split_amount(
+                val.text if val is not None else None)
+            act = sp.find(f"{_SPLIT_NS}action")
+            if act is not None and (act.text or "").strip():
+                actions.add(act.text.strip())
+        keys = ({num} if num else set()) | actions
+        for k in keys:
+            out.setdefault(k, []).append({a: round(v, 2) for a, v in by_acct.items()})
+    return out
+
+
+def classify_posted(rows: list[dict], book_by_num: dict) -> dict:
+    """{Transaction ID -> (status, detail)} for every journal in `rows`.
+
+    POSTED: a book transaction with the same Num and the same per-account
+    amounts. POSTED_MISMATCH: the Num is in the book but no transaction with
+    that Num carries these amounts -- never treated as posted, never silently
+    re-offered either. NOT_POSTED: the Num is not in the book."""
+    per_txn: dict = {}
+    for r in rows:
+        tid = (r.get("Transaction ID") or "").strip()
+        acct = (r.get("Account") or "").strip()
+        try:
+            amt = float(r.get("Amount") or 0)
+        except ValueError:
+            continue
+        d = per_txn.setdefault(tid, {})
+        d[acct] = round(d.get(acct, 0.0) + amt, 2)
+    out: dict = {}
+    for tid, mine in per_txn.items():
+        mine = {a: v for a, v in mine.items() if abs(v) >= 0.005}
+        candidates = book_by_num.get(tid) or []
+        if not candidates:
+            out[tid] = (NOT_POSTED, "")
+            continue
+        for cand in candidates:
+            theirs = {a: v for a, v in cand.items() if abs(v) >= 0.005}
+            if set(theirs) == set(mine) and all(
+                    abs(theirs[a] - mine[a]) < 0.01 for a in mine):
+                out[tid] = (POSTED, "")
+                break
+        else:
+            first = candidates[0]
+            fb = {a: v for a, v in first.items() if abs(v) >= 0.005}
+            vb = sorted(fb.values())
+            vm = sorted(mine.values())
+            if len(vb) == len(vm) and all(abs(x - y) < 0.01 for x, y in zip(vb, vm)):
+                out[tid] = (POSTED_ACCOUNT_MISMATCH, _account_diff_text(fb, mine))
+                continue
+            diffs = []
+            for a in sorted(set(first) | set(mine)):
+                if abs(first.get(a, 0.0) - mine.get(a, 0.0)) >= 0.01:
+                    diffs.append(f"{a}: book {first.get(a, 0.0):.2f}, this run {mine.get(a, 0.0):.2f}")
+            out[tid] = (POSTED_MISMATCH, "; ".join(diffs[:4]))
+    return out
+
+
 # -------------------- orchestration --------------------
 
 def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
@@ -1845,8 +2003,39 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
                                    credit_account=tcs_credit_account,
                                    overrides=tcs_overrides,
                                    learnings=learnings)
-    csv_rows = build_csv_rows(journals, fy)
-    write_rows_csv(csv_rows, out_path)
+    all_rows = build_csv_rows(journals, fy)
+    # TDS-18: a journal whose Transaction ID / Num is already in the book is
+    # left out of the import file, so a re-run never re-offers (and so never
+    # double-books) it. A same-Num journal with different amounts is reported
+    # and also left out: importing it would put a second transaction under the
+    # same Num. If the book cannot be read nothing is filtered and the run says
+    # so, never a silent "clean".
+    posted_error = ""
+    try:
+        posted_status = classify_posted(all_rows, load_book_journals_by_num(gnucash_path))
+    except Exception as e:  # noqa: BLE001
+        posted_status = {}
+        posted_error = f"{type(e).__name__}: {e}"
+    csv_rows = [r for r in all_rows
+                if posted_status.get((r.get("Transaction ID") or "").strip(),
+                                     (NOT_POSTED, ""))[0] == NOT_POSTED]
+    nothing_to_import = bool(all_rows) and not csv_rows and not posted_error
+    posted_ids = sorted(t for t, (st, _d) in posted_status.items() if st == POSTED)
+    mismatches = [{"id": t, "detail": d, "kind": st}
+                  for t, (st, d) in sorted(posted_status.items())
+                  if st in MISMATCH_STATUSES]
+    if csv_rows:
+        write_rows_csv(csv_rows, out_path)
+    elif out_path.exists():
+        # Nothing new to import: no CSV. A file left from an earlier run would
+        # otherwise still be offered for download.
+        out_path.unlink()
+    import json as _json
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    posted_sidecar_path(out_path).write_text(_json.dumps({
+        "already_posted": posted_ids, "mismatched": mismatches,
+        "nothing_to_import": nothing_to_import, "error": posted_error,
+    }), encoding="utf-8")
 
     review_path = out_path.with_name(out_path.stem + "-review.csv")
     write_review(journals, review_path, accounts)
@@ -1904,7 +2093,10 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     # TDS-15: pre-flight on the post-import balance of every income account the
     # journal debits. If the balances cannot be read the result says so
     # (preflight_error) rather than passing silently.
-    pf_issues, pf_error = preflight_for_csv(out_path, gnucash_path, accounts)
+    if csv_rows:
+        pf_issues, pf_error = preflight_for_csv(out_path, gnucash_path, accounts)
+    else:
+        pf_issues, pf_error = [], ""
 
     return {
         "preflight_issues": pf_issues,
@@ -1920,6 +2112,11 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "blocked_accounts": blocked_accounts,
         "rows": review_rows,
         "output": str(out_path),
+        "output_written": bool(csv_rows),
+        "nothing_to_import": nothing_to_import,
+        "already_posted": posted_ids,
+        "posted_mismatches": mismatches,
+        "posted_check_error": posted_error,
         "review": str(review_path),
         "part_i_output": part_i_output,
         "part_ii_problems": part_ii_problems,
@@ -2014,6 +2211,16 @@ def main(argv: list[str]) -> int:
                tcs_overrides=tcs_overrides, g_overrides=g_overrides,
                partner_comp_configured=partner_comp_configured,
                tds_expense_account=tds_expense_account)
+    for m in stats.get("posted_mismatches") or []:
+        print(mismatch_red_flag(m))
+    if stats.get("posted_check_error"):
+        print("NOTE - already-posted check NOT run: " + stats["posted_check_error"])
+    if stats.get("already_posted"):
+        print("ALREADY POSTED (left out of the import file): "
+              + ", ".join(stats["already_posted"]))
+    if stats.get("nothing_to_import"):
+        print(nothing_to_import_text(stats.get("already_posted") or [],
+                                     stats.get("posted_mismatches") or []))
     for line in format_preflight(stats.get("preflight_issues") or []):
         print(line)
     if stats.get("preflight_error"):
@@ -2052,7 +2259,8 @@ def main(argv: list[str]) -> int:
               "ID(s) -- kept in the Part I file, not dropped:")
         for p in stats["part_ii_problems"]:
             print(f"  - {p}")
-    print(f"Saved: {stats['output']}")
+    if stats.get("output_written"):
+        print(f"Saved: {stats['output']}")
     print(f"Review: {stats['review']}")
     if stats["part_i_output"]:
         print(f"Part I only (excludes 15G/15H, for hand-posted Part II): "

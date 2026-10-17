@@ -238,6 +238,20 @@ def preflight_issues(output_path: str, gnucash_path: str) -> tuple:
     return _BTJ.preflight_for_csv(out, Path(gnucash_path))
 
 
+def posted_info(output_path: str) -> dict:
+    """TDS-18: the already-posted check the build wrote next to the CSV, or {}
+    when there is none (older run, unreadable file)."""
+    try:
+        side = _BTJ.posted_sidecar_path(Path(output_path))
+        return json.loads(side.read_text(encoding="utf-8")) if side.is_file() else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def nothing_to_import(output_path: str) -> bool:
+    return bool(posted_info(output_path).get("nothing_to_import"))
+
+
 def final_summary(output_path: str, gnucash_path: str = "",
                   xlsx_path: str = "", tds_expense_account: str = "") -> str:
     """The single authoritative summary shown to the user, computed from the
@@ -253,6 +267,22 @@ def final_summary(output_path: str, gnucash_path: str = "",
     out = Path(output_path)
     review = out.with_name(out.stem + "-review.csv")
     lines = []
+    # TDS-18: the already-posted check (written by the build next to the CSV).
+    posted = posted_info(output_path)
+    for m in posted.get("mismatched") or []:
+        lines.append("**" + _BTJ.mismatch_red_flag(m) + "**")
+    if posted.get("error"):
+        lines.append("- NOT CHECKED - the already-posted check did not run: "
+                     + posted["error"])
+    if posted.get("nothing_to_import"):
+        _txt = _BTJ.nothing_to_import_text(posted.get("already_posted") or [],
+                                           posted.get("mismatched") or [])
+        lines.append(_txt.replace("Nothing to import", "**Nothing to import**", 1)
+                     + " No CSV was written.")
+        return chr(10).join(lines)
+    if posted.get("already_posted"):
+        lines.append("- ALREADY POSTED (left out of the import file): "
+                     + ", ".join(posted["already_posted"]))
     # TDS-15: RED FLAGs go at the very TOP, before any count.
     pf_issues, pf_error = preflight_issues(output_path, gnucash_path)
     for rf in _BTJ.format_preflight(pf_issues):
