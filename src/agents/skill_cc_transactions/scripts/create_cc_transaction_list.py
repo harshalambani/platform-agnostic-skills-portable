@@ -1442,8 +1442,16 @@ def _money(v: float) -> str:
 def fee_block(fees: list[FeeLine]) -> str:
     if not fees:
         return ""
-    lines = [f"CARD FEES CHARGED ({len(fees)}) - every line here is money the card cost you:"]
+    n_rev = sum(1 for f in fees if f.reversed_by is not None)
+    head = f"CARD FEES CHARGED ({len(fees)})"
+    if n_rev:
+        head += (f" - fees not marked reversed are money the card cost you; "
+                 f"{n_rev} reversed fee(s) are shown for the record and are not in the totals:")
+    else:
+        head += " - every line here is money the card cost you:"
+    lines = [head]
     totals: dict[str, float] = defaultdict(float)
+    reversed_totals: dict[str, float] = defaultdict(float)
     for f in fees:
         r = f.row
         when = r.date.strftime("%d %b %Y") if r.date else "undated"
@@ -1452,9 +1460,15 @@ def fee_block(fees: list[FeeLine]) -> str:
             c = f.reversed_by
             tail = f"  [reversed: credit {c.date:%d %b %Y} {c.description[:40]}]" if c.date else "  [reversed]"
         lines.append(f"  {r.card} | {r.period} | {when} | {r.description[:60]} | {_money(r.amount)}{tail}")
-        totals[r.card] += r.amount
+        # CC-20: a reversed fee did not cost the card holder anything; it stays visible but is not totalled
+        if f.reversed_by is None:
+            totals[r.card] += r.amount
+        else:
+            reversed_totals[r.card] += r.amount
+            totals[r.card] += 0.0
     for card in sorted(totals):
-        lines.append(f"  Total fees {card}: {_money(totals[card])}")
+        extra = f" (excludes {_money(reversed_totals[card])} reversed)" if reversed_totals.get(card) else ""
+        lines.append(f"  Total fees {card}: {_money(totals[card])}{extra}")
     return "\n".join(lines)
 
 
@@ -1585,10 +1599,12 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
                           + (f"; difference {_money(t.difference)}" if t.difference else ""))
             gap_lines.append(f"{t.card} {t.period} ({t.source}): {t.gap}")
     fees = collect_fees(statements)
-    for f in fees:
-        r = f.row
-        when = f"{r.date:%d %b %Y} " if r.date else ""
-        issues.append(f"fee charged: {r.card} {when}{r.description[:40]} {_money(r.amount)}")
+    # CC-20: the fee lines print once, in the fee block. The issues list carries one pointer for
+    # the fees that were NOT reversed (a reversed fee is resolved and is not an issue).
+    unreversed = [f for f in fees if f.reversed_by is None]
+    if unreversed:
+        issues.append(f"fee charged: {len(unreversed)} card fee(s) not reversed, total "
+                      f"{_money(sum(f.row.amount for f in unreversed))} - listed in the CARD FEES CHARGED block")
     emi_rows = [r for r in rows if r.kind in EMI_KINDS]
     for r in emi_rows:
         when = f"{r.date:%d %b %Y} " if r.date else ""
