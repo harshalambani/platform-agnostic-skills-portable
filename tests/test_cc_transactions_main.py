@@ -354,7 +354,8 @@ def test_fees_are_listed_first_and_each_counts_as_an_issue(tmp_path, monkeypatch
     assert res.message.startswith("CARD FEES CHARGED")
     assert "ANNUAL FEE" in res.message and "IGST @18%" in res.message   # GST listed with the fee
     assert "completed successfully" not in res.message
-    assert sum("fee charged" in i for i in res.issues) == 2
+    assert sum("fee charged" in i for i in res.issues) == 1          # CC-20: one pointer, the lines print once
+    assert "2 card fee(s) not reversed" in " ".join(res.issues)
     assert len(res.fees) == 2
     wb = load_workbook(out)
     assert len(list(wb["Fees"].iter_rows(min_row=2, values_only=True))) == 2

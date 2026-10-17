@@ -211,6 +211,10 @@ def _check_by_month(cov: CardCoverage, kept, start: date, end: date) -> CardCove
     return cov
 
 
+# CC-15: a tail after the last statement shorter than this (days) is less than one billing cycle.
+END_OF_YEAR_MAX_DAYS = 31
+
+
 def check_card(card: str, entries: list[tuple[str, StatementInfo | None]],
                fy_start: date, fy_end: date) -> CardCoverage:
     """entries: (file name, StatementInfo or None for "not a statement")."""
@@ -264,9 +268,18 @@ def check_card(card: str, entries: list[tuple[str, StatementInfo | None]],
     if last_date_only is not None and reach == last_date_only:
         reach = max(reach, date(last_date_only.year, last_date_only.month,
                                 calendar.monthrange(last_date_only.year, last_date_only.month)[1]))
-    if (fy_end - reach).days > TOLERANCE_DAYS - 1:
-        cov.gaps.append(f"no statement covers {_fmt(reach + timedelta(days=1))} - "
-                        f"{_fmt(fy_end)} - card opened/closed, or statement missing?")
+    tail = (fy_end - reach).days
+    if tail > TOLERANCE_DAYS - 1:
+        if not cov.gaps and tail < END_OF_YEAR_MAX_DAYS:
+            # CC-15: the only gap is the last days of the FY, shorter than one billing cycle. They
+            # are billed on the next statement, which is issued after the FY ends. This does not
+            # claim that statement exists.
+            cov.gaps.append(f"no statement covers {_fmt(reach + timedelta(days=1))} - "
+                            f"{_fmt(fy_end)} - these days fall in the next statement (issued after "
+                            f"{fy_end.day} {fy_end:%b}); add it to the input folder if you have it")
+        else:
+            cov.gaps.append(f"no statement covers {_fmt(reach + timedelta(days=1))} - "
+                            f"{_fmt(fy_end)} - card opened/closed, or statement missing?")
     return cov
 
 
@@ -340,6 +353,13 @@ class CompletenessReport:
                 or self.unknown_files):
             lines.append("File names are listed in completeness_report.txt.")
         return "\n".join(lines)
+
+    def panel_text(self) -> str:
+        """UI-39: the same summary as text(), as a Markdown list for the result panel
+        (the panel is Markdown without line breaks, so single newlines would run the
+        card lines together). text() and the saved report are untouched."""
+        head, *rest = self.text().split("\n")
+        return head + "\n\n" + "\n".join(f"- {ln.strip()}" for ln in rest)
 
     def full_text(self) -> str:
         """The saved report: the summary plus every file name."""
