@@ -604,6 +604,21 @@ def statement_reference_row(
     present_others = {k: v for k, v in other_sources.items() if v is not None}
     missing_others = [k for k, v in other_sources.items() if v is None]
 
+    if not present_others and missing_others == ["Return"]:
+        # H35-24 A: the ONLY missing source is the filed return. The
+        # statement figure is in hand; there is nothing yet to compare it
+        # with. Not a reconciliation gap, so not counted as open.
+        note = (
+            "NOT CHECKED (return not supplied) -- the LLP Statement of "
+            f"Account's figure ({statement_value:,.2f}) is the reference for "
+            "this row, but the filed return was not supplied to compare it "
+            "against. This is not a reconciliation gap; it will be checked "
+            "once the return is supplied."
+        )
+        return ReconciliationResult(category=category, sources=sources, agree=None,
+                                    note=note, not_checked=True,
+                                    status_label="NOT CHECKED (return not supplied)")
+
     if not present_others:
         note = (
             f"{CANNOT_RECONCILE} -- the statement's figure ({statement_value:,.2f}) is "
@@ -1646,7 +1661,8 @@ def build_report(data: dict) -> Report:
     )
 
     def _l5_tieout_row(category: str, booked, l5_key: str,
-                        pending_journal: dict | None = None) -> ReconciliationResult:
+                        pending_journal: dict | None = None,
+                        show_accrual: bool = False) -> ReconciliationResult:
         if llp_record is None:
             return ReconciliationResult(
                 category=category,
@@ -1656,11 +1672,22 @@ def build_report(data: dict) -> Report:
         # H35-04 item A: the L5 figure is the reference here too -- a
         # disagreement is reported as "Statement says X; Booked (monthly)
         # says Y; difference Z", not a generic two-way variance.
-        return statement_reference_row(
+        row = statement_reference_row(
             category, llp_record.get(l5_key), "LLP Statement (L5)",
             {"Booked (monthly)": booked},
             pending_journal=pending_journal,
         )
+        if show_accrual and booked is not None:
+            # H35-24 B: spell out monthly + year-end accrual = sum, so an
+            # AGREE (or a disagreement) can be followed. Display only: the
+            # verdict above was already decided and is not touched.
+            accr = (pending_journal or {}).get("amount") or 0.0
+            row.note = (
+                (row.note + " " if row.note else "")
+                + f"Booked (monthly) {booked:,.2f}; year-end accrual "
+                  f"{accr:,.2f}; sum {booked + accr:,.2f}."
+            )
+        return row
 
     # H35-04 item A (sweep, current-account-closing row): of the three L5
     # tie-out rows below, only this one can be affected by a not-yet-posted
@@ -1690,7 +1717,7 @@ def build_report(data: dict) -> Report:
     reconciliation.append(_l5_tieout_row(
         "L5 tie-out: current-account closing balance",
         booked_current_closing, "current_closing_balance",
-        pending_journal=pending_accrual,
+        pending_journal=pending_accrual, show_accrual=True,
     ))
 
     booked_remuneration = sum(m.remuneration for m in monthly) if monthly else None
