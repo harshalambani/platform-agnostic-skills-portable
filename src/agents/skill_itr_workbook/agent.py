@@ -164,6 +164,9 @@ def snippet_file_name(output_path: str, entity_key: str | None) -> str:
     return f"{output_path}{infix}-proposed-mappings.yaml"
 
 
+RED_FLAG_PREFIX = "RED FLAG:"
+
+
 def _mapping_summary(
     tree,
     mapping_file: str | None,
@@ -671,6 +674,9 @@ def _build_and_write_workbook(
             "UNCLASSIFIED/REVIEW bucket; DRAFT tax + worst-case upper bound shown on Computation "
             "(NOT filing-ready). See Unclassified / Mapping Review sheets."
         )
+    # ITR-15: the partner s.194T double-count RED FLAG lines. run() lifts them to
+    # the very top of the result; they never stop the run or change the credit.
+    lines.extend(w for w in model.taxes_paid.double_count_warnings if w.startswith(RED_FLAG_PREFIX))
     lines.extend(as26_lines)
     lines.extend(foreign_lines)
     if foreign_report is not None and not foreign_dividends_in_book:
@@ -960,7 +966,12 @@ def run(
         foreign_report_xlsx=foreign_report_xlsx, book_file=book_file,
     )
     if extra_lines:
+        # ITR-15: RED FLAG lines go to the TOP of the result (like the HELD line).
+        flags = [ln for ln in extra_lines if ln.startswith(RED_FLAG_PREFIX)]
+        extra_lines = [ln for ln in extra_lines if not ln.startswith(RED_FLAG_PREFIX)]
         summary = summary + "\n\n" + "\n".join(extra_lines)
+        if flags:
+            summary = "\n".join(flags) + "\n\n" + summary
     else:
         _write_stub_workbook(output_path, summary)
 
