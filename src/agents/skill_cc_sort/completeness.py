@@ -42,6 +42,55 @@ UNKNOWN_FOLDER = "Unknown-Unknown"
 NOT_STATEMENT_FOLDER = "Not-A-Statement"
 
 
+_TXN_MODULE = None
+
+
+def _txn_script():
+    """The Credit Card Transactions script, loaded once from its file (never copied), so the
+    older-SBM-layout rule (CC-16) lives in one place. None when it cannot be loaded."""
+    global _TXN_MODULE
+    if _TXN_MODULE is None:
+        try:
+            import importlib.util
+            import sys
+            script = (Path(__file__).resolve().parent.parent / "skill_cc_transactions"
+                      / "scripts" / "create_cc_transaction_list.py")
+            spec = importlib.util.spec_from_file_location("_cc_txn_period", script)
+            mod = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = mod      # dataclasses resolve annotations through it
+            try:
+                spec.loader.exec_module(mod)
+            finally:
+                sys.modules.pop(spec.name, None)
+            _TXN_MODULE = mod
+        except Exception:
+            return None
+    return _TXN_MODULE
+
+
+def _older_sbm_info(text: str) -> "StatementInfo | None":
+    """CC-21: the older SBM layout prints only "Statement Date : April-2025". It counts as a
+    statement only with the layout's structure (that line on its own AND rupee-marked rows or
+    figures), the same test CC Transactions uses; the period is derived there too (the earlier
+    of the month start and the first row date, to the month end)."""
+    mod = _txn_script()
+    if mod is None:
+        return None
+    lines = text.splitlines()
+    if not mod.is_sbm_older_layout(lines):
+        return None
+    # A leaflet or letter can carry one such line and a rupee sign. A statement also has the
+    # summary label and either dated rupee rows or the "Opening Balance" figures header.
+    if not re.search(r"Total\s+Amount\s+Due", text, re.I):
+        return None
+    if not (mod.sbm_older_row_dates(lines) or re.search(r"Opening\s+Balance", text, re.I)):
+        return None
+    period = mod.sbm_older_period(lines)
+    if not period:
+        return None
+    return StatementInfo("period", period[0], period[1], "SBM-older")
+
+
 def non_statement_title(pdf_path) -> str | None:
     """Why this PDF is not a statement ("Most Important Terms and Conditions",
     "Year End Statement & Summary"), or None when it may be one. The rule lives
@@ -103,7 +152,8 @@ def classify_text(text: str | None) -> StatementInfo | None:
             d = parse_date(m.group(1), fmt)
             if d:
                 return StatementInfo("date", None, d, name)
-    return None
+    # CC-21: last resort, so a printed full date or period always wins over a month-only date.
+    return _older_sbm_info(text)
 
 
 def read_page1_text(pdf_path) -> str | None:
