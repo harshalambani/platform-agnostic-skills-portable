@@ -423,10 +423,31 @@ def test_other_review_tabs_get_no_indent_code():
 
 def test_ui37_apply_sits_in_a_sticky_bar_and_panel_is_sticky(tmp_path):
     html = _html(tmp_path)
-    assert 'class="applybar"' in html and "position: sticky; bottom: 0" in html
+    assert 'class="applybar"' in html and "position: sticky; bottom: -8px" in html
     bar = html.index('class="applybar"')
     assert bar < html.index("itrmap-side-apply") < html.index("</div>", bar)
     assert "position: sticky; top: 8px" in html
+
+
+def _css_rule(html, selector):
+    import re
+    m = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", html)
+    assert m, selector
+    return m.group(1)
+
+
+def test_ui37_applybar_offset_cancels_panel_padding_so_nothing_shows_below_it(tmp_path):
+    import re
+    html = _html(tmp_path)
+    panel = _css_rule(html, "-app .tside")
+    bar = _css_rule(html, "-app .tside .applybar")
+    pad = int(re.search(r"padding:\s*(\d+)px", panel).group(1))
+    off = re.search(r"bottom:\s*(-?\d+)px", bar)
+    assert off, "the bar must have a bottom offset"
+    assert int(off.group(1)) == -pad                 # flush on the panel edge
+    assert "bottom: 0" not in bar                    # the regression: 0 inside a padded panel
+    assert "position: sticky" in bar                 # UI-37 original fix still in place
+    assert re.search(r"margin:\s*8px -8px -8px", bar)   # bar still spans the panel width
 
 
 @needs_node
