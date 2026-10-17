@@ -29,15 +29,15 @@ CSS = r"""
 <style>
 #%%APP%%-app .badge:empty { display: none; }
 #%%APP%%-app {
-  --inc: #f0a868; --ded: #6fd6cf; --paid: #b9a6f5; --rep: #9ca3af; --none: #6b7280;
-  --inc-soft: rgba(240,168,104,.16); --ded-soft: rgba(111,214,207,.16); --paid-soft: rgba(185,166,245,.16);
+  --inc: #f0a868; --exp: #f27c8d; --ded: #6fd6cf; --paid: #b9a6f5; --rep: #9ca3af; --none: #6b7280;
+  --inc-soft: rgba(240,168,104,.16); --exp-soft: rgba(242,124,141,.16); --ded-soft: rgba(111,214,207,.16); --paid-soft: rgba(185,166,245,.16);
   --panel: #161616; --line: #333; --muted: #9ca3af; --text: #e0e0e0; --warn: #fbbf24; --ok: #4ade80;
 }
 /* approved mockup values. The engine's own screens are dark-only, so dark is the
    base; the light set applies only if a light theme is ever set on an ancestor. */
 :root[data-theme="light"] #%%APP%%-app, .light #%%APP%%-app {
-  --inc: #9a4d00; --ded: #0b6e69; --paid: #5b3fb0;
-  --inc-soft: rgba(154,77,0,.12); --ded-soft: rgba(11,110,105,.12); --paid-soft: rgba(91,63,176,.12);
+  --inc: #9a4d00; --exp: #a3213a; --ded: #0b6e69; --paid: #5b3fb0;
+  --inc-soft: rgba(154,77,0,.12); --exp-soft: rgba(163,33,58,.12); --ded-soft: rgba(11,110,105,.12); --paid-soft: rgba(91,63,176,.12);
 }
 /* the side panel replaces the top picker */
 #%%APP%%-app .picker, #%%APP%%-app #%%APP%%-apply-sel { display: none; }
@@ -54,6 +54,7 @@ CSS = r"""
 #%%APP%%-app .tlegend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 11px; color: var(--muted); padding: 0 0 6px; }
 #%%APP%%-app .tlegend .sw { display: inline-block; width: 4px; height: 12px; margin-right: 4px; vertical-align: middle; }
 #%%APP%%-app .tlegend .sw.inc { background: var(--inc); }
+#%%APP%%-app .tlegend .sw.exp { background: var(--exp); }
 #%%APP%%-app .tlegend .sw.ded { background: var(--ded); }
 #%%APP%%-app .tlegend .sw.paid { background: var(--paid); }
 #%%APP%%-app .tlegend .sw.rep { background: var(--rep); }
@@ -96,6 +97,7 @@ CSS = r"""
 #%%APP%%-app .tp { display: inline-block; font-size: 10px; font-weight: 600; padding: 0 6px; border-radius: 8px;
   margin-left: 6px; border: 1px solid transparent; white-space: nowrap; }
 #%%APP%%-app .tp.k-inc { background: var(--inc-soft); color: var(--inc); border-color: var(--inc); }
+#%%APP%%-app .tp.k-exp { background: var(--exp-soft); color: var(--exp); border-color: var(--exp); }
 #%%APP%%-app .tp.k-ded { background: var(--ded-soft); color: var(--ded); border-color: var(--ded); }
 #%%APP%%-app .tp.k-paid { background: var(--paid-soft); color: var(--paid); border-color: var(--paid); }
 #%%APP%%-app .tp.k-rep { color: var(--rep); border-color: var(--rep); }
@@ -103,10 +105,12 @@ CSS = r"""
 #%%APP%%-app .tp.lk { background: transparent; border-style: dashed; font-style: italic; }
 #%%APP%%-app .plabel { color: var(--muted); font-size: 11px; margin-left: 6px; }
 #%%APP%%-app tbody tr.kr-inc td:first-child { box-shadow: inset 4px 0 0 var(--inc); }
+#%%APP%%-app tbody tr.kr-exp td:first-child { box-shadow: inset 4px 0 0 var(--exp); }
 #%%APP%%-app tbody tr.kr-ded td:first-child { box-shadow: inset 4px 0 0 var(--ded); }
 #%%APP%%-app tbody tr.kr-paid td:first-child { box-shadow: inset 4px 0 0 var(--paid); }
 #%%APP%%-app tbody tr.kr-rep td:first-child { box-shadow: inset 4px 0 0 var(--rep); }
 #%%APP%%-app tbody tr.lr-inc td:first-child { box-shadow: inset 4px 0 0 var(--inc-soft); }
+#%%APP%%-app tbody tr.lr-exp td:first-child { box-shadow: inset 4px 0 0 var(--exp-soft); }
 #%%APP%%-app tbody tr.lr-ded td:first-child { box-shadow: inset 4px 0 0 var(--ded-soft); }
 #%%APP%%-app tbody tr.lr-paid td:first-child { box-shadow: inset 4px 0 0 var(--paid-soft); }
 #%%APP%%-app tbody tr.stale td { color: var(--muted); font-style: italic; }
@@ -140,6 +144,7 @@ OPEN_HTML = r"""  <div class="tbar">
   </div>
   <div class="tlegend">
     <span><span class="sw inc"></span>adds income</span>
+    <span><span class="sw exp"></span>reduces income</span>
     <span><span class="sw ded"></span>deduction</span>
     <span><span class="sw paid"></span>tax paid</span>
     <span><span class="sw rep"></span>reported, no tax</span>
@@ -169,7 +174,7 @@ CLOSE_HTML = r"""  </div>
 JS = r"""  // ── ITR-07: tree + side panel (opt-in via spec.tree) ──
   const TREE = __TREE_JSON__;
   const HOLD_V = 'HOLD';
-  const KIND_WORD = { inc: 'adds income', ded: 'deduction', paid: 'tax paid', rep: 'reported only', none: 'not in return' };
+  const KIND_WORD = { inc: 'adds income', exp: 'reduces income', ded: 'deduction', paid: 'tax paid', rep: 'reported only', none: 'not in return' };
   const ITEM_BY = {};
   ITEMS.forEach(it => { ITEM_BY[it.value] = it; });
   const GROUP_OF = {};

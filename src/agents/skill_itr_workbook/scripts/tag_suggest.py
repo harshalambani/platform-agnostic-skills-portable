@@ -44,23 +44,46 @@ PARENT_WORD, PARENT_GENERIC = 1.0, 0.2
 SIBLING_BONUS = 1.5
 
 # Tax relationship classes (see kind()). Only these three change the tax.
-TAXK = frozenset({"inc", "ded", "paid"})
+TAXK = frozenset({"inc", "ded", "paid", "exp"})
+
+# UI-38: the tax relationship of every tag, set one by one. There is no prefix
+# fallback: a new tag must be added here (a test fails until it is), so a tag
+# can never silently pick up the wrong colour. "exp" reduces income (a business
+# expense or a house-property outgoing deducted from income).
+_INC, _EXP, _DED, _PAID, _REP, _NONE = "inc", "exp", "ded", "paid", "rep", "none"
+TAG_KIND: dict[str, str] = {
+    "SALARY_GROSS": _INC,
+    "BUS_REMUNERATION": _INC,
+    "BUS_EXPENSE": _EXP,
+    "OS_INTEREST_SB": _INC, "OS_INTEREST_BANK": _INC, "OS_INTEREST_NBFC": _INC,
+    "OS_INTEREST_EPF_TAXABLE": _INC, "OS_REFUND_INTEREST": _INC,
+    "OS_DIVIDEND": _INC, "OS_SLBS": _INC,
+    "NONTAX_REFUND_PRINCIPAL": _NONE,
+    "CG_LT_CONTROL": _INC, "CG_ST_CONTROL": _INC,
+    "EXEMPT_PPF_INTEREST": _REP, "EXEMPT_10_2A": _REP,
+    "EXEMPT_TAXFREE_BOND_INTEREST": _REP, "EXEMPT_OTHER": _REP,
+    "HP_RENT": _INC, "HP_MUNICIPAL_TAX": _EXP, "HP_INTEREST": _EXP,
+    "TAXPAID_ADV": _PAID, "TAXPAID_SAT": _PAID, "TAXPAID_TDS_SALARY": _PAID,
+    "TAXPAID_TDS_INTEREST": _PAID, "TAXPAID_TDS_DIVIDEND": _PAID,
+    "TAXPAID_TDS_PARTNER": _PAID, "TAXPAID_TDS_OTHER": _PAID,
+    "TAXPAID_TCS": _PAID, "TAXPAID_FOREIGN": _PAID,
+    "PERSONAL": _NONE,
+    "DED_80C_CANDIDATE": _DED, "DED_80D_CANDIDATE": _DED, "DED_80G_CANDIDATE": _DED,
+    "AL_IMMOVABLE": _REP, "AL_JEWELLERY": _REP, "AL_VEHICLE": _REP,
+    "AL_SECURITIES": _REP, "AL_INSURANCE_POLICY": _REP, "AL_LOANS_GIVEN": _REP,
+    "AL_CASH_BANK": _REP,
+    "AL_LIABILITY": _REP, "AL_FIRM_INTEREST": _REP,
+    "EQUITY_CAPITAL": _NONE, "TRADING": _NONE,
+}
 
 
 def kind(tag: str | None) -> str | None:
-    """None for no tag / HOLD; inc / ded / paid change tax; rep is reported
-    without tax (exempt income, Schedule AL); none is not in the return."""
+    """None for no tag / HOLD; inc (adds income), exp (reduces income), ded,
+    paid change tax; rep is reported without tax (exempt income, Schedule AL);
+    none is not in the return. Read from TAG_KIND only; an unlisted tag is "none"."""
     if not tag or tag == tag_vocab.HOLD:
         return None
-    if re.match(r"^(SALARY|HP_|BUS_|CG_|OS_)", tag):
-        return "inc"
-    if tag.startswith("DED_"):
-        return "ded"
-    if tag.startswith("TAXPAID_"):
-        return "paid"
-    if re.match(r"^(EXEMPT_|AL_)", tag):
-        return "rep"
-    return "none"
+    return TAG_KIND.get(tag, "none")
 
 
 def affects_tax(tag: str | None) -> bool:
