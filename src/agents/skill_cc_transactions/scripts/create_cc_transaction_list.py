@@ -918,9 +918,65 @@ def parse_sbi(lines, bank, card, period) -> Parsed:
 YES_PERIOD_LINE_RX = re.compile(r"^\d\d/\d\d/\d{4}\s+(?:to|-)\s+\d\d/\d\d/\d{4}\b\s*", re.I)
 
 
+YES_RS = rf"Rs\.?\s*({NUM})\s*(Cr|Dr)?"
+YES_REF_RX = re.compile(r"^Ref(?:erence)?\.?\s*(?:No|Number)\b", re.I)
+
+
+def read_yes_positional(lines):
+    """CC-17: the YES summary as printed in two columns, labels and values
+    interleaved across lines:
+        Previous Balance :                          -> the Rs. line under it
+        Available Credit Limit: & Other Charges :   -> "Statement Date : d Rs. <limit> Rs. <purchases> [Dr]"
+        Total Amount Due: Cash Limit: Points Earned : n  -> "Rs. <total due> Rs. <cash limit>"
+        Payment & Credits Received :                -> trailing "Rs. <payments> [Cr]" of the
+                                                       "Minimum Amount Due: Available Cash Limit:" line
+    Returns None when this layout is not on the page, else (figures, why):
+    figures holds the four numbers found by position, and why is "" only when
+    they satisfy previous + purchases - payments = total. A figure that is not
+    found, or a set that does not satisfy the equation, is reported, never
+    guessed and never taken as zero."""
+    pay_idx = next((i for i, ln in enumerate(lines)
+                    if re.match(rf"^Minimum Amount Due\s*:.*Available Cash Limit\s*:\s*{YES_RS}\s*$",
+                                ln.strip(), re.I)), None)
+    stmt_idx = next((i for i, ln in enumerate(lines)
+                     if re.match(rf"^Statement Date\s*:\s*\d\d/\d\d/\d{{4}}\s+{YES_RS}\s+{YES_RS}\s*$",
+                                 ln.strip(), re.I)), None)
+    if pay_idx is None and stmt_idx is None:
+        return None
+    found: dict = {}
+    if pay_idx is not None:
+        pm = re.search(rf"{YES_RS}\s*$", lines[pay_idx].strip(), re.I)
+        found["payments"] = num(pm.group(1))
+    if stmt_idx is not None:
+        vals = list(re.finditer(YES_RS, lines[stmt_idx], re.I))
+        found["purchases"] = num(vals[1].group(1))        # the 1st Rs. is the available credit limit
+    for i, ln in enumerate(lines):
+        t = ln.strip()
+        if re.match(r"^Previous Balance\s*:?\s*$", t, re.I):
+            nxt = next((x.strip() for x in lines[i + 1:] if x.strip()), "")
+            vm = re.match(rf"^{YES_RS}\s*$", nxt, re.I)
+            if vm:
+                found["prev"] = signed(num(vm.group(1)), vm.group(2))
+        elif re.match(r"^Total Amount Due\s*:.*Cash Limit\s*:", t, re.I):
+            nxt = next((x.strip() for x in lines[i + 1:] if x.strip()), "")
+            vals = list(re.finditer(YES_RS, nxt, re.I))
+            if len(vals) >= 2 and not re.sub(YES_RS, "", nxt, flags=re.I).strip():
+                found["total"] = signed(num(vals[0].group(1)), vals[0].group(2))   # the 1st Rs. is total due
+    absent = [k for k in ("prev", "purchases", "payments", "total") if k not in found]
+    if absent:
+        return found, "not found: " + ", ".join(absent)
+    got = round(found["prev"] + found["purchases"] - found["payments"], 2)
+    if abs(got - found["total"]) > TOL_STRICT + 1e-9:
+        return found, (f"previous balance {found['prev']:,.2f} + purchases {found['purchases']:,.2f} - payments "
+                       f"{found['payments']:,.2f} is {got:,.2f}, not the printed total {found['total']:,.2f}")
+    return found, ""
+
+
 def parse_yes(lines, bank, card, period) -> Parsed:
     p = Parsed()
+    positional = read_yes_positional(lines)
     row_rx = re.compile(rf"^(\d\d/\d\d/\d{{4}})\s+(.*?)\s+({AMT})\s+(Dr|Cr)\s*$", re.I)
+    row_at = {i for i, ln in enumerate(lines) if row_rx.match(ln.strip())}
     labels = {
         "prev": r"Previous Balance",
         "purchases": r"Current Purchases\s*/\s*Cash Advance",
@@ -930,7 +986,7 @@ def parse_yes(lines, bank, card, period) -> Parsed:
     found: dict[str, float] = {}
     label_queue: list = []
     value_queue: list = []
-    for line in lines:
+    for idx, line in enumerate(lines):
         line = line.strip()
         m = row_rx.match(line)
         if m:
@@ -939,6 +995,10 @@ def parse_yes(lines, bank, card, period) -> Parsed:
                 p.errors.append(f"unreadable date: {line[:70]}")
                 continue
             p.rows.append(_mk_row(bank, card, when, m.group(2), num(m.group(3)), norm_dir(m.group(4))))
+            continue
+        # CC-17: a wrapped row prints its description on the line above and "Ref No ..." below;
+        # neither is a summary label or value.
+        if YES_REF_RX.match(line) or (p.rows and (idx + 1) in row_at):
             continue
         pm = YES_PERIOD_LINE_RX.match(line)
         if pm:
@@ -976,6 +1036,17 @@ def parse_yes(lines, bank, card, period) -> Parsed:
         if vtoks and not re.sub(rf"Rs\.?\s*{NUM}\s*(?:Cr|Dr)?", "", line, flags=re.I).strip():
             for vm in vtoks:
                 value_queue.append((num(vm.group(1)), vm.group(2)))
+    if positional is not None:
+        # The two-column layout is read by position and only taken when the four figures satisfy
+        # previous + purchases - payments = total. The queue reader is not trusted here: its
+        # labels and values do not line up on this layout.
+        figs, why = positional
+        if why:
+            p.missing.append("summary figures: " + why)
+            return p
+        p.summary = dict(figs)
+        p.printed_closing = round(figs["prev"] + figs["purchases"] - figs["payments"], 2)
+        return p
     for key, val in zip(label_queue, value_queue):
         if key and key not in found:
             found[key] = signed(val[0], val[1]) if key in ("prev", "total") else val[0]
