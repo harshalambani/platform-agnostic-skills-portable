@@ -1501,6 +1501,15 @@ def emi_block(emi_rows: list) -> str:
     return "\n".join(lines)
 
 
+def no_activity(st: Statement) -> bool:
+    """CC-19: a statement with no rows whose printed summary figures are ALL zero
+    (within the tie-out tolerance) had no activity. Any non-zero printed figure,
+    or a summary that was not found, means rows may be missing: that is never
+    "no activity"."""
+    figs = st.parsed.summary
+    return bool(figs) and not st.parsed.missing and all(abs(v) <= TOL_STRICT for v in figs.values())
+
+
 def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date | None = None,
                    label: str = "all statements") -> Result:
     pdf_dir = Path(pdf_dir)
@@ -1555,7 +1564,10 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         if st.period is None:
             issues.append(f"{pdf.name}: statement period not found")
         if not st.parsed.rows:
-            issues.append(f"{pdf.name}: no transactions parsed")
+            if no_activity(st):
+                issues.append(f"{pdf.name}: no activity (every printed figure is zero)")
+            else:
+                issues.append(f"{pdf.name}: no transactions parsed")
         for e in st.parsed.errors:
             issues.append(f"{pdf.name}: {e}")
 
