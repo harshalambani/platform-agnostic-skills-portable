@@ -1108,6 +1108,16 @@ def _make_run_handler(skill: SkillInfo):
         def work():
             return run_fn(**kwargs)
 
+        # UI-42: direct-mode skills report progress too (the mapper's "AI row n of N"). The panel
+        # shows only the newest line under the elapsed time; the saved run log keeps all of them.
+        direct_events: list[str] = []
+        latest_event = {"line": ""}
+
+        def on_event(event, elapsed):
+            line = _runlog.redact(_runner._format_event(event, elapsed), secrets)
+            direct_events.append(line)
+            latest_event["line"] = line
+
         try:
             if skill.mode == "agent":
                 # Agent-mode: use streaming runner for live progress.
@@ -1120,16 +1130,20 @@ def _make_run_handler(skill: SkillInfo):
             else:
                 # Direct-mode: elapsed-time ticks only.
                 def tick_factory(elapsed: int):
+                    text = f"**Running** — still working ({elapsed}s elapsed)"
+                    if latest_event["line"]:
+                        text += "\n\n" + latest_event["line"]
                     return (
-                        tick(f"**Running** — still working ({elapsed}s elapsed)"),
+                        tick(text),
                         gr.update(interactive=False, value=None), gr.update(),
                     )
 
-                agent_reply = yield from _runner.run_with_progress(work, tick_factory)
+                agent_reply = yield from _runner.run_with_progress(
+                    work, tick_factory, on_event=on_event)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
             _runlog.write_run_log(
-                log_path, skill_name=skill.name, run_log_lines=log, traceback_text=tb,
+                log_path, skill_name=skill.name, run_log_lines=log + direct_events, traceback_text=tb,
                 secrets=secrets,
             )
             outcome(f"Error: run failed: {e}")
@@ -1143,7 +1157,7 @@ def _make_run_handler(skill: SkillInfo):
         # -- Handle cancellation --
         if agent_reply == "__CANCELLED__":
             msg = add("**Cancelled** — run was stopped by user.")
-            _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+            _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log + direct_events,
                                   secrets=secrets)
             outcome("Cancelled: the run was stopped by the user.")
             yield msg, gr.update(interactive=False, value=None), gr.update()
@@ -1153,7 +1167,7 @@ def _make_run_handler(skill: SkillInfo):
         #    transcript) regardless of outcome, so a silently-absorbed tool
         #    failure inside a successful-looking agent reply still leaves a
         #    trace on disk. --
-        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log,
+        _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log + direct_events,
                               secrets=secrets)
 
         # -- Verify output --

@@ -16,6 +16,7 @@ import math
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 from urllib.error import HTTPError as _HTTPError
@@ -2377,6 +2378,27 @@ def _register_pacing(cfg: dict) -> None:
     llm_pacing.configure_from_legacy(cfg)
 
 
+_AI_CLOCK = time.monotonic     # tests swap this for a fake clock
+
+
+def _ai_row_line(i: int, total: int, desc: str, started: float, first_gap: float = 0.0) -> str:
+    """UI-42: "AI row i of N: <desc> - about M min left" for the Running status.
+
+    The time left is the measured average of the rows already done times the rows still to
+    do; before any row is done it falls back to the pacing gap (0 = unknown, no estimate).
+    ``i`` never exceeds ``total``.
+    """
+    i = min(max(int(i), 1), max(int(total), 1))
+    line = f"AI row {i} of {total}: {desc[:40]}"
+    left = max(total - i + 1, 0)
+    done = i - 1
+    per_row = (_AI_CLOCK() - started) / done if done > 0 else first_gap
+    if per_row > 0 and left > 0:
+        mins = max(1, int(round(per_row * left / 60.0)))
+        line += f" - about {mins} min left"
+    return line
+
+
 def _announce_pacing(provider: str, base_url: str, rows: int) -> None:
     """MAP-20: when pacing is on, say up front how long the AI pass will take."""
     try:
@@ -2951,11 +2973,24 @@ def llm_fallback_mapping(
     history_model = _build_history_token_model(historical_mappings, reference_date) if historical_mappings else {}
 
     result: Dict[int, Dict] = {}
+    ai_started = _AI_CLOCK()
+    try:
+        from agents import llm_pacing as _lp  # noqa: PLC0415
+        _pc = _lp.pacer_for(provider, base_url)
+        first_gap = float(_pc.min_gap) if (_pc is not None and _pc.enabled) else 0.0
+    except Exception:  # noqa: BLE001
+        first_gap = 0.0
     # MAP-24: how each row's final answer turned out (after the retry).
     answer_counts = {"ok": 0, "skip": 0, "empty": 0, "cut off": 0, "unparseable": 0}
 
     for i, row in enumerate(unmatched_rows, 1):
         if guard.stopped:
+            _stop_why = str(guard.reason or "the AI model stopped answering")
+            if api_key:
+                _stop_why = _stop_why.replace(str(api_key), "***")
+            _emit_mapper_progress(
+                f"AI pass stopped at row {i} of {total}: {_stop_why}. "
+                f"{total - i + 1} row(s) not reached go to Suspense.")
             _LLM_RUN_STATUS.update({
                 'stopped': True, 'reason': guard.reason,
                 'unattempted_rows': [r["row"] for r in unmatched_rows[i - 1:]
@@ -2985,7 +3020,7 @@ def llm_fallback_mapping(
         elif withdrawal_amt > 0 and deposit_amt == 0:
             amt_info = " [withdrawal]"
 
-        _emit_mapper_progress(f"LLM row {i}/{total}: {desc[:40]}")
+        _emit_mapper_progress(_ai_row_line(i, total, desc, ai_started, first_gap))
 
         if historical_mappings:
             # MAP-12: numbered shortlist + strict answer parsing. The prompt
