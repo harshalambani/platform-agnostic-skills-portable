@@ -32,6 +32,8 @@ PERIOD_PATTERNS = [
 DATE_PATTERNS = [
     ("HDFC-old", r'Statement Date:(\d\d/\d\d/\d{4})', "%d/%m/%Y"),
     ("SBM", r'Statement Date : (\d{1,2}-' + M + r'-\d{4})', "%d-%b-%Y"),
+    # CC-30: older SBI Card layout prints no Statement Period, only "for Statement dated 20 Mar 2025".
+    ("SBI-old", r'(?i)\bStatement dated (\d{1,2} ' + M + r' \d{4})\b', "%d %b %Y"),
 ]
 
 TOLERANCE_DAYS = 3  # next period must start 1..3 days after the previous end

@@ -218,8 +218,11 @@ def pair_fee_reversals(journals: list) -> None:
     fees = [j for j in journals if j.kind == K_FEE]
     used: set = set()
     for rev in (j for j in journals if j.kind == K_FEE_REV):
-        hit = next((f for f in fees if id(f) not in used and f.card == rev.card
-                    and abs(f.amount - rev.amount) <= 0.005 and f.real_date <= rev.real_date), None)
+        # CC-30: the LATEST matching fee on or before the reversal (an annual fee repeats with the
+        # same amount), one-to-one.
+        hit = max((f for f in fees if id(f) not in used and f.card == rev.card
+                   and abs(f.amount - rev.amount) <= 0.005 and f.real_date <= rev.real_date),
+                  key=lambda f: f.real_date, default=None)
         if hit is not None:
             used.add(id(hit))
             rev.paired_with = f"{hit.description[:40]} {hit.real_date:%d %b %Y}"
