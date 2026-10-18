@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import date
 
 from . import journal as J
-from .matcher import BookPayment
+from .matcher import CLOSED_STATUSES, S_CSV_PRIOR, BookPayment
 
 
 def csv_label(st) -> str:
@@ -32,6 +32,9 @@ class RunReport:
     label: str = ""
     threshold: float = 0.0
     threshold_source: str = ""                                  # CC-14: which value applied
+    cred_max: float = 0.0                                       # CC-31: the CRED tolerance of this run (rupees)
+    cred_max_source: str = ""                                   # CC-31: "default" or "entities.yaml"
+    unpaid_why: dict = field(default_factory=dict)              # CC-32: id(Statement) -> why the next statement paid nothing
     ccp_path: str = ""
     entity: str = ""
     journals: list = field(default_factory=list)
@@ -86,7 +89,7 @@ class RunReport:
         return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
                     or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
-                    or any(s.status != "SETTLED" for s in self.settlements)
+                    or any(s.status not in CLOSED_STATUSES for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
 
 
@@ -285,14 +288,19 @@ def statement_block(rep: RunReport) -> str:
         out.append("PARTLY SETTLED - paid less than the statement total, nothing booked "
                    "(a NOT TIED statement is booked on its real dates):\n" + "\n".join(
             f"  {s.target.card} {s.target.label}: {s.reason}" for s in partly))
-    other = [s for s in rep.settlements if s.status not in ("SETTLED", "PARTLY SETTLED")]
+    other = [s for s in rep.settlements if s.status not in ("SETTLED", "PARTLY SETTLED", S_CSV_PRIOR)]
     if other:
         out.append("PAYMENTS THAT DID NOT SETTLE A STATEMENT IN THIS RUN:\n" + "\n".join(
             f"  {(s.target or s.paid_on).card} {(s.target or s.paid_on).label}: {s.status} - {s.reason}"
             for s in other))
     if rep.unpaid:
-        out.append("NOT SETTLED - a later statement exists but shows no payment for it, nothing booked:\n" + "\n".join(
-            f"  {st.card} {st.label}" for st in rep.unpaid))
+        out.append("NOT SETTLED - a later statement exists but no payment was matched for it, nothing booked:\n" + "\n".join(
+            f"  {st.card} {st.label} - " + rep.unpaid_why.get(id(st), "the later statement shows no payment")
+            for st in rep.unpaid))
+    csvp = [s for s in rep.settlements if s.status == S_CSV_PRIOR]
+    if csvp:
+        out.append("PAYMENTS OF STATEMENTS BOOKED FROM A CSV EXPORT (matched; nothing more to book):\n"
+                   + "\n".join(f"  {s.paid_on.card} {s.paid_on.label}: {s.reason}" for s in csvp))
     if rep.awaiting:
         out.append("AWAITING PAYMENT (latest statement, not yet paid; nothing booked):\n" + "\n".join(
             f"  {st.card} {st.label}" for st in rep.awaiting))
@@ -389,7 +397,7 @@ def build_message(rep: RunReport) -> str:
     if rep.open_items:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
             + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched)
-        n += sum(1 for s in rep.settlements if s.status != "SETTLED")
+        n += sum(1 for s in rep.settlements if s.status not in CLOSED_STATUSES)
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
         head = "Credit card spend booking completed successfully."
@@ -403,6 +411,8 @@ def build_message(rep: RunReport) -> str:
     parts.append(f"Range run: {rep.label}" + (f" | entity {rep.entity}" if rep.entity else ""))
     if rep.threshold_source:
         parts.append(f"Large-spend limit: {money(rep.threshold)} (from {rep.threshold_source})")
+    if rep.cred_max_source:
+        parts.append(f"CRED tolerance: {rep.cred_max:g} rupees ({rep.cred_max_source})")
     ready_n = n_ready
     booked_n = sum(1 for j in rep.journals if j.status == J.ST_BOOKED)
     parts.append(f"{ready_n} journal(s) ready to import" + (f", {booked_n} already booked" if booked_n else "")
@@ -450,7 +460,7 @@ def statement_rows(rep: RunReport) -> list:
         row(st)[3] = "AWAITING PAYMENT"
     for st in rep.unpaid:
         r = row(st)
-        r[3], r[4] = "NOT SETTLED", "later statement shows no payment"
+        r[3], r[4] = "NOT SETTLED", rep.unpaid_why.get(id(st), "later statement shows no payment")
     return [tuple(r) for r in rows.values()]
 
 

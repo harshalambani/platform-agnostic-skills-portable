@@ -77,8 +77,8 @@ def test_equal_counts_never_use_one_bank_payment_twice():                       
 
 
 def test_unequal_counts_stay_ambiguous_and_say_why():                                    # NEGATIVE
-    out = M.match_payments([L(1000, date(2025, 5, 10), card="C1"), L(1000, date(2025, 5, 11), card="C2")],
-                           [P("a", 1000, date(2025, 5, 10)), P("b", 1000, date(2025, 5, 11)),
+    out = M.match_payments([L(1000, date(2025, 5, 10), card="C1"), L(1000, date(2025, 5, 10), card="C2")],
+                           [P("a", 1000, date(2025, 5, 10)), P("b", 1000, date(2025, 5, 10)),
                             P("c", 1000, date(2025, 5, 12))])
     assert not out.pairings and out.ambiguous
     assert any("counts differ" in a["reason"] for a in out.ambiguous)

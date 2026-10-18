@@ -5,6 +5,7 @@ Every journal is two splits against the Credit Card Payment account (CCP):
   spend          Dr mapped expense          Cr CCP     (side W: the Account side is debited)
   refund         Dr CCP                     Cr the original expense
   cashback       Dr CCP                     Cr Drawings
+  cashback rev.  Dr Drawings                Cr CCP     (a cashback Dr row)
   fee            Dr Bank Service Charge     Cr CCP
   fee reversal   Dr CCP                     Cr Bank Service Charge
   CRED overage   Dr CCP                     Cr Drawings
@@ -28,13 +29,14 @@ EXPENSE_PREFIXES = ("Expense:", "Expenses:")
 LARGE_SPEND_FLAG = "Possible asset (jewellery, phone, appliance ...)"
 
 K_SPEND, K_REFUND, K_CASHBACK = "spend", "refund", "cashback"
+K_CASHBACK_REV = "cashback_reversal"   # CC-32: a cashback Dr row, the exact reverse of a cashback credit
 K_FEE, K_FEE_REV, K_OVERAGE = "fee", "fee_reversal", "cred_overage"
 K_EMI_INT = "emi_interest"
 # EMI kinds that ARE booked (user decision 10 Oct); every other emi_* kind is never booked.
 EMI_FEE_KINDS = ("emi_processing_fee", "gst_on_emi")
 EMI_UNVALIDATED = ("UNVALIDATED: EMI wording has not been checked against a real statement - "
                    "check every EMI row booked below before importing.")
-KIND_LABEL = {K_SPEND: "Spend", K_REFUND: "Refund", K_CASHBACK: "Cashback", K_FEE: "Fee",
+KIND_LABEL = {K_SPEND: "Spend", K_REFUND: "Refund", K_CASHBACK: "Cashback", K_CASHBACK_REV: "Cashback reversal", K_FEE: "Fee",
               K_FEE_REV: "Fee reversal", K_OVERAGE: "CRED overage",
               K_EMI_INT: "EMI interest"}
 
@@ -170,6 +172,8 @@ def journals_for_settlement(target, pay_date, fee_reversal_rx, large_threshold: 
                 kind, side = K_REFUND, "D"
         elif r.kind == "cashback" and r.direction == "Cr":
             kind, side = K_CASHBACK, "D"
+        elif r.kind == "cashback" and r.direction == "Dr":
+            kind, side = K_CASHBACK_REV, "W"
         elif r.kind == "fee" and r.direction == "Dr":
             kind, side = K_FEE, "W"
         else:
