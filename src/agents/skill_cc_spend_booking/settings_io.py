@@ -58,3 +58,22 @@ def read_large_spend_threshold(settings_path: str | Path | None) -> float:
         return got if got is not None else DEFAULT_LARGE_SPEND_THRESHOLD
     except Exception:
         return DEFAULT_LARGE_SPEND_THRESHOLD
+
+
+CRED_KEY = "cc_cred_max_overage"
+
+
+def resolve_cred_max_overage(entity) -> tuple:
+    """CC-31: (rupees, source) for the entity being run. A missing key is the code default (50); a
+    value that is not a number from 0 to 500 raises ValueError naming the key - never a silent fallback.
+    One entity's value is never read for another: only ``entity`` is looked at."""
+    from .matcher import CRED_MAX_OVERAGE
+    raw = getattr(entity, CRED_KEY, None)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return CRED_MAX_OVERAGE, "default"
+    import configs
+    try:
+        return configs.parse_cred_max_overage(raw), "from entities.yaml"
+    except ValueError as e:
+        raise ValueError(f"entity {getattr(entity, 'key', '?')!r} {CRED_KEY}: {e} "
+                         f"(a number from 0 to {configs.CRED_MAX_OVERAGE_LIMIT:g} rupees)") from None

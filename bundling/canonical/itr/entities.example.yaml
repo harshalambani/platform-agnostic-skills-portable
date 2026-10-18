@@ -173,6 +173,9 @@ SYN-PARTNER:
   foreign_dividend_income_account: "Income:Foreign Dividends"
   # CC-14: this entity's own large-spend (possible asset) limit in rupees; blank = the global setting.
   cc_large_spend_threshold: 15000
+  # CC-31: the most (rupees, 0 to 500) a CRED payment line on a statement may exceed the bank amount and
+  # still be matched. Missing = 50. Anything else than a number from 0 to 500 stops the card-spend run.
+  cc_cred_max_overage: 50
   # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
   partner_firm_pan: "FFFFF1234F"
   # Partner of a firm (Partner Compensation skill). Date admitted drives the
