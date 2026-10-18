@@ -1431,17 +1431,22 @@ def collect_fees(statements: list[Statement]) -> list[FeeLine]:
     credits = [r for st in statements for r in st.parsed.rows
                if r.direction == "Cr" and r.kind == "refund" and FEE_REVERSAL_RX.search(r.description)]
     used: set[int] = set()
-    for f in fees:
-        for c in credits:
-            if id(c) in used or c.card != f.row.card:
+    # CC-30: each reversal pairs with the LATEST same-card same-amount fee on or before it
+    # (an annual fee repeats with the same amount), one-to-one.
+    for c in credits:
+        best = None
+        for f in fees:
+            if f.reversed_by is not None or f.row.card != c.card:
                 continue
             if abs(c.amount - f.row.amount) > 0.005:
                 continue
             if f.row.date and c.date and c.date < f.row.date:
                 continue
-            f.reversed_by = c
+            if best is None or (f.row.date or datetime.min) >= (best.row.date or datetime.min):
+                best = f
+        if best is not None:
+            best.reversed_by = c
             used.add(id(c))
-            break
     fees.sort(key=lambda f: (f.row.card, f.row.date or datetime.min))
     return fees
 
@@ -1503,6 +1508,7 @@ class Result:
     csv_statements: list = field(default_factory=list)     # CC-22: ICICI CSV exports read (rows kept after overlap removal)
     csv_ties: list = field(default_factory=list)           # CC-22: one coverage line per CSV (no totals, so no tie-out)
     csv_refused: list = field(default_factory=list)        # CC-24: (file name, reason) for each CSV that books nothing
+    held: list = field(default_factory=list)               # CC-30: (file name, card, reason) statements held: period not read in a ranged run
 
 
 CSV_NO_TOTALS = "NO TOTALS (CSV export)"
@@ -1566,6 +1572,14 @@ def row_signature(st: Statement) -> tuple:
                         for r in st.parsed.rows))
 
 
+def held_block(held: list) -> str:
+    lines = [f"STATEMENT PERIOD NOT FOUND - NOT INCLUDED ({len(held)}) - the run is NOT complete; "
+             "none of their rows are in the list, the totals or any booking:"]
+    for name, card, why in held:
+        lines.append(f"  {name} | {card} | {why}")
+    return "\n".join(lines)
+
+
 def emi_block(emi_rows: list) -> str:
     if not emi_rows:
         return ""
@@ -1613,6 +1627,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     duplicates: list[str] = []
     skipped: list[str] = []
     outside: list[str] = []
+    held: list = []                        # CC-30: (file, card, reason): period not read in a ranged run
     seen_keys: dict = {}
 
     if not pdfs and not (list(pdf_dir.rglob("*.csv")) + list(pdf_dir.rglob("*.CSV"))):
@@ -1644,6 +1659,13 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             continue
         seen_keys[st.key] = (pdf.name, st)
         pool.append(st)
+        if st.period is None and start is not None and end is not None:
+            # CC-30: in a ranged run a statement whose period cannot be read is never included
+            # silently: it could belong to another year. Held, loud, and the run is NOT complete.
+            held.append((pdf.name, st.card, "statement period not found - not included"))
+            issues.append(f"{pdf.name}: statement period not found - not included (held; "
+                          "the run is NOT complete)")
+            continue
         if not _overlaps(st.period, start, end):
             outside.append(pdf.name)
             continue
@@ -1766,6 +1788,8 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     block = fee_block(fees)
     if block:
         parts.append(md_list(block))
+    if held:
+        parts.insert(0, md_list(held_block(held)))
     eb = emi_block(emi_rows)
     if eb:
         parts.append(md_list(eb))
@@ -1794,7 +1818,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
                   skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool,
-                  csv_statements=csv_statements, csv_ties=csv_ties, csv_refused=csv_refused)
+                  csv_statements=csv_statements, csv_ties=csv_ties, csv_refused=csv_refused, held=held)
 
 
 # ---------------------------------------------------------------------------

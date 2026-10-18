@@ -54,6 +54,7 @@ class RunReport:
     csv_lines_unmatched: list = field(default_factory=list)     # CC-27: CSV payment rows with no bank payment
     csv_ties: list = field(default_factory=list)                # CC-24: [(Statement, TieOut)] CSV exports read whole
     csv_refused: list = field(default_factory=list)             # CC-24: [(file name, reason)] CSV exports that book nothing
+    held: list = field(default_factory=list)                    # CC-30: [(file name, card, reason)] statements whose period was not read (ranged run)
     emi: dict = field(default_factory=dict)
     emi_interest_reason: str = ""
     issues: list = field(default_factory=list)
@@ -83,7 +84,7 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.untied or self.csv_refused or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
+                    or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
@@ -259,6 +260,13 @@ def not_tied_block(rep: RunReport) -> str:
     return "\n".join(lines)
 
 
+def held_block(rep: RunReport) -> str:
+    if not rep.held:
+        return ""
+    return ("STATEMENT PERIOD NOT FOUND - NOT INCLUDED (nothing booked from them; the run is NOT complete):\n" + "\n".join(
+        f"  {name} | {card} | {why}" for name, card, why in rep.held))
+
+
 def statement_block(rep: RunReport) -> str:
     out = []
     if rep.csv_ties:
@@ -371,7 +379,7 @@ def tie_block(rep: RunReport) -> str:
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (held_block(rep), not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)

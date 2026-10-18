@@ -273,6 +273,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         csv_ties = list(getattr(res, "csv_ties", None) or [])
         rep.csv_ties = list(zip(csv_sts, csv_ties))
         rep.csv_refused = list(getattr(res, "csv_refused", None) or [])
+        rep.held = list(getattr(res, "held", None) or [])
         _rows = [r for s in passing for r in s.parsed.rows] + [r for s in csv_sts for r in s.parsed.rows]
         if any(_fee_row(r, mod.FEE_REVERSAL_RX) for r in _rows):
             _bsc = _strip_root(ent.bank_service_charge_account)
