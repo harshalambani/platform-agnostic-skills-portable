@@ -11,14 +11,6 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [3.37.0] — 2026-10-18
-
-### Fixed
-- LEG-14: paths on a different drive no longer break the run.
-- CC-31: a CRED payment within a set tolerance now pairs with its statement line; the tolerance is editable per entity on the Entities screen.
-- CC-32: a payment that could pay two cards is held as ambiguous, and a CRED overage is booked once.
-
-
 ## [3.9.0] — 2026-09-16
 
 ### Fixed
