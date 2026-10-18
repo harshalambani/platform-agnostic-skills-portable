@@ -138,10 +138,9 @@ def test_a_row_in_both_the_pdf_and_the_csv_is_booked_once(tmp_path, monkeypatch)
     assert len({r["Transaction ID"] for r in rows}) == 3
 
 
-def test_a_pdf_whose_tie_out_fails_is_still_refused(tmp_path, monkeypatch):        # NEGATIVE
+def test_an_untied_pdf_and_a_csv_with_the_same_row_book_it_once(tmp_path, monkeypatch):        # NEGATIVE
     res = _with_pdfs(tmp_path, monkeypatch, fail=("apr.pdf",))
     reply, rows, _c, _o = _book(tmp_path / "w", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12))])
-    assert "REFUSED - statements that do not tie out" in reply
-    amounts = _amounts(rows)
-    assert "1200.50" not in amounts and "300.00" not in amounts                     # the refused PDF's rows stay out
-    assert "77.00" in amounts                                                       # the CSV-only row is a CSV matter
+    assert "NOT TIED - IMPORTED, CHECK BEFORE IMPORT" in reply and "REFUSED - statements" not in reply
+    assert _amounts(rows) == ["1200.50", "300.00", "77.00"]                         # CC-26: from the PDF, once; never twice
+    assert len({r["Transaction ID"] for r in rows}) == 3

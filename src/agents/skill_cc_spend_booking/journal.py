@@ -75,6 +75,7 @@ class Journal:
     emi: bool = False            # came from an emi_* row
     emi_validated: bool = False  # the EMI wording is the HSBC layout, checked against a real statement shape
     row_id: int = 0              # id() of the statement row it came from
+    untied: str = ""             # CC-26: the tie-out result of its statement when that did not pass ("" = tied)
 
     @property
     def ccp_effect(self) -> float:

@@ -245,11 +245,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                                                     or i.startswith("tie-out "))]
         rep.statements_read = len(res.statements)
         ties_by_id = {id(s): t for s, t in zip(res.statements, res.ties)}
-        rep.refused = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
+        # CC-26: a statement that does not tie is IMPORTED and reported loudly (NOT TIED). Only a statement
+        # that read 0 rows is still refused: nothing in it can be trusted to a card or a side.
+        _untied_all = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
+        rep.refused = [(s, t) for s, t in _untied_all if not s.parsed.rows]
+        rep.untied = [(s, t) for s, t in _untied_all if s.parsed.rows]
+        untied_ids = {id(s) for s, _t in rep.untied}
         rep.tie_results = {id(s): t.result for s, t in zip(res.statements, res.ties)}
 
         _mark("parse")
-        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result)]
+        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result) or id(s) in untied_ids]
 
         # ---- CC-08: fixed-account checks BEFORE any matching work ----------------
         # Fee / cashback rows on a passing statement need the entity's Bank Service Charge /
@@ -336,7 +341,21 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 ov = J.overage_journal(pr, min(p.date for p in pr.payments))
                 if ov is not None:
                     js.append(ov)
+            if id(s.target) in untied_ids:
+                for j in js:
+                    j.untied = ties_by_id[id(s.target)].result
             per_statement[id(s.target)] = js
+            journals += js
+        # ---- CC-26: an untied statement that no payment settled is booked on its real dates ----
+        for st in res.statements:
+            if id(st) not in untied_ids or id(st) in per_statement:
+                continue
+            js, _emi, iss = J.journals_for_settlement(st, None, mod.FEE_REVERSAL_RX, threshold,
+                                                      book_interest=not emi_bad)
+            rep.issues += iss
+            for j in js:
+                j.untied = ties_by_id[id(st)].result
+            per_statement[id(st)] = js
             journals += js
         # ---- CC-24: CSV rows, same classification and guards, no settling payment ----
         for cst in csv_sts:
@@ -360,6 +379,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         for s in settlements:
             if s.status == M.S_SETTLED and any(id(r) in left for r in s.target.parsed.rows):
                 rep.partly_booked.append((s.target, "has EMI rows that are not booked; only its other rows are booked"))
+        for st, _t in rep.untied:
+            if id(st) in per_statement and id(st) not in {id(s.target) for s in settlements if s.status == M.S_SETTLED}                     and any(id(r) in left for r in st.parsed.rows):
+                rep.partly_booked.append((st, "has EMI rows that are not booked; only its other rows are booked"))
         rep.journals = journals
 
         _mark("journals")

@@ -17,7 +17,7 @@ def _statement_rows(out):
     return [tuple(c.value for c in r) for r in ws.iter_rows(min_row=2)]
 
 
-def test_a_refused_statement_has_one_row_and_never_shows_pass(tmp_path, monkeypatch):      # NEGATIVE
+def test_an_untied_statement_has_one_row_and_never_shows_pass(tmp_path, monkeypatch):      # NEGATIVE
     s1, s2 = stmt(APR, april_rows()), stmt(MAY, may_rows())
     _r, _rows, _c, out = go(tmp_path, monkeypatch, [s1, s2],
                             [tie(s1, result="FAIL", printed=1900.0, gap="printed 1,900.00 vs rows 1,700.00"),
@@ -25,7 +25,7 @@ def test_a_refused_statement_has_one_row_and_never_shows_pass(tmp_path, monkeypa
     rows = _statement_rows(out)
     apr = [r for r in rows if r[1] == s1.label]
     assert len(apr) == 1 and apr[0][2] == "FAIL"
-    assert "REFUSED" in (apr[0][3] or "")                       # still shows what happened to its payment
+    assert apr[0][3] == "SETTLED"                               # CC-26: an untied statement is imported, its payment settles it
     assert len({(r[0], r[1]) for r in rows}) == len(rows)       # one row per statement
 
 

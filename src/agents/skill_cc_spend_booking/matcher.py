@@ -33,7 +33,7 @@ _CRED_RX = re.compile(r"\bCRED\b", re.I)
 # Why a book payment matched nothing (shown in the RED FLAG block).
 R_NO_STATEMENT = "no statement for any card in the window"
 R_AMOUNT_OFF = "amount off tolerance"
-R_REFUSED = "the statement it settles was refused because it is not PASS"
+R_REFUSED = "the statement it settles has no tie-out result, so it was not read whole"
 R_BEFORE_RANGE = "settles a statement from before the range"
 R_NO_PRIOR = "settles a statement that is not among the statements read"
 R_AMBIGUOUS = "ambiguous: more than one possible match"
@@ -301,7 +301,9 @@ def settle(pairings: list, run_statements: list, pool: list, ties_by_id: dict, f
         if id(target) not in in_run:
             out.append(Settlement(target, paid_on, S_BEFORE, due, paid, prs, R_BEFORE_RANGE))
             continue
-        if tie is None or not is_pass(tie.result):
+        # CC-26: a tie-out that does not pass no longer refuses the settlement; the rows are booked and
+        # reported loudly as NOT TIED. A statement with no tie-out at all is still refused.
+        if tie is None:
             out.append(Settlement(target, paid_on, S_REFUSED, due, paid, prs, R_REFUSED))
             continue
         if due is None or paid + SETTLE_TOL < due:
