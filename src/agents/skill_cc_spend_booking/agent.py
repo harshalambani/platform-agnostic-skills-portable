@@ -406,6 +406,28 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         for sid, ov in csv_prior_ov:
             per_statement.setdefault(sid, []).append(ov)
             journals.append(ov)
+        # ---- CC-33: the CRED difference of a PARTLY SETTLED statement and of a CSV payment row matched to a
+        # bank payment is booked too (Dr CCP / Cr Drawings, on the payment date). Held to the end so it can
+        # never stop a statement or a CSV from booking its own rows, and kept out of the per-statement view
+        # (a PARTLY statement's spends are NOT booked). One journal per pairing: the Num comes from the bank
+        # payment(s), the line date and the amount, so a pairing already seen in this run (SETTLED or
+        # CSV-prior) is skipped here, and a later run that settles the statement gives the same Num, which
+        # the already-booked check catches ----
+        _ov_seen = {j.num for j in journals if j.kind == J.K_OVERAGE}
+        _not_closed = {id(pr) for s in settlements if s.status not in (M.S_SETTLED, M.S_PARTLY, M.S_CSV_PRIOR)
+                       for pr in s.pairings}
+        _cc33 = [(pr, s.target) for s in settlements if s.status == M.S_PARTLY for pr in s.pairings]
+        _cc33 += [(pr, None) for pr in rep.csv_pairings if id(pr) not in _not_closed]
+        for pr, tgt in _cc33:
+            ov = J.overage_journal(pr, min(p.date for p in pr.payments))
+            if ov is None or ov.num in _ov_seen:
+                continue
+            _ov_seen.add(ov.num)
+            if tgt is not None and id(tgt) in untied_ids:
+                ov.untied = ties_by_id[id(tgt)].result
+            if id(pr.line.stmt) in csv_ids:
+                ov.statement = csv_label(pr.line.stmt)
+            journals.append(ov)
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)
         booked_rows = {j.row_id for j in journals if j.emi}
@@ -538,6 +560,12 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         unmatched = rep.unmatched_total
         not_booked = round(sum(p.amount for s in settlements if s.status == M.S_PARTLY
                                for p in s.payments if p.in_range), 2)
+        # CC-33: the CRED difference of a PARTLY statement is booked on its own (Dr CCP / Cr Drawings), while
+        # the statement's spends are not: it belongs with the not-booked payments, booked now or earlier
+        _partly_ov = [J.overage_journal(pr, min(p.date for p in pr.payments)) for s in settlements
+                      if s.status == M.S_PARTLY for pr in s.pairings]
+        _partly_ov = {j.num: j.amount for j in _partly_ov if j is not None}
+        not_booked = round(not_booked + sum(_partly_ov.values()), 2)
         after = round(before + effect, 2)
         n_settled = sum(1 for s in settlements if s.status == M.S_SETTLED)
         other = round(after - unmatched - not_booked, 2)
@@ -546,6 +574,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # for whatever is left (so the lines always add up to Other).
         _skip = {p.guid for p, _r in rep.unmatched_payments}
         _skip |= {p.guid for s in settlements if s.status == M.S_PARTLY for p in s.payments if p.in_range}
+        _skip |= {t.guid for t in view.txns if t.num in _partly_ov and start <= t.date <= end}
         _csv_guids = {p.guid for pr in rep.csv_pairings for p in pr.payments}
         other_lines = [(t.date, (t.description or "(no description)")
                         + (" [matched to a CSV payment row]" if t.guid in _csv_guids else ""), t.amount_on(CCP_PATH))
