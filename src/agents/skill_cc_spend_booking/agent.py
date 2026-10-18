@@ -22,7 +22,7 @@ from pathlib import Path
 from . import journal as J
 from . import matcher as M
 from .bookio import CCP_PATH, read_book
-from .report import RunReport, build_message, write_workbook
+from .report import RunReport, build_message, csv_label, write_workbook
 from .settings_io import resolve_large_spend_threshold
 
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent
@@ -262,7 +262,13 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             r = guard.blocked_target_reason(p)
             return f"{path!r} cannot be used: {r}" if r else None
 
-        _rows = [r for s in passing for r in s.parsed.rows]
+        # CC-24: a CSV export read whole (card identified, coverage and counts reported) is bookable;
+        # its rows take the same checks as PDF rows. A refused CSV is not in csv_statements at all.
+        csv_sts = list(getattr(res, "csv_statements", None) or [])
+        csv_ties = list(getattr(res, "csv_ties", None) or [])
+        rep.csv_ties = list(zip(csv_sts, csv_ties))
+        rep.csv_refused = list(getattr(res, "csv_refused", None) or [])
+        _rows = [r for s in passing for r in s.parsed.rows] + [r for s in csv_sts for r in s.parsed.rows]
         if any(_fee_row(r, mod.FEE_REVERSAL_RX) for r in _rows):
             _bsc = _strip_root(ent.bank_service_charge_account)
             if not _bsc:
@@ -331,6 +337,15 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 if ov is not None:
                     js.append(ov)
             per_statement[id(s.target)] = js
+            journals += js
+        # ---- CC-24: CSV rows, same classification and guards, no settling payment ----
+        for cst in csv_sts:
+            js, _emi, iss = J.journals_for_settlement(cst, None, mod.FEE_REVERSAL_RX, threshold,
+                                                      book_interest=not emi_bad, num_label="CSV")
+            rep.issues += iss
+            for j in js:
+                j.statement = csv_label(cst)
+            per_statement[id(cst)] = js
             journals += js
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)

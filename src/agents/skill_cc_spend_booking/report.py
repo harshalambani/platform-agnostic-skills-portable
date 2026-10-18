@@ -18,6 +18,10 @@ from . import journal as J
 from .matcher import BookPayment
 
 
+def csv_label(st) -> str:
+    return f"CSV export {st.card} {st.label}"
+
+
 def money(v) -> str:
     return f"{v:,.2f}"
 
@@ -40,6 +44,8 @@ class RunReport:
     awaiting: list = field(default_factory=list)                # Statements not yet paid (no later statement)
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
+    csv_ties: list = field(default_factory=list)                # CC-24: [(Statement, TieOut)] CSV exports read whole
+    csv_refused: list = field(default_factory=list)             # CC-24: [(file name, reason)] CSV exports that book nothing
     emi: dict = field(default_factory=dict)
     emi_interest_reason: str = ""
     issues: list = field(default_factory=list)
@@ -69,7 +75,7 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.unpaid or self.partly_booked or self.withheld
+                    or self.refused or self.csv_refused or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
@@ -124,6 +130,14 @@ def large_spend_block(rep: RunReport) -> str:
 
 def statement_block(rep: RunReport) -> str:
     out = []
+    if rep.csv_ties:
+        out.append("CSV EXPORTS (no balance tie-out; coverage and counts only):\n" + "\n".join(
+            f"  CSV export {st.card} {st.label}: {t.note}; "
+            f"{sum(1 for j in rep.journals if j.statement == csv_label(st))} journal(s)"
+            for st, t in rep.csv_ties) + "\n  CSV payment rows are not matched to bank payments.")
+    if rep.csv_refused:
+        out.append("REFUSED CSV exports (nothing booked from them):\n" + "\n".join(
+            f"  CSV export {name}: {why}" for name, why in rep.csv_refused))
     if rep.refused:
         out.append("REFUSED - statements that do not tie out (nothing booked from them):\n" + "\n".join(
             f"  {st.card} {st.label}: {t.result}; {t.gap or t.note}" for st, t in rep.refused))
@@ -226,7 +240,7 @@ def build_message(rep: RunReport) -> str:
     n_ready = len(rep.ready)
     if rep.open_items:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
-            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)
+            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused)
         n += sum(1 for s in rep.settlements if s.status != "SETTLED")
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
@@ -242,7 +256,8 @@ def build_message(rep: RunReport) -> str:
     booked_n = sum(1 for j in rep.journals if j.status == J.ST_BOOKED)
     parts.append(f"{ready_n} journal(s) ready to import" + (f", {booked_n} already booked" if booked_n else "")
                  + f" from {sum(1 for s in rep.settlements if s.status == 'SETTLED')} settled statement(s); "
-                 f"{rep.statements_read} statement(s) read in the range")
+                 f"{rep.statements_read} statement(s) read in the range"
+                 + (f" and {len(rep.csv_ties)} CSV export(s)" if rep.csv_ties else ""))
     if rep.skipped:
         parts.append(f"Skipped: not a statement ({len(rep.skipped)}):\n" + "\n".join(f"  {d}" for d in rep.skipped))
     if rep.duplicates:
@@ -272,6 +287,10 @@ def statement_rows(rep: RunReport) -> list:
     for st, t in rep.refused:
         r = row(st)
         r[2], r[4] = t.result, t.gap or t.note
+    for st, t in rep.csv_ties:
+        r = rows[id(st)] = [st.card, f"CSV export {st.label}", t.result, "n/a (CSV export)", t.note]
+    for name, why in rep.csv_refused:
+        rows[("csv", name)] = ["", f"CSV export {name}", "REFUSED (CSV export)", "", why]
     for s in rep.settlements:
         if s.target:
             r = row(s.target)

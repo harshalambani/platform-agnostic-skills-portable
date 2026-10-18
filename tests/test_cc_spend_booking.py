@@ -103,7 +103,7 @@ def fake_mapper_factory(calls):
 
 
 def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, threshold=None,
-       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None, model=None):
+       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None, model=None, result_override=None):
     book = tmp_path / "book.gnucash"
     book.write_text("x", encoding="utf-8")
     pdfs = tmp_path / "pdfs"
@@ -120,6 +120,8 @@ def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, th
         settings.write_text(yaml.safe_dump({"cc_large_spend_threshold": threshold}), encoding="utf-8")
     result = MOD.Result(message="", issues=[], rows=[], ties=ties, fees=[], duplicates=[], statements=stmts,
                         emi_rows=emi or [], pool=list(stmts))
+    if result_override is not None:
+        result = result_override
     monkeypatch.setattr(ccsb, "_extract", lambda *a, **k: (MOD, result))
     monkeypatch.setattr(ccsb, "read_book", lambda p: BookView(txns=list(txns), paths=set(PATHS)))
     from agents.gnucash_accounts import TargetGuard
