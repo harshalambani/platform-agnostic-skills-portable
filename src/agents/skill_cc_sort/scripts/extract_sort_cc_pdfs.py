@@ -387,7 +387,7 @@ def extract_bank_and_card_type(filename):
         ('HDFC', 'Regalia'):    r'hdfc.*regalia|regalia.*hdfc|regalia',
         ('HDFC', 'TataNeu'):    r'hdfc.*tata\s*neu|tata\s*neu.*hdfc|tata.?neu',
         ('ICICI', 'Amazon'):    r'amazon.*icici|icici.*amazon|amazon.*pay',
-        ('ICICI', 'Sapphiro'):  r'icici.*sapphiro|sapphiro.*icici|sapphiro|4315|3747',
+        ('ICICI', 'Sapphiro'):  r'icici.*sapphiro|sapphiro.*icici|sapphiro|3747',
         ('SBI', 'BPCL-Octane'): r'bpcl|sbi.*octane|octane.*sbi|9435',
         ('SBM', 'Global'):      r'sbm.*global|global.*sbm|niyo.*global|sbniyocr|global.credit|your.global.credit',
         ('HSBC', 'Premier'):    r'hsbc.*premier|premier.*hsbc|hsbc',
