@@ -45,6 +45,8 @@ class RunReport:
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
     untied: list = field(default_factory=list)                  # CC-26: [(Statement, TieOut)] imported although the tie-out did not pass
+    csv_pairings: list = field(default_factory=list)            # CC-27: Pairings of CSV payment rows with bank payments
+    csv_lines_unmatched: list = field(default_factory=list)     # CC-27: CSV payment rows with no bank payment
     csv_ties: list = field(default_factory=list)                # CC-24: [(Statement, TieOut)] CSV exports read whole
     csv_refused: list = field(default_factory=list)             # CC-24: [(file name, reason)] CSV exports that book nothing
     emi: dict = field(default_factory=dict)
@@ -76,7 +78,7 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.untied or self.csv_refused or self.unpaid or self.partly_booked or self.withheld
+                    or self.refused or self.untied or self.csv_refused or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
@@ -177,6 +179,14 @@ def statement_block(rep: RunReport) -> str:
     if rep.lines_unmatched:
         out.append("STATEMENT PAYMENT LINES WITH NO BANK PAYMENT IN THE BOOK:\n" + "\n".join(
             f"  {ln.stmt.card} {ln.date:%d %b %Y} {money(ln.amount)}" for ln in rep.lines_unmatched))
+    if rep.csv_lines_unmatched:
+        out.append("CSV PAYMENT ROWS WITH NO BANK PAYMENT IN THE BOOK (nothing booked for them):\n" + "\n".join(
+            f"  CSV export {ln.stmt.card} {ln.date:%d %b %Y} {money(ln.amount)}" for ln in rep.csv_lines_unmatched))
+    if rep.csv_pairings:
+        out.append("CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS (source CSV; confirms the payment, books nothing):\n"
+                   + "\n".join(
+            f"  CSV export {pr.line.stmt.card} {pr.line.date:%d %b %Y} {money(pr.line.amount)} <- "
+            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments) for pr in rep.csv_pairings))
     if rep.ambiguous:
         out.append("AMBIGUOUS payments (not matched, never guessed):\n" + "\n".join(
             "  " + (f"{a['line'].stmt.card} line {a['line'].date:%d %b %Y} {money(a['line'].amount)}: "
@@ -258,7 +268,7 @@ def build_message(rep: RunReport) -> str:
     n_ready = len(rep.ready)
     if rep.open_items:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
-            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied)
+            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched)
         n += sum(1 for s in rep.settlements if s.status != "SETTLED")
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
@@ -364,7 +374,10 @@ def write_workbook(rep: RunReport, path: str) -> str:
           [(f"{s.paid_on.card} {s.paid_on.label}", pr.line.date, pr.line.amount,
             ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
             pr.overage, f"{s.target.card} {s.target.label}" if s.target else "none read", s.status)
-           for s in rep.settlements for pr in s.pairings])
+           for s in rep.settlements for pr in s.pairings]
+          + [(f"CSV export {pr.line.stmt.card}", pr.line.date, pr.line.amount,
+              ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
+              pr.overage, "CSV payment row (settles nothing)", "MATCHED (CSV)") for pr in rep.csv_pairings])
     sheet("Large spends",
           ["Date", "Card", "Description", "Amount", "Account", "Flag", "Status"],
           [(j.real_date, j.card, j.raw_description, j.amount, j.account, j.flag, j.status)
