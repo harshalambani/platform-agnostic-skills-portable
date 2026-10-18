@@ -157,6 +157,16 @@ def _run(cmd: Sequence[str | Path], *, cwd: Path | None = None, env: dict | None
     return res
 
 
+def _display_path(p) -> str:
+    """LEG-14: a path for a log line. Relative to the project when it can be (same drive, under the
+    project); otherwise the path as given. os.path.relpath raises ValueError across drives and
+    Path.relative_to raises when the path is outside the project; a log line must never crash a build."""
+    try:
+        return os.path.relpath(p, PROJECT_ROOT)
+    except ValueError:
+        return str(p)
+
+
 def _rmtree(path: Path) -> None:
     if not path.exists():
         return
@@ -240,7 +250,7 @@ def step1_resolve_version(args: argparse.Namespace, log: _Log) -> tuple[str, str
         f'BUILD_TIMESTAMP: str = {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")!r}\n',
         encoding="utf-8",
     )
-    log.ok(f"wrote {BUILDINFO_PY.relative_to(PROJECT_ROOT)} ({version})")
+    log.ok(f"wrote {_display_path(BUILDINFO_PY)} ({version})")
     return version, sha, dirty
 
 
@@ -335,7 +345,7 @@ def step3_create_venv(args: argparse.Namespace, log: _Log) -> Path:
         _run([py, "-m", "pip", "install", "-r", REQUIREMENTS], log=log)
 
     _run([py, "-m", "pip", "install", "pyinstaller>=6.10"], log=log)
-    log.ok(f"venv ready at {BUILD_VENV.relative_to(PROJECT_ROOT)}")
+    log.ok(f"venv ready at {_display_path(BUILD_VENV)}")
     return py
 
 
@@ -370,7 +380,7 @@ def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
     if dest.exists():
         _rmtree(dest)
     shutil.copytree(src_dir, dest)
-    log.ok(f"frozen build copied to {os.path.relpath(dest, PROJECT_ROOT)}")
+    log.ok(f"frozen build copied to {_display_path(dest)}")
     return dest
 
 
@@ -387,7 +397,7 @@ def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
         _rmtree(dest)
     shutil.copytree(src, dest)
     count = sum(1 for _ in dest.rglob("*") if _.is_file())
-    log.info(f"  {label}: {count} files copied to {os.path.relpath(dest, PROJECT_ROOT)}")
+    log.info(f"  {label}: {count} files copied to {_display_path(dest)}")
     return count
 
 
@@ -561,7 +571,7 @@ def _pull_agents_git(cfg: dict, log: _Log) -> Path:
 
     if cache_dir.is_dir() and (cache_dir / ".git").is_dir():
         # Cache exists — try to update
-        log.info(f"cache hit: {cache_dir.relative_to(PROJECT_ROOT)}")
+        log.info(f"cache hit: {_display_path(cache_dir)}")
         try:
             subprocess.run(
                 ["git", "fetch", "--depth", "1", "origin", ref],
@@ -728,7 +738,7 @@ def _ensure_appinfo_icons(log: _Log) -> None:
     for name in real_present:
         shutil.copy2(icons_src / name, appinfo_dir / name)
     if real_present:
-        log.info(f"copied {len(real_present)} real icon(s) from {icons_src.relative_to(PROJECT_ROOT)}")
+        log.info(f"copied {len(real_present)} real icon(s) from {_display_path(icons_src)}")
 
     if not missing:
         log.ok("appicon set complete (all real artwork)")
@@ -837,8 +847,8 @@ def step8_render_inis(version: str, py: Path, log: _Log) -> None:
     _write_ini(appinfo_out, appinfo_txt)
     _write_ini(launcher_out, launcher_txt)
 
-    log.ok(f"wrote {appinfo_out.relative_to(PROJECT_ROOT)}")
-    log.ok(f"wrote {launcher_out.relative_to(PROJECT_ROOT)}")
+    log.ok(f"wrote {_display_path(appinfo_out)}")
+    log.ok(f"wrote {_display_path(launcher_out)}")
 
     _ensure_appinfo_icons(log)
     _ensure_launcher_splash(version, py, log)
@@ -856,7 +866,7 @@ def step9_copy_defaults(log: _Log) -> None:
         _rmtree(dest)
     shutil.copytree(DEFAULTDATA_TMPL, dest)
     count = sum(1 for _ in dest.rglob("*") if _.is_file())
-    log.ok(f"DefaultData copied -> {dest.relative_to(PROJECT_ROOT)} ({count} files)")
+    log.ok(f"DefaultData copied -> {_display_path(dest)} ({count} files)")
 
     # help.html at the app root is required by the PortableApps.com Installer and
     # is good to ship in the zip too.
@@ -963,7 +973,7 @@ def step10_launcher_gen(args: argparse.Namespace, log: _Log) -> bool:
 
     wrapper = STAGING / "PASkillsPortable.exe"
     if wrapper.is_file():
-        log.ok(f"wrapper produced: {wrapper.relative_to(PROJECT_ROOT)}")
+        log.ok(f"wrapper produced: {_display_path(wrapper)}")
         return True
 
     # Surface the launcher's own log when it bails - the generator writes
@@ -1022,7 +1032,7 @@ def step11_zip(version: str, log: _Log, *, launcher_ok: bool) -> Path | None:
             total_bytes += len(data)
 
     mb = total_bytes / (1024 * 1024)
-    log.ok(f"wrote {out.relative_to(PROJECT_ROOT)}  ({count} files, {mb:.1f} MiB uncompressed)")
+    log.ok(f"wrote {_display_path(out)}  ({count} files, {mb:.1f} MiB uncompressed)")
     return out
 
 
@@ -1080,7 +1090,7 @@ def step12_installer(args: argparse.Namespace, log: _Log, *, launcher_ok: bool) 
         dest.unlink()
     shutil.move(str(paf), str(dest))
     mb = dest.stat().st_size / (1024 * 1024)
-    log.ok(f"wrote {dest.relative_to(PROJECT_ROOT)}  ({mb:.1f} MiB)")
+    log.ok(f"wrote {_display_path(dest)}  ({mb:.1f} MiB)")
     return dest
 
 
