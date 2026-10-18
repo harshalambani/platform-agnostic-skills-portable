@@ -23,7 +23,7 @@ from . import journal as J
 from . import matcher as M
 from .bookio import CCP_PATH, read_book
 from .report import RunReport, build_message, csv_label, write_workbook
-from .settings_io import resolve_large_spend_threshold
+from .settings_io import resolve_cred_max_overage, resolve_large_spend_threshold
 
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent
 _MAPPER_FEE_REASON = "Fixed account: card fee or fee reversal -> the entity's Bank Service Charge account"
@@ -41,7 +41,7 @@ def _fee_row(r, fee_rx) -> bool:
 
 
 def _cashback_row(r) -> bool:
-    return r.kind == "cashback" and r.direction == "Cr"
+    return r.kind == "cashback" and r.direction in ("Cr", "Dr")
 
 
 def _impossible_target(guard, j) -> str:
@@ -225,8 +225,12 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         return _error(f"ERROR: {CCP_PATH} cannot be used: {why}. Nothing was booked.")
 
     threshold, threshold_source = resolve_large_spend_threshold(ent, settings_path)
+    try:
+        cred_max, cred_src = resolve_cred_max_overage(ent)
+    except ValueError as e:
+        return _error(f"ERROR: {e}. Nothing was booked.")
     rep = RunReport(label=label, threshold=threshold, ccp_path=CCP_PATH, entity=entity_key,
-                    threshold_source=threshold_source)
+                    threshold_source=threshold_source, cred_max=cred_max, cred_max_source=cred_src)
 
     # ---- statements -------------------------------------------------------
     _t0 = time.perf_counter()
@@ -302,13 +306,14 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # payment. The row itself is still never booked.
         csv_lines = M.pay_lines(csv_sts)
         csv_ids = {id(s) for s in csv_sts}
-        outcome = M.match_payments(lines + csv_lines, pool_pay)
+        outcome = M.match_payments(lines + csv_lines, pool_pay, cred_max)
         rep.pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) not in csv_ids]
         rep.csv_pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) in csv_ids]
         rep.lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) not in csv_ids]
         rep.csv_lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) in csv_ids]
         rep.ambiguous = outcome.ambiguous
-        settlements = M.settle(rep.pairings, res.statements, res.pool, ties_by_id, mod.find_prior, mod.is_pass)
+        settlements = M.settle(rep.pairings, res.statements, res.pool, ties_by_id, mod.find_prior, mod.is_pass,
+                               csv_statements=csv_sts, csv_pairings=rep.csv_pairings, range_end=end)
         rep.settlements = settlements
 
         flagged = {p.guid: (p, outcome.unmatched_reason[p.guid]) for p in outcome.payments_unmatched if p.in_range}
@@ -325,7 +330,17 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             if id(st) in settled_ids:
                 continue
             nxt = next((o for o in res.pool if o is not st and mod.find_prior(o, res.pool) is st), None)
-            (rep.unpaid if nxt is not None and id(nxt) in run_ids else rep.awaiting).append(st)
+            if nxt is not None and id(nxt) in run_ids:
+                rep.unpaid.append(st)
+                # CC-32: say when the next statement DOES show payment lines that matched no bank payment
+                bad = [ln for ln in rep.lines_unmatched if ln.stmt is nxt] +                       [a["line"] for a in rep.ambiguous if a.get("line") is not None and a["line"].stmt is nxt]
+                if bad:
+                    tot = sum(ln.amount for ln in bad)
+                    rep.unpaid_why[id(st)] = (f"the next statement shows {len(bad)} payment line(s) ({tot:,.2f}) "
+                                              f"that matched no bank payment (see 'Payments without statement' "
+                                              f"and the payment lines with no bank payment)")
+            else:
+                rep.awaiting.append(st)
 
         _mark("match")
         # ---- the EMI interest account (soft: a problem withholds the interest rows only) ----
@@ -355,6 +370,19 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     j.untied = ties_by_id[id(s.target)].result
             per_statement[id(s.target)] = js
             journals += js
+        # ---- CC-31: a CRED payment line whose prior period is a whole-booked CSV settles no PDF statement,
+        # but the card was credited more than the bank sent: its overage is booked once, exactly as for a
+        # settled statement (Dr CCP / Cr Drawings), so the CCP balance is not left off by the difference ----
+        # (held aside and merged into the view after the CC-26 and CC-24 loops, so the statement that was
+        # paid keeps its own rows booked by those loops)
+        csv_prior_ov = []
+        for s in settlements:
+            if s.status != M.S_CSV_PRIOR:
+                continue
+            for pr in s.pairings:
+                ov = J.overage_journal(pr, min(p.date for p in pr.payments))
+                if ov is not None:
+                    csv_prior_ov.append((id(s.paid_on), ov))
         # ---- CC-26: an untied statement that no payment settled is booked on its real dates ----
         for st in res.statements:
             if id(st) not in untied_ids or id(st) in per_statement:
@@ -375,6 +403,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 j.statement = csv_label(cst)
             per_statement[id(cst)] = js
             journals += js
+        for sid, ov in csv_prior_ov:
+            per_statement.setdefault(sid, []).append(ov)
+            journals.append(ov)
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)
         booked_rows = {j.row_id for j in journals if j.emi}
@@ -417,7 +448,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         for j in journals:
             if j.kind == J.K_EMI_INT:
                 j.account, j.confidence, j.match_reason = emi_acct, "high", "entity card_emi_interest_account"
-        if any(j.kind in (J.K_CASHBACK, J.K_OVERAGE) for j in journals):
+        if any(j.kind in (J.K_CASHBACK, J.K_CASHBACK_REV, J.K_OVERAGE) for j in journals):
             draw = [_strip_root(d) for d in ent.drawings_accounts]
             if len(draw) != 1:
                 return _error(f"ERROR: entity {entity_key!r} needs exactly one drawings_accounts entry for card "
@@ -426,7 +457,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             if bad:
                 return _error(f"ERROR: entity {entity_key!r} drawings account: {bad}. Nothing was booked.")
             for j in journals:
-                if j.kind in (J.K_CASHBACK, J.K_OVERAGE):
+                if j.kind in (J.K_CASHBACK, J.K_CASHBACK_REV, J.K_OVERAGE):
                     j.account, j.confidence, j.match_reason = draw[0], "high", _MAPPER_DRAW_REASON
 
         # ---- already booked (before mapping: an unmapped journal is checked too) ----

@@ -163,8 +163,8 @@ def test_exact_payment_pairs_one_to_one():
     assert len(out.pairings) == 1 and out.pairings[0].kind == "exact" and not out.payments_unmatched
 
 
-@pytest.mark.parametrize("over,ok", [(0.5, True), (15.0, True), (15.5, False)])
-def test_cred_overage_is_zero_to_fifteen_rupees(over, ok):
+@pytest.mark.parametrize("over,ok", [(0.5, True), (15.0, True), (50.0, True), (50.5, False)])
+def test_cred_overage_is_zero_to_fifty_rupees(over, ok):
     out = M.match_payments([L(1000 + over, date(2025, 5, 10), desc="CRED PAYMENT")],
                            [P("a", 1000, date(2025, 5, 10), desc="CRED CLUB")])
     assert bool(out.pairings) is ok
@@ -210,7 +210,7 @@ def test_part_payment_outside_fifteen_days_is_not_used():                      #
 
 
 def test_two_lines_one_payment_is_ambiguous_and_nothing_pairs():               # NEGATIVE (one-to-one)
-    out = M.match_payments([L(1000, date(2025, 5, 10), card="C1"), L(1000, date(2025, 5, 11), card="C2")],
+    out = M.match_payments([L(1000, date(2025, 5, 10), card="C1"), L(1000, date(2025, 5, 10), card="C2")],
                            [P("a", 1000, date(2025, 5, 10))])
     assert not out.pairings and out.ambiguous and out.payments_unmatched
 

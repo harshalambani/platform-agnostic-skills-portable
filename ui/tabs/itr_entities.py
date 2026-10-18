@@ -358,7 +358,7 @@ _FORM_UI35_FIELDS = (
     "bank_service_charge_account", "card_emi_interest_account", "partner_comp_accounts",
     "foreign_dividends_in_book", "foreign_dividends_in_book_by_ay", "partner_firm_pan",
     "cc_large_spend_threshold", "foreign_dividend_cash_account", "foreign_dividend_tax_account",
-    "foreign_dividend_income_account",
+    "foreign_dividend_income_account", "cc_cred_max_overage",
 )
 
 #: UI-35: EntityProfile field -> a fragment of the label of the control that
@@ -382,6 +382,7 @@ _FIELD_CONTROLS = {
     "card_emi_interest_account": "Card EMI interest account",
     "partner_firm_pan": "Firm PAN",
     "cc_large_spend_threshold": "Large-spend limit",
+    "cc_cred_max_overage": "CRED tolerance",
     "foreign_dividend_cash_account": "Foreign dividend cash account",
     "foreign_dividend_tax_account": "Foreign dividend tax account",
     "foreign_dividend_income_account": "Foreign dividend income account",
@@ -573,12 +574,28 @@ def _check_accounts(books: dict, fields: dict) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
+def _cred_default_text() -> str:
+    from agents.skill_cc_spend_booking.matcher import CRED_MAX_OVERAGE
+    return f"{CRED_MAX_OVERAGE:g}"
+
+
+def _cred_text(raw) -> str:
+    """CC-31: the CRED tolerance as shown on the form: the stored value; BLANK when the key is absent
+    (the default is shown as the placeholder), so a save never writes the default into the yaml."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return ""
+    try:
+        return f"{_configs_mod().parse_cred_max_overage(raw):g}"
+    except ValueError:
+        return str(raw)           # a bad hand-edited value is shown as it is, so it can be corrected
+
+
 def _entity_to_new_form(key: str, entities: dict) -> tuple:
     """UI-35 form values: foreign-dividend switches, drivers, the two card
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
+        return (False, "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
@@ -586,6 +603,7 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
         e.bank_service_charge_account or "", e.card_emi_interest_account or "",
         e.partner_firm_pan or "",
         ("" if e.cc_large_spend_threshold is None else f"{e.cc_large_spend_threshold:g}"),
+        _cred_text(e.cc_cred_max_overage),
         *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
         e.foreign_dividend_cash_account or "", e.foreign_dividend_tax_account or "",
         e.foreign_dividend_income_account or "",
@@ -615,6 +633,7 @@ def _save_entity(
     partner_comp_drivers_text: str | None = None,
     partner_firm_pan: str | None = None,
     cc_large_spend_threshold: str | None = None,
+    cc_cred_max_overage: str | None = None,
     foreign_dividend_cash_account: str | None = None,
     foreign_dividend_tax_account: str | None = None,
     foreign_dividend_income_account: str | None = None,
@@ -668,6 +687,19 @@ def _save_entity(
                 )
         else:
             large_spend = ""
+    cred_max = None   # None == keep the stored value; "" == clear (the default 50 applies)
+    if cc_cred_max_overage is not None:
+        text = str(cc_cred_max_overage).strip()
+        if text:
+            try:
+                cred_max = _configs_mod().parse_cred_max_overage(text)
+            except ValueError as exc:
+                kv_errors.append(
+                    f"CRED tolerance {cc_cred_max_overage!r} is refused ({exc}) -- enter rupees from 0 to "
+                    f"{_configs_mod().CRED_MAX_OVERAGE_LIMIT:g}, or leave blank for the default."
+                )
+        else:
+            cred_max = ""
     acct_fields = {}
     if bank_service_charge_account is not None:
         acct_fields["Bank service charge account"] = bank_service_charge_account
@@ -809,6 +841,8 @@ def _save_entity(
         new_profile.card_emi_interest_account = card_emi_interest_account.strip()
     if large_spend is not None:
         new_profile.cc_large_spend_threshold = None if large_spend == "" else float(large_spend)
+    if cred_max is not None:
+        new_profile.cc_cred_max_overage = None if cred_max == "" else float(cred_max)
     if foreign_dividend_cash_account is not None:
         new_profile.foreign_dividend_cash_account = foreign_dividend_cash_account.strip()
     if foreign_dividend_tax_account is not None:
@@ -1267,6 +1301,12 @@ def render(container_tab=None) -> None:
                     info="A card spend of this amount or more is flagged as a possible asset for THIS entity. "
                          "Blank = use the global setting. Zero, negative or text is refused.",
                 )
+                cred_max_box = gr.Textbox(
+                    label="CRED tolerance (rupees)", placeholder=f"{_cred_default_text()} (default)", interactive=True,
+                    info="The most a CRED payment line on a statement may exceed the bank amount and still be "
+                         "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
+                         "negative or above 500 is refused.",
+                )
             with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
                 firm_pan_box = gr.Textbox(
                     label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
@@ -1287,7 +1327,7 @@ def render(container_tab=None) -> None:
                     info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
                          "is refused and nothing is saved. Blank removes all drivers.",
                 )
-            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, *partner_dds,
+            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, *partner_dds,
                            fd_cash_dd, fd_tax_dd, fd_income_dd]
 
             save_status = gr.Markdown("_Fill in the fields and click Save._")
@@ -1331,12 +1371,12 @@ def render(container_tab=None) -> None:
         """UI-35 values for the new controls; the account pick-lists are rebuilt
         from the entity's newest registered book."""
         entities = _load_entities()
-        fdb, fdb_ay, drv, bank, emi, fpan, lsp, *partner = _entity_to_new_form(key or "", entities)
+        fdb, fdb_ay, drv, bank, emi, fpan, lsp, crm, *partner = _entity_to_new_form(key or "", entities)
         books = dict(entities[key].books) if (key or "") in entities else {}
         choices, note = _account_choices(books)
         def dd(v):
             return gr.update(choices=choices, value=v)
-        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, *[dd(v) for v in partner], "_" + note + "_")
+        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, crm, *[dd(v) for v in partner], "_" + note + "_")
 
     _new_outputs = [*_new_inputs, accounts_note_md]
 
@@ -1359,7 +1399,7 @@ def render(container_tab=None) -> None:
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
         reimbursement_markers_text, partner_admission_date,
-        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, large_spend, *partner_values,
+        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, large_spend, cred_max, *partner_values,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -1383,6 +1423,7 @@ def render(container_tab=None) -> None:
             partner_comp_drivers_text=drivers_text or "",
             partner_firm_pan=firm_pan or "",
             cc_large_spend_threshold=large_spend or "",
+            cc_cred_max_overage=cred_max or "",
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key

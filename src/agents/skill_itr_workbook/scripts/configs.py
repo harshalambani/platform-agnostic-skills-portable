@@ -183,6 +183,9 @@ class EntityProfile:
     foreign_dividend_income_account: str = ""  # ITR-09: foreign dividend income (credited at gross)
     cc_large_spend_threshold: float | None = None  # CC-14: this entity's own large-spend (possible
                                          # asset) limit in rupees. None == use the global setting.
+    cc_cred_max_overage: object = None   # CC-31: the most (rupees) a CRED payment line may exceed the bank
+                                         # amount and still match. Kept as read; checked by
+                                         # parse_cred_max_overage. None == the code default (50).
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -198,6 +201,24 @@ def _parse_positive_amount(value) -> float | None:
         return None
     if out != out or out <= 0 or out == float("inf"):
         return None
+    return out
+
+
+CRED_MAX_OVERAGE_LIMIT = 500.0
+
+
+def parse_cred_max_overage(value) -> float:
+    """CC-31: a number from 0 to 500 (rupees). Raises ValueError with a plain message otherwise."""
+    if value is None or isinstance(value, bool):
+        raise ValueError(f"{value!r} is not a number")
+    try:
+        out = float(str(value).replace(",", "").strip())
+    except ValueError:
+        raise ValueError(f"{value!r} is not a number") from None
+    if out != out or out in (float("inf"), float("-inf")):
+        raise ValueError(f"{value!r} is not a number")
+    if out < 0 or out > CRED_MAX_OVERAGE_LIMIT:
+        raise ValueError(f"{value!r} is outside 0 to {CRED_MAX_OVERAGE_LIMIT:g} rupees")
     return out
 
 
@@ -243,6 +264,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             card_emi_interest_account=str(fields_.get("card_emi_interest_account") or "").strip(),
             partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
             cc_large_spend_threshold=_parse_positive_amount(fields_.get("cc_large_spend_threshold")),
+            cc_cred_max_overage=fields_.get("cc_cred_max_overage"),
             foreign_dividend_cash_account=str(fields_.get("foreign_dividend_cash_account") or "").strip(),
             foreign_dividend_tax_account=str(fields_.get("foreign_dividend_tax_account") or "").strip(),
             foreign_dividend_income_account=str(fields_.get("foreign_dividend_income_account") or "").strip(),
@@ -340,6 +362,11 @@ def _entity_to_dict(e: EntityProfile) -> dict:
         d["partner_firm_pan"] = e.partner_firm_pan
     if e.cc_large_spend_threshold is not None:
         d["cc_large_spend_threshold"] = float(e.cc_large_spend_threshold)
+    if e.cc_cred_max_overage is not None and str(e.cc_cred_max_overage).strip() != "":
+        try:
+            d["cc_cred_max_overage"] = parse_cred_max_overage(e.cc_cred_max_overage)
+        except ValueError:
+            d["cc_cred_max_overage"] = e.cc_cred_max_overage   # never rewrite a bad value into a good-looking one
     for _k in ("foreign_dividend_cash_account", "foreign_dividend_tax_account",
                "foreign_dividend_income_account"):
         if getattr(e, _k):
