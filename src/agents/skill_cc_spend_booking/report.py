@@ -13,6 +13,7 @@ The headline never says "completed successfully" while anything above is open.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from . import journal as J
 from .matcher import BookPayment
@@ -45,6 +46,10 @@ class RunReport:
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
     untied: list = field(default_factory=list)                  # CC-26: [(Statement, TieOut)] imported although the tie-out did not pass
+    view_statements: list = field(default_factory=list)         # CC-23: PDF statements read in the range
+    view_per_statement: dict = field(default_factory=dict)      # CC-23: id(statement) -> journals (read-only view input)
+    view_pool: list = field(default_factory=list)               # CC-23: bank payments considered (BookPayment)
+    view_range: tuple = ()                                      # CC-23: (start, end) of the run
     csv_pairings: list = field(default_factory=list)            # CC-27: Pairings of CSV payment rows with bank payments
     csv_lines_unmatched: list = field(default_factory=list)     # CC-27: CSV payment rows with no bank payment
     csv_ties: list = field(default_factory=list)                # CC-24: [(Statement, TieOut)] CSV exports read whole
@@ -82,6 +87,113 @@ class RunReport:
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
+
+
+def _covers_a_financial_year(start, end) -> bool:
+    for y in range(start.year - 1, end.year + 1):
+        if start <= date(y, 4, 1) and end >= date(y + 1, 3, 31):
+            return True
+    return False
+
+
+def payment_statement_view(rep: RunReport):
+    """CC-23: a read-only view built from data the run already holds. Returns (range_line, rows, unknown).
+    rows: one dict per statement; unknown: bank payments no statement line took, by month. Books nothing."""
+    if not rep.view_range:
+        return "", [], []
+    start, end = rep.view_range
+    range_line = ""
+    if not _covers_a_financial_year(start, end):
+        range_line = (f"This view covers {start:%d %b %Y} to {end:%d %b %Y} only, "
+                      f"not the whole financial year.")
+    by_target = {}
+    for s in rep.settlements:
+        if s.target is not None and s.pairings:
+            by_target[id(s.target)] = s
+    bad_lines = {}
+    for ln in list(rep.lines_unmatched) + list(rep.csv_lines_unmatched):
+        bad_lines.setdefault(id(ln.stmt), []).append(ln)
+    for a in rep.ambiguous:
+        ln = a.get("line") if isinstance(a, dict) else None
+        if ln is not None:
+            bad_lines.setdefault(id(ln.stmt), []).append(ln)
+    csv_pay = {}
+    for pr in rep.csv_pairings:
+        csv_pay.setdefault(id(pr.line.stmt), []).extend(pr.payments)
+    awaiting = {id(s) for s in rep.awaiting}
+    entries = [(st, "PDF") for st in rep.view_statements] + [(st, "CSV export") for st, _t in rep.csv_ties]
+    rows = []
+    for st, src in entries:
+        if st.period is None:
+            continue
+        s0, e0 = st.period
+        if e0 < start or s0 > end:
+            continue
+        js = rep.view_per_statement.get(id(st))
+        if js is None:
+            book = "not assessed (statement not settled in this run)"
+        elif not js:
+            book = "nothing to book"
+        elif all(j.status == J.ST_BOOKED for j in js):
+            book = "all rows"
+        elif any(j.status == J.ST_BOOKED for j in js):
+            book = "some rows"
+        else:
+            book = "none"
+        printed = [r for r in st.parsed.rows if r.kind == "payment" and r.direction == "Cr"]
+        if src == "PDF":
+            s = by_target.get(id(st))
+            paid = list(s.payments) if s else []
+            due = s.due if s else None
+        else:
+            s, paid, due = None, list(csv_pay.get(id(st), [])), None
+        gaps = []
+        if src == "PDF" and not paid:
+            gaps.append("statement with no payment" + (" (latest statement, payment may not be due yet)"
+                                                      if id(st) in awaiting else ""))
+        if src != "PDF" and not printed:
+            gaps.append("statement with no payment")
+        if id(st) in bad_lines:
+            gaps.append("payment line with no bank payment")
+        rows.append({"card": st.card, "month": f"{e0:%b %Y}", "label": st.label, "source": src, "book": book,
+                     "due": due, "printed": [(r.date, r.amount) for r in printed],
+                     "paid": [(p.date, p.amount) for p in paid], "gap": "; ".join(gaps) or "none",
+                     "_k": (st.card, s0)})
+    rows.sort(key=lambda r: r["_k"])
+    taken = {p.guid for s in rep.settlements for p in s.payments}
+    taken |= {p.guid for pr in rep.csv_pairings for p in pr.payments}
+    taken |= {p.guid for pr in rep.pairings for p in pr.payments}
+    unknown = sorted(((p.date, p.amount) for p in rep.view_pool
+                      if p.in_range and start <= p.date <= end and p.guid not in taken))
+    return range_line, rows, unknown
+
+
+def _ds(pairs) -> str:
+    return ", ".join(f"{d:%d %b %Y} {money(a)}" for d, a in pairs) or "-"
+
+
+def payment_statement_block(rep: RunReport) -> str:
+    range_line, rows, unknown = payment_statement_view(rep)
+    if not rows and not unknown:
+        return ""
+    out = ["Payments and statements by card:"]
+    if range_line:
+        out.append(f"  {range_line}")
+    cur = None
+    for r in rows:
+        if r["card"] != cur:
+            cur = r["card"]
+            out.append(f"  {cur}")
+        out.append(f"    {r['month']} | {r['source']} | in the book: {r['book']} | payment lines: {_ds(r['printed'])}"
+                   f" | bank payments matched: {_ds(r['paid'])} | gap: {r['gap']}")
+    if unknown:
+        out.append("  Card not known (bank payments no statement line took; never assigned to a card by guessing)")
+        by_month = {}
+        for d, a in unknown:
+            by_month.setdefault(f"{d:%b %Y}", []).append((d, a))
+        for m, pairs in by_month.items():
+            out.append(f"    {m} | {_ds(pairs)}")
+    return "\n".join(out)
 
 
 def red_flag_block(rep: RunReport) -> str:
@@ -277,6 +389,9 @@ def build_message(rep: RunReport) -> str:
     tb = tie_block(rep)
     if tb:
         parts.append(tb)
+    pv = payment_statement_block(rep)
+    if pv:
+        parts.append(pv)
     parts.append(f"Range run: {rep.label}" + (f" | entity {rep.entity}" if rep.entity else ""))
     if rep.threshold_source:
         parts.append(f"Large-spend limit: {money(rep.threshold)} (from {rep.threshold_source})")
@@ -378,6 +493,15 @@ def write_workbook(rep: RunReport, path: str) -> str:
           + [(f"CSV export {pr.line.stmt.card}", pr.line.date, pr.line.amount,
               ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
               pr.overage, "CSV payment row (settles nothing)", "MATCHED (CSV)") for pr in rep.csv_pairings])
+    _rl, _vrows, _unk = payment_statement_view(rep)
+    sheet("Payments and statements by card",
+                ["Card", "Statement month", "Statement period", "Source", "In the book", "Payment due",
+                 "Payment lines printed", "Bank payments matched", "Gap"],
+                ([(_rl,) + ("",) * 8] if _rl else [])
+                + [(r["card"], r["month"], r["label"], r["source"], r["book"], r["due"], _ds(r["printed"]),
+                  _ds(r["paid"]), r["gap"]) for r in _vrows]
+                + [("card not known", f"{d:%b %Y}", "", "bank", "", None, "", _ds([(d, a)]),
+                    "bank payment with no statement line") for d, a in _unk])
     sheet("Large spends",
           ["Date", "Card", "Description", "Amount", "Account", "Flag", "Status"],
           [(j.real_date, j.card, j.raw_description, j.amount, j.account, j.flag, j.status)

@@ -393,6 +393,11 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     and any(id(r) in left for r in st.parsed.rows):
                 rep.partly_booked.append((st, "has EMI rows that are not booked; only its other rows are booked"))
         rep.journals = journals
+        # CC-23: inputs for the read-only payments-and-statements view (it books and changes nothing)
+        rep.view_statements = list(res.statements)
+        rep.view_per_statement = per_statement
+        rep.view_pool = pool_pay
+        rep.view_range = (start, end)
 
         _mark("journals")
         # ---- fixed accounts (backstop: the early check above already covers the normal case) ----
