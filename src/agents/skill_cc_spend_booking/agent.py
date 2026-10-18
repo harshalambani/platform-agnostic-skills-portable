@@ -373,14 +373,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # ---- CC-31: a CRED payment line whose prior period is a whole-booked CSV settles no PDF statement,
         # but the card was credited more than the bank sent: its overage is booked once, exactly as for a
         # settled statement (Dr CCP / Cr Drawings), so the CCP balance is not left off by the difference ----
+        # (held aside and merged into the view after the CC-26 and CC-24 loops, so the statement that was
+        # paid keeps its own rows booked by those loops)
+        csv_prior_ov = []
         for s in settlements:
             if s.status != M.S_CSV_PRIOR:
                 continue
             for pr in s.pairings:
                 ov = J.overage_journal(pr, min(p.date for p in pr.payments))
                 if ov is not None:
-                    per_statement.setdefault(id(s.paid_on), []).append(ov)
-                    journals.append(ov)
+                    csv_prior_ov.append((id(s.paid_on), ov))
         # ---- CC-26: an untied statement that no payment settled is booked on its real dates ----
         for st in res.statements:
             if id(st) not in untied_ids or id(st) in per_statement:
@@ -401,6 +403,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 j.statement = csv_label(cst)
             per_statement[id(cst)] = js
             journals += js
+        for sid, ov in csv_prior_ov:
+            per_statement.setdefault(sid, []).append(ov)
+            journals.append(ov)
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)
         booked_rows = {j.row_id for j in journals if j.emi}

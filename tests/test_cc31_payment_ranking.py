@@ -81,7 +81,8 @@ CSV = [(t22.MC, [("05-Apr-25", "SHOP ONE MUMBAI", "1,200.50"), ("30-Apr-25", "NE
        (t22.AMEX, [("06-Apr-25", "CAFE TWO PUNE", "300.00")])]
 
 
-def _res_may_only(tmp_path, monkeypatch, with_csv=True, desc="PAYMENT RECEIVED", amt=1500.50):
+def _res_may_only(tmp_path, monkeypatch, with_csv=True, desc="PAYMENT RECEIVED", amt=1500.50,
+                  spend=None, result="PASS"):
     d = tmp_path / "src"
     t22._write(d, "ICICI-Sapphiro", "may.pdf", "x")
     if with_csv:
@@ -91,13 +92,17 @@ def _res_may_only(tmp_path, monkeypatch, with_csv=True, desc="PAYMENT RECEIVED",
         period, (dt, _d, _a, dr) = PDF_MAY[0], PDF_MAY[1][0]
         r = m._mk_row(bank, card, datetime(*dt), desc, amt, dr)
         r.kind = "payment"
-        st = m.Statement(bank, card, source, period, "", m.Parsed(rows=[r]), list(lines))
-        r.period, r.source = st.label, source
-        r.statement = f"{st.card} | {st.label}"
+        rows = [r]
+        if spend:
+            rows.append(m._mk_row(bank, card, datetime(2025, 5, 20), "SPEND SHOP", spend, "Dr"))
+        st = m.Statement(bank, card, source, period, "", m.Parsed(rows=rows), list(lines))
+        for x in rows:
+            x.period, x.source = st.label, source
+            x.statement = f"{st.card} | {st.label}"
         return st
     t22._patch_pdf(monkeypatch, parse)
     res = _res(d)
-    res.ties = [dataclasses.replace(t, result="PASS", printed=0.0, computed=0.0) for t in res.ties]
+    res.ties = [dataclasses.replace(t, result=result, printed=0.0, computed=0.0) for t in res.ties]
     return res
 
 
@@ -174,3 +179,27 @@ def test_an_exact_amount_csv_prior_pairing_books_no_overage(tmp_path, monkeypatc
     res = _cred_prior(tmp_path, monkeypatch, "CRED PAYMENT RECEIVED", 1500.50)
     _r, rows, _c, _o = _book(tmp_path / "w", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12), desc="CRED CLUB")])
     assert not any("CRED payment" in r["Description"] for r in rows)
+
+
+def _csv_prior_with_own_spend(tmp_path, monkeypatch, result):
+    res = _res_may_only(tmp_path, monkeypatch, desc="CRED PAYMENT RECEIVED", amt=1530.50, spend=400.00, result=result)
+    return _book(tmp_path / "w", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12), desc="CRED CLUB")])
+
+
+def test_a_not_tied_statement_that_paid_a_csv_prior_still_books_its_own_spends_once(tmp_path, monkeypatch):   # NEGATIVE
+    reply, rows, _c, _o = _csv_prior_with_own_spend(tmp_path, monkeypatch, "FAIL")
+    ov = [r for r in rows if "CRED payment" in r["Description"]]
+    own = [r for r in rows if r["Amount (Withdrawal)"] == "400.00"]
+    assert len(ov) == 1 and len(own) == 1                           # the overage once, k's own spend once
+    assert len(rows) == 3 + 1 + 1                                   # 3 CSV spends + k's spend + the overage
+    assert len({r["Transaction ID"] for r in rows}) == len(rows)    # no row twice
+    assert "NOT TIED" in reply
+
+
+def test_a_tied_statement_in_the_same_setup_behaves_as_before(tmp_path, monkeypatch):
+    reply, rows, _c, _o = _csv_prior_with_own_spend(tmp_path, monkeypatch, "PASS")
+    ov = [r for r in rows if "CRED payment" in r["Description"]]
+    own = [r for r in rows if r["Amount (Withdrawal)"] == "400.00"]
+    assert len(ov) == 1 and len(own) == 1 and len(rows) == 3 + 1 + 1
+    assert "NOT TIED" not in reply
+    assert len({r["Transaction ID"] for r in rows}) == len(rows)
