@@ -103,7 +103,7 @@ def fake_mapper_factory(calls):
 
 
 def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, threshold=None,
-       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None, model=None):
+       period="Custom date range", start="2025-04-01", end="2025-05-31", mapper=None, model=None, result_override=None):
     book = tmp_path / "book.gnucash"
     book.write_text("x", encoding="utf-8")
     pdfs = tmp_path / "pdfs"
@@ -120,6 +120,8 @@ def go(tmp_path, monkeypatch, stmts, ties, txns, emi=None, entity_extra=None, th
         settings.write_text(yaml.safe_dump({"cc_large_spend_threshold": threshold}), encoding="utf-8")
     result = MOD.Result(message="", issues=[], rows=[], ties=ties, fees=[], duplicates=[], statements=stmts,
                         emi_rows=emi or [], pool=list(stmts))
+    if result_override is not None:
+        result = result_override
     monkeypatch.setattr(ccsb, "_extract", lambda *a, **k: (MOD, result))
     monkeypatch.setattr(ccsb, "read_book", lambda p: BookView(txns=list(txns), paths=set(PATHS)))
     from agents.gnucash_accounts import TargetGuard
@@ -393,9 +395,10 @@ def test_refusal_of_a_non_pass_statement_shows_its_gap_report(tmp_path, monkeypa
     reply, rows, _c, _ = go(tmp_path, monkeypatch, [s1, s2],
                             [tie(s1, result="FAIL", printed=1900.0, gap="printed 1,900.00 vs rows 1,700.00"),
                              tie(s2, printed=300.0)], [book_pay("p1", 1900, date(2025, 5, 12))])
-    assert rows == [] and "printed 1,900.00 vs rows 1,700.00" in reply
-    assert "REFUSED" in reply and M.R_REFUSED in reply
-    assert "completed successfully" not in reply                                  # NEGATIVE
+    # CC-26: not refused any more; imported, and reported loudly with its gap
+    assert len(rows) == 4 and "printed 1,900.00 vs rows 1,700.00" in reply
+    assert "NOT TIED - IMPORTED, CHECK BEFORE IMPORT" in reply and "REFUSED - statements that do not tie" not in reply
+    assert "completed successfully" not in reply and "NOT complete" in reply       # NEGATIVE
 
 
 def test_pass_chained_counts_as_pass(tmp_path, monkeypatch):
@@ -681,7 +684,9 @@ def test_payment_on_a_refused_statement_is_flagged_with_that_reason(tmp_path, mo
     s1, s2 = stmt(APR, april_rows()), stmt(MAY, may_rows())
     reply, _r, _c, _ = go(tmp_path, monkeypatch, [s1, s2], [tie(s1, result="FAIL", printed=1900.0), tie(s2, printed=300.0)],
                           [book_pay("p1", 1900, date(2025, 5, 12))])
-    assert reply.startswith("RED FLAG") and M.R_REFUSED in reply.split("\n\n")[0]
+    # CC-26: the untied statement is settled by its full payment and imported; the payment is not orphaned
+    assert not reply.startswith("RED FLAG") and "NOT TIED - IMPORTED" in reply.split("\n\n")[0]
+    assert M.R_REFUSED not in reply
 
 
 def test_payments_outside_the_range_are_not_flagged(tmp_path, monkeypatch):    # NEGATIVE

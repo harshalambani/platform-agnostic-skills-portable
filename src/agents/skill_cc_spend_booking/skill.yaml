@@ -6,8 +6,9 @@ description: >
   Match each bank payment to a credit card to the statement it settles, and write an
   import-ready GnuCash journal that books that statement's spends, refunds, cashback and
   fees against Expense:Withdrawals:Credit Card Payment. Payments, tie-outs and EMI rows are never
-  guessed: unmatched payments, statements that do not tie out, part payments and EMI rows are
-  reported, not booked. The account for a spend is chosen by rules and history first, then by an AI
+  guessed: unmatched payments, part payments and EMI rows are reported, not booked. A statement
+  that does not tie out is imported anyway and reported first as NOT TIED, with each of its
+  journals marked in the workbook, so it is checked before the import. The account for a spend is chosen by rules and history first, then by an AI
   step for what is left, and every AI match passes the account guards.
 category: "gnucash"
 version: "0.1.0"
@@ -86,8 +87,10 @@ help:
     that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount,
     within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly
     matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and
-    fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS
-    are booked. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
+    fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is
+    still booked (on its settling payment's date, or its real dates when no payment settles it) and is
+    reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement
+    that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
   when_to_use: >
     After the bank statements are imported and the card statements are sorted, when you want the
     card spends booked to their expense accounts.
@@ -137,6 +140,6 @@ help:
     The flag never changes its account.
   troubleshooting:
     - problem: "RED FLAG: payments match no statement."
-      fix: "Check the statements folder has the statement the payment settles, and that its tie-out is PASS."
+      fix: "Check the statements folder has the statement the payment settles, and that its dates make it the card's next statement."
     - problem: "Nothing was written."
-      fix: "No journal was ready to import; the result lists why (refused statements, part payments, EMI rows)."
+      fix: "No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows)."

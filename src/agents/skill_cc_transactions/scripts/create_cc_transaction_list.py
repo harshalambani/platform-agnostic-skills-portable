@@ -1502,6 +1502,7 @@ class Result:
     pool: list = field(default_factory=list)               # every distinct statement parsed (prior-statement lookups)
     csv_statements: list = field(default_factory=list)     # CC-22: ICICI CSV exports read (rows kept after overlap removal)
     csv_ties: list = field(default_factory=list)           # CC-22: one coverage line per CSV (no totals, so no tie-out)
+    csv_refused: list = field(default_factory=list)        # CC-24: (file name, reason) for each CSV that books nothing
 
 
 CSV_NO_TOTALS = "NO TOTALS (CSV export)"
@@ -1672,6 +1673,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             csv_files.append(p)
     csv_statements: list[Statement] = []
     csv_ties: list[TieOut] = []
+    csv_refused: list = []
     booked: dict = defaultdict(int)
     for st in statements:
         for r in st.parsed.rows:
@@ -1686,6 +1688,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         cst, why = read_icici_csv(cpath, bank, card)
         if cst is None:
             issues.append(f"{cpath.name}: {why}")
+            csv_refused.append((cpath.name, why))
             continue
         if cst.key in csv_keys_seen:
             first_name, first = csv_keys_seen[cst.key]
@@ -1694,10 +1697,12 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             else:
                 issues.append(f"{cpath.name}: same card and coverage as {first_name} but different rows; "
                               f"only {first_name} is used - check which one is right")
+                csv_refused.append((cpath.name, f"same card and coverage as {first_name} but different rows"))
             continue
         csv_keys_seen[cst.key] = (cpath.name, cst)
         if not cst.parsed.rows:
             issues.append(f"{cpath.name}: CSV read but holds no transactions - NOT clean")
+            csv_refused.append((cpath.name, "read but holds no transactions"))
             continue
         if not _overlaps(cst.period, start, end):
             outside.append(cpath.name)
@@ -1789,7 +1794,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
                   skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool,
-                  csv_statements=csv_statements, csv_ties=csv_ties)
+                  csv_statements=csv_statements, csv_ties=csv_ties, csv_refused=csv_refused)
 
 
 # ---------------------------------------------------------------------------

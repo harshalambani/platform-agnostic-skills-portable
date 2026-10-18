@@ -75,6 +75,7 @@ class Journal:
     emi: bool = False            # came from an emi_* row
     emi_validated: bool = False  # the EMI wording is the HSBC layout, checked against a real statement shape
     row_id: int = 0              # id() of the statement row it came from
+    untied: str = ""             # CC-26: the tie-out result of its statement when that did not pass ("" = tied)
 
     @property
     def ccp_effect(self) -> float:
@@ -114,9 +115,13 @@ def _desc(base: str, real: date, moved: bool, label: str) -> str:
     return f"{base} [{label} {real:%d-%b-%Y}]" if moved else base
 
 
-def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_threshold: float,
-                            book_interest: bool = True) -> tuple:
-    """(journals, emi_rows, issues) for one SETTLED statement."""
+def journals_for_settlement(target, pay_date, fee_reversal_rx, large_threshold: float,
+                            book_interest: bool = True, num_label: str = "") -> tuple:
+    """(journals, emi_rows, issues) for one SETTLED statement.
+
+    CC-24: a CSV export has no settling payment, so pay_date is None (rows book on their real
+    date) and num_label is a fixed label for the Num, so the same row gets the same Num however
+    many exports it appears in and however often the export is re-run."""
     journals: list = []
     emi_rows: list = []
     issues: list = []
@@ -171,12 +176,12 @@ def journals_for_settlement(target, pay_date: date, fee_reversal_rx, large_thres
             issues.append(f"{target.card} {target.label}: row not booked (unhandled {r.kind} {r.direction}): "
                           f"{r.description[:40]} {r.amount:,.2f}")
             continue
-        when, moved = booking_date(real, pay_date)
+        when, moved = (real, False) if pay_date is None else booking_date(real, pay_date)
         k = (kind, real, round(r.amount, 2), " ".join(r.description.split()))
         occ = seen[k]
         seen[k] += 1
         j = Journal(
-            num=make_num(r.card, target.label, kind, real, r.amount, r.description, occ),
+            num=make_num(r.card, num_label or target.label, kind, real, r.amount, r.description, occ),
             kind=kind, date=when, real_date=real,
             description=_desc(shown, real, moved, "spend" if kind == K_SPEND else KIND_LABEL[kind].lower()),
             amount=round(r.amount, 2), side=side, card=r.card, statement=target.label, source=target.source,

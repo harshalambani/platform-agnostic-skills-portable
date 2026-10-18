@@ -3,7 +3,7 @@
 
 *Mode: direct · 🤖 needs an LLM endpoint*
 
-Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount, within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and fees become two-split journals against Credit Card Payment. Only statements whose tie-out is PASS are booked. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
+Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 15 rupees more than the bank amount, within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement's spends, refunds, cashback and fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is still booked (on its settling payment's date, or its real dates when no payment settles it) and is reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
 
 ## When to use it
 
@@ -61,5 +61,5 @@ A spend at or above the large-spend threshold (Settings, default 20,000) is flag
 
 | If… | Then… |
 |------|-------|
-| RED FLAG: payments match no statement. | Check the statements folder has the statement the payment settles, and that its tie-out is PASS. |
-| Nothing was written. | No journal was ready to import; the result lists why (refused statements, part payments, EMI rows). |
+| RED FLAG: payments match no statement. | Check the statements folder has the statement the payment settles, and that its dates make it the card's next statement. |
+| Nothing was written. | No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows). |

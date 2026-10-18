@@ -13,9 +13,14 @@ The headline never says "completed successfully" while anything above is open.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 from . import journal as J
 from .matcher import BookPayment
+
+
+def csv_label(st) -> str:
+    return f"CSV export {st.card} {st.label}"
 
 
 def money(v) -> str:
@@ -40,6 +45,15 @@ class RunReport:
     awaiting: list = field(default_factory=list)                # Statements not yet paid (no later statement)
     unpaid: list = field(default_factory=list)                  # Statements with a later statement but no payment
     partly_booked: list = field(default_factory=list)           # [(Statement, reason)]
+    untied: list = field(default_factory=list)                  # CC-26: [(Statement, TieOut)] imported although the tie-out did not pass
+    view_statements: list = field(default_factory=list)         # CC-23: PDF statements read in the range
+    view_per_statement: dict = field(default_factory=dict)      # CC-23: id(statement) -> journals (read-only view input)
+    view_pool: list = field(default_factory=list)               # CC-23: bank payments considered (BookPayment)
+    view_range: tuple = ()                                      # CC-23: (start, end) of the run
+    csv_pairings: list = field(default_factory=list)            # CC-27: Pairings of CSV payment rows with bank payments
+    csv_lines_unmatched: list = field(default_factory=list)     # CC-27: CSV payment rows with no bank payment
+    csv_ties: list = field(default_factory=list)                # CC-24: [(Statement, TieOut)] CSV exports read whole
+    csv_refused: list = field(default_factory=list)             # CC-24: [(file name, reason)] CSV exports that book nothing
     emi: dict = field(default_factory=dict)
     emi_interest_reason: str = ""
     issues: list = field(default_factory=list)
@@ -69,10 +83,117 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.unpaid or self.partly_booked or self.withheld
+                    or self.refused or self.untied or self.csv_refused or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status != "SETTLED" for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
+
+
+def _covers_a_financial_year(start, end) -> bool:
+    for y in range(start.year - 1, end.year + 1):
+        if start <= date(y, 4, 1) and end >= date(y + 1, 3, 31):
+            return True
+    return False
+
+
+def payment_statement_view(rep: RunReport):
+    """CC-23: a read-only view built from data the run already holds. Returns (range_line, rows, unknown).
+    rows: one dict per statement; unknown: bank payments no statement line took, by month. Books nothing."""
+    if not rep.view_range:
+        return "", [], []
+    start, end = rep.view_range
+    range_line = ""
+    if not _covers_a_financial_year(start, end):
+        range_line = (f"This view covers {start:%d %b %Y} to {end:%d %b %Y} only, "
+                      f"not the whole financial year.")
+    by_target = {}
+    for s in rep.settlements:
+        if s.target is not None and s.pairings:
+            by_target[id(s.target)] = s
+    bad_lines = {}
+    for ln in list(rep.lines_unmatched) + list(rep.csv_lines_unmatched):
+        bad_lines.setdefault(id(ln.stmt), []).append(ln)
+    for a in rep.ambiguous:
+        ln = a.get("line") if isinstance(a, dict) else None
+        if ln is not None:
+            bad_lines.setdefault(id(ln.stmt), []).append(ln)
+    csv_pay = {}
+    for pr in rep.csv_pairings:
+        csv_pay.setdefault(id(pr.line.stmt), []).extend(pr.payments)
+    awaiting = {id(s) for s in rep.awaiting}
+    entries = [(st, "PDF") for st in rep.view_statements] + [(st, "CSV export") for st, _t in rep.csv_ties]
+    rows = []
+    for st, src in entries:
+        if st.period is None:
+            continue
+        s0, e0 = st.period
+        if e0 < start or s0 > end:
+            continue
+        js = rep.view_per_statement.get(id(st))
+        if js is None:
+            book = "not assessed (statement not settled in this run)"
+        elif not js:
+            book = "nothing to book"
+        elif all(j.status == J.ST_BOOKED for j in js):
+            book = "all rows"
+        elif any(j.status == J.ST_BOOKED for j in js):
+            book = "some rows"
+        else:
+            book = "none"
+        printed = [r for r in st.parsed.rows if r.kind == "payment" and r.direction == "Cr"]
+        if src == "PDF":
+            s = by_target.get(id(st))
+            paid = list(s.payments) if s else []
+            due = s.due if s else None
+        else:
+            s, paid, due = None, list(csv_pay.get(id(st), [])), None
+        gaps = []
+        if src == "PDF" and not paid:
+            gaps.append("statement with no payment" + (" (latest statement, payment may not be due yet)"
+                                                      if id(st) in awaiting else ""))
+        if src != "PDF" and not printed:
+            gaps.append("statement with no payment")
+        if id(st) in bad_lines:
+            gaps.append("payment line with no bank payment")
+        rows.append({"card": st.card, "month": f"{e0:%b %Y}", "label": st.label, "source": src, "book": book,
+                     "due": due, "printed": [(r.date, r.amount) for r in printed],
+                     "paid": [(p.date, p.amount) for p in paid], "gap": "; ".join(gaps) or "none",
+                     "_k": (st.card, s0)})
+    rows.sort(key=lambda r: r["_k"])
+    taken = {p.guid for s in rep.settlements for p in s.payments}
+    taken |= {p.guid for pr in rep.csv_pairings for p in pr.payments}
+    taken |= {p.guid for pr in rep.pairings for p in pr.payments}
+    unknown = sorted(((p.date, p.amount) for p in rep.view_pool
+                      if p.in_range and start <= p.date <= end and p.guid not in taken))
+    return range_line, rows, unknown
+
+
+def _ds(pairs) -> str:
+    return ", ".join(f"{d:%d %b %Y} {money(a)}" for d, a in pairs) or "-"
+
+
+def payment_statement_block(rep: RunReport) -> str:
+    range_line, rows, unknown = payment_statement_view(rep)
+    if not rows and not unknown:
+        return ""
+    out = ["Payments and statements by card:"]
+    if range_line:
+        out.append(f"  {range_line}")
+    cur = None
+    for r in rows:
+        if r["card"] != cur:
+            cur = r["card"]
+            out.append(f"  {cur}")
+        out.append(f"    {r['month']} | {r['source']} | in the book: {r['book']} | payment lines: {_ds(r['printed'])}"
+                   f" | bank payments matched: {_ds(r['paid'])} | gap: {r['gap']}")
+    if unknown:
+        out.append("  Card not known (bank payments no statement line took; never assigned to a card by guessing)")
+        by_month = {}
+        for d, a in unknown:
+            by_month.setdefault(f"{d:%b %Y}", []).append((d, a))
+        for m, pairs in by_month.items():
+            out.append(f"    {m} | {_ds(pairs)}")
+    return "\n".join(out)
 
 
 def red_flag_block(rep: RunReport) -> str:
@@ -122,14 +243,39 @@ def large_spend_block(rep: RunReport) -> str:
     return "\n".join(lines)
 
 
+def not_tied_block(rep: RunReport) -> str:
+    """CC-26: the first thing the reader sees. These statements did not tie out, their rows are in the
+    import file anyway, and the reader must check them before importing."""
+    if not rep.untied:
+        return ""
+    lines = [f"NOT TIED - IMPORTED, CHECK BEFORE IMPORT: {len(rep.untied)} statement(s) did not tie out. "
+             f"Their rows are in the import file (and marked NOT TIED in the workbook); the gap may be a row "
+             f"the reader missed or misread."]
+    for st, t in rep.untied:
+        n = sum(1 for j in rep.journals if j.untied and j.card == st.card and j.statement == st.label)
+        lines.append(f"  {st.card} {st.label}: {t.result}; {t.gap or t.note}"
+                     + (f"; difference {money(t.difference)}" if t.difference else "")
+                     + f"; {n} journal(s) from it in the import file")
+    return "\n".join(lines)
+
+
 def statement_block(rep: RunReport) -> str:
     out = []
+    if rep.csv_ties:
+        out.append("CSV EXPORTS (no balance tie-out; coverage and counts only):\n" + "\n".join(
+            f"  CSV export {st.card} {st.label}: {t.note}; "
+            f"{sum(1 for j in rep.journals if j.statement == csv_label(st))} journal(s)"
+            for st, t in rep.csv_ties) + "\n  CSV payment rows are not matched to bank payments.")
+    if rep.csv_refused:
+        out.append("REFUSED CSV exports (nothing booked from them):\n" + "\n".join(
+            f"  CSV export {name}: {why}" for name, why in rep.csv_refused))
     if rep.refused:
-        out.append("REFUSED - statements that do not tie out (nothing booked from them):\n" + "\n".join(
+        out.append("REFUSED - statements that read 0 rows (nothing booked from them):\n" + "\n".join(
             f"  {st.card} {st.label}: {t.result}; {t.gap or t.note}" for st, t in rep.refused))
     partly = [s for s in rep.settlements if s.status == "PARTLY SETTLED"]
     if partly:
-        out.append("PARTLY SETTLED - paid less than the statement total, nothing booked:\n" + "\n".join(
+        out.append("PARTLY SETTLED - paid less than the statement total, nothing booked "
+                   "(a NOT TIED statement is booked on its real dates):\n" + "\n".join(
             f"  {s.target.card} {s.target.label}: {s.reason}" for s in partly))
     other = [s for s in rep.settlements if s.status not in ("SETTLED", "PARTLY SETTLED")]
     if other:
@@ -145,6 +291,14 @@ def statement_block(rep: RunReport) -> str:
     if rep.lines_unmatched:
         out.append("STATEMENT PAYMENT LINES WITH NO BANK PAYMENT IN THE BOOK:\n" + "\n".join(
             f"  {ln.stmt.card} {ln.date:%d %b %Y} {money(ln.amount)}" for ln in rep.lines_unmatched))
+    if rep.csv_lines_unmatched:
+        out.append("CSV PAYMENT ROWS WITH NO BANK PAYMENT IN THE BOOK (nothing booked for them):\n" + "\n".join(
+            f"  CSV export {ln.stmt.card} {ln.date:%d %b %Y} {money(ln.amount)}" for ln in rep.csv_lines_unmatched))
+    if rep.csv_pairings:
+        out.append("CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS (source CSV; confirms the payment, books nothing):\n"
+                   + "\n".join(
+            f"  CSV export {pr.line.stmt.card} {pr.line.date:%d %b %Y} {money(pr.line.amount)} <- "
+            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments) for pr in rep.csv_pairings))
     if rep.ambiguous:
         out.append("AMBIGUOUS payments (not matched, never guessed):\n" + "\n".join(
             "  " + (f"{a['line'].stmt.card} line {a['line'].date:%d %b %Y} {money(a['line'].amount)}: "
@@ -217,7 +371,7 @@ def tie_block(rep: RunReport) -> str:
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)
@@ -226,7 +380,7 @@ def build_message(rep: RunReport) -> str:
     n_ready = len(rep.ready)
     if rep.open_items:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
-            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)
+            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched)
         n += sum(1 for s in rep.settlements if s.status != "SETTLED")
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
@@ -235,6 +389,9 @@ def build_message(rep: RunReport) -> str:
     tb = tie_block(rep)
     if tb:
         parts.append(tb)
+    pv = payment_statement_block(rep)
+    if pv:
+        parts.append(pv)
     parts.append(f"Range run: {rep.label}" + (f" | entity {rep.entity}" if rep.entity else ""))
     if rep.threshold_source:
         parts.append(f"Large-spend limit: {money(rep.threshold)} (from {rep.threshold_source})")
@@ -242,7 +399,8 @@ def build_message(rep: RunReport) -> str:
     booked_n = sum(1 for j in rep.journals if j.status == J.ST_BOOKED)
     parts.append(f"{ready_n} journal(s) ready to import" + (f", {booked_n} already booked" if booked_n else "")
                  + f" from {sum(1 for s in rep.settlements if s.status == 'SETTLED')} settled statement(s); "
-                 f"{rep.statements_read} statement(s) read in the range")
+                 f"{rep.statements_read} statement(s) read in the range"
+                 + (f" and {len(rep.csv_ties)} CSV export(s)" if rep.csv_ties else ""))
     if rep.skipped:
         parts.append(f"Skipped: not a statement ({len(rep.skipped)}):\n" + "\n".join(f"  {d}" for d in rep.skipped))
     if rep.duplicates:
@@ -269,9 +427,13 @@ def statement_rows(rep: RunReport) -> list:
             r = rows[id(st)] = [st.card, st.label, res, "", ""]
         return r
 
-    for st, t in rep.refused:
+    for st, t in list(rep.refused) + list(rep.untied):
         r = row(st)
         r[2], r[4] = t.result, t.gap or t.note
+    for st, t in rep.csv_ties:
+        r = rows[id(st)] = [st.card, f"CSV export {st.label}", t.result, "n/a (CSV export)", t.note]
+    for name, why in rep.csv_refused:
+        rows[("csv", name)] = ["", f"CSV export {name}", "REFUSED (CSV export)", "", why]
     for s in rep.settlements:
         if s.target:
             r = row(s.target)
@@ -303,13 +465,20 @@ def write_workbook(rep: RunReport, path: str) -> str:
             ws.column_dimensions[col[0].column_letter].width = min(max(width + 2, 10), 70)
         return ws
 
+    if rep.untied:
+        sheet("NOT TIED", ["Card", "Statement", "Tie-out", "Difference", "Detail", "Journals in the import"],
+              [(st.card, st.label, t.result, t.difference, t.gap or t.note,
+                sum(1 for j in rep.journals if j.untied and j.card == st.card and j.statement == st.label))
+               for st, t in rep.untied], first=True)
     sheet("Journals",
           ["Num", "Kind", "Date booked", "Statement date", "Description", "Debit account", "Credit account",
-           "Amount", "Card", "Statement", "Status", "Why / note", "Large spend flag", "Confidence", "Match reason"],
+           "Amount", "Card", "Statement", "Status", "Why / note", "Large spend flag", "Confidence", "Match reason",
+           "Tie-out"],
           [(j.num, J.KIND_LABEL[j.kind], j.date, j.real_date, j.description,
             j.account if j.side == "W" else rep.ccp_path, rep.ccp_path if j.side == "W" else j.account,
             j.amount, j.card, j.statement, j.status, "; ".join(x for x in (j.why, j.note) if x), j.flag,
-            j.confidence, j.match_reason) for j in rep.journals], first=True)
+            j.confidence, j.match_reason, "NOT TIED" if j.untied else "") for j in rep.journals],
+          first=not rep.untied)
     sheet("Payments without statement",
           ["Date", "Bank account", "Amount", "CRED / direct", "Reason"],
           [(p.date, p.bank_account, p.amount, "CRED" if p.cred else "direct", why)
@@ -320,7 +489,19 @@ def write_workbook(rep: RunReport, path: str) -> str:
           [(f"{s.paid_on.card} {s.paid_on.label}", pr.line.date, pr.line.amount,
             ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
             pr.overage, f"{s.target.card} {s.target.label}" if s.target else "none read", s.status)
-           for s in rep.settlements for pr in s.pairings])
+           for s in rep.settlements for pr in s.pairings]
+          + [(f"CSV export {pr.line.stmt.card}", pr.line.date, pr.line.amount,
+              ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
+              pr.overage, "CSV payment row (settles nothing)", "MATCHED (CSV)") for pr in rep.csv_pairings])
+    _rl, _vrows, _unk = payment_statement_view(rep)
+    sheet("Payments and statements by card",
+                ["Card", "Statement month", "Statement period", "Source", "In the book", "Payment due",
+                 "Payment lines printed", "Bank payments matched", "Gap"],
+                ([(_rl,) + ("",) * 8] if _rl else [])
+                + [(r["card"], r["month"], r["label"], r["source"], r["book"], r["due"], _ds(r["printed"]),
+                  _ds(r["paid"]), r["gap"]) for r in _vrows]
+                + [("card not known", f"{d:%b %Y}", "", "bank", "", None, "", _ds([(d, a)]),
+                    "bank payment with no statement line") for d, a in _unk])
     sheet("Large spends",
           ["Date", "Card", "Description", "Amount", "Account", "Flag", "Status"],
           [(j.real_date, j.card, j.raw_description, j.amount, j.account, j.flag, j.status)

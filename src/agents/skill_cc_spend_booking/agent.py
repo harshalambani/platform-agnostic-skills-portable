@@ -22,7 +22,7 @@ from pathlib import Path
 from . import journal as J
 from . import matcher as M
 from .bookio import CCP_PATH, read_book
-from .report import RunReport, build_message, write_workbook
+from .report import RunReport, build_message, csv_label, write_workbook
 from .settings_io import resolve_large_spend_threshold
 
 _AGENTS_ROOT = Path(__file__).resolve().parent.parent
@@ -245,11 +245,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                                                     or i.startswith("tie-out "))]
         rep.statements_read = len(res.statements)
         ties_by_id = {id(s): t for s, t in zip(res.statements, res.ties)}
-        rep.refused = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
+        # CC-26: a statement that does not tie is IMPORTED and reported loudly (NOT TIED). Only a statement
+        # that read 0 rows is still refused: nothing in it can be trusted to a card or a side.
+        _untied_all = [(s, t) for s, t in zip(res.statements, res.ties) if not mod.is_pass(t.result)]
+        rep.refused = [(s, t) for s, t in _untied_all if not s.parsed.rows]
+        rep.untied = [(s, t) for s, t in _untied_all if s.parsed.rows]
+        untied_ids = {id(s) for s, _t in rep.untied}
         rep.tie_results = {id(s): t.result for s, t in zip(res.statements, res.ties)}
 
         _mark("parse")
-        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result)]
+        passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result) or id(s) in untied_ids]
 
         # ---- CC-08: fixed-account checks BEFORE any matching work ----------------
         # Fee / cashback rows on a passing statement need the entity's Bank Service Charge /
@@ -262,7 +267,13 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             r = guard.blocked_target_reason(p)
             return f"{path!r} cannot be used: {r}" if r else None
 
-        _rows = [r for s in passing for r in s.parsed.rows]
+        # CC-24: a CSV export read whole (card identified, coverage and counts reported) is bookable;
+        # its rows take the same checks as PDF rows. A refused CSV is not in csv_statements at all.
+        csv_sts = list(getattr(res, "csv_statements", None) or [])
+        csv_ties = list(getattr(res, "csv_ties", None) or [])
+        rep.csv_ties = list(zip(csv_sts, csv_ties))
+        rep.csv_refused = list(getattr(res, "csv_refused", None) or [])
+        _rows = [r for s in passing for r in s.parsed.rows] + [r for s in csv_sts for r in s.parsed.rows]
         if any(_fee_row(r, mod.FEE_REVERSAL_RX) for r in _rows):
             _bsc = _strip_root(ent.bank_service_charge_account)
             if not _bsc:
@@ -284,11 +295,19 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # ---- payments ------------------------------------------------------
         pool_pay = _payment_pool(view, start, end)
         lines = M.pay_lines(res.statements)          # lines on every statement in range; refusal is decided at settlement
-        outcome = M.match_payments(lines, pool_pay)
-        rep.pairings = outcome.pairings
-        rep.lines_unmatched = outcome.lines_unmatched
+        # CC-27: the payment rows of a CSV export are matched to the bank payments by the same rule
+        # (same amount tolerance, same date window, one-to-one) in the SAME pool as the PDF lines, so a
+        # bank payment can never pair with two rows. A CSV pairing settles nothing: it only confirms the
+        # payment. The row itself is still never booked.
+        csv_lines = M.pay_lines(csv_sts)
+        csv_ids = {id(s) for s in csv_sts}
+        outcome = M.match_payments(lines + csv_lines, pool_pay)
+        rep.pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) not in csv_ids]
+        rep.csv_pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) in csv_ids]
+        rep.lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) not in csv_ids]
+        rep.csv_lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) in csv_ids]
         rep.ambiguous = outcome.ambiguous
-        settlements = M.settle(outcome.pairings, res.statements, res.pool, ties_by_id, mod.find_prior, mod.is_pass)
+        settlements = M.settle(rep.pairings, res.statements, res.pool, ties_by_id, mod.find_prior, mod.is_pass)
         rep.settlements = settlements
 
         flagged = {p.guid: (p, outcome.unmatched_reason[p.guid]) for p in outcome.payments_unmatched if p.in_range}
@@ -330,7 +349,30 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 ov = J.overage_journal(pr, min(p.date for p in pr.payments))
                 if ov is not None:
                     js.append(ov)
+            if id(s.target) in untied_ids:
+                for j in js:
+                    j.untied = ties_by_id[id(s.target)].result
             per_statement[id(s.target)] = js
+            journals += js
+        # ---- CC-26: an untied statement that no payment settled is booked on its real dates ----
+        for st in res.statements:
+            if id(st) not in untied_ids or id(st) in per_statement:
+                continue
+            js, _emi, iss = J.journals_for_settlement(st, None, mod.FEE_REVERSAL_RX, threshold,
+                                                      book_interest=not emi_bad)
+            rep.issues += iss
+            for j in js:
+                j.untied = ties_by_id[id(st)].result
+            per_statement[id(st)] = js
+            journals += js
+        # ---- CC-24: CSV rows, same classification and guards, no settling payment ----
+        for cst in csv_sts:
+            js, _emi, iss = J.journals_for_settlement(cst, None, mod.FEE_REVERSAL_RX, threshold,
+                                                      book_interest=not emi_bad, num_label="CSV")
+            rep.issues += iss
+            for j in js:
+                j.statement = csv_label(cst)
+            per_statement[id(cst)] = js
             journals += js
         rep.issues += J.withhold_emi_originals(journals, res.emi_rows)
         J.pair_fee_reversals(journals)
@@ -345,7 +387,17 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         for s in settlements:
             if s.status == M.S_SETTLED and any(id(r) in left for r in s.target.parsed.rows):
                 rep.partly_booked.append((s.target, "has EMI rows that are not booked; only its other rows are booked"))
+        for st, _t in rep.untied:
+            settled_targets = {id(s.target) for s in settlements if s.status == M.S_SETTLED}
+            if id(st) in per_statement and id(st) not in settled_targets \
+                    and any(id(r) in left for r in st.parsed.rows):
+                rep.partly_booked.append((st, "has EMI rows that are not booked; only its other rows are booked"))
         rep.journals = journals
+        # CC-23: inputs for the read-only payments-and-statements view (it books and changes nothing)
+        rep.view_statements = list(res.statements)
+        rep.view_per_statement = per_statement
+        rep.view_pool = pool_pay
+        rep.view_range = (start, end)
 
         _mark("journals")
         # ---- fixed accounts (backstop: the early check above already covers the normal case) ----
@@ -462,7 +514,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # for whatever is left (so the lines always add up to Other).
         _skip = {p.guid for p, _r in rep.unmatched_payments}
         _skip |= {p.guid for s in settlements if s.status == M.S_PARTLY for p in s.payments if p.in_range}
-        other_lines = [(t.date, t.description or "(no description)", t.amount_on(CCP_PATH))
+        _csv_guids = {p.guid for pr in rep.csv_pairings for p in pr.payments}
+        other_lines = [(t.date, (t.description or "(no description)")
+                        + (" [matched to a CSV payment row]" if t.guid in _csv_guids else ""), t.amount_on(CCP_PATH))
                        for t in sorted(view.txns, key=lambda x: (x.date, x.guid))
                        if start <= t.date <= end and t.has_path(CCP_PATH) and t.guid not in _skip]
         other_lines.append((None, "This run's journals (CCP effect)", effect))
