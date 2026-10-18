@@ -335,6 +335,10 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
             dist = min(abs((t.date - j.real_date).days), abs((t.date - j.date).days))
             if dist > ALREADY_BOOKED_WINDOW_DAYS or not _same_payee(j, t):
                 continue
+            # CC-33: a hand-booked CRED overage is always Dr CCP / Cr Drawings, so an overage candidate must
+            # have a split on CCP; a same-day same-amount Drawings entry that never touched CCP is unrelated
+            if j.kind == K_OVERAGE and not any(p == ccp_path for p, _ in t.splits):
+                continue
             hit = next(((p, v) for p, v in t.splits
                         if p != ccp_path and p.startswith(EXPENSE_PREFIXES) and abs(v - want) <= 0.005), None)
             if hit is not None:

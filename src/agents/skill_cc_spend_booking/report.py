@@ -276,7 +276,9 @@ def statement_block(rep: RunReport) -> str:
         out.append("CSV EXPORTS (no balance tie-out; coverage and counts only):\n" + "\n".join(
             f"  CSV export {st.card} {st.label}: {t.note}; "
             f"{sum(1 for j in rep.journals if j.statement == csv_label(st))} journal(s)"
-            for st, t in rep.csv_ties) + "\n  CSV payment rows are not matched to bank payments.")
+            for st, t in rep.csv_ties)
+            + ("\n  The payment rows matched to bank payments are listed under CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS."
+               if rep.csv_pairings else ""))
     if rep.csv_refused:
         out.append("REFUSED CSV exports (nothing booked from them):\n" + "\n".join(
             f"  CSV export {name}: {why}" for name, why in rep.csv_refused))
@@ -296,8 +298,13 @@ def statement_block(rep: RunReport) -> str:
             f"  {(s.target or s.paid_on).card} {(s.target or s.paid_on).label}: {s.status} - {s.reason}"
             for s in other))
     if rep.unpaid:
-        out.append("NOT SETTLED - a later statement exists but no payment was matched for it, nothing booked:\n" + "\n".join(
+        _untied_ids = {id(st) for st, _t in rep.untied}
+        _mixed = any(id(st) in _untied_ids for st in rep.unpaid)
+        out.append("NOT SETTLED - a later statement exists but no payment was matched for it, nothing booked"
+                   + (" (a NOT TIED statement is booked on its real dates):\n" if _mixed else ":\n") + "\n".join(
             f"  {st.card} {st.label} - " + rep.unpaid_why.get(id(st), "the later statement shows no payment")
+            + ("; NOT TIED, so its rows are booked on their real dates (see NOT TIED above)"
+               if id(st) in _untied_ids else "")
             for st in rep.unpaid))
     csvp = [s for s in rep.settlements if s.status == S_CSV_PRIOR]
     if csvp:
