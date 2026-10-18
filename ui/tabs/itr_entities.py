@@ -580,9 +580,10 @@ def _cred_default_text() -> str:
 
 
 def _cred_text(raw) -> str:
-    """CC-31: the CRED tolerance as shown on the form: the stored value, or the default when absent."""
+    """CC-31: the CRED tolerance as shown on the form: the stored value; BLANK when the key is absent
+    (the default is shown as the placeholder), so a save never writes the default into the yaml."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
-        return _cred_default_text()
+        return ""
     try:
         return f"{_configs_mod().parse_cred_max_overage(raw):g}"
     except ValueError:
@@ -594,7 +595,7 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", "", _cred_default_text(), *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
+        return (False, "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
@@ -1301,7 +1302,7 @@ def render(container_tab=None) -> None:
                          "Blank = use the global setting. Zero, negative or text is refused.",
                 )
                 cred_max_box = gr.Textbox(
-                    label="CRED tolerance (rupees)", placeholder=_cred_default_text(), interactive=True,
+                    label="CRED tolerance (rupees)", placeholder=f"{_cred_default_text()} (default)", interactive=True,
                     info="The most a CRED payment line on a statement may exceed the bank amount and still be "
                          "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
                          "negative or above 500 is refused.",

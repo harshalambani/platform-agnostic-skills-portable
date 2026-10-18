@@ -370,6 +370,17 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     j.untied = ties_by_id[id(s.target)].result
             per_statement[id(s.target)] = js
             journals += js
+        # ---- CC-31: a CRED payment line whose prior period is a whole-booked CSV settles no PDF statement,
+        # but the card was credited more than the bank sent: its overage is booked once, exactly as for a
+        # settled statement (Dr CCP / Cr Drawings), so the CCP balance is not left off by the difference ----
+        for s in settlements:
+            if s.status != M.S_CSV_PRIOR:
+                continue
+            for pr in s.pairings:
+                ov = J.overage_journal(pr, min(p.date for p in pr.payments))
+                if ov is not None:
+                    per_statement.setdefault(id(s.paid_on), []).append(ov)
+                    journals.append(ov)
         # ---- CC-26: an untied statement that no payment settled is booked on its real dates ----
         for st in res.statements:
             if id(st) not in untied_ids or id(st) in per_statement:

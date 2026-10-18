@@ -180,6 +180,8 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
                 continue
             p = top[0]
             rivals = [j for j in back[p.guid] if j not in done_lines and j not in paired_lines]
+            if len({getattr(lines[j].stmt, "card", None) for j in rivals}) > 1:
+                continue        # decision 6.6: a payment that could pay two cards is ambiguous, whatever the rank
             jbest = min(rank(j, p) for j in rivals)
             if [j for j in rivals if rank(j, p) == jbest] != [i]:
                 continue

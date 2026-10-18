@@ -81,14 +81,14 @@ CSV = [(t22.MC, [("05-Apr-25", "SHOP ONE MUMBAI", "1,200.50"), ("30-Apr-25", "NE
        (t22.AMEX, [("06-Apr-25", "CAFE TWO PUNE", "300.00")])]
 
 
-def _res_may_only(tmp_path, monkeypatch, with_csv=True):
+def _res_may_only(tmp_path, monkeypatch, with_csv=True, desc="PAYMENT RECEIVED", amt=1500.50):
     d = tmp_path / "src"
     t22._write(d, "ICICI-Sapphiro", "may.pdf", "x")
     if with_csv:
         t22._write(d, "ICICI-Sapphiro", "s.csv", t22._csv(CSV))
 
     def parse(lines, bank, card, source):
-        period, (dt, desc, amt, dr) = PDF_MAY[0], PDF_MAY[1][0]
+        period, (dt, _d, _a, dr) = PDF_MAY[0], PDF_MAY[1][0]
         r = m._mk_row(bank, card, datetime(*dt), desc, amt, dr)
         r.kind = "payment"
         st = m.Statement(bank, card, source, period, "", m.Parsed(rows=[r]), list(lines))
@@ -119,3 +119,58 @@ def test_the_csv_prior_pays_nothing_twice_on_a_rerun(tmp_path, monkeypatch):    
     res = _res_may_only(tmp_path, monkeypatch)
     _r, rows1, _c, _o = _book(tmp_path / "w1", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12))])
     assert len({r["Transaction ID"] for r in rows1}) == len(rows1)
+
+
+# ---- review fixes: guard 6.6 (two cards), and the CRED overage of a CSV-prior settlement ----
+
+def test_one_payment_that_could_pay_two_cards_is_ambiguous_whatever_the_date():              # guard 6.6
+    out = M.match_payments([L(1000.00, date(2025, 5, 11), card="C1"), L(1000.00, date(2025, 5, 14), card="C2")],
+                           [P("a", 1000.00, date(2025, 5, 12))])
+    assert not out.pairings and out.ambiguous and out.payments_unmatched
+
+
+def test_two_cards_exact_against_cred_is_still_ambiguous():                                  # guard 6.6
+    out = M.match_payments([L(1000.00, D, card="C1"), L(1030.00, D, desc="CRED PAYMENT", card="C2")],
+                           [P("a", 1000.00, D, desc="CRED CLUB")])
+    assert not out.pairings and out.ambiguous
+
+
+def test_the_same_card_with_different_dates_still_pairs_with_the_nearest():                  # NEGATIVE of the guard
+    out = M.match_payments([L(1000.00, date(2025, 5, 11), card="C1"), L(1000.00, date(2025, 5, 14), card="C1")],
+                           [P("a", 1000.00, date(2025, 5, 12))])
+    assert len(out.pairings) == 1 and out.pairings[0].line.date == date(2025, 5, 11) and not out.ambiguous
+
+
+def _cred_prior(tmp_path, monkeypatch, desc, amt):
+    res = _res_may_only(tmp_path, monkeypatch, desc=desc, amt=amt)
+    return res
+
+
+def test_a_cred_overage_on_a_csv_prior_settlement_is_booked_once(tmp_path, monkeypatch):
+    res = _cred_prior(tmp_path, monkeypatch, "CRED PAYMENT RECEIVED", 1530.50)
+    reply, rows, _c, _o = _book(tmp_path / "w", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12), desc="CRED CLUB")])
+    ov = [r for r in rows if "CRED payment" in r["Description"]]
+    assert len(ov) == 1 and ov[0]["Amount Negated (Deposit)"] == "30.00" and ov[0]["Account"] == "Equity:Drawings"
+    assert "RED FLAG" not in reply
+    assert len({r["Transaction ID"] for r in rows}) == len(rows)
+
+
+def test_the_overage_has_the_same_num_on_a_rerun_and_the_booked_check_catches_it(tmp_path, monkeypatch):   # NEGATIVE
+    from agents.skill_cc_spend_booking.bookio import CCP_PATH, BookTxn
+    bank = [book_pay("p1", 1500.50, date(2025, 5, 12), desc="CRED CLUB")]
+    res = _cred_prior(tmp_path / "a", monkeypatch, "CRED PAYMENT RECEIVED", 1530.50)
+    _r, rows1, _c, _o = _book(tmp_path / "w1", monkeypatch, res, bank)
+    ov1 = next(r for r in rows1 if "CRED payment" in r["Description"])
+    res2 = _cred_prior(tmp_path / "b", monkeypatch, "CRED PAYMENT RECEIVED", 1530.50)
+    _r, rows2, _c, _o = _book(tmp_path / "w2", monkeypatch, res2, bank)
+    assert next(r for r in rows2 if "CRED payment" in r["Description"])["Transaction ID"] == ov1["Transaction ID"]
+    booked = [BookTxn("b1", date(2025, 5, 12), "x", ov1["Transaction ID"], (("Equity:Drawings", -30.0), (CCP_PATH, 30.0)))]
+    res3 = _cred_prior(tmp_path / "c", monkeypatch, "CRED PAYMENT RECEIVED", 1530.50)
+    reply, rows3, _c, _o = _book(tmp_path / "w3", monkeypatch, res3, bank + booked)
+    assert not any("CRED payment" in r["Description"] for r in rows3) and "already booked" in reply
+
+
+def test_an_exact_amount_csv_prior_pairing_books_no_overage(tmp_path, monkeypatch):            # NEGATIVE
+    res = _cred_prior(tmp_path, monkeypatch, "CRED PAYMENT RECEIVED", 1500.50)
+    _r, rows, _c, _o = _book(tmp_path / "w", monkeypatch, res, [book_pay("p1", 1500.50, date(2025, 5, 12), desc="CRED CLUB")])
+    assert not any("CRED payment" in r["Description"] for r in rows)

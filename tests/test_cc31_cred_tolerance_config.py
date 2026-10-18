@@ -71,9 +71,26 @@ def test_one_entitys_value_is_never_used_for_another():                         
 
 # ---- the Entities tab ----
 
-def test_the_field_shows_fifty_when_the_key_is_absent():
+def test_an_absent_key_opens_a_blank_box_whose_placeholder_shows_the_default():
     e = configs.EntityProfile(key="A", name="A", pan="AAAAA0000A", status="Individual")
-    assert ui_mod._entity_to_new_form("A", {"A": e})[7] == "50"
+    assert ui_mod._entity_to_new_form("A", {"A": e})[7] == ""                      # blank, never "50"
+    assert ui_mod._cred_default_text() == "50"                                     # shown as "50 (default)"
+
+
+def test_saving_without_touching_the_field_does_not_add_the_key(tmp_path):              # NEGATIVE
+    root, p = _seed(tmp_path)
+    assert _call("SYN-P", root, cc_cred_max_overage="").startswith("**Saved**")      # what an untouched blank box sends
+    assert "cc_cred_max_overage" not in yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-P"]
+    assert _call("SYN-P", root).startswith("**Saved**")
+    assert "cc_cred_max_overage" not in yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-P"]
+    assert settings_io.resolve_cred_max_overage(_profiles(p)["SYN-P"]) == (50.0, "default")
+
+
+def test_typing_thirty_saves_thirty(tmp_path):
+    root, p = _seed(tmp_path)
+    assert _call("SYN-P", root, cc_cred_max_overage="30").startswith("**Saved**")
+    assert yaml.safe_load(p.read_text(encoding="utf-8"))["SYN-P"]["cc_cred_max_overage"] == 30
+    assert settings_io.resolve_cred_max_overage(_profiles(p)["SYN-P"]) == (30.0, "from entities.yaml")
 
 
 def test_a_stored_value_is_shown_on_the_form():
