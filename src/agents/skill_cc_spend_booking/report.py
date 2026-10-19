@@ -276,7 +276,9 @@ def statement_block(rep: RunReport) -> str:
         out.append("CSV EXPORTS (no balance tie-out; coverage and counts only):\n" + "\n".join(
             f"  CSV export {st.card} {st.label}: {t.note}; "
             f"{sum(1 for j in rep.journals if j.statement == csv_label(st))} journal(s)"
-            for st, t in rep.csv_ties) + "\n  CSV payment rows are not matched to bank payments.")
+            for st, t in rep.csv_ties)
+            + ("\n  The payment rows matched to bank payments are listed under CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS."
+               if rep.csv_pairings else ""))
     if rep.csv_refused:
         out.append("REFUSED CSV exports (nothing booked from them):\n" + "\n".join(
             f"  CSV export {name}: {why}" for name, why in rep.csv_refused))
@@ -285,18 +287,31 @@ def statement_block(rep: RunReport) -> str:
             f"  {st.card} {st.label}: {t.result}; {t.gap or t.note}" for st, t in rep.refused))
     partly = [s for s in rep.settlements if s.status == "PARTLY SETTLED"]
     if partly:
-        out.append("PARTLY SETTLED - paid less than the statement total, nothing booked "
-                   "(a NOT TIED statement is booked on its real dates):\n" + "\n".join(
-            f"  {s.target.card} {s.target.label}: {s.reason}" for s in partly))
+        out.append("PARTLY SETTLED - paid less than the statement total, its spends are not booked "
+                   "(a NOT TIED statement is booked on its real dates; a CRED overage is booked):\n" + "\n".join(
+            f"  {s.target.card} {s.target.label}: {s.reason}"
+            + "".join(f"; CRED overage {money(pr.overage)} booked (Dr CCP / Cr Drawings)"
+                      for pr in s.pairings if pr.overage > 0.004) for s in partly))
     other = [s for s in rep.settlements if s.status not in ("SETTLED", "PARTLY SETTLED", S_CSV_PRIOR)]
     if other:
         out.append("PAYMENTS THAT DID NOT SETTLE A STATEMENT IN THIS RUN:\n" + "\n".join(
             f"  {(s.target or s.paid_on).card} {(s.target or s.paid_on).label}: {s.status} - {s.reason}"
             for s in other))
     if rep.unpaid:
-        out.append("NOT SETTLED - a later statement exists but no payment was matched for it, nothing booked:\n" + "\n".join(
+        _untied_ids = {id(st) for st, _t in rep.untied}
+        _mixed = any(id(st) in _untied_ids for st in rep.unpaid)
+        out.append("NOT SETTLED - a later statement exists but no payment was matched for it, nothing booked"
+                   + (" (a NOT TIED statement is booked on its real dates):\n" if _mixed else ":\n") + "\n".join(
             f"  {st.card} {st.label} - " + rep.unpaid_why.get(id(st), "the later statement shows no payment")
+            + ("; NOT TIED, so its rows are booked on their real dates (see NOT TIED above)"
+               if id(st) in _untied_ids else "")
             for st in rep.unpaid))
+    x35 = [pr for s in rep.settlements for pr in s.pairings if pr.note] + [pr for pr in rep.csv_pairings if pr.note]
+    if x35:
+        out.append("PAIRED ACROSS CARDS (CC-35):\n" + "\n".join(
+            f"  {pr.line.stmt.card} {pr.line.date:%d %b %Y} {money(pr.line.amount)} <- "
+            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments) + f": {pr.note}"
+            for pr in x35))
     csvp = [s for s in rep.settlements if s.status == S_CSV_PRIOR]
     if csvp:
         out.append("PAYMENTS OF STATEMENTS BOOKED FROM A CSV EXPORT (matched; nothing more to book):\n"
@@ -311,10 +326,12 @@ def statement_block(rep: RunReport) -> str:
         out.append("CSV PAYMENT ROWS WITH NO BANK PAYMENT IN THE BOOK (nothing booked for them):\n" + "\n".join(
             f"  CSV export {ln.stmt.card} {ln.date:%d %b %Y} {money(ln.amount)}" for ln in rep.csv_lines_unmatched))
     if rep.csv_pairings:
-        out.append("CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS (source CSV; confirms the payment, books nothing):\n"
+        out.append("CSV PAYMENT ROWS MATCHED TO BANK PAYMENTS (source CSV; confirms the payment, books only a CRED overage):\n"
                    + "\n".join(
             f"  CSV export {pr.line.stmt.card} {pr.line.date:%d %b %Y} {money(pr.line.amount)} <- "
-            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments) for pr in rep.csv_pairings))
+            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments)
+            + (f"; CRED overage {money(pr.overage)} booked (Dr CCP / Cr Drawings)" if pr.overage > 0.004 else "")
+            for pr in rep.csv_pairings))
     if rep.ambiguous:
         out.append("AMBIGUOUS payments (not matched, never guessed):\n" + "\n".join(
             "  " + (f"{a['line'].stmt.card} line {a['line'].date:%d %b %Y} {money(a['line'].amount)}: "
@@ -505,7 +522,8 @@ def write_workbook(rep: RunReport, path: str) -> str:
           ["Statement with the payment line", "Line date", "Line amount", "Bank date(s)", "Bank amount", "Match",
            "CRED overage", "Settles statement", "Result"],
           [(f"{s.paid_on.card} {s.paid_on.label}", pr.line.date, pr.line.amount,
-            ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
+            ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments),
+            pr.kind + ("; " + pr.note if pr.note else ""),
             pr.overage, f"{s.target.card} {s.target.label}" if s.target else "none read", s.status)
            for s in rep.settlements for pr in s.pairings]
           + [(f"CSV export {pr.line.stmt.card}", pr.line.date, pr.line.amount,

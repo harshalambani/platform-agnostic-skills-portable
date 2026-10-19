@@ -26,6 +26,8 @@ PART_MIN_PARTS = 2
 PART_MAX_PARTS = 4
 PART_POOL_CAP = 14
 AMOUNT_TOL = 0.01
+CC35_MAX_LINES = 4
+CC35_NOTE = "paired across cards: each payment falls on its own card's statement line date (CC-35)"
 SETTLE_TOL = 1.0          # a statement counts as settled when paid >= due - 1 rupee
 
 _CRED_RX = re.compile(r"\bCRED\b", re.I)
@@ -72,6 +74,7 @@ class Pairing:
     payments: tuple
     kind: str               # exact | cred | part
     overage: float = 0.0    # CRED: statement line minus the bank amount
+    note: str = ""          # CC-35: set only on a pairing made across cards by the same-date rule
 
 
 @dataclass
@@ -156,6 +159,51 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
             out.pairings.append(Pairing(lines[i], (p,), "exact", 0.0))
             used.add(p.guid)
             done_lines.add(i)
+    # CC-35: a narrow exception to decision 6.6. A closed group of open lines and unused payments that spans
+    # two or more cards, with as many payments as lines (at most CC35_MAX_LINES), is paired when exactly ONE
+    # one-to-one assignment (every pair fits: exact or CRED) puts each payment on a line of the SAME date.
+    # Anything else (open group, unequal counts, over the cap, no or several same-date assignments) is left
+    # to the ranking below, i.e. ambiguous under 6.6.
+    comp_seen: set = set()
+    for start in range(len(lines)):
+        if start in comp_seen or start in done_lines:
+            continue
+        g_lines, g_pays, stack = set(), set(), [("L", start)]
+        while stack:
+            kind_, key = stack.pop()
+            if kind_ == "L":
+                if key in g_lines:
+                    continue
+                g_lines.add(key)
+                stack.extend(("P", p.guid) for p in cand[key])
+            else:
+                if key in g_pays:
+                    continue
+                g_pays.add(key)
+                stack.extend(("L", j) for j in back[key])
+        comp_seen |= g_lines
+        if len(g_lines) < 2 or len(g_lines) > CC35_MAX_LINES or len(g_pays) != len(g_lines):
+            continue
+        if any(j in done_lines for j in g_lines) or any(g in used for g in g_pays):
+            continue
+        if len({getattr(lines[j].stmt, "card", None) for j in g_lines}) < 2:
+            continue
+        gl = sorted(g_lines)
+        gp = sorted((p for p in payments if p.guid in g_pays), key=lambda p: (p.date, p.guid))
+        same_day = []
+        for perm in itertools.permutations(gl):
+            if all(single_fit(lines[j], p, cred_max) for j, p in zip(perm, gp)):
+                if all(lines[j].date == p.date for j, p in zip(perm, gp)):
+                    same_day.append(perm)
+        if len(same_day) != 1:
+            continue
+        for j, p in zip(same_day[0], gp):
+            kind = single_fit(lines[j], p, cred_max)
+            out.pairings.append(Pairing(lines[j], (p,), kind,
+                                        round(lines[j].amount - p.amount, 2) if kind == "cred" else 0.0,
+                                        CC35_NOTE))
+            used.add(p.guid)
+            done_lines.add(j)
     # CC-31: rank before calling a match ambiguous. For one line the best bank payment is the exact
     # amount, then the nearest date; for one bank payment the best line ranks the same way. A pair is
     # taken only when each is the UNIQUE best of the other (one-to-one, never guessed); a true tie at the
