@@ -11,8 +11,10 @@ Public surface:
     classify(exc, model=None)           -> LlmFailure
     LlmFailure.reason                   -> one plain sentence (safe to show/log)
     LlmFailure.kind                     -> auth | model_not_found | timeout |
-                                           rate_limit | connection | no_endpoint |
-                                           stopped | other
+                                           rate_limit | out_of_credits | connection |
+                                           no_endpoint | stopped | other
+    is_out_of_credits(status, text)     -> True when the provider says the
+                                           account has no credit / quota left
 """
 from __future__ import annotations
 
@@ -29,6 +31,26 @@ _KEY_LIKE = re.compile(
 )
 
 _MAX_MESSAGE = 200
+
+# Provider wordings for "the account has no credit or quota left". Anthropic:
+# "credit balance is too low"; OpenAI-style: code "insufficient_quota";
+# others: "quota exceeded/exhausted", "out of credits", "billing" refusals.
+_CREDIT_PHRASES = (
+    "credit balance", "insufficient_quota", "insufficient quota",
+    "exceeded your current quota", "quota exhausted", "quota is exhausted",
+    "out of credit", "no credits", "insufficient credit", "insufficient balance",
+    "insufficient funds", "payment required", "billing hard limit",
+)
+
+
+def is_out_of_credits(status, text: object) -> bool:
+    """True when a failed call means the account is out of credit/quota (more
+    calls cannot help until it is topped up). A plain rate limit (HTTP 429
+    with no such wording) is NOT this."""
+    if status == 402:
+        return True
+    low = ("" if text is None else str(text)).lower()
+    return any(p in low for p in _CREDIT_PHRASES)
 
 
 def redact(text: object, secrets: tuple = ()) -> str:
@@ -89,6 +111,8 @@ def classify(exc: BaseException, model: str | None = None, secrets: tuple = ()) 
         kind, why = "auth", "the AI service refused the key"
     elif status == 404 or "model" in low and ("not found" in low or "does not exist" in low or "unknown model" in low):
         kind, why = "model_not_found", f"the AI service does not have the model{model_txt}"
+    elif status == 402 or is_out_of_credits(status, f"{provider} {exc}"):
+        kind, why = "out_of_credits", "the AI service says the account is out of credits"
     elif status == 429:
         kind, why = "rate_limit", "the AI service is rate-limiting this key"
     elif "timeout" in low or "timed out" in low or isinstance(exc, TimeoutError):
