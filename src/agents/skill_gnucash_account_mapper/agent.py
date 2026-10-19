@@ -2114,6 +2114,9 @@ def _redact_llm_text(text, api_key=None) -> str:
 def _provider_message(err, api_key=None) -> str:
     """The provider's own error text from an HTTPError body (OpenAI style
     {"error": {"message": ...}}), redacted and capped. "" when there is none."""
+    cached = getattr(err, "_pa_provider_msg", None)
+    if cached is not None:      # the body can be read only once
+        return cached
     try:
         raw = err.read().decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
@@ -2125,7 +2128,20 @@ def _provider_message(err, api_key=None) -> str:
         msg = (e.get("message") if isinstance(e, dict) else e) or (body.get("message") if isinstance(body, dict) else "") or ""
     except Exception:  # noqa: BLE001
         msg = raw if len(raw) < 200 else ""
-    return _redact_llm_text(str(msg).strip(), api_key)[:200]
+    out = _redact_llm_text(str(msg).strip(), api_key)[:200]
+    try:
+        err._pa_provider_msg = out
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _llm_errors_out_of_credits(status, text) -> bool:
+    try:
+        from agents.llm_errors import is_out_of_credits  # noqa: PLC0415
+    except ImportError:  # CLI / bare-import usage
+        from llm_errors import is_out_of_credits  # type: ignore  # noqa: PLC0415
+    return is_out_of_credits(status, text)
 
 
 def _note_llm_error(exc, base_url: str, model: str, timeout, api_key=None) -> None:
@@ -2134,12 +2150,18 @@ def _note_llm_error(exc, base_url: str, model: str, timeout, api_key=None) -> No
     from urllib.parse import urlparse  # noqa: PLC0415
     host = urlparse(str(base_url or "")).netloc or str(base_url or "the AI service")
     fatal = False
+    credits = False
     if isinstance(exc, _HTTPError):
         code = exc.code
         pmsg = _provider_message(exc, api_key)
         low = pmsg.lower()
         shown = f"HTTP {code}: {pmsg}" if pmsg else f"HTTP {code}"
-        if code in (401, 403):
+        if _llm_errors_out_of_credits(code, pmsg):
+            # UI-47: more calls cannot help until the account is topped up.
+            reason = f"the AI service is out of credits ({shown})"
+            fatal = True
+            credits = True
+        elif code in (401, 403):
             reason = f"the AI service refused the API key ({shown}) - update the key in Settings"
             fatal = True
         elif code == 404 or ("model" in low and any(k in low for k in ("not found", "does not exist", "not exist", "unknown", "unsupported"))):
@@ -2156,7 +2178,7 @@ def _note_llm_error(exc, base_url: str, model: str, timeout, api_key=None) -> No
         else:
             reason = f"could not reach {host} ({type(exc).__name__})"
     _LLM_LAST_ERROR.clear()
-    _LLM_LAST_ERROR.update({"reason": reason, "fatal": fatal})
+    _LLM_LAST_ERROR.update({"reason": reason, "fatal": fatal, "credits": credits})
 
 
 def _take_llm_error() -> Dict:
@@ -2220,6 +2242,8 @@ class _LLMGuard:
         self.stopped = False
         self.reason = ""
         self.last_error = ""      # CC-11: why the most recent failed call failed
+        self.out_of_credits = False   # UI-47: stopped because the account has no credit left
+        self.rate_limited = False     # UI-47: stopped by repeated HTTP 429
 
     def _stop(self, reason: str) -> None:
         self.stopped = True
@@ -2241,6 +2265,7 @@ class _LLMGuard:
                 self.consecutive_failures += 1
                 rate_limited += 1
                 if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
+                    self.rate_limited = True
                     self._stop(f"the provider kept refusing calls (HTTP 429 rate limit, "
                                f"{self.consecutive_failures} failed calls in a row)")
                     return None
@@ -2256,6 +2281,7 @@ class _LLMGuard:
                     self.last_error = err["reason"]
                 if err.get("fatal"):
                     # the key or the model is refused: more calls cannot help
+                    self.out_of_credits = bool(err.get("credits"))
                     self._stop(err["reason"])
                     return None
                 if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
@@ -2515,7 +2541,7 @@ def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: flo
             return _Reply((body.get("message") or {}).get("content") or "",
                           body.get("done_reason"))
     except _HTTPError as e:
-        if e.code == 429:
+        if e.code == 429 and not _llm_errors_out_of_credits(429, _provider_message(e)):
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
         _note_llm_error(e, base_url, model, timeout)
         _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
@@ -2576,7 +2602,7 @@ def _openai_compatible_chat(
             return _Reply((choices[0].get("message") or {}).get("content") or "",
                           choices[0].get("finish_reason"))
     except _HTTPError as e:
-        if e.code == 429:
+        if e.code == 429 and not _llm_errors_out_of_credits(429, _provider_message(e, api_key)):
             raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
         _note_llm_error(e, base_url, model, timeout, api_key)
         _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
@@ -2914,9 +2940,17 @@ def llm_fallback_mapping(
     model_override: str = None,
     historical_mappings: List[Dict] = None,
     reference_date=None,
+    kept=None,
+    target_ok=None,
 ) -> Dict[int, Dict]:
     """
     Use the LLM to classify rows one at a time via direct Ollama API.
+
+    UI-47: ``kept`` (an ``ai_kept.KeptAnswers``) keeps each successful answer
+    as it arrives; a re-run of the same input for the same book reuses them
+    and asks the AI only for the rows still unanswered. ``target_ok(account)``
+    re-validates a kept answer against the current book (hidden/placeholder
+    targets are never used). A fully finished pass clears what was kept.
 
     Strategy: one row per call with a structured prompt that groups
     historical GnuCash patterns by account, turning classification into
@@ -2942,26 +2976,6 @@ def llm_fallback_mapping(
         f"provider={provider}, model={model}"
     )
 
-    # ── Warm up the model (cold start loads weights into VRAM) ───────────
-    _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
-    guard = _LLMGuard(model)
-    _announce_pacing(provider, base_url, total)
-    warmup_reply = guard.ask(
-        provider, base_url, model,
-        "Reply OK.", "ping",
-        api_key=api_key,
-        timeout=_LLM_WARMUP_TIMEOUT,
-    )
-    if warmup_reply is None:
-        _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
-        _LLM_RUN_STATUS.update({
-            'stopped': True,
-            'reason': guard.reason or guard.last_error or "the AI model did not answer the warm-up call",
-            'unattempted_rows': [r["row"] for r in unmatched_rows],
-        })
-        return {}
-    _emit_mapper_progress("LLM warm-up OK — model loaded")
-
     # Build the set of valid accounts from historical mappings (preferred)
     # or fall back to full account tree
     if historical_mappings:
@@ -2973,6 +2987,109 @@ def llm_fallback_mapping(
     history_model = _build_history_token_model(historical_mappings, reference_date) if historical_mappings else {}
 
     result: Dict[int, Dict] = {}
+
+    # UI-47: the key covers everything the AI is given for the row (the exact
+    # prompt, so description, amounts and the shortlist/account list), so any
+    # change to a row asks the AI again.
+    def _row_prompt(row):
+        desc = row["description"]
+        dep = _safe_float(row.get("deposit"))
+        wd = _safe_float(row.get("withdrawal"))
+        amt = ""
+        if dep > 0 and wd == 0:
+            amt = " [deposit]"
+        elif wd > 0 and dep == 0:
+            amt = " [withdrawal]"
+        if historical_mappings:
+            sl = _build_llm_shortlist(desc, dep, wd, history_model, account_set,
+                                      limit=LLM_SHORTLIST_SIZE)
+            if not sl:
+                return None
+            return _LLM_SHORTLIST_SYSTEM_PROMPT, _format_shortlist_prompt(sl, desc, amt)
+        acct_list = "\n".join(account_tree)
+        example_lines = ""
+        if example_mappings:
+            example_lines = "\nExamples:\n" + "\n".join(
+                f"  {ex['description']} -> {ex['account']}" for ex in example_mappings[:5])
+        return _LLM_SYSTEM_PROMPT, (f"Accounts:\n{acct_list}\n{example_lines}\n\n"
+                                    f"Transaction: {desc}{amt}\nAccount:")
+
+    def _key_of(row):
+        pr = _row_prompt(row)
+        return row_key_fn(*pr) if pr else None
+
+    kept_rows: set = set()      # rows answered from the kept answers this run
+    kept_used = 0
+    kept_on = kept is not None and getattr(kept, "enabled", False)
+    try:
+        from agents.skill_gnucash_account_mapper.ai_kept import row_key as row_key_fn  # noqa: PLC0415
+    except ImportError:  # CLI / bare-import usage
+        from skill_gnucash_account_mapper.ai_kept import row_key as row_key_fn  # type: ignore  # noqa: PLC0415
+    if kept_on:
+        for row in unmatched_rows:
+            k = _key_of(row)
+            ent = kept.get(k) if k else None
+            if not ent:
+                continue
+            acct = ent.get("account", "")
+            # Re-validate against the CURRENT book: still a known target, and
+            # never hidden / placeholder. Otherwise the AI is asked again.
+            if acct not in account_set or (target_ok is not None and not target_ok(acct)):
+                kept.drop(k)
+                continue
+            result[row["row"]] = {"account": acct, "reason": ent.get("reason") or "LLM: matched"}
+            kept_rows.add(row["row"])
+        kept_used = len(kept_rows)
+        if kept_used:
+            _emit_mapper_progress(
+                f"AI answers kept from an earlier run: {kept_used} of {total} row(s) reused; "
+                f"the AI is asked only for the other {total - kept_used}.")
+
+    def _stop_text(reason, guard_obj):
+        """The reason a stopped pass reports, in plain words (UI-47)."""
+        reason = str(reason or "the AI model stopped answering")
+        if not kept_on:
+            return reason
+        done = sum(1 for v in result.values() if v.get("account"))
+        if guard_obj is not None and guard_obj.out_of_credits:
+            lead = f"{reason} - out of credits: top up, then Run again"
+        elif guard_obj is not None and guard_obj.rate_limited:
+            lead = f"{reason} - rate limited: wait a while, then Run again"
+        else:
+            lead = f"{reason} - fix the cause, then Run again"
+        return (f"{lead}. {done} of {total} rows answered and kept; "
+                f"the re-run picks up from the rows not done")
+
+    remaining_rows = [r for r in unmatched_rows if r["row"] not in kept_rows]
+    if not remaining_rows:
+        _emit_mapper_progress(f"LLM fallback complete: all rows answered from kept answers")
+        if kept_on:
+            kept.clear()
+        return result
+
+    # ── Warm up the model (cold start loads weights into VRAM) ───────────
+    _emit_mapper_progress(f"LLM warm-up: loading {model} (up to {_LLM_WARMUP_TIMEOUT}s)…")
+    guard = _LLMGuard(model)
+    _announce_pacing(provider, base_url, len(remaining_rows))
+    warmup_reply = guard.ask(
+        provider, base_url, model,
+        "Reply OK.", "ping",
+        api_key=api_key,
+        timeout=_LLM_WARMUP_TIMEOUT,
+    )
+    if warmup_reply is None:
+        _emit_mapper_progress("LLM warm-up failed — skipping LLM fallback")
+        _LLM_RUN_STATUS.update({
+            'stopped': True,
+            'reason': _stop_text(
+                guard.reason or guard.last_error or "the AI model did not answer the warm-up call",
+                guard),
+            'unattempted_rows': [r["row"] for r in remaining_rows],
+        })
+        return result
+    _emit_mapper_progress("LLM warm-up OK — model loaded")
+
+    finished = True      # UI-47: False when the pass ends early (stop / Stop button)
     ai_started = _AI_CLOCK()
     try:
         from agents import llm_pacing as _lp  # noqa: PLC0415
@@ -2984,17 +3101,22 @@ def llm_fallback_mapping(
     answer_counts = {"ok": 0, "skip": 0, "empty": 0, "cut off": 0, "unparseable": 0}
 
     for i, row in enumerate(unmatched_rows, 1):
+        if row["row"] in kept_rows:
+            continue          # UI-47: answered in an earlier run, re-validated above
         if guard.stopped:
+            finished = False
             _stop_why = str(guard.reason or "the AI model stopped answering")
             if api_key:
                 _stop_why = _stop_why.replace(str(api_key), "***")
+            _left = [r["row"] for r in unmatched_rows[i - 1:] if r["row"] not in result]
+            if getattr(guard, "out_of_credits", False) and i > 1 and unmatched_rows[i - 2]["row"] not in result:
+                _left.insert(0, unmatched_rows[i - 2]["row"])   # the row whose call got refused
             _emit_mapper_progress(
                 f"AI pass stopped at row {i} of {total}: {_stop_why}. "
-                f"{total - i + 1} row(s) not reached go to Suspense.")
+                f"{len(_left)} row(s) not reached go to Suspense.")
             _LLM_RUN_STATUS.update({
-                'stopped': True, 'reason': guard.reason,
-                'unattempted_rows': [r["row"] for r in unmatched_rows[i - 1:]
-                                     if r["row"] not in result],
+                'stopped': True, 'reason': _stop_text(guard.reason, guard),
+                'unattempted_rows': _left,
             })
             break
         # Check for cancellation between rows
@@ -3002,6 +3124,7 @@ def llm_fallback_mapping(
             from ui._runner import is_cancelled
             if is_cancelled():
                 _emit_mapper_progress("LLM cancelled by user")
+                finished = False
                 break
         except ImportError:
             pass
@@ -3066,6 +3189,8 @@ def llm_fallback_mapping(
                     reason = f"LLM: matched [{_DIRECTION_FLAG_MARKER}]"
                 _emit_mapper_progress(f"  -> {matched_acct}")
                 result[row_num] = {"account": matched_acct, "reason": reason}
+                if kept_on:
+                    kept.put(row_key_fn(_LLM_SHORTLIST_SYSTEM_PROMPT, user_prompt), matched_acct, reason)
             elif status == "skip":
                 _emit_mapper_progress(f"  -> SKIP")
                 result[row_num] = {"account": "", "reason": "LLM: skip"}
@@ -3117,14 +3242,19 @@ def llm_fallback_mapping(
         if matched_acct:
             _emit_mapper_progress(f"  -> {matched_acct}")
             result[row_num] = {"account": matched_acct, "reason": "LLM: matched"}
+            if kept_on:
+                kept.put(row_key_fn(_LLM_SYSTEM_PROMPT, user_prompt), matched_acct, "LLM: matched")
         else:
             _emit_mapper_progress(f"  -> unknown: {answer!r}")
 
     if guard.stopped and not _LLM_RUN_STATUS.get('stopped'):
+        finished = False
         _LLM_RUN_STATUS.update({
-            'stopped': True, 'reason': guard.reason,
+            'stopped': True, 'reason': _stop_text(guard.reason, guard),
             'unattempted_rows': [r["row"] for r in unmatched_rows if r["row"] not in result],
         })
+    if kept_on and finished:
+        kept.clear()      # a fully finished pass leaves nothing behind
 
     if historical_mappings and any(answer_counts.values()):
         _emit_mapper_progress(
@@ -4280,6 +4410,29 @@ def run(
                 _llm_ref_kw = {}
         except (TypeError, ValueError):
             _llm_ref_kw = {}
+        # UI-47: keep the AI's answers per book + input file so a stopped pass
+        # can resume. Only passed when the callee takes it (older stand-ins do not).
+        try:
+            import inspect as _insp2  # noqa: PLC0415
+            if 'kept' in _insp2.signature(llm_fallback_mapping).parameters and config_path:
+                try:
+                    from agents.skill_gnucash_account_mapper import ai_kept as _ak  # noqa: PLC0415
+                except ImportError:
+                    from skill_gnucash_account_mapper import ai_kept as _ak  # type: ignore  # noqa: PLC0415
+                _kept = _ak.KeptAnswers(
+                    _ak.store_path(persistent_rules_path(gnucash_file, config_path).parent,
+                                   Path(gnucash_file).stem),
+                    Path(gnucash_file).stem, _ak.file_hash(canonical_csv))
+                _llm_ref_kw['kept'] = _kept
+
+                def _kept_target_ok(acct, _g=guard):
+                    a = acct or ''
+                    if all_account_paths and a not in all_account_paths                             and _strip_root(a) not in all_account_paths:
+                        return False
+                    return not (_g is not None and getattr(_g, 'known', False) and _g.is_blocked(a))
+                _llm_ref_kw['target_ok'] = _kept_target_ok
+        except (TypeError, ValueError):
+            pass
         if still_unmatched and config_path:
             _emit_mapper_progress(f"LLM fallback for {len(still_unmatched)} remaining rows")
             _LLM_RUN_STATUS.clear()
@@ -4601,7 +4754,8 @@ def run(
     if llm_stop_reason:
         ai_stop_note = (f"**AI pass stopped:** {llm_stop_reason}. "
                         f"What was already mapped is kept; the remaining {llm_stopped_final} "
-                        f"row(s) are in Suspense.\n\n")
+                        f"row(s) are in Suspense, waiting for a re-run (answers already given "
+                        f"are reused) or hand-mapping.\n\n")
 
     ifsc_note = ""
     if reverted_detail:

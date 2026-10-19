@@ -217,7 +217,8 @@ def ai_stop_block(rep: RunReport) -> str:
     if not rep.ai_stop:
         return ""
     return (f"RED FLAG: the AI pass stopped - {rep.ai_stop}. {rep.ai_stop_suspense} row(s) went to Suspense "
-            f"instead of an account. What was mapped before it stopped is kept. Fix the cause (see the reason), "
+            f"instead of an account, waiting for a re-run or hand-mapping. What was mapped before it stopped "
+            f"is kept, and a re-run reuses the AI answers already given. Fix the cause (see the reason), "
             f"then run again; this result is NOT a plain success.")
 
 
