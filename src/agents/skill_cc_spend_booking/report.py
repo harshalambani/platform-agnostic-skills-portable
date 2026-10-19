@@ -306,6 +306,12 @@ def statement_block(rep: RunReport) -> str:
             + ("; NOT TIED, so its rows are booked on their real dates (see NOT TIED above)"
                if id(st) in _untied_ids else "")
             for st in rep.unpaid))
+    x35 = [pr for s in rep.settlements for pr in s.pairings if pr.note] + [pr for pr in rep.csv_pairings if pr.note]
+    if x35:
+        out.append("PAIRED ACROSS CARDS (CC-35):\n" + "\n".join(
+            f"  {pr.line.stmt.card} {pr.line.date:%d %b %Y} {money(pr.line.amount)} <- "
+            + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pr.payments) + f": {pr.note}"
+            for pr in x35))
     csvp = [s for s in rep.settlements if s.status == S_CSV_PRIOR]
     if csvp:
         out.append("PAYMENTS OF STATEMENTS BOOKED FROM A CSV EXPORT (matched; nothing more to book):\n"
@@ -516,7 +522,8 @@ def write_workbook(rep: RunReport, path: str) -> str:
           ["Statement with the payment line", "Line date", "Line amount", "Bank date(s)", "Bank amount", "Match",
            "CRED overage", "Settles statement", "Result"],
           [(f"{s.paid_on.card} {s.paid_on.label}", pr.line.date, pr.line.amount,
-            ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments), pr.kind,
+            ", ".join(f"{p.date:%d %b %Y}" for p in pr.payments), sum(p.amount for p in pr.payments),
+            pr.kind + ("; " + pr.note if pr.note else ""),
             pr.overage, f"{s.target.card} {s.target.label}" if s.target else "none read", s.status)
            for s in rep.settlements for pr in s.pairings]
           + [(f"CSV export {pr.line.stmt.card}", pr.line.date, pr.line.amount,
