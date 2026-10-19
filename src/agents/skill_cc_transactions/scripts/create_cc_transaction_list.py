@@ -759,6 +759,11 @@ def parse_sbm_older(lines, bank, card, period) -> Parsed:
     return p
 
 
+# CC-36: the Calculation summary header can wrap over many lines ("Opening" / "Balance" / ...), so the
+# values row can sit well below the word OPENING.
+SBM_HEADER_LOOKBACK = 12
+
+
 def parse_sbm(lines, bank, card, period) -> Parsed:
     if is_sbm_older_layout(lines):
         return parse_sbm_older(lines, bank, card, period)
@@ -789,7 +794,7 @@ def parse_sbm(lines, bank, card, period) -> Parsed:
                 re.search(rf"\s(?:{amt}|-)\s+(?:{amt}|-)\s*$", line):
             p.errors.append(f"unparsed line: {line[:70]}")
         elif (not p.summary and re.match(rf"^({amt})(?:\s+({amt})){{4}}\s*$", line)
-              and any("OPENING" in ln.upper() for ln in lines[max(0, i - 4):i])):
+              and any("OPENING" in ln.upper() for ln in lines[max(0, i - SBM_HEADER_LOOKBACK):i])):
             vals = [num(x) for x in re.findall(amt, line)][:5]
             sbm_values.append(vals)
     if sbm_values:
@@ -802,7 +807,7 @@ def parse_sbm(lines, bank, card, period) -> Parsed:
         else:
             purch, pay, fin = roles
             closing = opening + purch + fin - pay
-            if abs(total) <= TOL_STRICT and closing < -TOL_STRICT:
+            if abs(total) <= TOL_STRICT and round(closing, 2) < -TOL_STRICT:
                 # CC-04: SBM prints a credit balance as 0.00. The arithmetic proves the credit
                 # (roles are only accepted when it does), so the balance is the proven credit.
                 total = round(closing, 2)
@@ -810,6 +815,23 @@ def parse_sbm(lines, bank, card, period) -> Parsed:
                           f"{-total:,.2f}")
             p.summary = dict(prev=opening, purchases=purch, finance=fin, payments=pay, total=total)
             p.printed_closing = closing
+    if not p.summary:
+        # CC-36: the Calculation summary could not be read (or its order could not be proven), but the
+        # statement prints Total Amount Due a second time in the Statement Summary box, on the values row
+        # under "Payment Due Date / Total Amount Due / Minimum Amount Due". A printed 0.00 is a total.
+        due_total = None
+        for j in sorted(due_values):
+            m2 = SBM_DUE_VALUES_RX.match(lines[j].strip())
+            if m2:
+                amts = re.findall(_SBM_AMT, lines[j].strip().split(None, 1)[1].replace(RUPEE, ""))
+                if len(amts) == 2:
+                    due_total = num(amts[0])
+                    break
+        if due_total is not None:
+            p.summary = dict(total=due_total)
+            p.missing = [x for x in p.missing if not x.startswith("summary figures")]
+            p.note = ("SBM: the Calculation summary could not be proven; the total is the Total Amount Due "
+                      "printed in the Statement Summary box")
     if not p.summary and not p.missing:
         p.missing.append("summary line")
     return p
@@ -848,6 +870,13 @@ def resolve_sbm_roles(opening, middle, total, rows):
     by_debit = [g for g in pool if abs(g[0] - debits) <= TOL_STRICT + 1e-9]
     if len(by_debit) == 1:
         return by_debit[0]
+    # CC-36: the bank rounds a paisa either way, so the 0.01 slack above can leave several assignments
+    # standing. Only then, prefer the assignment whose payments figure, then purchases figure, is closest
+    # to the rows; it is chosen only when that is unique.
+    near = [g for g in pool if rows and abs(g[1] - credits) <= min(abs(x[1] - credits) for x in pool) + 1e-9]
+    near = [g for g in near if abs(g[0] - debits) <= min(abs(x[0] - debits) for x in near) + 1e-9]
+    if len(near) == 1 and abs(near[0][1] - credits) <= TOL_STRICT + 1e-9 and abs(near[0][0] - debits) <= TOL_STRICT + 1e-9:
+        return near[0]
     # Purchases and finance charges are interchangeable in the arithmetic
     # (both add): the fee-kind rows decide which figure is the finance charge.
     fee_sum = round(sum(r.amount for r in rows if r.direction == "Dr" and r.kind == "fee"), 2)
