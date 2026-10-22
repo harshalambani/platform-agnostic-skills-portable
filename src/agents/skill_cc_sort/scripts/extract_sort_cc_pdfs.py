@@ -375,7 +375,8 @@ def find_passwords(search_folder):
     return []
 
 def extract_bank_and_card_type(filename):
-    """Extract bank name and card type from PDF filename."""
+    """Extract bank name and card type from the WORDS in a PDF filename. Card digits are
+    not matched here: they come from the card list (cc_cards.yaml), see choose_folder_why."""
     filename_lower = filename.lower()
 
     # Check MSG-prefixed filename (has __ separator) — also check the attachment part alone
@@ -387,11 +388,11 @@ def extract_bank_and_card_type(filename):
         ('HDFC', 'Regalia'):    r'hdfc.*regalia|regalia.*hdfc|regalia',
         ('HDFC', 'TataNeu'):    r'hdfc.*tata\s*neu|tata\s*neu.*hdfc|tata.?neu',
         ('ICICI', 'Amazon'):    r'amazon.*icici|icici.*amazon|amazon.*pay',
-        ('ICICI', 'Sapphiro'):  r'icici.*sapphiro|sapphiro.*icici|sapphiro|3747',
-        ('SBI', 'BPCL-Octane'): r'bpcl|sbi.*octane|octane.*sbi|9435',
+        ('ICICI', 'Sapphiro'):  r'icici.*sapphiro|sapphiro.*icici|sapphiro',
+        ('SBI', 'BPCL-Octane'): r'bpcl|sbi.*octane|octane.*sbi',
         ('SBM', 'Global'):      r'sbm.*global|global.*sbm|niyo.*global|sbniyocr|global.credit|your.global.credit',
         ('HSBC', 'Premier'):    r'hsbc.*premier|premier.*hsbc|hsbc',
-        ('YES', 'Reserv'):      r'yes.?bank.*reserv|reserv.*yes|yes_bank_reserv|400054',
+        ('YES', 'Reserv'):      r'yes.?bank.*reserv|reserv.*yes|yes_bank_reserv',
     }
 
     for (bank, card_type), pattern in patterns.items():
@@ -400,23 +401,81 @@ def extract_bank_and_card_type(filename):
 
     return None, None
 
-def choose_folder(original_name, decrypted_pdf):
+CARDS_ENV = 'PASK_CC_SETTINGS_PATH'
+
+
+def load_card_list():
+    """(cards, problem). cards is None when no card list is available; problem then
+    says why (None when the script was run without a settings path). Never digits."""
+    sp = os.environ.get(CARDS_ENV, '').strip()
+    if not sp:
+        return None, None
+    from agents import cc_cards
+    try:
+        return cc_cards.load_for_settings(sp), None
+    except cc_cards.CardListError as exc:
+        return None, str(exc)
+
+
+def choose_folder_why(original_name, decrypted_pdf, cards=None):
+    """(bank, card_type, refusal). refusal is None, or the reason the file was NOT placed
+    (then the folder is Unknown-Unknown). Never silent: a disagreement is a refusal.
+
+    With a card list: the file name's digits (an exact 4-digit token) and a masked card
+    number printed in the PDF are both read against it. A printed number that is not
+    listed, or that points at a different card than the file name, is refused; nothing
+    printed falls back to the name."""
+    bank, card_type = extract_bank_and_card_type(original_name)
+    name_folder = (bank, card_type) if bank and card_type else None
+    if cards:
+        from agents import cc_cards
+        named = {c.folder for c in cc_cards.cards_named_in(original_name, cards)}
+        if len(named) > 1:
+            return 'Unknown', 'Unknown', 'the file name carries digits of more than one listed card'
+        if named:
+            f = next(iter(named))
+            if name_folder and name_folder != f:
+                return 'Unknown', 'Unknown', 'the file name words and its card digits point at different cards'
+            name_folder = f
+        try:
+            from agents.skill_cc_sort.completeness import read_page1_text
+            printed = cc_cards.printed_last4s(read_page1_text(decrypted_pdf) or '')
+        except Exception:
+            printed = []
+        if printed:
+            idx = cc_cards.index_by_last4(cards)
+            folders = set()
+            for d in printed:
+                c = idx.get(d)
+                if c is None:
+                    return 'Unknown', 'Unknown', 'a card number printed in the statement is not on the card list'
+                folders.add(c.folder)
+            if len(folders) > 1:
+                return 'Unknown', 'Unknown', 'the card numbers printed in the statement belong to different cards'
+            f = next(iter(folders))
+            if name_folder and name_folder != f:
+                return 'Unknown', 'Unknown', 'the card number printed in the statement disagrees with the file name'
+            return f[0], f[1], None
+    if name_folder:
+        return name_folder[0], name_folder[1], None
+    try:
+        from agents.skill_cc_sort.completeness import non_statement_title
+        if non_statement_title(decrypted_pdf):
+            return 'Not', 'A-Statement', None
+    except Exception:
+        pass
+    return 'Unknown', 'Unknown', None
+
+
+def choose_folder(original_name, decrypted_pdf, cards=None):
     """(bank, card_type) for the destination folder <bank>-<card_type>.
 
     CC-07: a file whose bank/card is not recognised is checked against the
     shared "not a statement" rule (Credit Card Transactions' non_statement_reason:
     terms leaflets, year-end summaries). Those go to Not-A-Statement, never to
     Unknown-Unknown, so they are not reported as "bank not recognised"."""
-    bank, card_type = extract_bank_and_card_type(original_name)
-    if bank and card_type:
-        return bank, card_type
-    try:
-        from agents.skill_cc_sort.completeness import non_statement_title
-        if non_statement_title(decrypted_pdf):
-            return 'Not', 'A-Statement'
-    except Exception:
-        pass
-    return 'Unknown', 'Unknown'
+    b, c, _why = choose_folder_why(original_name, decrypted_pdf, cards)
+    return b, c
 
 def find_statement_csvs(input_path):
     """CC-22: ICICI statement CSV exports under the input folder. A CSV is not encrypted, so it is
@@ -515,8 +574,15 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
         'duplicates_removed': 0,
         'organization': defaultdict(int),
         'checksums': {},
+        'refused': [],
         'input_type': None
     }
+
+    # CC-28: the card list. Without it PDFs are placed by the words in the file name only
+    # and CSVs are refused (a CSV can only be placed by its card digits).
+    cards, cards_problem = load_card_list()
+    if cards_problem:
+        print(f"[WARN] Card list not usable: {cards_problem}")
 
     # Detect input type
     input_type = detect_input_type(input_path)
@@ -627,7 +693,10 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
         file_hash = calculate_md5(str(decrypted_pdf))
 
         # Extract bank and card type
-        bank, card_type = choose_folder(original_pdf.name, decrypted_pdf)
+        bank, card_type, refusal = choose_folder_why(original_pdf.name, decrypted_pdf, cards)
+        if refusal:
+            results['refused'].append({'file': original_pdf.name, 'reason': refusal})
+            print(f"  [REFUSED] {original_pdf.name[:50]}: {refusal}")
 
         bank_folder = decrypted_dir / f"{bank}-{card_type}"
         bank_folder.mkdir(parents=True, exist_ok=True)
@@ -659,11 +728,14 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
         results['checksums'][str(decrypted_pdf.relative_to(output_path))] = file_hash
 
     # CC-22: route each CSV by the masked card numbers inside it (never by name or row count).
-    from agents.skill_cc_sort.icici_csv import card_folder
+    from agents.skill_cc_sort.icici_csv import card_folder_why
     csv_hashes = set()
     for csv_path in csv_files:
         file_hash = calculate_md5(str(csv_path))
-        bank, card_type = card_folder(csv_path)
+        bank, card_type, refusal = card_folder_why(csv_path, cards)
+        if refusal:
+            results['refused'].append({'file': csv_path.name, 'reason': refusal})
+            print(f"  [REFUSED] {csv_path.name[:50]}: {refusal}")
         if file_hash in csv_hashes:
             dup_folder = duplicates_dir / f"{bank}-{card_type}"
             dup_folder.mkdir(parents=True, exist_ok=True)
@@ -693,7 +765,9 @@ def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False,
     # CC-01: the agent's completeness check needs to know what failed to
     # decrypt (file names only -- no passwords, no contents).
     with open(output_path / 'sort_results.json', 'w') as f:
-        json.dump({'failed_decryption': list(results['failed_decryption'])}, f, indent=2)
+        json.dump({'failed_decryption': list(results['failed_decryption']),
+                   'refused': list(results['refused']),
+                   'cards_problem': cards_problem}, f, indent=2)
 
     return results
 

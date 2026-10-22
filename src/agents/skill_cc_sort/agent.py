@@ -7,6 +7,7 @@ source mode we use subprocess. Pre-flight dependency checks are deterministic
 (no language model).
 """
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -48,6 +49,7 @@ def run(
     custom_end: str = "",
     config_path: str = "config.yaml",
     model_override: str = None,
+    settings_path: str = "",
 ) -> str:
     """
     Decrypt + sort raw CC PDFs/MSGs into organized folders under output_folder.
@@ -73,16 +75,34 @@ def run(
     # scripts/extract_sort_cc_pdfs.py.
     shown = [input_folder, output_folder] + (["<password hidden>"] if password else [])
     print(f"\n[Running] {SCRIPT.name} {' '.join(shown)}\n")
-    rc = _run_script(SCRIPT, args)
+    # CC-28: the script reads the card list (cc_cards.yaml, beside the settings file).
+    # It runs as a subprocess, so the settings path travels in the environment.
+    _env = "PASK_CC_SETTINGS_PATH"
+    _saved = os.environ.get(_env)
+    if settings_path:
+        os.environ[_env] = str(settings_path)
+    else:
+        os.environ.pop(_env, None)
+    try:
+        rc = _run_script(SCRIPT, args)
+    finally:
+        if _saved is None:
+            os.environ.pop(_env, None)
+        else:
+            os.environ[_env] = _saved
     if rc != 0:
         return f"Sort failed with exit code {rc}. Check output above for details."
 
     out_dir = Path(output_folder)
     failed: list[str] = []
+    refused: list[dict] = []
+    cards_problem = None
     unreadable = False
     try:
-        failed = list(json.loads((out_dir / "sort_results.json").read_text(encoding="utf-8"))
-                      .get("failed_decryption", []))
+        _res = json.loads((out_dir / "sort_results.json").read_text(encoding="utf-8"))
+        failed = list(_res.get("failed_decryption", []))
+        refused = list(_res.get("refused", []))
+        cards_problem = _res.get("cards_problem")
     except Exception:
         unreadable = True   # never a silent success: decrypt failures may be missing
 
@@ -95,7 +115,14 @@ def run(
                                            results_unreadable=unreadable)
     except ValueError as e:
         return f"ERROR: {e}"
-    issues = report.issues
+    issues = list(report.issues)
+    # CC-28: a file refused because of its card digits is never placed silently.
+    for r in refused:
+        issues.append(f"{r.get('file', '?')} was not placed on a card: {r.get('reason', '')}. "
+                      f"It is in Unknown-Unknown.")
+    if cards_problem:
+        issues.append(f"The card list was not used: {cards_problem}. Statement CSVs cannot be "
+                      f"placed without it, and PDFs were placed by the words in their file name only.")
     body = report.panel_text()
     try:
         (out_dir / "completeness_report.txt").write_text(report.full_text() + "\n", encoding="utf-8")

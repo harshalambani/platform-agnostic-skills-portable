@@ -25,6 +25,18 @@ def _load_script():
     return mod
 
 
+def load_cards(settings_path):
+    """(cards, problem) from cc_cards.yaml beside the settings file. cards is None, with the
+    reason in problem, when the list is missing or refused; never an empty list in its place."""
+    from agents import cc_cards
+    if not settings_path:
+        return None, None       # run without a settings path (a direct call): the card list is not used
+    try:
+        return cc_cards.load_for_settings(settings_path), None
+    except cc_cards.CardListError as exc:
+        return None, str(exc)
+
+
 def run(
     pdf_dir: str,
     output_excel: str,
@@ -33,6 +45,7 @@ def run(
     custom_end: str = "",
     config_path: str = "config.yaml",
     model_override: str = None,
+    settings_path: str = "",
 ) -> str:
     """
     Extract CC transactions from organized PDFs and write an Excel workbook.
@@ -60,7 +73,8 @@ def run(
     output_path = Path(output_excel)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     mod = _load_script()
-    result = mod.run_extraction(folder, output_path, start, end, label)
+    cards, cards_problem = load_cards(settings_path)
+    result = mod.run_extraction(folder, output_path, start, end, label, cards, cards_problem)
     return result.message
 
 

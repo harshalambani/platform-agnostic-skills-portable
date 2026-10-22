@@ -35,12 +35,6 @@ MASK_RX = re.compile(r"^(\d{4})\s+([Xx*]{4})\s+([Xx*]{4})\s+(\d{3,4})$")
 AMOUNT_RX = re.compile(r"^-?\d{1,3}(?:,\d{3})*\.\d{2}$|^-?\d+\.\d{2}$")
 INT_RX = re.compile(r"^-?\d+$")
 
-# Sapphiro is two cards (one Amex, one Mastercard) on one account and one bill.
-# The first digit group below marks a Sapphiro card when a file carries only one
-# card. 3747 is the Sapphiro Amex. 4315 is the Amazon Visa, NOT Sapphiro, so it
-# must never be listed here.
-SAPPHIRO_DIGITS = ("3747",)
-
 
 class CsvRefused(ValueError):
     """The file is not an ICICI statement CSV this reader can read exactly."""
@@ -221,33 +215,50 @@ def _try_date(text: str) -> date | None:
         return None
 
 
-def identify_card(masks: list[str]) -> tuple[str | None, str]:
-    """(card_type, reason). Two cards on two networks = Sapphiro; one card =
-    Amazon unless its digits are Sapphiro's. Never from row count or filename.
-    card_type is None when the file cannot be placed (reason says why)."""
+def identify_card(masks: list[str], cards) -> tuple[str | None, str]:
+    """(card_type, reason). Each masked number's last group is looked up in the card
+    list (cc_cards.yaml): a 4-digit group by exact match, an Amex 3-digit group only
+    when exactly one listed last4 ends with it. Every number must be listed, and all
+    must belong to one ICICI card (Sapphiro lists two numbers). Never from row count,
+    filename or a default: card_type is None when the file cannot be placed, and the
+    reason says why (it never carries card digits)."""
+    from agents import cc_cards
     masks = list(dict.fromkeys(masks))
     if not masks:
         return None, "no masked card number in the file"
-    if len(masks) == 2:
-        nets = {network_of(m) for m in masks}
-        if len(nets) == 2 and "Unknown" not in nets:
-            return "Sapphiro", ""
-        return None, "two card numbers but not on two different networks"
-    if len(masks) == 1:
-        m = MASK_RX.match(masks[0])
-        if m and m.group(1) in SAPPHIRO_DIGITS:
-            return "Sapphiro", ""
-        return "Amazon", ""
-    return None, f"{len(masks)} card numbers in one file"
+    if cards is None:
+        return None, "the card list (cc_cards.yaml) is not available"
+    found = []
+    for mk in masks:
+        m = MASK_RX.match(mk.strip())
+        if not m:
+            return None, "a card number in the file is not in the expected masked form"
+        last = m.group(4)
+        card = (cc_cards.card_for_last4(cards, last) if len(last) == 4
+                else cc_cards.card_for_tail(cards, last))
+        if card is None:
+            return None, "a card number in the file is not on the card list"
+        if card not in found:
+            found.append(card)
+    if len(found) > 1:
+        return None, f"{len(masks)} card numbers in one file belong to different cards"
+    if found[0].bank != "ICICI":
+        return None, "the card in the file is listed under a bank other than ICICI"
+    return found[0].card, ""
 
 
-def card_folder(path) -> tuple[str, str]:
-    """(bank, card_type) for CC Sort. ('Unknown', 'Unknown') when the file cannot
-    be read or placed; Credit Card Transactions then reports it."""
+def card_folder_why(path, cards) -> tuple[str, str, str]:
+    """(bank, card_type, reason). ('Unknown', 'Unknown', why) when the file cannot be
+    read or placed; Credit Card Transactions then reports it."""
     try:
-        card_type, _why = identify_card(parse_icici_csv(path).masks)
-    except CsvRefused:
-        return "Unknown", "Unknown"
+        card_type, why = identify_card(parse_icici_csv(path).masks, cards)
+    except CsvRefused as exc:
+        return "Unknown", "Unknown", str(exc)
     if card_type is None:
-        return "Unknown", "Unknown"
-    return "ICICI", card_type
+        return "Unknown", "Unknown", why
+    return "ICICI", card_type, ""
+
+
+def card_folder(path, cards) -> tuple[str, str]:
+    """(bank, card_type) for CC Sort; see card_folder_why for the reason."""
+    return card_folder_why(path, cards)[:2]

@@ -1,4 +1,4 @@
-"""tests/test_cc25_sapphiro_filename.py -- CC-25: 4315 is the Amazon Visa's first group, never Sapphiro."""
+"""tests/test_cc25_sapphiro_filename.py -- CC-25 (reworked by CC-28): card digits in a filename come from the card list."""
 from __future__ import annotations
 
 import importlib.util
@@ -17,11 +17,21 @@ sys.modules[_spec.name] = sort
 _spec.loader.exec_module(sort)
 
 
-def test_a_filename_with_4315_is_never_filed_as_sapphiro():                  # NEGATIVE
-    assert sort.extract_bank_and_card_type("ICICI_4315XXXXXXXX0000_statement.pdf") != ("ICICI", "Sapphiro")
-    assert sort.extract_bank_and_card_type("4315_statement.pdf") != ("ICICI", "Sapphiro")
+from agents.cc_cards import Card  # noqa: E402
+
+CARDS = [Card("ICICI", "Sapphiro", ("1111",), "", True), Card("ICICI", "Amazon", ("3333",), "", True)]
 
 
-def test_a_filename_with_3747_is_still_sapphiro():
-    assert sort.extract_bank_and_card_type("ICICI_3747XXXXXXX000_statement.pdf") == ("ICICI", "Sapphiro")
+def test_no_card_digits_live_in_the_code():                                  # NEGATIVE
+    # CC-28: digits come from the card list; a bare digit filename is never filed by a built-in pattern
+    assert sort.extract_bank_and_card_type("ICICI_3333XXXXXXXX0000_statement.pdf") == (None, None) or         sort.extract_bank_and_card_type("ICICI_3333XXXXXXXX0000_statement.pdf")[1] != "Sapphiro"
+    assert sort.extract_bank_and_card_type("9999_statement.pdf") == (None, None)
+
+
+def test_a_listed_amazon_number_is_never_filed_as_sapphiro(tmp_path):        # NEGATIVE
+    b, c, why = sort.choose_folder_why("ICICI_3333_statement.pdf", str(tmp_path / "x.pdf"), CARDS)
+    assert (b, c, why) == ("ICICI", "Amazon", None)
+
+
+def test_the_sapphiro_word_still_files_without_digits():
     assert sort.extract_bank_and_card_type("icici sapphiro april.pdf") == ("ICICI", "Sapphiro")

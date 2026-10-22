@@ -15,6 +15,7 @@ from tests.test_cc_spend_booking import BANK, FOOD, book_pay, go
 
 m = t22.m
 MC, AMEX, SOLO = t22.MC, t22.AMEX, t22.SOLO
+_CARDS = t22.CARDS
 
 BLOCKS = [
     (MC, [("05-Apr-25", "SHOP ONE MUMBAI", "1,200.50"),
@@ -30,7 +31,7 @@ def _src(tmp_path, blocks=BLOCKS, folder="ICICI-Sapphiro", name="s.csv"):
 
 
 def _res(d):
-    return m.run_extraction(d, d / "x.xlsx", date(2025, 4, 1), date(2025, 5, 31))
+    return m.run_extraction(d, d / "x.xlsx", date(2025, 4, 1), date(2025, 5, 31), cards=_CARDS)
 
 
 def _book(work, monkeypatch, res, txns=None):

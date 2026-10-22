@@ -40,6 +40,8 @@ R_BEFORE_RANGE = "settles a statement from before the range"
 R_NO_PRIOR = "settles a statement that is not among the statements read"
 R_AMBIGUOUS = "ambiguous: more than one possible match"
 R_PARTLY = "part of a payment that does not cover the statement"
+R_CARD_CONFLICT = "the bank narration carries the digits of {named}, but the statement line it fits is on {other}; not booked"
+R_CARD_TWO = "the bank narration carries the digits of more than one listed card; not booked"
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class MatchOutcome:
     lines_unmatched: list = field(default_factory=list)
     payments_unmatched: list = field(default_factory=list)
     unmatched_reason: dict = field(default_factory=dict)   # payment guid -> reason
+    conflicts: list = field(default_factory=list)          # CC-28: {"payment", "named", "line"}: narration card vs line card
 
 
 def _day(d):
@@ -122,13 +125,48 @@ def _subset_fit(line: PayLine, parts, cred_max: float = CRED_MAX_OVERAGE):
     return None
 
 
-def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERAGE) -> MatchOutcome:
+def narration_cards(payments: list, cards) -> dict:
+    """CC-28: {payment guid: [Card, ...]} for the payments whose narration carries the digits
+    of a listed card. Only digits name a card: no card is ever taken from a word."""
+    if not cards:
+        return {}
+    from agents import cc_cards
+    out = {}
+    for p in payments:
+        named = cc_cards.cards_named_in(p.description or "", cards)
+        if named:
+            out[p.guid] = named
+    return out
+
+
+def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERAGE,
+                   cards=None) -> MatchOutcome:
     out = MatchOutcome()
     cand: dict = {i: [] for i in range(len(lines))}
     back: dict = {p.guid: [] for p in payments}
+    named = narration_cards(payments, cards)
+    barred: dict = {}           # payment guid -> reason, for a payment that fits only against another card
+
+    def allowed(ln, p) -> bool:
+        """CC-28: a payment whose narration carries a listed card's digits may only settle that card."""
+        nc = named.get(p.guid)
+        return not nc or {c.label for c in nc} == {getattr(ln.stmt, "card", None)}
+
     for i, ln in enumerate(lines):
         for p in payments:
             if single_fit(ln, p, cred_max):
+                nc = named.get(p.guid)
+                if nc:
+                    labels = {c.label for c in nc}
+                    if len(labels) > 1:
+                        barred[p.guid] = R_CARD_TWO
+                        out.conflicts.append({"payment": p, "named": sorted(labels), "line": ln.stmt.card})
+                        continue
+                    if next(iter(labels)) != getattr(ln.stmt, "card", None):
+                        barred.setdefault(p.guid, R_CARD_CONFLICT.format(
+                            named=next(iter(labels)), other=getattr(ln.stmt, "card", "another card")))
+                        out.conflicts.append({"payment": p, "named": sorted(labels), "line": ln.stmt.card})
+                        continue
                 cand[i].append(p)
                 back[p.guid].append(i)
 
@@ -153,7 +191,7 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
         if any(not set(back[g]) <= set(idxs) for g in guids):
             continue
         pairs = list(zip(sorted(idxs, key=lambda i: (lines[i].date, i)), sorted(ps, key=lambda p: (p.date, p.guid))))
-        if any(single_fit(lines[i], p, cred_max) != "exact" for i, p in pairs):
+        if any(single_fit(lines[i], p, cred_max) != "exact" or not allowed(lines[i], p) for i, p in pairs):
             continue
         for i, p in pairs:
             out.pairings.append(Pairing(lines[i], (p,), "exact", 0.0))
@@ -192,7 +230,7 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
         gp = sorted((p for p in payments if p.guid in g_pays), key=lambda p: (p.date, p.guid))
         same_day = []
         for perm in itertools.permutations(gl):
-            if all(single_fit(lines[j], p, cred_max) for j, p in zip(perm, gp)):
+            if all(single_fit(lines[j], p, cred_max) and allowed(lines[j], p) for j, p in zip(perm, gp)):
                 if all(lines[j].date == p.date for j, p in zip(perm, gp)):
                     same_day.append(perm)
         if len(same_day) != 1:
@@ -273,7 +311,7 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
     for i, ln in enumerate(lines):
         if i in done_lines:
             continue
-        near = [p for p in free if abs((p.date - ln.date).days) <= PART_WINDOW_DAYS]
+        near = [p for p in free if abs((p.date - ln.date).days) <= PART_WINDOW_DAYS and allowed(ln, p)]
         near = sorted(near, key=lambda p: abs((p.date - ln.date).days))[:PART_POOL_CAP]
         found = []
         for n in range(PART_MIN_PARTS, PART_MAX_PARTS + 1):
@@ -312,7 +350,10 @@ def match_payments(lines: list, payments: list, cred_max: float = CRED_MAX_OVERA
         if p.guid in paired:
             continue
         out.payments_unmatched.append(p)
-        out.unmatched_reason[p.guid] = R_AMBIGUOUS if p.guid in amb_guids else _why_unmatched(p, lines)
+        if p.guid in barred and not back[p.guid]:
+            out.unmatched_reason[p.guid] = barred[p.guid]
+        else:
+            out.unmatched_reason[p.guid] = R_AMBIGUOUS if p.guid in amb_guids else _why_unmatched(p, lines)
     return out
 
 

@@ -21,6 +21,11 @@ for _p in (str(SRC), str(ROOT)):
 
 from agents.skill_cc_sort import completeness as comp  # noqa: E402
 from agents.skill_cc_sort import icici_csv as ic  # noqa: E402
+from agents.cc_cards import Card  # noqa: E402
+
+# CC-28: the card list. Made-up digits only. Sapphiro lists its two numbers.
+CARDS = [Card("ICICI", "Sapphiro", ("1111", "0222"), "", True),
+         Card("ICICI", "Amazon", ("3333", "0000"), "", True)]
 
 
 def _load(name, path):
@@ -116,28 +121,28 @@ def test_billing_sign_differing_from_amount_refuses_file(tmp_path):
 
 
 def test_card_identity_from_masks_not_filename_or_rows(tmp_path):
-    assert ic.identify_card([MC, AMEX])[0] == "Sapphiro"
-    assert ic.identify_card([SOLO])[0] == "Amazon"
-    assert ic.identify_card([MC, MC])[0] == "Amazon"      # one distinct card
-    assert ic.identify_card([])[0] is None
-    assert ic.identify_card([MC, AMEX, SOLO])[0] is None
+    assert ic.identify_card([MC, AMEX], CARDS)[0] == "Sapphiro"
+    assert ic.identify_card([SOLO], CARDS)[0] == "Amazon"
+    assert ic.identify_card([MC, MC], CARDS)[0] == "Sapphiro"      # one distinct card
+    assert ic.identify_card([], CARDS)[0] is None
+    assert ic.identify_card([MC, AMEX, SOLO], CARDS)[0] is None
     one_row_two_cards = _csv([(MC, [("05-Apr-25", "X", "1.00")]), (AMEX, [])])
     p = _write(tmp_path, "amazon-named", "amazon_icici.csv", one_row_two_cards)
-    assert ic.card_folder(p) == ("ICICI", "Sapphiro")
+    assert ic.card_folder(p, CARDS) == ("ICICI", "Sapphiro")
     many_rows_one_card = _csv([(SOLO, [("05-Apr-25", f"M{i}", "1.00") for i in range(9)])])
     p2 = _write(tmp_path, "x", "sapphiro.csv", many_rows_one_card)
-    assert ic.card_folder(p2) == ("ICICI", "Amazon")
+    assert ic.card_folder(p2, CARDS) == ("ICICI", "Amazon")
 
 
 def test_unreadable_csv_routes_unknown(tmp_path):
     p = _write(tmp_path, "a", "a.csv", _csv(SAPPH, header="a,b,c"))
-    assert ic.card_folder(p) == ("Unknown", "Unknown")
+    assert ic.card_folder(p, CARDS) == ("Unknown", "Unknown")
 
 
 # ---- Credit Card Transactions ----
 
 def _run(tmp, **kw):
-    return m.run_extraction(tmp, Path(tmp) / "out.xlsx", kw.get("start"), kw.get("end"))
+    return m.run_extraction(tmp, Path(tmp) / "out.xlsx", kw.get("start"), kw.get("end"), cards=CARDS)
 
 
 def test_both_networks_land_on_one_account_with_network_column(tmp_path):
@@ -344,7 +349,7 @@ def test_completeness_unreadable_csv_is_not_coverage(tmp_path):
     assert card.statements == 0 and card.not_statements == ["s.csv"]
 
 
-def test_sort_routes_csv_by_card_numbers(tmp_path):
+def test_sort_routes_csv_by_card_numbers(tmp_path, monkeypatch):
     sort = _load("extract_sort_cc_pdfs_cc22", SORT_SCRIPT)
     inp = tmp_path / "in"
     inp.mkdir()
@@ -352,6 +357,12 @@ def test_sort_routes_csv_by_card_numbers(tmp_path):
     (inp / "other.csv").write_text("a,b\n1,2\n", encoding="utf-8")        # not a statement: ignored
     assert sort.detect_input_type(inp) == "csv"
     out = tmp_path / "out"
+    settings = tmp_path / "settings"
+    settings.mkdir()
+    (settings / "cc_cards.yaml").write_text(
+        'cards:\n  - bank: "ICICI"\n    card: "Sapphiro"\n    last4: ["1111", "0222"]\n'
+        '    holder: ""\n    active: true\n', encoding="utf-8")
+    monkeypatch.setenv("PASK_CC_SETTINGS_PATH", str(settings / "config.yaml"))
     res = sort.organize_pdfs(str(inp), str(out), password=None)
     assert (out / "Decrypted_PDFs_Correct" / "ICICI-Sapphiro" / "random_name.csv").exists()
     assert res["organization"] == {"ICICI-Sapphiro": 1}
@@ -411,30 +422,27 @@ def test_exact_header_only_after_dated_rows_is_refused(tmp_path):
     assert "before any statement header" in str(e.value)
 
 
-# ---- one-card identity: Amazon Visa 4315 is never Sapphiro ----
+# ---- one-card identity comes from the card list (CC-28) ----
 
-def test_one_card_visa_4315_is_amazon_never_sapphiro(tmp_path):
-    visa = "4315 XXXX XXXX 0000"
-    assert ic.identify_card([visa]) == ("Amazon", "")
-    assert ic.identify_card([visa])[0] != "Sapphiro"                  # NEGATIVE
+def test_one_card_visa_is_amazon_never_sapphiro(tmp_path):
+    visa = "4000 XXXX XXXX 0000"
+    assert ic.identify_card([visa], CARDS) == ("Amazon", "")
+    assert ic.identify_card([visa], CARDS)[0] != "Sapphiro"                  # NEGATIVE
     p = _write(tmp_path, "x", "v.csv", _csv([(visa, [("05-Apr-25", "SHOP", "10.00")])]))
-    assert ic.card_folder(p) == ("ICICI", "Amazon")
+    assert ic.card_folder(p, CARDS) == ("ICICI", "Amazon")
 
 
-def test_one_card_amex_3747_is_sapphiro(tmp_path):
-    amex = "3747 XXXX XXXX 000"
-    assert ic.identify_card([amex])[0] == "Sapphiro"
+def test_one_card_amex_with_a_three_digit_group_is_matched_by_its_tail(tmp_path):
+    amex = "3700 XXXX XXXX 222"
+    assert ic.identify_card([amex], CARDS)[0] == "Sapphiro"
     p = _write(tmp_path, "x", "a.csv", _csv([(amex, [("05-Apr-25", "SHOP", "10.00")])]))
-    assert ic.card_folder(p) == ("ICICI", "Sapphiro")
+    assert ic.card_folder(p, CARDS) == ("ICICI", "Sapphiro")
 
 
 def test_amex_plus_mastercard_is_still_sapphiro():
-    assert ic.identify_card([MC, AMEX])[0] == "Sapphiro"
+    assert ic.identify_card([MC, AMEX], CARDS)[0] == "Sapphiro"
 
 
-def test_no_visa_first_group_is_in_the_sapphiro_digit_set():          # NEGATIVE guard
-    assert ic.SAPPHIRO_DIGITS == ("3747",)
-    assert "4315" not in ic.SAPPHIRO_DIGITS
-    assert all(not d.startswith("4") for d in ic.SAPPHIRO_DIGITS)
-    # a last group equal to a Sapphiro digit group does not make a card Sapphiro
-    assert ic.identify_card(["4000 XXXX XXXX 3747"])[0] == "Amazon"
+def test_first_digit_group_is_never_used():                                  # NEGATIVE
+    # a first group equal to a listed last4 does not place the card; only the LAST group does
+    assert ic.identify_card(["1111 XXXX XXXX 9999"], CARDS)[0] is None
