@@ -9,6 +9,8 @@ Every journal is two splits against the Credit Card Payment account (CCP):
   fee            Dr Bank Service Charge     Cr CCP
   fee reversal   Dr CCP                     Cr Bank Service Charge
   CRED overage   Dr CCP                     Cr Drawings
+  move (CC-39)   Dr card sub-account        Cr CCP     (one per bank payment, once the card is split)
+  prepayment     Dr chosen Drawings account Cr CCP     (CC-29, a payment the user marked)
 
 EMI interest (to the entity's EMI interest account) and the EMI processing fee / GST
 (as fees) are journalled; HSBC instalment principal is journalled as a spend. EMI conversion credits, the
@@ -32,13 +34,16 @@ K_SPEND, K_REFUND, K_CASHBACK = "spend", "refund", "cashback"
 K_CASHBACK_REV = "cashback_reversal"   # CC-32: a cashback Dr row, the exact reverse of a cashback credit
 K_FEE, K_FEE_REV, K_OVERAGE = "fee", "fee_reversal", "cred_overage"
 K_EMI_INT = "emi_interest"
+K_MOVE = "ccp_move"            # CC-39: a bank payment moved from the pool to the card's sub-account
+K_PREPAY = "prepayment"        # CC-29: a marked unmatched payment, booked Dr Drawings / Cr CCP
+POOL_ONLY_KINDS = (K_MOVE, K_PREPAY)    # never mapped, never matched against hand-booked expenses
 # EMI kinds that ARE booked (user decision 10 Oct); every other emi_* kind is never booked.
 EMI_FEE_KINDS = ("emi_processing_fee", "gst_on_emi")
 EMI_UNVALIDATED = ("UNVALIDATED: EMI wording has not been checked against a real statement - "
                    "check every EMI row booked below before importing.")
 KIND_LABEL = {K_SPEND: "Spend", K_REFUND: "Refund", K_CASHBACK: "Cashback", K_CASHBACK_REV: "Cashback reversal", K_FEE: "Fee",
               K_FEE_REV: "Fee reversal", K_OVERAGE: "CRED overage",
-              K_EMI_INT: "EMI interest"}
+              K_EMI_INT: "EMI interest", K_MOVE: "Payment moved to card", K_PREPAY: "Corporate card prepayment"}
 
 ST_READY = "READY"
 ST_BOOKED = "ALREADY BOOKED"
@@ -78,11 +83,27 @@ class Journal:
     emi_validated: bool = False  # the EMI wording is the HSBC layout, checked against a real statement shape
     row_id: int = 0              # id() of the statement row it came from
     untied: str = ""             # CC-26: the tie-out result of its statement when that did not pass ("" = tied)
+    transfer: str = ""           # CC-39: the pool-side account; "" = the CCP parent, else the card's sub-account
 
     @property
     def ccp_effect(self) -> float:
-        """Effect on the CCP account (debit positive)."""
+        """Effect on the pool as if nothing were split (debit positive): the figure the parent
+        alone showed before CC-39. A move only shifts money inside the pool, so it is 0."""
+        if self.kind == K_MOVE:
+            return 0.0
         return round(-self.amount if self.side == "W" else self.amount, 2)
+
+    def pool_legs(self, ccp_path: str) -> dict:
+        """{account path: signed amount} for each of this journal's two legs that sits in the pool
+        (the parent or any account below it). What the book will actually show once imported."""
+        prefix = ccp_path + ":"
+        a = self.amount if self.side == "W" else -self.amount          # the Account leg: debit +
+        legs = {self.account: a, (self.transfer or ccp_path): -a}
+        out: dict = {}
+        for path, v in legs.items():
+            if path == ccp_path or path.startswith(prefix):
+                out[path] = round(out.get(path, 0.0) + v, 2)
+        return out
 
 
 def fy_start(d: date) -> date:
@@ -303,6 +324,7 @@ def _same_payee(j, t) -> bool:
 
 
 def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
+    # CC-39: the pool is the parent AND every account below it; a card sub-account is not an expense.
     """A book transaction whose Num equals the journal's Num means the journal is
     ALREADY BOOKED (definite). The fallback catches a hand-booked entry: a book
     transaction (including one this skill numbered on an earlier run, unless it was exact-matched
@@ -315,6 +337,9 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     candidate (RF-1). The account the mapper would choose is irrelevant, and an
     unmapped journal is checked too. Pairing is one-to-one, nearest date first,
     and only withholds with a warning."""
+    def in_pool(p: str) -> bool:
+        return p == ccp_path or p.startswith(ccp_path + ":")
+
     by_num = {t.num: t for t in txns if t.num}
     claimed_guids: set = set()
     for j in journals:
@@ -325,11 +350,11 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     # CCSB-numbered entries are candidates too (an earlier run or release may have
     # hashed a different Num); only those exact-matched in this run are excluded.
     cands = [t for t in txns if t.guid not in claimed_guids
-             and any(p != ccp_path and p.startswith(EXPENSE_PREFIXES) for p, _ in t.splits)]
+             and any(not in_pool(p) and p.startswith(EXPENSE_PREFIXES) for p, _ in t.splits)]
     pairs = []
     for ji, j in enumerate(journals):
-        if j.status != ST_READY:
-            continue
+        if j.status != ST_READY or j.kind in POOL_ONLY_KINDS:
+            continue         # a move / prepayment is recognised by its exact Num only
         want = j.amount if j.side == "W" else -j.amount          # expense side: debit +, credit -
         for t in cands:
             dist = min(abs((t.date - j.real_date).days), abs((t.date - j.date).days))
@@ -337,10 +362,10 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
                 continue
             # CC-33: a hand-booked CRED overage is always Dr CCP / Cr Drawings, so an overage candidate must
             # have a split on CCP; a same-day same-amount Drawings entry that never touched CCP is unrelated
-            if j.kind == K_OVERAGE and not any(p == ccp_path for p, _ in t.splits):
+            if j.kind == K_OVERAGE and not any(in_pool(p) for p, _ in t.splits):
                 continue
             hit = next(((p, v) for p, v in t.splits
-                        if p != ccp_path and p.startswith(EXPENSE_PREFIXES) and abs(v - want) <= 0.005), None)
+                        if not in_pool(p) and p.startswith(EXPENSE_PREFIXES) and abs(v - want) <= 0.005), None)
             if hit is not None:
                 pairs.append((dist, ji, t.guid, t, hit[0]))
     pairs.sort(key=lambda x: (x[0], x[1], x[2]))
@@ -357,3 +382,42 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
                else "a book transaction")
         j.why = (f"{who} on {t.date:%d %b %Y} ({dist} day(s) off) already has {j.amount:,.2f} "
                  f"on {path} ({t.description[:40]})")
+
+
+# ---------------------------------------------------------------------------
+# CC-39 / CC-29: the rows that move or re-route a bank payment
+# ---------------------------------------------------------------------------
+
+def _pool_num(tag: str, guid: str) -> str:
+    return NUM_PREFIX + hashlib.sha1(f"{tag}|{guid}".encode()).hexdigest()[:12]
+
+
+def move_num(payment_guid: str) -> str:
+    """One move per bank payment. The sub-account is not in the key: a payment already moved is
+    recognised in the book whichever account it was moved to."""
+    return _pool_num("ccp-move", payment_guid)
+
+
+def prepay_num(payment_guid: str) -> str:
+    """One prepayment row per bank payment (the Drawings account is not in the key, so changing
+    the account later can never book the same payment twice)."""
+    return _pool_num("ccp-prepay", payment_guid)
+
+
+def prepay_code(payment_guid: str) -> str:
+    """The short code the report prints beside an unmatched payment; the user pastes it to mark it."""
+    return hashlib.sha1(f"ccp-prepay-code|{payment_guid}".encode()).hexdigest()[:8]
+
+
+def move_journal(payment, sub: str, card: str, statement_label: str, source: str, card_label: str) -> Journal:
+    return Journal(num=move_num(payment.guid), kind=K_MOVE, date=payment.date, real_date=payment.date,
+                   description=f"Moves card payment to the {card_label} card account ({payment.date:%d-%b-%Y})",
+                   amount=round(payment.amount, 2), side="W", card=card, statement=statement_label, source=source,
+                   account=sub, confidence="high", match_reason="CC-39 card sub-account")
+
+
+def prepay_journal(payment, account: str) -> Journal:
+    return Journal(num=prepay_num(payment.guid), kind=K_PREPAY, date=payment.date, real_date=payment.date,
+                   description=f"Corporate card prepayment ({payment.date:%d-%b-%Y})",
+                   amount=round(payment.amount, 2), side="W", card="corporate card", statement="",
+                   account=account, confidence="high", match_reason="CC-29 payment marked by the user")

@@ -70,6 +70,12 @@ class RunReport:
     errors: list = field(default_factory=list)
     ai_stop: str = ""                    # CC-11: why the mapper's AI pass stopped ("" = it did not)
     ai_stop_suspense: int = 0            # rows that went to Suspense because it stopped
+    splits: list = field(default_factory=list)          # CC-39: one record per statement booked to a card sub-account
+    split_refused: list = field(default_factory=list)   # CC-39: [(Settlement, sub-account, why)] books nothing
+    pool_failure: str = ""                              # CC-39: the pool tie-out did not tie; no import file is written
+    prepayments: list = field(default_factory=list)     # CC-29: [(BookPayment, Journal)] marked this run
+    prepaid_earlier: list = field(default_factory=list) # CC-29: payments whose prepayment row is already in the book
+    unmatched_codes: dict = field(default_factory=dict) # CC-29: payment guid -> the code that marks it
 
     @property
     def ready(self) -> list:
@@ -86,7 +92,7 @@ class RunReport:
     @property
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
-        return bool(self.ai_stop or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
+        return bool(self.ai_stop or self.pool_failure or self.split_refused or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
                     or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status not in CLOSED_STATUSES for s in self.settlements)
@@ -200,6 +206,19 @@ def payment_statement_block(rep: RunReport) -> str:
     return "\n".join(out)
 
 
+def pool_block(rep: RunReport) -> str:
+    """CC-39: the first thing the reader sees when the pool does not tie or a card's sub-account was refused."""
+    out = []
+    if rep.pool_failure:
+        out.append("RED FLAG: the Credit Card Payment pool does not tie, so NO import file was written. "
+                   f"{rep.pool_failure}. Nothing is booked until this is explained.")
+    for s, sub, why in rep.split_refused:
+        out.append(f"RED FLAG: {s.target.card} {s.target.label} was NOT booked: its card sub-account {sub} "
+                   f"cannot be used ({why}). Fix the account on the Cards screen or in the book; the statement "
+                   f"is not booked against {rep.ccp_path} instead.")
+    return "\n".join(out)
+
+
 def red_flag_block(rep: RunReport) -> str:
     if not rep.unmatched_payments:
         return ""
@@ -207,8 +226,27 @@ def red_flag_block(rep: RunReport) -> str:
              f"(total {money(rep.unmatched_total)}). Money left the bank for a card and no spend is booked "
              f"against it. Nothing here was matched to the nearest statement."]
     for p, reason in sorted(rep.unmatched_payments, key=lambda x: (x[0].date, x[0].amount)):
+        code = rep.unmatched_codes.get(p.guid)
         lines.append(f"  {p.date:%d %b %Y} | {p.bank_account or 'bank account not found'} | {money(p.amount)} | "
-                     f"{'CRED' if p.cred else 'direct'} | {reason}")
+                     f"{'CRED' if p.cred else 'direct'} | {reason}"
+                     + (f" | corporate card prepayment code: {code}" if code else ""))
+    if rep.unmatched_codes:
+        lines.append("  To book a payment above as a corporate card prepayment, paste its code into "
+                     "'Corporate card prepayments' and run again. Nothing is marked for you.")
+    return "\n".join(lines)
+
+
+def prepay_block(rep: RunReport) -> str:
+    if not rep.prepayments and not rep.prepaid_earlier:
+        return ""
+    lines = []
+    if rep.prepayments:
+        lines.append(f"Corporate card prepayments marked ({len(rep.prepayments)}): each is Dr "
+                     f"{rep.prepayments[0][1].account} / Cr {rep.ccp_path} for the payment amount.")
+        for p, j in rep.prepayments:
+            lines.append(f"  {p.date:%d %b %Y} | {money(p.amount)} | {j.status}")
+    if rep.prepaid_earlier:
+        lines.append(f"Already booked as prepayments earlier ({len(rep.prepaid_earlier)}): left out of the matching.")
     return "\n".join(lines)
 
 
@@ -397,6 +435,13 @@ def tie_block(rep: RunReport) -> str:
              f"    of which payments with no statement: {money(t['unmatched'])}",
              f"    of which payments on statements not booked: {money(t['not_booked'])}",
              f"    other: {money(t['other'])}"]
+    if "parent_effect" in t and (t.get("subs_effect") or t.get("subs_before") or rep.splits):
+        lines.append("  Parent + card sub-accounts (CC-39): the pool must change by what the parent alone would have:")
+        lines.append(f"    parent {rep.ccp_path}: these journals {money(t['parent_effect'])}")
+        for pth, v in t["subs_effect"].items():
+            lines.append(f"    sub-account {pth}: these journals {money(v)}")
+        lines.append(f"    parent + sub-accounts: {money(t['effect'])}; parent alone, unsplit: {money(t['old_effect'])}; "
+                     f"difference {money(t['pool_gap'])} -> {'TIES' if t.get('pool_ok') else 'DOES NOT TIE'}")
     for d, text, amt in t.get("other_lines") or []:
         lines.append(f"      {d:%d %b %Y} " if d else "      ")
         lines[-1] += f"{text[:60]}: {money(amt)}"
@@ -405,7 +450,8 @@ def tie_block(rep: RunReport) -> str:
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (held_block(rep), not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (pool_block(rep), held_block(rep), not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep),
+                  prepay_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)
@@ -414,7 +460,8 @@ def build_message(rep: RunReport) -> str:
     n_ready = len(rep.ready)
     if rep.open_items:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
-            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched)
+            + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched) \
+            + len(rep.split_refused) + (1 if rep.pool_failure else 0)
         n += sum(1 for s in rep.settlements if s.status not in CLOSED_STATUSES)
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
@@ -511,7 +558,8 @@ def write_workbook(rep: RunReport, path: str) -> str:
            "Amount", "Card", "Statement", "Status", "Why / note", "Large spend flag", "Confidence", "Match reason",
            "Tie-out"],
           [(j.num, J.KIND_LABEL[j.kind], j.date, j.real_date, j.description,
-            j.account if j.side == "W" else rep.ccp_path, rep.ccp_path if j.side == "W" else j.account,
+            j.account if j.side == "W" else (j.transfer or rep.ccp_path),
+            (j.transfer or rep.ccp_path) if j.side == "W" else j.account,
             j.amount, j.card, j.statement, j.status, "; ".join(x for x in (j.why, j.note) if x), j.flag,
             j.confidence, j.match_reason, "NOT TIED" if j.untied else "") for j in rep.journals],
           first=not rep.untied)
@@ -557,11 +605,21 @@ def write_workbook(rep: RunReport, path: str) -> str:
     sheet("Statements", ["Card", "Statement", "Tie-out", "Settlement", "Detail"], statement_rows(rep))
     t = rep.tie or {}
     sheet("CCP tie-out", ["Line", "Amount"],
-          [("Before (book as it stands)", t.get("before")), ("These journals", t.get("effect")),
+          [("Before (book as it stands; parent + sub-accounts)", t.get("before")), ("These journals", t.get("effect")),
            ("After (residual)", t.get("after")), ("Payments with no statement", t.get("unmatched")),
            ("Payments on statements not booked", t.get("not_booked")), ("Other", t.get("other"))]
           + [(f"  Other: {d:%d %b %Y} {text}" if d else f"  Other: {text}", amt)
-             for d, text, amt in t.get("other_lines") or []])
+             for d, text, amt in t.get("other_lines") or []]
+          + ([("Parent: these journals", t.get("parent_effect"))]
+             + [(f"Sub-account {pth}: these journals", v) for pth, v in (t.get("subs_effect") or {}).items()]
+             + [("Parent + sub-accounts", t.get("effect")), ("Parent alone, unsplit", t.get("old_effect")),
+                ("Difference (must be 0)", t.get("pool_gap"))] if "parent_effect" in t else []))
+    sheet("Card sub-accounts", ["Card", "Statement", "Sub-account", "Bank payment date", "Moved amount", "Move status"],
+          [(rec["card"], rec["statement"], rec["sub"], m.date, m.amount, m.status)
+           for rec in rep.splits for m in rec["moves"]]
+          + [(s.target.card, s.target.label, sub, "", "", f"REFUSED: {why}") for s, sub, why in rep.split_refused])
+    sheet("Prepayments", ["Date", "Amount", "Debit account", "Credit account", "Status"],
+          [(p.date, p.amount, j.account, rep.ccp_path, j.status) for p, j in rep.prepayments])
     sheet("Issues", ["Issue"], ([(f"AI pass stopped: {rep.ai_stop}; {rep.ai_stop_suspense} row(s) in Suspense",)]
                                 if rep.ai_stop else []) + [(i,) for i in rep.issues])
     wb.save(path)

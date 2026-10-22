@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import journal as J
 from . import matcher as M
+from . import split as SP
 from .bookio import CCP_PATH, read_book
 from .report import RunReport, build_message, csv_label, write_workbook
 from .settings_io import resolve_cred_max_overage, resolve_large_spend_threshold
@@ -57,6 +58,45 @@ def _impossible_target(guard, j) -> str:
         return (f"{j.account} is an asset account and was reached by a {j.confidence or 'automatic'} match; "
                 f"only a saved rule of yours may put a card spend on an asset account")
     return ""
+
+
+def _split_target(s, cards, split_from) -> tuple:
+    """(sub-account path or "", an Issue text or ""). A statement is split when its card has an
+    `account` in the card list, ccp_split_from is set, and every bank payment that settled it is dated on
+    or after ccp_split_from. A mixed settlement, or a folder shared by two listed cards, is not split."""
+    if split_from is None or not cards or not s.payments:
+        return "", ""
+    same = [c for c in cards if c.label == s.target.card]
+    if not any(c.account for c in same):
+        return "", ""
+    where = f"{s.target.card} {s.target.label}"
+    if len(same) > 1:
+        return "", (f"{where}: two listed cards share this card folder, so the statement cannot be tied to one "
+                    f"sub-account; it is booked against {CCP_PATH} as before")
+    dates = [p.date for p in s.payments]
+    if all(d < split_from for d in dates):
+        return "", ""
+    if any(d < split_from for d in dates):
+        return "", (f"{where}: its bank payments fall on both sides of ccp_split_from ({split_from:%d %b %Y}); "
+                    f"it is booked against {CCP_PATH} as before")
+    return same[0].account, ""
+
+
+def _reconcile_splits(rep, journals: list) -> None:
+    """A statement already in the book against the parent (its rows carry their Num) is never split now:
+    that would move its payment onto the sub-account while its spends stayed on the parent."""
+    for rec in list(rep.splits):
+        moved_booked = [m for m in rec["moves"] if m.status == J.ST_BOOKED]
+        if moved_booked:
+            continue
+        if any(j.status == J.ST_BOOKED for j in rec["journals"]):
+            for j in rec["journals"]:
+                j.transfer = ""
+            drop = {id(m) for m in rec["moves"]}
+            journals[:] = [j for j in journals if id(j) not in drop]
+            rep.splits.remove(rec)
+            rep.issues.append(f"{rec['card']} {rec['statement']}: already in the book against {CCP_PATH}, so it is "
+                              f"not split and its payment stays in the pool")
 
 
 def _log_line(text: str) -> None:
@@ -166,7 +206,7 @@ def _write_import_csv(ready, path: Path) -> None:
     rows = []
     for j in sorted(ready, key=lambda x: (x.date, x.num)):
         rows.append({"Date": j.date.strftime("%d/%m/%Y"), "Transaction ID": j.num, "Description": j.description,
-                     "Account": j.account, "Transfer Account": CCP_PATH,
+                     "Account": j.account, "Transfer Account": j.transfer or CCP_PATH,
                      IMPORT_DEPOSIT_HEADER: f"{j.amount:.2f}" if j.side == "D" else "",
                      IMPORT_WITHDRAWAL_HEADER: f"{j.amount:.2f}" if j.side == "W" else "",
                      "Balance": "", "Currency": "INR", "Confidence": j.confidence,
@@ -181,7 +221,7 @@ def _write_import_csv(ready, path: Path) -> None:
 
 def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, period: str = "",
         custom_start: str = "", custom_end: str = "", entities_path: str = "", settings_path: str = "",
-        config_path: str = None, model_override: str = None):
+        config_path: str = None, model_override: str = None, prepayment_marks: str = ""):
     from agents.period_picker import resolve_period
     from agents.outputs import ReplyWithOutputs, extra_output
 
@@ -236,6 +276,30 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
     why = guard.blocked_target_reason(CCP_PATH)
     if why:
         return _error(f"ERROR: {CCP_PATH} cannot be used: {why}. Nothing was booked.")
+
+    # ---- CC-39 / CC-29 settings (both come from the card list; both are optional) ----------------
+    split_from = getattr(cards, "split_from", None)
+    prepay_acct = _strip_root(getattr(cards, "prepayment_account", "") or "")
+    mark_tokens = SP.parse_marks(prepayment_marks)
+    if mark_tokens:
+        if cards is None:
+            return _error("ERROR: payments were marked as corporate card prepayments, but the card list "
+                          f"({cc_cards.CARDS_FILENAME}) was not found. Nothing was booked.")
+        if split_from is None:
+            return _error("ERROR: payments were marked as corporate card prepayments, but ccp_split_from is not "
+                          "set in the card list; only payments on or after it can be marked. Nothing was booked.")
+        if not prepay_acct:
+            return _error("ERROR: payments were marked as corporate card prepayments, but prepayment_account is "
+                          "not set in the card list (choose it on the Cards screen). Nothing was booked.")
+        if prepay_acct not in view.paths:
+            return _error(f"ERROR: prepayment_account {prepay_acct!r} is not an account in the book. Nothing was booked.")
+        _pw = guard.blocked_target_reason(prepay_acct)
+        if _pw:
+            return _error(f"ERROR: prepayment_account {prepay_acct!r} cannot be used: {_pw}. Nothing was booked.")
+        _bad_tok = [t for t in mark_tokens if not SP.valid_code(t)]
+        if _bad_tok:
+            return _error("ERROR: a prepayment code is not an 8-character code from the report "
+                          f"({len(_bad_tok)} such value(s)). Nothing was booked.")
 
     threshold, threshold_source = resolve_large_spend_threshold(ent, settings_path)
     try:
@@ -312,6 +376,12 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
 
         # ---- payments ------------------------------------------------------
         pool_pay = _payment_pool(view, start, end)
+        # CC-29: a payment already booked as a prepayment (its row is in the book) is the user's earlier
+        # decision read back, not a new marking. It leaves the pool, so it can never be paired to a card.
+        _book_nums = {t.num for t in view.txns if t.num}
+        rep.prepaid_earlier = [p for p in pool_pay if J.prepay_num(p.guid) in _book_nums]
+        _prepaid_ids = {p.guid for p in rep.prepaid_earlier}
+        pool_pay = [p for p in pool_pay if p.guid not in _prepaid_ids]
         lines = M.pay_lines(res.statements)          # lines on every statement in range; refusal is decided at settlement
         # CC-27: the payment rows of a CSV export are matched to the bank payments by the same rule
         # (same amount tolerance, same date window, one-to-one) in the SAME pool as the PDF lines, so a
@@ -336,6 +406,36 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     if p.in_range:
                         flagged[p.guid] = (p, s.reason)
         rep.unmatched_payments = list(flagged.values())
+
+        # ---- CC-29: payments the user marked as corporate card prepayments -------------------------
+        # Only a payment that no statement line took, in range, on or after ccp_split_from. Nothing is
+        # marked automatically. A code that cannot be applied is reported and books nothing.
+        _paired = {p.guid for pr in outcome.pairings for p in pr.payments}
+        _paired |= {p.guid for s in settlements for p in s.payments}
+        _unpaired = {p.guid for p in outcome.payments_unmatched if p.in_range and p.guid not in _paired}
+        _by_code = {J.prepay_code(p.guid): p for p in pool_pay if p.in_range}
+        prepay_js: dict = {}
+        for tok in mark_tokens:
+            p = _by_code.get(tok)
+            if p is None:
+                rep.issues.append(f"prepayment code {tok}: no bank payment to the card pool in this range has that "
+                                  f"code; nothing was booked for it")
+            elif p.guid in _paired:
+                rep.issues.append(f"prepayment code {tok}: the {p.date:%d %b %Y} payment of {p.amount:,.2f} is paired "
+                                  f"to a statement, so it cannot be a prepayment; nothing was booked for it")
+            elif p.date < split_from:
+                rep.issues.append(f"prepayment code {tok}: the {p.date:%d %b %Y} payment is before ccp_split_from "
+                                  f"({split_from:%d %b %Y}); nothing was booked for it")
+            elif p.guid not in _unpaired:
+                rep.issues.append(f"prepayment code {tok}: the {p.date:%d %b %Y} payment is not an unmatched "
+                                  f"payment; nothing was booked for it")
+            else:
+                prepay_js[p.guid] = J.prepay_journal(p, prepay_acct)
+        rep.unmatched_payments = [(p, why) for p, why in rep.unmatched_payments if p.guid not in prepay_js]
+        rep.prepayments = [(p, prepay_js[p.guid]) for p in sorted(_by_code.values(), key=lambda x: (x.date, x.amount))
+                           if p.guid in prepay_js]
+        rep.unmatched_codes = {p.guid: J.prepay_code(p.guid) for p, _w in rep.unmatched_payments
+                               if p.guid in _unpaired and split_from is not None and p.date >= split_from}
 
         settled_ids = {id(s.target) for s in settlements if s.target is not None}
         run_ids = {id(s) for s in res.statements}
@@ -381,6 +481,23 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             if id(s.target) in untied_ids:
                 for j in js:
                     j.untied = ties_by_id[id(s.target)].result
+            # CC-39: a statement of a card with its own sub-account, paid on or after ccp_split_from, is
+            # booked against that sub-account, and each bank payment is moved onto it
+            sub, sub_note = _split_target(s, cards, split_from)
+            if sub_note:
+                rep.issues.append(sub_note)
+            if sub:
+                bad_sub = _usable(sub)
+                if bad_sub:
+                    rep.split_refused.append((s, sub, bad_sub))
+                    continue        # nothing is booked for this statement; it never falls back to the parent
+                for j in js:
+                    j.transfer = sub
+                moves = [J.move_journal(p, sub, s.target.card, s.target.label, s.target.source, s.target.card)
+                         for p in s.payments]
+                rep.splits.append({"card": s.target.card, "statement": s.target.label, "sub": sub,
+                                   "payments": list(s.payments), "moves": moves, "journals": js})
+                journals += moves
             per_statement[id(s.target)] = js
             journals += js
         # ---- CC-31: a CRED payment line whose prior period is a whole-booked CSV settles no PDF statement,
@@ -496,7 +613,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     j.account, j.confidence, j.match_reason = draw[0], "high", _MAPPER_DRAW_REASON
 
         # ---- already booked (before mapping: an unmapped journal is checked too) ----
+        journals += list(prepay_js.values())
         J.mark_booked(journals, view.txns, CCP_PATH)
+        _reconcile_splits(rep, journals)
         _mark("already-booked check")
 
         # ---- mapper for spends and refunds ---------------------------------
@@ -552,6 +671,9 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 # principal is the item's cost, never the interest account
                 j.status, j.why = J.ST_NO_ACCOUNT, "the mapper chose the EMI interest account for EMI principal"
                 continue
+            if j.needs_mapping and j.account.startswith(CCP_PATH + ":"):
+                j.status, j.why = J.ST_NO_ACCOUNT, "the mapper chose a card payment sub-account as the expense"
+                continue
             bad = _usable(j.account)
             if bad:
                 j.status, j.why = (J.ST_BLOCKED if "cannot be used" in bad else J.ST_NO_ACCOUNT), bad
@@ -567,12 +689,31 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                     j.match_reason = f"{j.match_reason} (was: {was})".strip()
 
         # ---- CCP tie-out -------------------------------------------------------
-        before = round(sum(t.amount_on(CCP_PATH) for t in view.txns if start <= t.date <= end), 2)
-        effect = round(sum(j.ccp_effect for j in journals if j.status == J.ST_READY or
-                           (j.status == J.ST_BOOKED and not (start <= j.date <= end))), 2)
+        # CC-39: the pool is the parent plus every card sub-account; parent + subs must equal what the parent
+        # alone showed before any split. With no sub-account in the book this is the old parent-only figure.
+        _in_rng = [t for t in view.txns if start <= t.date <= end]
+        before = round(sum(SP.pool_amount(t, CCP_PATH) for t in _in_rng), 2)
+        parent_before = round(sum(t.amount_on(CCP_PATH) for t in _in_rng), 2)
+        subs_before: dict = {}
+        for t in _in_rng:
+            for pth, v in t.splits:
+                if pth != CCP_PATH and SP.in_pool(pth, CCP_PATH):
+                    subs_before[pth] = round(subs_before.get(pth, 0.0) + v, 2)
+        counted = [j for j in journals if j.status == J.ST_READY or
+                   (j.status == J.ST_BOOKED and not (start <= j.date <= end))]
+        ptie = SP.pool_tie(counted, CCP_PATH)
+        effect = ptie["new_total"]
+        _mp = SP.moves_problem(rep.splits)
+        if not ptie["ok"]:
+            rep.pool_failure = (f"parent + card sub-accounts change by {ptie['new_total']:,.2f} but the parent alone "
+                                f"would have changed by {ptie['old_total']:,.2f} (difference {ptie['gap']:,.2f})")
+        elif _mp:
+            rep.pool_failure = _mp
         unmatched = rep.unmatched_total
         not_booked = round(sum(p.amount for s in settlements if s.status == M.S_PARTLY
                                for p in s.payments if p.in_range), 2)
+        not_booked = round(not_booked + sum(p.amount for s, _sub, _why in rep.split_refused
+                                            for p in s.payments if p.in_range), 2)
         # CC-33: the CRED difference of a PARTLY statement is booked on its own (Dr CCP / Cr Drawings), while
         # the statement's spends are not: it belongs with the not-booked payments, booked now or earlier
         _partly_ov = [J.overage_journal(pr, min(p.date for p in pr.payments)) for s in settlements
@@ -590,21 +731,25 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _skip |= {t.guid for t in view.txns if t.num in _partly_ov and start <= t.date <= end}
         _csv_guids = {p.guid for pr in rep.csv_pairings for p in pr.payments}
         other_lines = [(t.date, (t.description or "(no description)")
-                        + (" [matched to a CSV payment row]" if t.guid in _csv_guids else ""), t.amount_on(CCP_PATH))
+                        + (" [matched to a CSV payment row]" if t.guid in _csv_guids else ""), SP.pool_amount(t, CCP_PATH))
                        for t in sorted(view.txns, key=lambda x: (x.date, x.guid))
-                       if start <= t.date <= end and t.has_path(CCP_PATH) and t.guid not in _skip]
+                       if start <= t.date <= end and any(SP.in_pool(pth, CCP_PATH) for pth, _v in t.splits)
+                       and t.guid not in _skip]
         other_lines.append((None, "This run's journals (CCP effect)", effect))
         rest = round(other - sum(a for _d, _x, a in other_lines), 2)
         if abs(rest) >= 0.005:
             other_lines.append((None, "Not attributable to one entry", rest))
         rep.tie = {"before": before, "effect": effect, "after": after, "unmatched": unmatched,
                    "not_booked": not_booked, "other": other, "other_lines": other_lines,
-                   "tol": max(1.0, float(n_settled))}
+                   "tol": max(1.0, float(n_settled)),
+                   "parent_before": parent_before, "subs_before": subs_before,
+                   "parent_effect": ptie["parent_effect"], "subs_effect": ptie["subs_effect"],
+                   "old_effect": ptie["old_total"], "pool_gap": ptie["gap"], "pool_ok": not rep.pool_failure}
 
         # ---- output ------------------------------------------------------------
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
-        ready = rep.ready
+        ready = [] if rep.pool_failure else rep.ready
         if ready:
             _write_import_csv(ready, out)
             rep.output_csv = str(out)
