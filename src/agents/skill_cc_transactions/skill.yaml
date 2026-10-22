@@ -39,6 +39,7 @@ run_args:
   custom_start: "{inputs.custom_start}"
   custom_end: "{inputs.custom_end}"
   config_path: "{config_path}"
+  settings_path: "{data_root}/settings/config.yaml"
   model_override: "{model_override}"
 
 output:

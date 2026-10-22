@@ -81,11 +81,11 @@ def _strip_root(p: str) -> str:
     return p[len("Root Account:"):] if p.startswith("Root Account:") else p
 
 
-def _extract(pdf_dir, xlsx, start, end, label):
+def _extract(pdf_dir, xlsx, start, end, label, cards=None, cards_problem=None):
     """(script module, Result). A seam so tests can supply synthetic statements."""
     from agents.skill_cc_transactions.agent import _load_script
     mod = _load_script()
-    return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label)
+    return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label, cards, cards_problem)
 
 
 def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account, model=None):
@@ -206,6 +206,19 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
     if ent is None:
         return _error(f"ERROR: entity {entity_key!r} is not in entities.yaml.")
 
+    # ---- the card list (CC-28) ---------------------------------------------
+    # A missing list is reported loudly in the Issues and the run goes on without card digits
+    # (pairing is then exactly as before). A list that is present but refused stops the run.
+    from agents import cc_cards
+    cards, cards_problem = None, None
+    if settings_path:
+        try:
+            cards = cc_cards.load_for_settings(settings_path, entities_path or None)
+        except cc_cards.CardListMissing as e:
+            cards_problem = str(e)
+        except cc_cards.CardListError as e:
+            return _error(f"ERROR: the card list cannot be used: {e}. Nothing was booked.")
+
     # ---- the book (read-only) ---------------------------------------------
     try:
         view = read_book(gnucash_path)
@@ -243,7 +256,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _t0 = now
 
     with tempfile.TemporaryDirectory() as tmp:
-        mod, res = _extract(pdf_dir, Path(tmp) / "extraction.xlsx", start, end, label)
+        mod, res = _extract(pdf_dir, Path(tmp) / "extraction.xlsx", start, end, label, cards, cards_problem)
         rep.skipped, rep.duplicates = list(res.skipped), list(res.duplicates)
         rep.issues = [i for i in res.issues if not (i.startswith("fee charged") or i.startswith("EMI row (")
                                                     or i.startswith("tie-out "))]
@@ -306,7 +319,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         # payment. The row itself is still never booked.
         csv_lines = M.pay_lines(csv_sts)
         csv_ids = {id(s) for s in csv_sts}
-        outcome = M.match_payments(lines + csv_lines, pool_pay, cred_max)
+        outcome = M.match_payments(lines + csv_lines, pool_pay, cred_max, cards)
         rep.pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) not in csv_ids]
         rep.csv_pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) in csv_ids]
         rep.lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) not in csv_ids]

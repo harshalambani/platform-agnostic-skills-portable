@@ -1547,14 +1547,14 @@ def _csv_key(r: Row) -> tuple:
     return (r.card, r.date.date() if r.date else None, round(r.amount, 2), r.direction)
 
 
-def read_icici_csv(path: Path, bank: str, card: str) -> tuple[Statement | None, str]:
+def read_icici_csv(path: Path, bank: str, card: str, cards=None) -> tuple[Statement | None, str]:
     """CC-22: (Statement, "") or (None, why it was refused). The period is the first to the last
     transaction date: the export prints no statement period and no totals."""
     try:
         parsed = parse_icici_csv(path)
     except CsvRefused as e:
         return None, f"refused - {e}"
-    ctype, why = identify_card(parsed.masks)
+    ctype, why = identify_card(parsed.masks, cards)
     if ctype is None:
         return None, f"refused - cannot tell which card this is ({why}); not read"
     if ctype.lower() != card.lower():
@@ -1641,7 +1641,10 @@ def no_activity(st: Statement) -> bool:
 
 
 def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date | None = None,
-                   label: str = "all statements") -> Result:
+                   label: str = "all statements", cards=None, cards_problem: str | None = None) -> Result:
+    """`cards` is the CC-28 card list (agents.cc_cards.Card objects). A CSV is placed by its
+    card digits against it; without it every CSV is refused. `cards_problem` is why the list
+    is not available (shown as an issue)."""
     pdf_dir = Path(pdf_dir)
     seen_names, pdfs = set(), []
     for p in sorted(pdf_dir.rglob("*.pdf")) + sorted(pdf_dir.rglob("*.PDF")):
@@ -1659,6 +1662,8 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     held: list = []                        # CC-30: (file, card, reason): period not read in a ranged run
     seen_keys: dict = {}
 
+    if cards_problem:
+        issues.append(f"the card list was not used: {cards_problem}; statement CSVs are refused without it")
     if not pdfs and not (list(pdf_dir.rglob("*.csv")) + list(pdf_dir.rglob("*.CSV"))):
         issues.append(f"no PDFs found under {pdf_dir}")
 
@@ -1736,7 +1741,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         if bank.lower() != "icici":
             skipped.append(f"{cpath.name} (a CSV statement is only read for ICICI)")
             continue
-        cst, why = read_icici_csv(cpath, bank, card)
+        cst, why = read_icici_csv(cpath, bank, card, cards)
         if cst is None:
             issues.append(f"{cpath.name}: {why}")
             csv_refused.append((cpath.name, why))

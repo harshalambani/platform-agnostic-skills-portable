@@ -1458,6 +1458,11 @@ def render(container_tab=None) -> None:
         outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs, confirm_1_cb, confirm_2_cb],
     )
 
+    # --- Credit cards (CC-28): settings/cc_cards.yaml, the one card list ----
+    with gr.Accordion("Credit cards (the card list every CC skill reads)", open=False):
+        from . import _entity_cards  # noqa: PLC0415
+        _entity_cards.render(container_tab=container_tab)
+
     # --- Other dropdown data (read-only) -----------------------------------
     # Entities is the only dropdown source in the app that is hand-maintained
     # data; the other three are DERIVED and have no file to edit. Rather than
