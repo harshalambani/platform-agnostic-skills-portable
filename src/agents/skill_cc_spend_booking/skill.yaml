@@ -52,6 +52,10 @@ inputs:
     type: "text"
     label: "Custom end date (YYYY-MM-DD) -- only for 'Custom date range'"
     required: false
+  - name: "prepayment_marks"
+    type: "text"
+    label: "Corporate card prepayments -- codes of unmatched payments to book to the prepayment account (optional)"
+    required: false
 
 run_args:
   pdf_dir: "{inputs.pdf_dir}"
@@ -61,6 +65,7 @@ run_args:
   period: "{inputs.period}"
   custom_start: "{inputs.custom_start}"
   custom_end: "{inputs.custom_end}"
+  prepayment_marks: "{inputs.prepayment_marks}"
   entities_path: "{data_root}/itr/entities.yaml"
   settings_path: "{data_root}/settings/config.yaml"
   config_path: "{config_path}"
@@ -90,7 +95,7 @@ help:
     fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is
     still booked (on its settling payment's date, or its real dates when no payment settles it) and is
     reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement
-    that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked.
+    that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked. Card sub-accounts: a card with an account on the Cards screen, paid on or after ccp_split_from, has each bank payment moved onto its sub-account and its spends booked there; the pool (parent plus sub-accounts) must tie to the unsplit figure or no import file is written. Corporate card prepayments: paste the code printed beside an unmatched payment to book it to the prepayment account; nothing is marked for you.
   when_to_use: >
     After the bank statements are imported and the card statements are sorted, when you want the
     card spends booked to their expense accounts.
@@ -123,6 +128,10 @@ help:
       tooltip: "End date, only used when 'Custom date range' is selected."
       accepts: "YYYY-MM-DD."
       gotchas: "Both start and end are required for a custom range."
+    - name: "prepayment_marks"
+      tooltip: "Codes printed beside unmatched payments in the report. Each code books that payment to the prepayment account (Drawings) instead of leaving it in the pool."
+      accepts: "Codes separated by spaces or commas. Needs ccp_split_from and prepayment_account on the Cards screen."
+      gotchas: "Only unmatched payments on or after the split date can be marked. Nothing is marked for you."
   steps:
     - "Run Credit Card - Sort PDFs first, and import the bank statements into the book."
     - "Pick the entity and financial year, then the statements folder and the period."

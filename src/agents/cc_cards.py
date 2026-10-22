@@ -26,6 +26,10 @@ from pathlib import Path
 
 CARDS_FILENAME = "cc_cards.yaml"
 ALLOWED_KEYS = ("bank", "card", "last4", "holder", "active")
+OPTIONAL_KEYS = ("account",)          # CC-39: the card's own sub-account under the pool
+TOP_KEYS = ("cards", "ccp_split_from", "prepayment_account")
+# The Credit Card Payment pool. Kept equal to skill_cc_spend_booking.bookio.CCP_PATH by a test.
+CCP_PATH = "Expense:Withdrawals:Credit Card Payment"
 
 _LAST4_RX = re.compile(r"[0-9]{4}")
 
@@ -67,6 +71,14 @@ TOP_COMMENT = """\
 #
 # Write every value in double quotes. Without quotes YAML turns YES into true and
 # 0123 into a number, and the file is then refused. No other keys are allowed.
+#   account (optional) the full GnuCash path of this card's own sub-account under
+#           Expense:Withdrawals:Credit Card Payment. Blank: the card is not split.
+#
+# Two optional top-level keys sit above "cards:":
+#   ccp_split_from      "2026-04-01" - payments on or after this date are moved to the card's
+#                       sub-account. Absent: no card is split at all.
+#   prepayment_account  the Drawings account a corporate-card prepayment is booked to.
+#
 # A last4 may appear on one card only. Keep this comment block; the Cards screen keeps it.
 """
 
@@ -86,6 +98,7 @@ class Card:
     last4: tuple[str, ...]
     holder: str        # entity key, or "" when blank
     active: bool
+    account: str = ""  # CC-39: sub-account path under CCP_PATH, or "" (not split)
 
     @property
     def folder(self) -> tuple[str, str]:
@@ -130,27 +143,67 @@ def entity_keys_from(entities_path) -> set[str]:
 # The strict loader
 # ---------------------------------------------------------------------------
 
-def parse_cards(raw, entity_keys) -> list[Card]:
+class CardList(list):
+    """The cards, plus the two optional top-level settings (CC-39 / CC-29). A plain
+    list to every caller that predates them."""
+    split_from = None            # datetime.date or None
+    prepayment_account = ""
+
+
+def _check_account(where: str, value, label: str = "account") -> str:
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise CardListError(f"{where}: '{label}' must be text in quotes, or blank")
+    v = value.strip()
+    if v and v != value:
+        raise CardListError(f"{where}: '{label}' has spaces around it")
+    return v
+
+
+def _parse_split_date(value):
+    import datetime as _dt
+    if not isinstance(value, str):
+        raise CardListError("'ccp_split_from' must be a date as text in quotes, like \"2026-04-01\"")
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        raise CardListError("'ccp_split_from' must be a date like \"2026-04-01\"")
+    try:
+        return _dt.date.fromisoformat(value)
+    except ValueError:
+        raise CardListError("'ccp_split_from' is not a real date") from None
+
+
+def parse_cards(raw, entity_keys) -> CardList:
     """Validate an already-parsed YAML value. Raises CardListError (no digits in it)."""
     keys = set(entity_keys or ())
     if not isinstance(raw, dict):
         raise CardListError("the card list must be a mapping with a 'cards' list")
-    extra = [k for k in raw if k != "cards"]
+    extra = [k for k in raw if k not in TOP_KEYS]
     if extra:
-        raise CardListError("the card list has a top-level key other than 'cards'")
+        raise CardListError("the card list has a top-level key other than "
+                            + ", ".join(f"'{k}'" for k in TOP_KEYS))
     entries = raw.get("cards")
     if not isinstance(entries, list):
         raise CardListError("'cards' must be a list")
 
-    cards: list[Card] = []
+    cards = CardList()
+    if raw.get("ccp_split_from") is not None:
+        cards.split_from = _parse_split_date(raw["ccp_split_from"])
+    elif "ccp_split_from" in raw:
+        raise CardListError("'ccp_split_from' must be a date as text in quotes, or left out")
+    pre = _check_account("the card list", raw.get("prepayment_account"), "prepayment_account")
+    if pre == CCP_PATH or pre.startswith(CCP_PATH + ":"):
+        raise CardListError("'prepayment_account' must be a Drawings account, not the Credit Card Payment pool")
+    cards.prepayment_account = pre
     seen: dict[str, int] = {}
+    seen_acct: dict[str, int] = {}
     for i, e in enumerate(entries, 1):
         where = f"card {i}"
         if not isinstance(e, dict):
             raise CardListError(f"{where}: each card must be a mapping")
         for k in e:
-            if k not in ALLOWED_KEYS:
-                raise CardListError(f"{where}: unknown key (allowed: {', '.join(ALLOWED_KEYS)})")
+            if k not in ALLOWED_KEYS and k not in OPTIONAL_KEYS:
+                raise CardListError(f"{where}: unknown key (allowed: {', '.join(ALLOWED_KEYS + OPTIONAL_KEYS)})")
         for k in ALLOWED_KEYS:
             if k not in e:
                 raise CardListError(f"{where}: '{k}' is missing")
@@ -184,11 +237,19 @@ def parse_cards(raw, entity_keys) -> list[Card]:
             raise CardListError(f"{where}: 'holder' is not an entity key in entities.yaml")
         if not isinstance(e["active"], bool):
             raise CardListError(f"{where}: 'active' must be true or false")
-        cards.append(Card(folder[0], folder[1], tuple(l4), holder, e["active"]))
+        acct = _check_account(where, e.get("account"))
+        if acct:
+            if not acct.startswith(CCP_PATH + ":") or acct.endswith(":") or "::" in acct:
+                raise CardListError(f"{where}: 'account' must be a sub-account under {CCP_PATH}")
+            if acct in seen_acct:
+                raise CardListError(f"card {seen_acct[acct]} and card {i} share an account; "
+                                    f"a sub-account belongs to one card")
+            seen_acct[acct] = i
+        cards.append(Card(folder[0], folder[1], tuple(l4), holder, e["active"], acct))
     return cards
 
 
-def parse_text(text: str, entity_keys) -> list[Card]:
+def parse_text(text: str, entity_keys) -> CardList:
     import yaml
     try:
         raw = yaml.safe_load(text)
@@ -200,7 +261,7 @@ def parse_text(text: str, entity_keys) -> list[Card]:
     return parse_cards(raw, entity_keys)
 
 
-def load_cards(path, entity_keys) -> list[Card]:
+def load_cards(path, entity_keys) -> CardList:
     """Load and validate cc_cards.yaml. A missing or unreadable file is an error,
     never 'no cards'."""
     p = Path(path)
@@ -213,7 +274,7 @@ def load_cards(path, entity_keys) -> list[Card]:
     return parse_text(text, entity_keys)
 
 
-def load_for_settings(settings_path, entities_path=None) -> list[Card]:
+def load_for_settings(settings_path, entities_path=None) -> CardList:
     """The loader as the skills call it: file beside the settings, holders checked
     against the data root's entities.yaml (or the one given)."""
     ents = Path(entities_path) if entities_path else entities_path_for(settings_path)
@@ -324,11 +385,18 @@ def leading_comments(text: str) -> str:
     return "".join(lines)
 
 
-def render_yaml(rows: list[dict], header: str = TOP_COMMENT) -> str:
-    """The file text: `header` verbatim, then every text value double-quoted."""
+def render_yaml(rows: list[dict], header: str = TOP_COMMENT, split_from: str = "",
+                prepayment_account: str = "") -> str:
+    """The file text: `header` verbatim, then every text value double-quoted. `split_from`
+    (ISO date text) and `prepayment_account` are written only when set; `account` is written
+    on a card only when it has one."""
     out = [header if header.endswith("\n") or not header else header + "\n"]
     if header and not header.endswith("\n\n"):
         out.append("\n")
+    if split_from:
+        out.append(f"ccp_split_from: {_q(split_from)}\n")
+    if prepayment_account:
+        out.append(f"prepayment_account: {_q(prepayment_account)}\n")
     out.append("cards:" + (" []" if not rows else "") + "\n")
     for r in rows:
         out.append(f"  - bank: {_q(r['bank'])}\n")
@@ -336,4 +404,6 @@ def render_yaml(rows: list[dict], header: str = TOP_COMMENT) -> str:
         out.append("    last4: [" + ", ".join(_q(v) for v in r["last4"]) + "]\n")
         out.append(f"    holder: {_q(r.get('holder') or '')}\n")
         out.append(f"    active: {'true' if r['active'] else 'false'}\n")
+        if r.get("account"):
+            out.append(f"    account: {_q(r['account'])}\n")
     return "".join(out)
