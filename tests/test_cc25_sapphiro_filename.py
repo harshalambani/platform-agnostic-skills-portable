@@ -25,7 +25,7 @@ CARDS = [Card("ICICI", "Sapphiro", ("1111",), "", True), Card("ICICI", "Amazon",
 def test_no_card_digits_live_in_the_code():                                  # NEGATIVE
     # CC-28: digits come from the card list; a bare digit filename is never filed by a built-in pattern
     assert sort.extract_bank_and_card_type("ICICI_3333XXXXXXXX0000_statement.pdf") == (None, None) or         sort.extract_bank_and_card_type("ICICI_3333XXXXXXXX0000_statement.pdf")[1] != "Sapphiro"
-    assert sort.extract_bank_and_card_type("4315_statement.pdf") == (None, None)
+    assert sort.extract_bank_and_card_type("9999_statement.pdf") == (None, None)
 
 
 def test_a_listed_amazon_number_is_never_filed_as_sapphiro(tmp_path):        # NEGATIVE

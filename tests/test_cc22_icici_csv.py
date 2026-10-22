@@ -425,7 +425,7 @@ def test_exact_header_only_after_dated_rows_is_refused(tmp_path):
 # ---- one-card identity comes from the card list (CC-28) ----
 
 def test_one_card_visa_is_amazon_never_sapphiro(tmp_path):
-    visa = "4315 XXXX XXXX 0000"
+    visa = "4000 XXXX XXXX 0000"
     assert ic.identify_card([visa], CARDS) == ("Amazon", "")
     assert ic.identify_card([visa], CARDS)[0] != "Sapphiro"                  # NEGATIVE
     p = _write(tmp_path, "x", "v.csv", _csv([(visa, [("05-Apr-25", "SHOP", "10.00")])]))

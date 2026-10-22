@@ -91,11 +91,11 @@ def test_not_a_statement_folder_is_never_an_issue_nor_unknown(tmp_path, monkeypa
 
 
 def test_unknown_folder_still_an_issue_but_by_count(tmp_path, monkeypatch):
-    files = [f"Synth-Gold/{n}" for n in FULL] + ["Unknown-Unknown/mystery_4315.pdf"]
+    files = [f"Synth-Gold/{n}" for n in FULL] + ["Unknown-Unknown/mystery_9999.pdf"]
     msg, root = _run(tmp_path, monkeypatch, files, FULL)
     assert "completed with 1 issue" in msg
-    assert "mystery_4315" not in msg                       # no file names / card fragments
-    assert "mystery_4315.pdf" in (root / "completeness_report.txt").read_text()
+    assert "mystery_9999" not in msg                       # no file names / card fragments
+    assert "mystery_9999.pdf" in (root / "completeness_report.txt").read_text()
 
 
 def test_panel_never_prints_decrypt_failure_names(tmp_path, monkeypatch):
