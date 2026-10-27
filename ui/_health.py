@@ -361,6 +361,20 @@ def bare_model_name(name: str) -> str:
     return n[len("models/"):] if n.startswith("models/") else n
 
 
+_TOKEN_LIMIT_WORDS = ("max_tokens", "max_output_tokens", "token limit", "output limit",
+                      "maxoutputtokens", "length")
+
+
+def _only_about_token_limit(msg: str) -> bool:
+    """A 400 whose message is about the token/output limit, not the model."""
+    low = (msg or "").lower()
+    if not low:
+        return False
+    if any(w in low for w in ("model", "not found", "does not exist", "unsupported", "unknown"))             and not any(w in low for w in ("max_tokens", "max_output_tokens", "maxoutputtokens")):
+        return False
+    return any(w in low for w in _TOKEN_LIMIT_WORDS)
+
+
 def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = None) -> HealthResult:
     """UI-49: ONE tiny real call with the CHOSEN model, so a wrong model, a model
     the address does not serve, or a bad key fails in seconds, before a long
@@ -384,8 +398,17 @@ def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = No
         if key and key not in ("", "not-needed"):
             headers["Authorization"] = f"Bearer {key}"
         url = f"{base}/chat/completions"
-        payload = {"model": model, "stream": False, "max_tokens": 1,
+        # the same settings the real run uses for this model (a thinking model
+        # can answer HTTP 400 to a 1-token cap)
+        try:
+            from agents.llm_model_params import reasoning_effort_for, reply_cap_for
+        except ImportError:
+            from llm_model_params import reasoning_effort_for, reply_cap_for
+        payload = {"model": model, "stream": False, "max_tokens": reply_cap_for(model),
                    "messages": [{"role": "user", "content": "ping"}]}
+        effort = reasoning_effort_for(model)
+        if effort:
+            payload["reasoning_effort"] = effort
         timeout = timeout or 20.0
     else:
         return HealthResult(False, "unreachable", f"Unknown provider '{provider}'.")
@@ -406,6 +429,8 @@ def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = No
             msg = ""
         if e.code in (401, 403):
             return HealthResult(False, "auth", f"HTTP {e.code}: the key was refused. {msg}".strip())
+        if e.code == 400 and _only_about_token_limit(msg):
+            return HealthResult(True, "ok", f"Model '{model}' reachable (HTTP 400 about the token limit).")
         if e.code in (400, 404):
             return HealthResult(False, "model", f"HTTP {e.code}: model '{model}' was refused by this address. {msg}".strip())
         if e.code == 429:

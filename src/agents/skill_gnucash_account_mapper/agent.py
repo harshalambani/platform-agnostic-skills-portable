@@ -2523,8 +2523,18 @@ def _resolve_llm_endpoint_config(
 # off) and keep 300. 2.5 Pro and Gemini 3.x cannot turn thinking off; "low" is
 # still a ~1,024-token thinking budget that shares the cap with the visible
 # reply, so those models get the larger LLM_REPLY_MAX_TOKENS_THINKING.
-LLM_REPLY_MAX_TOKENS = 300
-LLM_REPLY_MAX_TOKENS_THINKING = 1500
+try:
+    from agents.llm_model_params import (  # noqa: PLC0415
+        LLM_REPLY_MAX_TOKENS, LLM_REPLY_MAX_TOKENS_THINKING,
+        chat_model_name as _chat_model_name,
+        reasoning_effort_for as _reasoning_effort_for,
+        reply_cap_for as _reply_cap_for)
+except ImportError:  # CLI / bare-import usage
+    from llm_model_params import (  # type: ignore  # noqa: PLC0415
+        LLM_REPLY_MAX_TOKENS, LLM_REPLY_MAX_TOKENS_THINKING,
+        chat_model_name as _chat_model_name,
+        reasoning_effort_for as _reasoning_effort_for,
+        reply_cap_for as _reply_cap_for)
 
 
 class _Reply(str):
@@ -2540,38 +2550,8 @@ class _Reply(str):
         return obj
 
 
-def _reasoning_effort_for(model: str) -> Optional[str]:
-    """The `reasoning_effort` to send, or None to send nothing. gpt-oss: "low"
-    (Groq documents it for GPT-OSS only). Gemini 2.5 Flash/Flash-Lite: "none".
-    Gemini 2.5 Pro and 3.x (cannot turn thinking off): "low". Never sent to any
-    other model: an unrecognised field can 400 on other servers."""
-    low = _chat_model_name(model).lower()
-    if "gpt-oss" in low:
-        return "low"
-    if low.startswith("gemini-2.5-flash"):
-        return "none"
-    if low.startswith("gemini-2.5-pro") or low.startswith("gemini-3"):
-        return "low"
-    return None
-
-
 def _wants_reasoning_effort(model: str) -> bool:
     return _reasoning_effort_for(model) is not None
-
-
-def _reply_cap_for(model: str) -> int:
-    """UI-49: the larger cap only for models whose thinking cannot be turned off."""
-    low = _chat_model_name(model).lower()
-    if low.startswith("gemini-2.5-pro") or low.startswith("gemini-3"):
-        return LLM_REPLY_MAX_TOKENS_THINKING
-    return LLM_REPLY_MAX_TOKENS
-
-
-def _chat_model_name(model: str) -> str:
-    """UI-49: Gemini lists models as "models/gemini-..." but the chat call needs
-    the bare name. Other providers' names are left unchanged."""
-    m = model or ""
-    return m[len("models/"):] if m.startswith("models/") else m
 
 
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:

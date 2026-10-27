@@ -203,7 +203,7 @@ def test_d_good_endpoint_and_model_pass_with_one_call(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", fake)
     health, used = _health.check_with_model(OPENAI_EP, "good")
     assert health.ok and used == "good" and calls["chat"] == 1
-    assert calls["sent"]["max_tokens"] == 1
+    assert calls["sent"]["max_tokens"] == 300 and "reasoning_effort" not in calls["sent"]
 
 
 @pytest.mark.parametrize("code", [404, 400])
@@ -381,3 +381,81 @@ def test_g_classify_reads_a_list_body():
     exc = urllib.error.HTTPError("u", 404, "nf", {}, io.BytesIO(b"[]"))
     exc.body = [{"error": {"message": "model not found"}}]
     assert le.message_from_body(exc.body) == "model not found"
+
+
+# ------------------------- model check is safe for thinking models (D 2.2 A)
+def _probe_sent(monkeypatch, model):
+    fake, calls = _router(lambda r: _Resp({"choices": []}), models=(model,))
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    ep = dict(OPENAI_EP, default_model=model)
+    health, used = _health.check_with_model(ep, model)
+    assert health.ok and used == _health.bare_model_name(model)
+    return calls["sent"]
+
+
+@pytest.mark.parametrize("model", ["gemini-3-flash", "gemini-3.1-flash-lite",
+                                   "models/gemini-2.5-pro", "gemini-2.5-pro"])
+def test_probe_thinking_models_send_low_and_1500(monkeypatch, model):
+    sent = _probe_sent(monkeypatch, model)
+    assert sent["reasoning_effort"] == "low" and sent["max_tokens"] == 1500
+
+
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+def test_probe_flash_sends_none_and_300(monkeypatch, model):
+    sent = _probe_sent(monkeypatch, model)
+    assert sent["reasoning_effort"] == "none" and sent["max_tokens"] == 300
+
+
+def test_probe_gpt_oss_sends_low(monkeypatch):
+    sent = _probe_sent(monkeypatch, "openai/gpt-oss-20b")
+    assert sent["reasoning_effort"] == "low" and sent["max_tokens"] == 300
+
+
+def test_probe_other_model_sends_no_reasoning_effort_key(monkeypatch):
+    sent = _probe_sent(monkeypatch, "llama-3.3-70b")
+    assert "reasoning_effort" not in sent and sent["max_tokens"] == 300
+
+
+def test_probe_sends_the_chosen_model_and_no_other(monkeypatch):
+    sent = _probe_sent(monkeypatch, "gemini-3-flash")
+    assert sent["model"] == "gemini-3-flash"
+
+
+@pytest.mark.parametrize("body", [
+    {"error": {"message": "max_tokens is too large for this request"}},
+    [{"error": {"message": "Unable to parse: max_output_tokens exceeds the token limit",
+                "status": "INVALID_ARGUMENT"}}],
+    {"error": {"message": "Output length limit reached"}},
+])
+def test_probe_400_about_token_limit_is_reachable(monkeypatch, body):
+    def chat(r):
+        raise _http_error(400, body)
+    fake, _ = _router(chat)
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    health, used = _health.check_with_model(OPENAI_EP, "good")
+    assert health.ok and used == "good"
+
+
+@pytest.mark.parametrize("body", [
+    {"error": {"message": "model 'zzz' does not exist"}},
+    [{"error": {"message": "models/zzz is not found for API version v1beta"}}],
+    {"error": {"message": "invalid request"}},
+])
+def test_probe_other_400_is_still_refused_and_names_model(monkeypatch, body):
+    def chat(r):
+        raise _http_error(400, body)
+    fake, _ = _router(chat)
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    health, _u = _health.check_with_model(OPENAI_EP, "good", "ep1")
+    assert not health.ok and health.status == "model"
+    assert "'good'" in health.detail and "ep1" in health.detail
+
+
+def test_probe_404_and_auth_unchanged_by_backstop(monkeypatch):
+    for code, status in ((404, "model"), (401, "auth"), (403, "auth")):
+        def chat(r, code=code):
+            raise _http_error(code, {"error": {"message": "max_tokens token limit"}})
+        fake, _ = _router(chat)
+        monkeypatch.setattr("urllib.request.urlopen", fake)
+        health, _u = _health.check_with_model(OPENAI_EP, "good")
+        assert not health.ok and health.status == status
