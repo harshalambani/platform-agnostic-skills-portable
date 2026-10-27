@@ -355,6 +355,120 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
     return result
 
 
+def bare_model_name(name: str) -> str:
+    """Strip a leading "models/" (Gemini's list form). Other names unchanged."""
+    n = name or ""
+    return n[len("models/"):] if n.startswith("models/") else n
+
+
+_TOKEN_LIMIT_WORDS = ("max_tokens", "max_output_tokens", "token limit", "output limit",
+                      "maxoutputtokens", "length")
+
+
+def _only_about_token_limit(msg: str) -> bool:
+    """A 400 whose message is about the token/output limit, not the model."""
+    low = (msg or "").lower()
+    if not low:
+        return False
+    if any(w in low for w in ("model", "not found", "does not exist", "unsupported", "unknown"))             and not any(w in low for w in ("max_tokens", "max_output_tokens", "maxoutputtokens")):
+        return False
+    return any(w in low for w in _TOKEN_LIMIT_WORDS)
+
+
+def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = None) -> HealthResult:
+    """UI-49: ONE tiny real call with the CHOSEN model, so a wrong model, a model
+    the address does not serve, or a bad key fails in seconds, before a long
+    read. Not cached. ok=True only when the call came back with a 2xx."""
+    provider = endpoint.get("provider")
+    base = (endpoint.get("base_url") or "").rstrip("/")
+    model = bare_model_name(model)
+    if not base or not model:
+        return HealthResult(False, "model", "No model is selected.")
+    headers = {"User-Agent": "PA-Skills-Portable/health", "Content-Type": "application/json"}
+    if provider == "ollama":
+        url = f"{base}/api/chat"
+        payload = {"model": model, "stream": False,
+                   "messages": [{"role": "user", "content": "ping"}],
+                   "options": {"num_predict": 1}}
+        timeout = timeout or 120.0      # a cold local model has to load first
+    elif provider == "openai_compatible":
+        from . import _config
+        raw_key = endpoint.get("api_key", "")
+        key = _config.decrypt_api_key(raw_key) if raw_key else ""
+        if key and key not in ("", "not-needed"):
+            headers["Authorization"] = f"Bearer {key}"
+        url = f"{base}/chat/completions"
+        # the same settings the real run uses for this model (a thinking model
+        # can answer HTTP 400 to a 1-token cap)
+        try:
+            from agents.llm_model_params import reasoning_effort_for, reply_cap_for
+        except ImportError:
+            from llm_model_params import reasoning_effort_for, reply_cap_for
+        payload = {"model": model, "stream": False, "max_tokens": reply_cap_for(model),
+                   "messages": [{"role": "user", "content": "ping"}]}
+        effort = reasoning_effort_for(model)
+        if effort:
+            payload["reasoning_effort"] = effort
+        timeout = timeout or 20.0
+    else:
+        return HealthResult(False, "unreachable", f"Unknown provider '{provider}'.")
+    req = request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                          method="POST", headers=headers)
+    try:
+        with request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except error.HTTPError as e:
+        msg = ""
+        try:
+            try:
+                from agents.llm_errors import message_from_body
+            except ImportError:
+                from llm_errors import message_from_body
+            msg = message_from_body(json.loads(e.read().decode("utf-8", errors="replace")))
+        except Exception:  # noqa: BLE001
+            msg = ""
+        if e.code in (401, 403):
+            return HealthResult(False, "auth", f"HTTP {e.code}: the key was refused. {msg}".strip())
+        if e.code == 400 and _only_about_token_limit(msg):
+            return HealthResult(True, "ok", f"Model '{model}' reachable (HTTP 400 about the token limit).")
+        if e.code in (400, 404):
+            return HealthResult(False, "model", f"HTTP {e.code}: model '{model}' was refused by this address. {msg}".strip())
+        if e.code == 429:
+            # rate-limited / out of quota: the model exists; the run decides how to wait
+            return HealthResult(True, "ok", f"Model '{model}' reachable (HTTP 429).")
+        return HealthResult(False, "model", f"HTTP {e.code}: {msg or e.reason}".strip())
+    except error.URLError as e:
+        return HealthResult(False, "unreachable", f"{type(e).__name__}: {e.reason}")
+    except TimeoutError:
+        return HealthResult(False, "slow", f"Model '{model}' did not answer within {timeout:.0f}s.")
+    except Exception as e:  # noqa: BLE001
+        return HealthResult(False, "unreachable", f"{type(e).__name__}: {e}")
+    return HealthResult(True, "ok", f"Model '{model}' answered.")
+
+
+def check_with_model(endpoint: dict[str, Any], model: str, name: str = "") -> tuple[HealthResult, str]:
+    """The pre-run check: the endpoint probe, then ONE call with the model AS
+    CHOSEN. The model is never replaced: a typed name the endpoint does not list
+    is used as typed if the call accepts it, and refused otherwise. An empty
+    choice falls back to the endpoint's default (nothing to probe if none)."""
+    health = check(endpoint)
+    if not health.ok:
+        return health, model
+    chosen = bare_model_name(model) or bare_model_name(endpoint.get("default_model") or "")
+    if not chosen:
+        return health, model
+    probe = probe_model(endpoint, chosen)
+    if probe.ok:
+        return health, chosen
+    if probe.status in ("model", "auth"):
+        who = f" by endpoint '{name}'" if name else ""
+        probe = HealthResult(
+            False, probe.status,
+            f"Model '{chosen}' was refused{who} ({probe.detail}). "
+            "Pick a model from the list or check the name.")
+    return probe, chosen
+
+
 def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
     provider = endpoint.get("provider")
     base = (endpoint.get("base_url") or "").rstrip("/")
@@ -405,7 +519,9 @@ def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
         )
     else:
         data = body.get("data") or []
-        names = tuple(m.get("id", "") for m in data if isinstance(m, dict))
+        # UI-49: Gemini lists "models/gemini-..." but its chat call needs the
+        # bare name; use the name the chat call accepts. Other names unchanged.
+        names = tuple(bare_model_name(m.get("id", "")) for m in data if isinstance(m, dict))
         infos = tuple(_openai_model_info(n) for n in names)
 
     return HealthResult(

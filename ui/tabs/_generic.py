@@ -82,6 +82,26 @@ _SINGLE_FILE_HEIGHT: int = 95
 # ---------------------------------------------------------------------------
 
 _choices_cache: list[tuple[str, str]] | None = None
+_choices_key: tuple | None = None   # UI-49: the endpoint the cache was filled for
+
+
+def _active_endpoint_key() -> tuple:
+    cfg = _config.load_portable_config()
+    name = cfg.get("active_endpoint", "")
+    ep = (cfg.get("endpoints") or {}).get(name) or {}
+    return (name, ep.get("provider"), (ep.get("base_url") or "").rstrip("/"))
+
+
+def _cache_valid() -> bool:
+    """UI-49: the model list is cached for the ACTIVE endpoint only."""
+    return _choices_cache is not None and _choices_key == _active_endpoint_key()
+
+
+def invalidate_model_choices() -> None:
+    """UI-49: forget the cached model list (an endpoint was switched/edited)."""
+    global _choices_cache, _choices_key
+    _choices_cache = None
+    _choices_key = None
 
 
 def _scan_output_files(match: str, file_types: tuple[str, ...]) -> list[tuple[str, str]]:
@@ -544,8 +564,8 @@ def _refresh_models(*, use_cache: bool = False, allow_probe: bool = True) -> lis
     load event still replaces it with the real list. This is the startup path;
     see wire_deferred_model_loads.
     """
-    global _choices_cache
-    if use_cache and _choices_cache is not None:
+    global _choices_cache, _choices_key
+    if use_cache and _cache_valid():
         return list(_choices_cache)
     cfg = _config.load_portable_config()
     endpoints = cfg.get("endpoints") or {}
@@ -561,6 +581,7 @@ def _refresh_models(*, use_cache: bool = False, allow_probe: bool = True) -> lis
             return [(fallback, fallback)] if fallback else []
         choices = known
 
+    _choices_key = (active, ep.get("provider"), (ep.get("base_url") or "").rstrip("/"))
     if choices:
         _choices_cache = choices
         return list(_choices_cache)
@@ -610,6 +631,18 @@ def wire_deferred_model_loads(app) -> None:
 
     app.load(fn=_fill, inputs=None, outputs=dropdowns)
 
+    # UI-49: after an endpoint switch the list is stale; opening a dropdown
+    # re-reads it for the ACTIVE endpoint (cached per endpoint, so cheap).
+    def _on_focus(current):
+        choices = _refresh_models(use_cache=True)
+        values = [v for _, v in choices]
+        value = current if current in values else _default_model_value(choices)
+        return gr.update(choices=choices, value=value)
+
+    for _dd in dropdowns:
+        if hasattr(_dd, "focus"):
+            _dd.focus(fn=_on_focus, inputs=_dd, outputs=_dd)
+
 
 _LOADING_MODELS_LABEL = "Loading models…"
 
@@ -636,7 +669,7 @@ def _startup_model_choices() -> tuple[list[tuple[str, str]], str | None]:
     # _refresh_models only populates _choices_cache when it has REAL choices;
     # the default-model guess is deliberately returned uncached so the deferred
     # load still replaces it. So a non-None cache here means "confirmed".
-    if _choices_cache is not None:
+    if _cache_valid():
         return known, _default_model_value(known)
     fallback = known[0][1] if known else ""
     return [(_LOADING_MODELS_LABEL, fallback)], fallback
@@ -650,7 +683,7 @@ def _default_model_value(choices: list[tuple[str, str]]):
         return None
     cfg = _config.load_portable_config()
     ep = (cfg.get("endpoints") or {}).get(cfg.get("active_endpoint", "")) or {}
-    want = _config.default_model_for(ep, cfg)
+    want = _health.bare_model_name(_config.default_model_for(ep, cfg) or "")
     values = [v for _, v in choices]
     return want if want in values else choices[0][1]
 
@@ -1003,7 +1036,10 @@ def _make_run_handler(skill: SkillInfo):
         if skill.requires.llm:
             yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None), gr.update()
 
-            health = _health.check(ep)
+            # UI-49: the endpoint probe plus ONE tiny call with the chosen model,
+            # so a wrong model or key fails here, before the long read. The model is
+            # never replaced: refused means the run stops.
+            health, model_choice = _health.check_with_model(ep, model_choice, active)
             if not health.ok and llm_precheck_mode(skill) == "stop":
                 yield add(
                     f"Error: endpoint '{active}' is {health.status}: "

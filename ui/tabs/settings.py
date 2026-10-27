@@ -107,6 +107,7 @@ def _save_endpoint(
         cfg["active_endpoint"] = name
 
     _config.write_portable_config(cfg)
+    _forget_model_list()
     action = "Updated" if name in (cfg.get("endpoints") or {}) else "Added"
     active_note = " (set as active)" if set_active else ""
     return f"**{action}** endpoint `{name}`{active_note}."
@@ -126,7 +127,17 @@ def _delete_endpoint(name: str) -> str:
     if cfg.get("active_endpoint") == name:
         cfg["active_endpoint"] = next(iter(endpoints))
     _config.write_portable_config(cfg)
+    _forget_model_list()
     return f"**Deleted** endpoint `{name}`. Active is now `{cfg['active_endpoint']}`."
+
+
+def _forget_model_list() -> None:
+    """UI-49: the tabs' cached model list belongs to the old endpoint."""
+    try:
+        from . import _generic  # noqa: PLC0415
+        _generic.invalidate_model_choices()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _switch_active(name: str) -> str:
@@ -138,6 +149,7 @@ def _switch_active(name: str) -> str:
         return f"Error: endpoint '{name}' not found."
     cfg["active_endpoint"] = name
     _config.write_portable_config(cfg)
+    _forget_model_list()
     return f"Active endpoint switched to `{name}`."
 
 

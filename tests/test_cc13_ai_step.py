@@ -83,6 +83,7 @@ def _drive(monkeypatch, tmp_path, health):
            "base_url": "http://127.0.0.1:9/v1", "api_key": FAKE_KEY, "default_model": "m"}}}
     monkeypatch.setattr("agents.registry.load_run_function", lambda s: fake_run)
     monkeypatch.setattr("ui.tabs._generic._health.check", lambda ep: health)
+    monkeypatch.setattr("ui.tabs._generic._health.probe_model", lambda ep, model, **k: type("P", (), {"ok": True, "status": "ok", "detail": ""})())
     monkeypatch.setattr("ui._config.load_portable_config", lambda: cfg)
     monkeypatch.setattr("ui._config.output_dir", lambda: tmp_path / "out")
     (tmp_path / "out").mkdir(exist_ok=True)
