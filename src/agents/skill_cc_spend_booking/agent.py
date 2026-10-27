@@ -121,11 +121,26 @@ def _strip_root(p: str) -> str:
     return p[len("Root Account:"):] if p.startswith("Root Account:") else p
 
 
-def _extract(pdf_dir, xlsx, start, end, label, cards=None, cards_problem=None):
+def _reads_store(mod, gnucash_path, config_path):
+    """CC-37: the kept statement reads, next to the book's other per-book state (same folder and
+    atomic-write style as the kept AI answers). None when the folder cannot be worked out."""
+    try:
+        from agents.skill_gnucash_account_mapper.persistent_rules import rules_path
+        stem = Path(gnucash_path).stem
+        folder = rules_path(str(gnucash_path), config_path).parent
+        return mod.StatementReads(Path(folder) / f"{stem}_cc_statement_reads.json", stem)
+    except Exception:  # noqa: BLE001  - a convenience; never stops a run
+        return None
+
+
+def _extract(pdf_dir, xlsx, start, end, label, cards=None, cards_problem=None,
+             gnucash_path=None, config_path=None):
     """(script module, Result). A seam so tests can supply synthetic statements."""
     from agents.skill_cc_transactions.agent import _load_script
     mod = _load_script()
-    return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label, cards, cards_problem)
+    reads = _reads_store(mod, gnucash_path, config_path) if gnucash_path else None
+    return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label, cards, cards_problem,
+                                   reads=reads)
 
 
 def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account, model=None):
@@ -320,11 +335,16 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _t0 = now
 
     with tempfile.TemporaryDirectory() as tmp:
-        mod, res = _extract(pdf_dir, Path(tmp) / "extraction.xlsx", start, end, label, cards, cards_problem)
+        mod, res = _extract(pdf_dir, Path(tmp) / "extraction.xlsx", start, end, label, cards, cards_problem,
+                            gnucash_path=gnucash_path, config_path=config_path)
         rep.skipped, rep.duplicates = list(res.skipped), list(res.duplicates)
         rep.issues = [i for i in res.issues if not (i.startswith("fee charged") or i.startswith("EMI row (")
                                                     or i.startswith("tie-out "))]
         rep.statements_read = len(res.statements)
+        rep.statements_reused = getattr(res, "reused", 0)
+        rep.statements_fresh = getattr(res, "read_fresh", 0)
+        if rep.statements_reused or rep.statements_fresh:
+            _log_line(f"statement reads: {rep.statements_reused} reused, {rep.statements_fresh} read fresh")
         ties_by_id = {id(s): t for s, t in zip(res.statements, res.ties)}
         # CC-26: a statement that does not tie is IMPORTED and reported loudly (NOT TIED). Only a statement
         # that read 0 rows is still refused: nothing in it can be trusted to a card or a side.

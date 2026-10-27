@@ -26,6 +26,9 @@ forced to pass.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
 import sys
 from collections import defaultdict
@@ -1518,6 +1521,152 @@ def fee_block(fees: list[FeeLine]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# CC-37: keep each statement's read result so a re-run does not re-read it
+# ---------------------------------------------------------------------------
+
+# Bump this whenever a parser or the tie-out inputs change what a statement reads as:
+# every kept result from another version is then ignored and read fresh.
+PARSER_VERSION = 1
+_READS_FILE_VERSION = 1
+
+
+def _file_sha256(path) -> str:
+    """SHA-256 of the file's bytes as stored on disk (never the decrypted bytes); '' if unreadable."""
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return ""
+
+
+def _enc(v):
+    if isinstance(v, datetime):
+        return {"__dt": v.isoformat()}
+    if isinstance(v, date):
+        return {"__d": v.isoformat()}
+    if isinstance(v, tuple):
+        return {"__t": [_enc(x) for x in v]}
+    if isinstance(v, list):
+        return [_enc(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _enc(x) for k, x in v.items()}
+    if isinstance(v, (str, int, float, bool)) or v is None:
+        return v
+    raise TypeError(type(v).__name__)
+
+
+def _dec(v):
+    if isinstance(v, dict):
+        if "__dt" in v:
+            return datetime.fromisoformat(v["__dt"])
+        if "__d" in v:
+            return date.fromisoformat(v["__d"])
+        if "__t" in v:
+            return tuple(_dec(x) for x in v["__t"])
+        return {k: _dec(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_dec(x) for x in v]
+    return v
+
+
+def statement_to_json(st: Statement) -> dict:
+    """The parsed result only: rows, totals, period, notes. NOT the page text (``lines``)
+    and nothing derived from the password: the PDF is never kept."""
+    p = st.parsed
+    return {
+        "bank": st.bank, "card_type": st.card_type, "source": st.source,
+        "period": _enc(st.period), "period_note": st.period_note,
+        "parsed": {
+            "rows": [_enc({f: getattr(r, f) for f in Row.__dataclass_fields__}) for r in p.rows],
+            "summary": _enc(p.summary), "printed_closing": p.printed_closing,
+            "tol_loose": p.tol_loose, "missing": list(p.missing), "errors": list(p.errors),
+            "rows_net_expected": p.rows_net_expected, "note": p.note,
+            "loans": [_enc({f: getattr(x, f) for f in Loan.__dataclass_fields__}) for x in p.loans],
+            "outstanding_parts": _enc(p.outstanding_parts), "proof_failed": p.proof_failed,
+        },
+    }
+
+
+def statement_from_json(d: dict) -> Statement:
+    pj = d["parsed"]
+    parsed = Parsed(
+        rows=[Row(**_dec(r)) for r in pj["rows"]], summary=_dec(pj["summary"]),
+        printed_closing=pj["printed_closing"], tol_loose=pj["tol_loose"], missing=list(pj["missing"]),
+        errors=list(pj["errors"]), rows_net_expected=pj["rows_net_expected"], note=pj["note"],
+        loans=[Loan(**_dec(x)) for x in pj["loans"]], outstanding_parts=_dec(pj["outstanding_parts"]),
+        proof_failed=pj["proof_failed"])
+    return Statement(d["bank"], d["card_type"], d["source"], _dec(d["period"]), d["period_note"], parsed, [])
+
+
+class StatementReads:
+    """One small JSON file per book: file hash + folder-derived card + file name -> the parsed
+    statement. Unreadable / corrupt / other-version content is ignored (a fresh read follows)."""
+
+    def __init__(self, path, book: str):
+        self.path, self.book = Path(path), book
+        self._files = self._read_all()
+        self._dirty = False
+
+    @staticmethod
+    def key(file_hash: str, bank: str, card: str, name: str) -> str:
+        h = hashlib.sha256()
+        for part in (file_hash, bank, card, name):
+            h.update(str(part).encode("utf-8", errors="replace"))
+            h.update(b"\x1f")
+        return h.hexdigest()
+
+    def _read_all(self) -> dict:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if (not isinstance(data, dict) or data.get("version") != _READS_FILE_VERSION
+                or data.get("book") != self.book or data.get("parser_version") != PARSER_VERSION):
+            return {}
+        files = data.get("files")
+        return files if isinstance(files, dict) else {}
+
+    def get(self, key: str):
+        d = self._files.get(key)
+        if not isinstance(d, dict):
+            return None
+        try:
+            return statement_from_json(d)
+        except Exception:  # noqa: BLE001  - a damaged entry is read fresh, never an error
+            return None
+
+    def put(self, key: str, st: Statement) -> None:
+        try:
+            self._files[key] = statement_to_json(st)
+            self._dirty = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    def drop(self, key: str) -> None:
+        if self._files.pop(key, None) is not None:
+            self._dirty = True
+
+    def save(self) -> None:
+        if not self._dirty:
+            return
+        try:
+            if not self._files:
+                if self.path.exists():
+                    self.path.unlink()
+                return
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps({"version": _READS_FILE_VERSION, "book": self.book,
+                                       "parser_version": PARSER_VERSION, "files": self._files},
+                                      indent=1), encoding="utf-8")
+            os.replace(tmp, self.path)
+        except OSError:
+            pass    # keeping reads is a convenience; never fail the run
+
+
+# ---------------------------------------------------------------------------
 # Whole-folder run
 # ---------------------------------------------------------------------------
 
@@ -1538,6 +1687,8 @@ class Result:
     csv_ties: list = field(default_factory=list)           # CC-22: one coverage line per CSV (no totals, so no tie-out)
     csv_refused: list = field(default_factory=list)        # CC-24: (file name, reason) for each CSV that books nothing
     held: list = field(default_factory=list)               # CC-30: (file name, card, reason) statements held: period not read in a ranged run
+    reused: int = 0                                        # CC-37: statements whose kept read result was reused
+    read_fresh: int = 0                                    # CC-37: statements read from the PDF this run
 
 
 CSV_NO_TOTALS = "NO TOTALS (CSV export)"
@@ -1641,7 +1792,8 @@ def no_activity(st: Statement) -> bool:
 
 
 def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date | None = None,
-                   label: str = "all statements", cards=None, cards_problem: str | None = None) -> Result:
+                   label: str = "all statements", cards=None, cards_problem: str | None = None,
+                   reads: "StatementReads | None" = None) -> Result:
     """`cards` is the CC-28 card list (agents.cc_cards.Card objects). A CSV is placed by its
     card digits against it; without it every CSV is refused. `cards_problem` is why the list
     is not available (shown as an issue)."""
@@ -1667,26 +1819,46 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     if not pdfs and not (list(pdf_dir.rglob("*.csv")) + list(pdf_dir.rglob("*.CSV"))):
         issues.append(f"no PDFs found under {pdf_dir}")
 
+    reused_n = fresh_n = 0
+    reused_info: dict = {}     # id(statement) -> (cache key, pdf) for a reused read result
+    dup_keys: dict = {}        # id(first statement) -> [(cache key, identical duplicate)]
+    fresh_info: dict = {}      # id(statement) -> (cache key, pdf) for a statement read from the PDF
     for pdf in pdfs:
         bank, card = get_bank_and_card_type(pdf)
-        try:
-            lines = read_lines(pdf)
-        except Exception as e:  # unreadable PDF: say so, never skip silently
-            issues.append(f"{pdf.name}: could not be read ({type(e).__name__})")
-            continue
-        if not any(ln.strip() for ln in lines):
-            # A scanned statement: never 0 rows, never PASS.
-            issues.append(f"{pdf.name}: {NO_TEXT_LAYER}")
-            continue
-        reason = non_statement_reason(lines, bank)
-        if reason:
-            skipped.append(f"{pdf.name} ({reason})")
-            continue
-        st = parse_statement(lines, bank, card, pdf.name)
+        ckey = ""
+        st = None
+        if reads is not None:
+            fh = _file_sha256(pdf)
+            if fh:
+                ckey = StatementReads.key(fh, bank, card, pdf.name)
+                st = reads.get(ckey)
+        if st is not None:
+            reused_n += 1
+            reused_info[id(st)] = (ckey, pdf)
+        else:
+            try:
+                lines = read_lines(pdf)
+            except Exception as e:  # unreadable PDF: say so, never skip silently
+                issues.append(f"{pdf.name}: could not be read ({type(e).__name__})")
+                continue
+            if not any(ln.strip() for ln in lines):
+                # A scanned statement: never 0 rows, never PASS.
+                issues.append(f"{pdf.name}: {NO_TEXT_LAYER}")
+                continue
+            reason = non_statement_reason(lines, bank)
+            if reason:
+                skipped.append(f"{pdf.name} ({reason})")
+                continue
+            st = parse_statement(lines, bank, card, pdf.name)
+            fresh_n += 1
+            if ckey:
+                fresh_info[id(st)] = (ckey, pdf)
         if st.key in seen_keys:
             first_name, first = seen_keys[st.key]
             if row_signature(st) == row_signature(first):
                 duplicates.append(f"{st.card} {st.label}: {pdf.name} - Duplicate of {first_name} (counted once)")
+                if id(st) in fresh_info:     # CC-37: an identical copy is kept too, once the first one is
+                    dup_keys.setdefault(id(first), []).append((fresh_info[id(st)][0], st))
             else:
                 issues.append(f"{pdf.name}: same card and period as {first_name} but different rows; "
                               f"only {first_name} is used - check which one is right")
@@ -1790,6 +1962,31 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     if undated:
         issues.append(f"{len(undated)} row(s) without a date")
     ties = [tie_out(st, find_prior(st, pool)) for st in statements]
+    if reads is not None:
+        # A reused statement that no longer ties (its prior statement changed or went): drop the kept
+        # result and bring back the page text, so the gap report below is as complete as a fresh read.
+        for st, t in zip(statements, ties):
+            info = reused_info.get(id(st))
+            if info and not is_pass(t.result):
+                reads.drop(info[0])
+                try:
+                    st.lines = read_lines(info[1])
+                except Exception:  # noqa: BLE001
+                    pass
+        # Keep only a statement read cleanly AND tying out. Never a failed, refused or untied one.
+        for st in pool:
+            info = fresh_info.get(id(st))
+            if not info:
+                continue
+            tt = next((t for x, t in zip(statements, ties) if x is st), None) or tie_out(st, find_prior(st, pool))
+            pr = st.parsed
+            clean = (is_pass(tt.result) and not pr.errors and not pr.missing and not pr.proof_failed
+                     and st.period is not None and (bool(pr.rows) or no_activity(st)))
+            if clean:
+                reads.put(info[0], st)
+                for dkey, dst in dup_keys.get(id(st), []):
+                    reads.put(dkey, dst)
+        reads.save()
     gap_lines: list[str] = []
     for st, t in zip(statements, ties):
         if not is_pass(t.result):
@@ -1834,6 +2031,8 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
         parts.append("Credit card transactions completed successfully.")
     if gap_lines:
         parts.append("Gap report (statements that did not tie out):\n\n" + "\n".join(f"- {g}" for g in gap_lines))
+    if reads is not None:
+        parts.append(f"Statement reads: {reused_n} reused from the earlier run, {fresh_n} read fresh")
     parts.append(f"Range run: {label}")
     parts.append(f"{len(rows)} transactions from {len(statements)} statement(s)"
                  + (f" and {len(csv_statements)} CSV export(s)" if csv_statements else "")
@@ -1852,7 +2051,8 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     parts.append(f"Output: {out}" if out else "No Excel written: no transactions were extracted.")
     return Result("\n\n".join(parts), issues, rows, ties, fees, duplicates, out,
                   skipped=skipped, statements=statements, emi_rows=emi_rows, pool=pool,
-                  csv_statements=csv_statements, csv_ties=csv_ties, csv_refused=csv_refused, held=held)
+                  csv_statements=csv_statements, csv_ties=csv_ties, csv_refused=csv_refused, held=held,
+                  reused=reused_n, read_fresh=fresh_n)
 
 
 # ---------------------------------------------------------------------------
