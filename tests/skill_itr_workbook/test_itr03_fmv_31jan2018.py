@@ -153,6 +153,7 @@ def _run_cg(commodity, scrips, tables, monkeypatch):
     rules = rules_engine.load_rules(RULES_DIR, "2024-25")
     monkeypatch.setattr(lots_engine, "reconstruct_lots", lambda book, yk: ["recon"])
     monkeypatch.setattr(lots_engine, "all_lots", lambda recons: [_Lot(commodity)])
+    monkeypatch.setattr(lots_engine, "non_sale_lots", lambda recons: [])
 
     class _Acct:
         commodity_id = commodity

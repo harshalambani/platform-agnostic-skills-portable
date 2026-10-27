@@ -526,11 +526,12 @@ def test_cf4_flag_reaches_capital_gains_schedule_end_to_end():
     lot_before = _FakeLot(date(2024, 6, 1), date(2023, 1, 1), 100, 50000.0, 150000.0, 100000.0, "X", "acct1")
     lot_after = _FakeLot(date(2024, 8, 1), date(2023, 1, 1), 100, 50000.0, 150000.0, 100000.0, "X", "acct1")
 
-    monkeypatch_targets = (lots_engine, "reconstruct_lots"), (lots_engine, "all_lots")
+    monkeypatch_targets = (lots_engine, "reconstruct_lots"), (lots_engine, "all_lots"), (lots_engine, "non_sale_lots")
     orig = {name: getattr(mod, name) for mod, name in monkeypatch_targets}
     try:
         lots_engine.reconstruct_lots = lambda book, year_key: ["recon"]
         lots_engine.all_lots = lambda recons: [lot_before, lot_after]
+        lots_engine.non_sale_lots = lambda recons: []
 
         class _FakeAccount:
             commodity_id = "X"

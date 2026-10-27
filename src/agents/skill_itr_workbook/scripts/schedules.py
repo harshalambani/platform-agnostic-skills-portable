@@ -736,10 +736,23 @@ class CGLotRow:
 
 
 @dataclass
+class CGNonSaleRow:
+    """ITR-19: a disposal that is not a sale (gift / no consideration). Listed
+    for review only; never in any CG total."""
+    scrip: str
+    date: date
+    buy_date: date | None
+    qty: float
+    cost: float
+    reason: str
+
+
+@dataclass
 class CapitalGainsSchedule:
     lt_control: float = 0.0
     st_control: float = 0.0
     lot_rows: list = field(default_factory=list)          # list[CGLotRow]
+    non_sale_rows: list = field(default_factory=list)     # list[CGNonSaleRow] (ITR-19)
     lt_taxable_gross: float = 0.0
     st_taxable_gross: float = 0.0
     lt_exemption_used: float = 0.0
@@ -807,6 +820,12 @@ def build_capital_gains(
     st_gross_total = 0.0
     lt_before_split = 0.0
     lt_on_after_split = 0.0
+
+    for lot, reason in lots_engine.non_sale_lots(reconciliations):
+        sched.non_sale_rows.append(CGNonSaleRow(
+            scrip=lot.scrip, date=lot.sale_date, buy_date=lot.buy_date,
+            qty=lot.qty, cost=lot.cost, reason=reason,
+        ))
 
     for recon in reconciliations:
         for lot in lots_engine.all_lots([recon]):

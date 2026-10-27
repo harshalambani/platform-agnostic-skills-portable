@@ -50,6 +50,12 @@ from fractions import Fraction
 from parse_gnucash import Book, fy_window
 
 _STOCK_TYPES = {"STOCK", "MUTUAL"}
+#: ITR-19: account types that can never carry consideration. A disposal whose
+#: only non-stock legs are of these types (and has no booked-gain leg) brought
+#: no money and no receivable in -- a gift (Expense) or a write-off against
+#: Equity -- so it is not a "transfer" for capital gains (s.47(iii)).
+_NO_CONSIDERATION_TYPES = {"EXPENSE", "EQUITY"}
+NOT_A_SALE_REASON = "gift / no consideration: not a transfer, s.47(iii)"
 UNATTRIBUTED = "unattributed — review"
 FIFO_VIOLATION = "FIFO violation — review"
 STRADDLE_UNRESOLVED = "straddle — review"
@@ -98,6 +104,11 @@ class SaleReconciliation:
     booked_gain: float
     lot_gain_sum: float
     lots: list[Lot] = field(default_factory=list)
+    #: ITR-19: False for a disposal that is not a sale (gift / no consideration).
+    #: Its lots still consume their buy lots (FIFO) but are kept out of the CG
+    #: schedule; the CapitalGains sheet lists them with `not_sale_reason`.
+    is_sale: bool = True
+    not_sale_reason: str = ""
 
     @property
     def ok(self) -> bool:
@@ -116,6 +127,19 @@ def _buy_lots(book: Book, account_guid: str) -> list[_BuyLot]:
                 ))
     lots.sort(key=lambda bl: bl.date)
     return lots
+
+
+def _is_not_a_sale(book: Book, gain_splits, other_splits) -> bool:
+    """True when the disposal brought in no consideration: no booked-gain leg
+    and every other leg sits on an EXPENSE or EQUITY account. Any money or
+    receivable leg (BANK/CASH/ASSET/RECEIVABLE/broker...) keeps it a sale."""
+    if gain_splits or not other_splits:
+        return False
+    return all(
+        (book.accounts.get(sp.account_guid) is not None
+         and book.accounts[sp.account_guid].type in _NO_CONSIDERATION_TYPES)
+        for sp in other_splits
+    )
 
 
 def _sale_transactions(book: Book):
@@ -223,6 +247,7 @@ def reconstruct_lots(book: Book, year_key: str) -> list[SaleReconciliation]:
 
     for txn, stock_splits, gain_splits, proceeds_splits in _sale_transactions(book):
         in_window = start <= txn.date_posted <= end
+        not_a_sale = _is_not_a_sale(book, gain_splits, proceeds_splits)
 
         total_proceeds = sum((sp.value for sp in proceeds_splits), Fraction(0))
         total_gain_raw = sum((sp.value for sp in gain_splits), Fraction(0))
@@ -310,6 +335,8 @@ def reconstruct_lots(book: Book, year_key: str) -> list[SaleReconciliation]:
                 sale_txn_guid=txn.guid, sale_date=txn.date_posted,
                 booked_gain=booked_gain, lot_gain_sum=sum(lot.gain for lot in lots),
                 lots=lots,
+                is_sale=not not_a_sale,
+                not_sale_reason="" if not not_a_sale else NOT_A_SALE_REASON,
             ))
 
     results.sort(key=lambda r: r.sale_date)
@@ -317,4 +344,11 @@ def reconstruct_lots(book: Book, year_key: str) -> list[SaleReconciliation]:
 
 
 def all_lots(reconciliations: list[SaleReconciliation]) -> list[Lot]:
-    return [lot for r in reconciliations for lot in r.lots]
+    """Lots of real sales only; disposals that are not a sale (ITR-19) are
+    excluded -- see `non_sale_lots`."""
+    return [lot for r in reconciliations if r.is_sale for lot in r.lots]
+
+
+def non_sale_lots(reconciliations: list[SaleReconciliation]) -> list[tuple[Lot, str]]:
+    """(lot, reason) for every disposal that is not a sale (gift etc.)."""
+    return [(lot, r.not_sale_reason) for r in reconciliations if not r.is_sale for lot in r.lots]
