@@ -514,6 +514,22 @@ def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_
         sw.cell(12, lot.attribution)
         sw.cell(13, lot.fmv_source)
         sw.row += 1
+    if cg.non_sale_rows:
+        # ITR-19: disposals that are not a sale. Below the lot rows so the lot
+        # range the CG view reads is untouched; never in any total above.
+        sw.blank()
+        sw.header("Disposals that are not a sale (not in Schedule CG)")
+        for col, h in enumerate(["Scrip", "Date", "Buy date", "Qty", "Cost", "Reason"], start=1):
+            sw.cell(col, h)
+        sw.row += 1
+        for r in cg.non_sale_rows:
+            sw.cell(1, r.scrip)
+            sw.cell(2, r.date.isoformat())
+            sw.cell(3, r.buy_date.isoformat() if r.buy_date else None)
+            sw.cell(4, r.qty)
+            sw.cell(5, r.cost, number_format=INR_FORMAT)
+            sw.cell(6, r.reason)
+            sw.row += 1
     return layout
 
 
