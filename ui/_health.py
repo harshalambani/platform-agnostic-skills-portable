@@ -421,20 +421,27 @@ def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = No
     return HealthResult(True, "ok", f"Model '{model}' answered.")
 
 
-def check_with_model(endpoint: dict[str, Any], model: str) -> tuple[HealthResult, str]:
-    """The pre-run check: the endpoint probe, then ONE call with the model.
-    Returns (result, model_used). A model the endpoint did not list falls back
-    to its default (or first listed) model, so a run never sends an unlisted one."""
+def check_with_model(endpoint: dict[str, Any], model: str, name: str = "") -> tuple[HealthResult, str]:
+    """The pre-run check: the endpoint probe, then ONE call with the model AS
+    CHOSEN. The model is never replaced: a typed name the endpoint does not list
+    is used as typed if the call accepts it, and refused otherwise. An empty
+    choice falls back to the endpoint's default (nothing to probe if none)."""
     health = check(endpoint)
     if not health.ok:
         return health, model
-    names = list(getattr(health, "models", ()) or ())
-    chosen = bare_model_name(model)
-    if names and chosen not in names:
-        dflt = bare_model_name(endpoint.get("default_model") or "")
-        chosen = dflt if dflt in names else names[0]
+    chosen = bare_model_name(model) or bare_model_name(endpoint.get("default_model") or "")
+    if not chosen:
+        return health, model
     probe = probe_model(endpoint, chosen)
-    return (health if probe.ok else probe), chosen
+    if probe.ok:
+        return health, chosen
+    if probe.status in ("model", "auth"):
+        who = f" by endpoint '{name}'" if name else ""
+        probe = HealthResult(
+            False, probe.status,
+            f"Model '{chosen}' was refused{who} ({probe.detail}). "
+            "Pick a model from the list or check the name.")
+    return probe, chosen
 
 
 def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:

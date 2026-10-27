@@ -150,15 +150,27 @@ def _capture_payload(monkeypatch, model):
     return seen
 
 
-def test_c_gemini_25_gets_limited_thinking(monkeypatch):
-    assert _capture_payload(monkeypatch, "gemini-2.5-flash").get("reasoning_effort") == "low"
+@pytest.mark.parametrize("model", ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                                   "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite"])
+def test_c_gemini_25_flash_family_gets_thinking_off_and_300(monkeypatch, model):
+    sent = _capture_payload(monkeypatch, model)
+    assert sent["reasoning_effort"] == "none" and sent["max_tokens"] == 300
+
+
+@pytest.mark.parametrize("model", ["gemini-2.5-pro", "models/gemini-2.5-pro", "gemini-3-pro-preview",
+                                   "gemini-3.1-flash-lite", "models/gemini-3-flash-preview"])
+def test_c_gemini_25_pro_and_3x_get_low_and_the_larger_cap(monkeypatch, model):
+    sent = _capture_payload(monkeypatch, model)
+    assert sent["reasoning_effort"] == "low"
+    assert sent["max_tokens"] == m.LLM_REPLY_MAX_TOKENS_THINKING == 1500
 
 
 def test_c_gpt_oss_unchanged_and_others_get_none(monkeypatch):
-    assert _capture_payload(monkeypatch, "openai/gpt-oss-20b").get("reasoning_effort") == "low"
-    assert "reasoning_effort" not in _capture_payload(monkeypatch, "llama-3.3-70b-versatile")
-    assert "reasoning_effort" not in _capture_payload(monkeypatch, "gemma3:12b")
-    assert "reasoning_effort" not in _capture_payload(monkeypatch, "gemini-1.5-flash")
+    sent = _capture_payload(monkeypatch, "openai/gpt-oss-20b")
+    assert sent["reasoning_effort"] == "low" and sent["max_tokens"] == 300
+    for other in ("llama-3.3-70b-versatile", "gemma3:12b", "gemini-1.5-flash", "gemini-2.0-flash"):
+        sent = _capture_payload(monkeypatch, other)
+        assert "reasoning_effort" not in sent and sent["max_tokens"] == 300
 
 
 def test_e_chat_call_drops_the_models_prefix_and_leaves_others(monkeypatch):
@@ -272,12 +284,32 @@ def test_e_ollama_and_groq_names_unchanged(monkeypatch):
     assert _health.bare_model_name("library/model:latest") == "library/model:latest"
 
 
-def test_e_run_never_sends_an_unlisted_model(monkeypatch):
+def test_e_unlisted_typed_model_the_probe_accepts_is_sent_unchanged(monkeypatch):
     fake, calls = _router(lambda r: _Resp({}), models=("good", "other"))
     monkeypatch.setattr("urllib.request.urlopen", fake)
-    health, used = _health.check_with_model(OPENAI_EP, "from-the-old-endpoint")
-    assert used in ("good", "other") and calls["sent"]["model"] == used
-    assert calls["sent"]["model"] != "from-the-old-endpoint"
+    health, used = _health.check_with_model(OPENAI_EP, "typed-custom", "ep1")
+    assert health.ok and used == "typed-custom"
+    assert calls["sent"]["model"] == "typed-custom" and calls["chat"] == 1
+
+
+def test_e_unlisted_model_the_probe_refuses_stops_with_model_and_endpoint_named(monkeypatch):
+    def chat(r):
+        raise _http_error(404, {"error": {"message": "no such model"}})
+    fake, calls = _router(chat, models=("good", "other"))
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    health, used = _health.check_with_model(OPENAI_EP, "typed-custom", "ep1")
+    assert not health.ok
+    assert "typed-custom" in health.detail and "ep1" in health.detail and "404" in health.detail
+    assert used == "typed-custom"           # never a different model
+    assert calls["chat"] == 1               # no further chat calls
+    assert calls["sent"]["model"] != "good" and calls["sent"]["model"] != "other"
+
+
+def test_e_empty_choice_falls_back_to_the_endpoint_default(monkeypatch):
+    fake, calls = _router(lambda r: _Resp({}), models=("good", "other"))
+    monkeypatch.setattr("urllib.request.urlopen", fake)
+    health, used = _health.check_with_model(OPENAI_EP, "", "ep1")
+    assert health.ok and used == "good"
 
 
 # --------------------------------------------------- (f) endpoint switching

@@ -1037,9 +1037,9 @@ def _make_run_handler(skill: SkillInfo):
             yield add("**Checking LLM endpoint…**"), gr.update(interactive=False, value=None), gr.update()
 
             # UI-49: the endpoint probe plus ONE tiny call with the chosen model,
-            # so a wrong model or key fails here, before the long read. A model
-            # the endpoint did not list is replaced by its default/first one.
-            health, model_choice = _health.check_with_model(ep, model_choice)
+            # so a wrong model or key fails here, before the long read. The model is
+            # never replaced: refused means the run stops.
+            health, model_choice = _health.check_with_model(ep, model_choice, active)
             if not health.ok and llm_precheck_mode(skill) == "stop":
                 yield add(
                     f"Error: endpoint '{active}' is {health.status}: "

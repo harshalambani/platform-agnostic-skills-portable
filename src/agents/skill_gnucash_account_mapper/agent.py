@@ -2519,7 +2519,12 @@ def _resolve_llm_endpoint_config(
 # a reasoning model room (with reasoning_effort "low" it needs well under 150)
 # while staying modest for a free tier (Groq free gpt-oss-120b: 8K tokens/minute,
 # 30 requests/minute). It is a ceiling, not a spend: a clean reply is one digit.
+# UI-49: Gemini. 2.5 Flash / Flash-Lite are sent reasoning_effort "none" (thinking
+# off) and keep 300. 2.5 Pro and Gemini 3.x cannot turn thinking off; "low" is
+# still a ~1,024-token thinking budget that shares the cap with the visible
+# reply, so those models get the larger LLM_REPLY_MAX_TOKENS_THINKING.
 LLM_REPLY_MAX_TOKENS = 300
+LLM_REPLY_MAX_TOKENS_THINKING = 1500
 
 
 class _Reply(str):
@@ -2535,14 +2540,31 @@ class _Reply(str):
         return obj
 
 
-def _wants_reasoning_effort(model: str) -> bool:
-    """Only gpt-oss models are sent `reasoning_effort` (Groq documents it for
-    GPT-OSS 20B/120B only). Never sent to any other model: an unrecognised field
-    can 400 on other OpenAI-compatible servers."""
+def _reasoning_effort_for(model: str) -> Optional[str]:
+    """The `reasoning_effort` to send, or None to send nothing. gpt-oss: "low"
+    (Groq documents it for GPT-OSS only). Gemini 2.5 Flash/Flash-Lite: "none".
+    Gemini 2.5 Pro and 3.x (cannot turn thinking off): "low". Never sent to any
+    other model: an unrecognised field can 400 on other servers."""
     low = _chat_model_name(model).lower()
-    # UI-49: Gemini 2.5 thinking models too, so reasoning does not use up the
-    # 300-token reply (Gemini's compatible address accepts reasoning_effort).
-    return "gpt-oss" in low or low.startswith("gemini-2.5")
+    if "gpt-oss" in low:
+        return "low"
+    if low.startswith("gemini-2.5-flash"):
+        return "none"
+    if low.startswith("gemini-2.5-pro") or low.startswith("gemini-3"):
+        return "low"
+    return None
+
+
+def _wants_reasoning_effort(model: str) -> bool:
+    return _reasoning_effort_for(model) is not None
+
+
+def _reply_cap_for(model: str) -> int:
+    """UI-49: the larger cap only for models whose thinking cannot be turned off."""
+    low = _chat_model_name(model).lower()
+    if low.startswith("gemini-2.5-pro") or low.startswith("gemini-3"):
+        return LLM_REPLY_MAX_TOKENS_THINKING
+    return LLM_REPLY_MAX_TOKENS
 
 
 def _chat_model_name(model: str) -> str:
@@ -2613,11 +2635,12 @@ def _openai_compatible_chat(
             {"role": "user", "content": user},
         ],
         "temperature": 0.0,
-        "max_tokens": LLM_REPLY_MAX_TOKENS,
+        "max_tokens": _reply_cap_for(model),
         "stream": False,
     }
-    if _wants_reasoning_effort(model):
-        body_out["reasoning_effort"] = "low"
+    effort = _reasoning_effort_for(model)
+    if effort:
+        body_out["reasoning_effort"] = effort
     payload = json.dumps(body_out).encode("utf-8")
 
     headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
