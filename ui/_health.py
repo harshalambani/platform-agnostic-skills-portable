@@ -355,6 +355,88 @@ def check(endpoint: dict[str, Any]) -> HealthResult:
     return result
 
 
+def bare_model_name(name: str) -> str:
+    """Strip a leading "models/" (Gemini's list form). Other names unchanged."""
+    n = name or ""
+    return n[len("models/"):] if n.startswith("models/") else n
+
+
+def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = None) -> HealthResult:
+    """UI-49: ONE tiny real call with the CHOSEN model, so a wrong model, a model
+    the address does not serve, or a bad key fails in seconds, before a long
+    read. Not cached. ok=True only when the call came back with a 2xx."""
+    provider = endpoint.get("provider")
+    base = (endpoint.get("base_url") or "").rstrip("/")
+    model = bare_model_name(model)
+    if not base or not model:
+        return HealthResult(False, "model", "No model is selected.")
+    headers = {"User-Agent": "PA-Skills-Portable/health", "Content-Type": "application/json"}
+    if provider == "ollama":
+        url = f"{base}/api/chat"
+        payload = {"model": model, "stream": False,
+                   "messages": [{"role": "user", "content": "ping"}],
+                   "options": {"num_predict": 1}}
+        timeout = timeout or 120.0      # a cold local model has to load first
+    elif provider == "openai_compatible":
+        from . import _config
+        raw_key = endpoint.get("api_key", "")
+        key = _config.decrypt_api_key(raw_key) if raw_key else ""
+        if key and key not in ("", "not-needed"):
+            headers["Authorization"] = f"Bearer {key}"
+        url = f"{base}/chat/completions"
+        payload = {"model": model, "stream": False, "max_tokens": 1,
+                   "messages": [{"role": "user", "content": "ping"}]}
+        timeout = timeout or 20.0
+    else:
+        return HealthResult(False, "unreachable", f"Unknown provider '{provider}'.")
+    req = request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                          method="POST", headers=headers)
+    try:
+        with request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+    except error.HTTPError as e:
+        msg = ""
+        try:
+            try:
+                from agents.llm_errors import message_from_body
+            except ImportError:
+                from llm_errors import message_from_body
+            msg = message_from_body(json.loads(e.read().decode("utf-8", errors="replace")))
+        except Exception:  # noqa: BLE001
+            msg = ""
+        if e.code in (401, 403):
+            return HealthResult(False, "auth", f"HTTP {e.code}: the key was refused. {msg}".strip())
+        if e.code in (400, 404):
+            return HealthResult(False, "model", f"HTTP {e.code}: model '{model}' was refused by this address. {msg}".strip())
+        if e.code == 429:
+            # rate-limited / out of quota: the model exists; the run decides how to wait
+            return HealthResult(True, "ok", f"Model '{model}' reachable (HTTP 429).")
+        return HealthResult(False, "model", f"HTTP {e.code}: {msg or e.reason}".strip())
+    except error.URLError as e:
+        return HealthResult(False, "unreachable", f"{type(e).__name__}: {e.reason}")
+    except TimeoutError:
+        return HealthResult(False, "slow", f"Model '{model}' did not answer within {timeout:.0f}s.")
+    except Exception as e:  # noqa: BLE001
+        return HealthResult(False, "unreachable", f"{type(e).__name__}: {e}")
+    return HealthResult(True, "ok", f"Model '{model}' answered.")
+
+
+def check_with_model(endpoint: dict[str, Any], model: str) -> tuple[HealthResult, str]:
+    """The pre-run check: the endpoint probe, then ONE call with the model.
+    Returns (result, model_used). A model the endpoint did not list falls back
+    to its default (or first listed) model, so a run never sends an unlisted one."""
+    health = check(endpoint)
+    if not health.ok:
+        return health, model
+    names = list(getattr(health, "models", ()) or ())
+    chosen = bare_model_name(model)
+    if names and chosen not in names:
+        dflt = bare_model_name(endpoint.get("default_model") or "")
+        chosen = dflt if dflt in names else names[0]
+    probe = probe_model(endpoint, chosen)
+    return (health if probe.ok else probe), chosen
+
+
 def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
     provider = endpoint.get("provider")
     base = (endpoint.get("base_url") or "").rstrip("/")
@@ -405,7 +487,9 @@ def _check_uncached(endpoint: dict[str, Any]) -> HealthResult:
         )
     else:
         data = body.get("data") or []
-        names = tuple(m.get("id", "") for m in data if isinstance(m, dict))
+        # UI-49: Gemini lists "models/gemini-..." but its chat call needs the
+        # bare name; use the name the chat call accepts. Other names unchanged.
+        names = tuple(bare_model_name(m.get("id", "")) for m in data if isinstance(m, dict))
         infos = tuple(_openai_model_info(n) for n in names)
 
     return HealthResult(

@@ -2086,6 +2086,8 @@ LLM_MAX_RETRIES = 1      # one retry after an invalid/unparseable answer, then s
 LLM_MAX_CONSECUTIVE_FAILURES = 5    # N: consecutive failed calls (no reply, or HTTP 429) before the pass stops
 LLM_BACKOFF_BASE_SECONDS = 2.0      # 429 without Retry-After: 2, 4, 8, ... seconds
 LLM_BACKOFF_CAP_SECONDS = 30.0      # a wait (Retry-After or backoff) is never longer than this
+LLM_FAIL_WINDOW = 20                # UI-49: size of the window of most recent calls
+LLM_FAIL_RATE_STOP = 0.8            # UI-49: stop when MORE than this share of that window failed
 LLM_VALIDITY_WINDOW_K = 20          # K: the first K rows' first answers are checked for validity
 LLM_INVALID_RATE_STOP = 0.8         # stop if MORE than this share of those K answers is invalid
 
@@ -2111,6 +2113,14 @@ def _redact_llm_text(text, api_key=None) -> str:
     return _SECRET_LIKE_RX.sub("***", s)
 
 
+def _message_from_body(body) -> str:
+    try:
+        from agents.llm_errors import message_from_body  # noqa: PLC0415
+    except ImportError:  # CLI / bare-import usage
+        from llm_errors import message_from_body  # type: ignore  # noqa: PLC0415
+    return message_from_body(body)
+
+
 def _provider_message(err, api_key=None) -> str:
     """The provider's own error text from an HTTPError body (OpenAI style
     {"error": {"message": ...}}), redacted and capped. "" when there is none."""
@@ -2124,8 +2134,8 @@ def _provider_message(err, api_key=None) -> str:
     msg = ""
     try:
         body = json.loads(raw)
-        e = body.get("error") if isinstance(body, dict) else None
-        msg = (e.get("message") if isinstance(e, dict) else e) or (body.get("message") if isinstance(body, dict) else "") or ""
+        # UI-49: an object body, or a LIST wrapping it (Gemini's compatible address)
+        msg = _message_from_body(body)
     except Exception:  # noqa: BLE001
         msg = raw if len(raw) < 200 else ""
     out = _redact_llm_text(str(msg).strip(), api_key)[:200]
@@ -2244,6 +2254,15 @@ class _LLMGuard:
         self.last_error = ""      # CC-11: why the most recent failed call failed
         self.out_of_credits = False   # UI-47: stopped because the account has no credit left
         self.rate_limited = False     # UI-47: stopped by repeated HTTP 429
+        self.recent = []              # UI-49: outcomes of the most recent calls (True = failed)
+
+    def _note_outcome(self, failed: bool) -> bool:
+        """UI-49: record one call; True when MOST of the recent calls failed (a
+        provider that lets an occasional call through still crawls)."""
+        self.recent.append(bool(failed))
+        del self.recent[:-LLM_FAIL_WINDOW]
+        return (len(self.recent) >= LLM_FAIL_WINDOW
+                and sum(self.recent) > LLM_FAIL_RATE_STOP * LLM_FAIL_WINDOW)
 
     def _stop(self, reason: str) -> None:
         self.stopped = True
@@ -2264,10 +2283,13 @@ class _LLMGuard:
             except _LLMRateLimited as e:
                 self.consecutive_failures += 1
                 rate_limited += 1
-                if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES:
+                mostly = self._note_outcome(True)
+                if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES or mostly:
                     self.rate_limited = True
                     self._stop(f"the provider kept refusing calls (HTTP 429 rate limit, "
-                               f"{self.consecutive_failures} failed calls in a row)")
+                               + (f"{self.consecutive_failures} failed calls in a row)"
+                                  if self.consecutive_failures >= LLM_MAX_CONSECUTIVE_FAILURES
+                                  else f"{sum(self.recent)} of the last {len(self.recent)} calls failed)"))
                     return None
                 wait = e.retry_after if e.retry_after is not None else                     LLM_BACKOFF_BASE_SECONDS * (2 ** (rate_limited - 1))
                 wait = min(max(wait, 0.0), LLM_BACKOFF_CAP_SECONDS)
@@ -2276,6 +2298,7 @@ class _LLMGuard:
                 continue
             if reply is None:
                 self.consecutive_failures += 1
+                mostly = self._note_outcome(True)
                 err = _take_llm_error()
                 if err.get("reason"):
                     self.last_error = err["reason"]
@@ -2288,8 +2311,13 @@ class _LLMGuard:
                     self._stop(f"the provider kept failing ({self.consecutive_failures} "
                                f"calls in a row without a reply)"
                                + (f": {self.last_error}" if self.last_error else ""))
+                elif mostly:
+                    self._stop(f"the provider kept failing ({sum(self.recent)} of the "
+                               f"last {len(self.recent)} calls without a reply)"
+                               + (f": {self.last_error}" if self.last_error else ""))
                 return None
             self.consecutive_failures = 0
+            self._note_outcome(False)
             return reply
         return None
 
@@ -2511,7 +2539,17 @@ def _wants_reasoning_effort(model: str) -> bool:
     """Only gpt-oss models are sent `reasoning_effort` (Groq documents it for
     GPT-OSS 20B/120B only). Never sent to any other model: an unrecognised field
     can 400 on other OpenAI-compatible servers."""
-    return "gpt-oss" in (model or "").lower()
+    low = _chat_model_name(model).lower()
+    # UI-49: Gemini 2.5 thinking models too, so reasoning does not use up the
+    # 300-token reply (Gemini's compatible address accepts reasoning_effort).
+    return "gpt-oss" in low or low.startswith("gemini-2.5")
+
+
+def _chat_model_name(model: str) -> str:
+    """UI-49: Gemini lists models as "models/gemini-..." but the chat call needs
+    the bare name. Other providers' names are left unchanged."""
+    m = model or ""
+    return m[len("models/"):] if m.startswith("models/") else m
 
 
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
@@ -2569,7 +2607,7 @@ def _openai_compatible_chat(
     from urllib import request as _req
 
     body_out = {
-        "model": model,
+        "model": _chat_model_name(model),
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

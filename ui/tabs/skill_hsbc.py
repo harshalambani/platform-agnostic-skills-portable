@@ -94,7 +94,7 @@ def _run_hsbc(pdf_file, model_choice):
     # skill uses a model (requires.llm).
     if skill_uses_llm("HSBC"):
         yield add("**Step 3/5** — Checking the LLM endpoint."), gr.update(visible=False)
-        health = _health.check(ep)
+        health, model_choice = _health.check_with_model(ep, model_choice)
         if not health.ok:
             yield add(
                 f"Error: active endpoint '{active}' is {health.status}: {health.detail}. "
