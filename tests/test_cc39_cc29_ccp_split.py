@@ -216,7 +216,7 @@ def test_a_paired_payment_after_the_cutoff_is_moved_and_the_statement_books_to_t
     assert len(mv) == 1
     m = mv[0]
     assert m["Account"] == SUB and m["Transfer Account"] == CCP_PATH
-    assert _amt(m) == 1900.0 and m["Date"] == "12/05/2025"
+    assert _amt(m) == 1900.0 and m["Date"] == "2025-05-12"
     spends = [r for r in rows if r not in mv]
     assert spends and all(r["Transfer Account"] == SUB for r in spends)
     assert not any(r["Transfer Account"] == CCP_PATH for r in spends)
@@ -373,7 +373,7 @@ def test_a_marked_payment_gets_one_drawings_row(tmp_path, monkeypatch, paths):
     reply, rows, _c, out = _run(tmp_path, monkeypatch, _cards_text(), txns=_txns(STRAY), marks=CODE)
     pre = [r for r in rows if r["Account"] == DRAW]
     assert len(pre) == 1 and pre[0]["Transfer Account"] == CCP_PATH and _amt(pre[0]) == 777.0
-    assert pre[0]["Date"] == "20/05/2025"
+    assert pre[0]["Date"] == "2025-05-20"
     assert "Corporate card prepayments marked (1)" in reply and not reply.startswith("RED FLAG")
     assert [r for r in _report(out, "Prepayments")][1:]
     # not also moved to a card
