@@ -1657,6 +1657,7 @@ class StatementReads:
                 if self.path.exists():
                     self.path.unlink()
                 return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.path.with_name(self.path.name + ".tmp")
             tmp.write_text(json.dumps({"version": _READS_FILE_VERSION, "book": self.book,
                                        "parser_version": PARSER_VERSION, "files": self._files},
