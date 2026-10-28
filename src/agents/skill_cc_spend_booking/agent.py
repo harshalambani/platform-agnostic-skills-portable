@@ -209,7 +209,7 @@ def _canonical_csv(rows, path: Path) -> None:
         w = csv.DictWriter(f, fieldnames=list(CANONICAL_FIELDS))
         w.writeheader()
         for j in rows:
-            w.writerow({"Date": j.date.strftime("%d/%m/%Y"), "Transaction ID": j.num,
+            w.writerow({"Date": j.date.strftime("%Y-%m-%d"), "Transaction ID": j.num,
                         "Description": j.raw_description or j.description, "Account": "",
                         "Deposit": f"{j.amount:.2f}" if j.side == "D" else "",
                         "Withdrawal": f"{j.amount:.2f}" if j.side == "W" else "",
@@ -220,7 +220,7 @@ def _write_import_csv(ready, path: Path) -> None:
     from agents.canonical_io import IMPORT_DEPOSIT_HEADER, IMPORT_WITHDRAWAL_HEADER, order_import_ready_headers
     rows = []
     for j in sorted(ready, key=lambda x: (x.date, x.num)):
-        rows.append({"Date": j.date.strftime("%d/%m/%Y"), "Transaction ID": j.num, "Description": j.description,
+        rows.append({"Date": j.date.strftime("%Y-%m-%d"), "Transaction ID": j.num, "Description": j.description,
                      "Account": j.account, "Transfer Account": j.transfer or CCP_PATH,
                      IMPORT_DEPOSIT_HEADER: f"{j.amount:.2f}" if j.side == "D" else "",
                      IMPORT_WITHDRAWAL_HEADER: f"{j.amount:.2f}" if j.side == "W" else "",

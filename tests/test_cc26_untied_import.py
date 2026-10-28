@@ -95,8 +95,8 @@ def test_untied_rows_take_the_same_dates_as_a_passing_run(tmp_path, monkeypatch)
 def test_an_untied_statement_with_no_payment_books_on_real_dates(tmp_path, monkeypatch):
     reply, rows, _c, out = _two(tmp_path, monkeypatch, "FAIL", txns=[])
     dates = sorted({r["Date"] for r in rows})
-    assert dates == ["05/04/2025", "09/04/2025", "10/04/2025", "20/04/2025"] or len(rows) == 4
-    assert {r["Date"] for r in rows} <= {"05/04/2025", "09/04/2025", "10/04/2025", "20/04/2025"}
+    assert dates == ["2025-04-05", "2025-04-09", "2025-04-10", "2025-04-20"] or len(rows) == 4
+    assert {r["Date"] for r in rows} <= {"2025-04-05", "2025-04-09", "2025-04-10", "2025-04-20"}
     assert all(r["Transaction ID"].startswith("CCSB-") for r in rows)
 
 
