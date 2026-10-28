@@ -324,3 +324,158 @@ def test_run_does_not_use_another_books_cache(agent_env):                       
     sidecar.joinpath("other_cc_statement_reads.json").write_bytes(_reads_file(sidecar).read_bytes())
     out = go("other.gnucash")
     assert "Statement reads: 0 reused from the earlier run, 1 read fresh" in out and state["reads"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Pruning: entries for files that are gone or superseded are dropped on save
+# ---------------------------------------------------------------------------
+
+def _entries(tmp):
+    p = tmp / "book_cc_statement_reads.json"
+    return json.loads(p.read_text())["files"] if p.exists() else {}
+
+
+def test_deleted_file_entry_is_gone_after_the_next_save(env):
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    put("b.pdf", b"%PDF-1.4 synthetic B")
+    run()
+    assert len(_entries(tmp)) == 2
+    (d / "b.pdf").unlink()
+    d2 = d.parent / "SBI-Other-Card"                               # another card, so not a duplicate
+    d2.mkdir()
+    (d2 / "c.pdf").write_bytes(b"%PDF-1.4 synthetic C")
+    run()
+    paths = sorted(Path(e["path"]).name for e in _entries(tmp).values())
+    assert paths == ["a.pdf", "c.pdf"]                             # b.pdf's entry gone
+
+
+def test_changed_file_old_entry_is_gone_and_new_one_kept(env):
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    run()
+    old = set(_entries(tmp))
+    put("a.pdf", b"%PDF-1.4 synthetic CHANGED")
+    run()
+    new = set(_entries(tmp))
+    assert len(new) == 1 and not (old & new)                       # stale key not left behind
+    assert run().reused == 1                                       # and the new one is used
+
+
+def test_unchanged_file_entry_is_not_dropped(env):                 # NEGATIVE
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    run()
+    before = _entries(tmp)
+    run()
+    assert _entries(tmp) == before and len(before) == 1
+
+
+def test_entry_for_a_file_outside_this_runs_folder_is_not_dropped(env, tmp_path):   # NEGATIVE
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    run()
+    other = tmp / "elsewhere"
+    other.mkdir()
+    (other / "x.pdf").write_bytes(b"%PDF-1.4 synthetic X")
+    store = m.StatementReads(tmp / "book_cc_statement_reads.json", "book")
+    k = next(iter(store._files))
+    store._files["outside"] = dict(store._files[k], path=str(other / "x.pdf"))
+    store._dirty = True
+    store.save()
+    (d / "new.pdf").write_bytes(b"%PDF-1.4 synthetic NEW")        # the next run only looks at the folder d
+    run()
+    assert "outside" in _entries(tmp)
+    (other / "x.pdf").unlink()                                     # but once that file is gone it goes
+    (d / "new2.pdf").write_bytes(b"%PDF-1.4 synthetic NEW2")
+    run()
+    assert "outside" not in _entries(tmp)
+
+
+def test_entry_without_a_path_is_dropped_once_never_kept_forever(env):
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    run()
+    p = tmp / "book_cc_statement_reads.json"
+    data = json.loads(p.read_text())
+    for e in data["files"].values():
+        e.pop("path")
+    p.write_text(json.dumps(data))
+    res = run()
+    assert (res.reused, res.read_fresh) == (0, 1)
+    assert all("path" in e for e in _entries(tmp).values()) and len(_entries(tmp)) == 1
+
+
+def test_a_prune_error_does_not_fail_the_run(env, monkeypatch):    # NEGATIVE
+    tmp, d, state, put, run = env
+    put("a.pdf")
+    run()
+    monkeypatch.setattr(m.os.path, "exists", lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    (d / "b.pdf").write_bytes(b"%PDF-1.4 synthetic B")
+    res = run()
+    assert res.rows and res.read_fresh == 1
+
+
+# ---------------------------------------------------------------------------
+# PARSER_VERSION guard: the parser source must not change without a version bump
+# ---------------------------------------------------------------------------
+import hashlib                                                      # noqa: E402
+from pathlib import Path                                            # noqa: E402
+
+_SCRIPT = (Path(__file__).resolve().parent.parent / "src" / "agents" / "skill_cc_transactions"
+           / "scripts" / "create_cc_transaction_list.py")
+
+# What is fingerprinted (everything that turns PDF text into a parsed Statement):
+#   - the parse constants AMT, NUM, MON3, MONTHS, DATE_START, TOL_STRICT, TOL_LOOSE;
+#   - every definition from `num` through `parse_statement`: num, signed, norm_dir, squash, tokens,
+#     explicit_emi_kind, classify, the Row / Loan / Parsed / Statement dataclasses, _mk_row, _dmy,
+#     _unparsed, parse_axis, parse_hdfc_old, strip_emi_marker, parse_hdfc_new, parse_icici, _hsbc_year,
+#     _merchant_tokens, merchants_match, hsbc_instalment_kind, read_loan_summary, loans_booked_in_period,
+#     parse_hsbc, the SBM helpers and parsers, resolve_sbm_roles, sbi_date, is_sbi_row, parse_sbi,
+#     read_yes_positional, parse_yes, read_lines, get_bank_and_card_type, detect_period,
+#     non_statement_reason, parse_statement.
+# NOT fingerprinted: is_pass and the RESULT_* names, TieOut, find_prior, tie_out, gap_report, fees,
+# the cache code, run_extraction, Excel writing: those run fresh on reused reads.
+
+
+def parser_fingerprint(source: str) -> str:
+    source = source.replace("\r\n", "\n")
+    a, b = source.index('AMT = r"'), source.index("RESULT_PASS =")
+    c, e = source.index("def num("), source.index("@dataclass\nclass TieOut")
+    text = source[a:b] + "\n#--\n" + source[c:e]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Append-only: one entry per parser state. Never edit an old entry; a new parser state gets a new version.
+KNOWN_PARSER_FINGERPRINTS = {
+    1: "3e4576689854c447ff8e4260ca78a24ec6ebfdc7ba5730a8feca6d21a39c2970",
+}
+
+
+def _current():
+    return parser_fingerprint(_SCRIPT.read_text(encoding="utf-8"))
+
+
+def test_parser_source_matches_its_parser_version():
+    now = _current()
+    v = m.PARSER_VERSION
+    assert KNOWN_PARSER_FINGERPRINTS.get(v) == now, (
+        f"parser source changed: bump PARSER_VERSION in create_cc_transaction_list.py and add "
+        f"{{{v + 1}: '{now}'}} to KNOWN_PARSER_FINGERPRINTS (if this is the first run for version {v}, "
+        f"add {{{v}: '{now}'}} instead)")
+
+
+def test_every_known_fingerprint_is_distinct():
+    vals = list(KNOWN_PARSER_FINGERPRINTS.values())
+    assert len(set(vals)) == len(vals), "a new parser state must not reuse an old fingerprint"
+    assert max(KNOWN_PARSER_FINGERPRINTS) == m.PARSER_VERSION, "PARSER_VERSION is behind the newest known entry"
+
+
+def test_a_parser_change_changes_the_fingerprint_but_a_tie_out_change_does_not():   # NEGATIVE
+    src = _SCRIPT.read_text(encoding="utf-8")
+    base = parser_fingerprint(src)
+    assert parser_fingerprint(src.replace("def parse_sbi(lines", "def parse_sbi(lines ", 1)) != base
+    assert parser_fingerprint(src.replace('AMT = r"\d', 'AMT = r"\s?\d', 1)) != base
+    assert parser_fingerprint(src.replace("def tie_out(st", "def tie_out(st ", 1)) == base
+    assert parser_fingerprint(src.replace("def run_extraction(", "def run_extraction( ", 1)) == base
+    assert parser_fingerprint(src.replace("\n", "\r\n")) == base          # CRLF checkout gives the same hash

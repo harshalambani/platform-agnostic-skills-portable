@@ -1527,7 +1527,8 @@ def fee_block(fees: list[FeeLine]) -> str:
 # Bump this whenever a parser or the tie-out inputs change what a statement reads as:
 # every kept result from another version is then ignored and read fresh.
 PARSER_VERSION = 1
-_READS_FILE_VERSION = 1
+# 2: each kept read also records the file's path (for pruning). A version-1 file is ignored once.
+_READS_FILE_VERSION = 2
 
 
 def _file_sha256(path) -> str:
@@ -1609,6 +1610,7 @@ class StatementReads:
         self.path, self.book = Path(path), book
         self._files = self._read_all()
         self._dirty = False
+        self._seen: dict = {}      # file path -> the key it has this run (reused or read fresh)
 
     @staticmethod
     def key(file_hash: str, bank: str, card: str, name: str) -> str:
@@ -1631,16 +1633,43 @@ class StatementReads:
 
     def get(self, key: str):
         d = self._files.get(key)
-        if not isinstance(d, dict):
+        if not isinstance(d, dict) or not d.get("path"):    # no recorded path: read fresh (and kept with one)
             return None
         try:
             return statement_from_json(d)
         except Exception:  # noqa: BLE001  - a damaged entry is read fresh, never an error
             return None
 
-    def put(self, key: str, st: Statement) -> None:
+    @staticmethod
+    def path_of(pdf) -> str:
+        return os.path.abspath(str(pdf))
+
+    def seen(self, pdf, key: str) -> None:
+        """Note that this run met this file under this key (any older key for it is stale)."""
+        if key:
+            self._seen[self.path_of(pdf)] = key
+
+    def prune(self) -> None:
+        """Drop entries whose file is gone, and entries for a file this run met under another key.
+        Never drops an entry just because this run did not look at it. Never raises."""
         try:
-            self._files[key] = statement_to_json(st)
+            for k, d in list(self._files.items()):
+                path = d.get("path") if isinstance(d, dict) else None
+                if not path:                 # no recorded path (damaged entry): cannot be matched, drop
+                    del self._files[k]
+                    self._dirty = True
+                elif self._seen.get(path, k) != k or not os.path.exists(path):
+                    del self._files[k]
+                    self._dirty = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    def put(self, key: str, st: Statement, pdf=None) -> None:
+        try:
+            d = statement_to_json(st)
+            if pdf is not None:
+                d["path"] = self.path_of(pdf)
+            self._files[key] = d
             self._dirty = True
         except Exception:  # noqa: BLE001
             pass
@@ -1650,6 +1679,7 @@ class StatementReads:
             self._dirty = True
 
     def save(self) -> None:
+        self.prune()
         if not self._dirty:
             return
         try:
@@ -1833,6 +1863,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             if fh:
                 ckey = StatementReads.key(fh, bank, card, pdf.name)
                 st = reads.get(ckey)
+                reads.seen(pdf, ckey)
         if st is not None:
             reused_n += 1
             reused_info[id(st)] = (ckey, pdf)
@@ -1859,7 +1890,7 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             if row_signature(st) == row_signature(first):
                 duplicates.append(f"{st.card} {st.label}: {pdf.name} - Duplicate of {first_name} (counted once)")
                 if id(st) in fresh_info:     # CC-37: an identical copy is kept too, once the first one is
-                    dup_keys.setdefault(id(first), []).append((fresh_info[id(st)][0], st))
+                    dup_keys.setdefault(id(first), []).append((fresh_info[id(st)][0], st, fresh_info[id(st)][1]))
             else:
                 issues.append(f"{pdf.name}: same card and period as {first_name} but different rows; "
                               f"only {first_name} is used - check which one is right")
@@ -1984,9 +2015,9 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
             clean = (is_pass(tt.result) and not pr.errors and not pr.missing and not pr.proof_failed
                      and st.period is not None and (bool(pr.rows) or no_activity(st)))
             if clean:
-                reads.put(info[0], st)
-                for dkey, dst in dup_keys.get(id(st), []):
-                    reads.put(dkey, dst)
+                reads.put(info[0], st, info[1])
+                for dkey, dst, dpdf in dup_keys.get(id(st), []):
+                    reads.put(dkey, dst, dpdf)
         reads.save()
     gap_lines: list[str] = []
     for st, t in zip(statements, ties):
