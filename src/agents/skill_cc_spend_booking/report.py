@@ -64,6 +64,8 @@ class RunReport:
     skipped: list = field(default_factory=list)
     duplicates: list = field(default_factory=list)
     statements_read: int = 0
+    statements_reused: int = 0      # CC-37: kept read results reused this run
+    statements_fresh: int = 0       # CC-37: statements read from the PDF this run
     tie: dict = field(default_factory=dict)
     output_csv: str = ""
     output_xlsx: str = ""
@@ -484,6 +486,9 @@ def build_message(rep: RunReport) -> str:
                  + f" from {sum(1 for s in rep.settlements if s.status == 'SETTLED')} settled statement(s); "
                  f"{rep.statements_read} statement(s) read in the range"
                  + (f" and {len(rep.csv_ties)} CSV export(s)" if rep.csv_ties else ""))
+    if rep.statements_reused or rep.statements_fresh:
+        parts.append(f"Statement reads: {rep.statements_reused} reused from the earlier run, "
+                     f"{rep.statements_fresh} read fresh")
     if rep.skipped:
         parts.append(f"Skipped: not a statement ({len(rep.skipped)}):\n" + "\n".join(f"  {d}" for d in rep.skipped))
     if rep.duplicates:
