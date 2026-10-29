@@ -796,6 +796,11 @@ if __name__ == "__main__":
     input_folder = sys.argv[1]
     output_folder = sys.argv[2] if len(sys.argv) > 2 else None
     password = sys.argv[3] if len(sys.argv) > 3 else None
+    if password is not None and password.startswith('--'):
+        password = None   # a flag, not a password (e.g. --password-stdin)
+    if '--password-stdin' in sys.argv:
+        # SEC-15: the agent passes the password on stdin, not in argv.
+        password = sys.stdin.readline().rstrip('\r\n') or None
 
     extract_msg = '--extract-msg' in sys.argv
     folder_structure = None

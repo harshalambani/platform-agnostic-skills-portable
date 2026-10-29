@@ -119,10 +119,12 @@ def _anchored_line(cn_no, leg):
 
 def decrypt(pdf, pw, out):
     qpdf_path = resolve_qpdf()
-    r = subprocess.run([qpdf_path, f"--password={pw}", "--decrypt", pdf, out],
-                       capture_output=True, text=True)
+    # SEC-15: the password goes to qpdf on stdin, not on its command line.
+    r = subprocess.run([qpdf_path, "--password-file=-", "--decrypt", pdf, out],
+                       input=(pw or "") + "\n", capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError(f"qpdf failed on {pdf}: {r.stderr.strip()}")
+        detail = (r.stderr or "").replace(pw or chr(0), "***").strip()
+        raise RuntimeError(f"qpdf failed on {pdf}: {detail}")
 
 
 def text_of(pdf):

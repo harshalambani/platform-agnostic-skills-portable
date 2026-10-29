@@ -140,14 +140,19 @@ def _format_event(event: dict, elapsed: int) -> str:
 
     if etype == "tool_call":
         tool = event.get("tool", "?")
-        args = event.get("args", "")
+        # SEC-15: a tool call's arguments can carry a statement password.
+        # Mask sensitive keys (nested dicts/lists, argv-style flags) before
+        # the line goes to the screen or the run log.
+        from agents.secret_redact import redact_value
+        args = redact_value(event.get("args", ""))
         return (
             f"**Step {step}** — Calling tool: `{tool}`\n"
             f"> {args}"
         )
     elif etype == "tool_result":
+        from agents.secret_redact import redact_text
         tool = event.get("tool", "?")
-        snippet = event.get("snippet", "")
+        snippet = redact_text(str(event.get("snippet", "")))
         return f"**Step {step}** — `{tool}` returned:\n> {snippet}"
     elif etype == "llm_response":
         snippet = event.get("snippet", "")

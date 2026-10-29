@@ -26,15 +26,15 @@ from pathlib import Path
 SCRIPTS = Path(__file__).parent
 
 
-def run(cmd):
+def run(cmd, input_text=None):
     print(f"\n$ {' '.join(str(c) for c in cmd)}", flush=True)
-    res = subprocess.run(cmd)
+    res = subprocess.run(cmd, input=input_text, text=True if input_text else None)
     if res.returncode != 0:
         sys.exit(f"Stage failed: {cmd[1] if len(cmd) > 1 else cmd[0]}")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__,
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pdf-dir", type=Path, required=True,
                     help="Folder containing HSBC statement PDFs.")
@@ -48,9 +48,18 @@ def main():
                     help="Reuse existing TSVs in <work-dir>/tsv/ (skip the OCR step).")
     ap.add_argument("--dpi", type=int, default=300,
                     help="OCR raster DPI (default 300; do not go below 250).")
-    ap.add_argument("--password", default=None,
-                    help="User password for encrypted PDFs (passed to pdftoppm).")
+    ap.add_argument("--password-file", default=None, metavar="FILE",
+                    help="File holding the user password for encrypted PDFs "
+                         "(first line), or '-' to read it from stdin. The "
+                         "password is never accepted on the command line.")
     args = ap.parse_args()
+    password = None
+    if args.password_file:
+        if args.password_file == "-":
+            password = sys.stdin.readline().rstrip("\r\n")
+        else:
+            password = Path(args.password_file).read_text(
+                encoding="utf-8").splitlines()[0]
 
     args.work_dir.mkdir(parents=True, exist_ok=True)
 
@@ -59,9 +68,9 @@ def main():
                    "--pdf-dir", str(args.pdf_dir),
                    "--work-dir", str(args.work_dir),
                    "--dpi", str(args.dpi)]
-        if args.password:
-            ocr_cmd += ["--password", args.password]
-        run(ocr_cmd)
+        if password:
+            ocr_cmd += ["--password-file", "-"]
+        run(ocr_cmd, input_text=(password + "\n") if password else None)
     else:
         print("[skip-ocr] reusing existing TSVs", flush=True)
 
