@@ -23,7 +23,7 @@ inputs:
     file_types: [".pdf"]
     required: true
   - name: "password"
-    type: "text"
+    type: "password"
     label: "PDF password (account holder's PAN)"
     required: true
 

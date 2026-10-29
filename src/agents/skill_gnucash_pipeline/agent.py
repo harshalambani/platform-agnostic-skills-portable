@@ -1637,7 +1637,14 @@ def run(
                     for w in bank_result.warnings:
                         log_lines.append(f"⚠ {w}")
             except Exception as e:
-                log.error("%s extraction failed: %s", bank, e, exc_info=True)
+                # SEC-15: an error text from a parser or an external tool must
+                # not carry the statement password (typed or derived).
+                import traceback as _tb
+                from agents.secret_redact import redact_text
+                _secrets = (pdf_password or "",)
+                _etext = redact_text(str(e), secrets=_secrets)
+                log.error("%s extraction failed: %s\n%s", bank, _etext,
+                          redact_text(_tb.format_exc(), secrets=_secrets))
                 _hint = (
                     "\n\nThe password was derived from the Entities record "
                     f"({_derived}) and did not open the file -- type the "
@@ -1645,7 +1652,7 @@ def run(
                 ) if _derived else ""
                 return (
                     f"## {bank} → extraction error\n\n"
-                    f"❌ {bank} skill raised an exception:\n```\n{e}\n```{_hint}"
+                    f"❌ {bank} skill raised an exception:\n```\n{_etext}\n```{_hint}"
                 )
 
         elif bank == "Other Bank (CSV)":

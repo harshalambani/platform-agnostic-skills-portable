@@ -15,7 +15,6 @@ agent-mode skills, doubles as the tool-call transcript -- see
 """
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -31,21 +30,12 @@ def new_log_path(skill_name: str) -> Path:
     return logs_dir / f"{stamp}-{safe_name}.log"
 
 
-_BEARER_RX = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}")
-_KEYVAL_RX = re.compile(
-    r"(?i)(api[_-]?key|password|passwd|secret|access[_-]?token)(\"?'?\s*[:=]\s*\"?'?)"
-    r"[^\s\"',}]{4,}")
-
-
 def redact(text: str, secrets=()) -> str:
     """Replace every non-empty secret value (a statement password, an API key)
-    with ***, then any bearer token or key=value secret still in the text."""
-    for s in sorted((x for x in (secrets or ()) if isinstance(x, str) and x),
-                    key=len, reverse=True):
-        text = text.replace(s, "***")
-    text = _BEARER_RX.sub("Bearer ***", text)
-    text = _KEYVAL_RX.sub(lambda m: m.group(1) + m.group(2) + "***", text)
-    return text
+    with ***, then any bearer token, key=value secret or "--password x" flag
+    still in the text. The rules live in agents.secret_redact (SEC-15)."""
+    from agents.secret_redact import redact_text
+    return redact_text(text, secrets)
 
 
 def write_run_log(

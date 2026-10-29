@@ -15,15 +15,19 @@ from pathlib import Path
 SCRIPT = Path(__file__).parent / "scripts" / "extract_sort_cc_pdfs.py"
 
 
-def _run_script(script: Path, args: list[str]) -> int:
+def _run_script(script: Path, args: list[str], stdin_text: str | None = None) -> int:
     """
     Run a Python script. In frozen mode, uses runpy to avoid re-launching
     the exe. In source mode, uses subprocess for clean process isolation.
     """
     if getattr(sys, "frozen", False):
         import runpy
+        import io
         saved_argv = sys.argv[:]
+        saved_stdin = sys.stdin
         sys.argv = [str(script)] + args
+        if stdin_text is not None:
+            sys.stdin = io.StringIO(stdin_text)
         try:
             runpy.run_path(str(script), run_name="__main__")
             return 0
@@ -31,11 +35,12 @@ def _run_script(script: Path, args: list[str]) -> int:
             return int(e.code) if isinstance(e.code, int) else (0 if e.code is None else 1)
         finally:
             sys.argv = saved_argv
+            sys.stdin = saved_stdin
     else:
         import subprocess
         result = subprocess.run(
             [sys.executable, str(script)] + args,
-            capture_output=False, text=True,
+            capture_output=False, text=True, input=stdin_text,
         )
         return result.returncode
 
@@ -66,9 +71,10 @@ def run(
         notes.append("Note: extract-msg not importable — .msg inputs will be "
                      "skipped; PDFs are still processed.")
 
+    # SEC-15: the password goes to the script on stdin, never in its argv.
     args = [input_folder, output_folder]
     if password:
-        args.append(password)
+        args.append("--password-stdin")
 
     # The password is deliberately not echoed -- joining argv here put the live
     # statement password into stdout on every run. See _pw_label() in
@@ -84,7 +90,8 @@ def run(
     else:
         os.environ.pop(_env, None)
     try:
-        rc = _run_script(SCRIPT, args)
+        rc = _run_script(SCRIPT, args,
+                         stdin_text=(password + "\n") if password else None)
     finally:
         if _saved is None:
             os.environ.pop(_env, None)

@@ -30,7 +30,9 @@ from pathlib import Path
 # skill_krc_recon/scripts/parse_krc_bills.py and skill_cc_sort/scripts/
 # extract_sort_cc_pdfs.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
-from agents._native_resolve import resolve_pdftoppm, resolve_tesseract  # noqa: E402
+from agents._native_resolve import (  # noqa: E402
+    resolve_pdftoppm, resolve_qpdf, resolve_tesseract,
+)
 
 
 def check_binaries():
@@ -54,6 +56,22 @@ def check_binaries():
         )
 
 
+def _decrypt_with_qpdf(pdf_path: Path, out_path: Path, password: str):
+    """Decrypt ``pdf_path`` to ``out_path`` with the password on qpdf's stdin."""
+    result = subprocess.run(
+        [resolve_qpdf(), "--password-file=-", "--decrypt",
+         str(pdf_path), str(out_path)],
+        input=password + "\n", capture_output=True, text=True,
+    )
+    # qpdf exits 3 for "succeeded with warnings".
+    if result.returncode not in (0, 3):
+        detail = (result.stderr or result.stdout or "").replace(password, "***")
+        raise RuntimeError(
+            f"qpdf could not open {pdf_path.name} (wrong password?): "
+            f"{detail.strip()}"
+        )
+
+
 def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None):
     """Render one PDF to PNGs then OCR each page to TSV.
 
@@ -70,10 +88,24 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
     print(f"[{stem}] rasterising at {dpi} DPI...", flush=True)
     pdftoppm_path = resolve_pdftoppm()
     cmd = [pdftoppm_path, "-r", str(dpi)]
+    # SEC-15: pdftoppm only takes a password as "-upw <pw>" on its command
+    # line. So an encrypted statement is first decrypted by qpdf (password on
+    # stdin) into a scratch copy, which is rasterised and then removed.
+    source = pdf_path
+    scratch = None
     if password:
-        cmd += ["-upw", password]
-    cmd += ["-png", str(pdf_path), str(png_dir / "page")]
-    subprocess.run(cmd, check=True)
+        scratch = work_dir / f"_decrypted_{stem}.pdf"
+        _decrypt_with_qpdf(pdf_path, scratch, password)
+        source = scratch
+    cmd += ["-png", str(source), str(png_dir / "page")]
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        if scratch is not None:
+            try:
+                scratch.unlink()
+            except OSError:
+                pass
 
     pngs = sorted(png_dir.glob("page-*.png"))
     # pdftoppm may produce `page-1.png` or `page-01.png` depending on page count.
@@ -114,16 +146,24 @@ def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     ap.add_argument("--pdf-dir", required=True, type=Path,
                     help="Folder containing HSBC statement PDFs (one file per statement period).")
     ap.add_argument("--work-dir", required=True, type=Path,
                     help="Scratch folder for intermediate PNG/TSV output.")
     ap.add_argument("--dpi", type=int, default=300,
                     help="Raster DPI (default 300; do not go below 250).")
-    ap.add_argument("--password", default=None,
-                    help="User password for encrypted PDFs (passed to pdftoppm -upw).")
+    ap.add_argument("--password-file", default=None, metavar="FILE",
+                    help="File holding the user password for encrypted PDFs "
+                         "(first line), or '-' to read it from stdin.")
     args = ap.parse_args()
+    password = None
+    if args.password_file:
+        if args.password_file == "-":
+            password = sys.stdin.readline().rstrip("\r\n")
+        else:
+            password = Path(args.password_file).read_text(
+                encoding="utf-8").splitlines()[0]
 
     check_binaries()
 
@@ -134,7 +174,7 @@ def main():
 
     print(f"Found {len(pdfs)} PDF(s) in {args.pdf_dir}")
     for pdf in pdfs:
-        ocr_pdf(pdf, args.work_dir, dpi=args.dpi, password=args.password)
+        ocr_pdf(pdf, args.work_dir, dpi=args.dpi, password=password)
 
     print(f"\nDone. TSVs under {args.work_dir / 'tsv'}/")
 

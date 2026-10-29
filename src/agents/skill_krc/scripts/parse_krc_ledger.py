@@ -131,15 +131,18 @@ def _cluster_lines(words: list[dict], tol: float = 2.0) -> list[list[dict]]:
 def decrypt_pdf(pdf_path: str, password: str, scratch_path: str) -> None:
     """Decrypt a password-protected PDF via qpdf. Raises on failure."""
     qpdf_path = resolve_qpdf()
+    # SEC-15: the password goes to qpdf on stdin, not on its command line.
     result = subprocess.run(
-        [qpdf_path, f"--password={password}", "--decrypt", pdf_path, scratch_path],
+        [qpdf_path, "--password-file=-", "--decrypt", pdf_path, scratch_path],
+        input=(password or "") + "\n",
         capture_output=True,
         text=True,
     )
     if result.returncode != 0:
+        detail = (result.stderr or "").replace(password or chr(0), "***").strip()
         raise RuntimeError(
             f"qpdf decryption failed (wrong password, or qpdf not installed): "
-            f"{result.stderr.strip()}"
+            f"{detail}"
         )
 
 

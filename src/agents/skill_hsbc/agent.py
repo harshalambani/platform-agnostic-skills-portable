@@ -303,12 +303,17 @@ def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Pat
         "--work-dir", str(work_dir / "work"),
         "--out", str(out_xlsx),
     ]
+    # SEC-15: the password travels on the child's stdin ("--password-file -"),
+    # never on its command line, where any local process could read it.
     if password:
-        cmd += ["--password", password]
+        cmd += ["--password-file", "-"]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True,
+                            input=(password + "\n") if password else None)
     if result.returncode != 0:
         stderr = result.stderr.strip() or result.stdout.strip() or "(no output captured)"
+        if password:
+            stderr = stderr.replace(password, "***")
         if _password.is_password_error(RuntimeError(stderr)):
             raise ValueError(
                 _password.password_error_message("the statement-open password")
