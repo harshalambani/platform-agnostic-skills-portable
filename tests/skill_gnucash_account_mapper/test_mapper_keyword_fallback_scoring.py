@@ -173,46 +173,71 @@ def test_prefix_match_branch_reports_weak_confidence():
 # Part 2: smart_pattern_match rule 5 (TDS on dividend) and rule 14 (tax)
 # ---------------------------------------------------------------------------
 
-def test_rule5_multiple_bare_tds_accounts_yields_no_match():
-    """Wrong behaviour guarded against: picking the first tree-order
-    account merely because it contains the bare substring 'TDS', with two
-    equally-plausible bare-TDS accounts and no 'TDS on Dividend' account
-    at all."""
-    account_tree = [
-        "Expenses:Tax:TDS Receivable Bank A",
-        "Expenses:Tax:TDS Receivable Bank B",
-    ]
-    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
-    assert result is None
+_TDS_REVIEW = ("TDS on dividend narration: 26AS books this TDS; "
+               "check whether this is the net dividend credit")
+
+_TDS_NARRATIONS = [
+    "TDS ON DIV FROM ACME LTD",
+    "TDS ON DIVIDEND ACME LTD",
+    "TDS FOR DIV ACME LTD",
+    "tds on dividend - acme ltd",
+]
+
+_TDS_TREES = {
+    "none": ["Expenses:Misc", "Income:Dividend Income:Acme Ltd"],
+    "single_bare": ["Expenses:Tax:TDS Receivable Only Account"],
+    "two_bare": ["Expenses:Tax:TDS Receivable Bank A",
+                 "Expenses:Tax:TDS Receivable Bank B"],
+    "specific": ["Expenses:Tax:TDS Receivable Bank A",
+                 "Expenses:Tax:TDS Receivable Bank B",
+                 "Income:Dividend:TDS on Dividend"],
+}
 
 
-def test_rule5_multiple_bare_tds_accounts_order_independent():
-    account_tree = [
-        "Expenses:Tax:TDS Receivable Bank A",
-        "Expenses:Tax:TDS Receivable Bank B",
-    ]
-    reversed_tree = list(reversed(account_tree))
-    result_a = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
-    result_b = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", reversed_tree)
-    assert result_a == result_b is None
+def test_rule5_tds_on_dividend_goes_to_review_not_a_tds_account():
+    """TDS-14: only the 26AS journal books dividend TDS. Whatever the
+    account tree holds, the narration is sent to Review with the reason and
+    NEVER mapped to an account (wrong behaviour: a TDS account)."""
+    for name, tree in _TDS_TREES.items():
+        for narration in _TDS_NARRATIONS:
+            result = agent.smart_pattern_match(narration, tree)
+            assert result is not None, (name, narration)
+            assert result["account"] == "", (name, narration)
+            assert "TDS" not in result["account"]
+            assert result["reason"] == _TDS_REVIEW
 
 
-def test_rule5_single_bare_tds_account_matches_deterministically():
-    account_tree = ["Expenses:Tax:TDS Receivable Only Account"]
-    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
+def test_rule5_review_result_is_independent_of_tree_order():
+    for tree in _TDS_TREES.values():
+        a = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", tree)
+        b = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD",
+                                      list(reversed(tree)))
+        assert a == b
+        assert a["account"] == ""
+
+
+def test_rule5_empty_tree_still_reviews():
+    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", [])
+    assert result == {"account": "", "reason": _TDS_REVIEW}
+
+
+def test_rule5_ordinary_nach_dividend_credit_still_maps():
+    """The fix must not touch rule 4: a plain NACH dividend credit (no TDS
+    wording) still maps to the payer's dividend income account."""
+    tree = ["Income:Dividend Income:Acme Ltd", "Expenses:Tax:TDS Receivable Only Account"]
+    result = agent.smart_pattern_match(
+        "NACHMU-MUMBAI/ACHCR/ACME LTD", tree, deposit="100.00")
     assert result is not None
-    assert result["account"] == "Expenses:Tax:TDS Receivable Only Account"
+    assert result["account"] == "Income:Dividend Income:Acme Ltd"
+    assert "TDS" not in result["account"]
 
 
-def test_rule5_prefers_specific_tds_on_dividend_account():
-    account_tree = [
-        "Expenses:Tax:TDS Receivable Bank A",     # bare TDS, decoy
-        "Expenses:Tax:TDS Receivable Bank B",     # bare TDS, decoy
-        "Income:Dividend:TDS on Dividend",        # the specific one -- must win
-    ]
-    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
+def test_rule5_nach_dividend_with_tds_wording_never_lands_on_tds_account():
+    tree = ["Income:Dividend Income:Acme Ltd", "Expenses:Tax:TDS Receivable Only Account"]
+    result = agent.smart_pattern_match(
+        "NACHMU-MUMBAI/ACHCR/TDS ON DIV ACME LTD", tree, deposit="100.00")
     assert result is not None
-    assert result["account"] == "Income:Dividend:TDS on Dividend"
+    assert "TDS" not in result["account"]
 
 
 def test_rule14_multiple_bare_tax_accounts_yields_no_match():
@@ -275,41 +300,18 @@ def test_rule14_single_bare_tax_account_matches_deterministically():
 # LLM (always available, per the user) is the right fallback when a tier
 # is ambiguous -- these rules must never guess, at any tier.
 
-def test_rule5_multiple_tds_on_dividend_accounts_yields_no_match():
-    """Two 'TDS on Dividend' leaves (e.g. one per payer) -- the specific
-    tier itself is ambiguous. Must NOT pick either one (not the
-    alphabetically first), and must NOT drop down to a bare 'TDS' tier."""
-    account_tree = [
-        "Income:Dividend:TDS on Dividend Acme",
-        "Income:Dividend:TDS on Dividend Zenith",
-    ]
-    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
-    assert result is None
-
-
-def test_rule5_multiple_tds_on_dividend_accounts_order_independent():
-    account_tree = [
-        "Income:Dividend:TDS on Dividend Acme",
-        "Income:Dividend:TDS on Dividend Zenith",
-    ]
-    reversed_tree = list(reversed(account_tree))
-    result_a = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
-    result_b = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", reversed_tree)
-    assert result_a == result_b is None
-
-
-def test_rule5_ambiguous_specific_tier_does_not_drop_to_bare_tier():
-    """Two 'TDS on Dividend' leaves PLUS exactly one other bare 'TDS' leaf
-    (which on its own would be an unambiguous match at the fallback tier).
-    The specific tier's ambiguity must still win -- the rule falls through
-    entirely rather than dropping down to the now-unambiguous bare tier."""
-    account_tree = [
+def test_rule5_several_tds_on_dividend_accounts_still_review_not_a_pick():
+    """TDS-14: with one, two or many 'TDS on Dividend' leaves, in any
+    order, and with or without a bare 'TDS' decoy, the row goes to Review
+    and never lands on any of those accounts."""
+    base = [
         "Income:Dividend:TDS on Dividend Acme",
         "Income:Dividend:TDS on Dividend Zenith",
         "Expenses:Tax:TDS Receivable Only Other Account",
     ]
-    result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", account_tree)
-    assert result is None
+    for tree in (base, list(reversed(base)), base[:2], base[:1]):
+        result = agent.smart_pattern_match("TDS ON DIV FROM ACME LTD", tree)
+        assert result == {"account": "", "reason": _TDS_REVIEW}
 
 
 def test_rule14_multiple_advance_tax_accounts_yields_no_match():

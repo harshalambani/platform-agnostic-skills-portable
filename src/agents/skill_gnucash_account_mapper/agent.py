@@ -265,6 +265,9 @@ def _fuzzy_match_dividend(company_fragment: str, account_tree: List[str]) -> Opt
 
 
 _SMART_SELF_CHEQUE_REASON = "Self cheque / cash withdrawal"
+_TDS_DIVIDEND_REVIEW_REASON = (
+    "TDS on dividend narration: 26AS books this TDS; "
+    "check whether this is the net dividend credit")
 
 
 def smart_pattern_match(
@@ -315,31 +318,14 @@ def smart_pattern_match(
             if matched_acct:
                 return {"account": matched_acct, "reason": f"NACH dividend — {company}"}
 
-    # 5. TDS on Dividend: "NACH.*TDS", narrations with TDS
-    # MAP-08: the old code picked the first tree-order account containing
-    # the bare substring "TDS", which is order-dependent and can land on
-    # the wrong account when several accounts contain "TDS".
-    #
-    # MAP-08 follow-up: an earlier version of this fix preferred the first
-    # (sorted) "TDS on Dividend" leaf whenever ANY such leaves existed — but
-    # a book can have several "TDS on Dividend" leaves (one per payer), and
-    # picking the alphabetically first one is the exact same arbitrary-pick
-    # bug this fix removes, just moved up a tier. Each tier now requires
-    # EXACTLY ONE candidate to return a match: "TDS on Dividend" leaves
-    # first; if there are none, fall back to a bare "TDS" leaf only when
-    # exactly one exists. If a tier has more than one candidate, the whole
-    # rule falls through (no match here — never drop down to a less
-    # specific tier just because the specific one was ambiguous) and the
-    # LLM pass (always available) decides instead of guessing.
+    # 5. TDS on Dividend narration.
+    # TDS-14: only the 26AS journal books interest and dividend TDS, so a bank
+    # row must never be mapped to a TDS account by this rule (the old code
+    # picked a single "TDS" leaf, which double-booked the TDS once 26AS ran).
+    # The row goes to Review with a reason; it is not dropped and no dividend
+    # income account is guessed.
     if re.search(r'TDS\s*(ON|FOR)?\s*DIV', desc_upper):
-        for candidates in (
-            sorted(a for a in account_tree if "TDS on Dividend" in a),
-            sorted(a for a in account_tree if "TDS" in a),
-        ):
-            if len(candidates) == 1:
-                return {"account": candidates[0], "reason": "TDS on dividend pattern"}
-            if len(candidates) > 1:
-                break  # ambiguous at this tier — fall through the whole rule
+        return {"account": "", "reason": _TDS_DIVIDEND_REVIEW_REASON}
 
     # 6. Self/internal transfer patterns
     if re.search(r'SELF\s*TRANSFER|AC\s*XFR\s*FROM|TRANSFER\s*TO\s*SELF|FD\s*MATURITY', desc_upper):
