@@ -159,17 +159,17 @@ def test_num_match_is_not_stolen_by_an_earlier_lookalike(tmp_path):
 def test_sale_and_charge_already_in_book_are_left_out(tmp_path):
     lot = _buy_txn("H1", "2024-01-01", 20, 200.0)
     sale = _txn("KRC-SC9", "2025-07-01", [_split("br", 300.0), _split("s1", -100.0, -10)])
-    chg = _txn("KRC-D1", "2025-06-03", [_split("ex1", 50.0), _split("br", -50.0)])
+    chg = _txn("KRC-D20250603-5000", "2025-06-03", [_split("ex1", 50.0), _split("br", -50.0)])
     ledger = [("2025-06-03", "DP charges synthetic", 50.0, None, 0.0, "Cr", "Demat Charge")]
     r, out = _run(tmp_path, [base._sell("C9", "ALPHA STEEL", 10, 300.0)], ledger,
                   [lot, sale, chg], extra=("--demat-account", "Expenses:Demat Charges"))
     assert not (out / "Sale.csv").exists() and not (out / "Charges.csv").exists()
     assert "insufficient" not in r.stdout          # not re-sold from the lots
-    assert "KRC-D1" in r.stdout and "KRC-SC9" in r.stdout
+    assert "KRC-D20250603-5000" in r.stdout and "KRC-SC9" in r.stdout
 
 
 def test_charge_same_num_other_amount_is_red_flag(tmp_path):
-    chg = _txn("KRC-D1", "2025-06-03", [_split("ex1", 40.0), _split("br", -40.0)])
+    chg = _txn("KRC-D20250603-5000", "2025-06-03", [_split("ex1", 40.0), _split("br", -40.0)])
     ledger = [("2025-06-03", "DP charges synthetic", 50.0, None, 0.0, "Cr", "Demat Charge")]
     r, out = _run(tmp_path, [], ledger, [chg], extra=("--demat-account", "Expenses:Demat Charges"))
     assert r.stdout.splitlines()[0].startswith("RED FLAG - IN BOOK, DIFFERENT AMOUNTS")
