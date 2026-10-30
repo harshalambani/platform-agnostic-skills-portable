@@ -226,21 +226,28 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
     report = []
     matched_count = 0
     duplicate_count = 0
+    consumed_count = 0
     new_count = 0
 
+    # IMP-16: one-to-one. Each book entry accounts for at most one statement
+    # row; once used it is gone, so rows beyond the number of matching book
+    # entries stay New and are offered.
     for csv_row in csv_rows:
         amount = csv_row['deposit'] - csv_row['withdrawal']
         index_key = (csv_row['date'], round(amount, 2))
 
-        if index_key in gnucash_index:
+        if gnucash_index.get(index_key):
             matches = gnucash_index[index_key]
-            if len(matches) == 1:
+            n_avail = len(matches)
+            used = matches.pop(0)          # consumed: no book entry is counted twice
+            consumed_count += 1
+            if n_avail == 1:
                 status = "Match"
-                details = f"Found in {matches[0]['account']}"
+                details = f"Found in {used['account']}"
                 matched_count += 1
             else:
                 status = "Duplicate"
-                details = f"{len(matches)} matching transactions in GnuCash"
+                details = f"{n_avail} matching transactions in GnuCash (one used)"
                 duplicate_count += 1
         else:
             status = "New"
@@ -261,7 +268,7 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
         'matched': matched_count,
         'duplicates': duplicate_count,
         'new': new_count,
-        'missing': len(gnucash_txns) - matched_count,  # Approximate
+        'missing': len(gnucash_txns) - consumed_count,  # Approximate
         'balance_gaps': 0,  # TODO: implement if CSV has Balance column
         'actions': []
     }
@@ -274,6 +281,18 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
         summary['actions'].append("No balance gaps detected")
 
     return report, summary
+
+
+def format_withheld_rows(rows) -> str:
+    """IMP-16: the rows left out because the book already holds them, one per line
+    (date, amount, short description) under a heading. rows = (date, amount, description)."""
+    rows = list(rows)
+    if not rows:
+        return ""
+    out = [f"**Already in the book (left out): {len(rows)} row(s)**"]
+    for d, a, desc in rows:
+        out.append(f"- {d} | {a} | {str(desc)[:40]}")
+    return chr(10).join(out)
 
 
 # ============================================================================
