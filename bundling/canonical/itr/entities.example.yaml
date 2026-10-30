@@ -215,3 +215,7 @@ SYN-PARTNER:
         target_compensation: 1200000
         remuneration_tds_section: "194T"
         remuneration_tds_start_date: "2024-04-01"
+        # The capital rule (informational only). Both are optional: unset means 0.40 and 48,
+        # shown as "Default" in the run. Editable on the Entities screen (as a percent there).
+        capital_rate: 0.40
+        capital_months_total: 48

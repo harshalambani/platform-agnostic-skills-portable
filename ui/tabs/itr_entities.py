@@ -431,7 +431,78 @@ def _format_drivers(drivers: dict | None) -> str:
     if not drivers:
         return ""
     import yaml  # noqa: PLC0415
-    return yaml.safe_dump(drivers, sort_keys=True, default_flow_style=False, allow_unicode=True)
+    # H35-23: the capital-rule rate and months have their own per-FY fields,
+    # so they are not repeated in this free-text box.
+    shown = {}
+    for fy, block in drivers.items():
+        if isinstance(block, dict):
+            block = {k: v for k, v in block.items() if k not in _CAPITAL_RULE_KEYS}
+            if not block:
+                continue
+        shown[fy] = block
+    if not shown:
+        return ""
+    return yaml.safe_dump(shown, sort_keys=True, default_flow_style=False, allow_unicode=True)
+
+
+#: H35-23: the two capital-rule drivers edited in their own per-FY fields
+#: (stored in the same partner_comp_drivers keys the skill already reads).
+_CAPITAL_RULE_KEYS = ("capital_rate", "capital_months_total")
+
+
+def _format_capital_rule_lines(drivers: dict | None, key: str) -> str:
+    """One 'FY = value' line per FY that sets `key`. The rate is shown as a percent."""
+    lines = []
+    for fy in sorted(drivers or {}):
+        block = (drivers or {}).get(fy)
+        v = block.get(key) if isinstance(block, dict) else None
+        if v is None:
+            continue
+        if key == "capital_rate" and _is_number(v):
+            lines.append(f"{fy} = {round(v * 100, 6):g}")
+        else:
+            lines.append(f"{fy} = {v}")
+    return "\n".join(lines)
+
+
+def _parse_capital_rule_lines(text: str, key: str) -> tuple[dict, list[str]]:
+    """Parse 'FY = value' lines. Rate: a percent strictly between 0 and 100
+    (a trailing % is accepted); months: a positive whole number. Returns
+    ({FY: stored value}, errors); the rate is stored as a fraction."""
+    label = "capital rate (percent)" if key == "capital_rate" else "capital months in total"
+    out: dict = {}
+    errors: list[str] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if "=" not in line:
+            errors.append(f"{label}: '{line}' is not 'YYYY-YY = value'.")
+            continue
+        fy, _, val = line.partition("=")
+        fy, val = fy.strip(), val.strip().rstrip("%").strip()
+        if not _FY_KEY_RE.match(fy):
+            errors.append(f"{label}: '{fy}' is not a valid financial year (expected YYYY-YY, e.g. 2025-26).")
+            continue
+        if fy in out:
+            errors.append(f"{label}: {fy} is given twice.")
+            continue
+        if key == "capital_rate":
+            try:
+                pct = float(val)
+            except ValueError:
+                errors.append(f"{label} {fy}: '{val}' is not a number -- enter a percent such as 40.")
+                continue
+            if not 0 < pct < 100:
+                errors.append(f"{label} {fy}: {val} must be above 0 and below 100 (40 means 40%).")
+                continue
+            out[fy] = round(pct / 100, 10)
+        else:
+            if not val.isdigit() or int(val) < 1:
+                errors.append(f"{label} {fy}: '{val}' must be a positive whole number of months.")
+                continue
+            out[fy] = int(val)
+    return out, errors
 
 
 def _parse_drivers(text: str) -> tuple[dict, list[str]]:
@@ -595,7 +666,7 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "")
+        return (False, "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "", "", "")
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
@@ -607,6 +678,8 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
         *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
         e.foreign_dividend_cash_account or "", e.foreign_dividend_tax_account or "",
         e.foreign_dividend_income_account or "",
+        _format_capital_rule_lines((e.extra_items or {}).get("partner_comp_drivers"), "capital_rate"),
+        _format_capital_rule_lines((e.extra_items or {}).get("partner_comp_drivers"), "capital_months_total"),
     )
 
 
@@ -637,6 +710,8 @@ def _save_entity(
     foreign_dividend_cash_account: str | None = None,
     foreign_dividend_tax_account: str | None = None,
     foreign_dividend_income_account: str | None = None,
+    capital_rate_by_fy_text: str | None = None,
+    capital_months_by_fy_text: str | None = None,
 ) -> str:
     orig_key = (orig_key or "").strip()
     new_key = (new_key or "").strip()
@@ -664,6 +739,21 @@ def _save_entity(
     if partner_comp_drivers_text is not None:
         drivers, driver_errors = _parse_drivers(partner_comp_drivers_text)
         kv_errors += driver_errors
+    # H35-23: the capital-rule rate and months have their own per-FY fields.
+    # None == keep what is stored; a value (even empty) replaces it.
+    capital_rates = capital_months = None
+    if capital_rate_by_fy_text is not None:
+        capital_rates, _e = _parse_capital_rule_lines(capital_rate_by_fy_text, "capital_rate")
+        kv_errors += _e
+    if capital_months_by_fy_text is not None:
+        capital_months, _e = _parse_capital_rule_lines(capital_months_by_fy_text, "capital_months_total")
+        kv_errors += _e
+    for _fy, _blk in (drivers or {}).items():
+        for _ck in _CAPITAL_RULE_KEYS:
+            if isinstance(_blk, dict) and _ck in _blk:
+                kv_errors.append(
+                    f"partner compensation drivers {_fy}: '{_ck}' has its own field "
+                    "(Capital rule rate / Capital rule total months) -- remove it from this box.")
     if partner_comp_accounts is not None:
         for k in partner_comp_accounts:
             if k not in _PARTNER_ACCOUNT_KEYS:
@@ -785,8 +875,33 @@ def _save_entity(
         else:
             extra_items.pop(_k, None)
     if drivers is not None:
-        if drivers:
-            extra_items["partner_comp_drivers"] = drivers
+        # The YAML box never carries the capital-rule keys: keep the stored
+        # ones, so saving the box does not wipe a hand-set value.
+        _stored = (prior.extra_items or {}).get("partner_comp_drivers") if prior is not None else None
+        merged = copy.deepcopy(drivers)
+        for _fy, _blk in (_stored or {}).items():
+            if not isinstance(_blk, dict):
+                continue
+            for _ck in _CAPITAL_RULE_KEYS:
+                if _blk.get(_ck) is not None:
+                    merged.setdefault(_fy, {})[_ck] = _blk[_ck]
+        if merged:
+            extra_items["partner_comp_drivers"] = merged
+        else:
+            extra_items.pop("partner_comp_drivers", None)
+    for _ck, _new in (("capital_rate", capital_rates), ("capital_months_total", capital_months)):
+        if _new is None:
+            continue
+        blocks = extra_items.get("partner_comp_drivers")
+        blocks = copy.deepcopy(blocks) if isinstance(blocks, dict) else {}
+        for _fy, _blk in list(blocks.items()):
+            if isinstance(_blk, dict):
+                _blk.pop(_ck, None)
+        for _fy, _v in _new.items():
+            blocks.setdefault(_fy, {})[_ck] = _v
+        blocks = {k: v for k, v in blocks.items() if v}
+        if blocks:
+            extra_items["partner_comp_drivers"] = blocks
         else:
             extra_items.pop("partner_comp_drivers", None)
 
@@ -1327,8 +1442,19 @@ def render(container_tab=None) -> None:
                     info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
                          "is refused and nothing is saved. Blank removes all drivers.",
                 )
+                capital_rate_box = gr.Textbox(
+                    label="Capital rule rate by FY (percent, one per line 'FY = percent')",
+                    placeholder="2025-26 = 40", lines=2, interactive=True,
+                    info="Share of target compensation required as capital. Blank = the default, 40%. "
+                         "A percent above 0 and below 100. Informational only; no journal uses it.",
+                )
+                capital_months_box = gr.Textbox(
+                    label="Capital rule total months by FY (one per line 'FY = months')",
+                    placeholder="2025-26 = 48", lines=2, interactive=True,
+                    info="Months over which the capital is built up. Blank = the default, 48. A positive whole number.",
+                )
             _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, *partner_dds,
-                           fd_cash_dd, fd_tax_dd, fd_income_dd]
+                           fd_cash_dd, fd_tax_dd, fd_income_dd, capital_rate_box, capital_months_box]
 
             save_status = gr.Markdown("_Fill in the fields and click Save._")
             with gr.Row():
@@ -1372,11 +1498,13 @@ def render(container_tab=None) -> None:
         from the entity's newest registered book."""
         entities = _load_entities()
         fdb, fdb_ay, drv, bank, emi, fpan, lsp, crm, *partner = _entity_to_new_form(key or "", entities)
+        cap_rate, cap_months = partner[-2:]
+        partner = partner[:-2]
         books = dict(entities[key].books) if (key or "") in entities else {}
         choices, note = _account_choices(books)
         def dd(v):
             return gr.update(choices=choices, value=v)
-        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, crm, *[dd(v) for v in partner], "_" + note + "_")
+        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, crm, *[dd(v) for v in partner], cap_rate, cap_months, "_" + note + "_")
 
     _new_outputs = [*_new_inputs, accounts_note_md]
 
@@ -1421,6 +1549,8 @@ def render(container_tab=None) -> None:
             foreign_dividends_in_book=bool(fdb),
             foreign_dividends_in_book_by_ay_text=fdb_by_ay_text or "",
             partner_comp_drivers_text=drivers_text or "",
+            capital_rate_by_fy_text=(partner_values[len(_PARTNER_ACCOUNT_KEYS) + 3] or ""),
+            capital_months_by_fy_text=(partner_values[len(_PARTNER_ACCOUNT_KEYS) + 4] or ""),
             partner_firm_pan=firm_pan or "",
             cc_large_spend_threshold=large_spend or "",
             cc_cred_max_overage=cred_max or "",
