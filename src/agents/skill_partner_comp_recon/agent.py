@@ -73,7 +73,6 @@ from .engine import (
     build_report,
 )
 from .gnucash_tieout import (
-    ALREADY_POSTED,
     accrual_book_gap,
     accrual_txn_id,
     restate_posted_accrual_rows,
@@ -83,6 +82,7 @@ from .gnucash_tieout import (
     build_balance_tieout,
     build_posted_check,
     match_payouts_to_bank,
+    partition_by_posted,
 )
 from .jv_emitter import (
     ACCOUNT_KEYS,
@@ -1130,7 +1130,6 @@ def _run_from_documents(
     # H35-21: rows built before the book was read offer the year-end accrual
     # as pending; when the book already holds it, say so instead.
     restate_posted_accrual_rows(report.reconciliation, posted_check, report)
-    posted_ids = {p.txn_id for p in posted_check if p.status == ALREADY_POSTED}
 
     # H35-05: per-payout fuzzy match result reported above. `bank_matches`
     # is {} whenever matching could not run at all (see
@@ -1195,6 +1194,7 @@ def _run_from_documents(
                    "path was skipped (see Optional-leg status).")
     accrual_out: str | None = None
     accrual_why = "No accrual journal written: needs the journal above and its own path."
+    red_flags: list[str] = []  # IMP-18: printed first in the reply
     # UI-17: "auto" asks for the default CSV names (entity + FY, beside the
     # workbook). Unlike an explicit path it is best-effort: with no journal
     # accounts configured for the entity, or no LLP statement for the accrual,
@@ -1259,19 +1259,25 @@ def _run_from_documents(
                     report, accounts, book_gap=_gap)
             except JournalValidationError as e:
                 return f"ERROR: {e}"
-            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
             if accrual_journal is not None:
-                accrual_out = accrual_journal_path
-                accrual_line = (
-                    f"  Accrual journal CSV: {accrual_journal_path} "
-                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
-                )
-                if accrual_journal.txn_id in posted_ids:
-                    accrual_posted_note = (
-                        f"ALREADY POSTED: {accrual_journal.txn_id} is already in the book - "
-                        "do not import this file.")
-                    accrual_line += f"\n  {accrual_posted_note}"
-                    accrual_why = accrual_posted_note
+                # IMP-18: an accrual already in the book is left OUT of the CSV.
+                _part = partition_by_posted([accrual_journal], posted_check)
+                _flags, _info, _why = _posted_report(_part, gnucash_note)
+                red_flags.extend(_flags)
+                if not _part["write"]:
+                    accrual_line = (
+                        f"  Accrual journal: not written. {_why}"
+                        + "".join(f"\n  {x}" for x in _info))
+                    accrual_why = f"No accrual journal written: {_why}"
+                else:
+                    write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+                    accrual_out = accrual_journal_path
+                    accrual_line = (
+                        f"  Accrual journal CSV: {accrual_journal_path} "
+                        f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                    )
+                    accrual_line += "".join(f"\n  {x}" for x in _info)
+                    accrual_why = _why
             else:
                 accrual_line = f"  Accrual journal: not written. {accrual_note}"
                 accrual_why = f"No accrual journal written: {accrual_note}"
@@ -1312,20 +1318,26 @@ def _run_from_documents(
             journals = build_journals(report, accounts, bank_matches=bank_matches or None)
         except JournalValidationError as e:
             return f"ERROR: {e}"
-        write_journal_csv(journals, journal_path)
-        monthly_out = journal_path
-        row_count = sum(len(j.splits) for j in journals)
-        journal_line = (
-            f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
-            f"{row_count} row(s))."
-        )
-        _already = [j.txn_id for j in journals if j.txn_id in posted_ids]
-        if _already:
-            monthly_posted_note = (
-                f"ALREADY POSTED: {', '.join(_already)} ({len(_already)} of {len(journals)}) "
-                "already in the book - do not import those.")
-            journal_line += f"\n  {monthly_posted_note}"
-            monthly_why = monthly_posted_note
+        # IMP-18: journals already in the book are left OUT of the CSV.
+        _part = partition_by_posted(journals, posted_check)
+        _flags, _info, _why = _posted_report(_part, gnucash_note)
+        red_flags.extend(_flags)
+        journals = _part["write"]
+        if journals:
+            write_journal_csv(journals, journal_path)
+            monthly_out = journal_path
+            row_count = sum(len(j.splits) for j in journals)
+            journal_line = (
+                f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
+                f"{row_count} row(s))."
+            )
+            monthly_why = _why
+        else:
+            journal_line = ("  Journal CSV: not written. "
+                            + (_why or "No monthly journals are implied by this run."))
+            monthly_why = ("No journal written: "
+                           + (_why or "no monthly journals are implied by this run."))
+        journal_line += "".join(f"\n  {x}" for x in _info)
         if accrual_line:
             journal_line += f"\n{accrual_line}"
 
@@ -1342,14 +1354,47 @@ def _run_from_documents(
         lines.insert(0, f"WARNING: {settings_error} The journal, the posted-already "
                         "check, the bank match, the GnuCash tie-out and the 26AS "
                         "ownership check were NOT run with this entity's settings.")
+    for _rf in reversed(red_flags):  # IMP-18: RED FLAGs lead the reply
+        lines.insert(0, _rf)
     return ReplyWithOutputs("\n".join(lines), [
-        extra_output("journal_csv", monthly_out,
-                     (monthly_why if monthly_why.startswith("ALREADY POSTED") else "")
-                     if monthly_out else monthly_why),
-        extra_output("accrual_journal_csv", accrual_out,
-                     (accrual_why if accrual_why.startswith("ALREADY POSTED") else "")
-                     if accrual_out else accrual_why),
+        extra_output("journal_csv", monthly_out, monthly_why),
+        extra_output("accrual_journal_csv", accrual_out, accrual_why),
     ])
+
+
+def _posted_report(part: dict, gnucash_note: str) -> tuple[list[str], list[str], str]:
+    """IMP-18: turn a partition_by_posted() result into (red flags, info lines,
+    one-line why for extra_output). Num and date only -- no amounts."""
+    def _ref(js):
+        return ", ".join(f"{j.txn_id} ({j.date})" for j in js)
+
+    flags: list[str] = []
+    info: list[str] = []
+    why: list[str] = []
+    if part["mismatch"]:
+        flags.append(
+            f"RED FLAG: {_ref(part['mismatch'])} is already in the book with DIFFERENT "
+            "amounts from the journal this run computes - the book and the computed "
+            "journal disagree. It was left out of the CSV; resolve it before posting "
+            "anything for it.")
+        why.append(f"left out (book and computed journal disagree): {_ref(part['mismatch'])}")
+    if part["unchecked"]:
+        reason = (gnucash_note or "").strip() or "no GnuCash book was read."
+        flags.append(
+            "RED FLAG: NOT CHECKED against the book - "
+            f"{reason} Every journal was written; any of them may already be in the "
+            "book, so check before import.")
+        why.append("NOT CHECKED against the book - any journal may already be posted")
+    if part["left_out"]:
+        info.append(
+            f"Already in the book (left out): {len(part['left_out'])} journal(s) - "
+            f"{_ref(part['left_out'])}")
+        why.append(f"already in the book, left out: {_ref(part['left_out'])}")
+    if part["possible"]:
+        info.append(
+            f"Possible already in the book - check before import: {_ref(part['possible'])}")
+        why.append(f"possible already in the book - check before import: {_ref(part['possible'])}")
+    return flags, info, "; ".join(why)
 
 
 def _run_from_structured_input(
@@ -1427,6 +1472,9 @@ def _run_from_structured_input(
         write_journal_csv(journals, journal_path)
         row_count = sum(len(j.splits) for j in journals)
         journal_line = (
+            "  RED FLAG: NOT CHECKED against the book - this structured-input entry "
+            "path has no GnuCash book, so the posted-already check did not run; any "
+            "journal below may already be in the book.\n"
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
