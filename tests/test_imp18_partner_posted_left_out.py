@@ -252,6 +252,7 @@ def test_structured_input_path_says_it_did_not_check_the_book(tmp_path):
     res = A.run(input_path=str(p), output_path=str(tmp_path / "o.xlsx"), journal_path=str(jr))
     text = _text(res)
     assert "RED FLAG: NOT CHECKED against the book" in text
+    assert text.splitlines()[0].startswith("RED FLAG")  # leads the reply
     assert "ERROR" not in text or jr.exists()
 
 
@@ -346,3 +347,56 @@ def test_accrual_posted_is_not_reoffered_and_unposted_is(env):
     t = _text(res2)
     assert "Accrual journal: not written" in t and "Already in the book (left out)" in t
     assert "RED FLAG" not in t
+
+
+# ------------------------------------------- stale CSV from an earlier run --
+
+def _data_rows(path):
+    return _read(path)
+
+
+def test_stale_monthly_csv_is_blanked_when_everything_is_now_posted(env):
+    env.state["months"] = ["2025-04"]
+    _, guids = _tree()
+    book = _write_book(env.tmp, "st1", _deposits(guids, ["2025-04"]))
+    res, jr, _, _ = env(book, tag="same")
+    rows = _by_id(_read(jr))
+    assert len(rows) == 1                               # run 1 wrote the journal
+    (jid,) = rows
+    book2 = _write_book(env.tmp, "st2", _deposits(guids, ["2025-04"])
+                        + [_txn_from_csv(guids, rows[jid], "posted-1")])
+    res2, jr2, _, _ = env(book2, tag="same")            # SAME path, now all posted
+    assert jr2.exists()                                 # never deleted
+    assert _data_rows(jr2) == []                        # NEGATIVE: no importable rows left
+    assert "Older CSV at" in _text(res2) and "replaced with an empty one" in _text(res2)
+
+
+def test_no_older_file_means_no_file_and_no_replaced_line(env):
+    env.state["months"] = ["2025-04"]
+    _, guids = _tree()
+    book = _write_book(env.tmp, "ns1", _deposits(guids, ["2025-04"]))
+    _, jr, _, _ = env(book, tag="fresh")
+    rows = _by_id(_read(jr))
+    (jid,) = rows
+    book2 = _write_book(env.tmp, "ns2", _deposits(guids, ["2025-04"])
+                        + [_txn_from_csv(guids, rows[jid], "posted-1")])
+    res2, jr2, _, _ = env(book2, tag="other")           # a different, never-written path
+    assert not jr2.exists()
+    assert "Older CSV" not in _text(res2)
+
+
+def test_stale_accrual_csv_is_blanked_when_the_accrual_is_now_posted(env):
+    env.state["months"] = ["2025-04"]
+    _, guids = _tree()
+    env.state["llp"] = {"current_profit_share": 307000.0, "current_opening_balance": 100000.0,
+                        "current_closing_balance": None, "capital_closing_balance": None}
+    book = _write_book(env.tmp, "sa1", _deposits(guids, ["2025-04"]))
+    res, jr, ar, _ = env(book, with_accrual=True, tag="acs")
+    arows = _by_id(_read(ar))
+    (aid,) = arows
+    book2 = _write_book(env.tmp, "sa2", _deposits(guids, ["2025-04"])
+                        + [_txn_from_csv(guids, arows[aid], "posted-accr")])
+    res2, jr2, ar2, _ = env(book2, with_accrual=True, tag="acs")
+    assert ar2.exists() and _data_rows(ar2) == []       # NEGATIVE: nothing importable
+    assert jr2.exists() and _data_rows(jr2)             # the unposted month still offered
+    assert "Older CSV at" in _text(res2)

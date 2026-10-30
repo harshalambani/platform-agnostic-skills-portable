@@ -1268,6 +1268,9 @@ def _run_from_documents(
                     accrual_line = (
                         f"  Accrual journal: not written. {_why}"
                         + "".join(f"\n  {x}" for x in _info))
+                    _stale = _blank_stale_csv(accrual_journal_path)
+                    if _stale:
+                        accrual_line += "\n  " + _stale
                     accrual_why = f"No accrual journal written: {_why}"
                 else:
                     write_accrual_journal_csv(accrual_journal, accrual_journal_path)
@@ -1335,6 +1338,9 @@ def _run_from_documents(
         else:
             journal_line = ("  Journal CSV: not written. "
                             + (_why or "No monthly journals are implied by this run."))
+            _stale = _blank_stale_csv(journal_path)
+            if _stale:
+                journal_line += "\n  " + _stale
             monthly_why = ("No journal written: "
                            + (_why or "no monthly journals are implied by this run."))
         journal_line += "".join(f"\n  {x}" for x in _info)
@@ -1360,6 +1366,19 @@ def _run_from_documents(
         extra_output("journal_csv", monthly_out, monthly_why),
         extra_output("accrual_journal_csv", accrual_out, accrual_why),
     ])
+
+
+def _blank_stale_csv(path: str) -> str:
+    """IMP-18: when every journal is left out nothing is written, so a CSV from
+    an EARLIER run at the same path would still hold journals that are now in
+    the book and could be imported twice. Replace such a file with a
+    header-only CSV (never delete it). Returns the reply line, or "" when no
+    older file existed."""
+    if not path or not Path(path).exists():
+        return ""
+    write_journal_csv([], path)
+    return (f"Older CSV at {path} replaced with an empty one: everything in it "
+            "is already in the book.")
 
 
 def _posted_report(part: dict, gnucash_note: str) -> tuple[list[str], list[str], str]:
@@ -1463,6 +1482,7 @@ def _run_from_structured_input(
     write_report_workbook(report, str(out_path))
 
     journal_line = ""
+    not_checked_flag = ""
     if journal_path:
         accounts = data.get("accounts") or {}
         try:
@@ -1471,10 +1491,12 @@ def _run_from_structured_input(
             return f"ERROR: {e}"
         write_journal_csv(journals, journal_path)
         row_count = sum(len(j.splits) for j in journals)
-        journal_line = (
-            "  RED FLAG: NOT CHECKED against the book - this structured-input entry "
+        not_checked_flag = (
+            "RED FLAG: NOT CHECKED against the book - this structured-input entry "
             "path has no GnuCash book, so the posted-already check did not run; any "
-            "journal below may already be in the book.\n"
+            "journal below may already be in the book."
+        )
+        journal_line = (
             f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
             f"{row_count} row(s))."
         )
@@ -1498,4 +1520,5 @@ def _run_from_structured_input(
                 f"\n  {residual.category}: {residual_status}. {residual.note}"
             )
 
-    return _summarize_report(report, output_path, journal_line)
+    summary = _summarize_report(report, output_path, journal_line)
+    return f"{not_checked_flag}\n{summary}" if not_checked_flag else summary
