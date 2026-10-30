@@ -308,13 +308,149 @@ def suggest_parent(stock_paths):
     return ":".join(common) or None
 
 
-def build_entries(bills, cfg, paths, holdings, notes=None):
+# ---------- IMP-17: already-in-book check ----------
+def _cents(x):
+    return int(round(float(x) * 100))
+
+
+def bill_id(b):
+    """The Num this run gives a bill's journal (same text build_entries writes)."""
+    if b.get("type") == "SLBM":
+        return f"KRC-L{b['settlement'] or b['cn_no']}"
+    if str(b.get("direction") or "").startswith("Receiv"):
+        return f"KRC-S{b['cn_no']}"
+    return f"KRC-P{b['cn_no']}"
+
+
+def load_book_txns(gnucash_path, paths):
+    """Every book transaction as {num, date, splits{path: [cents, qty]}} - read
+    only for the already-in-book check. Raises on anything it cannot read, so
+    the caller can say NOT CHECKED instead of guessing."""
+    raw = Path(gnucash_path).read_bytes()
+    xml = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
+    out = []
+    for t in re.findall(r"<gnc:transaction[^>]*>.*?</gnc:transaction>", xml, re.S):
+        dm = re.search(r"<trn:date-posted>.*?<ts:date>(.*?)</ts:date>", t, re.S)
+        d = parse_date(dm.group(1)[:10]) if dm else None
+        if d is None:
+            raise ValueError("a book transaction has no readable posted date")
+        nm = re.search(r"<trn:num>(.*?)</trn:num>", t, re.S)
+        splits = {}
+        for sp in re.findall(r"<trn:split>.*?</trn:split>", t, re.S):
+            ga = (re.search(r"<split:account[^>]*>(.*?)</split:account>", sp) or [None, ""])[1]
+            if ga not in paths:
+                raise ValueError(f"a book split points at an unknown account ({ga!r})")
+            vm = re.search(r"<split:value>(.*?)</split:value>", sp)
+            qm = re.search(r"<split:quantity>(.*?)</split:quantity>", sp)
+            if not vm:
+                raise ValueError("a book split has no value")
+            val = _frac(vm.group(1))
+            qty = _frac(qm.group(1)) if qm else Fraction(0)
+            cur = splits.setdefault(paths[ga], [0, Fraction(0)])
+            cur[0] += int(round(float(val) * 100)); cur[1] += qty
+        out.append({"num": (_unescape(nm.group(1)).strip() if nm else ""),
+                    "date": d, "splits": splits})
+    return out
+
+
+class BookIndex:
+    """The book's transactions, each usable for at most ONE bill (IMP-16 rule)."""
+    def __init__(self, txns, reserved_nums=()):
+        self.txns = txns
+        self.used = set()
+        self.reserved = set(reserved_nums)   # Nums some bill of this run will claim
+
+    @staticmethod
+    def _sig(txn):
+        return {p: v[0] for p, v in txn["splits"].items() if v[0] != 0}
+
+    def _fits(self, txn, want, exact, stock):
+        sig = self._sig(txn)
+        if exact:
+            if sig != want:
+                return False
+        else:
+            if any(sig.get(p) != c for p, c in want.items()):
+                return False
+        if stock:
+            path, q = stock
+            if path not in txn["splits"] or txn["splits"][path][1] != q:
+                return False
+        return True
+
+    def classify(self, num, dt, want, exact=True, stock=None):
+        """-> None | ("DEFINITE", txn) | ("MISMATCH", txn) | ("PROBABLE", [txns], tie)
+        `want` = {account path: cents}. DEFINITE/MISMATCH consume the book txn."""
+        d = parse_date(dt)
+        cands = [i for i, t in enumerate(self.txns) if i not in self.used and t["num"] == num]
+        if cands:
+            def dist(i):
+                return abs((self.txns[i]["date"] - d).days) if d else 0
+            fit = [i for i in cands if self._fits(self.txns[i], want, exact, stock)]
+            if fit:
+                i = min(fit, key=dist); self.used.add(i)
+                return ("DEFINITE", self.txns[i])
+            i = min(cands, key=dist); self.used.add(i)
+            return ("MISMATCH", self.txns[i])
+        if d is None:
+            return None
+        free = [i for i, t in enumerate(self.txns)
+                if i not in self.used and t["date"] == d and t["num"] not in self.reserved
+                and self._fits(t, want, exact, stock)]
+        if not free:
+            return None
+        if len(free) == 1:
+            self.used.add(free[0])
+            return ("PROBABLE", [self.txns[free[0]]], False)
+        return ("PROBABLE", [self.txns[i] for i in free], True)
+
+
+def _sig_text(sig):
+    return ", ".join(f"{p} {c / 100:+.2f}" for p, c in sorted(sig.items())) or "(no amounts)"
+
+
+def entry_want(entry):
+    w = {}
+    for acc_, amt, _sh in entry["splits"]:
+        w[acc_] = w.get(acc_, 0) + _cents(amt)
+    return {p: c for p, c in w.items() if c != 0}
+
+
+def book_check(book, notes, row, entry_id, dt, want, exact=True, stock=None):
+    """Run the check for one journal. Returns True when it must be LEFT OUT.
+    Records the outcome on `notes` (in_book / mismatch / possible)."""
+    if book is None:
+        return False
+    res = book.classify(entry_id, dt, want, exact, stock)
+    if res is None:
+        return False
+    info = {"id": entry_id, "cn_no": row.get("cn_no"), "type": row.get("type"),
+            "security": row.get("security"), "net": row.get("net"), "date": dt}
+    if res[0] == "DEFINITE":
+        info["book_date"] = res[1]["date"].isoformat()
+        notes["in_book"].append(info)
+        return True
+    if res[0] == "MISMATCH":
+        info.update(book_date=res[1]["date"].isoformat(),
+                    book_text=_sig_text(BookIndex._sig(res[1])),
+                    run_text=_sig_text(want))
+        notes["mismatch"].append(info)
+        return True
+    info.update(book_dates=[t["date"].isoformat() for t in res[1]], tie=res[2],
+                book_text="; ".join(_sig_text(BookIndex._sig(t)) for t in res[1]))
+    notes["possible"].append(info)
+    return False
+
+
+def build_entries(bills, cfg, paths, holdings, notes=None, book=None):
     """`notes` (optional dict) collects KRC-03 flags: notes["new_securities"]
     (purchases with no account) and notes["fuzzy"] (name-similarity matches)."""
     if notes is None:
         notes = {}
     notes.setdefault("new_securities", [])
     notes.setdefault("fuzzy", [])
+    for _k in ("in_book", "mismatch", "possible", "left_out_entries"):
+        notes.setdefault(_k, [])
     acct = cfg["accounts"]
     stock_paths = [p for g, p in paths.items()]  # all paths; matcher filters by leaf tokens
     # restrict to STOCK/MUTUAL leaves for matching
@@ -332,15 +468,20 @@ def build_entries(bills, cfg, paths, holdings, notes=None):
             review.append((b, "no net amount")); continue
         net = f2(net)
         dt = b["date"]
+        row = {"cn_no": b["cn_no"], "type": b["type"], "security": b["security"], "net": net}
         if b["type"] == "SLBM":
-            slbm.append({
+            ent = {
                 "id": f"KRC-L{b['settlement'] or b['cn_no']}",
                 "date": dt, "desc": f"SLBM {b['security']} (CN {b['cn_no']}, settle {b['settlement']})",
                 "splits": [
                     (acct["broker"], net, None),
                     (acct["slbs_income"], -net, None),
                 ],
-            })
+            }
+            if book_check(book, notes, row, ent["id"], dt, entry_want(ent)):
+                notes["left_out_entries"].append(ent)
+            else:
+                slbm.append(ent)
             continue
         # TRADE -> Purchase or Sale by direction
         sec_path, how = match_security(b["security"], _stock_paths, cfg.get("security_aliases") or {})
@@ -362,16 +503,24 @@ def build_entries(bills, cfg, paths, holdings, notes=None):
                                    "score": how.split(":", 1)[1], "cn_no": b["cn_no"]})
         if not is_sale:
             # Purchase
-            purchases.append({
+            ent = {
                 "id": f"KRC-P{b['cn_no']}",
                 "date": dt, "desc": f"Buy {b['security']} (CN {b['cn_no']})",
                 "splits": [
                     (sec_path, net, qty),
                     (acct["broker"], -net, None),
                 ],
-            })
-            # add lot to holdings for later sales in this run
+            }
             q = Fraction(str(qty)) if qty else Fraction(0)
+            # IMP-17: a purchase already in the book is left out AND adds no lot -
+            # load_book already replayed its lot from the book, so adding it again
+            # would count the same shares twice.
+            if book_check(book, notes, row, ent["id"], dt, entry_want(ent),
+                          stock=(sec_path, q) if q > 0 else None):
+                notes["left_out_entries"].append(ent)
+                continue
+            purchases.append(ent)
+            # add lot to holdings for later sales in this run
             if q > 0:
                 holdings.setdefault(sec_path, []).append([parse_date(dt), q, Fraction(str(net)) / q])
         else:
@@ -387,6 +536,16 @@ def build_entries(bills, cfg, paths, holdings, notes=None):
                                   f"amount {net:.2f} for {float(q)} shares of "
                                   f"{b['security']} (CN {b['cn_no']}) is not a "
                                   f"positive sale proceed")); continue
+            # IMP-17: a sale already in the book has ALREADY consumed its lots in
+            # load_book's replay; selling it again would eat the next lots, so
+            # it is checked (and left out) BEFORE any FIFO work. Only the
+            # deterministic legs are compared (proceeds + the stock account's
+            # share count): cost and gain legs depend on the lots.
+            if book_check(book, notes, row, f"KRC-S{b['cn_no']}", dt,
+                          {acct["broker"]: _cents(net)}, exact=False, stock=(sec_path, -q)):
+                notes["left_out_entries"].append({"id": f"KRC-S{b['cn_no']}", "date": dt,
+                                                  "splits": [(acct["broker"], net, None)]})
+                continue
             lots = holdings.get(sec_path, [])
             avail = sum(lot[1] for lot in lots)
             if avail < q:
@@ -617,6 +776,50 @@ def fuzzy_flags(fuzzy):
             f"{f['account']} (score {f['score']}, CN {f['cn_no']})" for f in fuzzy]
 
 
+def _id_line(i):
+    return f"{i['id']} ({i['security']}, {i['date']})"
+
+
+def book_red_flags(notes, not_checked):
+    out = []
+    if not_checked:
+        out.append("RED FLAG - NOT CHECKED: the book's transactions could not be read, so "
+                   "contract notes already in the book were NOT looked for. Importing these "
+                   f"files may double-book. Reason: {not_checked}")
+    for i in notes["mismatch"]:
+        out.append(f"RED FLAG - IN BOOK, DIFFERENT AMOUNTS: {_id_line(i)} is already in the "
+                   f"book under that Num (dated {i['book_date']}) but with other amounts. "
+                   f"Book: {i['book_text']}. This run: {i['run_text']}. LEFT OUT of the "
+                   f"import files; decide which is right.")
+    return out
+
+
+def possible_flags(notes):
+    out = []
+    for i in notes["possible"]:
+        tie = (" More than one book transaction fits - none was picked: " if i["tie"]
+               else " Book transaction: ")
+        out.append(f"FLAG - Possibly already in the book - check before importing: "
+                   f"{_id_line(i)} matches a book transaction with the same date, amounts "
+                   f"and accounts but a different Num.{tie}{i['book_text']}. It stays in "
+                   f"the import files.")
+    return out
+
+
+def book_review_rows(notes):
+    rows = []
+    for i in notes["mismatch"]:
+        rows.append((i, f"IN BOOK, DIFFERENT AMOUNTS (left out): {i['id']}; book "
+                        f"{i['book_text']}; this run {i['run_text']}"))
+    for i in notes["possible"]:
+        rows.append((i, f"Possibly already in the book - check before importing: {i['id']} "
+                        f"resembles a book transaction ({i['book_text']})"))
+    for i in notes["in_book"]:
+        rows.append((i, f"Already in the book (left out): {i['id']} matches the book "
+                        f"transaction dated {i['book_date']}"))
+    return rows
+
+
 def write_new_securities(path, new_securities):
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -712,20 +915,39 @@ def main():
     _stock_paths = [paths[g] for g in stock_guids if not acc[g]["special"]]
     bills = load_bills(bills_xlsx)
 
-    notes = {}
-    purchases, slbm, sales, review = build_entries(bills, cfg, paths, holdings, notes)
-
-    # ---- demat charges (KRC-01) ----
     ledger = load_ledger_rows(bills_xlsx)
     dem = demat_rows(ledger)
+
+    # ---- IMP-17: read the book's own transactions for the already-in-book check
+    reserved = {bill_id(b) for b in bills} | {f"KRC-D{n}" for n in range(1, len(dem) + 1)}
+    book, not_checked = None, None
+    try:
+        book = BookIndex(load_book_txns(gnucash_path, paths), reserved)
+    except Exception as e:  # noqa: BLE001
+        not_checked = str(e) or type(e).__name__
+
+    notes = {}
+    purchases, slbm, sales, review = build_entries(bills, cfg, paths, holdings, notes, book)
+
+    # ---- demat charges (KRC-01) ----
     demat_acct, demat_src, demat_msg = resolve_demat_account(
         cfg, entity, opts.get("demat-account"), valid_expense_paths(acc, paths))
     if demat_src == "form" and entity:
         remember_demat_account(cfg_path, entity, demat_acct)
     charges = build_charges(ledger, cfg["accounts"]["broker"], demat_acct) if (dem and demat_acct) else []
+    kept_charges = []
+    for e in charges:
+        row = {"cn_no": e["id"], "type": "DEMAT", "security": e["desc"],
+               "net": round(-e["splits"][1][1], 2)}
+        if book_check(book, notes, row, e["id"], e["date"], entry_want(e)):
+            notes["left_out_entries"].append(e)
+        else:
+            kept_charges.append(e)
+    charges = kept_charges
 
-    red_flags = sale_red_flags(review)
-    flags = new_security_flags(notes["new_securities"]) + fuzzy_flags(notes["fuzzy"])
+    red_flags = book_red_flags(notes, not_checked) + sale_red_flags(review)
+    flags = (possible_flags(notes) + new_security_flags(notes["new_securities"])
+             + fuzzy_flags(notes["fuzzy"]))
     if dem and not demat_acct:
         total = round(sum((r["debit"] or 0.0) - (r["credit"] or 0.0) for r in dem), 2)
         red_flags.append(
@@ -737,7 +959,9 @@ def main():
         flags.append("FLAG - " + demat_msg)
 
     # ---- completeness (KRC-01 c) ----
-    emitted = purchases + slbm + sales + charges
+    # entries left out because the book already has them still count: the
+    # ledger describes every one of them, so the broker account must add up.
+    emitted = purchases + slbm + sales + charges + notes["left_out_entries"]
     comp_line = None
     closing_info = None   # KRC-04: information only, every run
     if ledger is None:
@@ -773,11 +997,14 @@ def main():
     if notes["new_securities"]:
         write_new_securities(out / "NewSecurities.csv", notes["new_securities"])
         written.append("NewSecurities.csv")
-    if review:
+    book_rows = book_review_rows(notes)
+    if review or book_rows:
         with open(out / "Review.csv", "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f); w.writerow(["CN No", "Type", "Security", "Net", "Reason"])
             for b, why in review:
                 w.writerow([b["cn_no"], b["type"], b["security"], b["net"], why])
+            for r, why in book_rows:
+                w.writerow([r["cn_no"], r["type"], r["security"], r["net"], why])
         written.append("Review.csv")
 
     # Run metadata for the Review tab (UI-27): the run's own client code (as
@@ -791,6 +1018,10 @@ def main():
             "flags": flags,
             "new_securities": [{**n, "date": _isod(n["date"])} for n in notes["new_securities"]],
             "fuzzy_matches": notes["fuzzy"],
+            "already_in_book": notes["in_book"],
+            "in_book_different_amounts": notes["mismatch"],
+            "possibly_in_book": notes["possible"],
+            "book_check": "NOT CHECKED" if not_checked else "checked",
             "files": written,
         }, indent=2), encoding="utf-8")
     except Exception as e:  # noqa: BLE001
@@ -812,6 +1043,11 @@ def main():
         print("")
     print(f"Config: {cfg_path} (long-term threshold {cfg['long_term_threshold_months']} months)")
     print(f"Bills read: {len(bills)}")
+    if notes["in_book"]:
+        print(f"Already in the book (left out): {len(notes['in_book'])}")
+        for i in notes["in_book"]:
+            print(f"  IN BOOK: {i['id']} ({i['security']}, {i['date']}) - same Num and "
+                  f"amounts as the book transaction dated {i['book_date']}; not in the CSVs.")
     def _ln(name, entries):
         return (f"{name} entries: {len(entries)} -> {name}.csv" if entries
                 else f"{name} entries: 0 (no file written)")
@@ -826,7 +1062,7 @@ def main():
     if closing_info:
         print(closing_info)
     print(f"Files written: {', '.join(written) if written else '(none)'}")
-    print(f"Needs review:     {len(review)}" + (" -> Review.csv" if review else ""))
+    print(f"Needs review:     {len(review)}" + (" -> Review.csv" if (review or book_rows) else ""))
     for b, why in review:
         print(f"  REVIEW: CN {b['cn_no']} ({b['type']}) {b['security']}: {why}")
     if bad:
@@ -835,7 +1071,7 @@ def main():
             print("  " + m)
     else:
         print("All transactions balance (Amount splits sum to zero).")
-    return 0 if (not review and not bad and not red_flags) else 2
+    return 0 if (not review and not bad and not red_flags and not notes["possible"]) else 2
 
 
 if __name__ == "__main__":
