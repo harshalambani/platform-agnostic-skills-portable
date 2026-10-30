@@ -53,6 +53,7 @@ from agents.skill_gnucash_reconciler.agent import (
     reconcile,
     detect_contra_entries,
     match_booked_own_transfers,
+    format_withheld_rows,
 )
 
 log = logging.getLogger(__name__)
@@ -1877,6 +1878,11 @@ def run(
                 booked_matches = [dict(m, row_idx=_new_pos[m["row_idx"]])
                                   for m in _raw_matches if m["row_idx"] in _new_pos]
 
+                # IMP-16: every row left out as already booked is LISTED, never just counted
+                withheld_block = format_withheld_rows([
+                    (r.get('date', ''), r.get('amount', ''), r.get('description', ''))
+                    for r in report if r.get('status') != 'New'])
+
                 # Edge case: all rows are duplicates
                 if total_duplicates > 0 and new_count == 0:
                     return (
@@ -1888,6 +1894,7 @@ def run(
                         f"1. Your GnuCash file is current\n"
                         f"2. Your bank statement covers the right period\n"
                         f"3. Transactions match by date + amount (GnuCash matching logic)"
+                        f"\n\n{withheld_block}"
                     )
 
                 # Rewrite canonical CSV with only new rows
@@ -1896,6 +1903,7 @@ def run(
                         f"Duplicate check — {total_duplicates} already in GnuCash "
                         f"(removed), {new_count} new (will be mapped)"
                     )
+                    log_lines.append(withheld_block)
                     with open(canonical_path, "w", newline="", encoding="utf-8") as f:
                         writer = csv.DictWriter(f, fieldnames=CANONICAL_COLS)
                         writer.writeheader()
