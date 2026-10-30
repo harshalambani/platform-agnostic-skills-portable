@@ -56,6 +56,9 @@ hiddenimports = [
     # Transitive deps of agents/ modules — since agents is excluded from
     # Analysis, PyInstaller won't discover these automatically.
     "yaml",
+    # libyaml-backed loader used by agents/yaml_cache.py (it falls back to the
+    # pure-Python loader if absent, but the fast path needs it bundled).
+    "yaml._yaml",
     "pandas",
     "langchain_core",
     "langchain_core.tools",

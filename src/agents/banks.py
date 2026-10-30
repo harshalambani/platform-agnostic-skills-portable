@@ -24,10 +24,9 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-import yaml
-
 from agents.bank_contract import BankSkill
 from agents.registry import _AGENTS_ROOT
+from agents.yaml_cache import load_yaml_file
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +42,7 @@ class BankInfo:
 
 def _parse_bank_manifest(path: Path) -> BankInfo | None:
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = load_yaml_file(path)
     except Exception as e:
         log.warning("Skipping %s: YAML parse error: %s", path, e)
         return None

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-import yaml
+from agents.yaml_cache import load_yaml_file
 
 log = logging.getLogger(__name__)
 
@@ -309,7 +309,7 @@ def _parse_help(raw: Any) -> SkillHelp | None:
 def _parse_manifest(path: Path) -> SkillInfo | None:
     """Parse a single skill.yaml. Returns None on validation failure."""
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        raw = load_yaml_file(path)
     except Exception as e:
         log.warning("Skipping %s: YAML parse error: %s", path, e)
         return None

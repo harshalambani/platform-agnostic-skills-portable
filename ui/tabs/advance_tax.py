@@ -757,7 +757,14 @@ def render(container_tab=None) -> None:
     )
 
     with gr.Row():
-        estimate_dd = gr.Dropdown(choices=_estimate_choices(), value="", label="Saved estimate", scale=3)
+        # With a container tab the list is filled when the tab is first selected
+        # (see container_tab.select below), so building the UI does not have to
+        # import the estimator (and its schedules/tax_core imports).  Without
+        # one there is no select hook, so fill the list now.
+        estimate_dd = gr.Dropdown(
+            choices=[("(new estimate)", "")] if container_tab is not None else _estimate_choices(),
+            value="", label="Saved estimate", scale=3,
+        )
         refresh_btn = gr.Button("Refresh", scale=1)
         load_btn = gr.Button("Load", scale=1)
 

@@ -52,6 +52,8 @@ from typing import Any
 
 import yaml
 
+from agents.yaml_cache import load_yaml_file
+
 
 # ---------------------------------------------------------------------------
 # API key encryption (security: finding #4 / MP-04)
@@ -330,7 +332,7 @@ def load_portable_config(path: Path | None = None) -> dict[str, Any]:
     path = path or PORTABLE_CONFIG_PATH
     if not path.is_file():
         return {}
-    return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    return load_yaml_file(path) or {}
 
 
 def write_portable_config(cfg: dict[str, Any], path: Path | None = None) -> None:

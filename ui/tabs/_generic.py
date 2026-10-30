@@ -411,7 +411,7 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
     Data\\itr\\rules is empty (the normal case)."""
     search_dirs = [_config.canonical_itr_rules_dir(), _config.data_root_dir() / "itr" / "rules"]
     try:
-        import yaml
+        from agents.yaml_cache import load_yaml_file
         pairs: dict[str, tuple[str, str]] = {}
         # Base first, overlay last -- overlay's entry overwrites on a
         # matching fy, so the overlay wins the dedup.
@@ -419,7 +419,7 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
             if not rules_dir.is_dir():
                 continue
             for p in sorted(rules_dir.glob("tax_rules_*.yaml")):
-                raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+                raw = load_yaml_file(p) or {}
                 meta = raw.get("meta", {}) if isinstance(raw, dict) else {}
                 fy = meta.get("fy")
                 if fy:
