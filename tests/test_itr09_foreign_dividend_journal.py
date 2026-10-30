@@ -197,4 +197,4 @@ def test_entity_keys_survive_a_save_and_a_reload(tmp_path):
     assert "foreign_dividend_tax_account" not in after
     assert after["foreign_dividend_income_account"] == INC
     vals = ui_mod._entity_to_new_form("SYN-P", {"SYN-P": configs.load_entities(p)["SYN-P"]})
-    assert vals[-3:] == ("Assets:Other Cash", "", INC)
+    assert vals[-5:-2] == ("Assets:Other Cash", "", INC)

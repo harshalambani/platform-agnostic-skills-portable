@@ -137,12 +137,17 @@ def apply_capital_rule_defaults(data: dict, admission_date) -> None:
     from .engine import capital_months_from_admission
     drivers = data.setdefault("drivers", {})
     sources = data.setdefault("driver_sources", {})
+    fy = data.get("financial_year") or ""
     if drivers.get("capital_rate") is None:
         drivers["capital_rate"] = _DEFAULT_CAPITAL_RATE
         sources["capital_rate"] = "Default (40% of target compensation over 48 months)"
+    elif "capital_rate" not in sources:
+        sources["capital_rate"] = f"Entity setting for {fy}"
     if drivers.get("capital_months_total") is None:
         drivers["capital_months_total"] = _DEFAULT_CAPITAL_MONTHS_TOTAL
         sources["capital_months_total"] = "Default (48 months)"
+    elif "capital_months_total" not in sources:
+        sources["capital_months_total"] = f"Entity setting for {fy}"
     if drivers.get("capital_months_achieved") is None:
         months, note = capital_months_from_admission(
             admission_date, data.get("financial_year") or "",
