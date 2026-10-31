@@ -56,6 +56,11 @@ from datetime import date
 from fractions import Fraction
 from pathlib import Path
 
+# IMP-15: the shared already-in-book rule. This script runs as its own process,
+# so it finds the module by path rather than relying on the `agents` package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import book_check as shared_book_check  # noqa: E402
+
 DEFAULT_CONFIG = "Data/settings/krc_gnucash_config.yaml"
 
 
@@ -354,55 +359,40 @@ def load_book_txns(gnucash_path, paths):
 
 
 class BookIndex:
-    """The book's transactions, each usable for at most ONE bill (IMP-16 rule)."""
+    """The book's transactions, each usable for at most ONE bill (IMP-16 rule).
+    IMP-15: the Num / same-date rule is the shared book_check module's; this
+    class only converts this script's dicts to its types and back."""
     def __init__(self, txns, reserved_nums=()):
         self.txns = txns
-        self.used = set()
-        self.reserved = set(reserved_nums)   # Nums some bill of this run will claim
+        self._bt = [
+            shared_book_check.BookTxn(
+                id=str(i), num=t["num"], date=t["date"],
+                legs=tuple((p, v[0]) for p, v in t["splits"].items()),
+                qty=tuple((p, v[1]) for p, v in t["splits"].items()))
+            for i, t in enumerate(txns)]
+        self._chk = shared_book_check.BookChecker(
+            self._bt, reserved_nums, shared_book_check.Options(net_per_account=True))
 
     @staticmethod
     def _sig(txn):
         return {p: v[0] for p, v in txn["splits"].items() if v[0] != 0}
 
-    def _fits(self, txn, want, exact, stock):
-        sig = self._sig(txn)
-        if exact:
-            if sig != want:
-                return False
-        else:
-            if any(sig.get(p) != c for p, c in want.items()):
-                return False
-        if stock:
-            path, q = stock
-            if path not in txn["splits"] or txn["splits"][path][1] != q:
-                return False
-        return True
-
     def classify(self, num, dt, want, exact=True, stock=None):
         """-> None | ("DEFINITE", txn) | ("MISMATCH", txn) | ("PROBABLE", [txns], tie)
         `want` = {account path: cents}. DEFINITE/MISMATCH consume the book txn."""
-        d = parse_date(dt)
-        cands = [i for i, t in enumerate(self.txns) if i not in self.used and t["num"] == num]
-        if cands:
-            def dist(i):
-                return abs((self.txns[i]["date"] - d).days) if d else 0
-            fit = [i for i in cands if self._fits(self.txns[i], want, exact, stock)]
-            if fit:
-                i = min(fit, key=dist); self.used.add(i)
-                return ("DEFINITE", self.txns[i])
-            i = min(cands, key=dist); self.used.add(i)
-            return ("MISMATCH", self.txns[i])
-        if d is None:
-            return None
-        free = [i for i, t in enumerate(self.txns)
-                if i not in self.used and t["date"] == d and t["num"] not in self.reserved
-                and self._fits(t, want, exact, stock)]
-        if not free:
-            return None
-        if len(free) == 1:
-            self.used.add(free[0])
-            return ("PROBABLE", [self.txns[free[0]]], False)
-        return ("PROBABLE", [self.txns[i] for i in free], True)
+        entry = shared_book_check.Entry(
+            num=num, date=parse_date(dt), legs=tuple(want.items()), subset=not exact,
+            qty=((stock[0], stock[1]),) if stock else ())
+        v = self._chk.check(entry)
+        if v.kind == shared_book_check.DEFINITE:
+            return ("DEFINITE", self.txns[int(v.book.id)])
+        if v.kind == shared_book_check.MISMATCH:
+            return ("MISMATCH", self.txns[int(v.book.id)])
+        if v.kind == shared_book_check.PROBABLE:
+            return ("PROBABLE", [self.txns[int(v.book.id)]], False)
+        if v.kind == shared_book_check.TIE:
+            return ("PROBABLE", [self.txns[int(t.id)] for t in v.candidates], True)
+        return None
 
 
 def _sig_text(sig):

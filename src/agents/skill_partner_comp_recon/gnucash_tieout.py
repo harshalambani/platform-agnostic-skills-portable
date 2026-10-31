@@ -43,7 +43,10 @@ from __future__ import annotations
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import date as _date
 from pathlib import Path
+
+from .. import book_check
 
 from .engine import (
     CANNOT_RECONCILE,
@@ -1010,6 +1013,10 @@ KIND_POSSIBLE = "possible"
 KIND_POSSIBLE_TIE = "possible_tie"
 
 
+def _cents(x) -> int:
+    return int(round(round(float(x), 2) * 100))
+
+
 def _journal_legs(journal, ignore: set | None = None) -> Counter:
     ignore = ignore or set()
     return Counter(
@@ -1133,84 +1140,69 @@ def build_posted_check(
     # rounding legs are ignored on both sides).
     accr_ignore = {accounts.get("current_account"), accounts.get(ROUNDING_KEY)} - {None, ""}
 
-    # One-to-one: a book transaction clears at most one journal.
-    consumed: set = set()
-    by_id: dict = {}
-
-    # Pass 1: Num matches (definite, or mismatch when the amounts differ).
+    # IMP-15: the Num / date+amount+account rule lives in the shared
+    # book_check module (rule S.1 = B); this adapter only converts to and
+    # from its types and keeps this skill's own wording.
+    bc_entries = []
     for j in journals:
-        cands = [t for t in book.transactions
-                 if t.num and t.num == j.txn_id and t.guid not in consumed]
-        if not cands:
-            continue
+        ignore = frozenset(accr_ignore) if j.txn_id == accr_id else frozenset()
+        bc_entries.append(book_check.Entry(
+            num=j.txn_id, date=_date.fromisoformat(j.date), ignore=ignore,
+            legs=tuple((s.account, _cents(s.debit - s.credit)) for s in j.splits)))
+    bc_txns = [
+        book_check.BookTxn(
+            id=t.guid, num=t.num or "", date=t.date_posted,
+            legs=tuple((colon_paths.get(sp.account_guid, ""), _cents(sp.value))
+                       for sp in t.splits))
+        for t in book.transactions]
+    fy_ids = {t.guid for t in fy_txns}
+    verdicts = book_check.check_all(
+        bc_entries, bc_txns, book_check.Options(), fallback_ids=fy_ids, reserve=False)
+
+    by_id: dict = {}
+    consumed: set = {v.book.id for v in verdicts
+                     if v.book is not None and v.kind in (book_check.DEFINITE, book_check.MISMATCH)}
+    for j, v in zip(journals, verdicts):
         ignore = accr_ignore if j.txn_id == accr_id else None
-        j_legs = _journal_legs(j, ignore)
-        exact = [t for t in cands if _book_legs(t, colon_paths, ignore) == j_legs]
-        if exact or not j_legs:
-            hit = (exact or cands)[0]
-            consumed.add(hit.guid)
+        base = dict(txn_id=j.txn_id, date=j.date, description=j.description)
+        if v.kind == book_check.DEFINITE:
             by_id[j.txn_id] = PostedCheckResult(
-                txn_id=j.txn_id, date=j.date, description=j.description,
                 status=ALREADY_POSTED, kind=KIND_DEFINITE,
                 detail=(
                     f"Matched by Transaction ID/Num {j.txn_id!r} on book "
-                    f"transaction {hit.guid!r} -- definite match"
+                    f"transaction {v.book.id!r} -- definite match"
                     + (" (accrual compared on its share-of-profit leg only)."
                        if ignore else ".")
-                ),
-            )
-        else:
-            hit = cands[0]
-            consumed.add(hit.guid)
+                ), **base)
+        elif v.kind == book_check.MISMATCH:
             by_id[j.txn_id] = PostedCheckResult(
-                txn_id=j.txn_id, date=j.date, description=j.description,
                 status=ALREADY_POSTED, kind=KIND_MISMATCH,
                 detail=(
                     f"Transaction ID/Num {j.txn_id!r} is in the book (transaction "
-                    f"{hit.guid!r}) but its amounts differ from the journal this "
+                    f"{v.book.id!r}) but its amounts differ from the journal this "
                     "run computes -- the book and the computed journal disagree."
-                ),
-            )
-
-    # Pass 2: no Num hit -> exact date + amount + account fallback, still
-    # one-to-one. Several equally good candidates are never auto-picked.
-    for j in journals:
-        if j.txn_id in by_id:
-            continue
-        ignore = accr_ignore if j.txn_id == accr_id else None
-        j_legs = _journal_legs(j, ignore)
-        same_day = [t for t in fy_txns
-                    if t.date_posted.isoformat() == j.date and t.guid not in consumed]
-        exact = [t for t in same_day
-                 if j_legs and _book_legs(t, colon_paths, ignore) == j_legs]
-        if len(exact) == 1:
-            consumed.add(exact[0].guid)
+                ), **base)
+        elif v.kind == book_check.PROBABLE:
+            consumed.add(v.book.id)
             by_id[j.txn_id] = PostedCheckResult(
-                txn_id=j.txn_id, date=j.date, description=j.description,
                 status=ALREADY_POSTED, kind=KIND_POSSIBLE,
                 detail=(
-                    f"Possible match: book transaction {exact[0].guid!r} on {j.date} "
+                    f"Possible match: book transaction {v.book.id!r} on {j.date} "
                     "has the same signed amount + account for every split, but no "
                     "trn:num match -- check before import."
-                ),
-            )
-        elif len(exact) > 1:
+                ), **base)
+        elif v.kind == book_check.TIE:
             by_id[j.txn_id] = PostedCheckResult(
-                txn_id=j.txn_id, date=j.date, description=j.description,
                 status=ALREADY_POSTED, kind=KIND_POSSIBLE_TIE,
                 detail=(
-                    f"{len(exact)} book transactions on {j.date} fit this journal "
-                    "equally well (" + ", ".join(repr(t.guid) for t in exact)
+                    f"{len(v.candidates)} book transactions on {j.date} fit this journal "
+                    "equally well (" + ", ".join(repr(t.id) for t in v.candidates)
                     + ") -- not auto-picked; check before import."
-                ),
-            )
+                ), **base)
         else:
             remaining = [t for t in fy_txns if t.guid not in consumed]
             status, detail = _fallback_classify(j, remaining, colon_paths)
-            by_id[j.txn_id] = PostedCheckResult(
-                txn_id=j.txn_id, date=j.date, description=j.description,
-                status=status, detail=detail,
-            )
+            by_id[j.txn_id] = PostedCheckResult(status=status, detail=detail, **base)
 
     results: list[PostedCheckResult] = [by_id[j.txn_id] for j in journals]
 
