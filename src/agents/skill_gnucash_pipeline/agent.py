@@ -54,6 +54,7 @@ from agents.skill_gnucash_reconciler.agent import (
     detect_contra_entries,
     match_booked_own_transfers,
     format_withheld_rows,
+    format_ref_flagged_rows,
 )
 
 log = logging.getLogger(__name__)
@@ -1884,6 +1885,12 @@ def run(
                 withheld_block = format_withheld_rows([
                     (r.get('date', ''), r.get('amount', ''), r.get('description', ''))
                     for r in report if r.get('status') != 'New'])
+
+                ref_flag_block = format_ref_flagged_rows([
+                    (r.get('date', ''), r.get('description', ''))
+                    for r in report if r.get('ref_flag')])
+                if ref_flag_block:
+                    log_lines.append(ref_flag_block)
 
                 # Edge case: all rows are duplicates
                 if total_duplicates > 0 and new_count == 0:

@@ -212,6 +212,26 @@ def extract_key(description: str) -> str:
     return description[:40].strip()
 
 
+def is_reference_num(num: str) -> bool:
+    """IMP-15 4b: a Num is usable as a reference only if it has a non-zero digit and is at
+    least 4 chars. (It must also sit on exactly one book transaction; the caller checks that.)"""
+    s = str(num or '').strip()
+    return len(s) >= 4 and any(c in '123456789' for c in s)
+
+
+def format_ref_flagged_rows(rows) -> str:
+    """Rows kept in the file whose bank ref matches a book entry with a different amount.
+    rows = (date, description). No amounts or refs are printed."""
+    rows = list(rows)
+    if not rows:
+        return ""
+    out = [f"**Same bank ref as a book entry but a different amount - check before import "
+           f"(kept in the file): {len(rows)} row(s)**"]
+    for d, desc in rows:
+        out.append(f"- {d} | {str(desc)[:40]}")
+    return chr(10).join(out)
+
+
 def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dict]:
     """Compare CSV rows to GnuCash transactions."""
     gnucash_txns = gnucash_data['transactions']
@@ -234,43 +254,56 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
     # IMP-16: one-to-one. Each book entry accounts for at most one statement
     # row; once used it is gone, so rows beyond the number of matching book
     # entries stay New and are offered.
-    # IMP-15 4b (AC 2.2 = A): an exact own-Num match comes FIRST. The statement
-    # Ref / Cheque No is compared with the book Num as TEXT (no int cast, leading
-    # zeros kept). A Num hit is definite and consumes its book entry, so the
-    # date + amount fallback below can never count the same entry again. With no
-    # ref, or a blank book Num, the date + amount fallback applies as before; a
-    # book entry that carries a DIFFERENT Num is not a candidate for a row that
-    # carries a ref (they are two different payments).
-    by_num = defaultdict(list)
+    # IMP-15 4b (AC 2.2 = A, S.1): a statement Ref / Cheque No that equals a book Num AND
+    # whose amount is identical to the paisa is definite: left out, and it consumes its book
+    # entry, so the date + amount fallback below can never count the same entry again. Text
+    # compare, leading zeros kept. A Num is only a REFERENCE if it has a non-zero digit, is
+    # at least 4 chars and sits on exactly ONE book transaction in the scoped account;
+    # placeholders ("0", all zeros, short text) are not references and go straight to the
+    # one-to-one date + amount fallback. Same reference, different amount: NOT consumed, the
+    # row stays in the file and is flagged. Two different real references are two payments.
+    num_count = defaultdict(int)
     for txn in gnucash_txns:
         if txn.get('num'):
-            by_num[txn['num']].append(txn)
+            num_count[txn['num']] += 1
+    by_num = {txn['num']: txn for txn in gnucash_txns
+              if txn.get('num') and is_reference_num(txn['num']) and num_count[txn['num']] == 1}
+
+    def _cents(v):
+        return int(round(float(v) * 100))
+
     num_hit = {}
+    ref_flag = {}
     for pos, csv_row in enumerate(csv_rows):
         ref = str(csv_row.get('txn_id') or '').strip()
-        cands = by_num.get(ref) if ref else None
-        if not cands:
+        cand = by_num.get(ref) if ref and is_reference_num(ref) else None
+        if cand is None:
             continue
-        used = cands.pop(0)
-        num_hit[pos] = used
-        for key_list in gnucash_index.values():           # consumed for the fallback too
-            if any(x is used for x in key_list):
-                key_list[:] = [x for x in key_list if x is not used]
+        amount = csv_row['deposit'] - csv_row['withdrawal']
+        if _cents(amount) == _cents(cand['amount']):
+            num_hit[pos] = cand
+            by_num.pop(ref)
+            for key_list in gnucash_index.values():           # consumed for the fallback too
+                if any(x is cand for x in key_list):
+                    key_list[:] = [x for x in key_list if x is not cand]
+        else:
+            ref_flag[pos] = True                              # kept, flagged, entry not consumed
 
     for pos, csv_row in enumerate(csv_rows):
         amount = csv_row['deposit'] - csv_row['withdrawal']
         index_key = (csv_row['date'], round(amount, 2))
         ref = str(csv_row.get('txn_id') or '').strip()
+        row_has_ref = bool(ref) and is_reference_num(ref)
 
         if pos in num_hit:
             used = num_hit[pos]
             consumed_count += 1
             matched_count += 1
             status = "Match"
-            details = f"Found in {used['account']} (same Num {used['num']})"
+            details = f"Found in {used['account']} (same bank ref and amount)"
         else:
             avail = [x for x in gnucash_index.get(index_key, [])
-                     if not (ref and x.get('num'))]        # a different Num is not a candidate
+                     if not (row_has_ref and x.get('num') in by_num and x['num'] != ref)]
             if avail:
                 n_avail = len(avail)
                 used = avail[0]
@@ -288,6 +321,9 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
                 status = "New"
                 details = "Not in GnuCash (ready to import)"
                 new_count += 1
+                if ref_flag.get(pos):
+                    details = ("same bank ref as a book entry but a different amount - "
+                               "check before import")
 
         report.append({
             'row_num': csv_row['row_num'],
@@ -296,6 +332,7 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
             'amount': f"{amount:.2f}",
             'status': status,
             'details': details,
+            'ref_flag': bool(ref_flag.get(pos)) and status == "New",
         })
 
     summary = {

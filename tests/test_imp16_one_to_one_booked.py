@@ -116,8 +116,8 @@ def test_the_num_is_compared_as_text_so_leading_zeros_matter():
 def test_a_num_hit_is_not_also_matched_by_date_and_amount():
     # NEGATIVE: one book entry, one Num row and one no-ref row with the same date + amount.
     # The Num row takes the entry; the other row must stay New (the entry is not counted twice).
-    rows = _nrows(("2026-01-10", 100.0, ""), ("2026-01-10", 100.0, "A1"))
-    rep, _ = reconcile(rows, _nbook(("2026-01-10", 100.0, "A1")))
+    rows = _nrows(("2026-01-10", 100.0, ""), ("2026-01-10", 100.0, "A10001"))
+    rep, _ = reconcile(rows, _nbook(("2026-01-10", 100.0, "A10001")))
     assert _status(rep) == ["New", "Match"]
 
 
@@ -129,16 +129,55 @@ def test_two_identical_rows_against_one_book_entry_book_exactly_one():
 
 
 def test_a_blank_book_num_falls_back_to_date_and_amount():
-    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R9")), _nbook(("2026-01-10", 100.0, "")))
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R90001")), _nbook(("2026-01-10", 100.0, "")))
     assert _status(rep) == ["Match"]
 
 
 def test_a_different_book_num_is_not_a_date_and_amount_candidate():
     # NEGATIVE: two different cheques on one day for one amount are two payments
-    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R9")), _nbook(("2026-01-10", 100.0, "R8")))
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R90001")), _nbook(("2026-01-10", 100.0, "R80001")))
     assert _status(rep) == ["New"]
 
 
 def test_no_ref_and_a_numbered_book_entry_still_falls_back():
-    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "")), _nbook(("2026-01-10", 100.0, "R8")))
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "")), _nbook(("2026-01-10", 100.0, "R80001")))
     assert _status(rep) == ["Match"]
+
+
+def test_placeholder_refs_never_drop_a_row_by_num():
+    # NEGATIVE: "0", an all-zeros ref and a 2-letter ref, against several book entries that share
+    # those placeholder Nums with different amounts. Only exact date + amount one-to-one matches go.
+    rows = _nrows(("2026-01-10", 100.0, "0"), ("2026-01-11", 200.0, "000000000000000"),
+                  ("2026-01-12", 300.0, "ab"), ("2026-01-13", 400.0, "0"))
+    book = _nbook(("2026-02-01", 100.0, "0"), ("2026-02-02", 200.0, "0"), ("2026-02-03", 300.0, "0"),
+                  ("2026-02-04", 400.0, "000000000000000"), ("2026-02-05", 400.0, "000000000000000"),
+                  ("2026-02-06", 100.0, "ab"), ("2026-02-07", 300.0, "ab"), ("2026-01-12", 300.0, "ab"))
+    rep, _ = reconcile(rows, book)
+    assert _status(rep) == ["New", "New", "Match", "New"]           # only the exact date + amount one
+
+
+def test_a_placeholder_book_num_is_still_a_date_and_amount_candidate():
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R90001")), _nbook(("2026-01-10", 100.0, "0")))
+    assert _status(rep) == ["Match"]
+
+
+def test_same_reference_different_amount_stays_in_and_is_flagged_and_not_consumed():
+    rows = _nrows(("2026-01-10", 100.0, "CHQ4512"), ("2026-01-12", 250.0, ""))
+    book = _nbook(("2026-01-12", 250.0, "CHQ4512"))
+    rep, _ = reconcile(rows, book)
+    assert rep[0]["status"] == "New" and rep[0]["ref_flag"] is True
+    assert "check before import" in rep[0]["details"]
+    assert "CHQ4512" not in rep[0]["details"] and "100" not in rep[0]["details"]
+    assert rep[1]["status"] == "Match"                    # the book entry was not consumed by row 1
+
+
+def test_a_reference_shared_by_two_book_transactions_is_not_a_num_match():
+    rows = _nrows(("2026-01-10", 100.0, "CHQ4512"))
+    book = _nbook(("2026-02-01", 100.0, "CHQ4512"), ("2026-02-02", 100.0, "CHQ4512"))
+    rep, _ = reconcile(rows, book)
+    assert _status(rep) == ["New"] and not rep[0]["ref_flag"]       # NEGATIVE: ambiguous, not used
+
+
+def test_amount_must_match_to_the_paisa():
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.01, "CHQ4512")), _nbook(("2026-01-12", 100.0, "CHQ4512")))
+    assert _status(rep) == ["New"]
