@@ -816,9 +816,9 @@ def run(
     write_summary(str(summary_path), summary)
 
     matched    = summary.get('matched', 0)
-    new_txns   = summary.get('new_in_csv', 0)
+    new_txns   = summary.get('new', 0)
     duplicates = summary.get('duplicates', 0)
-    missing    = summary.get('missing_in_csv', 0)
+    missing    = summary.get('missing', 0)
     total_csv  = len(csv_rows)
 
     return (
