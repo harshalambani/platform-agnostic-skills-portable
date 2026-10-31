@@ -995,6 +995,38 @@ class PostedCheckResult:
     description: str
     status: str
     detail: str
+    # IMP-18: how an ALREADY_POSTED verdict was reached. "definite" = same
+    # Num AND same per-account amounts; "mismatch" = same Num but the book
+    # and the computed journal disagree; "possible" = no Num, matched only
+    # by date + amount + accounts (a guess, never a certainty);
+    # "possible_tie" = more than one book transaction fits equally well.
+    # "" = not set (older callers): treated as definite.
+    kind: str = ""
+
+
+KIND_DEFINITE = "definite"
+KIND_MISMATCH = "mismatch"
+KIND_POSSIBLE = "possible"
+KIND_POSSIBLE_TIE = "possible_tie"
+
+
+def _journal_legs(journal, ignore: set | None = None) -> Counter:
+    ignore = ignore or set()
+    return Counter(
+        (round(s.debit - s.credit, 2), s.account)
+        for s in journal.splits if s.account not in ignore
+    )
+
+
+def _book_legs(txn, colon_paths: dict, ignore: set | None = None) -> Counter:
+    ignore = ignore or set()
+    out: Counter = Counter()
+    for sp in txn.splits:
+        acct = colon_paths.get(sp.account_guid, "")
+        if acct in ignore:
+            continue
+        out[(round(float(sp.value), 2), acct)] += 1
+    return out
 
 
 def _fallback_classify(journal, fy_txns, colon_paths: dict) -> tuple[str, str]:
@@ -1094,25 +1126,93 @@ def build_posted_check(
 
     colon_paths = _colon_paths(book)
     fy_txns = parse_gnucash.fy_transactions(book, year_key)
+    accr_id = accr.txn_id if accr is not None else None
+    # IMP-18: the run sizes the accrual's rounding line against the book,
+    # but this check builds the accrual without it, so the accrual is
+    # compared on its share-of-profit leg only (the current-account and
+    # rounding legs are ignored on both sides).
+    accr_ignore = {accounts.get("current_account"), accounts.get(ROUNDING_KEY)} - {None, ""}
 
-    results: list[PostedCheckResult] = []
+    # One-to-one: a book transaction clears at most one journal.
+    consumed: set = set()
+    by_id: dict = {}
+
+    # Pass 1: Num matches (definite, or mismatch when the amounts differ).
     for j in journals:
-        num_hit = next((t for t in book.transactions if t.num and t.num == j.txn_id), None)
-        if num_hit is not None:
-            results.append(PostedCheckResult(
+        cands = [t for t in book.transactions
+                 if t.num and t.num == j.txn_id and t.guid not in consumed]
+        if not cands:
+            continue
+        ignore = accr_ignore if j.txn_id == accr_id else None
+        j_legs = _journal_legs(j, ignore)
+        exact = [t for t in cands if _book_legs(t, colon_paths, ignore) == j_legs]
+        if exact or not j_legs:
+            hit = (exact or cands)[0]
+            consumed.add(hit.guid)
+            by_id[j.txn_id] = PostedCheckResult(
                 txn_id=j.txn_id, date=j.date, description=j.description,
-                status=ALREADY_POSTED,
+                status=ALREADY_POSTED, kind=KIND_DEFINITE,
                 detail=(
                     f"Matched by Transaction ID/Num {j.txn_id!r} on book "
-                    f"transaction {num_hit.guid!r} -- definite match."
+                    f"transaction {hit.guid!r} -- definite match"
+                    + (" (accrual compared on its share-of-profit leg only)."
+                       if ignore else ".")
                 ),
-            ))
+            )
+        else:
+            hit = cands[0]
+            consumed.add(hit.guid)
+            by_id[j.txn_id] = PostedCheckResult(
+                txn_id=j.txn_id, date=j.date, description=j.description,
+                status=ALREADY_POSTED, kind=KIND_MISMATCH,
+                detail=(
+                    f"Transaction ID/Num {j.txn_id!r} is in the book (transaction "
+                    f"{hit.guid!r}) but its amounts differ from the journal this "
+                    "run computes -- the book and the computed journal disagree."
+                ),
+            )
+
+    # Pass 2: no Num hit -> exact date + amount + account fallback, still
+    # one-to-one. Several equally good candidates are never auto-picked.
+    for j in journals:
+        if j.txn_id in by_id:
             continue
-        status, detail = _fallback_classify(j, fy_txns, colon_paths)
-        results.append(PostedCheckResult(
-            txn_id=j.txn_id, date=j.date, description=j.description,
-            status=status, detail=detail,
-        ))
+        ignore = accr_ignore if j.txn_id == accr_id else None
+        j_legs = _journal_legs(j, ignore)
+        same_day = [t for t in fy_txns
+                    if t.date_posted.isoformat() == j.date and t.guid not in consumed]
+        exact = [t for t in same_day
+                 if j_legs and _book_legs(t, colon_paths, ignore) == j_legs]
+        if len(exact) == 1:
+            consumed.add(exact[0].guid)
+            by_id[j.txn_id] = PostedCheckResult(
+                txn_id=j.txn_id, date=j.date, description=j.description,
+                status=ALREADY_POSTED, kind=KIND_POSSIBLE,
+                detail=(
+                    f"Possible match: book transaction {exact[0].guid!r} on {j.date} "
+                    "has the same signed amount + account for every split, but no "
+                    "trn:num match -- check before import."
+                ),
+            )
+        elif len(exact) > 1:
+            by_id[j.txn_id] = PostedCheckResult(
+                txn_id=j.txn_id, date=j.date, description=j.description,
+                status=ALREADY_POSTED, kind=KIND_POSSIBLE_TIE,
+                detail=(
+                    f"{len(exact)} book transactions on {j.date} fit this journal "
+                    "equally well (" + ", ".join(repr(t.guid) for t in exact)
+                    + ") -- not auto-picked; check before import."
+                ),
+            )
+        else:
+            remaining = [t for t in fy_txns if t.guid not in consumed]
+            status, detail = _fallback_classify(j, remaining, colon_paths)
+            by_id[j.txn_id] = PostedCheckResult(
+                txn_id=j.txn_id, date=j.date, description=j.description,
+                status=status, detail=detail,
+            )
+
+    results: list[PostedCheckResult] = [by_id[j.txn_id] for j in journals]
 
     counts = Counter(r.status for r in results)
     summary = ", ".join(f"{counts[s]} {s.lower()}" for s in
@@ -1122,6 +1222,35 @@ def build_posted_check(
         f"({summary or 'nothing to report'}). See the 'Posted check' sheet for detail."
     )
     return results, note
+
+
+def partition_by_posted(journals: list, posted_check: list) -> dict:
+    """IMP-18: split the journals a run is about to write by what the posted
+    check found. Returns a dict of lists of journals:
+      write       -- goes into the CSV (not posted, or only a possible match)
+      left_out    -- definite match, left OUT of the CSV
+      mismatch    -- same Num, different amounts: left OUT, RED FLAG
+      possible    -- stays IN the CSV, flagged "check before import"
+      unchecked   -- the posted check did not cover this journal (book
+                     unreadable / not supplied): stays IN, RED FLAG
+    """
+    by_id = {p.txn_id: p for p in (posted_check or [])}
+    out = {"write": [], "left_out": [], "mismatch": [], "possible": [], "unchecked": []}
+    for j in journals:
+        p = by_id.get(j.txn_id)
+        if p is None or p.status == CANNOT_CHECK:
+            out["unchecked"].append(j)
+            out["write"].append(j)
+        elif p.status == ALREADY_POSTED and p.kind == KIND_MISMATCH:
+            out["mismatch"].append(j)
+        elif p.status == ALREADY_POSTED and p.kind in (KIND_POSSIBLE, KIND_POSSIBLE_TIE):
+            out["possible"].append(j)
+            out["write"].append(j)
+        elif p.status == ALREADY_POSTED:
+            out["left_out"].append(j)
+        else:
+            out["write"].append(j)
+    return out
 
 
 # ---------------------------------------------------------------------------
