@@ -152,6 +152,8 @@ def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = 
                                 'account': acc_path,
                                 'description': desc,
                                 'other_accounts': others,
+                                # IMP-15 4b: the book Num, kept as TEXT (leading zeros stay)
+                                'num': txn_num.strip(),
                             })
                     except Exception as e:
                         logger.warning(f"Failed to parse transaction: {e}")
@@ -232,27 +234,60 @@ def reconcile(csv_rows: List[Dict], gnucash_data: Dict) -> Tuple[List[Dict], Dic
     # IMP-16: one-to-one. Each book entry accounts for at most one statement
     # row; once used it is gone, so rows beyond the number of matching book
     # entries stay New and are offered.
-    for csv_row in csv_rows:
+    # IMP-15 4b (AC 2.2 = A): an exact own-Num match comes FIRST. The statement
+    # Ref / Cheque No is compared with the book Num as TEXT (no int cast, leading
+    # zeros kept). A Num hit is definite and consumes its book entry, so the
+    # date + amount fallback below can never count the same entry again. With no
+    # ref, or a blank book Num, the date + amount fallback applies as before; a
+    # book entry that carries a DIFFERENT Num is not a candidate for a row that
+    # carries a ref (they are two different payments).
+    by_num = defaultdict(list)
+    for txn in gnucash_txns:
+        if txn.get('num'):
+            by_num[txn['num']].append(txn)
+    num_hit = {}
+    for pos, csv_row in enumerate(csv_rows):
+        ref = str(csv_row.get('txn_id') or '').strip()
+        cands = by_num.get(ref) if ref else None
+        if not cands:
+            continue
+        used = cands.pop(0)
+        num_hit[pos] = used
+        for key_list in gnucash_index.values():           # consumed for the fallback too
+            if any(x is used for x in key_list):
+                key_list[:] = [x for x in key_list if x is not used]
+
+    for pos, csv_row in enumerate(csv_rows):
         amount = csv_row['deposit'] - csv_row['withdrawal']
         index_key = (csv_row['date'], round(amount, 2))
+        ref = str(csv_row.get('txn_id') or '').strip()
 
-        if gnucash_index.get(index_key):
-            matches = gnucash_index[index_key]
-            n_avail = len(matches)
-            used = matches.pop(0)          # consumed: no book entry is counted twice
+        if pos in num_hit:
+            used = num_hit[pos]
             consumed_count += 1
-            if n_avail == 1:
-                status = "Match"
-                details = f"Found in {used['account']}"
-                matched_count += 1
-            else:
-                status = "Duplicate"
-                details = f"{n_avail} matching transactions in GnuCash (one used)"
-                duplicate_count += 1
+            matched_count += 1
+            status = "Match"
+            details = f"Found in {used['account']} (same Num {used['num']})"
         else:
-            status = "New"
-            details = "Not in GnuCash (ready to import)"
-            new_count += 1
+            avail = [x for x in gnucash_index.get(index_key, [])
+                     if not (ref and x.get('num'))]        # a different Num is not a candidate
+            if avail:
+                n_avail = len(avail)
+                used = avail[0]
+                gnucash_index[index_key] = [x for x in gnucash_index[index_key] if x is not used]
+                consumed_count += 1          # no book entry is counted twice
+                if n_avail == 1:
+                    status = "Match"
+                    details = f"Found in {used['account']}"
+                    matched_count += 1
+                else:
+                    status = "Duplicate"
+                    details = f"{n_avail} matching transactions in GnuCash (one used)"
+                    duplicate_count += 1
+            else:
+                status = "New"
+                details = "Not in GnuCash (ready to import)"
+                new_count += 1
 
         report.append({
             'row_num': csv_row['row_num'],

@@ -216,6 +216,7 @@ def test_unresolvable_account_skips_dedup_instead_of_falling_back_unscoped(tmp_p
         config_path=None,
     )
 
+    assert "NOT CHECKED against the book" in result      # IMP-15 4b: loud, not just a log line
     assert "Duplicate check skipped" in result, (
         f"no matching HDFC account exists in this book, so dedup must say it "
         f"was skipped rather than silently proceeding unscoped.\nlog={result}"
@@ -268,3 +269,22 @@ def test_account_filter_matching_nothing_yields_no_transactions_not_a_fallback(t
         "transaction in the book (which would be indistinguishable from no "
         "filter at all)"
     )
+
+
+def test_an_unreadable_book_keeps_every_row_and_says_not_checked(tmp_path, monkeypatch):
+    """IMP-15 4b: if the book cannot be read for the already-in-book check, no row is dropped
+    and the run says NOT CHECKED loudly."""
+    from agents.skill_gnucash_pipeline import agent as pipe
+
+    def boom(*_a, **_k):
+        raise OSError("cannot read the book")
+    csv_path = tmp_path / "syn_hdfc.csv"
+    csv_path.write_text(fixture_gen.build_csv_text(), encoding="utf-8")
+    gnucash_file = _build_book_with_unrelated_same_date_amount_posting(tmp_path)
+    monkeypatch.setattr(pipe, "parse_gnucash_for_reconcile", boom)
+    out_path = tmp_path / "out.csv"
+    result = pipe.run(bank="HDFC", statement_files=str(csv_path), gnucash_file=gnucash_file,
+                      output_path=str(out_path), config_path=None)
+    assert "NOT CHECKED against the book" in result
+    assert "already in GnuCash" not in result                       # NEGATIVE: nothing left out
+    assert "2025-04-01" in [r.get("Date") for r in _read_output_rows(out_path)]

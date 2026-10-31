@@ -47,7 +47,8 @@ KIND_LABEL = {K_SPEND: "Spend", K_REFUND: "Refund", K_CASHBACK: "Cashback", K_CA
 
 ST_READY = "READY"
 ST_BOOKED = "ALREADY BOOKED"
-ST_POSSIBLY = "POSSIBLY ALREADY BOOKED (withheld)"
+ST_POSSIBLY = "POSSIBLY ALREADY BOOKED - check before import"   # IMP-15 4b: written to the CSV AND flagged
+WRITTEN = (ST_READY, ST_POSSIBLY)                              # the statuses that go into the import file
 ST_EMI = "WITHHELD: original purchase of an EMI conversion"
 ST_BLOCKED = "WITHHELD: account is hidden or a placeholder"
 ST_NO_ACCOUNT = "WITHHELD: no account"
@@ -291,8 +292,8 @@ def emi_summary(emi_rows: list) -> dict:
 
 def fee_totals(journals: list) -> dict:
     """Totals of fee journals (EMI interest is not a fee journal and never in here)."""
-    fees = [j for j in journals if j.kind == K_FEE and j.status == ST_READY]
-    revs = [j for j in journals if j.kind == K_FEE_REV and j.status == ST_READY]
+    fees = [j for j in journals if j.kind == K_FEE and j.status in WRITTEN]
+    revs = [j for j in journals if j.kind == K_FEE_REV and j.status in WRITTEN]
     return {"fees": round(sum(j.amount for j in fees), 2), "reversals": round(sum(j.amount for j in revs), 2),
             "net": round(sum(j.amount for j in fees) - sum(j.amount for j in revs), 2),
             "count": len(fees) + len(revs)}
@@ -314,7 +315,7 @@ def payee_words(text: str) -> set:
 def _same_payee(j, t) -> bool:
     """CC-12: a hand entry only counts as the same spend when the payee wording agrees. Only spends
     and refunds have a payee; when either side has no payee words at all the answer is YES (the
-    safe side: a withheld row is checked by a person, a missed duplicate is a double booking)."""
+    safe side: a flagged row is checked by a person, a missed duplicate is a double booking)."""
     if j.kind not in (K_SPEND, K_REFUND):
         return True
     a, b = payee_words(j.raw_description or j.description), payee_words(t.description)
@@ -336,7 +337,8 @@ def mark_booked(journals: list, txns: list, ccp_path: str) -> None:
     payment (CCP against a bank or asset account, no expense split) is not a
     candidate (RF-1). The account the mapper would choose is irrelevant, and an
     unmapped journal is checked too. Pairing is one-to-one, nearest date first,
-    and only withholds with a warning."""
+    and only FLAGS (IMP-15 4b): the row stays in the import file, marked
+    "check before import"; only an exact Num match leaves a row out."""
     def in_pool(p: str) -> bool:
         return p == ccp_path or p.startswith(ccp_path + ":")
 

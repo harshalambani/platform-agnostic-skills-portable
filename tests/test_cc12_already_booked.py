@@ -25,9 +25,9 @@ def _run(tmp_path, monkeypatch, desc):
     return basic(tmp_path, monkeypatch, txns=[book_pay("p1", 1900, date(2025, 5, 12)), _hand(desc)])
 
 
-def test_a_same_payee_hand_entry_withholds_and_the_row_keeps_its_account(tmp_path, monkeypatch):
+def test_a_same_payee_hand_entry_is_written_and_flagged_and_keeps_its_account(tmp_path, monkeypatch):
     _r, rows, _c, out = _run(tmp_path, monkeypatch, "Swiggy dinner with friends")
-    assert "SWIGGY ORDER" not in {r["Description"] for r in rows}
+    assert "SWIGGY ORDER" in {r["Description"] for r in rows}                # written, never withheld
     j = next(x for x in _jrows(out) if "SWIGGY" in str(x["Description"]).upper())
     assert j["Status"] == J.ST_POSSIBLY
     assert j["Debit account"] == FOOD and j["Confidence"] == "high"         # kept, not blanked

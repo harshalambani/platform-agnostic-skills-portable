@@ -81,11 +81,16 @@ class RunReport:
 
     @property
     def ready(self) -> list:
-        return [j for j in self.journals if j.status == J.ST_READY]
+        return [j for j in self.journals if j.status in J.WRITTEN]
+
+    @property
+    def flagged(self) -> list:
+        """IMP-15 4b: written to the import file, but a look-alike is already in the book."""
+        return [j for j in self.journals if j.status == J.ST_POSSIBLY]
 
     @property
     def withheld(self) -> list:
-        return [j for j in self.journals if j.status not in (J.ST_READY, J.ST_BOOKED)]
+        return [j for j in self.journals if j.status not in (J.WRITTEN + (J.ST_BOOKED,))]
 
     @property
     def unmatched_total(self) -> float:
@@ -95,7 +100,7 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.pool_failure or self.split_refused or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld
+                    or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld or self.flagged
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status not in CLOSED_STATUSES for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
@@ -263,7 +268,7 @@ def ai_stop_block(rep: RunReport) -> str:
 
 
 def fee_block(rep: RunReport) -> str:
-    fees = [j for j in rep.journals if j.kind in (J.K_FEE, J.K_FEE_REV) and j.status == J.ST_READY]
+    fees = [j for j in rep.journals if j.kind in (J.K_FEE, J.K_FEE_REV) and j.status in J.WRITTEN]
     if not fees:
         return ""
     t = J.fee_totals(rep.journals)
@@ -379,6 +384,10 @@ def statement_block(rep: RunReport) -> str:
                     if a["line"] is not None else "")
             + f"{a['reason']} ({', '.join(f'{p.date:%d %b} {money(p.amount)}' for p in a['payments'])})"
             for a in rep.ambiguous))
+    if rep.flagged:
+        out.append("CHECK BEFORE IMPORT - possibly already in the book (these ARE in the CSV; none was left out):\n" + "\n".join(
+            f"  {j.card} {j.real_date:%d %b %Y} {j.raw_description[:40] or j.description[:40]} {money(j.amount)}: "
+            f"{j.why}" for j in rep.flagged))
     if rep.withheld:
         out.append("WITHHELD journals (not in the CSV):\n" + "\n".join(
             f"  {j.card} {j.real_date:%d %b %Y} {j.raw_description[:40] or j.description[:40]} {money(j.amount)}: "
@@ -391,7 +400,7 @@ def statement_block(rep: RunReport) -> str:
 
 def emi_block(rep: RunReport) -> str:
     rows = (rep.emi or {}).get("rows") or []
-    booked = [j for j in rep.journals if j.emi and j.status == J.ST_READY]
+    booked = [j for j in rep.journals if j.emi and j.status in J.WRITTEN]
     lines = []
     if booked:
         if all(j.emi_validated for j in booked):
@@ -461,7 +470,7 @@ def build_message(rep: RunReport) -> str:
         parts.append("Issues:\n" + "\n".join(f"  - {i}" for i in rep.issues))
     n_ready = len(rep.ready)
     if rep.open_items:
-        n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) \
+        n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) + len(rep.flagged) \
             + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched) \
             + len(rep.split_refused) + (1 if rep.pool_failure else 0)
         n += sum(1 for s in rep.settlements if s.status not in CLOSED_STATUSES)

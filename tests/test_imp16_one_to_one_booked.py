@@ -86,3 +86,59 @@ def test_pipeline_lists_the_row_it_left_out(tmp_path):
     assert "50000.00" in result
     rows = _read_output_rows(out)
     assert "2025-04-01" not in [r.get("Date") for r in rows] or True    # other rows may share the date
+
+
+# ---------------------------------------------------------------------------
+# IMP-15 4b: own-Num match first (text, leading zeros kept), then the fallback
+# ---------------------------------------------------------------------------
+
+def _nrows(*specs):
+    return [{"row_num": i + 1, "date": d, "description": "x", "deposit": dep, "withdrawal": 0.0,
+             "txn_id": ref} for i, (d, dep, ref) in enumerate(specs)]
+
+
+def _nbook(*entries):
+    return {"transactions": [{"date": d, "amount": a, "account": "Assets:Bank", "num": n}
+                             for d, a, n in entries]}
+
+
+def test_an_exact_num_match_is_left_out_even_when_the_date_differs():
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "004512")), _nbook(("2026-01-12", 100.0, "004512")))
+    assert _status(rep) == ["Match"]
+
+
+def test_the_num_is_compared_as_text_so_leading_zeros_matter():
+    # NEGATIVE: 004512 is not 4512, and no int cast is applied
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "4512")), _nbook(("2026-01-12", 100.0, "004512")))
+    assert _status(rep) == ["New"]
+
+
+def test_a_num_hit_is_not_also_matched_by_date_and_amount():
+    # NEGATIVE: one book entry, one Num row and one no-ref row with the same date + amount.
+    # The Num row takes the entry; the other row must stay New (the entry is not counted twice).
+    rows = _nrows(("2026-01-10", 100.0, ""), ("2026-01-10", 100.0, "A1"))
+    rep, _ = reconcile(rows, _nbook(("2026-01-10", 100.0, "A1")))
+    assert _status(rep) == ["New", "Match"]
+
+
+def test_two_identical_rows_against_one_book_entry_book_exactly_one():
+    # NEGATIVE: identical date + amount, no refs, one book entry with a blank Num
+    rep, summ = reconcile(_nrows(("2026-01-10", 100.0, ""), ("2026-01-10", 100.0, "")),
+                          _nbook(("2026-01-10", 100.0, "")))
+    assert sorted(_status(rep)) == ["Match", "New"] and summ["new"] == 1
+
+
+def test_a_blank_book_num_falls_back_to_date_and_amount():
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R9")), _nbook(("2026-01-10", 100.0, "")))
+    assert _status(rep) == ["Match"]
+
+
+def test_a_different_book_num_is_not_a_date_and_amount_candidate():
+    # NEGATIVE: two different cheques on one day for one amount are two payments
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "R9")), _nbook(("2026-01-10", 100.0, "R8")))
+    assert _status(rep) == ["New"]
+
+
+def test_no_ref_and_a_numbered_book_entry_still_falls_back():
+    rep, _ = reconcile(_nrows(("2026-01-10", 100.0, "")), _nbook(("2026-01-10", 100.0, "R8")))
+    assert _status(rep) == ["Match"]

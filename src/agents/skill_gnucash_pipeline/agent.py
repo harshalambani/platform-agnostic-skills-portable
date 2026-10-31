@@ -1807,8 +1807,8 @@ def run(
                 # same date/amount — silently mark a real statement row as
                 # already-imported. Skip dedup rather than risk that.
                 log_lines.append(
-                    f"⚠️ Duplicate check skipped — no matching '{bank}' bank "
-                    f"account found in GnuCash book; proceeding with all rows."
+                    f"⚠️ NOT CHECKED against the book. Duplicate check skipped — no matching '{bank}' bank "
+                    f"account found in GnuCash book; proceeding with all rows (none left out; check them before import)."
                 )
             else:
                 # Parse the whole book once for contra detection later (it
@@ -1832,6 +1832,7 @@ def run(
                             'row_num': idx,
                             'date': row.get('Date', ''),
                             'description': row.get('Description', ''),
+                            'txn_id': str(row.get('Transaction ID', '') or ''),
                             'deposit': deposit,
                             'withdrawal': withdrawal,
                         })
@@ -1840,6 +1841,7 @@ def run(
                             'row_num': idx,
                             'date': row.get('Date', ''),
                             'description': row.get('Description', ''),
+                            'txn_id': str(row.get('Transaction ID', '') or ''),
                             'deposit': 0.0,
                             'withdrawal': 0.0,
                         })
@@ -1916,7 +1918,8 @@ def run(
 
         except Exception as e:
             log_lines.append(
-                f"⚠️ Duplicate check skipped — {e}. Proceeding with all rows."
+                f"⚠️ NOT CHECKED against the book. Duplicate check skipped — {e}. "
+                f"Proceeding with all rows (none left out; check them before import)."
             )
             log.warning(f"Duplicate detection failed: {e}")
 

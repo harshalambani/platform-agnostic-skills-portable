@@ -280,6 +280,8 @@ def final_summary(output_path: str, gnucash_path: str = "",
         lines.append(_txt.replace("Nothing to import", "**Nothing to import**", 1)
                      + " No CSV was written.")
         return chr(10).join(lines)
+    if posted.get("possibly_posted"):
+        lines.append("- " + _BTJ.lookalike_text(posted["possibly_posted"]))
     if posted.get("already_posted"):
         lines.append("- ALREADY POSTED (left out of the import file): "
                      + ", ".join(posted["already_posted"]))

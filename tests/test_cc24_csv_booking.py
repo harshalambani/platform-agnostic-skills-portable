@@ -64,12 +64,12 @@ def test_rerun_of_the_same_csv_books_nothing_new(tmp_path, monkeypatch):        
     assert "already booked" in reply
 
 
-def test_a_hand_booked_csv_row_is_never_offered(tmp_path, monkeypatch):          # NEGATIVE
+def test_a_hand_booked_csv_row_is_written_and_flagged(tmp_path, monkeypatch):
     hand = BookTxn("h1", date(2025, 4, 5), "Shop one purchase", "", ((FOOD, 1200.50), (BANK, -1200.50)))
     reply, rows, _c, _o = _book(tmp_path / "w", monkeypatch, _res(_src(tmp_path)), [hand])
-    assert "1200.50" not in _amounts(rows)
+    assert "1200.50" in _amounts(rows)                                           # written, never withheld
     assert "300.00" in _amounts(rows)                                            # the other row is still offered
-    assert J.ST_POSSIBLY in reply or "POSSIBLY ALREADY BOOKED" in reply
+    assert "CHECK BEFORE IMPORT - possibly already in the book" in reply
 
 
 def test_a_refused_csv_books_nothing_and_is_listed_with_its_reason(tmp_path, monkeypatch):   # NEGATIVE
