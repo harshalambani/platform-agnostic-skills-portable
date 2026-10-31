@@ -706,13 +706,43 @@ def demat_rows(ledger_rows):
             and round((r["debit"] or 0.0) - (r["credit"] or 0.0), 2) != 0]
 
 
+def charge_nums(dem):
+    """IMP-20: a stable Num per demat charge, derived from the charge's OWN data
+    (KRC-D<yyyymmdd>-<amount in paise>; a credit/refund gets an R before the
+    paise), never from its position in the ledger. Adding or removing an
+    unrelated ledger row therefore never renames a charge, so the IMP-17
+    same-Num-other-amount check cannot fire falsely.
+
+    Charges sharing date and amount are told apart by occurrence: the first
+    carries no suffix, the next ones -2, -3 ... Occurrence order is by the
+    charge's particulars text, then by ledger order. Two charges identical in
+    date, amount AND particulars are indistinguishable, so they are numbered by
+    occurrence among the identical ones (ledger order has no other meaning
+    for them). Returns the Nums in the same order as `dem`."""
+    keyed = []
+    for i, r in enumerate(dem):
+        amt = round((r["debit"] or 0.0) - (r["credit"] or 0.0), 2)
+        d = parse_date(r["date"])
+        day = d.strftime("%Y%m%d") if d else re.sub(r"\W", "", str(r["date"]))
+        paise = int(round(abs(amt) * 100))
+        base = f"KRC-D{day}-{'R' if amt < 0 else ''}{paise}"
+        keyed.append((base, str(r["particulars"]).strip(), i))
+    nums = [None] * len(dem)
+    seen = {}
+    for base, part, i in sorted(keyed):
+        seen[base] = seen.get(base, 0) + 1
+        nums[i] = base if seen[base] == 1 else f"{base}-{seen[base]}"
+    return nums
+
+
 def build_charges(ledger_rows, broker, expense):
     """One transaction per Demat Charge row: Dr expense / Cr broker."""
     out = []
-    for n, r in enumerate(demat_rows(ledger_rows), 1):
+    dem = demat_rows(ledger_rows)
+    for num, r in zip(charge_nums(dem), dem):
         amt = round((r["debit"] or 0.0) - (r["credit"] or 0.0), 2)
         out.append({
-            "id": f"KRC-D{n}", "date": r["date"],
+            "id": num, "date": r["date"],
             "desc": f"Demat charge: {str(r['particulars']).strip()[:80]}",
             "splits": [(expense, amt, None), (broker, -amt, None)],
         })
@@ -919,7 +949,7 @@ def main():
     dem = demat_rows(ledger)
 
     # ---- IMP-17: read the book's own transactions for the already-in-book check
-    reserved = {bill_id(b) for b in bills} | {f"KRC-D{n}" for n in range(1, len(dem) + 1)}
+    reserved = {bill_id(b) for b in bills} | set(charge_nums(dem))
     book, not_checked = None, None
     try:
         book = BookIndex(load_book_txns(gnucash_path, paths), reserved)
