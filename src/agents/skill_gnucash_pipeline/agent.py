@@ -54,6 +54,7 @@ from agents.skill_gnucash_reconciler.agent import (
     detect_contra_entries,
     match_booked_own_transfers,
     format_withheld_rows,
+    format_ref_flagged_rows,
 )
 
 log = logging.getLogger(__name__)
@@ -1807,8 +1808,8 @@ def run(
                 # same date/amount — silently mark a real statement row as
                 # already-imported. Skip dedup rather than risk that.
                 log_lines.append(
-                    f"⚠️ Duplicate check skipped — no matching '{bank}' bank "
-                    f"account found in GnuCash book; proceeding with all rows."
+                    f"⚠️ NOT CHECKED against the book. Duplicate check skipped — no matching '{bank}' bank "
+                    f"account found in GnuCash book; proceeding with all rows (none left out; check them before import)."
                 )
             else:
                 # Parse the whole book once for contra detection later (it
@@ -1832,6 +1833,7 @@ def run(
                             'row_num': idx,
                             'date': row.get('Date', ''),
                             'description': row.get('Description', ''),
+                            'txn_id': str(row.get('Transaction ID', '') or ''),
                             'deposit': deposit,
                             'withdrawal': withdrawal,
                         })
@@ -1840,6 +1842,7 @@ def run(
                             'row_num': idx,
                             'date': row.get('Date', ''),
                             'description': row.get('Description', ''),
+                            'txn_id': str(row.get('Transaction ID', '') or ''),
                             'deposit': 0.0,
                             'withdrawal': 0.0,
                         })
@@ -1883,6 +1886,12 @@ def run(
                     (r.get('date', ''), r.get('amount', ''), r.get('description', ''))
                     for r in report if r.get('status') != 'New'])
 
+                ref_flag_block = format_ref_flagged_rows([
+                    (r.get('date', ''), r.get('description', ''))
+                    for r in report if r.get('ref_flag')])
+                if ref_flag_block:
+                    log_lines.append(ref_flag_block)
+
                 # Edge case: all rows are duplicates
                 if total_duplicates > 0 and new_count == 0:
                     return (
@@ -1916,7 +1925,8 @@ def run(
 
         except Exception as e:
             log_lines.append(
-                f"⚠️ Duplicate check skipped — {e}. Proceeding with all rows."
+                f"⚠️ NOT CHECKED against the book. Duplicate check skipped — {e}. "
+                f"Proceeding with all rows (none left out; check them before import)."
             )
             log.warning(f"Duplicate detection failed: {e}")
 

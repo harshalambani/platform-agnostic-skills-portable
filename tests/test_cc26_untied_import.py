@@ -129,10 +129,10 @@ def test_a_rerun_of_an_untied_statement_books_nothing_new(tmp_path, monkeypatch)
     assert "already booked" in str(reply.text if hasattr(reply, "text") else reply).lower()
 
 
-def test_an_untied_row_already_hand_booked_is_never_offered(tmp_path, monkeypatch):        # NEGATIVE
+def test_an_untied_row_already_hand_booked_is_written_and_flagged(tmp_path, monkeypatch):
     hand = BookTxn("hand1", date(2025, 4, 5), "Swiggy dinner", "", ((FOOD, 1500.0), (BANK, -1500.0)))
     _r, rows, _c, out = _two(tmp_path, monkeypatch, "FAIL", txns=[book_pay("p1", 1900, date(2025, 5, 12)), hand])
-    assert "SWIGGY ORDER" not in {r["Description"] for r in rows}
+    assert "SWIGGY ORDER" in {r["Description"] for r in rows}
     j = next(x for x in _wb(out, "Journals") if "SWIGGY" in str(x["Description"]).upper())
     assert j["Status"] == J.ST_POSSIBLY and j["Tie-out"] == "NOT TIED"
 

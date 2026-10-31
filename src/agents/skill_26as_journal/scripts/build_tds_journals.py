@@ -97,6 +97,10 @@ from openpyxl import load_workbook
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 import tds_learnings  # noqa: E402
+# IMP-15 4b: the shared already-in-book rule. This script runs as its own
+# process, so it finds the module by path, not through the `agents` package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import book_check as shared_book_check  # noqa: E402
 from part_labels import PART_II_LABEL  # noqa: E402
 
 # -------------------- fixed account names --------------------
@@ -1924,6 +1928,93 @@ def load_book_journals_by_num(gnucash_path: Path) -> dict:
     return out
 
 
+# IMP-15 4b: a journal whose Num is NOT in the book but whose date and amounts
+# match a book transaction is probably the same entry booked by hand. It is
+# KEPT in the import file and flagged "check before import" (rule S.1 = B).
+LOOKALIKE_WINDOW_DAYS = 0
+
+
+def load_book_txns(gnucash_path: Path) -> list:
+    """Read-only: every book transaction as a shared_book_check.BookTxn (legs in
+    paise). The book is only read (read_bytes), never opened for write."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    paths: dict = {}
+    names = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        names[aid.text] = (name.text, par.text if par is not None else None)
+    for aid in names:
+        parts, cur, seen = [], aid, set()
+        while cur in names and cur not in seen:
+            seen.add(cur)
+            n, p = names[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        paths[aid] = ":".join(parts)
+    out = []
+    for k, trn in enumerate(root.iter(f"{_GNC_NS}transaction")):
+        d_el = trn.find(f"{_TRN_NS}date-posted/{_TS_NS}date")
+        try:
+            d = _dt.date.fromisoformat((d_el.text or "").strip()[:10])
+        except (AttributeError, ValueError):
+            continue          # an undated transaction can never be a look-alike
+        num_el = trn.find(f"{_TRN_NS}num")
+        num = (num_el.text or "").strip() if num_el is not None else ""
+        legs = []
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            legs.append((paths[acc.text], round(_parse_split_amount(
+                val.text if val is not None else None) * 100)))
+        out.append(shared_book_check.BookTxn(str(k), num, d, tuple(legs)))
+    return out
+
+
+def lookalike_journals(rows: list, posted_status: dict, txns: list) -> list:
+    """[{id, date, detail}] for journals that are NOT posted by Num but match a
+    book transaction on date and per-account amounts (or tie between several).
+    They stay in the import file; the caller flags them. Pure, read-only."""
+    per: dict = {}
+    for r in rows:
+        tid = (r.get("Transaction ID") or "").strip()
+        if posted_status.get(tid, (NOT_POSTED, ""))[0] != NOT_POSTED:
+            continue
+        try:
+            amt = float(r.get("Amount") or 0)
+            d = _dt.date.fromisoformat((r.get("Date") or "").strip()[:10])
+        except ValueError:
+            continue
+        e = per.setdefault(tid, {"date": d, "legs": []})
+        e["legs"].append(((r.get("Account") or "").strip(), round(amt * 100)))
+    ids = sorted(per)
+    entries = [shared_book_check.Entry(t, per[t]["date"], tuple(per[t]["legs"])) for t in ids]
+    verdicts = shared_book_check.check_all(
+        entries, txns, shared_book_check.Options(
+            net_per_account=True, window_days=LOOKALIKE_WINDOW_DAYS))
+    return [{"id": e.num, "date": e.date.isoformat(),
+             "detail": ("several book transactions fit equally well"
+                        if v.kind == shared_book_check.TIE else v.reason)}
+            for e, v in zip(entries, verdicts)
+            if v.kind in shared_book_check.CHECK_BEFORE_IMPORT]
+
+
+def lookalike_text(items: list) -> str:
+    """One line for the reply. Ids and dates only, never amounts."""
+    return ("POSSIBLY ALREADY IN THE BOOK - check before import (kept in the file): "
+            + ", ".join(f"{i['id']} ({i['date']})" for i in items))
+
+
 def classify_posted(rows: list[dict], book_by_num: dict) -> dict:
     """{Transaction ID -> (status, detail)} for every journal in `rows`.
 
@@ -2016,6 +2107,13 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     except Exception as e:  # noqa: BLE001
         posted_status = {}
         posted_error = f"{type(e).__name__}: {e}"
+    lookalikes: list = []
+    if not posted_error:
+        try:
+            lookalikes = lookalike_journals(all_rows, posted_status,
+                                            load_book_txns(gnucash_path))
+        except Exception as e:  # noqa: BLE001
+            posted_error = f"{type(e).__name__}: {e}"
     csv_rows = [r for r in all_rows
                 if posted_status.get((r.get("Transaction ID") or "").strip(),
                                      (NOT_POSTED, ""))[0] == NOT_POSTED]
@@ -2034,6 +2132,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     posted_sidecar_path(out_path).write_text(_json.dumps({
         "already_posted": posted_ids, "mismatched": mismatches,
+        "possibly_posted": lookalikes,
         "nothing_to_import": nothing_to_import, "error": posted_error,
     }), encoding="utf-8")
 
@@ -2115,6 +2214,7 @@ def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
         "output_written": bool(csv_rows),
         "nothing_to_import": nothing_to_import,
         "already_posted": posted_ids,
+        "possibly_posted": lookalikes,
         "posted_mismatches": mismatches,
         "posted_check_error": posted_error,
         "review": str(review_path),
@@ -2215,6 +2315,8 @@ def main(argv: list[str]) -> int:
         print(mismatch_red_flag(m))
     if stats.get("posted_check_error"):
         print("NOTE - already-posted check NOT run: " + stats["posted_check_error"])
+    if stats.get("possibly_posted"):
+        print(lookalike_text(stats["possibly_posted"]))
     if stats.get("already_posted"):
         print("ALREADY POSTED (left out of the import file): "
               + ", ".join(stats["already_posted"]))

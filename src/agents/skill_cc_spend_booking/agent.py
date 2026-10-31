@@ -639,8 +639,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _mark("already-booked check")
 
         # ---- mapper for spends and refunds ---------------------------------
-        # CC-12: a row withheld as POSSIBLY ALREADY BOOKED is mapped too, so the report still shows
-        # the account and confidence the mapper chose; its status stays withheld.
+        # CC-12: a row flagged POSSIBLY ALREADY BOOKED is mapped too (IMP-15 4b: it is also written,
+        # flagged "check before import").
         to_map = [j for j in journals if j.needs_mapping and j.status in (J.ST_READY, J.ST_POSSIBLY)]
         if to_map:
             cin, cout = Path(tmp) / "cc_canonical.csv", Path(tmp) / "cc_mapped_GnuCash_import_ready.csv"
@@ -682,7 +682,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         suspense = next((p for p in sorted(view.paths) if p.rsplit(":", 1)[-1] == "Suspense"),
                         J.SUSPENSE_DEFAULT)
         for j in journals:
-            if j.status != J.ST_READY:
+            if j.status not in J.WRITTEN:
                 continue
             if not j.account:
                 j.status, j.why = J.ST_NO_ACCOUNT, j.why or "the mapper found no account"
@@ -719,7 +719,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
             for pth, v in t.splits:
                 if pth != CCP_PATH and SP.in_pool(pth, CCP_PATH):
                     subs_before[pth] = round(subs_before.get(pth, 0.0) + v, 2)
-        counted = [j for j in journals if j.status == J.ST_READY or
+        counted = [j for j in journals if j.status in J.WRITTEN or
                    (j.status == J.ST_BOOKED and not (start <= j.date <= end))]
         ptie = SP.pool_tie(counted, CCP_PATH)
         effect = ptie["new_total"]

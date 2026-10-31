@@ -8,8 +8,10 @@ One balanced entry per payment, at the report's INR figures:
     foreign dividend tax account    Dr  tax withheld
     foreign dividend income account Cr  gross
 
-A payment the book already holds (same date, and an amount equal to the gross or
-the net) is left out and listed as "already booked". The three accounts come
+A payment the book seems to hold already (same date, and an amount equal to the
+gross or the net) is KEPT in the file and flagged "check before import" (IMP-15,
+rule S.1 = B: nothing here proves the book entry is the same payment, so it is
+never withheld). If the book cannot be read the run says NOT CHECKED. The three accounts come
 from the entity's own settings; if any is missing, unknown to the book, hidden
 or a placeholder, the run STOPS, emits nothing and says why. Nothing here
 guesses an account.
@@ -75,7 +77,8 @@ class Entry:
 @dataclass
 class JournalResult:
     entries: list = field(default_factory=list)
-    already_booked: list = field(default_factory=list)   # [(payment label, gross cents, book description)]
+    possibly_booked: list = field(default_factory=list)  # [(payment label, gross cents, book description or "")]
+    not_checked: str = ""                                # non-empty == the book could not be read
     problems: list = field(default_factory=list)         # payments left out, with the reason
     stopped: str = ""                                    # non-empty == the run stopped, nothing emitted
     notes: list = field(default_factory=list)
@@ -101,19 +104,26 @@ class JournalResult:
         return sum(e.tax for e in self.entries) / 100
 
     @property
-    def booked_gross_total(self) -> float:
-        return sum(g for _l, g, _d in self.already_booked) / 100
+    def possibly_booked_gross_total(self) -> float:
+        return sum(g for _l, g, _d in self.possibly_booked) / 100
 
     def summary_lines(self) -> list:
         if self.stopped:
             return [f"Foreign dividend journal: NOT written -- {self.stopped}"]
-        lines = [
+        lines = []
+        if self.not_checked:
+            lines.append(f"RED FLAG: NOT CHECKED against the book - {self.not_checked} "
+                         "Every payment was written; any may already be in the book, "
+                         "so check before import.")
+        lines.append(
             f"Foreign dividend journal: {len(self.entries)} entry(ies) to import "
             f"(gross Rs {self.gross_total:,.2f}, tax withheld Rs {self.tax_total:,.2f}); "
-            f"{len(self.already_booked)} already booked; {len(self.problems)} left out."
-        ]
-        for label, _g, desc in self.already_booked:
-            lines.append(f"  already booked: {label} (matches '{desc}')")
+            f"{len(self.possibly_booked)} possibly already booked (kept, check before import); "
+            f"{len(self.problems)} left out.")
+        for label, _g, desc in self.possibly_booked:
+            lines.append(f"  possibly already booked - check before import: {label}"
+                         + (f" (looks like '{desc}')" if desc else
+                            " (several book entries fit; none was picked)"))
         for p in self.problems:
             lines.append(f"  left out: {p}")
         lines.extend(f"  {n}" for n in self.notes)
@@ -197,17 +207,18 @@ def build(payments, accounts: dict, book_txns=(), guard=None, fy_label: str = ""
             continue
         net = gross - tax
         sum_gross += gross
-        hit = None
-        for i, bt in enumerate(book_txns):
-            if i in consumed or bt.when != when:
-                continue
-            if gross in bt.amounts or net in bt.amounts:
-                hit = i
-                break
-        if hit is not None:
-            consumed.add(hit)
-            res.already_booked.append((label, gross, book_txns[hit].description))
-            continue
+        # Same date and the gross or the net on a book entry: a look-alike, never
+        # proof. The payment is still written; the flag tells the user to check.
+        # One book entry flags one payment; several equally good entries are a
+        # tie, listed without picking one.
+        hits = [i for i, bt in enumerate(book_txns)
+                if i not in consumed and bt.when == when
+                and (gross in bt.amounts or net in bt.amounts)]
+        if len(hits) == 1:
+            consumed.add(hits[0])
+            res.possibly_booked.append((label, gross, book_txns[hits[0]].description))
+        elif hits:
+            res.possibly_booked.append((label, gross, ""))
         seq += 1
         txn_id = f"{pfx}-FDIV{seq:02d}"
         desc = f"Foreign dividend - {p.company or 'unknown company'}" + (f" ({p.broker})" if p.broker else "")
@@ -257,9 +268,16 @@ def run_for_workbook(entity, foreign_report, book, book_file, output_path: str) 
                 sys.path.insert(0, src)
             from agents.gnucash_accounts import TargetGuard  # noqa: PLC0415
             guard = TargetGuard.from_book(book_file)
-        txns = book_txns_from_book(book) if book is not None else []
+        not_checked = ""
+        try:
+            txns = book_txns_from_book(book) if book is not None else []
+            if book is None:
+                not_checked = "the book was not available."
+        except Exception as e:  # noqa: BLE001
+            txns, not_checked = [], f"the book could not be read ({type(e).__name__})."
         res = build(payments, accounts, txns, guard, getattr(div, "financial_year", "") or "",
                     getattr(div, "total", None))
+        res.not_checked = not_checked
     except Exception as e:  # noqa: BLE001
         return [f"Foreign dividend journal: NOT written -- {e}"]
     if not res.stopped and res.entries:
