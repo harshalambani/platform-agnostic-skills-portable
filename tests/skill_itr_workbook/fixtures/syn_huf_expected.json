@@ -1,0 +1,146 @@
+{
+  "section_totals": {
+    "Assets Accounts": 10000.0,
+    "Liability Accounts": 0.0,
+    "Trading Accounts": 0.0,
+    "Equity Accounts": 8500.0,
+    "Equity, Trading, and Liabilities": 8500.0,
+    "Retained Earnings": 1500.0
+  },
+  "imbalance": 0.0,
+  "sections": {
+    "Assets": [
+      {
+        "guid": "33bbdfff81ab386dd7ff40e54516bc4b",
+        "name": "Assets",
+        "depth": 0,
+        "section": "Assets",
+        "path": "Assets",
+        "balance": null,
+        "total": 10000.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "312c46ecfae0bb71ab98aa0b1856614f",
+            "name": "Cash and Bank",
+            "depth": 1,
+            "section": "Assets",
+            "path": "Assets/Cash and Bank",
+            "balance": null,
+            "total": 10000.0,
+            "qty": null,
+            "symbol": null,
+            "children": [
+              {
+                "guid": "511f41bc0d8587462fe40f7e8ce0d8fc",
+                "name": "Cash",
+                "depth": 2,
+                "section": "Assets",
+                "path": "Assets/Cash and Bank/Cash",
+                "balance": 10000.0,
+                "total": 10000.0,
+                "qty": null,
+                "symbol": null,
+                "children": []
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "Liability": [],
+    "Trading": [],
+    "Equity": [
+      {
+        "guid": "7bfb501d6e616ca8ebb43acabceec369",
+        "name": "Equity",
+        "depth": 0,
+        "section": "Equity",
+        "path": "Equity",
+        "balance": null,
+        "total": 8500.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "27c9cfd9b9232d5019e9b827c8591991",
+            "name": "Capital Account",
+            "depth": 1,
+            "section": "Equity",
+            "path": "Equity/Capital Account",
+            "balance": 8500.0,
+            "total": 8500.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      }
+    ],
+    "RetainedEarnings": [
+      {
+        "guid": "12c89b95edec4ee223ed58657e20eee3",
+        "name": "Income",
+        "depth": 0,
+        "section": "RetainedEarnings-Income",
+        "path": "Income",
+        "balance": null,
+        "total": 3000.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "d2be039e3964fe7d492463e4ef63bd35",
+            "name": "Interest Income",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/Interest Income",
+            "balance": 2000.0,
+            "total": 2000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "ed10f46a6bd9514cde878abd28c2fe9c",
+            "name": "Long Term Capital Gain",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/Long Term Capital Gain",
+            "balance": 1000.0,
+            "total": 1000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      },
+      {
+        "guid": "a7c0c4749f697ad19e4df596f3a87e02",
+        "name": "Expense",
+        "depth": 0,
+        "section": "RetainedEarnings-Expense",
+        "path": "Expense",
+        "balance": null,
+        "total": -1500.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "02cbfe4ecdfd793dcc15b99643465df8",
+            "name": "TDS on Interest",
+            "depth": 1,
+            "section": "RetainedEarnings-Expense",
+            "path": "Expense/TDS on Interest",
+            "balance": -1500.0,
+            "total": -1500.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}

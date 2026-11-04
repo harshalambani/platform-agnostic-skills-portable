@@ -1,0 +1,132 @@
+# skill.yaml -- MF CAS manifest.
+# Parses a KFintech Capital Gain / Loss Statement (mutual funds, encrypted
+# .xlsx) and cross-checks its three internally-redundant gain figures.
+# Output lands as standalone artifacts only -- see AGENT.md's N1 assumption.
+# Renders under GnuCash > ITR. See AGENT.md for why this directory is still
+# named skill_mf_cas even though the document it targets is not a CAS.
+
+name: "mf_cas"
+display_name: "MF Capital Gain Statement"
+description: >
+  Parses a KFintech Capital Gain / Loss Statement (an encrypted .xlsx
+  workbook, not the raw transaction-history CAS) for mutual funds and
+  produces a matched-lots ledger, a per-scheme summary, a s.234C
+  period-wise summary, and a three-way reconciliation between the
+  statement's Trasaction_Details rows, its Scheme_Level_Summary totals, and
+  its Summary sheet totals. Short/long-term gains and grandfathered cost
+  values are carried through exactly as the RTA reports them -- no tax
+  rate/slab/exemption computation is performed. Anything the statement does
+  not itself make derivable is reported with an explicit reason rather than
+  left blank. Output is a standalone workbook -- it does not write into any
+  .gnucash book or the ITR workbook. Covers KFINTECH-serviced funds only;
+  CAMS-serviced funds need CAMS's own Capital Gain statement (not yet
+  supported).
+category: "itr"
+version: "2.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "cas_path"
+    type: "file"
+    label: "KFintech Capital Gain / Loss Statement (.xlsx)"
+    file_types: [".xlsx"]
+    required: true
+  - name: "cas_password"
+    type: "password"
+    label: "Statement password"
+    required: true
+
+run_args:
+  cas_path: "{inputs.cas_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  cas_password: "{inputs.cas_password}"
+
+output:
+  extension: ".xlsx"
+  suffix: "MF-CAS"
+  download_label: "Download MF Capital Gain Report"
+
+requires:
+  native_binaries: []
+  python_packages: ["msoffcrypto-tool", "openpyxl"]
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Reads KFintech's "Capital Gain / Loss Statement" -- an RTA-issued,
+    password-protected .xlsx workbook that already lists every acquisition
+    matched against its disposal, with the RTA's own short-term/long-term
+    gain figures and grandfathered cost values -- and turns it into a
+    matched-lots ledger, a per-scheme summary, a s.234C period-wise summary
+    (the five advance-tax instalment buckets), and a three-way
+    reconciliation across the statement's own Trasaction_Details,
+    Scheme_Level_Summary, and Summary sheets. This is NOT the raw,
+    transaction-wise CAS (Consolidated Account Statement) -- the RTA has
+    already done the buy/sell matching here, so no FIFO reconstruction is
+    performed. Only the figures the statement itself supplies are emitted;
+    no tax rate, slab, exemption, or indexation computation is done -- that
+    is left to the ITR Workbook skill's own tax-rules config. Grandfathered
+    cost values (for holdings bought before 2018-02-01) are carried through
+    exactly as KFintech supplies them, since the RTA has already applied
+    the FMV as of 31-Jan-2018 -- this skill never needs and never looks up
+    a separate FMV source for this statement.
+  when_to_use: >
+    Use this after receiving your KFintech Capital Gain / Loss Statement
+    (typically requested/downloaded per financial year) for mutual funds
+    serviced by KFintech, when you need a clean realised-capital-gains feed
+    to review or feed manually into the ITR Workbook. This skill does NOT
+    cover CAMS-serviced funds -- CAMS issues its own, differently-shaped
+    Capital Gain statement, which this skill does not yet support. GnuCash
+    books in this codebase hold mutual funds only as cash transfers to the
+    AMC, so there is no commodity-lot data inside GnuCash for capital gains
+    to be derived from automatically.
+  inputs:
+    - name: "cas_path"
+      tooltip: "Your KFintech Capital Gain / Loss Statement, as an .xlsx file."
+      accepts: ".xlsx (.pdf is not supported -- see troubleshooting below)."
+      gotchas: "Must be the KFintech-issued Capital Gain / Loss Statement (sheets: Summary - Equity, Summary - NonEquity, Scheme_Level_Summary, Trasaction_Details), not the raw transaction-wise CAS and not a CAMS statement."
+    - name: "cas_password"
+      tooltip: "The statement's own open password, as supplied by KFintech."
+      accepts: "The statement's open password (KFintech's own delivery convention -- check the email/portal you got the file from)."
+      gotchas: "Never logged, never included in any error message or output file. Required -- this statement is always encrypted."
+  steps:
+    - "Download your KFintech Capital Gain / Loss Statement (.xlsx) from KFintech's portal or email delivery."
+    - "Pick the .xlsx file and enter its password."
+    - "Click Run."
+    - "Download the workbook and review the Reconciliation and Exceptions sheets first."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-MF-CAS.xlsx"
+        tooltip: >
+          Five sheets: MatchedLots (every RTA-matched acquisition/outflow/
+          gain row, as-is), SchemeSummary (Scheme_Level_Summary, as given),
+          PeriodSummary (the five s.234C bucket figures per section from
+          both Summary sheets), Reconciliation (the three-way
+          agree/variance/cannot-reconcile result per gain category), and
+          Exceptions (every category that did not agree or could not be
+          reconciled, collected in one place).
+      - name: "YYYY-MM-DD-HHMMSS-<input>-MF-CAS_matched_lots.csv"
+        tooltip: "CSV sibling of the MatchedLots sheet."
+  tips: >
+    Start with the Reconciliation sheet -- it shows, per gain category
+    (Short Term, Long Term With Indexation, Long Term Without Indexation),
+    whether the statement's own Trasaction_Details row sum, its
+    Scheme_Level_Summary total, and its Summary sheet total all agree. A
+    "CANNOT RECONCILE" result means one of those three figures was not
+    present in this particular workbook -- it is reported explicitly rather
+    than silently treated as a match.
+  troubleshooting:
+    - problem: "'xlsx is password-protected — supply the statement password (the statement's own open password, as supplied by KFintech).' error."
+      fix: "Enter the statement's own open password, as supplied by KFintech."
+    - problem: "This skill no longer accepts a PDF."
+      fix: "KFintech issues the Capital Gain / Loss Statement as an encrypted .xlsx workbook, not a PDF. Depository *_TXN.pdf files and PDF parsing of the CG statement are out of scope for this skill."
+    - problem: "'This workbook does not look like a KFintech Capital Gain / Loss Statement.'"
+      fix: "Confirm the file is KFintech's own Capital Gain / Loss Statement export (sheets: Summary - Equity, Summary - NonEquity, Scheme_Level_Summary, Trasaction_Details), not a CAMS statement or a different KFintech report."
+    - problem: "A reconciliation category shows VARIANCE."
+      fix: "The three figures for that gain category did not agree within tolerance. Check the Reconciliation sheet's Note column for the exact numbers, and re-check the source statement for a corporate action this skill does not model."

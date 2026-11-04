@@ -1,0 +1,96 @@
+# .github/dependabot.yml — automated dependency update PRs.
+#
+# Dependabot checks for new versions of pip packages weekly and opens PRs
+# against main. Each PR triggers CI (if a test workflow exists), so you can
+# see whether the update breaks anything before merging.
+#
+# Native binaries (Tesseract, Poppler, qpdf) are NOT covered here — they're
+# managed via binaries.toml and checked by the check-native-binaries workflow.
+
+version: 2
+updates:
+  # Python pip dependencies
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "deps"
+    # Group minor/patch updates into a single PR to reduce noise
+    groups:
+      langchain-ecosystem:
+        patterns:
+          - "langchain*"
+          - "langgraph*"
+      pdf-ocr:
+        patterns:
+          - "pdfplumber"
+          - "pypdfium2"
+          - "pytesseract"
+      ui:
+        patterns:
+          - "gradio*"
+    ignore:
+      # websockets is a TRANSITIVE dependency -- it is not in requirements.txt;
+      # the lock records "# via langgraph-sdk, langsmith". langgraph-sdk 0.4.2
+      # (still the newest release as of 2026-08-07) declares
+      # "websockets<16,>=14", so any major bump produces a lock that pip cannot
+      # resolve at all -- that breaks the frozen build, not just a test. PR #145
+      # (15.0.1 -> 17.0.1) sat open for exactly this reason and was closed.
+      #
+      # Scoped to majors on purpose: a blanket ignore would also suppress
+      # security updates, and 15.x patches must keep flowing.
+      #
+      # REMOVE THIS as soon as langgraph-sdk lifts the <16 cap -- check with:
+      #   pip index versions langgraph-sdk
+      # then let the normal bump through.
+      - dependency-name: "websockets"
+        update-types: ["version-update:semver-major"]
+
+      # tomlkit is the same shape: transitive ("# via gradio"), and gradio
+      # 6.21.0 declares "tomlkit<0.15.0,>=0.12.0". #103 bumped it to 0.15.1
+      # anyway and the lock has been UNINSTALLABLE ever since -- unnoticed
+      # because nothing installs from the lock (the build resolves the loose
+      # pins in requirements.txt, where pip honours the ceiling and picks
+      # 0.14.0). So the lock was attesting hashes for a version the product
+      # never actually ran. Pinned back to 0.14.0 alongside this rule.
+      #
+      # tomlkit is pre-1.0, so the ceiling-crossing bump is a semver-MINOR one
+      # (0.14 -> 0.15); majors are ignored too for the same reason. Patch
+      # updates within 0.14.x still come through.
+      #
+      # REMOVE when gradio raises its tomlkit ceiling.
+      - dependency-name: "tomlkit"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+
+      # pydantic-core is the same shape: transitive (not in requirements.txt),
+      # and the lock records it via pydantic. pydantic 2.13.4 pins it with an
+      # exact "==", not a range: "pydantic-core==2.46.4". That means there is
+      # no independent bump of pydantic-core that can ever produce an
+      # installable lock, at ANY semver level -- patch, minor, or major --
+      # because pip will always reject it against the parent's exact pin.
+      # PR #171 (2.46.4 -> 2.48.0) proved exactly this and was closed.
+      #
+      # Unlike websockets and tomlkit above, this is a blanket ignore (no
+      # update-types filter) because there is no bump width where the parent
+      # pin would ever let it through. That also suppresses security updates
+      # for pydantic-core specifically -- but a pydantic-core security fix is
+      # only installable once pydantic itself releases against it, so the fix
+      # will still arrive, via the pydantic bump.
+      #
+      # REMOVE if pydantic ever loosens the "==" pin to a range.
+      - dependency-name: "pydantic-core"
+
+  # GitHub Actions versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "ci"

@@ -1,0 +1,1338 @@
+"""
+ui/tabs/tds_journal_review.py -- 26AS "Review" tab for the 26AS journal
+skill's TDS/TCS output.
+
+The skill (src/agents/skill_26as_journal) parses a 26AS workbook and emits
+two files side by side in the output folder:
+
+  <stem>-tds-journals.csv         the GnuCash multi-split import (one row per
+                                   split; Amount is signed, Debit +, Credit -).
+  <stem>-tds-journals-review.csv  the audit: one row per deductor/collector,
+                                   with the credit account it matched (or
+                                   Liabilities:Suspense + "Needs Review" when
+                                   it could not).
+
+Deductors routed to Suspense today require hand-editing the CSV. This tab
+gives that a proper review UI, built on the shared ui._review_engine skeleton
+(searchable assign picker, multi-select, sort/filter, save payload bridge).
+It mirrors ui/tabs/gnucash_review.py's Gradio wiring (output-folder dropdown +
+refresh, GnuCash-book File picker for the account tree, CSS-hidden payload
+textbox, DownloadButton toggled via `interactive`, Reset).
+
+The one thing this screen must get right that a plain "edit one CSV" screen
+doesn't: reassigning a deductor's Credit Account must rewrite BOTH files, and
+the review row -> journal splits link is by Transaction ID, not row order.
+See _apply_changes()'s docstring for the exact matching rules.
+
+Save also regenerates a THIRD file, <stem>-tds-journals-partI.csv, containing
+only the Part I (TDSJ/TCSJ) rows with every Part II (15GJ) transaction
+dropped whole. It exists for users who post 15G/15H by hand in GnuCash
+themselves: importing the full journal's 15GJ rows on top of that hand entry
+double-books the Interest-on-FD -> NBFC reclassification. Regenerating it on
+every Save (never hand-editing a copy) is the whole point -- see
+_regenerate_part_i_split()'s docstring and build_tds_journals.split_part_ii()
+for why a stale hand-filtered copy was the original bug.
+"""
+from __future__ import annotations
+
+import csv
+import json
+from html import escape as html_escape
+from pathlib import Path
+
+import gradio as gr
+
+from ui import _config as _config_mod
+from ui import _filedialog
+from ui import _safe_paths
+from ui.tabs import _entity_book
+from ui._review_engine import (
+    Column,
+    PickerItem,
+    ReviewSpec,
+    build_html,
+    parse_payload,
+    payload_box_css,
+)
+from ui.tabs._generic import _MAX_UPLOAD_SIZE_BYTES
+from agents.skill_26as_journal.scripts.part_labels import PART_II_LABEL
+
+APP_ID = "tdsjr"
+TARGET_COL = "Credit Account"
+# TDS-15: Category A only -- the account the NET interest (c - a) is booked in.
+# Edited inline (double-click); the typed text travels in NET_EDIT_KEY.
+NET_COL = "Net Interest Account"
+NET_EDIT_KEY = "Net Interest Edit"
+NET_PICK_BASIS = "Net interest account chosen on Review"
+
+# Shared with the spec's also_set (see _spec()) so the "what does a user
+# override look like" answer lives in exactly one place.
+OVERRIDE_CONFIDENCE = "override"
+OVERRIDE_BASIS = "User override (review)"
+
+
+# ---------------------------------------------------------------------------
+# Output-folder CSV scanner
+# ---------------------------------------------------------------------------
+
+def _scan_review_csvs() -> list[tuple[str, str]]:
+    """Find *-tds-journals-review.csv files in the output dir, newest first."""
+    try:
+        out_dir = _config_mod.output_dir()
+    except Exception:
+        return []
+    csvs = sorted(
+        out_dir.glob("*-tds-journals-review.csv"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    return [(p.name, str(p)) for p in csvs[:20]]
+
+
+def _journal_path_for(review_path: str) -> Path:
+    """<stem>-tds-journals-review.csv -> <stem>-tds-journals.csv (sibling)."""
+    p = Path(review_path)
+    stem = p.name[: -len("-review.csv")] if p.name.endswith("-review.csv") else p.stem
+    return p.with_name(stem + ".csv")
+
+
+# ---------------------------------------------------------------------------
+# GnuCash account tree extraction -- identical approach to gnucash_review's
+# _extract_account_tree (same postable-accounts filter).
+# ---------------------------------------------------------------------------
+
+def _extract_account_tree(gnucash_file: str) -> list[str]:
+    try:
+        from agents.gnucash_accounts import load_accounts, postable_accounts
+        accounts = postable_accounts(load_accounts(gnucash_file))
+    except Exception:
+        return []
+    return sorted({a.path for a in accounts if a.path and ":" in a.path})
+
+
+# ---------------------------------------------------------------------------
+# Row loading + presentation (computed in Python, per the engine's core rule)
+# ---------------------------------------------------------------------------
+
+def _row_presentation(row: dict) -> None:
+    """Fill in the engine's _tags / _rowclass / _badges / _note keys in place."""
+    needs_review = (row.get("Needs Review") or "").strip().lower() == "yes"
+    credit_account = row.get("Credit Account") or ""
+    is_suspense = "suspense" in credit_account.lower()
+    is_ambiguous = (row.get("Confidence") or "").strip() == "Ambiguous"
+    missing_account = (row.get("Account Exists") or "").strip().upper() == "NO"
+    unbalanced = (row.get("Balanced") or "").strip().upper() == "NO"
+
+    tags: list[str] = []
+    if needs_review:
+        tags.append("needs_review")
+    if is_suspense:
+        tags.append("suspense")
+    if is_ambiguous:
+        tags.append("ambiguous")
+    if missing_account:
+        tags.append("missing_account")
+    if unbalanced:
+        tags.append("unbalanced")
+    if not tags:
+        tags.append("matched")
+    row["_tags"] = tags
+
+    # unbalanced is the loudest failure state -- a transaction whose splits
+    # don't sum to zero is a harder error than an unrecognised account name --
+    # so it's ranked with (not below) needs_review/suspense/ambiguous, above
+    # missing_account, and it must never fall through to a plain row.
+    if needs_review or is_suspense or is_ambiguous or unbalanced:
+        row["_rowclass"] = "accent-red"
+    elif missing_account:
+        row["_rowclass"] = "accent-amber"
+    else:
+        row["_rowclass"] = "accent-green"
+
+    badges: dict = {}
+    if is_ambiguous:
+        badges[TARGET_COL] = {"text": "AMBIGUOUS", "cls": "amber"}
+    elif is_suspense:
+        badges[TARGET_COL] = {"text": "SUSPENSE", "cls": "red"}
+    elif missing_account:
+        badges[TARGET_COL] = {"text": "NO ACCOUNT", "cls": "amber"}
+    if badges:
+        row["_badges"] = badges
+
+    if (row.get("Net Interest Choice Needed") or "").strip().lower() == "yes":
+        # Two or more FD/bond/EPF asset accounts match this deductor: the build
+        # did not guess. Shown on the net-interest cell so it cannot be missed.
+        badges = dict(badges) if badges else {}
+        badges[NET_COL] = {"text": "CHOOSE", "cls": "amber"}
+        row["_badges"] = badges
+
+    note = row.get("Basis") or ""
+    tied = (row.get("Tied Candidates") or "").strip()
+    if tied:
+        note = (note + " | tied candidates: " + tied) if note else ("tied candidates: " + tied)
+    row["_note"] = note
+
+
+def _load_review_rows(review_path: str) -> list[dict]:
+    with open(review_path, "r", encoding="utf-8", errors="replace") as f:
+        rows = list(csv.DictReader(f))
+    for row in rows:
+        _row_presentation(row)
+        # TDS-15: a row left out on a previous Save starts struck through.
+        if (row.get("Left Out") or "").strip().lower() == "yes":
+            row["_excluded"] = True
+    return rows
+
+
+def _spec(picker_items: list[PickerItem], review_path: str, gnucash_path: str = "") -> ReviewSpec:
+    return ReviewSpec(
+        app_id=APP_ID,
+        columns=[
+            Column("Sr", "Sr", sort="number"),
+            Column("Deductor", "Deductor"),
+            Column("Section", "Section"),
+            Column("Category", "Category"),
+            Column(TARGET_COL, "Credit Account"),
+            Column(NET_COL, "Net interest booked in", edit_key=NET_EDIT_KEY),
+            Column("Confidence", "Confidence"),
+            Column("Account Exists", "Account Exists"),
+            Column("Balanced", "Balanced"),
+            Column("Debit", "Debit", sort="number"),
+            Column("Credit", "Credit", sort="number"),
+            Column("Needs Review", "Needs Review"),
+            Column("Tied Candidates", "Tied Candidates"),
+        ],
+        target_col=TARGET_COL,
+        payload_var="_tdsJrSavePayload",
+        picker_label="Assign account:",
+        picker_placeholder="Type to search accounts…",
+        picker_items=picker_items,
+        status_options=[
+            ("needs_review", "Needs review"),
+            ("suspense", "Suspense"),
+            ("ambiguous", "Ambiguous"),
+            ("missing_account", "Missing account"),
+            ("unbalanced", "Unbalanced"),
+            ("matched", "Matched"),
+        ],
+        status_label="Show:",
+        default_sort="Sr",
+        # Deliberately NOT set: each deductor appears exactly once in this
+        # review, so "apply to matching" has nothing meaningful to match on.
+        apply_matching_on="",
+        also_set={"Confidence": OVERRIDE_CONFIDENCE, "Basis": OVERRIDE_BASIS},
+        context={"review_path": review_path, "gnucash_path": gnucash_path},
+        # TDS-15: "Don't import selected" is the per-row Leave out. A left-out
+        # row is in NO download (full or Part I only) after the next Save.
+        allow_exclude=True,
+    )
+
+
+def _load_review_data(review_path: str, gnucash_path: str) -> str:
+    if not review_path:
+        return "<p>Select a review CSV, then click Load.</p>"
+
+    # SEC-19: resolve + refuse non-files, wrong types and paths outside the
+    # known folders before anything is opened.
+    try:
+        review_p = _safe_paths.resolve_input_file(review_path, (".csv",))
+    except _safe_paths.UnsafePathError as e:
+        return f"<p>{html_escape(str(e))}</p>"
+
+    rows = _load_review_rows(str(review_p))
+    if not rows:
+        return "<p>Review CSV is empty -- nothing to review.</p>"
+
+    accounts: list[str] = []
+    gnucash_path = _safe_book(gnucash_path)
+    if gnucash_path:
+        accounts = _extract_account_tree(gnucash_path)
+    if not accounts:
+        accounts = sorted({r.get(TARGET_COL, "") for r in rows if r.get(TARGET_COL)})
+
+    picker_items = [PickerItem(value=a, primary=a) for a in accounts]
+    spec = _spec(picker_items, str(review_p), gnucash_path or "")
+    banner = _preflight_banner_html(_journal_path_for(str(review_p)), gnucash_path or "")
+    return payload_box_css(spec.payload_box_id) + banner + build_html(spec, rows)
+
+
+# ---------------------------------------------------------------------------
+# Save logic -- kept as small, Gradio-free module functions so they are
+# unit-testable directly (see tests/test_tds_journal_review.py).
+# ---------------------------------------------------------------------------
+
+def _fy_prefix_from(journal_rows: list[dict]) -> str:
+    """Parse the fy_prefix off the journal CSV's existing Transaction IDs.
+
+    Transaction IDs are built as f"{fy_prefix}-{kind}{sr:02d}" -- everything
+    before the LAST '-' is the prefix. Deliberately not re-derived from the
+    review CSV's FY: a run in a different FY must still resolve correctly
+    against whatever prefix is actually in the journal file on disk.
+    """
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        if "-" in txn_id:
+            return txn_id.rsplit("-", 1)[0]
+    return ""
+
+
+def _txn_id_for(fy_prefix: str, sr: str, category: str) -> str:
+    # Single source of truth for category -> Transaction ID series lives in
+    # build_tds_journals.py (CATEGORY_SERIES / series_for_category) — imported
+    # rather than restated here so this file and the journal builder can never
+    # drift apart (see that module for why: a wrong series here would build an
+    # id absent from the journal CSV and _find_credit_split would silently
+    # find nothing, dropping the row on Save without any indication why).
+    try:
+        import sys as _sys
+
+        _src = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from agents.skill_26as_journal.scripts.build_tds_journals import (
+            series_for_category,
+        )
+    except ImportError as e:
+        # The single source of truth could not even be loaded -- never guess
+        # a series in that situation, raise loudly with the cause attached.
+        raise ImportError(
+            "_txn_id_for: could not load the category->series table from "
+            "build_tds_journals.series_for_category; refusing to guess a "
+            "Transaction ID series"
+        ) from e
+    # ValueError from an unrecognised category is intentionally NOT caught
+    # here -- series_for_category raises it precisely so an unknown category
+    # fails loud instead of silently producing a wrong (and thus missing)
+    # Transaction ID. Callers must handle it, not this function.
+    kind = series_for_category(category)
+    try:
+        sr_num = int(str(sr).strip())
+    except ValueError:
+        sr_num = 0
+    return f"{fy_prefix}-{kind}{sr_num:02d}"
+
+
+def _find_credit_split(
+    journal_rows: list[dict], txn_id: str, old_credit_account: str,
+) -> tuple[int | None, str | None]:
+    """Locate the unique credit split for `txn_id` within journal_rows.
+
+    Returns (row_index, error) -- error is None on a clean, unambiguous match.
+    Rule 1 (primary): the split whose Account equals old_credit_account.
+    Rule 2 (fallback): if that finds nothing, the unique split with
+    Amount < 0. Neither resolving to exactly one row is reported, not guessed.
+    """
+    txn_indices = [i for i, r in enumerate(journal_rows)
+                   if (r.get("Transaction ID") or "").strip() == txn_id]
+    if not txn_indices:
+        return None, f"no splits found for Transaction ID {txn_id!r}"
+
+    primary = [i for i in txn_indices
+               if (journal_rows[i].get("Account") or "") == old_credit_account]
+    if len(primary) == 1:
+        return primary[0], None
+    if len(primary) > 1:
+        return None, (
+            f"ambiguous: {len(primary)} splits in {txn_id!r} match account "
+            f"{old_credit_account!r} -- skipped"
+        )
+
+    def _amount(i: int) -> float:
+        try:
+            return float(journal_rows[i].get("Amount") or 0)
+        except ValueError:
+            return 0.0
+
+    negative = [i for i in txn_indices if _amount(i) < 0]
+    if len(negative) == 1:
+        return negative[0], None
+    if len(negative) == 0:
+        return None, f"no credit (negative-amount) split found in {txn_id!r} -- skipped"
+    return None, (
+        f"ambiguous: {len(negative)} negative-amount splits in {txn_id!r} -- skipped"
+    )
+
+
+def _load_split_part_ii():
+    """Import split_part_ii / part_i_path_for / write_rows_csv from
+    build_tds_journals the same defensive way _txn_id_for (above) imports
+    series_for_category -- both pull from that module's single source of
+    truth, and both must fail loud rather than silently guess if it can't be
+    loaded (a guess here could regenerate the Part I file wrong, or not at
+    all, without any indication why)."""
+    try:
+        import sys as _sys
+
+        _src = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from agents.skill_26as_journal.scripts.build_tds_journals import (
+            part_i_path_for,
+            split_part_ii,
+            write_rows_csv,
+        )
+    except ImportError as e:
+        raise ImportError(
+            "_load_split_part_ii: could not load split_part_ii from "
+            "build_tds_journals; refusing to guess the Part I split"
+        ) from e
+    return split_part_ii, part_i_path_for, write_rows_csv
+
+
+def _regenerate_part_i_split(
+    journal_rows: list[dict], journal_p: Path,
+) -> tuple[str | None, list[dict], list[dict], list[str]]:
+    """Regenerate the Part-I-only sibling of journal_p from the just-written
+    journal_rows, so a hand-filtered copy can never go stale -- this is
+    called on every Save, in lockstep with the journal/review rewrite (see
+    build_tds_journals.write_part_i_split's docstring for the same
+    delete-if-not-needed rule this mirrors).
+
+    Returns (part_i_path_or_None, part_i_rows, part_ii_rows, split_problems).
+    """
+    split_part_ii, part_i_path_for, write_rows_csv = _load_split_part_ii()
+    part_i_rows, part_ii_rows, split_problems = split_part_ii(journal_rows)
+    part_i_path = part_i_path_for(journal_p)
+    if not part_ii_rows:
+        if part_i_path.exists():
+            part_i_path.unlink()
+        return None, part_i_rows, part_ii_rows, split_problems
+    write_rows_csv(part_i_rows, part_i_path)
+    return str(part_i_path), part_i_rows, part_ii_rows, split_problems
+
+
+def _verify_balanced(journal_rows: list[dict], tolerance: float = 0.01) -> list[str]:
+    """Re-verify every transaction's Amount column sums to zero.
+
+    Returns a list of human-readable problems (empty when everything balances).
+    """
+    totals: dict[str, float] = {}
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        try:
+            amt = float(row.get("Amount") or 0)
+        except ValueError:
+            amt = 0.0
+        totals[txn_id] = totals.get(txn_id, 0.0) + amt
+
+    problems = []
+    for txn_id, total in totals.items():
+        if abs(total) > tolerance:
+            problems.append(f"{txn_id}: splits sum to {total:.2f} (expected 0.00)")
+    return problems
+
+
+def _apply_changes(
+    review_rows: list[dict], journal_rows: list[dict], changes: list[dict],
+    known_accounts: set[str] | None = None,
+) -> tuple[list[dict], list[dict], list[str], int]:
+    """Apply `changes` (from the review payload) to both row sets in place.
+
+    `changes` entries carry at least {Sr, Category, Credit Account, _orig}
+    (the engine's payload shape -- see _review_engine.build_html's syncPayload
+    -- plus whatever other columns are in the spec). `_orig` is the credit
+    account BEFORE this edit (used to find the old split).
+
+    `known_accounts` is the real GnuCash account tree (from
+    _extract_account_tree), used to (re)set "Account Exists" on a changed row.
+    When None (no book was loaded), the column is left untouched rather than
+    written with a value that can't be justified -- checking the new account
+    against the *journal CSV's own* accounts would be tautological (the
+    account was just written into it) and checks the wrong source of truth
+    anyway (a book's chart, not what happens to already appear in this run's
+    output).
+
+    Returns (updated_review_rows, updated_journal_rows, problems, applied) --
+    problems is a list of skip/ambiguity messages (including the
+    blank-input case) and applied is an explicit count of changes that were
+    actually written, not `len(changes) - len(problems)` (a change dropped by
+    the blank-input guard previously appended nothing to problems, so it was
+    silently counted as applied). Rows are mutated by Sr (Category
+    disambiguates the two ID series), never by list position, so this is safe
+    to call with review_rows in a different order than the CSV was loaded in.
+    """
+    fy_prefix = _fy_prefix_from(journal_rows)
+    review_by_sr = {
+        (str(r.get("Sr", "")).strip(), (r.get("Category") or "").strip()): r
+        for r in review_rows
+    }
+    problems: list[str] = []
+    applied = 0
+
+    for ch in changes:
+        sr = str(ch.get("Sr", "")).strip()
+        category = (ch.get("Category") or "").strip()
+        new_account = (ch.get(TARGET_COL) or "").strip()
+        old_account = (ch.get("_orig") or "").strip()
+        if not sr or not new_account:
+            problems.append(
+                f"Sr {sr or '?'}/{category or '?'}: blank Sr or Credit Account "
+                "-- skipped"
+            )
+            continue
+
+        review_row = review_by_sr.get((sr, category))
+        if review_row is None:
+            problems.append(f"Sr {sr}/{category}: no matching review row -- skipped")
+            continue
+
+        if not fy_prefix:
+            problems.append(
+                f"Sr {sr}/{category}: could not determine fy_prefix from journal "
+                "CSV -- skipped"
+            )
+            continue
+
+        try:
+            txn_id = _txn_id_for(fy_prefix, sr, category)
+        except (ValueError, ImportError) as e:
+            problems.append(
+                f"Sr {sr}/{category or '?'}: could not determine Transaction ID "
+                f"series for category {category or '?'!r} -- skipped ({e})"
+            )
+            continue
+        idx, err = _find_credit_split(journal_rows, txn_id, old_account)
+        if err:
+            problems.append(f"Sr {sr}/{category} ({txn_id}): {err}")
+            continue
+
+        journal_rows[idx]["Account"] = new_account
+        review_row["Credit Account"] = new_account
+        review_row["Confidence"] = OVERRIDE_CONFIDENCE
+        review_row["Basis"] = OVERRIDE_BASIS
+        # Once the user has picked an account, the row is no longer
+        # ambiguous — any stale tied-candidate list from an Ambiguous row
+        # would otherwise linger after it's been resolved.
+        if "Tied Candidates" in review_row:
+            review_row["Tied Candidates"] = ""
+        if known_accounts is not None:
+            review_row["Account Exists"] = "yes" if new_account in known_accounts else "NO"
+        # FL1.2: a HUMAN save from this Review tab is the only thing allowed
+        # to clear "Needs Review" -- an LLM/model override never does (see
+        # build_tds_journals.py's build_journals()/build_15g_journals()/
+        # build_tcs_journals(), which now keep needs_review True on an
+        # override so a "Model pick - confirm" row still lands here). Once a
+        # person has actually looked at this row and (re)assigned its
+        # account, it is reviewed, regardless of what state it arrived in
+        # (Suspense, Ambiguous, or an unconfirmed model pick).
+        if "Needs Review" in review_row:
+            review_row["Needs Review"] = ""
+        applied += 1
+
+    return review_rows, journal_rows, problems, applied
+
+
+# ---------------------------------------------------------------------------
+# CSV read/write helpers
+# ---------------------------------------------------------------------------
+
+_JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description",
+                    "Account", "Amount", "Currency"]
+_REVIEW_HEADERS = ["Sr", "Deductor", "Section", "Category", "Credit Account",
+                   "Confidence", "Account Exists", "Balanced", "Debit",
+                   "Credit", "Needs Review", "Basis", "Tied Candidates", "TAN",
+                   "Net Interest Account", "Net Interest Source",
+                   "Net Interest Choice Needed", "Left Out", "Left Out Splits"]
+
+
+def _read_csv_rows(path: Path) -> list[dict]:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
+        return list(csv.DictReader(f))
+
+
+def _write_csv_rows(path: Path, headers: list[str], rows: list[dict]) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=headers, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _stage_for_download(path: Path) -> str | None:
+    """Copy `path` into the download staging dir and return the staged path,
+    or None (with the caller responsible for reporting the failure)."""
+    # SEC-19: source must be a regular .csv inside a known folder; the copy
+    # is verified to land directly in the staging folder.
+    src = _safe_paths.resolve_input_file(path, (".csv",))
+    staged = _safe_paths.stage_copy(src, _config_mod.download_staging_dir())
+    return str(staged)
+
+
+def _import_tds_learnings():
+    """Import tds_learnings.py -- a sibling script under
+    skill_26as_journal/scripts/, NOT part of the `agents` package (see that
+    module's own docstring: build_tds_journals.py runs as a subprocess and
+    cannot rely on `agents` being importable in a frozen child, so
+    tds_learnings.py must stay import-able as a plain sibling module rather
+    than a package submodule).
+
+    Located via `agents.skill_26as_journal`'s own installed __file__ rather
+    than a hardcoded relative path from this UI module, so this resolves
+    unchanged in both a source checkout and a frozen (PyInstaller) build --
+    the same reasoning gnucash_review.py's _save_changes() gives for
+    importing persistent_rules via the `agents` package rather than a bare
+    sys.path insert.
+    """
+    import sys as _sys
+
+    import agents.skill_26as_journal as _skill_pkg
+    scripts_dir = Path(_skill_pkg.__file__).resolve().parent / "scripts"
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+    import tds_learnings
+    return tds_learnings
+
+
+def _collect_learnings_to_save(changes: list[dict], review_rows: list[dict]) -> list:
+    """Build [(key, account), ...] for rows THIS Save actually applied.
+
+    `review_rows` must be the post-_apply_changes() rows (Confidence ==
+    OVERRIDE_CONFIDENCE, the human-save marker, only on rows that call
+    genuinely wrote -- see _apply_changes). A `changes` entry _apply_changes
+    skipped (blank Sr, no matching row, no fy_prefix, an unresolvable
+    Transaction ID series, no matching split) never reaches that Confidence
+    value, so it is correctly excluded here with no separate bookkeeping.
+
+    Mirrors gnucash_review.py's _save_changes(): an account containing
+    "Suspense" is never learned -- an unresolved row must not be persisted
+    as if it were a confirmed answer.
+    """
+    tds_learnings = _import_tds_learnings()
+    review_by_sr = {
+        (str(r.get("Sr", "")).strip(), (r.get("Category") or "").strip()): r
+        for r in review_rows
+    }
+    items = []
+    for ch in changes:
+        sr = str(ch.get("Sr", "")).strip()
+        category = (ch.get("Category") or "").strip()
+        row = review_by_sr.get((sr, category))
+        if row is None or row.get("Confidence") != OVERRIDE_CONFIDENCE:
+            continue
+        account = (row.get(TARGET_COL) or "").strip()
+        if not account or "Suspense" in account:
+            continue
+        domain = (tds_learnings.DOMAIN_TCS if category.strip().upper() == "T"
+                  else tds_learnings.DOMAIN_INCOME)
+        key = tds_learnings.deductor_key(domain, row.get("TAN") or "",
+                                         row.get("Deductor") or "")
+        items.append((key, account))
+    return items
+
+
+# ---------------------------------------------------------------------------
+# TDS-15: net-interest account, Leave out, income-balance pre-flight
+# ---------------------------------------------------------------------------
+
+def _safe_book(path) -> str:
+    """A GnuCash book path from the UI, validated: an existing .gnucash file
+    inside a known folder, else "" (so no file access happens on it)."""
+    if not path:
+        return ""
+    try:
+        return str(_safe_paths.resolve_input_file(path, (".gnucash",)))
+    except _safe_paths.UnsafePathError:
+        return ""
+
+
+def _load_preflight_tools():
+    """build_tds_journals' balance reader + pre-flight (single source of truth;
+    fails loud like _load_split_part_ii rather than guessing)."""
+    try:
+        import sys as _sys
+
+        _src = Path(__file__).resolve().parent.parent.parent / "src"
+        if str(_src) not in _sys.path:
+            _sys.path.insert(0, str(_src))
+        from agents.skill_26as_journal.scripts import build_tds_journals as _b
+    except ImportError as e:
+        raise ImportError("could not load the income-balance pre-flight from "
+                          "build_tds_journals") from e
+    return _b
+
+
+def _preflight(journal_rows: list[dict], part_i_rows: list[dict], gnucash_path: str):
+    """-> (full_issues, part_i_issues, error). `error` is a string when the check
+    could not run (no book / unreadable) -- never read as 'clean'."""
+    if not gnucash_path:
+        return [], [], "no GnuCash book is loaded, so account balances could not be read"
+    try:
+        book = _safe_paths.resolve_input_file(gnucash_path, (".gnucash",))
+    except _safe_paths.UnsafePathError as e:
+        return [], [], f"{e}"
+    try:
+        b = _load_preflight_tools()
+        accounts = b.load_accounts(book)
+        balances = b.load_account_balances(book)
+        full = b.income_debit_preflight(journal_rows, balances, accounts, "full journal")
+        part = (b.income_debit_preflight(part_i_rows, balances, accounts, "Part I only file")
+                if part_i_rows else [])
+        return full, part, ""
+    except Exception as e:  # noqa: BLE001
+        return [], [], f"balances could not be read ({type(e).__name__}: {e})"
+
+
+def _preflight_lines(full_issues: list, part_issues: list) -> list[str]:
+    b = _load_preflight_tools()
+    return b.format_preflight(full_issues) + b.format_preflight(part_issues)
+
+
+def _preflight_banner_html(journal_p: Path, gnucash_path: str) -> str:
+    """Banner shown above the table on Load: RED FLAG(s) for the journal as it
+    stands on disk, or a NOT CHECKED notice. Empty when clean."""
+    try:
+        if not journal_p.is_file():
+            return ""
+        rows = _read_csv_rows(journal_p)
+        split_part_ii, _pp, _w = _load_split_part_ii()
+        part_i_rows, part_ii_rows, _prob = split_part_ii(rows)
+        full, part, err = _preflight(rows, part_i_rows if part_ii_rows else [], gnucash_path)
+        lines = _preflight_lines(full, part)
+    except Exception as e:  # noqa: BLE001
+        return ("<div style='border:2px solid #b45309;padding:8px;margin:6px 0'>"
+                f"NOT CHECKED - income-balance pre-flight failed: {html_escape(str(e))}</div>")
+    out = ""
+    for ln in lines:
+        out += ("<div style='border:2px solid #b91c1c;background:#fef2f2;color:#7f1d1d;"
+                "padding:8px;margin:6px 0;font-weight:600'>" + html_escape(ln) + "</div>")
+    if err:
+        out += ("<div style='border:2px solid #b45309;padding:8px;margin:6px 0'>"
+                "NOT CHECKED - the income-balance pre-flight did not run: "
+                + html_escape(err) + ". Downloads after Save are NOT protected by it.</div>")
+    return out
+
+
+def _row_key(r: dict) -> tuple:
+    return (str(r.get("Sr", "")).strip(), (r.get("Category") or "").strip())
+
+
+def _apply_net_edits(
+    review_rows: list[dict], journal_rows: list[dict], edited_rows: list[dict],
+    known_accounts: set[str] | None, left_out_keys: set,
+) -> tuple[list[dict], list[tuple]]:
+    """Apply typed "Net interest booked in" edits. Category A only; the account
+    must be a POSTABLE account of the loaded book (so a hidden/placeholder/
+    missing account is refused, never written). The split to change is the
+    unique positive-amount split on the current net account -- never guessed.
+    Returns (problems, applied) where applied = [(review_row, new_account)]."""
+    problems: list[str] = []
+    applied: list[tuple] = []
+    fy_prefix = _fy_prefix_from(journal_rows)
+    by_key = {_row_key(r): r for r in review_rows}
+    for er in edited_rows:
+        new = (er.get(NET_EDIT_KEY) or "").strip()
+        if not new:
+            continue
+        key = _row_key(er)
+        label = f"Sr {key[0]}/{key[1]}"
+        row = by_key.get(key)
+        if row is None:
+            problems.append(f"{label}: net-interest edit has no matching review row -- skipped")
+            continue
+        if key in left_out_keys or (row.get("Left Out") or "").strip().lower() == "yes":
+            problems.append(f"{label}: row is left out -- net-interest edit not applied "
+                            "(put the row back first)")
+            continue
+        if key[1] != "A":
+            problems.append(f"{label}: only interest rows (Category A) have a net-interest "
+                            "account -- skipped")
+            continue
+        if known_accounts is None:
+            problems.append(f"{label}: no GnuCash book is loaded, so {new!r} cannot be "
+                            "checked as a postable account -- skipped")
+            continue
+        if new not in known_accounts:
+            problems.append(f"{label}: {new!r} is not a postable account in the book "
+                            "(missing, hidden or a header account) -- skipped")
+            continue
+        old = (row.get(NET_COL) or "").strip()
+        if new == old:
+            continue
+        if not fy_prefix:
+            problems.append(f"{label}: could not determine fy_prefix from the journal -- skipped")
+            continue
+        try:
+            txn_id = _txn_id_for(fy_prefix, key[0], key[1])
+        except (ValueError, ImportError) as e:
+            problems.append(f"{label}: could not build the Transaction ID ({e}) -- skipped")
+            continue
+        hits = []
+        for i, jr in enumerate(journal_rows):
+            if (jr.get("Transaction ID") or "").strip() != txn_id:
+                continue
+            if (jr.get("Account") or "") != old:
+                continue
+            try:
+                if float(jr.get("Amount") or 0) > 0:
+                    hits.append(i)
+            except ValueError:
+                pass
+        if len(hits) != 1:
+            problems.append(f"{label} ({txn_id}): found {len(hits)} debit split(s) on "
+                            f"{old!r}; expected exactly one -- skipped")
+            continue
+        journal_rows[hits[0]]["Account"] = new
+        row[NET_COL] = new
+        row["Net Interest Source"] = "user pick"
+        was_choice = (row.get("Net Interest Choice Needed") or "").strip().lower() == "yes"
+        row["Net Interest Choice Needed"] = ""
+        basis = row.get("Basis") or ""
+        row["Basis"] = (basis + " -- " if basis else "") + NET_PICK_BASIS
+        # Clear Needs Review only if this choice was the reason AND the credit
+        # side is otherwise settled (not Suspense / Ambiguous / Low / blocked).
+        conf = (row.get("Confidence") or "").strip()
+        credit_ok = (conf not in ("Ambiguous", "Suspense", "Low")
+                     and "suspense" not in (row.get("Credit Account") or "").lower()
+                     and "BLOCKED ACCOUNT" not in basis)
+        if was_choice and credit_ok and "Needs Review" in row:
+            row["Needs Review"] = ""
+        if known_accounts is not None:
+            row["Account Exists"] = "yes"
+        applied.append((row, new))
+    return problems, applied
+
+
+def _apply_left_out(
+    review_rows: list[dict], journal_rows: list[dict], left_out_keys: set,
+) -> tuple[list[dict], list[str], int, int]:
+    """Make the journal match the Leave out state: a left-out row's splits are
+    REMOVED from journal_rows (so they are in no download, full or Part I) and
+    stashed as JSON in the review row's "Left Out Splits"; a row put back has its
+    stashed splits restored. Whole transactions only. -> (journal_rows,
+    problems, n_left_out, n_restored)."""
+    problems: list[str] = []
+    out_n = back_n = 0
+    fy_prefix = _fy_prefix_from(journal_rows)
+    for row in review_rows:
+        key = _row_key(row)
+        is_out = (row.get("Left Out") or "").strip().lower() == "yes"
+        want_out = key in left_out_keys
+        label = f"Sr {key[0]}/{key[1]}"
+        if want_out and not is_out:
+            if not fy_prefix:
+                problems.append(f"{label}: could not determine fy_prefix -- not left out")
+                continue
+            try:
+                txn_id = _txn_id_for(fy_prefix, key[0], key[1])
+            except (ValueError, ImportError) as e:
+                problems.append(f"{label}: could not build the Transaction ID ({e}) -- not left out")
+                continue
+            mine = [r for r in journal_rows
+                    if (r.get("Transaction ID") or "").strip() == txn_id]
+            if not mine:
+                problems.append(f"{label}: no splits in the journal (nothing to leave out) "
+                                "-- not changed")
+                continue
+            journal_rows = [r for r in journal_rows
+                            if (r.get("Transaction ID") or "").strip() != txn_id]
+            row["Left Out Splits"] = json.dumps(mine)
+            row["Left Out"] = "yes"
+            out_n += 1
+        elif is_out and not want_out:
+            try:
+                stash = json.loads(row.get("Left Out Splits") or "[]")
+            except ValueError:
+                stash = []
+            if not stash:
+                problems.append(f"{label}: no saved splits to put back -- re-run the build "
+                                "to restore this row")
+                continue
+            journal_rows = journal_rows + [dict(r) for r in stash]
+            row["Left Out Splits"] = ""
+            row["Left Out"] = ""
+            back_n += 1
+    return journal_rows, problems, out_n, back_n
+
+
+def _collect_net_learnings(applied: list[tuple]) -> list:
+    """[(key, account)] for net-interest picks THIS human Save applied. A
+    Suspense account is never learned."""
+    tds_learnings = _import_tds_learnings()
+    items = []
+    for row, account in applied:
+        if not account or "Suspense" in account:
+            continue
+        key = tds_learnings.deductor_key(tds_learnings.DOMAIN_NETINT, row.get("TAN") or "",
+                                         row.get("Deductor") or "")
+        items.append((key, account))
+    return items
+
+
+def _save_changes(
+    changes_json: str,
+) -> tuple[str, "gr.update", "gr.update"]:
+    """Process a Save from the review UI -- rewrites the journal and review
+    CSVs, regenerates the Part-I-only sibling (excluding any 15G/15H rows) in
+    lockstep, re-verifies balance on both the full journal and the Part I
+    split independently, and stages both CSVs for download.
+
+    Returns (status_markdown, download_file_update, part_i_download_update).
+    """
+    no_change = (
+        gr.update(interactive=False, value=None),
+        gr.update(interactive=False, value=None),
+    )
+    if not changes_json or not changes_json.strip():
+        return ("No changes to save.",) + no_change
+
+    try:
+        payload = parse_payload(changes_json)
+    except ValueError as e:
+        return (f"Error parsing changes: {e}",) + no_change
+
+    changes = payload["changes"]
+    context = payload["context"]
+    review_path = context.get("review_path", "")
+    gnucash_path = _safe_book(context.get("gnucash_path", ""))
+
+    # TDS-15: typed net-interest edits ride in all_rows / excluded; the Leave
+    # out state is the engine's "excluded" list (authoritative when present).
+    excluded_rows = payload.get("excluded") if "excluded" in payload else None
+    net_edit_rows = [r for r in (payload["all_rows"] + (excluded_rows or []))
+                     if (r.get(NET_EDIT_KEY) or "").strip()]
+    left_out_keys = ({_row_key(r) for r in excluded_rows} if excluded_rows is not None
+                     else None)
+
+    if not changes and not net_edit_rows and excluded_rows is None:
+        return ("No changes to save.",) + no_change
+    if not review_path:
+        return ("Error: no review CSV path in payload -- nothing was saved.",) + no_change
+
+    review_p = Path(review_path)
+    if not review_p.is_file():
+        return (f"Error: review CSV not found: {review_p}",) + no_change
+
+    journal_p = _journal_path_for(str(review_p))
+    if not journal_p.is_file():
+        return (f"Error: journal CSV not found: {journal_p}",) + no_change
+
+    review_rows = _read_csv_rows(review_p)
+    journal_rows = _read_csv_rows(journal_p)
+
+    known_accounts: set[str] | None = None
+    if gnucash_path:
+        known_accounts = set(_extract_account_tree(gnucash_path))
+
+    if left_out_keys is None:        # no exclude info in the payload: keep as is
+        left_out_keys = {_row_key(r) for r in review_rows
+                         if (r.get("Left Out") or "").strip().lower() == "yes"}
+    current_out = {_row_key(r) for r in review_rows
+                   if (r.get("Left Out") or "").strip().lower() == "yes"}
+    if not changes and not net_edit_rows and left_out_keys == current_out:
+        return ("No changes to save.",) + no_change
+
+    review_rows, journal_rows, problems, applied = _apply_changes(
+        review_rows, journal_rows, changes, known_accounts=known_accounts,
+    )
+    net_problems, net_applied = _apply_net_edits(
+        review_rows, journal_rows, net_edit_rows, known_accounts, left_out_keys)
+    problems = list(problems) + net_problems
+    journal_rows, out_problems, n_left_out, n_restored = _apply_left_out(
+        review_rows, journal_rows, left_out_keys)
+    problems += out_problems
+    applied_total = applied + len(net_applied)
+
+    # TDS-11: persist this Save's human-confirmed credit-account picks as
+    # learnings (src/agents/skill_26as_journal/scripts/tds_learnings.py), so
+    # a later run of the 26AS journal builder can resolve the same
+    # deductor/collector automatically instead of asking again. Only ever
+    # fires from a genuinely HUMAN save via this function -- never from the
+    # LLM-override path in build_tds_journals.py, which deliberately keeps
+    # needs_review=True precisely so an accepted model pick is never
+    # mistaken for a human confirmation (see FL1.2). A failure here must
+    # never block the actual CSV save that follows -- caught and reported
+    # as a warning, same pattern as gnucash_review.py's override save.
+    learnings_msg = ""
+    if applied_total:
+        if gnucash_path:
+            try:
+                tds_learnings = _import_tds_learnings()
+                learn_items = (_collect_learnings_to_save(changes, review_rows)
+                               + _collect_net_learnings(net_applied))
+                if learn_items:
+                    tds_learnings.save_learnings_batch(gnucash_path, learn_items)
+                    learnings_msg = (
+                        f"Learned {len(learn_items)} deductor/collector account "
+                        "pick(s) for next time."
+                    )
+            except Exception as e:
+                learnings_msg = f"Warning: could not save learnings -- {e}"
+        else:
+            learnings_msg = (
+                "No GnuCash book loaded -- confirmed pick(s) were not saved "
+                "as learnings this time."
+            )
+
+    _write_csv_rows(review_p, _REVIEW_HEADERS, review_rows)
+    _write_csv_rows(journal_p, _JOURNAL_HEADERS, journal_rows)
+
+    balance_problems = _verify_balanced(journal_rows)
+
+    # Regenerate the Part-I-only file from the rows just written, so an edit
+    # made on this screen (e.g. a credit-account reassignment) is reflected
+    # in it immediately -- a hand-filtered copy of the pre-edit journal would
+    # otherwise silently go stale the moment this Save runs.
+    # split_failed is tracked separately from part_i_path is None -- the two
+    # are NOT the same thing. part_i_path is None legitimately means "no
+    # Part II rows this run, nothing to exclude" (safe to say the full
+    # journal is the only file needed). split_failed means "we don't know" --
+    # the splitter didn't run at all, so we have no idea whether Part II rows
+    # exist, and must not claim either answer. Collapsing these two into one
+    # None-check is exactly the bug this block used to have: on ImportError
+    # it fell into the "no Part II transactions" branch and told the user
+    # the full journal was the only file to import -- the same
+    # double-booking risk this whole feature exists to eliminate.
+    split_failed = False
+    stale_part_i_path = None
+    stale_part_i_deleted = False
+    try:
+        part_i_path, part_i_rows, part_ii_rows, split_problems = \
+            _regenerate_part_i_split(journal_rows, journal_p)
+    except ImportError as e:
+        part_i_path, part_i_rows, part_ii_rows, split_problems = None, [], [], []
+        split_failed = True
+        problems = list(problems) + [f"Part I split not regenerated: {e}"]
+        # part_i_path_for() came from the same failed import, so its naming
+        # rule (stem + "-partI.csv") is reproduced locally here rather than
+        # calling a helper we know just failed to load. A stale file we
+        # cannot vouch for is worse than no file: if one exists, it is
+        # deleted rather than left to be mistaken for a fresh regeneration.
+        candidate = journal_p.with_name(journal_p.stem + "-partI.csv")
+        if candidate.exists():
+            try:
+                candidate.unlink()
+                stale_part_i_deleted = True
+            except OSError as unlink_err:
+                stale_part_i_path = str(candidate)
+                problems.append(
+                    f"Could not delete stale {candidate} after the Part I "
+                    f"split failed to regenerate -- treat it as stale, do "
+                    f"not import it ({unlink_err})"
+                )
+
+    part_i_balance_problems = _verify_balanced(part_i_rows) if part_i_rows else []
+    excluded_txns = sorted({(r.get("Transaction ID") or "").strip()
+                            for r in part_ii_rows if r.get("Transaction ID")})
+
+    # TDS-15: pre-flight -- would importing this on top of the book push an
+    # income account the journal debits onto a DEBIT balance? Checked on the
+    # rows just written, for the full journal AND the Part I only file.
+    pf_full, pf_part, pf_error = _preflight(journal_rows, part_i_rows if part_ii_rows else [], gnucash_path)
+    pf_lines = _preflight_lines(pf_full, pf_part)
+
+    lines = []
+    for ln in pf_lines:
+        lines.append("**" + ln + "**")
+        lines.append("")
+    if pf_error:
+        lines.append("**NOT CHECKED - the income-balance pre-flight did not run: "
+                     + pf_error + ". These downloads are NOT protected by it.**")
+        lines.append("")
+    lines += ["**Saved**", ""]
+    lines.append(f"Applied {applied} of {len(changes)} change(s).")
+    if net_applied:
+        lines.append(f"Net-interest account changed on {len(net_applied)} row(s).")
+    if n_left_out or n_restored:
+        lines.append(f"Left out {n_left_out} row(s) and put back {n_restored}; a left-out "
+                     "row is in no download. (A re-run of the build starts from the 26AS "
+                     "again and forgets Review-time leave-outs.)")
+    lines.append(f"Rewrote {review_p.name} and {journal_p.name}.")
+    if learnings_msg:
+        lines.append(learnings_msg)
+    if problems:
+        lines.append("")
+        lines.append(f"{len(problems)} change(s) skipped (not guessed):")
+        for p in problems:
+            lines.append(f"  - {p}")
+    if balance_problems:
+        lines.append("")
+        lines.append(
+            "**WARNING: re-verification found unbalanced transaction(s) after "
+            "save** -- an account rename should never change split sums, so "
+            "this points at something else going wrong. Investigate before "
+            "importing:"
+        )
+        for p in balance_problems:
+            lines.append(f"  - {p}")
+    else:
+        lines.append("")
+        lines.append("Balance re-verification: all transactions sum to 0.00 (ok).")
+
+    # This paragraph is the user's only defence against picking the wrong
+    # file to import, so it states plainly, in numbers, what each file is.
+    lines.append("")
+    if part_i_path:
+        lines.append(
+            f"{len(excluded_txns)} transaction(s) excluded from "
+            f"{Path(part_i_path).name} because they are {PART_II_LABEL} "
+            f"reclassifications -- **if you post Part II by hand in "
+            f"GnuCash, import {Path(part_i_path).name}, not "
+            f"{journal_p.name}, or the reclassification will be "
+            f"double-booked.**"
+        )
+        if part_i_balance_problems:
+            lines.append(
+                "**WARNING: the Part I split itself does not balance after "
+                "re-verification** -- dropping whole transactions must "
+                "never change split sums; investigate before importing "
+                "either file:"
+            )
+            for p in part_i_balance_problems:
+                lines.append(f"  - {p}")
+        else:
+            lines.append(
+                f"Part I split re-verification: all {len(part_i_rows)} "
+                "row(s) sum to 0.00 per transaction (ok)."
+            )
+    elif split_failed:
+        lines.append(
+            "**WARNING: the Part I split could not be regenerated -- we do "
+            f"not know whether this run has {PART_II_LABEL} transactions, "
+            f"so we cannot say whether {journal_p.name} is safe to import "
+            "on its own. Do NOT assume it is the only file to import.** "
+            + (
+                f"A stale -partI.csv on disk could not be deleted either "
+                f"({stale_part_i_path}) -- treat it as stale and do not "
+                "import it."
+                if stale_part_i_path else
+                "A stale -partI.csv left over from a previous save was "
+                "deleted so it cannot be mistaken for a fresh regeneration."
+                if stale_part_i_deleted else
+                "There was no -partI.csv on disk to worry about."
+            )
+        )
+    else:
+        lines.append(
+            f"No {PART_II_LABEL} transactions in this run -- there is "
+            f"nothing to exclude, so {journal_p.name} is the only file "
+            "to import."
+        )
+    if split_problems:
+        lines.append("")
+        lines.append(
+            "Warning: could not determine the series for some Transaction "
+            "ID(s) -- kept in the Part I file, not dropped:"
+        )
+        for p in split_problems:
+            lines.append(f"  - {p}")
+
+    download_path: str | None = None
+    try:
+        if pf_full:
+            lines.append("")
+            lines.append("**No download offered for the full journal: fix the RED FLAG "
+                         "above (re-point the net-interest account or leave the rows "
+                         "out), then Save again.**")
+        else:
+            download_path = _stage_for_download(journal_p)
+    except Exception as e:
+        lines.append("")
+        lines.append(f"Warning: could not stage download -- {e}")
+
+    part_i_download_path: str | None = None
+    if part_i_path and pf_part:
+        lines.append("")
+        lines.append("**No download offered for the Part I only file: fix the RED FLAG "
+                     "above, then Save again.**")
+    elif part_i_path:
+        try:
+            part_i_download_path = _stage_for_download(Path(part_i_path))
+        except Exception as e:
+            lines.append("")
+            lines.append(f"Warning: could not stage Part I download -- {e}")
+
+    journal_update = (gr.update(value=download_path, interactive=True)
+                      if download_path else gr.update(interactive=False, value=None))
+    part_i_update = (gr.update(value=part_i_download_path, interactive=True)
+                     if part_i_download_path else gr.update(interactive=False, value=None))
+
+    return "\n".join(lines), journal_update, part_i_update
+
+
+# ---------------------------------------------------------------------------
+# Gradio tab renderer
+# ---------------------------------------------------------------------------
+
+def render(container_tab=None) -> None:
+    """Render the 26AS Review tab. Must be called inside gr.Tab()."""
+    gr.Markdown(
+        "## Review\n\n"
+        "Review deductors the 26AS Convert to GnuCash skill routed to "
+        "`Liabilities:Suspense` (or otherwise flagged Needs Review). Select "
+        "a review CSV and GnuCash book, click Load, assign the correct "
+        "credit account via the searchable dropdown, select rows, Apply to "
+        "selected, then Save -- this rewrites both the journal and review "
+        "CSVs and re-verifies every transaction still balances. Save also "
+        "regenerates a second, Part-I-only CSV excluding any 15G/15H rows: "
+        "download the full journal to import everything, or the Part I "
+        "file if you post 15G/15H by hand in GnuCash yourself."
+    )
+
+    initial_csvs = _scan_review_csvs()
+
+    with gr.Row():
+        entity_dd = gr.Dropdown(
+            label="Entity (optional -- auto-fills the GnuCash book from the registry)",
+            choices=_entity_book.entity_choices(),
+            value=None,
+            allow_custom_value=True,
+            interactive=True,
+            scale=4,
+        )
+        entity_refresh_btn = gr.Button("↻", scale=0, min_width=40)
+
+    # A registry hit writes the path into the field below in plain sight and
+    # says nothing here. A miss leaves that field exactly as it was, which is
+    # indistinguishable from "nothing happened" -- that case gets a line.
+    # See _entity_book.book_status().
+    book_status_md = gr.Markdown("", visible=False, elem_classes=["pa-book-status"])
+
+    with gr.Row():
+        csv_dropdown = gr.Dropdown(
+            label="TDS/TCS Review CSV",
+            choices=initial_csvs,
+            value=initial_csvs[0][1] if initial_csvs else None,
+            allow_custom_value=True,
+            scale=4,
+        )
+        refresh_btn = gr.Button("↻", scale=0, min_width=40)
+        # A path textbox, not a gr.File: the book is a live file opened
+        # read-only in place, never an upload. A gr.File would try to move it
+        # into Gradio's cache and serve it to the browser, which fails
+        # outright for any book outside the working directory. See the
+        # matching comment in ui/tabs/_generic.py for the full reasoning.
+        gnucash_file = gr.Textbox(
+            label="GnuCash book (.gnucash)",
+            placeholder="Pick an entity above, or Browse… to a .gnucash file",
+            lines=1,
+            max_lines=1,
+            scale=4,
+        )
+        gnucash_browse_btn = gr.Button("Browse...", scale=0, min_width=110)
+
+    load_btn = gr.Button("Load for Review", variant="primary")
+
+    refresh_btn.click(
+        fn=lambda: gr.update(choices=_scan_review_csvs()),
+        inputs=[],
+        outputs=[csv_dropdown],
+    )
+
+    entity_dd.change(
+        fn=lambda entity_val, current=None: (
+            _entity_book.book_update(entity_val, None, current),
+            _entity_book.book_status_update(entity_val, None, current),
+        ),
+        inputs=[entity_dd, gnucash_file],
+        outputs=[gnucash_file, book_status_md],
+    )
+
+    # ...and the moment the field holds a path -- from Browse..., typing, or
+    # the prefill above -- the "pick a book" line has been answered and goes
+    # away, rather than sitting there contradicting the field beside it.
+    gnucash_file.change(
+        fn=_entity_book.book_status_clear_if_filled,
+        inputs=[gnucash_file],
+        outputs=[book_status_md],
+    )
+    entity_refresh_btn.click(
+        fn=lambda: gr.update(choices=_entity_book.entity_choices()),
+        inputs=[],
+        outputs=[entity_dd],
+    )
+
+    # Native OS file picker for the GnuCash book — a bare gr.File stages a
+    # *temp copy* in the browser and hands the handler that temp path, which
+    # is catastrophic for a live .gnucash (wrong path, breaks the book GUID).
+    # This mirrors ui/tabs/_generic.py's "Browse..." wiring exactly: it opens
+    # at the box's remembered folder, validates the pick server-side (the
+    # browser's type filter and upload caps are bypassed by a native pick),
+    # and sets gnucash_file's value to the REAL absolute path. Drag-drop into
+    # the box is untouched — this is additive.
+    # NOTE: the Entity dropdown above resolves a registered book via
+    # _entity_book.book_update() (registry hit fills gnucash_file; a miss
+    # leaves it untouched). Browse still wins if used afterward — it always
+    # overwrites with the picked path, no validation blocks that. The picked
+    # path itself is still not written back into ui/_book_registry.py; that
+    # remains the Entities registration UI's job — these tabs only consume
+    # the registry, they don't update it.
+    def _browse_gnucash_book():
+        valid, warnings = _filedialog.pick_files(
+            f"{APP_ID}.gnucash_book",
+            multiple=False,
+            file_types=(".gnucash",),
+            max_size_bytes=_MAX_UPLOAD_SIZE_BYTES,
+            title="Select the GnuCash book (.gnucash)",
+        )
+        for w in warnings:
+            gr.Warning(w)
+        if not valid:
+            # Cancelled, or the pick was rejected — keep the current value.
+            return gr.update()
+        return gr.update(value=valid[0])
+
+    gnucash_browse_btn.click(fn=_browse_gnucash_book, inputs=[], outputs=[gnucash_file])
+
+    if container_tab is not None:
+        def _rescan_newest():
+            choices = _scan_review_csvs()
+            return gr.update(choices=choices,
+                             value=(choices[0][1] if choices else None))
+        container_tab.select(fn=_rescan_newest, inputs=[], outputs=[csv_dropdown])
+
+    review_html = gr.HTML(value="<p><em>Load a CSV to begin reviewing.</em></p>")
+
+    with gr.Row():
+        save_btn = gr.Button("Save & Export", variant="primary")
+        reset_btn = gr.Button("Reset", variant="secondary")
+    save_result = gr.Markdown("")
+    download_file = gr.DownloadButton(
+        label="Download corrected journal CSV", visible=True, interactive=False,
+        variant="primary",
+    )
+    # Interactive only when this run actually produced a Part II (15G/15H)
+    # row -- with none to exclude there is nothing to distinguish this file
+    # from the full journal, so offering it would just invite picking the
+    # wrong download for no reason.
+    part_i_download_file = gr.DownloadButton(
+        label="Download Part I only (excludes 15G/15H)", visible=True,
+        interactive=False, variant="secondary",
+    )
+
+    _payload_box = gr.Textbox(
+        value="", show_label=False, container=False, lines=1,
+        elem_id=f"{APP_ID}-payload-box",
+    )
+
+    load_btn.click(
+        fn=_load_review_data,
+        inputs=[csv_dropdown, gnucash_file],
+        outputs=review_html,
+    )
+    save_btn.click(
+        fn=_save_changes,
+        inputs=[_payload_box],
+        outputs=[save_result, download_file, part_i_download_file],
+        js="(x) => window._tdsJrSavePayload || ''",
+    )
+
+    def _handle_reset():
+        choices = _scan_review_csvs()
+        return (
+            gr.update(choices=choices, value=(choices[0][1] if choices else None)),
+            gr.update(value=""),                                     # gnucash_file
+            gr.update(value=None),                                   # entity_dd
+            gr.update(value="", visible=False),                       # book_status_md
+            "<p><em>Load a CSV to begin reviewing.</em></p>",        # review_html
+            "",                                                       # save_result
+            gr.update(interactive=False, value=None),                 # download_file
+            gr.update(interactive=False, value=None),                 # part_i_download_file
+            "",                                                       # _payload_box
+        )
+
+    reset_btn.click(
+        fn=_handle_reset,
+        inputs=[],
+        outputs=[csv_dropdown, gnucash_file, entity_dd, book_status_md, review_html,
+                 save_result, download_file, part_i_download_file, _payload_box],
+        js="() => { window._tdsJrSavePayload = ''; }",
+    )

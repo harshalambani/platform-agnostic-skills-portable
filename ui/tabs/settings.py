@@ -1,0 +1,457 @@
+"""
+ui/tabs/settings.py — Settings tab for managing LLM endpoints.
+
+Provides a Gradio UI for viewing, switching, adding, editing, deleting,
+and testing LLM endpoint configurations. Reads and writes through
+ui._config (load_portable_config / write_portable_config) so the user
+never needs to hand-edit config.yaml.
+
+Supported providers: "ollama", "openai_compatible".
+"""
+from __future__ import annotations
+
+import gradio as gr
+
+from .. import _buildinfo
+from .. import _config
+from .. import _health
+from .. import _update
+
+
+# ---------------------------------------------------------------------------
+# Helpers.
+# ---------------------------------------------------------------------------
+
+def _load_endpoint_names() -> list[str]:
+    """Return sorted list of endpoint names from the config."""
+    cfg = _config.load_portable_config()
+    return sorted((cfg.get("endpoints") or {}).keys())
+
+
+def _load_active() -> str:
+    """Return the name of the currently active endpoint."""
+    return _config.active_endpoint_name()
+
+
+def _load_endpoint(name: str) -> dict:
+    """Return the endpoint dict for a given name, or empty dict."""
+    cfg = _config.load_portable_config()
+    return (cfg.get("endpoints") or {}).get(name, {})
+
+
+def _test_endpoint(name: str) -> str:
+    """Test connectivity of the named endpoint, return a status string."""
+    ep = _load_endpoint(name)
+    if not ep:
+        return f"Endpoint '{name}' not found in config."
+    result = _health.check(ep)
+    if result.ok:
+        models = ", ".join(result.models[:10]) if result.models else "(none listed)"
+        suffix = f"… and {len(result.models) - 10} more" if len(result.models) > 10 else ""
+        return f"**Connected** — {result.detail}\n\nModels: {models}{suffix}"
+    return f"**{result.status.upper()}** — {result.detail}"
+
+
+def _save_endpoint(
+    name: str,
+    provider: str,
+    base_url: str,
+    default_model: str,
+    api_key: str,
+    temperature: float,
+    set_active: bool,
+    min_gap_seconds: float = 0,
+    daily_cap: int = 0,
+) -> str:
+    """Save or update an endpoint in the config. Returns a status message."""
+    name = name.strip()
+    if not name:
+        return "Error: endpoint name cannot be empty."
+    if not base_url.strip():
+        return "Error: base URL cannot be empty."
+    if provider not in ("ollama", "openai_compatible"):
+        return "Error: provider must be 'ollama' or 'openai_compatible'."
+
+    cfg = _config.load_portable_config()
+    if "endpoints" not in cfg or cfg["endpoints"] is None:
+        cfg["endpoints"] = {}
+
+    ep: dict = {
+        "provider": provider,
+        "base_url": base_url.strip().rstrip("/"),
+        "default_model": default_model.strip(),
+        "temperature": round(temperature, 2),
+    }
+    # MAP-20: AI call pacing. Stored only when switched on (default OFF).
+    try:
+        gap = max(0.0, float(min_gap_seconds or 0))
+        cap = max(0, int(daily_cap or 0))
+    except (TypeError, ValueError):
+        return "Error: minimum gap and daily cap must be numbers."
+    if gap > 0:
+        ep["min_gap_seconds"] = gap
+    if cap > 0:
+        ep["daily_cap"] = cap
+    if provider == "openai_compatible":
+        new_key = api_key.strip()
+        if new_key:
+            # User supplied a key — encrypt it before storing.
+            ep["api_key"] = _config.encrypt_api_key(new_key)
+        else:
+            # Blank field means "keep the existing stored value".
+            existing = (cfg.get("endpoints") or {}).get(name, {})
+            ep["api_key"] = existing.get("api_key") or "not-needed"
+
+    cfg["endpoints"][name] = ep
+    if set_active:
+        cfg["active_endpoint"] = name
+
+    _config.write_portable_config(cfg)
+    _forget_model_list()
+    action = "Updated" if name in (cfg.get("endpoints") or {}) else "Added"
+    active_note = " (set as active)" if set_active else ""
+    return f"**{action}** endpoint `{name}`{active_note}."
+
+
+def _delete_endpoint(name: str) -> str:
+    """Delete an endpoint from the config. Returns a status message."""
+    name = name.strip()
+    cfg = _config.load_portable_config()
+    endpoints = cfg.get("endpoints") or {}
+    if name not in endpoints:
+        return f"Error: endpoint '{name}' not found."
+    if len(endpoints) <= 1:
+        return "Error: cannot delete the last remaining endpoint."
+    del endpoints[name]
+    # If we deleted the active endpoint, switch to the first remaining one.
+    if cfg.get("active_endpoint") == name:
+        cfg["active_endpoint"] = next(iter(endpoints))
+    _config.write_portable_config(cfg)
+    _forget_model_list()
+    return f"**Deleted** endpoint `{name}`. Active is now `{cfg['active_endpoint']}`."
+
+
+def _forget_model_list() -> None:
+    """UI-49: the tabs' cached model list belongs to the old endpoint."""
+    try:
+        from . import _generic  # noqa: PLC0415
+        _generic.invalidate_model_choices()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _switch_active(name: str) -> str:
+    """Switch the active endpoint. Returns a status message."""
+    name = name.strip()
+    cfg = _config.load_portable_config()
+    endpoints = cfg.get("endpoints") or {}
+    if name not in endpoints:
+        return f"Error: endpoint '{name}' not found."
+    cfg["active_endpoint"] = name
+    _config.write_portable_config(cfg)
+    _forget_model_list()
+    return f"Active endpoint switched to `{name}`."
+
+
+def _repo_url() -> str:
+    """The repo's github.com URL, derived from ui._update._REPO (single source)."""
+    return f"https://github.com/{_update._REPO}"
+
+
+def _check_for_updates() -> str:
+    """Run a fresh update check and render the result as Markdown."""
+    info = _update.check_now()
+    if info.error:
+        return "_Couldn't check for updates right now — you're offline or GitHub is unreachable._"
+    if not info.available:
+        return f"You're on the latest version ({info.current_tag})."
+    lines = [f"**Update available:** {info.latest_tag} (you have {info.current_tag})."]
+    if info.asset_url:
+        lines.append(f"[Download {info.latest_tag} for Windows →]({info.asset_url})")
+    lines.append(f"[View release notes / all downloads →]({info.download_url})")
+    return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Public: render the Settings tab.
+# ---------------------------------------------------------------------------
+
+def _load_large_spend_threshold() -> float:
+    from agents.skill_cc_spend_booking.settings_io import read_large_spend_threshold
+    return read_large_spend_threshold(_config.PORTABLE_CONFIG_PATH)
+
+
+def _save_large_spend_threshold(value) -> str:
+    """Persist the card large-spend threshold (CC-03). A value that is not a
+    positive number is refused and nothing is written."""
+    from agents.skill_cc_spend_booking.settings_io import THRESHOLD_KEY, parse_threshold
+    got = parse_threshold(value)
+    if got is None:
+        return "Not saved: enter a positive number of rupees."
+    cfg = _config.load_portable_config()
+    cfg[THRESHOLD_KEY] = got
+    _config.write_portable_config(cfg)
+    return f"Saved: card spends of {got:,.0f} or more are flagged as a possible asset."
+
+
+def render() -> None:
+    """
+    Render the complete Settings tab body.
+
+    Must be called inside a `with gr.Tab(...)` context.
+    """
+    gr.Markdown(
+        "## Settings\n\n"
+        "Manage LLM endpoints and test connectivity. "
+        "Changes are saved to `config.yaml` immediately.\n\n"
+        "> **Security note:** API keys are stored unencrypted in "
+        "`Data\\settings\\config.yaml`. Keep this file private. "
+        "API key fields are masked in this UI but the underlying file is plaintext."
+    )
+
+    # -- Current config info --
+    config_path_display = str(_config.PORTABLE_CONFIG_PATH)
+    gr.Markdown(
+        f"**Config file:** `{config_path_display}`\n\n"
+        f"**Output directory:** `{_config.output_dir()}`"
+    )
+
+    _open_out_btn = gr.Button("Open output folder", variant="secondary")
+    _open_out_btn.click(
+        fn=lambda: _config.open_in_file_manager(_config.output_dir()),
+        inputs=None, outputs=None,
+    )
+
+    # -----------------------------------------------------------------------
+    # Section 1: Active endpoint selector.
+    # -----------------------------------------------------------------------
+    gr.Markdown("### Active Endpoint")
+
+    with gr.Row():
+        active_dd = gr.Dropdown(
+            label="Active endpoint",
+            choices=_load_endpoint_names(),
+            value=_load_active(),
+            interactive=True,
+        )
+        switch_btn = gr.Button("Switch", variant="secondary")
+        test_btn = gr.Button("Test Connection", variant="secondary")
+
+    status_md = gr.Markdown("_Select an endpoint and click Test Connection._")
+
+    # Switch active endpoint.
+    def _on_switch(name):
+        msg = _switch_active(name)
+        return msg
+
+    switch_btn.click(fn=_on_switch, inputs=[active_dd], outputs=[status_md])
+
+    # Test connectivity.
+    def _on_test(name):
+        return _test_endpoint(name)
+
+    test_btn.click(fn=_on_test, inputs=[active_dd], outputs=[status_md])
+
+    # -----------------------------------------------------------------------
+    # Section 2: View / edit endpoint details.
+    # -----------------------------------------------------------------------
+    gr.Markdown("### Endpoint Details")
+    gr.Markdown(
+        "_Select an endpoint above to load its details, or type a new name "
+        "to create one._"
+    )
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            ep_name = gr.Textbox(
+                label="Endpoint name",
+                placeholder="e.g. local_ollama",
+                interactive=True,
+            )
+            ep_provider = gr.Dropdown(
+                label="Provider",
+                choices=["ollama", "openai_compatible"],
+                value="ollama",
+                interactive=True,
+            )
+            ep_base_url = gr.Textbox(
+                label="Base URL",
+                placeholder="http://localhost:11434",
+                interactive=True,
+            )
+            ep_default_model = gr.Textbox(
+                label="Default model",
+                placeholder="e.g. gemma4, llama3.1, qwen3",
+                interactive=True,
+            )
+            ep_api_key = gr.Textbox(
+                label="API key (openai_compatible only)",
+                placeholder="not-needed",
+                interactive=True,
+                visible=True,
+                # type="password" masks the value in the browser — it is never
+                # shown in cleartext in the UI.  The key is still stored
+                # unencrypted in config.yaml (see security note below).
+                type="password",
+            )
+            ep_temperature = gr.Slider(
+                label="Temperature",
+                minimum=0.0,
+                maximum=2.0,
+                step=0.05,
+                value=0.0,
+                interactive=True,
+            )
+            ep_min_gap = gr.Number(
+                label="Minimum gap between AI calls (seconds, 0 = off)",
+                info="Paces every AI call on this endpoint (all skills). Use e.g. 60 or 600 "
+                     "for a free tier with a call quota. Stop keeps what is done so far.",
+                value=0, minimum=0, precision=0, interactive=True,
+            )
+            ep_daily_cap = gr.Number(
+                label="Daily cap on AI calls (0 = off)",
+                info="Once reached, AI calls stop with a clear message until tomorrow.",
+                value=0, minimum=0, precision=0, interactive=True,
+            )
+            ep_set_active = gr.Checkbox(
+                label="Set as active endpoint after saving",
+                value=False,
+            )
+
+        with gr.Column(scale=1):
+            save_status = gr.Markdown("_Edit fields and click Save._")
+            with gr.Row():
+                save_btn = gr.Button("Save Endpoint", variant="primary")
+                delete_btn = gr.Button("Delete Endpoint", variant="stop")
+
+    # Load endpoint details when dropdown selection changes.
+    def _on_select_endpoint(name):
+        ep = _load_endpoint(name)
+        if not ep:
+            return (
+                name,                           # ep_name
+                "ollama",                        # ep_provider
+                "",                              # ep_base_url
+                "",                              # ep_default_model
+                "",                              # ep_api_key
+                0.0,                             # ep_temperature
+                0,                               # ep_min_gap
+                0,                               # ep_daily_cap
+                False,                           # ep_set_active
+                f"_No endpoint named `{name}`._",  # save_status
+            )
+        # Never return the stored (possibly encrypted) key to the UI.
+        # An empty field means "leave unchanged" when the user saves.
+        has_key = bool(ep.get("api_key") and ep.get("api_key") != "not-needed")
+        key_status = "_Key stored — leave blank to keep, or type a new key to replace._" if has_key else ""
+        return (
+            name,
+            ep.get("provider", "ollama"),
+            ep.get("base_url", ""),
+            ep.get("default_model", ""),
+            "",                              # ep_api_key — never expose stored value
+            float(ep.get("temperature", 0.0)),
+            float(ep.get("min_gap_seconds", 0) or 0),
+            int(ep.get("daily_cap", 0) or 0),
+            False,
+            f"_Loaded `{name}`. Edit and Save, or Delete._"
+            + (f"\n\n{key_status}" if key_status else ""),
+        )
+
+    active_dd.change(
+        fn=_on_select_endpoint,
+        inputs=[active_dd],
+        outputs=[
+            ep_name, ep_provider, ep_base_url, ep_default_model,
+            ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap,
+            ep_set_active, save_status,
+        ],
+    )
+
+    # Save endpoint.
+    def _on_save(name, provider, base_url, default_model, api_key, temperature,
+                 min_gap, daily_cap, set_active):
+        msg = _save_endpoint(name, provider, base_url, default_model, api_key, temperature,
+                             set_active, min_gap, daily_cap)
+        # Refresh the dropdown choices and active value.
+        new_names = _load_endpoint_names()
+        new_active = _load_active()
+        return msg, gr.update(choices=new_names, value=new_active)
+
+    save_btn.click(
+        fn=_on_save,
+        inputs=[ep_name, ep_provider, ep_base_url, ep_default_model,
+                ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap, ep_set_active],
+        outputs=[save_status, active_dd],
+    )
+
+    # Delete endpoint.
+    def _on_delete(name):
+        msg = _delete_endpoint(name)
+        new_names = _load_endpoint_names()
+        new_active = _load_active()
+        # Load the new active endpoint's details.
+        ep = _load_endpoint(new_active)
+        return (
+            msg,
+            gr.update(choices=new_names, value=new_active),
+            new_active,
+            ep.get("provider", "ollama"),
+            ep.get("base_url", ""),
+            ep.get("default_model", ""),
+            "",                              # ep_api_key — never expose stored value
+            float(ep.get("temperature", 0.0)),
+            float(ep.get("min_gap_seconds", 0) or 0),
+            int(ep.get("daily_cap", 0) or 0),
+            False,
+        )
+
+    delete_btn.click(
+        fn=_on_delete,
+        inputs=[ep_name],
+        outputs=[
+            save_status, active_dd,
+            ep_name, ep_provider, ep_base_url, ep_default_model,
+            ep_api_key, ep_temperature, ep_min_gap, ep_daily_cap, ep_set_active,
+        ],
+    )
+
+    # -----------------------------------------------------------------------
+    # Card large-spend flag (CC-03).
+    # -----------------------------------------------------------------------
+    gr.Markdown("### Credit card: large-spend flag")
+    gr.Markdown(
+        "_A card spend of this amount or more is flagged **Possible asset (jewellery, "
+        "phone, appliance ...)** in Credit Card - Book spends. The flag is a prompt "
+        "to look; it never moves a spend to an asset account._"
+    )
+    with gr.Row():
+        large_spend_num = gr.Number(
+            label="Large-spend threshold (rupees)",
+            value=_load_large_spend_threshold(),
+            precision=2, minimum=1, interactive=True,
+        )
+        large_spend_btn = gr.Button("Save threshold", variant="secondary")
+    large_spend_status = gr.Markdown("")
+    large_spend_btn.click(fn=_save_large_spend_threshold, inputs=[large_spend_num],
+                          outputs=[large_spend_status])
+
+    # -----------------------------------------------------------------------
+    # Section 3: About.
+    # -----------------------------------------------------------------------
+    from ..webui import APP_TITLE  # deferred: webui imports this module at load time
+
+    gr.Markdown("### About")
+
+    build_note = " (dirty build)" if _buildinfo.BUILD_DIRTY else ""
+    gr.Markdown(
+        f"**{APP_TITLE}** — LLM-powered document processing skills, packaged "
+        f"as a single portable folder.\n\n"
+        f"**Version:** {_buildinfo.VERSION}{build_note}\n\n"
+        f"_Commit {_buildinfo.COMMIT_SHA}, built {_buildinfo.BUILD_TIMESTAMP}_\n\n"
+        f"[Repository]({_repo_url()}) · [Releases]({_repo_url()}/releases)"
+    )
+
+    update_status = gr.Markdown("_Click Check for updates to see if a newer version is available._")
+    check_updates_btn = gr.Button("Check for updates", variant="secondary")
+    check_updates_btn.click(fn=_check_for_updates, outputs=[update_status])

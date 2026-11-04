@@ -1,0 +1,2380 @@
+"""
+build_tds_journals.py — Form 26AS (Parts I & VI) -> GnuCash multi-split journal CSV.
+
+Reads the Part I (TDS) and Part VI (TCS) sub-totals from a Convert-tab 26AS
+workbook and the user's GnuCash account tree, and emits one balanced journal
+transaction per deductor / collector, in four categories driven by the section:
+
+  A. Interest   (sections 194A, 193)
+       Dr  Expense:TDS on Interest                  = Tax Deducted          (a)
+       Dr  Income:Interest Income:Interest on FD    = Amount - Tax  (c - a)     [fixed generic]
+       Cr  <matched interest income account>        = Amount Paid/Credited  (c)
+  B. Dividend   (section 194)
+       Dr  Expense:TDS on Dividend                  = Tax Deducted          (a)
+       Cr  <matched dividend income account>        = Tax Deducted          (a)
+  C. Partnership (section 194T)
+       Dr  Expense:TDS on Partnership Payments      = Tax Deducted          (a)   [emitted as-is]
+       Cr  <matched remuneration income account>    = Tax Deducted          (a)
+  T. TCS         (Part VI, sections 206C*)
+       Dr  Expense:TCS on Foreign Trip              = Tax Collected         (a)
+       Cr  Expense:Drawings                         = Tax Collected         (a)
+     Only the TAX moves — the spend it was collected on is already booked.
+     Both accounts are discovered from the chart, and the credit leg is
+     caller-configurable (Bank instead of Drawings when the TCS was paid
+     across separately).
+  G. 15G/15H    (Part II — TDS for 15G/15H)
+       Dr  Expense:TDS on Interest                  = Tax Deducted          (a)   [normally 0]
+       Dr  Income:Interest Income:Interest on FD    = Amount - Tax  (c - a)     [fixed generic]
+       Cr  <matched interest income account>        = Amount Paid/Credited  (c)
+     A RECLASSIFICATION, not new income: the 15G/15H interest is already
+     booked in the generic FD bucket, so this moves it into the specific
+     NBFC/deductor account. Tax deducted is statutorily supposed to be zero
+     for a 15G/15H deductor (that is the point of filing the form) — with
+     a=0 this degenerates to a plain 2-split Dr Interest on FD / Cr NBFC. If
+     tax is nonetheless non-zero it posts exactly like Category A's 3-split
+     (same maths; only the category letter, id series and description
+     differ — see CATEGORY_SERIES below). Category is decided by WHICH PART
+     the row came from, NEVER by section lookup — Part II rows are almost
+     always section 194A too, and a section-based lookup would silently
+     merge them into genuine Part I TDS.
+
+Amounts come from the per-party sub-totals (header totals) in Part I / Part VI.
+Each transaction is dated 31-March of the current calendar year.
+
+Account matching is DETERMINISTIC (token overlap + acronym + alias table +
+single-candidate rule). Anything that cannot be matched with confidence is
+routed to Liabilities:Suspense and flagged in the review for LLM/manual
+resolution. No network or LLM calls happen here — this module is pure and
+testable.
+
+CSV dialect: GnuCash multi-split transaction import. One row per split. The
+Date / Transaction ID / Description are REPEATED on every split row of a
+transaction — GnuCash groups splits by matching transaction fields / shared
+Transaction ID, and does NOT reliably attach blank-date continuation rows
+(blank rows import as parse errors). A single signed "Amount" column holds the
+split value using GnuCash's convention (Debit = positive, Credit = negative);
+each transaction's Amounts sum to zero. Map it to the importer's "Amount"
+column type (or "Amount (Negated)" if a build imports the signs reversed).
+Transfer Amount / Transfer Account are NOT used: those exist only in two-split
+mode (one row = one 2-split transaction), and the Interest journals have three
+splits, so the file must be multi-split. Account is the full colon path WITHOUT
+the "Root Account:" prefix. Import with the "Multi-split" box ticked, skipping
+the 1 header line.
+
+Usage:
+  python build_tds_journals.py <26as.xlsx> <book.gnucash> <out.csv>
+      [overrides.json] [--partner-comp-configured]
+      [--tds-expense-account <account path>]
+
+TDS-13: for entities with partner_comp_accounts configured (the caller
+passes --partner-comp-configured plus the entity's tds_expense account via
+--tds-expense-account), Category C (s.194T) rows stay out of both
+importable CSVs as before (skill_partner_comp_recon already books them
+month-by-month), and a read-only reconciliation compares 26AS's own
+per-month s.194T TDS against what that journal has actually posted to
+tds_expense in the book -- see reconcile_s194t()/S194TReco above.
+"""
+from __future__ import annotations
+
+import csv
+import datetime as _dt
+import gzip
+import re
+import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Optional
+
+from openpyxl import load_workbook
+
+# tds_learnings.py is a sibling script, not part of the `agents` package --
+# this module runs as a subprocess (see the module docstring and tools.py's
+# _run_script()) and cannot rely on `agents` being importable in a frozen
+# child. Same sys.path-insert pattern used elsewhere in this codebase for
+# sibling-script imports (e.g. skill_gnucash_intercompany_matrix's
+# matrix_recon.py).
+if str(Path(__file__).parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).parent))
+import tds_learnings  # noqa: E402
+# IMP-15 4b: the shared already-in-book rule. This script runs as its own
+# process, so it finds the module by path, not through the `agents` package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+import book_check as shared_book_check  # noqa: E402
+from part_labels import PART_II_LABEL  # noqa: E402
+
+# -------------------- fixed account names --------------------
+
+ACC_TDS_INTEREST = "Expense:TDS on Interest"
+ACC_TDS_DIVIDEND = "Expense:TDS on Dividend"
+ACC_TDS_PARTNERSHIP = "Expense:TDS on Partnership Payments"  # may not exist; emitted as-is
+ACC_INTEREST_ON_FD = "Income:Interest Income:Interest on FD"  # fixed generic (Category A debit b)
+ACC_SUSPENSE = "Liabilities:Suspense"
+
+# Category T (TCS, Part VI). The debit is the tax the collector took off the
+# assessee — a credit claimable in the return, so it must reach the books or
+# the refund is understated. The contra is the personal spending the collection
+# rode on (a foreign tour package, an LRS remittance), which in these books is
+# already sitting in Drawings: the journal reclassifies that slice of Drawings
+# into a recoverable tax. Both are defaults — the caller may override either,
+# e.g. to credit Bank when the TCS was paid separately rather than bundled into
+# the spend.
+ACC_TCS_DEFAULT = "Expense:TCS on Foreign Trip"
+ACC_DRAWINGS = "Expense:Drawings"
+
+CURRENCY = "INR"
+
+# Section -> category. TCS sections (206C...) are matched by prefix, not by
+# this table, because the sub-section suffix varies (206CQ foreign remittance /
+# tour package, 206CR sale of goods, 206CL motor vehicle, ...) and they all
+# post identically.
+SECTION_CATEGORY = {
+    "194A": "A", "193": "A",
+    "194": "B",
+    "194T": "C",
+}
+
+TCS_SECTION_PREFIX = "206C"
+
+# Category -> Transaction ID series prefix. SINGLE SOURCE OF TRUTH: both this
+# module's write_csv() and ui/tabs/tds_journal_review.py's _txn_id_for() must
+# resolve a category to the same series, or the review screen's Save path
+# builds a Transaction ID that doesn't exist in the journal CSV and silently
+# skips the row (see series_for_category's docstring). The review tab imports
+# this dict rather than restating it.
+CATEGORY_SERIES = {
+    "A": "TDSJ", "B": "TDSJ", "C": "TDSJ",   # Part I (TDS)
+    "T": "TCSJ",                              # Part VI (TCS)
+    "G": "15GJ",                              # Part II (15G/15H)
+    "?": "TDSJ",  # unhandled/mixed section (build_journals' placeholder) —
+                  # already routed Suspense/Suspense on both legs, so the
+                  # series choice doesn't affect the books; kept as "TDSJ"
+                  # only to preserve pre-existing behaviour, not because it
+                  # means anything.
+}
+
+
+# Part II's series token, derived from CATEGORY_SERIES rather than restated
+# as the literal "15GJ" -- split_part_ii() (below) and anything that needs to
+# recognise a Part II Transaction ID must key off this constant, so a future
+# rename of the series in CATEGORY_SERIES can't silently desync the splitter
+# from the id the journal was actually built with.
+PART_II_SERIES = CATEGORY_SERIES["G"]
+
+
+def series_for_category(category: str) -> str:
+    """Resolve a Journal.category to its Transaction ID series prefix.
+
+    Raises ValueError on any category not listed in CATEGORY_SERIES rather
+    than silently defaulting to "TDSJ" — a wrong series would build a
+    Transaction ID that doesn't exist in the journal CSV, and the review
+    screen's Save path would then skip the row without any indication of why
+    (see ui/tabs/tds_journal_review.py's _find_credit_split). "?" (the
+    placeholder build_journals() uses for an unhandled section) IS listed,
+    mapped to "TDSJ", purely to preserve pre-existing behaviour for those
+    already-Suspense-routed journals — not because it carries any category
+    meaning of its own.
+    """
+    try:
+        return CATEGORY_SERIES[(category or "").strip().upper()]
+    except KeyError:
+        raise ValueError(
+            f"no Transaction ID series defined for category {category!r} — "
+            "add it to CATEGORY_SERIES"
+        ) from None
+
+# Alias expansion for matching: maps a token found in an ACCOUNT name to the
+# set of tokens it stands for in a DEDUCTOR name (and vice-versa via expansion).
+ALIASES = {
+    # TDS-02: "BANK" is in every bank's name, so it must never be what ties a payer to BoB.
+    "BOB": {"BARODA"},
+    "EPF": {"PROVIDENT", "FUND"},
+    "PF": {"PROVIDENT", "FUND"},
+    "HDFC": {"HDFC"},
+    "ICICI": {"ICICI"},
+    "SBM": {"SBM"},
+    "PNB": {"PUNJAB", "NATIONAL"},
+    "LIC": {"LIFE", "INSURANCE"},
+}
+
+# Legal / generic noise tokens stripped from deductor names before matching.
+STOPWORDS = {
+    "LIMITED", "LTD", "LIMITE", "COMPANY", "CO", "PRIVATE", "PVT", "LLP",
+    "INVESTMENT", "INVESTMENTS", "FINANCE", "AND", "THE", "OF", "OFFICE",
+    "INDIA", "SERVICES", "SERVICE", "REGIONAL", "COMMISSIONER", "BANDRA",
+    "EAST", "WEST", "NORTH", "SOUTH", "INC", "CORPORATION", "CORP",
+}
+
+# Account-name decoration stripped before matching (keeps the entity token).
+ACC_NOISE = {
+    "INTEREST", "ON", "FROM", "FD", "BOND", "DIVIDEND", "SHARES", "REMUNERATION",
+    "TAXABLE", "BANK", "PARTNERSHIP", "MF", "INCOME",
+}
+
+
+# -------------------- data classes --------------------
+
+@dataclass
+class Deductor:
+    sr: int
+    name: str
+    sections: tuple
+    amount_paid: float
+    tax_deducted: float
+    tds_deposited: float
+    tan: str = ""  # column 3 ("TAN of Deductor" / "TAN of Collector"); may be blank
+
+
+@dataclass
+class Account:
+    path: str          # full path WITHOUT "Root Account:" prefix
+    leaf: str
+    type: str
+    special: bool = False  # placeholder/hidden/etc. — not a valid post target
+    # IMP-09: the hard block. ONLY hidden (own or inherited from any ancestor)
+    # and placeholder (own only). tax-related / opening-balance are NOT blocked.
+    blocked: bool = False
+
+
+@dataclass
+class Split:
+    account: str
+    debit: float = 0.0
+    credit: float = 0.0
+
+
+@dataclass
+class S194TReco:
+    """Read-only reconciliation of 26AS section-194T TDS against the Partner
+    Compensation Reconciliation journal's own monthly `tds_expense` postings (TDS-09's design
+    is unchanged -- that journal's leg is never written to here, only read).
+
+    Only meaningful for entities with partner_comp_accounts configured (the
+    caller must not construct/surface this for an entity without one -- see
+    reconcile_s194t's docstring and TDS-13 brief 1.4).
+
+    status is one of:
+      "OPEN"     -- nothing at all posted to tds_expense in the FY yet
+                    (loud: run the partner recon first).
+      "MATCH"    -- every month (and the FY total) agrees within Re 1.
+      "PARTIAL"  -- some months posted, but at least one 26AS month has NO
+                    matching book posting at all (loud: names the missing
+                    month(s)).
+      "VARIANCE" -- posted, but at least one month's amount differs from
+                    26AS by more than Re 1 (loud: names the month(s)).
+    """
+    applicable: bool
+    status: str = ""
+    message: str = ""
+    months_26as: dict = field(default_factory=dict)
+    months_book: dict = field(default_factory=dict)
+
+    @property
+    def loud(self) -> bool:
+        return self.status != "MATCH"
+
+
+@dataclass
+class Journal:
+    sr: int
+    deductor: str
+    category: str
+    section_label: str
+    splits: list = field(default_factory=list)
+    credit_account: str = ""
+    credit_confidence: str = ""        # High / Medium / Low / Suspense / Ambiguous
+    credit_basis: str = ""
+    candidates: list = field(default_factory=list)
+    tied_candidates: list = field(default_factory=list)  # populated only when Ambiguous
+    needs_review: bool = False
+    excluded_from_journal: bool = False  # Category C, partner-comp already books it
+    tan: str = ""  # deductor/collector TAN, carried through for the review CSV/tab
+    # TDS-04: placeholder/hidden accounts this journal would have posted to
+    # and was NOT allowed to (the leg was moved to Suspense instead).
+    blocked_targets: list = field(default_factory=list)
+    # TDS-15 (Category A only): where the NET interest (c - a) is booked.
+    #   source: "learned" (a prior human pick for this deductor), "unique match"
+    #   (exactly one FD/bond/EPF asset account matches the deductor),
+    #   "generic" (the generic Interest-on-FD account, as before).
+    # choice_needed: two or more asset accounts match -- NOT guessed; the generic
+    #   account is used meanwhile and the row is sent to Review.
+    net_interest_account: str = ""
+    net_interest_source: str = ""
+    net_interest_choice_needed: bool = False
+    net_interest_candidates: list = field(default_factory=list)
+
+    @property
+    def total_debit(self) -> float:
+        return round(sum(s.debit for s in self.splits), 2)
+
+    @property
+    def total_credit(self) -> float:
+        return round(sum(s.credit for s in self.splits), 2)
+
+    @property
+    def balanced(self) -> bool:
+        return abs(self.total_debit - self.total_credit) < 0.005
+
+
+# -------------------- 26AS xlsx parsing --------------------
+
+def parse_part_i(xlsx_path: Path) -> tuple[list[Deductor], str]:
+    """Return (deductors, financial_year) from a Convert-tab 26AS workbook."""
+    wb = load_workbook(xlsx_path, data_only=True)
+    if "Part I" not in wb.sheetnames:
+        raise ValueError("Workbook has no 'Part I' sheet — is this a 26AS Convert output?")
+    return _parse_party_sheet(wb["Part I"])
+
+
+def parse_parts(xlsx_path: Path) -> tuple[list[Deductor], list[Deductor], list[Deductor], str]:
+    """Return (part_i_deductors, part_ii_deductors, part_vi_collectors, financial_year).
+
+    Any part may be empty — a 26AS with only TCS and no TDS is perfectly
+    valid, and so is one with no 15G/15H deductors — but a workbook carrying
+    NONE of the three sheets is not a Convert output and is rejected, so a
+    wrong file never silently produces an empty journal.
+
+    Part II shares columns 1/2/4/5/6/8 (Sr, Name, the three header totals,
+    Section) with Part I/VI byte-for-byte — the missing "Status of Booking"
+    column only shifts columns FROM 10 onward, which _parse_party_sheet never
+    reads — so the same reader serves all three sheets unchanged.
+    """
+    wb = load_workbook(xlsx_path, data_only=True)
+    if not ({"Part I", "Part II", "Part VI"} & set(wb.sheetnames)):
+        raise ValueError("Workbook has none of 'Part I' / 'Part II' / 'Part VI' "
+                         "— is this a 26AS Convert output?")
+    deductors, fy = ([], "")
+    if "Part I" in wb.sheetnames:
+        deductors, fy = _parse_party_sheet(wb["Part I"])
+    g_deductors, fy2 = ([], "")
+    if "Part II" in wb.sheetnames:
+        g_deductors, fy2 = _parse_party_sheet(wb["Part II"])
+    collectors, fy6 = ([], "")
+    if "Part VI" in wb.sheetnames:
+        collectors, fy6 = _parse_party_sheet(wb["Part VI"])
+    return deductors, g_deductors, collectors, (fy or fy2 or fy6)
+
+
+def _parse_party_sheet(ws) -> tuple[list[Deductor], str]:
+    """Read a deductor/collector sheet (Part I, Part II or Part VI — identical
+    geometry through column 8; see parse_parts).
+
+    For Part VI the same fields carry the TCS equivalents: amount_paid is the
+    amount paid/DEBITED and tax_deducted the tax COLLECTED.
+    """
+    # Financial year lives in the meta strip (row 2).
+    fy = ""
+    meta = ws.cell(2, 1).value or ""
+    m = re.search(r"Financial Year:\s*(\d{4}-\d{2})", str(meta))
+    if m:
+        fy = m.group(1)
+
+    from collections import OrderedDict
+    hdr: "OrderedDict[int, list]" = OrderedDict()
+    secs: dict[int, list] = {}
+    for r in range(4, ws.max_row + 1):
+        a = ws.cell(r, 1).value
+        if not isinstance(a, int):
+            continue
+        sr = a
+        if sr not in hdr:
+            # Column 3 is "TAN of Deductor" (Part I/II) / "TAN of Collector"
+            # (Part VI) -- see skill_26as/scripts/extract_26as_to_xlsx.py's
+            # P1_HEADER_TOKENS/P6_HEADER_TOKENS. Previously silently skipped
+            # (only columns 1/2/4/5/6/8 were read); now carried through so
+            # the learnings store (tds_learnings.py) can key on it.
+            hdr[sr] = [ws.cell(r, 2).value, ws.cell(r, 3).value, ws.cell(r, 4).value,
+                       ws.cell(r, 5).value, ws.cell(r, 6).value]
+            secs[sr] = []
+        sec = ws.cell(r, 8).value
+        if sec is not None and str(sec) not in secs[sr]:
+            secs[sr].append(str(sec))
+
+    deductors = []
+    for sr, (name, tan, amt, tax, tds) in hdr.items():
+        deductors.append(Deductor(
+            sr=sr, name=str(name).strip(), sections=tuple(secs[sr]),
+            amount_paid=float(amt or 0), tax_deducted=float(tax or 0),
+            tds_deposited=float(tds or 0),
+            tan=str(tan).strip() if tan is not None else "",
+        ))
+    return deductors, fy
+
+
+def parse_194t_monthly(xlsx_path: Path) -> dict[str, float]:
+    """Per-month totals of section-194T Tax Deducted, read directly from the
+    Part I sheet's raw per-TRANSACTION rows -- NOT the FY sub-totals
+    _parse_party_sheet() reads (that function only keeps the first row's
+    header fields per Sr and a deduplicated set of section strings; it never
+    reads columns 9/11/14). Sr/name/tan/FY-totals (columns 1-6) repeat on
+    every transaction row of a deductor and column 8 is the Section, exactly
+    as _parse_party_sheet relies on -- see skill_26as/scripts/
+    extract_26as_to_xlsx.py's build_part_i(). Column 9 is the Transaction
+    Date (string "DD-Mon-YYYY") -- the date of payment/credit, which is the
+    same month the Partner Compensation Reconciliation journal accrues and dates its own
+    monthly posting on (jv_emitter.py's _month_end/_monthly_journal) --
+    and column 14 is that transaction's own Tax Deducted. Sub-total rows
+    (column 1 a literal "#<sr>" string) and the grand-total row (column 1
+    blank) are skipped by the same `isinstance(a, int)` gate
+    _parse_party_sheet uses.
+
+    Returns {"YYYY-MM": total_tax_deducted} for section "194T" rows only. A
+    row with an unparsable date or blank tax is skipped (not counted) rather
+    than raising, since this reconciliation is read-only best-effort audit,
+    not the primary journal build.
+    """
+    wb = load_workbook(xlsx_path, data_only=True)
+    if "Part I" not in wb.sheetnames:
+        return {}
+    ws = wb["Part I"]
+    out: dict[str, float] = {}
+    for r in range(4, ws.max_row + 1):
+        a = ws.cell(r, 1).value
+        if not isinstance(a, int):
+            continue
+        sec = ws.cell(r, 8).value
+        if str(sec or "").strip() != "194T":
+            continue
+        txn_date = ws.cell(r, 9).value
+        tax = ws.cell(r, 14).value
+        if not txn_date or tax in (None, ""):
+            continue
+        try:
+            dt = _dt.datetime.strptime(str(txn_date).strip(), "%d-%b-%Y").date()
+        except ValueError:
+            continue
+        try:
+            tax_f = float(tax)
+        except (TypeError, ValueError):
+            continue
+        key = f"{dt.year:04d}-{dt.month:02d}"
+        out[key] = round(out.get(key, 0.0) + tax_f, 2)
+    return out
+
+
+# GnuCash XML namespaces, self-contained (this module runs as a subprocess,
+# see the sys.path-insert comment near the top of this file) -- mirrors
+# skill_gnucash_intercompany/scripts/reconcile_intercompany.py's constants,
+# adapted rather than imported per this codebase's sibling-script convention.
+_GNC_NS = "{http://www.gnucash.org/XML/gnc}"
+_ACT_NS = "{http://www.gnucash.org/XML/act}"
+_TRN_NS = "{http://www.gnucash.org/XML/trn}"
+_SPLIT_NS = "{http://www.gnucash.org/XML/split}"
+_TS_NS = "{http://www.gnucash.org/XML/ts}"
+
+
+def _parse_split_amount(text: Optional[str]) -> float:
+    """GnuCash split values are either a plain decimal or an "n/d" fraction."""
+    text = (text or "0/1").strip()
+    if "/" in text:
+        num, den = text.split("/", 1)
+        try:
+            return float(num) / float(den)
+        except (ValueError, ZeroDivisionError):
+            return 0.0
+    try:
+        return float(text)
+    except ValueError:
+        return 0.0
+
+
+def monthly_debits_for_account(gnucash_path: Path, account_path: str,
+                                lo: Optional[_dt.date] = None,
+                                hi: Optional[_dt.date] = None) -> dict[str, float]:
+    """Read-only: {"YYYY-MM": signed total} of every split posted to
+    `account_path` in the .gnucash book, restricted to [lo, hi] inclusive by
+    the transaction's posted date when given. GnuCash's Debit-positive /
+    Credit-negative convention (matches this module's own Split dataclass) --
+    a monthly `tds_expense` DEBIT total is therefore positive here, the same
+    sign the Partner Compensation Reconciliation journal books it with.
+
+    Adapted from skill_gnucash_intercompany/scripts/reconcile_intercompany.py's
+    load_book/extract_movements pattern rather than importing it (this module
+    cannot rely on `agents` being importable in a frozen subprocess -- see
+    the sys.path-insert comment near the top of this file).
+
+    Never writes to gnucash_path. Returns {} if no account in the book
+    matches account_path exactly.
+    """
+    raw = gnucash_path.read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+
+    by_id: dict[str, tuple[str, Optional[str]]] = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    target_guids = {aid for aid in by_id if full_path(aid) == account_path}
+    if not target_guids:
+        return {}
+
+    out: dict[str, float] = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        posted = trn.find(f"{_TRN_NS}date-posted/{_TS_NS}date")
+        if posted is None or not posted.text:
+            continue
+        try:
+            dt = _dt.datetime.strptime(posted.text.strip()[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if lo and dt < lo:
+            continue
+        if hi and dt > hi:
+            continue
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in target_guids:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            amt = _parse_split_amount(val.text if val is not None else None)
+            key = f"{dt.year:04d}-{dt.month:02d}"
+            out[key] = round(out.get(key, 0.0) + amt, 2)
+    return out
+
+
+RECONCILIATION_TOLERANCE = 1.0  # Re 1, the standing tolerance convention
+                                 # used elsewhere in this codebase's recos
+                                 # (e.g. skill_partner_comp_recon/engine.py) --
+                                 # no shared constant is importable here (this
+                                 # module runs as a stand-alone subprocess),
+                                 # so it is restated as a local literal.
+
+
+def _fy_bounds(fy: str) -> Optional[tuple]:
+    """"2025-26" -> (date(2025,4,1), date(2026,3,31)), or None if fy doesn't
+    parse (in which case the book read is left unbounded rather than wrongly
+    scoped)."""
+    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
+    if not m:
+        return None
+    y1 = int(m.group(1))
+    return _dt.date(y1, 4, 1), _dt.date(y1 + 1, 3, 31)
+
+
+def reconcile_s194t(xlsx_path: Path, gnucash_path: Path,
+                    tds_expense_account: str,
+                    fy: Optional[str] = None) -> Optional[S194TReco]:
+    """Read-only s.194T reconciliation (TDS-13): 26AS section-194T TDS, by
+    month and for the FY, against the Partner Compensation Reconciliation journal's own
+    monthly `tds_expense` postings already in the book. Never writes to the
+    book or the CSV -- this only reads what skill_partner_comp_recon already
+    posted (TDS-09's design: that journal's tds_expense leg is unchanged).
+
+    Only call this for an entity with partner_comp_accounts configured --
+    an entity without one has no reco item at all (brief 1.4); the caller
+    (run()) gates on that, not this function.
+
+    Returns None when the 26AS workbook carries no section-194T amounts at
+    all (nothing to reconcile -- distinct from "OPEN", which means 26AS DOES
+    have 194T but the book has nothing posted for it yet).
+
+    `fy` is the already-parsed financial year string ("2025-26") when the
+    caller has it (run()); if omitted, it is derived from the workbook via
+    parse_part_i() so this function is also usable standalone (tools.py's
+    final_summary()).
+    """
+    months_26as = parse_194t_monthly(xlsx_path)
+    if not any(abs(v) >= 0.01 for v in months_26as.values()):
+        return None
+
+    if fy is None:
+        _, fy = parse_part_i(xlsx_path)
+
+    bounds = _fy_bounds(fy)
+    lo, hi = bounds if bounds else (None, None)
+    months_book = monthly_debits_for_account(gnucash_path, tds_expense_account, lo, hi)
+
+    total_book = round(sum(months_book.values()), 2)
+    if abs(total_book) < 0.01:
+        return S194TReco(
+            applicable=True, status="OPEN",
+            message="partner journal not yet posted -- run the partner recon",
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    missing: list[str] = []
+    variant: list[str] = []
+    for m in sorted(months_26as):
+        as_amt = months_26as[m]
+        if abs(as_amt) < 0.01:
+            continue
+        book_amt = months_book.get(m, 0.0)
+        if abs(book_amt) < 0.01:
+            missing.append(m)
+        elif abs(as_amt - book_amt) > RECONCILIATION_TOLERANCE:
+            variant.append(m)
+
+    if not missing and not variant:
+        return S194TReco(
+            applicable=True, status="MATCH",
+            message="26AS s.194T TDS matches the Partner Comp journal's "
+                    "tds_expense postings (within Re 1) for every month.",
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    if missing and not variant:
+        return S194TReco(
+            applicable=True, status="PARTIAL",
+            message=("partner journal only partly posted -- missing month(s): "
+                     + ", ".join(missing)),
+            months_26as=months_26as, months_book=months_book,
+        )
+
+    named = sorted(set(variant) | set(missing))
+    return S194TReco(
+        applicable=True, status="VARIANCE",
+        message=("26AS s.194T TDS does not match the Partner Comp journal's "
+                 "tds_expense postings for month(s): " + ", ".join(named)),
+        months_26as=months_26as, months_book=months_book,
+    )
+
+
+# -------------------- gnucash account parsing --------------------
+
+# GnuCash marks "special account types" via KVP slots on the account element.
+# Such accounts are NOT valid posting targets and must never be offered as a
+# credit-account candidate (a placeholder header like 'Income:Interest Income'
+# cannot receive splits directly; a hidden account is retired). These keys are
+# the boolean 'true'/'false' slots; 'opening-balance' is handled separately as
+# an 'equity-type' string slot.
+#
+# This list is a SELF-CONTAINED mirror of agents.gnucash_accounts.BOOL_FLAG_KEYS
+# — this script runs as a stand-alone subprocess and cannot rely on `agents`
+# being importable in a frozen child. tests/test_gnucash_accounts.py asserts the
+# two lists stay identical so they never drift.
+SPECIAL_BOOL_FLAG_KEYS = ("placeholder", "hidden", "tax-related",
+                          "auto-interest-transfer")
+_SPECIAL_TRUE_VALUES = frozenset({"true", "t", "1", "yes", "y"})
+_EQUITY_TYPE_KEY = "equity-type"
+_OPENING_BALANCE_VALUE = "opening-balance"
+
+
+def _account_is_special(acc_el: ET.Element, ns: dict) -> bool:
+    """True if a <gnc:account> element carries any special-type flag slot."""
+    slots = acc_el.find("act:slots", ns)
+    if slots is None:
+        return False
+    for slot in list(slots):                       # direct <slot> children only
+        key = value = ""
+        for child in slot:
+            local = child.tag.rsplit("}", 1)[-1]
+            if local == "key":
+                key = (child.text or "").strip()
+            elif local == "value":
+                value = (child.text or "").strip()
+        if key in SPECIAL_BOOL_FLAG_KEYS and value.lower() in _SPECIAL_TRUE_VALUES:
+            return True
+        if key == _EQUITY_TYPE_KEY and value.lower() == _OPENING_BALANCE_VALUE:
+            return True
+    return False
+
+
+# IMP-09: self-contained mirror of agents.gnucash_accounts.BLOCKING_FLAGS (this
+# script cannot import `agents` in a frozen child). tests/test_gnucash_accounts.py
+# pins the two and checks that both guards agree on the same book.
+BLOCKING_FLAGS = ("hidden", "placeholder")
+
+
+def _account_flag_set(acc_el: ET.Element, ns: dict) -> frozenset:
+    """Which BLOCKING_FLAGS are set on a <gnc:account> element."""
+    slots = acc_el.find("act:slots", ns)
+    out = set()
+    if slots is None:
+        return frozenset()
+    for slot in list(slots):
+        key = value = ""
+        for child in slot:
+            local = child.tag.rsplit("}", 1)[-1]
+            if local == "key":
+                key = (child.text or "").strip()
+            elif local == "value":
+                value = (child.text or "").strip()
+        if key in BLOCKING_FLAGS and value.lower() in _SPECIAL_TRUE_VALUES:
+            out.add(key)
+    return frozenset(out)
+
+
+def load_accounts(gnucash_path: Path) -> list[Account]:
+    raw = gnucash_path.read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    ns = {"gnc": "http://www.gnucash.org/XML/gnc",
+          "act": "http://www.gnucash.org/XML/act"}
+    by_id = {}
+    block_flags: dict = {}
+    for a in root.iter("{http://www.gnucash.org/XML/gnc}account"):
+        name = a.find("act:name", ns).text
+        aid = a.find("act:id", ns).text
+        typ = a.find("act:type", ns).text
+        par = a.find("act:parent", ns)
+        by_id[aid] = (name, par.text if par is not None else None, typ,
+                      _account_is_special(a, ns))
+        block_flags[aid] = _account_flag_set(a, ns)
+
+    def full_path(aid):
+        parts = []
+        cur = aid
+        while cur and cur in by_id:
+            n, p, _t, _s = by_id[cur]
+            parts.append(n)
+            cur = p
+        return list(reversed(parts))
+
+    accounts = []
+    for aid, (name, _p, typ, special) in by_id.items():
+        parts = full_path(aid)
+        # Drop the root account name ("Root Account") from the path.
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        if not parts:
+            continue
+        blocked = "hidden" in block_flags.get(aid, ()) or "placeholder" in block_flags.get(aid, ())
+        anc, seen = _p, set()
+        while not blocked and anc and anc in by_id and anc not in seen:
+            seen.add(anc)
+            if "hidden" in block_flags.get(anc, ()):
+                blocked = True
+            anc = by_id[anc][1]
+        accounts.append(Account(path=":".join(parts), leaf=parts[-1], type=typ,
+                                special=special, blocked=blocked))
+    return accounts
+
+
+def find_account(accounts: list[Account], path: str) -> Optional[Account]:
+    for a in accounts:
+        if a.path == path:
+            return a
+    return None
+
+
+# -------------------- matching --------------------
+
+def _tokens(s: str) -> list[str]:
+    return [t for t in re.split(r"[^A-Za-z0-9]+", s.upper()) if t]
+
+
+def _sig_tokens(s: str, drop: set) -> set:
+    return {t for t in _tokens(s) if t not in drop and len(t) > 1}
+
+
+def _acronym(tokens: list[str]) -> str:
+    return "".join(t[0] for t in tokens if t)
+
+
+# Tokens that are generic to a fixed-deposit interest account (i.e. NOT a
+# bank/entity name). Used to tell the generic 'Interest on FD' account apart
+# from deductor-specific ones like 'Interest on BOB - FD'.
+FD_NOISE = {"INTEREST", "ON", "FROM", "INCOME", "RECEIVED", "EARNED", "OTHER",
+            "THE", "A", "OF", "FD", "FDS", "FIXED", "TERM", "DEPOSIT", "DEPOSITS"}
+
+
+def find_generic_fd_account(accounts: list[Account]) -> Optional[str]:
+    """Deterministically locate the GENERIC fixed-deposit interest income
+    account — the Category-A second debit ('Interest on FD' in the spec).
+
+    Its exact name varies per book: 'Interest on FD', 'Interest on Fixed
+    Deposit', 'FD Interest', 'Interest on Fixed Deposits', etc. We fuzzy-match:
+    an INCOME account under an interest subtree that mentions FD / Fixed Deposit
+    and carries NO specific bank/entity token (a specific token means it's a
+    deductor account like 'Interest on BOB - FD', not the generic one)."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.blocked:
+            continue  # placeholder/hidden — not a valid post target
+        if a.type != "INCOME" or "interest" not in a.path.lower():
+            continue
+        toks = _tokens(a.leaf)
+        tokset = set(toks)
+        # TDS-03: also 'Interest on FDs', 'Fixed Deposits', 'Term Deposit(s)'
+        # and a bare 'Deposits'. A savings / other interest account carries
+        # none of these tokens, so it is still never taken as the FD account.
+        has_fd = bool(tokset & {"FD", "FDS", "DEPOSIT", "DEPOSITS"})
+        if not has_fd:
+            continue
+        entity = {t for t in toks if t not in FD_NOISE and len(t) > 1}
+        if entity:
+            continue  # deductor-specific (e.g. 'Interest on BOB - FD')
+        # If several generic candidates, prefer the shortest (simplest) leaf.
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
+def find_tcs_account(accounts: list[Account]) -> Optional[str]:
+    """Locate the account that carries TCS suffered, e.g. 'TCS on Foreign Trip'.
+
+    Its name varies by what the collection was on ('TCS on Foreign Trip', 'TCS
+    on LRS Remittance', 'TCS Receivable'), so we match on the TCS token rather
+    than a fixed path. Deliberately NOT restricted to one account type: books
+    model this either as an expense reclassified out of Drawings or as an asset
+    (a receivable from the department). Prefer the shortest leaf when several
+    exist, and never a placeholder."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.blocked:
+            continue
+        if "TCS" not in _tokens(a.leaf):
+            continue
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
+def find_drawings_account(accounts: list[Account]) -> Optional[str]:
+    """Locate the Drawings account — the default TCS contra."""
+    best: Optional[Account] = None
+    for a in accounts:
+        if a.blocked:
+            continue
+        if "DRAWINGS" not in _tokens(a.leaf):
+            continue
+        if best is None or len(a.leaf) < len(best.leaf):
+            best = a
+    return best.path if best else None
+
+
+def _candidates_for(category: str, accounts: list[Account],
+                    fd_exclude: str = "") -> list[Account]:
+    """Income accounts in the relevant subtree. Subtree match is case-insensitive
+    and lenient (handles 'Interest Income', 'Interest Received', 'Dividend
+    Income', 'Dividend - Shares', etc.). The generic FD account (fd_exclude) is
+    never offered as a credit candidate, so a deductor can't land a debit and
+    credit on the same account."""
+    out = []
+    for a in accounts:
+        if a.blocked:
+            continue  # placeholder/hidden — never a credit candidate
+        if a.type != "INCOME":
+            continue
+        pl = a.path.lower()
+        if category == "A" and "interest" in pl:
+            if fd_exclude and a.path == fd_exclude:
+                continue
+            out.append(a)
+        elif category == "B" and "dividend" in pl:
+            out.append(a)
+        elif category == "C" and "remuneration" in pl:
+            out.append(a)
+    return out
+
+
+def match_credit_account(deductor: str, category: str,
+                         accounts: list[Account],
+                         fd_account: str = "") -> tuple[Optional[str], str, str, list, list]:
+    """Return (account_path|None, confidence, basis, candidate_paths, tied_paths).
+
+    Matching is FIRST-WINS: when two or more candidates tie on the winning
+    score, the first one in chart order (cands' order, i.e. accounts' order)
+    is still the account returned/posted — this function never routes a tie
+    to Suspense and never picks a different candidate because of a tie. What
+    changes is visibility: a tie at a score that would otherwise be a
+    confident match (>= 1.5, the existing Suspense threshold) is reported as
+    confidence "Ambiguous" instead of "High"/"Medium", with every tied
+    candidate's path in tied_paths and named (with its own hits) in basis —
+    so the caller can flag it for the user to manually confirm which tied
+    candidate is actually correct, without ever silently guessing on their
+    behalf. A tie BELOW the threshold is indistinguishable from any other
+    unconfident result and still returns "Suspense" (tied_paths == []) —
+    "Ambiguous" means "confidently tied", not "equally bad".
+    """
+    cands = _candidates_for(category, accounts, fd_account)
+    cand_paths = [c.path for c in cands]
+    if not cands:
+        return None, "Suspense", "no income accounts in category subtree", [], []
+
+    # Single-candidate rule (e.g. Category C has only 'Remuneration from Partnership').
+    if len(cands) == 1:
+        return cands[0].path, "Medium", "only candidate in category subtree", cand_paths, []
+
+    d_tokens_list = [t for t in _tokens(deductor) if t not in STOPWORDS and len(t) > 1]
+    d_tokens = set(d_tokens_list)
+    d_acro = _acronym(d_tokens_list)
+
+    # Score every candidate first (rather than tracking a running "best" with
+    # a strict '>' comparison) so ties at the winning score can be detected
+    # afterwards — a running strict-greater comparison silently keeps only
+    # the first candidate to reach a score and can never notice that a later
+    # candidate tied it.
+    scored: list[tuple[Account, float, str]] = []
+    for c in cands:
+        c_tokens = _sig_tokens(c.leaf, ACC_NOISE)
+        score = 0.0
+        hits = []
+        # 1) direct shared significant tokens
+        shared = d_tokens & c_tokens
+        if shared:
+            score += 2.0 * len(shared)
+            hits.append("token:" + "/".join(sorted(shared)))
+        # 2) prefix / substring (CHOLA in CHOLAMANDALAM)
+        for ct in c_tokens:
+            for dt in d_tokens:
+                if ct == dt:
+                    continue
+                if len(ct) >= 3 and (dt.startswith(ct) or ct.startswith(dt)):
+                    score += 1.5
+                    hits.append(f"prefix:{ct}~{dt}")
+        # 3) acronym: account token equals deductor acronym (BOB, ABC)
+        for ct in c_tokens:
+            if len(ct) >= 2 and ct == d_acro:
+                score += 2.5
+                hits.append(f"acronym:{ct}")
+        # 4) alias table
+        for ct in c_tokens:
+            alias = ALIASES.get(ct)
+            if alias and (alias & d_tokens):
+                score += 2.0
+                hits.append(f"alias:{ct}")
+        scored.append((c, score, ", ".join(hits)))
+
+    best_score = max(score for _c, score, _hits in scored)
+    if best_score < 1.5:
+        return None, "Suspense", "no confident match", cand_paths, []
+
+    # Ties: every candidate within float-rounding of best_score, in chart
+    # order (the order `cands`/`scored` was built in, i.e. `accounts`' order)
+    # — first-wins picks tied[0], never a different candidate because of the
+    # tie.
+    tied = [(c, hits) for c, score, hits in scored if abs(score - best_score) < 1e-9]
+    best, best_basis = tied[0]
+
+    if len(tied) > 1:
+        tied_paths = [c.path for c, _hits in tied]
+        basis = "; ".join(f"{c.path}: {hits or '(no hits)'}" for c, hits in tied)
+        return best.path, "Ambiguous", basis, cand_paths, tied_paths
+
+    conf = "High" if best_score >= 2.0 else "Medium"
+    return best.path, conf, best_basis, cand_paths, []
+
+
+# -------------------- journal construction --------------------
+
+def categorize(sections: tuple) -> tuple[Optional[str], str]:
+    """Return (category, label). label is the section string for the description."""
+    cats = {SECTION_CATEGORY.get(s) for s in sections}
+    cats.discard(None)
+    label = "/".join(sections)
+    if len(cats) == 1:
+        return cats.pop(), label
+    return None, label  # unknown or mixed -> needs review
+
+
+BLOCKED_MARK = "BLOCKED ACCOUNT"
+
+
+def enforce_postable(journals: list[Journal], accounts: list[Account]) -> list[Journal]:
+    """TDS-04: a placeholder or hidden account is NEVER a posting target.
+
+    Any split that names one is moved to Suspense, the journal is forced to
+    review, and the account is recorded in Journal.blocked_targets so the
+    caller reports it loudly as an account to create / unhide. Without this a
+    chart that only carries the canonical 'Interest on FD' as a placeholder
+    let the FD leg post there, and nothing was flagged.
+    """
+    blocked = {a.path for a in accounts if a.blocked}
+    if not blocked:
+        return journals
+    for j in journals:
+        for sp in j.splits:
+            if sp.account in blocked:
+                if sp.account not in j.blocked_targets:
+                    j.blocked_targets.append(sp.account)
+                sp.account = ACC_SUSPENSE
+        if j.blocked_targets:
+            j.needs_review = True
+            if j.credit_account in blocked:
+                j.credit_account = ACC_SUSPENSE
+                j.credit_confidence = "Suspense"
+            note = (f"{BLOCKED_MARK}: {', '.join(j.blocked_targets)} is a placeholder/hidden "
+                    "account and cannot be posted to - that leg is on Suspense; "
+                    "create or unhide a postable account")
+            if note not in (j.credit_basis or ""):
+                j.credit_basis = ((j.credit_basis + " -- ") if j.credit_basis else "") + note
+    return journals
+
+
+# TDS-15: tokens that mark an account as an interest-bearing INSTRUMENT (the
+# place a fixed deposit / bond / provident-fund balance actually sits).
+NET_INSTRUMENT_TOKENS = {"FD", "FDS", "FIXED", "DEPOSIT", "DEPOSITS", "BOND", "BONDS",
+                         "EPF", "PF", "PROVIDENT", "DEBENTURE", "DEBENTURES", "NCD",
+                         "NCDS", "PPF", "RD"}
+# Words in an asset path that say nothing about WHO the deductor is.
+NET_GENERIC_TOKENS = {"ASSETS", "ASSET", "CURRENT", "INVESTMENTS", "INVESTMENT", "NON",
+                      "LONG", "SHORT", "TERM", "BANK", "ACCOUNT", "FUND", "ACCOUNTS",
+                      "RETIREMENT", "SAVINGS", "SECURITIES"}
+NET_ASSET_TYPES = {"ASSET", "BANK"}
+
+
+def find_net_interest_candidates(deductor_name: str, accounts: list[Account]) -> list[str]:
+    """TDS-15: asset accounts (FD / bond / EPF ...) that belong to this deductor.
+
+    An account qualifies only if it is an ASSET/BANK account that is NOT
+    hidden/placeholder, its path names an interest-bearing instrument, AND it
+    shares a distinguishing word with the deductor (a bare 'Bank', 'FD' or
+    'Limited' is never enough; EPF/PF accounts match through the alias table).
+    Returned in chart order; the caller auto-picks ONLY when exactly one
+    comes back."""
+    d_tokens_list = [t for t in _tokens(deductor_name)
+                     if t not in STOPWORDS and t not in NET_GENERIC_TOKENS
+                     and t not in NET_INSTRUMENT_TOKENS and len(t) > 1]
+    d_tokens = set(d_tokens_list)
+    d_all = {t for t in _tokens(deductor_name) if t not in STOPWORDS}
+    d_acro = _acronym(d_tokens_list)
+    out: list[str] = []
+    for a in accounts:
+        if a.blocked or a.special or a.type not in NET_ASSET_TYPES:
+            continue
+        ptoks = [t for t in _tokens(a.path)]
+        pset = set(ptoks)
+        if not (pset & NET_INSTRUMENT_TOKENS):
+            continue
+        ent = {t for t in ptoks if t not in NET_GENERIC_TOKENS
+               and t not in NET_INSTRUMENT_TOKENS and t not in STOPWORDS and len(t) > 1}
+        hit = bool(ent & d_tokens)
+        if not hit:
+            for ct in ent:
+                if len(ct) >= 3 and any(dt != ct and (dt.startswith(ct) or ct.startswith(dt))
+                                        for dt in d_tokens):
+                    hit = True
+                    break
+        if not hit and d_acro:
+            hit = any(len(ct) >= 2 and ct == d_acro for ct in ent)
+        if not hit:
+            for ct in ptoks:
+                alias = ALIASES.get(ct)
+                if alias and (alias & d_all):
+                    hit = True
+                    break
+        if hit:
+            out.append(a.path)
+    return out
+
+
+def resolve_net_interest_account(d: Deductor, accounts: list[Account], learnings: dict,
+                                 fd_account: str) -> tuple:
+    """TDS-15: -> (account, source, choice_needed, candidates, note).
+
+    Order: (1) the choice remembered for this deductor (a human Review save);
+    (2) the one FD/bond/EPF asset account that matches, ONLY if exactly one;
+    (3) the generic Interest-on-FD account, as before. Two or more matches are
+    never guessed among: generic is used, choice_needed is True. A remembered
+    or matched account that is hidden/placeholder, or no longer in the book, is
+    never used."""
+    by_path = {a.path: a for a in accounts}
+    key = tds_learnings.deductor_key(tds_learnings.DOMAIN_NETINT, d.tan, d.name)
+    learned = learnings.get(key)
+    note = ""
+    if learned:
+        acc = by_path.get(learned)
+        if acc is not None and not acc.blocked and not acc.special:
+            return learned, "learned", False, [], ""
+        note = (f"remembered net-interest account {learned!r} is not a usable account in "
+                "this book (missing, hidden or a header account), so it was not used")
+    cands = find_net_interest_candidates(d.name, accounts)
+    if len(cands) == 1:
+        return cands[0], "unique match", False, cands, note
+    if len(cands) >= 2:
+        return fd_account, "generic", True, cands, note
+    return fd_account, "generic", False, [], note
+
+
+def build_journals(deductors: list[Deductor], accounts: list[Account],
+                   overrides: Optional[dict] = None,
+                   partner_comp_configured: bool = False,
+                   learnings: Optional[dict] = None) -> list[Journal]:
+    """overrides: {deductor_sr (int) -> credit account full path}. Used by the
+    LLM-fallback path to resolve deductors the deterministic matcher sent to
+    Suspense. An override always wins over the deterministic choice.
+
+    learnings: {tds_learnings.deductor_key(...) -> credit account full path},
+    persisted confirmations from a PRIOR human Review-tab save (see
+    tds_learnings.py). Applied only when this run has no explicit `overrides`
+    entry for the same deductor (an override is this run's deliberate,
+    one-off choice and always wins) and takes priority over the deterministic
+    matcher's own scoring -- a human already resolved this exact
+    deductor once; a fresh fuzzy match is never a better answer than that. A
+    learning is applied to Category C exactly like any other category before
+    the partner-comp-exclusion check below runs, so it never bypasses that
+    check: excluded_from_journal is still decided the same way regardless of
+    how credit_account/confidence got set.
+
+    partner_comp_configured: True when this entity has partner_comp_accounts
+    set up (skill_partner_comp_recon/jv_emitter.py's _monthly_journal() books
+    s.194T TDS -- Category C here -- month-by-month already, Dr TDS / Cr
+    Remuneration). Importing this journal's own Category C postings on top of
+    that would double-book the TDS and overstate remuneration by the full TDS
+    amount. When True, Category C journals are still built and still fully
+    populated (so the Review CSV/tab shows them) but are marked
+    excluded_from_journal so build_csv_rows() leaves them out of the
+    importable CSV (and, as a consequence, out of the -partI.csv split too).
+    When False (not configured, or unknown), today's behaviour is kept but
+    made loud: the credit_basis carries an explicit double-booking warning."""
+    overrides = overrides or {}
+    learnings = learnings or {}
+    # The generic FD-interest debit account ('Interest on FD' in the spec) is
+    # fuzzy-found from the actual chart, since its name varies per book
+    # ('Interest on Fixed Deposit', etc.). Falls back to the canonical name
+    # (surfaced under 'accounts to create') only if no FD account exists.
+    fd_account = find_generic_fd_account(accounts) or ACC_INTEREST_ON_FD
+    journals = []
+    for d in deductors:
+        cat, label = categorize(d.sections)
+        j = Journal(sr=d.sr, deductor=d.name, category=cat or "?", section_label=label,
+                    tan=d.tan)
+        a = round(d.tax_deducted, 2)
+        c = round(d.amount_paid, 2)
+
+        if cat is None:
+            # Unknown/mixed section — park the tax on Suspense, flag.
+            j.splits = [Split(ACC_SUSPENSE, debit=a), Split(ACC_SUSPENSE, credit=a)]
+            j.credit_account = ACC_SUSPENSE
+            j.credit_confidence = "Suspense"
+            j.credit_basis = f"unhandled section(s): {label}"
+            j.needs_review = True
+            journals.append(j)
+            continue
+
+        acct, conf, basis, cands, tied = match_credit_account(d.name, cat, accounts, fd_account)
+        j.candidates = cands
+        j.tied_candidates = tied
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_INCOME, d.tan, d.name)
+        learned_acct = learnings.get(learn_key)
+        if d.sr in overrides and overrides[d.sr]:
+            credit_acc = overrides[d.sr]
+            j.credit_account = credit_acc
+            j.credit_confidence = "Override"
+            # FL1.2: an LLM/model-picked override must never skip human
+            # review -- needs_review stays True here (was False) so the row
+            # still surfaces in the Review tab, labelled as a pick to
+            # confirm rather than an already-verified match. Only a human
+            # save from the Review tab (ui/tabs/tds_journal_review.py's
+            # _apply_changes) may clear this flag.
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
+        elif learned_acct:
+            # TDS-11: a prior HUMAN save already resolved this exact
+            # deductor (by TAN, or by normalised name when no TAN was
+            # parsed) -- take priority over a fresh fuzzy match, but this is
+            # still just this run's normal credit-account pick, not a
+            # per-run override, so it is free to be re-learned again on a
+            # later save.
+            credit_acc = learned_acct
+            j.credit_account = credit_acc
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
+        else:
+            credit_acc = acct or ACC_SUSPENSE
+            j.credit_account = credit_acc
+            j.credit_confidence = conf
+            j.credit_basis = basis
+            j.needs_review = acct is None or conf in ("Low", "Suspense", "Ambiguous")
+
+        if cat == "A":
+            net_acc, net_src, net_need, net_cands, net_note = resolve_net_interest_account(
+                d, accounts, learnings, fd_account)
+            j.net_interest_account = net_acc
+            j.net_interest_source = net_src
+            j.net_interest_choice_needed = net_need
+            j.net_interest_candidates = net_cands
+            j.splits = [
+                Split(ACC_TDS_INTEREST, debit=a),
+                Split(net_acc, debit=round(c - a, 2)),
+                Split(credit_acc, credit=c),
+            ]
+            extra = []
+            if net_src in ("learned", "unique match"):
+                extra.append(f"Net interest booked in {net_acc} ({net_src})")
+            if net_need:
+                j.needs_review = True
+                extra.append(
+                    "NET INTEREST ACCOUNT NEEDS A CHOICE: " + str(len(net_cands))
+                    + " asset accounts match this deductor (" + "; ".join(net_cands)
+                    + f") - not guessed; posted to {net_acc} until you pick one")
+            if net_note:
+                extra.append(net_note)
+            if extra:
+                j.credit_basis = ((j.credit_basis + " -- ") if j.credit_basis else "") + " -- ".join(extra)
+        elif cat == "B":
+            j.splits = [
+                Split(ACC_TDS_DIVIDEND, debit=a),
+                Split(credit_acc, credit=a),
+            ]
+        elif cat == "C":
+            j.splits = [
+                Split(ACC_TDS_PARTNERSHIP, debit=a),
+                Split(credit_acc, credit=a),
+            ]
+            if (not partner_comp_configured
+                    and ACC_TDS_PARTNERSHIP not in {x.path for x in accounts}):
+                # TDS-07: the debit account for s.194T TDS is not in the book,
+                # so this row cannot post as it stands. The single-candidate
+                # rule leaves such a row at Medium (no review); force it into
+                # review and say why, whatever the credit-side match was.
+                j.needs_review = True
+                j.credit_basis = (
+                    (j.credit_basis + " -- " if j.credit_basis else "")
+                    + f"MISSING DEBIT ACCOUNT: {ACC_TDS_PARTNERSHIP} is not in "
+                    "the book - create it before importing")
+            if partner_comp_configured:
+                j.excluded_from_journal = True
+                j.needs_review = False
+                j.credit_basis = (
+                    "Booked by the Partner Comp journal - not in this CSV"
+                    + (f" (matcher basis: {basis})" if basis else "")
+                )
+            else:
+                j.credit_basis = (
+                    (j.credit_basis + " -- " if j.credit_basis else "")
+                    + "WARNING: s.194T TDS is also booked month-by-month by the "
+                    "Partner Compensation Reconciliation journal if that entity has "
+                    "partner_comp_accounts configured -- importing both "
+                    "double-books this TDS and overstates remuneration."
+                )
+        journals.append(j)
+    return enforce_postable(journals, accounts)
+
+
+def build_15g_journals(deductors: list[Deductor], accounts: list[Account],
+                       overrides: Optional[dict] = None,
+                       learnings: Optional[dict] = None) -> list[Journal]:
+    """The 15G/15H section of Part II -> Category G journals.
+
+    Reuses Category A's exact posting template and account-matching pool
+    (interest income accounts) — no new maths, per the spec: with tax
+    deducted (a) at its statutory value of 0 this degenerates to a plain
+    2-split Dr Interest on FD / Cr NBFC transfer, and if a is ever nonzero it
+    posts the identical 3-split Category A does.
+
+    Category is hardcoded to "G" here — NEVER derived from
+    categorize()/SECTION_CATEGORY. Part II deductors are almost always
+    section 194A, which SECTION_CATEGORY maps to "A"; routing them through
+    that lookup would silently merge 15G/15H reclassifications into the
+    TDSJ id series, indistinguishable from genuine Part I TDS in the review
+    CSV (see CATEGORY_SERIES / series_for_category).
+
+    overrides: {deductor_sr (int) -> credit account full path}, same shape
+    as build_journals' — Part II Sr numbers restart per part (like Part VI),
+    so this is deliberately a separate map from the Part I overrides.
+
+    learnings: same shape and priority as build_journals' -- Part II shares
+    Category A's DOMAIN_INCOME namespace (both search the income subtree for
+    an interest account), so a deductor learned via a Part I Category A save
+    is reused here too, and vice versa.
+    """
+    overrides = overrides or {}
+    learnings = learnings or {}
+    fd_account = find_generic_fd_account(accounts) or ACC_INTEREST_ON_FD
+    journals = []
+    for d in deductors:
+        label = "/".join(d.sections)
+        j = Journal(sr=d.sr, deductor=d.name, category="G", section_label=label,
+                    tan=d.tan)
+        a = round(d.tax_deducted, 2)
+        c = round(d.amount_paid, 2)
+
+        # Account matching reuses Category A's candidate pool (interest income
+        # accounts) — a 15G/15H deductor's amount is interest income exactly
+        # like a Category A one; only the tax-withholding status differs.
+        acct, conf, basis, cands, tied = match_credit_account(d.name, "A", accounts, fd_account)
+        j.candidates = cands
+        j.tied_candidates = tied
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_INCOME, d.tan, d.name)
+        learned_acct = learnings.get(learn_key)
+        if d.sr in overrides and overrides[d.sr]:
+            credit_acc = overrides[d.sr]
+            j.credit_account = credit_acc
+            j.credit_confidence = "Override"
+            # FL1.2: keep needs_review True on an LLM/model override -- see
+            # the identical comment in build_journals() above.
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
+        elif learned_acct:
+            # TDS-11: see the identical branch in build_journals() above.
+            credit_acc = learned_acct
+            j.credit_account = credit_acc
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
+        else:
+            credit_acc = acct or ACC_SUSPENSE
+            j.credit_account = credit_acc
+            j.credit_confidence = conf
+            j.credit_basis = basis
+            j.needs_review = acct is None or conf in ("Low", "Suspense", "Ambiguous")
+
+        if a:
+            # Tax deducted despite 15G/15H (shouldn't happen, but if it does,
+            # handle it exactly like Category A's 3-split).
+            j.splits = [
+                Split(ACC_TDS_INTEREST, debit=a),
+                Split(fd_account, debit=round(c - a, 2)),
+                Split(credit_acc, credit=c),
+            ]
+        else:
+            # Statutory case: no tax withheld -> a plain reclassification,
+            # Dr Interest on FD / Cr the specific NBFC account. Total income
+            # is unchanged, this only moves it out of the generic bucket.
+            j.splits = [
+                Split(fd_account, debit=c),
+                Split(credit_acc, credit=c),
+            ]
+        journals.append(j)
+    return enforce_postable(journals, accounts)
+
+
+def is_tcs_section(sections: tuple) -> bool:
+    """True if every section on the collector block is a 206C sub-section."""
+    secs = [str(s).strip().upper() for s in sections if str(s).strip()]
+    return bool(secs) and all(s.startswith(TCS_SECTION_PREFIX) for s in secs)
+
+
+def build_tcs_journals(collectors: list[Deductor], accounts: list[Account],
+                       tcs_account: str = "", credit_account: str = "",
+                       overrides: Optional[dict] = None,
+                       learnings: Optional[dict] = None) -> list[Journal]:
+    """One 2-split journal per collector:
+
+        Dr  <TCS account>       = Tax Collected
+        Cr  <credit account>    = Tax Collected
+
+    Only the TAX is journalled, never the amount paid/debited: the underlying
+    spend is already in the books (that is what the collection rode on), so
+    posting the gross would double-count it.
+
+    Both accounts default to what the chart actually contains and fall back to
+    the canonical names, which then surface under 'accounts to create' rather
+    than importing silently wrong. credit_account is a parameter because the
+    contra is a bookkeeping choice, not a statutory one — Drawings when the TCS
+    was bundled into personal spending, Bank when it was paid across separately.
+
+    match_credit_account is deliberately NOT used here: it searches INCOME
+    subtrees, and a collection at source is a spending-side event with no
+    income leg to match.
+
+    overrides: {collector_sr -> credit account path}, same shape as the TDS path.
+
+    learnings: same shape and priority as build_journals', but namespaced
+    under tds_learnings.DOMAIN_TCS rather than DOMAIN_INCOME -- the credit
+    leg here is a spending-side contra account (Drawings/Bank), not an
+    income account, and a TCS collector's TAN colliding with an unrelated
+    TDS deductor's TAN (the same bank can plausibly be both) must never let
+    a learned income-account pick leak into a TCS contra-account slot.
+    """
+    overrides = overrides or {}
+    learnings = learnings or {}
+    dr = tcs_account or find_tcs_account(accounts) or ACC_TCS_DEFAULT
+    cr_default = credit_account or find_drawings_account(accounts) or ACC_DRAWINGS
+
+    journals = []
+    for c in collectors:
+        label = "/".join(c.sections)
+        j = Journal(sr=c.sr, deductor=c.name, category="T", section_label=label,
+                    tan=c.tan)
+        tax = round(c.tax_deducted, 2)
+        learn_key = tds_learnings.deductor_key(tds_learnings.DOMAIN_TCS, c.tan, c.name)
+        learned_acct = learnings.get(learn_key)
+
+        if c.sr in overrides and overrides[c.sr]:
+            cr = overrides[c.sr]
+            j.credit_confidence = "Override"
+            # FL1.2: keep needs_review True on an LLM/model override -- see
+            # the identical comment in build_journals() above. (This branch
+            # previously left needs_review at its False default, which had
+            # the same effect as the other two categories' explicit False.)
+            j.credit_basis = "Model pick - confirm"
+            j.needs_review = True
+        elif learned_acct:
+            # TDS-11: see the identical branch in build_journals() above.
+            cr = learned_acct
+            j.credit_confidence = "Learned"
+            j.credit_basis = f"Learned from a prior confirmation ({learn_key})"
+            j.needs_review = False
+        else:
+            cr = cr_default
+            j.credit_confidence = "High" if credit_account or \
+                find_drawings_account(accounts) else "Medium"
+            j.credit_basis = ("TCS contra — " + (
+                "credit account supplied by caller" if credit_account
+                else f"defaulted to {cr}"))
+
+        if not is_tcs_section(c.sections):
+            # A non-206C section under Part VI means the sheet was misread or
+            # the department used a section we don't model. Park it loudly
+            # rather than posting a tax credit we can't justify.
+            j.splits = [Split(ACC_SUSPENSE, debit=tax), Split(ACC_SUSPENSE, credit=tax)]
+            j.credit_account = ACC_SUSPENSE
+            j.credit_confidence = "Suspense"
+            j.credit_basis = f"unexpected non-206C section(s) in Part VI: {label}"
+            j.needs_review = True
+            journals.append(j)
+            continue
+
+        j.credit_account = cr
+        j.splits = [Split(dr, debit=tax), Split(cr, credit=tax)]
+        journals.append(j)
+    return enforce_postable(journals, accounts)
+
+
+# -------------------- output --------------------
+
+def journal_date() -> str:
+    """31-March of the current calendar year, ISO format."""
+    return _dt.date(_dt.date.today().year, 3, 31).isoformat()
+
+
+def fy_prefix(fy: str) -> str:
+    """Compact financial-year prefix for Transaction IDs: '2025-26' -> '2526'.
+
+    Keeps Transaction IDs unique across years (next year's TDSJ01 would
+    otherwise collide). Falls back to the journal date's FY when fy is blank
+    (31-March of year Y closes FY (Y-1)-(Y))."""
+    m = re.match(r"\s*(\d{4})-(\d{2})\s*$", fy or "")
+    if m:
+        return m.group(1)[2:] + m.group(2)
+    y = _dt.date.today().year
+    return f"{(y - 1) % 100:02d}{y % 100:02d}"
+
+
+def _fmt(x: float) -> str:
+    return f"{x:.2f}" if x else ""
+
+
+# Column order for the GnuCash multi-split journal CSV. Shared by
+# build_csv_rows()/write_csv() here and by ui/tabs/tds_journal_review.py's
+# _JOURNAL_HEADERS (restated there, not imported, because that module reads
+# rows back with csv.DictReader rather than building them from Journal
+# objects -- but the two lists must stay in the same order and shape).
+JOURNAL_HEADERS = ["Date", "Transaction ID", "Number", "Description", "Account",
+                   "Amount", "Currency"]
+
+
+def build_csv_rows(journals: list[Journal], fy: str) -> list[dict]:
+    """Build one row dict per split, in JOURNAL_HEADERS order/shape.
+
+    This is the single place that turns Journal objects into the CSV row
+    shape everything else operates on: write_csv() writes these rows
+    verbatim, and split_part_ii() (below) partitions this exact shape -- the
+    review screen's Save path partitions the same shape read back off disk
+    via csv.DictReader, so one splitter serves both call sites.
+    """
+    date = journal_date()
+    fy_pfx = fy_prefix(fy)
+    rows: list[dict] = []
+    for j in journals:
+        if j.excluded_from_journal:
+            # Category C, partner-comp already books this month-by-month --
+            # leave it out of the importable CSV (and, since -partI.csv is
+            # derived from this same output, out of that split too). It
+            # still appears in full in the -review.csv sidecar.
+            continue
+        # Each category gets its own ID series (see CATEGORY_SERIES): Part
+        # I Sr.1, Part II Sr.1 and Part VI Sr.1 are different parties, and
+        # a shared prefix would make GnuCash's multi-split importer fuse
+        # their splits into one unbalanced transaction.
+        kind = series_for_category(j.category)
+        if j.category == "T":
+            tag, part_label = "TCS", "Part VI"
+        elif j.category == "G":
+            tag, part_label = "15G/15H TDS", PART_II_LABEL
+        else:
+            tag, part_label = "TDS", "Part I"
+        txn_id = f"{fy_pfx}-{kind}{j.sr:02d}"
+        desc = (f"{part_label} {tag} FY {fy} - {j.deductor} (Sec {j.section_label})"
+                 if fy else
+                 f"{part_label} {tag} - {j.deductor} (Sec {j.section_label})")
+        # Repeat Date / Transaction ID / Description on EVERY split row.
+        # GnuCash's multi-split importer groups splits by matching
+        # transaction fields (and the Transaction ID), NOT by blank-date
+        # continuation rows -- blank rows show up as parse errors.
+        for s in j.splits:
+            signed = round(s.debit - s.credit, 2)   # Dr +, Cr -
+            # Drop zero-amount splits (e.g. Category A's statutorily-zero
+            # NBFC tax-deducted leg -- see the module docstring above). A
+            # split contributing exactly 0.00 never changes whether the
+            # transaction balances, so omitting it is always safe, and
+            # importing a Rs 0.00 row into GnuCash is pure line noise (some
+            # importer builds even warn/reject on it). This is the single
+            # shared row builder for both the full journal CSV and the
+            # Part-I-only sibling (write_part_i_split() partitions THESE
+            # rows), so filtering here drops the zero rows from both files
+            # in lockstep.
+            if signed == 0.0:
+                continue
+            # Number duplicates Transaction ID -> GnuCash visible Num field.
+            rows.append({
+                "Date": date, "Transaction ID": txn_id, "Number": txn_id,
+                "Description": desc, "Account": s.account,
+                "Amount": f"{signed:.2f}", "Currency": CURRENCY,
+            })
+    return rows
+
+
+def write_rows_csv(rows: list[dict], out_path: Path) -> None:
+    """Write JOURNAL_HEADERS-shaped row dicts to out_path (multi-split
+    GnuCash layout). Shared by write_csv() and the Part-I-only split file so
+    the two files are byte-for-byte the same dialect."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=JOURNAL_HEADERS)
+        w.writeheader()
+        w.writerows(rows)
+
+
+def write_csv(journals: list[Journal], out_path: Path, fy: str) -> None:
+    # GnuCash-native multi-split layout. One signed "Amount" column per split
+    # (maps to the importer's "Amount" column type). GnuCash's sign
+    # convention: Debit = positive, Credit = negative; per transaction the
+    # Amounts sum to zero. (If a given build of GnuCash imports the signs
+    # reversed, map this column to "Amount (Negated)" instead.)
+    write_rows_csv(build_csv_rows(journals, fy), out_path)
+
+
+def _series_token(txn_id: str) -> Optional[str]:
+    """Parse the series token out of a Transaction ID shaped
+    f"{fy_prefix}-{kind}{sr:02d}" -- everything after the LAST '-', with
+    trailing digits stripped. fy_prefix itself may contain '-' (it doesn't
+    today, but nothing guarantees that), so splitting on the FIRST '-' would
+    be wrong; rsplit(..., 1) is deliberate. Returns None if txn_id has no '-'
+    or the tail is entirely digits (no series letters survive the strip)."""
+    txn_id = (txn_id or "").strip()
+    if "-" not in txn_id:
+        return None
+    tail = txn_id.rsplit("-", 1)[1]
+    token = tail.rstrip("0123456789")
+    return token or None
+
+
+def split_part_ii(journal_rows: list[dict]) -> tuple[list[dict], list[dict], list[str]]:
+    """Partition JOURNAL_HEADERS-shaped CSV row dicts into
+    (part_i_rows, part_ii_rows, problems).
+
+    Whole TRANSACTIONS are partitioned, never individual splits: every row
+    sharing a Transaction ID goes to the same side, decided once per id (the
+    first row seen for that id) rather than per row -- splitting a
+    transaction across both files would silently unbalance whichever file
+    lost a split, the exact failure this feature exists to prevent.
+
+    A Transaction ID whose series token cannot be parsed is kept in
+    part_i_rows -- NOT dropped. Silently discarding a real journal entry
+    because its id looked strange is a far worse failure than leaving it in
+    a file the user reviews before import; the id is also appended to
+    `problems` so the anomaly is never silent either.
+    """
+    problems: list[str] = []
+    side_by_txn: dict[str, str] = {}   # txn_id -> "II" or "I"
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        if txn_id in side_by_txn:
+            continue
+        token = _series_token(txn_id)
+        if token is None:
+            side_by_txn[txn_id] = "I"
+            problems.append(
+                f"Transaction ID {txn_id!r} has no parseable series -- "
+                "kept in the Part I file rather than dropped"
+            )
+        elif token == PART_II_SERIES:
+            side_by_txn[txn_id] = "II"
+        else:
+            side_by_txn[txn_id] = "I"
+
+    part_i_rows: list[dict] = []
+    part_ii_rows: list[dict] = []
+    for row in journal_rows:
+        txn_id = (row.get("Transaction ID") or "").strip()
+        if side_by_txn.get(txn_id) == "II":
+            part_ii_rows.append(row)
+        else:
+            part_i_rows.append(row)
+    return part_i_rows, part_ii_rows, problems
+
+
+def part_i_path_for(out_path: Path) -> Path:
+    """<stem>-tds-journals.csv -> <stem>-tds-journals-partI.csv (sibling),
+    same naming convention as the existing -review.csv sibling."""
+    return out_path.with_name(out_path.stem + "-partI.csv")
+
+
+def write_part_i_split(rows: list[dict], out_path: Path) -> tuple[Optional[str], list[str]]:
+    """Write/delete the Part-I-only sibling of out_path, given the FULL set
+    of just-written journal rows.
+
+    Returns (part_i_output_path_or_None, problems). If no Part II rows exist
+    in `rows`, no file is written -- and if a stale one from a PREVIOUS run
+    is sitting there, it is deleted, because a leftover Part-I file the
+    current run didn't need is exactly the hand-filtered-copy-goes-stale bug
+    this feature replaces. Called both by run() (generation time) and by
+    ui/tabs/tds_journal_review.py's _save_changes() (every re-save), so a
+    hand-filtered copy can never exist without being regenerated in lockstep.
+    """
+    part_i_path = part_i_path_for(out_path)
+    part_i_rows, part_ii_rows, problems = split_part_ii(rows)
+    if not part_ii_rows:
+        if part_i_path.exists():
+            part_i_path.unlink()
+        return None, problems
+    write_rows_csv(part_i_rows, part_i_path)
+    return str(part_i_path), problems
+
+
+def posted_sidecar_path(out_path: Path) -> Path:
+    """<stem>-tds-journals.csv -> <stem>-posted.json (the already-posted check)."""
+    return out_path.with_name(out_path.stem + "-posted.json")
+
+
+def journal_id(j: Journal) -> str:
+    """TDS-05: 'TDSJ2' / '15GJ2' / 'TCSJ2' -- unique across Parts, unlike Sr."""
+    return f"{series_for_category(j.category)}{j.sr}"
+
+
+def write_review(journals: list[Journal], path: Path, accounts: list[Account]) -> None:
+    existing = {a.path for a in accounts}
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        # "Tied Candidates" and "TAN" are appended LAST, in that order, after
+        # "Basis" — anything that reads this CSV by column position (rather
+        # than by header name) must keep working unchanged for the first 12
+        # columns. "Tied Candidates" is empty except for "Ambiguous" rows;
+        # "TAN" is empty when the 26AS workbook carried no TAN for that
+        # deductor/collector (see _parse_party_sheet).
+        w.writerow(["Sr", "Deductor", "Section", "Category", "Credit Account",
+                    "Confidence", "Account Exists", "Balanced", "Debit", "Credit",
+                    "Needs Review", "Basis", "Tied Candidates", "TAN",
+                    "Net Interest Account", "Net Interest Source",
+                    "Net Interest Choice Needed", "Left Out", "Left Out Splits"])
+        for j in journals:
+            w.writerow([
+                j.sr, j.deductor, j.section_label, j.category, j.credit_account,
+                j.credit_confidence,
+                # TDS-08: every account the journal posts to must exist -- the
+                # debit side too, not just the credit account.
+                "yes" if all(sp.account in existing for sp in j.splits) and
+                j.credit_account in existing else "NO",
+                "yes" if j.balanced else "NO", f"{j.total_debit:.2f}",
+                f"{j.total_credit:.2f}", "yes" if j.needs_review else "",
+                j.credit_basis, "; ".join(j.tied_candidates), j.tan,
+                # TDS-15: Category A only (the account holding the NET interest);
+                # "Left Out" / "Left Out Splits" are set by the Review screen.
+                (j.splits[1].account if j.category == "A" and len(j.splits) > 1 else ""),
+                (j.net_interest_source if j.category == "A" else ""),
+                "yes" if (j.category == "A" and j.net_interest_choice_needed) else "",
+                "", "",
+            ])
+
+
+# -------------------- TDS-15: pre-flight on income-account balances --------------------
+
+def load_account_balances(gnucash_path: Path) -> dict[str, float]:
+    """Read-only: {account path -> sum of every split value} for the WHOLE book
+    (all dates, not limited to the FY). GnuCash convention: debit positive, so a
+    normal INCOME account holds a NEGATIVE number. Never writes to the book.
+
+    Per-FY books (one book per entity+FY) make the whole-book figure the FY
+    figure; for a multi-year book it is the running balance, which is what an
+    'income account has gone debit' check needs to be conservative about."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    by_id: dict = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    paths = {aid: full_path(aid) for aid in by_id}
+    out: dict[str, float] = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            path = paths[acc.text]
+            out[path] = out.get(path, 0.0) + _parse_split_amount(
+                val.text if val is not None else None)
+    return {k: round(v, 2) for k, v in out.items()}
+
+
+INCOME_ROOT_PREFIX = "Income"
+
+
+def income_debit_preflight(journal_rows: list[dict], balances: dict,
+                           accounts: list[Account], scope: str = "journal") -> list[dict]:
+    """TDS-15: for every INCOME account the journal DEBITS, the balance it would
+    have after this journal is imported on top of the book. Returns one issue
+    per account that would end on a DEBIT balance (income should be credit):
+
+        {"account", "scope", "book_credit", "journal_net_debit",
+         "post_credit", "rows": [(txn_id, description, amount), ...]}
+
+    An account the journal debits that is not in the book yet is treated as an
+    income account with a zero balance when its path starts with 'Income' (it
+    will be created empty, so the debit takes it negative straight away)."""
+    types = {a.path: a.type for a in accounts}
+    net: dict[str, float] = {}
+    debit_rows: dict[str, list] = {}
+    for r in journal_rows:
+        acct = (r.get("Account") or "").strip()
+        try:
+            amt = float(r.get("Amount") or 0)
+        except ValueError:
+            continue
+        if not acct:
+            continue
+        net[acct] = net.get(acct, 0.0) + amt
+        if amt > 0:
+            debit_rows.setdefault(acct, []).append(
+                ((r.get("Transaction ID") or "").strip(),
+                 (r.get("Description") or "").strip(), round(amt, 2)))
+    issues = []
+    for acct, rows in debit_rows.items():
+        if acct in types:
+            is_income = types[acct] == "INCOME"
+        else:
+            is_income = acct.split(":")[0] == INCOME_ROOT_PREFIX
+        if not is_income:
+            continue
+        book = balances.get(acct, 0.0)
+        post_value = book + net[acct]          # debit-positive
+        if post_value > 0.005:
+            issues.append({
+                "account": acct, "scope": scope,
+                "book_credit": round(-book, 2),
+                "journal_net_debit": round(net[acct], 2),
+                "post_credit": round(-post_value, 2),
+                "rows": rows,
+            })
+    return sorted(issues, key=lambda i: i["account"])
+
+
+def format_preflight(issues: list[dict]) -> list[str]:
+    """RED FLAG lines for income_debit_preflight() issues (empty when clean)."""
+    out = []
+    for i in issues:
+        rows = "; ".join(f"{t}: {d} ({a:.2f})" for t, d, a in i["rows"][:12])
+        more = f" (+{len(i['rows']) - 12} more)" if len(i["rows"]) > 12 else ""
+        out.append(
+            f"RED FLAG - Income account would go to a DEBIT balance: {i['account']} "
+            f"({i['scope']}). Book credit balance today {i['book_credit']:.2f}; this "
+            f"journal debits it by {i['journal_net_debit']:.2f} net, leaving "
+            f"{i['post_credit']:.2f} (negative = debit). Rows: {rows}{more}. Re-point "
+            f"the net-interest account of those rows, or leave the rows out, on the "
+            f"Review screen. No download is offered until this is cleared.")
+    return out
+
+
+def preflight_for_csv(journal_csv: Path, gnucash_path: Path,
+                      accounts: Optional[list] = None) -> tuple:
+    """-> (issues, error). Reads the journal CSV on disk, checks it AND its
+    Part-I-only split against the book's balances. error is a string when the
+    check could not run (no book, unreadable) - never silently 'clean'."""
+    try:
+        accounts = accounts if accounts is not None else load_accounts(gnucash_path)
+        balances = load_account_balances(gnucash_path)
+        with Path(journal_csv).open("r", encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+    except Exception as e:  # noqa: BLE001
+        return [], f"balances could not be read ({type(e).__name__}: {e})"
+    issues = income_debit_preflight(rows, balances, accounts, "full journal")
+    try:
+        part_i, part_ii, _problems = split_part_ii(rows)
+    except Exception:
+        part_i, part_ii = rows, []
+    if part_ii:
+        seen = {i["account"] for i in issues}
+        for i in income_debit_preflight(part_i, balances, accounts, "Part I only file"):
+            if i["account"] not in seen:
+                issues.append(i)
+    return issues, ""
+
+
+# -------------------- already-posted check (TDS-18) --------------------
+
+POSTED = "ALREADY POSTED"
+POSTED_MISMATCH = "IN BOOK, DIFFERENT AMOUNTS"
+POSTED_ACCOUNT_MISMATCH = "IN BOOK, DIFFERENT ACCOUNT"
+MISMATCH_STATUSES = (POSTED_MISMATCH, POSTED_ACCOUNT_MISMATCH)
+
+
+def _account_diff_text(book: dict, mine: dict) -> str:
+    """Name the accounts that differ. Legs are paired by amount; if the pairing
+    is ambiguous both sides are listed."""
+    only_b = {a: v for a, v in book.items() if a not in mine}
+    only_m = {a: v for a, v in mine.items() if a not in book}
+    vb = sorted(round(v, 2) for v in only_b.values())
+    vm = sorted(round(v, 2) for v in only_m.values())
+    if len(set(vb)) == len(vb) and vb == vm:
+        by_amt = {round(v, 2): a for a, v in only_m.items()}
+        return "; ".join(
+            f"posted to {a} where this run would use {by_amt[round(v, 2)]}"
+            for a, v in sorted(only_b.items()))
+    return (f"the book has {', '.join(sorted(only_b)) or 'none'} where this run has "
+            f"{', '.join(sorted(only_m)) or 'none'}")
+
+
+def nothing_to_import_text(already_posted: list, mismatches: list) -> str:
+    """The 'Nothing to import' sentence, counted by mismatch kind. 'Every journal
+    is already in the book' only when there is no mismatch of either kind."""
+    if not mismatches:
+        return ("Nothing to import: every journal is already in the book"
+                + (f" ({', '.join(already_posted)})." if already_posted else "."))
+    n_acct = sum(1 for m in mismatches if m.get("kind") == POSTED_ACCOUNT_MISMATCH)
+    n_amt = len(mismatches) - n_acct
+    parts = [f"{len(already_posted)} already posted"]
+    if n_acct:
+        parts.append(f"{n_acct} left out because the book has the same Num and amounts "
+                     "but a different account")
+    if n_amt:
+        parts.append(f"{n_amt} left out because the book has the same Num with "
+                     "different amounts")
+    return "Nothing to import - " + "; ".join(parts) + " (RED FLAG above)."
+
+
+def mismatch_red_flag(m: dict) -> str:
+    """The RED FLAG sentence for one mismatch entry {id, detail, kind}."""
+    if m.get("kind") == POSTED_ACCOUNT_MISMATCH:
+        return (f"RED FLAG - {m['id']} is already in the book under the same Num with the "
+                f"same amounts, but {m.get('detail', '')}. It is left out of the import "
+                "file; check which account is right before changing anything.")
+    return (f"RED FLAG - {m['id']} is already in the book under the same Num but with "
+            f"different amounts ({m.get('detail', '')}). It is left out of the import "
+            "file; check the book before posting anything for it.")
+NOT_POSTED = "NOT POSTED"
+
+
+def load_book_journals_by_num(gnucash_path: Path) -> dict:
+    """Read-only: {Num -> [ {account path -> summed split value}, ... ]} for
+    every transaction in the book that carries a Num. Same matching key as the
+    Partner Comp posted check (Transaction ID == Num). The book is only read
+    (read_bytes), never opened for write."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    by_id: dict = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        by_id[aid.text] = (name.text, par.text if par is not None else None)
+
+    def full_path(aid: str) -> str:
+        parts, cur, seen = [], aid, set()
+        while cur in by_id and cur not in seen:
+            seen.add(cur)
+            n, p = by_id[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        return ":".join(parts)
+
+    paths = {aid: full_path(aid) for aid in by_id}
+    out: dict = {}
+    for trn in root.iter(f"{_GNC_NS}transaction"):
+        num_el = trn.find(f"{_TRN_NS}num")
+        num = (num_el.text or "").strip() if num_el is not None else ""
+        by_acct: dict = {}
+        actions = set()
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            path = paths[acc.text]
+            by_acct[path] = by_acct.get(path, 0.0) + _parse_split_amount(
+                val.text if val is not None else None)
+            act = sp.find(f"{_SPLIT_NS}action")
+            if act is not None and (act.text or "").strip():
+                actions.add(act.text.strip())
+        keys = ({num} if num else set()) | actions
+        for k in keys:
+            out.setdefault(k, []).append({a: round(v, 2) for a, v in by_acct.items()})
+    return out
+
+
+# IMP-15 4b: a journal whose Num is NOT in the book but whose date and amounts
+# match a book transaction is probably the same entry booked by hand. It is
+# KEPT in the import file and flagged "check before import" (rule S.1 = B).
+LOOKALIKE_WINDOW_DAYS = 0
+
+
+def load_book_txns(gnucash_path: Path) -> list:
+    """Read-only: every book transaction as a shared_book_check.BookTxn (legs in
+    paise). The book is only read (read_bytes), never opened for write."""
+    raw = Path(gnucash_path).read_bytes()
+    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
+    root = ET.fromstring(data)
+    paths: dict = {}
+    names = {}
+    for a in root.iter(f"{_GNC_NS}account"):
+        name = a.find(f"{_ACT_NS}name")
+        aid = a.find(f"{_ACT_NS}id")
+        if name is None or aid is None:
+            continue
+        par = a.find(f"{_ACT_NS}parent")
+        names[aid.text] = (name.text, par.text if par is not None else None)
+    for aid in names:
+        parts, cur, seen = [], aid, set()
+        while cur in names and cur not in seen:
+            seen.add(cur)
+            n, p = names[cur]
+            parts.append(n)
+            cur = p
+        parts = list(reversed(parts))
+        if parts and parts[0].lower().startswith("root"):
+            parts = parts[1:]
+        paths[aid] = ":".join(parts)
+    out = []
+    for k, trn in enumerate(root.iter(f"{_GNC_NS}transaction")):
+        d_el = trn.find(f"{_TRN_NS}date-posted/{_TS_NS}date")
+        try:
+            d = _dt.date.fromisoformat((d_el.text or "").strip()[:10])
+        except (AttributeError, ValueError):
+            continue          # an undated transaction can never be a look-alike
+        num_el = trn.find(f"{_TRN_NS}num")
+        num = (num_el.text or "").strip() if num_el is not None else ""
+        legs = []
+        for sp in trn.iter(f"{_TRN_NS}split"):
+            acc = sp.find(f"{_SPLIT_NS}account")
+            if acc is None or acc.text not in paths:
+                continue
+            val = sp.find(f"{_SPLIT_NS}value")
+            legs.append((paths[acc.text], round(_parse_split_amount(
+                val.text if val is not None else None) * 100)))
+        out.append(shared_book_check.BookTxn(str(k), num, d, tuple(legs)))
+    return out
+
+
+def lookalike_journals(rows: list, posted_status: dict, txns: list) -> list:
+    """[{id, date, detail}] for journals that are NOT posted by Num but match a
+    book transaction on date and per-account amounts (or tie between several).
+    They stay in the import file; the caller flags them. Pure, read-only."""
+    per: dict = {}
+    for r in rows:
+        tid = (r.get("Transaction ID") or "").strip()
+        if posted_status.get(tid, (NOT_POSTED, ""))[0] != NOT_POSTED:
+            continue
+        try:
+            amt = float(r.get("Amount") or 0)
+            d = _dt.date.fromisoformat((r.get("Date") or "").strip()[:10])
+        except ValueError:
+            continue
+        e = per.setdefault(tid, {"date": d, "legs": []})
+        e["legs"].append(((r.get("Account") or "").strip(), round(amt * 100)))
+    ids = sorted(per)
+    entries = [shared_book_check.Entry(t, per[t]["date"], tuple(per[t]["legs"])) for t in ids]
+    verdicts = shared_book_check.check_all(
+        entries, txns, shared_book_check.Options(
+            net_per_account=True, window_days=LOOKALIKE_WINDOW_DAYS))
+    return [{"id": e.num, "date": e.date.isoformat(),
+             "detail": ("several book transactions fit equally well"
+                        if v.kind == shared_book_check.TIE else v.reason)}
+            for e, v in zip(entries, verdicts)
+            if v.kind in shared_book_check.CHECK_BEFORE_IMPORT]
+
+
+def lookalike_text(items: list) -> str:
+    """One line for the reply. Ids and dates only, never amounts."""
+    return ("POSSIBLY ALREADY IN THE BOOK - check before import (kept in the file): "
+            + ", ".join(f"{i['id']} ({i['date']})" for i in items))
+
+
+def classify_posted(rows: list[dict], book_by_num: dict) -> dict:
+    """{Transaction ID -> (status, detail)} for every journal in `rows`.
+
+    POSTED: a book transaction with the same Num and the same per-account
+    amounts. POSTED_MISMATCH: the Num is in the book but no transaction with
+    that Num carries these amounts -- never treated as posted, never silently
+    re-offered either. NOT_POSTED: the Num is not in the book."""
+    per_txn: dict = {}
+    for r in rows:
+        tid = (r.get("Transaction ID") or "").strip()
+        acct = (r.get("Account") or "").strip()
+        try:
+            amt = float(r.get("Amount") or 0)
+        except ValueError:
+            continue
+        d = per_txn.setdefault(tid, {})
+        d[acct] = round(d.get(acct, 0.0) + amt, 2)
+    out: dict = {}
+    for tid, mine in per_txn.items():
+        mine = {a: v for a, v in mine.items() if abs(v) >= 0.005}
+        candidates = book_by_num.get(tid) or []
+        if not candidates:
+            out[tid] = (NOT_POSTED, "")
+            continue
+        for cand in candidates:
+            theirs = {a: v for a, v in cand.items() if abs(v) >= 0.005}
+            if set(theirs) == set(mine) and all(
+                    abs(theirs[a] - mine[a]) < 0.01 for a in mine):
+                out[tid] = (POSTED, "")
+                break
+        else:
+            first = candidates[0]
+            fb = {a: v for a, v in first.items() if abs(v) >= 0.005}
+            vb = sorted(fb.values())
+            vm = sorted(mine.values())
+            if len(vb) == len(vm) and all(abs(x - y) < 0.01 for x, y in zip(vb, vm)):
+                out[tid] = (POSTED_ACCOUNT_MISMATCH, _account_diff_text(fb, mine))
+                continue
+            diffs = []
+            for a in sorted(set(first) | set(mine)):
+                if abs(first.get(a, 0.0) - mine.get(a, 0.0)) >= 0.01:
+                    diffs.append(f"{a}: book {first.get(a, 0.0):.2f}, this run {mine.get(a, 0.0):.2f}")
+            out[tid] = (POSTED_MISMATCH, "; ".join(diffs[:4]))
+    return out
+
+
+# -------------------- orchestration --------------------
+
+def run(xlsx_path: Path, gnucash_path: Path, out_path: Path,
+        overrides: Optional[dict] = None, tcs_credit_account: str = "",
+        tcs_overrides: Optional[dict] = None,
+        g_overrides: Optional[dict] = None,
+        partner_comp_configured: bool = False,
+        tds_expense_account: str = "") -> dict:
+    deductors, g_deductors, collectors, fy = parse_parts(xlsx_path)
+    accounts = load_accounts(gnucash_path)
+    # TDS-11: auto-load persisted human confirmations for this book. The
+    # sidecar path is derived purely from gnucash_path (see
+    # tds_learnings.learnings_path) -- no new CLI flag/plumbing needed
+    # through main()'s already-fragile positional-argv scheme. A missing or
+    # corrupt sidecar loads as {} (see load_learnings' docstring), so a
+    # brand-new book with no learnings yet behaves exactly as before this
+    # change.
+    learnings = tds_learnings.load_learnings(str(gnucash_path))
+    journals = build_journals(deductors, accounts, overrides,
+                              partner_comp_configured=partner_comp_configured,
+                              learnings=learnings)
+    # Part II (15G/15H). Sr numbers restart per part, so this is a separate
+    # overrides map — a shared one would let Part I Sr.2 silently redirect
+    # Part II Sr.2. Shares the DOMAIN_INCOME learnings namespace with
+    # Category A (see build_15g_journals' docstring).
+    journals += build_15g_journals(g_deductors, accounts, overrides=g_overrides,
+                                   learnings=learnings)
+    # Part VI TCS. Sr numbers restart per part, so TCS overrides are a separate
+    # map — a shared one would let Part I Sr.2 silently redirect Part VI Sr.2.
+    journals += build_tcs_journals(collectors, accounts,
+                                   credit_account=tcs_credit_account,
+                                   overrides=tcs_overrides,
+                                   learnings=learnings)
+    all_rows = build_csv_rows(journals, fy)
+    # TDS-18: a journal whose Transaction ID / Num is already in the book is
+    # left out of the import file, so a re-run never re-offers (and so never
+    # double-books) it. A same-Num journal with different amounts is reported
+    # and also left out: importing it would put a second transaction under the
+    # same Num. If the book cannot be read nothing is filtered and the run says
+    # so, never a silent "clean".
+    posted_error = ""
+    try:
+        posted_status = classify_posted(all_rows, load_book_journals_by_num(gnucash_path))
+    except Exception as e:  # noqa: BLE001
+        posted_status = {}
+        posted_error = f"{type(e).__name__}: {e}"
+    lookalikes: list = []
+    if not posted_error:
+        try:
+            lookalikes = lookalike_journals(all_rows, posted_status,
+                                            load_book_txns(gnucash_path))
+        except Exception as e:  # noqa: BLE001
+            posted_error = f"{type(e).__name__}: {e}"
+    csv_rows = [r for r in all_rows
+                if posted_status.get((r.get("Transaction ID") or "").strip(),
+                                     (NOT_POSTED, ""))[0] == NOT_POSTED]
+    nothing_to_import = bool(all_rows) and not csv_rows and not posted_error
+    posted_ids = sorted(t for t, (st, _d) in posted_status.items() if st == POSTED)
+    mismatches = [{"id": t, "detail": d, "kind": st}
+                  for t, (st, d) in sorted(posted_status.items())
+                  if st in MISMATCH_STATUSES]
+    if csv_rows:
+        write_rows_csv(csv_rows, out_path)
+    elif out_path.exists():
+        # Nothing new to import: no CSV. A file left from an earlier run would
+        # otherwise still be offered for download.
+        out_path.unlink()
+    import json as _json
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    posted_sidecar_path(out_path).write_text(_json.dumps({
+        "already_posted": posted_ids, "mismatched": mismatches,
+        "possibly_posted": lookalikes,
+        "nothing_to_import": nothing_to_import, "error": posted_error,
+    }), encoding="utf-8")
+
+    review_path = out_path.with_name(out_path.stem + "-review.csv")
+    write_review(journals, review_path, accounts)
+
+    # Part-I-only sibling for users who post 15G/15H (Part II) by hand in
+    # GnuCash: importing the full journal's 15GJ rows on top of a hand-posted
+    # entry double-books the Interest-on-FD -> NBFC reclassification. This
+    # file is ALWAYS regenerated from the journal just written (never a
+    # stale hand-filtered copy) -- see write_part_i_split's docstring.
+    part_i_output, part_ii_problems = write_part_i_split(csv_rows, out_path)
+
+    # TDS-13: read-only s.194T reconciliation, for entities with
+    # partner_comp_accounts configured only (partner_comp_configured=True
+    # implies the caller resolved a tds_expense account too -- if it is
+    # blank anyway, e.g. not configured in entities.yaml, the reco is simply
+    # skipped rather than raising, since this is an audit item, not the
+    # primary journal build).
+    s194t_reco: Optional[S194TReco] = None
+    if partner_comp_configured and tds_expense_account:
+        try:
+            s194t_reco = reconcile_s194t(xlsx_path, gnucash_path,
+                                         tds_expense_account, fy=fy)
+        except Exception as e:
+            s194t_reco = S194TReco(
+                applicable=True, status="VARIANCE",
+                message=f"could not complete the s.194T reconciliation: {e}",
+            )
+
+    existing = {a.path for a in accounts}
+
+    # Any split account (debit or credit) not present in the book must be
+    # created by the user before import (e.g. 'Expense:TDS on Partnership
+    # Payments'). Surface them explicitly so nothing imports silently wrong.
+    missing = sorted({s.account for j in journals if not j.excluded_from_journal
+                      for s in j.splits if s.account not in existing})
+    # TDS-04: placeholder/hidden accounts that were refused as posting targets
+    # are reported with the missing ones -- the user must create/unhide one.
+    blocked_accounts = sorted({b for j in journals if not j.excluded_from_journal
+                               for b in j.blocked_targets})
+    missing = sorted(set(missing) | set(blocked_accounts))
+
+    review_rows = []
+    for j in journals:
+        review_rows.append({
+            "sr": j.sr, "id": journal_id(j), "deductor": j.deductor, "section": j.section_label,
+            "category": j.category, "credit_account": j.credit_account,
+            "confidence": j.credit_confidence,
+            "account_exists": (j.credit_account in existing
+                               and all(sp.account in existing for sp in j.splits)),
+            "balanced": j.balanced, "needs_review": j.needs_review,
+            "candidates": j.candidates, "basis": j.credit_basis,
+            "tied_candidates": j.tied_candidates,
+        })
+
+    # TDS-15: pre-flight on the post-import balance of every income account the
+    # journal debits. If the balances cannot be read the result says so
+    # (preflight_error) rather than passing silently.
+    if csv_rows:
+        pf_issues, pf_error = preflight_for_csv(out_path, gnucash_path, accounts)
+    else:
+        pf_issues, pf_error = [], ""
+
+    return {
+        "preflight_issues": pf_issues,
+        "preflight_error": pf_error,
+        "fy": fy,
+        "journal_date": journal_date(),
+        "deductors": len(deductors),
+        "part_ii_deductors": len(g_deductors),
+        "collectors": len(collectors),
+        "balanced_all": all(j.balanced for j in journals),
+        "needs_review": [r for r in review_rows if r["needs_review"]],
+        "missing_accounts": missing,
+        "blocked_accounts": blocked_accounts,
+        "rows": review_rows,
+        "output": str(out_path),
+        "output_written": bool(csv_rows),
+        "nothing_to_import": nothing_to_import,
+        "already_posted": posted_ids,
+        "possibly_posted": lookalikes,
+        "posted_mismatches": mismatches,
+        "posted_check_error": posted_error,
+        "review": str(review_path),
+        "part_i_output": part_i_output,
+        "part_ii_problems": part_ii_problems,
+        "s194t_reco": s194t_reco,
+    }
+
+
+_OVERRIDE_SERIES = ("TDSJ", "15GJ", "TCSJ")
+_OVERRIDE_KEY_RE = re.compile(r"(TDSJ|15GJ|TCSJ)\D*(?P<sr>\d+)", re.I)
+
+
+def parse_override_key(key) -> Optional[tuple]:
+    """TDS-05: an override key -> (series, sr), or None when it carries no number.
+
+    Sr numbers restart in every Part of the 26AS, so a bare number is
+    ambiguous. A row is identified by its Transaction ID series plus its Sr:
+    'TDSJ2' (Part I), '15GJ2' (Part II), 'TCSJ2' (Part VI). A bare number (or
+    'Sr 2') keeps meaning Part I, as it always did -- it is never applied to
+    Part II or Part VI.
+    """
+    text = str(key)
+    m = _OVERRIDE_KEY_RE.search(text)
+    if m:
+        return m.group(1).upper(), int(m.group("sr"))
+    m = re.search(r"\d+", text)
+    return ("TDSJ", int(m.group(0))) if m else None
+
+
+def split_overrides(raw: dict) -> tuple:
+    """{key -> account} -> (part_i, part_ii, part_vi) maps of {sr -> account}."""
+    out = {"TDSJ": {}, "15GJ": {}, "TCSJ": {}}
+    for k, v in (raw or {}).items():
+        parsed = parse_override_key(k)
+        if parsed and v:
+            out[parsed[0]][parsed[1]] = v
+    return out["TDSJ"], out["15GJ"], out["TCSJ"]
+
+
+def _review_flag(needs_review: bool, confidence: str) -> str:
+    """CLI flag text for one review row.
+
+    "Ambiguous" gets its own flag text, distinct from the plain "REVIEW"
+    used for Suspense/low-confidence rows: AGENT.md instructs the LLM
+    fallback (agent.py) to only resolve deductors flagged REVIEW via
+    apply_overrides. An Ambiguous row has two or more candidates tied on
+    score — it is for the user to tag in the Review tab, never for the LLM
+    to guess — so its flag text must never read "REVIEW".
+    """
+    if not needs_review:
+        return ""
+    if confidence == "Ambiguous":
+        return "  <-- AMBIGUOUS (tag manually in Review tab)"
+    return "  <-- REVIEW"
+
+
+_PARTNER_COMP_FLAG = "--partner-comp-configured"
+_TDS_EXPENSE_FLAG = "--tds-expense-account"
+
+
+def main(argv: list[str]) -> int:
+    argv = list(argv)
+    partner_comp_configured = _PARTNER_COMP_FLAG in argv
+    if partner_comp_configured:
+        argv = [a for a in argv if a != _PARTNER_COMP_FLAG]
+    tds_expense_account = ""
+    if _TDS_EXPENSE_FLAG in argv:
+        i = argv.index(_TDS_EXPENSE_FLAG)
+        if i + 1 >= len(argv):
+            print(f"{_TDS_EXPENSE_FLAG} requires a value", file=sys.stderr)
+            return 2
+        tds_expense_account = argv[i + 1]
+        del argv[i:i + 2]
+    if len(argv) not in (4, 5):
+        print("Usage: python build_tds_journals.py <26as.xlsx> <book.gnucash> "
+              f"<out.csv> [overrides.json] [{_PARTNER_COMP_FLAG}] "
+              f"[{_TDS_EXPENSE_FLAG} <account path>]", file=sys.stderr)
+        return 2
+    overrides = None
+    if len(argv) == 5:
+        import json
+        raw = json.loads(Path(argv[4]).read_text(encoding="utf-8"))
+        # Keys are deductor Sr numbers. Be tolerant of keys that carry extra
+        # text (a tool-calling model may echo the display label "Sr 7" rather
+        # than "7"): pull the digits out and skip any key with no number so a
+        # stray label never crashes the build with int("Sr 7").
+        # TDS-05: Sr numbers restart per Part, so keys may carry the series
+        # ('15GJ2'); each override only ever reaches its own Part.
+        overrides, g_overrides, tcs_overrides = split_overrides(raw)
+    else:
+        g_overrides = tcs_overrides = None
+    stats = run(Path(argv[1]), Path(argv[2]), Path(argv[3]), overrides,
+               tcs_overrides=tcs_overrides, g_overrides=g_overrides,
+               partner_comp_configured=partner_comp_configured,
+               tds_expense_account=tds_expense_account)
+    for m in stats.get("posted_mismatches") or []:
+        print(mismatch_red_flag(m))
+    if stats.get("posted_check_error"):
+        print("NOTE - already-posted check NOT run: " + stats["posted_check_error"])
+    if stats.get("possibly_posted"):
+        print(lookalike_text(stats["possibly_posted"]))
+    if stats.get("already_posted"):
+        print("ALREADY POSTED (left out of the import file): "
+              + ", ".join(stats["already_posted"]))
+    if stats.get("nothing_to_import"):
+        print(nothing_to_import_text(stats.get("already_posted") or [],
+                                     stats.get("posted_mismatches") or []))
+    for line in format_preflight(stats.get("preflight_issues") or []):
+        print(line)
+    if stats.get("preflight_error"):
+        print("NOTE - income-balance pre-flight NOT run: " + stats["preflight_error"])
+    print(f"FY {stats['fy']}  date {stats['journal_date']}  "
+          f"deductors {stats['deductors']}  part_ii_deductors {stats['part_ii_deductors']}  "
+          f"collectors {stats['collectors']}  balanced_all {stats['balanced_all']}")
+    for r in stats["rows"]:
+        flag = _review_flag(r["needs_review"], r["confidence"])
+        print(f"  {r['id']:>6} [{r['category']}/{r['section']:<5}] {r['deductor'][:34]:34} "
+              f"-> {r['credit_account']}  ({r['confidence']}){flag}")
+        if r["needs_review"] and r.get("tied_candidates"):
+            print(f"        tied candidates: {', '.join(r['tied_candidates'])}")
+        elif r["needs_review"] and r["candidates"]:
+            print(f"        candidates: {', '.join(r['candidates'])}")
+    if stats["needs_review"]:
+        amb_n = sum(1 for r in stats["needs_review"] if r["confidence"] == "Ambiguous")
+        susp_n = len(stats["needs_review"]) - amb_n
+        parts = []
+        if susp_n:
+            parts.append(f"{susp_n} Suspense/low confidence")
+        if amb_n:
+            parts.append(f"{amb_n} Ambiguous (tied candidates — tag manually in Review tab)")
+        print(f"\n{len(stats['needs_review'])} deductor(s) need review ({', '.join(parts)}).")
+    if stats["blocked_accounts"]:
+        print("\n*** NOT POSTED - placeholder/hidden account(s); that leg is on Suspense "
+              "and the row is flagged for review:")
+        for acc in stats["blocked_accounts"]:
+            print(f"  - {acc}")
+    if stats["missing_accounts"]:
+        print("\nAccounts to CREATE in GnuCash before import:")
+        for acc in stats["missing_accounts"]:
+            print(f"  - {acc}")
+    if stats["part_ii_problems"]:
+        print("\nWarning: could not determine the series for some Transaction "
+              "ID(s) -- kept in the Part I file, not dropped:")
+        for p in stats["part_ii_problems"]:
+            print(f"  - {p}")
+    if stats.get("output_written"):
+        print(f"Saved: {stats['output']}")
+    print(f"Review: {stats['review']}")
+    if stats["part_i_output"]:
+        print(f"Part I only (excludes 15G/15H, for hand-posted Part II): "
+              f"{stats['part_i_output']}")
+    reco = stats.get("s194t_reco")
+    if reco is not None:
+        header = "s.194T reconciliation (26AS vs Partner Comp journal)"
+        if reco.loud:
+            print(f"\n*** {header}: {reco.status} *** {reco.message}")
+        else:
+            print(f"\n{header}: {reco.status} -- {reco.message}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))

@@ -1,0 +1,255 @@
+{
+  "section_totals": {
+    "Assets Accounts": 1071300.5,
+    "Liability Accounts": 0.0,
+    "Trading Accounts": 0.0,
+    "Equity Accounts": 400000.5,
+    "Equity, Trading, and Liabilities": 400000.5,
+    "Retained Earnings": 671300.0
+  },
+  "imbalance": 0.0,
+  "sections": {
+    "Assets": [
+      {
+        "guid": "0eac675bb5775172f8d42242a11b34df",
+        "name": "Assets",
+        "depth": 0,
+        "section": "Assets",
+        "path": "Assets",
+        "balance": null,
+        "total": 1071300.5,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "b839c3f5cb91f9fde4105c9b832cfc3f",
+            "name": "Cash and Bank",
+            "depth": 1,
+            "section": "Assets",
+            "path": "Assets/Cash and Bank",
+            "balance": null,
+            "total": 916300.5,
+            "qty": null,
+            "symbol": null,
+            "children": [
+              {
+                "guid": "2af1901149441464ce63bf4184a66e15",
+                "name": "Cash",
+                "depth": 2,
+                "section": "Assets",
+                "path": "Assets/Cash and Bank/Cash",
+                "balance": 25000.0,
+                "total": 25000.0,
+                "qty": null,
+                "symbol": null,
+                "children": []
+              },
+              {
+                "guid": "da1d98074f1846d68855bfed18673557",
+                "name": "HDFC Bank - SYN001",
+                "depth": 2,
+                "section": "Assets",
+                "path": "Assets/Cash and Bank/HDFC Bank - SYN001",
+                "balance": 891300.5,
+                "total": 891300.5,
+                "qty": null,
+                "symbol": null,
+                "children": []
+              }
+            ]
+          },
+          {
+            "guid": "eed00646b42e3231f755d1c27694cacc",
+            "name": "Investments",
+            "depth": 1,
+            "section": "Assets",
+            "path": "Assets/Investments",
+            "balance": null,
+            "total": 150000.0,
+            "qty": null,
+            "symbol": null,
+            "children": [
+              {
+                "guid": "a892f15fe43fd86af7512ba45740ec6a",
+                "name": "SynthCorp Shares",
+                "depth": 2,
+                "section": "Assets",
+                "path": "Assets/Investments/SynthCorp Shares",
+                "balance": 150000.0,
+                "total": 150000.0,
+                "qty": 1000.0,
+                "symbol": "SYNCORP.NS",
+                "children": []
+              }
+            ]
+          },
+          {
+            "guid": "ca85f6240bb66d5d38a0e4f40d908525",
+            "name": "Misc Holding (unmapped)",
+            "depth": 1,
+            "section": "Assets",
+            "path": "Assets/Misc Holding (unmapped)",
+            "balance": 5000.0,
+            "total": 5000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      }
+    ],
+    "Liability": [],
+    "Trading": [],
+    "Equity": [
+      {
+        "guid": "fdfe0d14e462e09a38c9ac86fe5abb78",
+        "name": "Equity",
+        "depth": 0,
+        "section": "Equity",
+        "path": "Equity",
+        "balance": null,
+        "total": 400000.5,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "84486cc24c1d61165711e1b881ef1bab",
+            "name": "Capital Account",
+            "depth": 1,
+            "section": "Equity",
+            "path": "Equity/Capital Account",
+            "balance": 400000.5,
+            "total": 400000.5,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      }
+    ],
+    "RetainedEarnings": [
+      {
+        "guid": "6b40e8b9261fa91d444d58d47808b51d",
+        "name": "Income",
+        "depth": 0,
+        "section": "RetainedEarnings-Income",
+        "path": "Income",
+        "balance": null,
+        "total": 821300.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "e605d8704bc37ebb37e724769e83bfb6",
+            "name": "Business Remuneration",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/Business Remuneration",
+            "balance": 300000.0,
+            "total": 300000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "11fc5a724efb9eb161ac039825b3e6dd",
+            "name": "Bank Interest",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/Bank Interest",
+            "balance": 20000.0,
+            "total": 20000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "c5c2ae4db662a860303859d190b3e93b",
+            "name": "Salary",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/Salary",
+            "balance": 500000.0,
+            "total": 500000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "0403526e9bfd848676046e7c26556bb9",
+            "name": "IT Refund Principal",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/IT Refund Principal",
+            "balance": 1000.0,
+            "total": 1000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "f1cba329edfd1b9bb836eb67534b93f4",
+            "name": "IT Refund Interest",
+            "depth": 1,
+            "section": "RetainedEarnings-Income",
+            "path": "Income/IT Refund Interest",
+            "balance": 300.0,
+            "total": 300.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      },
+      {
+        "guid": "0f90a08b3277a3bb69b5bb79d689ad59",
+        "name": "Expense",
+        "depth": 0,
+        "section": "RetainedEarnings-Expense",
+        "path": "Expense",
+        "balance": null,
+        "total": -150000.0,
+        "qty": null,
+        "symbol": null,
+        "children": [
+          {
+            "guid": "2239368f6b27f15392c15b66544ca0f2",
+            "name": "Business Expenses",
+            "depth": 1,
+            "section": "RetainedEarnings-Expense",
+            "path": "Expense/Business Expenses",
+            "balance": -120000.0,
+            "total": -120000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "3b305b86a4a5d6c626c6234b129ea174",
+            "name": "TDS on Interest",
+            "depth": 1,
+            "section": "RetainedEarnings-Expense",
+            "path": "Expense/TDS on Interest",
+            "balance": -5000.0,
+            "total": -5000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          },
+          {
+            "guid": "cd3bba82ab4dbdba3bc02d6b8f97ff76",
+            "name": "TDS on Salary",
+            "depth": 1,
+            "section": "RetainedEarnings-Expense",
+            "path": "Expense/TDS on Salary",
+            "balance": -25000.0,
+            "total": -25000.0,
+            "qty": null,
+            "symbol": null,
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}

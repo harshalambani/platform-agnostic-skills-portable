@@ -1,0 +1,183 @@
+"""Stage 1: Convert HSBC bank-statement PDFs to per-page Tesseract TSV.
+
+Each PDF goes through two steps:
+
+  1. `pdftoppm -r 300 -png <pdf> <work>/png/<name>/page`
+     Rasterises the PDF at 300 DPI. High DPI is important: HSBC's printed
+     numbers are small and Tesseract loses decimal points below ~250 DPI.
+  2. `tesseract <png> <work>/tsv/<name>/page-N --psm 6 tsv`
+     TSV mode is crucial because downstream stages use the x/y coordinates
+     to classify amounts into Deposit / Withdrawal / Balance columns.
+     PSM 6 = "assume a single uniform block of text" — works well for
+     statement pages which are essentially one big table.
+
+The filename (without extension) becomes the statement key; the enclosing
+script groups pages by this key.
+
+Usage:
+    python ocr_to_tsv.py --pdf-dir /path/to/hsbc_pdfs --work-dir /path/to/work
+"""
+import argparse
+import subprocess
+import sys
+from pathlib import Path
+
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_krc_recon/scripts/parse_krc_bills.py and skill_cc_sort/scripts/
+# extract_sort_cc_pdfs.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import (  # noqa: E402
+    resolve_pdftoppm, resolve_qpdf, resolve_tesseract,
+)
+
+
+def check_binaries():
+    """Resolve both binaries by absolute path up front so a missing vendored
+    copy (and no usable fallback) fails loudly before any PDF is processed,
+    instead of a bare-name subprocess call silently resolving to whatever
+    tool happens to be on PATH."""
+    missing = []
+    try:
+        resolve_pdftoppm()
+    except FileNotFoundError as e:
+        missing.append(str(e))
+    try:
+        resolve_tesseract()
+    except FileNotFoundError as e:
+        missing.append(str(e))
+    if missing:
+        sys.exit(
+            "Missing required binaries:\n  " + "\n  ".join(missing) + "\n"
+            "Install with: apt-get install -y poppler-utils tesseract-ocr"
+        )
+
+
+def _decrypt_with_qpdf(pdf_path: Path, out_path: Path, password: str):
+    """Decrypt ``pdf_path`` to ``out_path`` with the password on qpdf's stdin."""
+    result = subprocess.run(
+        [resolve_qpdf(), "--password-file=-", "--decrypt",
+         str(pdf_path), str(out_path)],
+        input=password + "\n", capture_output=True, text=True,
+    )
+    # qpdf exits 3 for "succeeded with warnings".
+    if result.returncode not in (0, 3):
+        detail = (result.stderr or result.stdout or "").replace(password, "***")
+        raise RuntimeError(
+            f"qpdf could not open {pdf_path.name} (wrong password?): "
+            f"{detail.strip()}"
+        )
+
+
+def ocr_pdf(pdf_path: Path, work_dir: Path, dpi: int = 300, password: str = None):
+    """Render one PDF to PNGs then OCR each page to TSV.
+
+    Creates:
+      <work_dir>/png/<stem>/page-1.png, page-2.png, ...
+      <work_dir>/tsv/<stem>/page-1.tsv, page-2.tsv, ...
+    """
+    stem = pdf_path.stem
+    png_dir = work_dir / "png" / stem
+    tsv_dir = work_dir / "tsv" / stem
+    png_dir.mkdir(parents=True, exist_ok=True)
+    tsv_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"[{stem}] rasterising at {dpi} DPI...", flush=True)
+    pdftoppm_path = resolve_pdftoppm()
+    cmd = [pdftoppm_path, "-r", str(dpi)]
+    # SEC-15: pdftoppm only takes a password as "-upw <pw>" on its command
+    # line. So an encrypted statement is first decrypted by qpdf (password on
+    # stdin) into a scratch copy, which is rasterised and then removed.
+    source = pdf_path
+    scratch = None
+    if password:
+        scratch = work_dir / f"_decrypted_{stem}.pdf"
+        _decrypt_with_qpdf(pdf_path, scratch, password)
+        source = scratch
+    cmd += ["-png", str(source), str(png_dir / "page")]
+    try:
+        subprocess.run(cmd, check=True)
+    finally:
+        if scratch is not None:
+            try:
+                scratch.unlink()
+            except OSError:
+                pass
+
+    pngs = sorted(png_dir.glob("page-*.png"))
+    # pdftoppm may produce `page-1.png` or `page-01.png` depending on page count.
+    # Normalise filenames so downstream glob('page-*.tsv') sorting works by int.
+    tesseract_path = resolve_tesseract()
+    for png in pngs:
+        page_num = int("".join(c for c in png.stem.split("-")[-1] if c.isdigit()))
+        tsv_path = tsv_dir / f"page-{page_num}.tsv"
+        print(f"  OCR page {page_num}...", flush=True)
+        # tesseract <png> <out_stem> <config> -> writes <out_stem>.tsv
+        subprocess.run(
+            [
+                tesseract_path, str(png), str(tsv_path.with_suffix("")),
+                "--psm", "6", "tsv",
+            ],
+            check=True,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # tesseract exits 0 even when it can't find the "tsv" config file
+        # under tessdata/configs/ -- it just prints "read_params_file:
+        # Can't open tsv" to stderr (discarded above) and silently falls
+        # back to writing plain <out_stem>.txt instead of <out_stem>.tsv.
+        # Trusting the exit code alone lets that failure run silently
+        # through every remaining page and only surface ~270s later when
+        # parse_tsv.py finds nothing to glob. Fail loudly here, on this
+        # page, instead.
+        if not tsv_path.exists() or tsv_path.stat().st_size == 0:
+            raise RuntimeError(
+                f"[{stem}] tesseract did not produce {tsv_path} for page "
+                f"{page_num} (exit code was 0). This almost always means "
+                "the vendored tessdata/configs/tsv config file is missing "
+                "-- tesseract silently wrote a .txt file instead of a .tsv "
+                "one. Check vendor/tesseract/tessdata/configs/tsv exists."
+            )
+
+    return tsv_dir
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    ap.add_argument("--pdf-dir", required=True, type=Path,
+                    help="Folder containing HSBC statement PDFs (one file per statement period).")
+    ap.add_argument("--work-dir", required=True, type=Path,
+                    help="Scratch folder for intermediate PNG/TSV output.")
+    ap.add_argument("--dpi", type=int, default=300,
+                    help="Raster DPI (default 300; do not go below 250).")
+    ap.add_argument("--password-file", default=None, metavar="FILE",
+                    help="File holding the user password for encrypted PDFs "
+                         "(first line), or '-' to read it from stdin.")
+    args = ap.parse_args()
+    password = None
+    if args.password_file:
+        if args.password_file == "-":
+            password = sys.stdin.readline().rstrip("\r\n")
+        else:
+            password = Path(args.password_file).read_text(
+                encoding="utf-8").splitlines()[0]
+
+    check_binaries()
+
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    pdfs = sorted(args.pdf_dir.glob("*.pdf"))
+    if not pdfs:
+        sys.exit(f"No PDFs found in {args.pdf_dir}")
+
+    print(f"Found {len(pdfs)} PDF(s) in {args.pdf_dir}")
+    for pdf in pdfs:
+        ocr_pdf(pdf, args.work_dir, dpi=args.dpi, password=password)
+
+    print(f"\nDone. TSVs under {args.work_dir / 'tsv'}/")
+
+
+if __name__ == "__main__":
+    main()

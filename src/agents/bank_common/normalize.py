@@ -1,0 +1,112 @@
+"""
+agents/bank_common/normalize.py — shared amount/date normalization.
+
+Moved verbatim from ``skill_hdfc/agent.py`` (``_clean_amount`` /
+``_normalise_date``), which remains the reference implementation. Extended
+for BoB (P2): a trailing Cr/Dr balance suffix (e.g. "1,63,258.00Cr") and a
+"-"-separated DD-MM-YY(YY) date form, both common on BoB statements but
+absent from HDFC's.
+"""
+from __future__ import annotations
+
+import re
+from datetime import date as _date
+
+_ISO_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+_CR_DR_SUFFIX_RE = re.compile(r'(Cr|Dr)$', re.IGNORECASE)
+
+# ICICI-specific: month abbreviation -> number, for the "DD,Mon,YYYY" date shape
+# (e.g. "01,Apr,2024") used throughout ICICI's XLS statement downloads.
+MONTH_ABBR = {
+    'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
+    'may': '05', 'jun': '06', 'jul': '07', 'aug': '08',
+    'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12',
+}
+
+
+def clean_amount(s, blank_zero: bool = True) -> str:
+    """Strip thousands separators and a trailing Cr/Dr suffix.
+
+    ``blank_zero`` (default True, HDFC's original convention) renders an
+    exact-zero amount as "" (blank cell) -- the canonical schema's
+    convention for "no amount". Pass ``blank_zero=False`` to keep the
+    zero-amount string as-is instead (BoB's canonical mapper applies its own
+    blank/zero convention on top of this primitive).
+    """
+    s = str(s).replace(",", "").strip()
+    s = _CR_DR_SUFFIX_RE.sub("", s).strip()
+    try:
+        return "" if (blank_zero and float(s) == 0.0) else s
+    except ValueError:
+        return s
+
+
+def normalise_date(d) -> str:
+    """Normalize a DD/MM/YY(YY) or DD-MM-YY(YY) date string to ISO
+    YYYY-MM-DD; pass through values already in ISO form or that don't match
+    either shape."""
+    d = str(d).strip()
+    if _ISO_DATE_RE.match(d):
+        return d  # already canonical ISO
+    sep = "/" if "/" in d else "-" if "-" in d else None
+    if sep is None:
+        return d
+    parts = d.split(sep)
+    if len(parts) != 3:
+        return d
+    dd, mm, yy = parts[0], parts[1], parts[2]
+    if len(yy) == 2:
+        yy = "20" + yy
+    return yy + "-" + mm + "-" + dd
+
+
+def parse_space_month_date(d) -> str | None:
+    """Parse Kotak's "DD Mon YYYY" date shape (e.g. "03 Jun 2026") to ISO
+    YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't
+    match -- callers decide how to log/report that (e.g. reject the row)."""
+    if not d or not isinstance(d, str):
+        return None
+    d = d.strip()
+    if not d:
+        return None
+    parts = d.split()
+    if len(parts) != 3:
+        return None
+    day, month_abbr, year = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
+    month = MONTH_ABBR.get(month_abbr)
+    if not month or not day.isdigit() or not year.isdigit() or len(year) != 4:
+        return None
+    return f"{year}-{month}-{day.zfill(2)}"
+
+
+def parse_comma_month_date(d) -> str | None:
+    """Parse ICICI's "DD,Mon,YYYY" date shape (e.g. "01,Apr,2024") to ISO
+    YYYY-MM-DD. Returns None if the shape or month abbreviation doesn't
+    match -- callers decide how to log/report that.
+
+    A 2-digit year (e.g. "01,Apr,24") is mapped to 2000+YY, matching this
+    module's other date helper (``normalise_date``)'s existing convention
+    for 2-digit years. A calendar-invalid date (e.g. "31,Feb,2024") returns
+    None rather than a garbage ISO-shaped string.
+    """
+    if not d or not isinstance(d, str):
+        return None
+    d = d.strip().strip('"')
+    if not d:
+        return None
+    parts = d.split(',')
+    if len(parts) != 3:
+        return None
+    day, month_abbr, year = parts[0].strip(), parts[1].strip().lower(), parts[2].strip()
+    month = MONTH_ABBR.get(month_abbr)
+    if not month or not day.isdigit() or not year.isdigit():
+        return None
+    if len(year) == 2:
+        year = "20" + year
+    elif len(year) != 4:
+        return None
+    try:
+        _date(int(year), int(month), int(day))
+    except ValueError:
+        return None
+    return f"{year}-{month}-{day.zfill(2)}"

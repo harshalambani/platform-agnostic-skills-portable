@@ -1,0 +1,141 @@
+# skill.yaml — 26AS TDS Journal skill manifest
+# Read by the skill registry (agents/registry.py) at startup.
+
+name: "26AS Journal"
+display_name: "Convert to GnuCash"
+description: >
+  Create GnuCash TDS/TCS journal entries from a 26AS Convert workbook and your
+  .gnucash file. One balanced transaction per Part I deductor (Interest /
+  Dividend / Partnership) and per Part VI collector (TCS), with credit accounts
+  matched to your chart of accounts and unmatched ones routed to Suspense for
+  review.
+category: "26as"
+version: "1.0.0"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  # Form standard (UI-15): Entity first, then source, then the book.
+  # `entity` is a consumed input here (it is read to check
+  # partner_comp_accounts -- the s.194T double-booking guard), but
+  # ui/tabs/_generic.py never lets an entity/AY select name the output file
+  # (see _output_name_source), so it can lead the form and the output is
+  # still named after the 26AS workbook.
+  - name: "entity"
+    type: "select"
+    label: "Entity -- fills in the GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: true
+  - name: "xlsx_path"
+    type: "output_file"
+    label: "26AS workbook (Convert output)"
+    match: "*-26AS.xlsx"
+    entity_from: "entity"
+    file_types: [".xlsx"]
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash file"
+    file_types: [".gnucash"]
+    required: true
+    book_from: "entity"
+
+run_args:
+  entity: "{inputs.entity}"
+  xlsx_path: "{inputs.xlsx_path}"
+  gnucash_path: "{inputs.gnucash_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  # Same {data_root} token as skill_itr_workbook / skill_ais_reconcile /
+  # skill_gnucash_coverage use for entities_path -- NOT the {config_path}
+  # token above, which is the LLM endpoint config.yaml, not entities.yaml.
+  # Used only to check whether `entity` has partner_comp_accounts configured
+  # (skill_partner_comp_recon already books s.194T TDS month-by-month for
+  # such an entity; this skill must not also book it via Category C, or the
+  # TDS is counted twice and remuneration is overstated by the full amount).
+  entities_path: "{data_root}/itr/entities.yaml"
+
+output:
+  extension: ".csv"
+  suffix: "tds-journals"
+  download_label: "Download Journal CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []
+
+help:
+  overview: >
+    Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book.
+    It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of
+    your accounts (deterministic fuzzy match first, LLM fallback for the hard
+    cases), and writes a balanced journal CSV ready to import. TCS entries debit
+    your TCS account and credit Drawings — only the tax moves, since the spend
+    it was collected on is already in your books. For an entity with a Partner
+    Compensation Reconciliation book configured, s.194T (partnership) TDS is left out of the CSV
+    — that TDS is already booked month-by-month by the Partner Compensation Reconciliation
+    journal — and the summary instead shows a read-only reconciliation of the
+    26AS s.194T figures against what that journal has actually posted (MATCH /
+    OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.
+  when_to_use: >
+    Use this after "26AS Convert", when you want the TDS and TCS recorded in
+    GnuCash as journal entries instead of typing each one by hand. Getting TCS
+    into the book matters: it is a credit against your tax, and if it never
+    reaches the books your return understates the refund due.
+  inputs:
+    - name: "xlsx_path"
+      tooltip: "The 26AS workbook produced by 26AS Convert — pick it from the list of prior outputs."
+      accepts: "Excel (.xlsx) matching *-26AS.xlsx."
+      gotchas: "Run 26AS Convert first; the picker only shows workbooks from earlier runs."
+    - name: "gnucash_path"
+      tooltip: "Your GnuCash book — used only to read account names for matching."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Close the book in GnuCash before running so the file is not locked. It is never modified."
+    - name: "entity"
+      tooltip: "Pick the entity this 26AS workbook belongs to. Also auto-fills the GnuCash book field from the registered book for that entity."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "Required — the skill uses this to check whether s.194T partner-comp TDS is already booked elsewhere, so it does not double-book it."
+  steps:
+    - "Pick the 26AS workbook from the dropdown of prior outputs."
+    - "Select your .gnucash book (make sure GnuCash has it closed)."
+    - "Click Run; review any deductors flagged as unmatched."
+    - "Import the CSV into GnuCash: File > Import > Import Transactions from CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-tds-journals.csv"
+        tooltip: >
+          One balanced journal transaction per TDS entry (every transaction's
+          amounts sum to zero), debiting the TDS receivable / asset account and
+          crediting the income account, ready for GnuCash CSV import.
+      - name: "YYYY-MM-DD-HHMMSS-<input>-tds-journals-partI.csv"
+        tooltip: >
+          Only written when the 26AS has 15G/15H (Part II) entries: the same
+          journal with every 15G/15H transaction dropped whole. Import this
+          instead of the full journal if you post 15G/15H entries by hand in
+          GnuCash yourself, so the Interest-on-FD reclassification is not
+          double-booked. Regenerated on every save from the Review
+          screen, so it can never go stale.
+  tips: >
+    Entries whose deductor could not be matched to an account are flagged so you
+    can fix the account name in your book (or add the missing account) and re-run.
+    Confirming a credit account on the Review screen is remembered for that
+    deductor (by its TAN) for next time — a later run applies it automatically,
+    without a fresh guess and without asking you to confirm it again. If the
+    s.194T reconciliation reports OPEN, run "Partner Compensation Reconciliation" (GnuCash > Partner) first, then
+    re-run this skill — the expected order is bank, then Partner Compensation Reconciliation,
+    then this skill.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings)."
+    - problem: "A deductor was assigned the wrong account."
+      fix: "Rename/add the account in GnuCash so its name is closer to the deductor, then re-run."
+    - problem: "s.194T reconciliation shows OPEN or VARIANCE."
+      fix: >
+        OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for
+        this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL
+        names the month(s) where 26AS and the posted journal disagree (or a
+        month is missing) -- check that journal's postings for those months
+        before importing.

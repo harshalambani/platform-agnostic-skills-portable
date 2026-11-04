@@ -1,0 +1,314 @@
+# Invented, self-consistent fixture for the Partner Compensation
+# Reconciliation skill (agents.skill_partner_comp_recon). No figure here is
+# copied or derived from any real document -- every number was chosen to
+# exercise this package's arithmetic rules (see AGENT.md / engine.py):
+#
+#   - the misc-adjustment derivation (s.3.1)
+#   - a one-off gross-up that lands exactly on a round lakh (s.3.2, CONFIRMED)
+#   - the incentive-cohort FY straddle, with one instalment paid the
+#     following financial year (s.4)
+#   - the capital rule (s.5.1) landing exactly on the Advisory's stated
+#     closing capital
+#   - a mid-year capital-rate-change inside that same cohort (s.5.2) --
+#     deliberately present *alongside* the s.5.1 agreement above, to
+#     demonstrate that an aggregate match does not mask an
+#     instalment-level anomaly
+#   - the advisory block's financial_year matches the cohort's award_fy
+#     ("2024-25"), and its schedule_instalments_gross_total (2,000,000)
+#     matches the two in-FY cohort instalments' gross total exactly, so
+#     the "Incentive instalments: award-year Advisory vs payment schedule"
+#     category resolves to AGREE, not CANNOT RECONCILE
+#   - every other external figure set to agree exactly with the computed
+#     total, so this fixture's only non-AGREE signal is the rate-change
+#     suspect on Capital (a note on rate_change_suspects, not a
+#     reconciliation row)
+#
+# Stage 1b additions (jv_emitter.py -- see AGENT.md's "Stage 1b" section):
+#   - firm_name, used only in the journal CSV's transaction descriptions
+#   - an accounts: block naming a (fictitious) chart-of-accounts leaf for
+#     every journal leg
+#   - an opening_reclass: block, balancing to zero, invented and unrelated
+#     to any real correction -- both splits are deliberately balance-sheet
+#     accounts (never income or equity), because the whole point of an
+#     opening reclassification is that a closed, filed year is corrected
+#     without ever touching current-year income (see AGENT.md's Stage 1b
+#     section)
+#   - the April line carries non-zero interest_on_capital, medical_topup
+#     and prior_cohort_drawdown so the journal emitter's tests exercise
+#     all three optional monthly fields. prior_cohort_drawdown is POSITIVE
+#     here: it is a prior-year incentive instalment RECEIVED this year --
+#     cash in, adds to total_paid, and CREDITS (reduces) the current-account
+#     balance the firm owes the partner
+
+financial_year: "2025-26"
+
+firm_name: "Northgate Advisors LLP"
+
+accounts:
+  bank: "Assets:Bank:Current Account"
+  # TDS deducted at source is booked as an EXPENSE, consistently with every
+  # other deducted-tax account in this ledger -- deliberately NOT an
+  # asset/tax-credit account. Do not "correct" this to an Assets path.
+  tds_expense: "Expenses:Tax:TDS 194T"
+  interest_on_capital: "Income:PGBP:Interest on Capital"
+  current_account: "Assets:Firm Current Account"
+  capital_contribution: "Assets:Firm Capital Account"
+  medical_expense: "Expenses:Medical"
+  remuneration_income: "Income:PGBP:Remuneration"
+  share_of_profit_income: "Income:PGBP:Share of Profit"
+
+opening_reclass:
+  date: "2025-04-01"
+  description: "Reclass of a misallocated FY2024-25 capital contribution"
+  # Deliberately touches no income or equity account -- an opening
+  # reclassification corrects a closed, filed year, and the doctrine this
+  # entry demonstrates is that such a correction never re-touches
+  # current-year income (see AGENT.md's Stage 1b section). Both legs here
+  # are balance-sheet accounts: an amount posted to the capital account by
+  # mistake, moved to the current account where it belonged.
+  splits:
+    - account: "Assets:Firm Current Account"
+      amount: 218650
+    - account: "Assets:Firm Capital Account"
+      amount: -218650
+
+drivers:
+  firms_tax_rate: 0.349440
+  capital_rate: 0.40
+  capital_months_total: 48
+  capital_months_achieved: 12
+  target_compensation: 10000000
+  remuneration_tds_section: "194T"
+  remuneration_tds_rate: 0.10
+  remuneration_tds_start_date: "2025-04-01"
+
+monthly:
+  - month: "2025-04"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    # Stage 1b fields (jv_emitter.py) -- only this month carries them, to
+    # exercise interest_on_capital / medical_topup / prior_cohort_drawdown
+    # without disturbing the other eleven identical months.
+    interest_on_capital: 12000
+    medical_topup: -8000
+    prior_cohort_drawdown: 60000
+    total_paid: 659280
+  - month: "2025-05"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-06"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-07"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-08"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-09"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-10"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-11"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2025-12"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    # additional_share_of_profit here is a prior-year PLMI drawdown,
+    # already NET of the firm's tax on that drawdown (see AGENT.md / this
+    # skill's principle -- "gross PLMI, less firm's tax paid by firm, less
+    # capital contribution = net PLMI"): gross 1,000,000 less firms_tax_other
+    # 349440 (both at firms_tax_rate) = 650560. jv_emitter.py books this
+    # NET figure as-is, with no further subtraction of firms_tax_other --
+    # that leg is what already netted it.
+    additional_share_of_profit: 650560
+    firms_tax_sop: -174720
+    firms_tax_other: -349440
+    tds: -30000
+    capital_transferred: 0
+    # total_paid = remuneration 300000 + net current-year SoP leg 325280
+    # (500000 - 174720) + the PLMI leg 650560 (already net, booked as-is)
+    # - tds 30000 = 1245840. (Recomputed for the firms_tax_sop/
+    # firms_tax_other split -- the old combined-field arithmetic gave
+    # 896400, which no longer balances the journal now that the PLMI leg
+    # is booked at its full net value instead of being re-netted.)
+    total_paid: 1245840
+  - month: "2026-01"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2026-02"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+  - month: "2026-03"
+    remuneration: 300000
+    share_of_profit_gross: 500000
+    additional_share_of_profit: 0
+    firms_tax_sop: -174720
+    tds: -30000
+    capital_transferred: 0
+    total_paid: 595280
+
+cohorts:
+  - award_fy: "2024-25"
+    gross_award: 3000000
+    instalments:
+      - date: "2025-07-31"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -416667
+        net: 233893
+      - date: "2025-10-31"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -291667
+        net: 358893
+      - date: "2026-06-30"
+        gross: 1000000
+        firms_tax: -349440
+        capital: -291667
+        net: 358893
+
+advisory:
+  stated_closing_capital: 1000000
+  # H35-07 item 1(i): this SAME FY's Advisory also prints an "Opening
+  # balance (as on 1 Apr 26)" line under the Capital/PLMI/Special Incentive
+  # schedule -- "1 Apr" of the year after this FY's own 31 March is the day
+  # after this FY's close, so it describes the same date as the statement's
+  # own closing capital (1,000,000) and is expected to tie to it exactly.
+  opening_capital_next_fy: 1000000
+  # This is the AWARD-year Advisory for the cohort above (award_fy
+  # "2024-25"), so its own schedule_instalments gross total is directly
+  # comparable against the reporting FY's cohort ledger gross total: the
+  # two in-FY instalments (2025-07-31 and 2025-10-31) at 1,000,000 gross
+  # each = 2,000,000 (the third instalment, 2026-06-30, belongs to next
+  # FY and is excluded from the reporting-FY total -- see s.4 above).
+  financial_year: "2024-25"
+  schedule_instalments_gross_total: 2000000
+
+# H35-02: the L5 LLP Statement of Account, whole (see
+# parsers/llp_statement.py's field shape). Every figure here is chosen to
+# agree exactly with this fixture's own monthly/capital/advisory figures,
+# same as every other external source in this file -- so the new L5
+# tie-out rows (engine.py) and the Exempt-SoP row (which now reads
+# current_profit_share here, never the monthly total) all AGREE, keeping
+# this fixture's single documented non-AGREE signal the Capital rate-change
+# suspect noted above.
+#   - capital_closing_balance (1,000,000) matches the Rule/Advisory/Return
+#     closing capital already agreeing above.
+#   - current_profit_share (6,000,000) matches the twelve months'
+#     share_of_profit_gross total (12 x 500,000) -- and, not coincidentally,
+#     also return_exempt_share_of_profit below, same as before H35-02.
+#   - current_remuneration (3,600,000) matches the twelve months' summed
+#     remuneration (12 x 300,000).
+#   - capital_interest_on_capital (12,000) matches the one non-zero
+#     interest_on_capital monthly figure (April).
+#   - current_opening_balance (500,000, invented) minus the one non-zero
+#     prior_cohort_drawdown (60,000, April) gives current_closing_balance
+#     (440,000) -- the "booked (monthly)" side of that tie-out row.
+#   - current_drawings (-8,213,920, printed negative/parenthesised per the
+#     L5 convention -- see parsers/llp_statement.py) is the magnitude of
+#     the twelve months' total_paid (7,857,920) plus the s.194T TDS
+#     withheld on them (360,000), plus the one non-zero medical_topup
+#     (8,000, April, a payslip deduction paid on the partner's behalf),
+#     minus the one non-zero interest_on_capital (12,000, April, GROSS --
+#     credited to the CAPITAL column, not current, so it is backed out of
+#     this current-account identity): 7,857,920 + 360,000 + 8,000 - 12,000
+#     = 8,213,920 -- H35-04 (reworked) D1 identity row ("Current-account
+#     drawings: statement vs (net monthly payouts + TDS + other payslip
+#     deductions - gross interest on capital)"). Only `current_drawings`
+#     itself is read by engine.py for this row; current_total_withdrawals/
+#     capital_drawings below are not consumed by build_report() and are
+#     left as originally invented (they matter only to the L5 *parser's*
+#     own arithmetic checks, not exercised by this structured-input
+#     fixture).
+llp_record:
+  document_type: "llp_statement"
+  financial_year: "2025-26"
+  # H35-07 item 1(ii): every monthly line's capital_transferred is 0 this
+  # FY (no payslip capital deduction), so the roll-forward (opening + sum
+  # of payslip capital deductions) is expected to equal the closing
+  # balance exactly only when opening == closing (1,000,000). This year's
+  # only capital movement is the interest-on-capital credit below
+  # (capital_interest_on_capital / capital_total_additions, 12,000) --
+  # which is a different, already-covered tie-out (see the
+  # booked-vs-statement interest-on-capital row) and is deliberately NOT
+  # part of the item 1(ii) roll-forward formula (payslip capital
+  # deductions only, per spec), so it is not double counted here.
+  capital_opening_balance: 1000000
+  capital_introduced_transferred: 0
+  capital_interest_on_capital: 12000
+  capital_total_additions: 12000
+  capital_drawings: 0
+  capital_total_withdrawals: 0
+  capital_closing_balance: 1000000
+  current_opening_balance: 500000
+  current_remuneration: 3600000
+  current_profit_share: 6000000
+  current_total_additions: 10100000
+  current_drawings: -8213920
+  current_transfer_to_capital: 0
+  current_total_withdrawals: 60000
+  current_closing_balance: 440000
+
+external:
+  # bank_credits_total is the sum of the twelve monthly total_paid figures
+  # ALONE (7,857,920) -- the reconciliation compares monthly payouts to the
+  # bank, never monthly + cohort instalment nets, because total_paid is
+  # already inclusive of any PLMI instalment paid that month (see engine.py
+  # build_report()'s "Total cash received (monthly payouts) vs Bank").
+  bank_credits_total: 7857920
+  form_26as_total_credit: 360000
+  return_exempt_share_of_profit: 6000000
+  return_closing_capital: 1000000

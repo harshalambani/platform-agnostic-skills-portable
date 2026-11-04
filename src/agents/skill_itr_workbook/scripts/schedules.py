@@ -1,0 +1,1810 @@
+"""
+schedules.py -- pure-python schedule models built from the resolved mapping,
+book, Form 16, and rules config (plan section 2.2 / 3). Every number here is
+traceable to a tag/source (mapping tag -> leaf total, book split, Form16
+field, or Rules config value) -- nothing is hardcoded.
+
+This module is deliberately data-only: it builds dataclasses describing each
+schedule's figures. write_workbook.py turns them into formula-linked cells;
+this module supplies the VALUES the formulas must reproduce (used for golden
+tests and for the values baked into Rules/Entity/transcript sheets, which
+are not themselves formulas).
+"""
+from __future__ import annotations
+
+import csv
+import dataclasses
+import math
+import re
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+import as26 as as26_engine
+import configs
+import foreign_tax as foreign_tax_engine
+import interest_234
+import lots as lots_engine
+import parse_eguile as pe
+import quarters as quarters_engine
+import rules as rules_engine
+import tax_core
+from parse_gnucash import Book, fy_window
+
+DATA_DIR = Path(__file__).parent.parent / "data"
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _node_by_guid(tree: pe.ParsedBalanceSheet) -> dict:
+    return {n.guid: n for n in tree.all_nodes() if n.guid}
+
+
+def _sum_tag(resolved: dict, node_by_guid: dict, tag: str) -> float:
+    return sum(
+        (node_by_guid[leaf.guid].total or 0.0)
+        for leaf in resolved.values()
+        if leaf.tag == tag and leaf.guid in node_by_guid
+    )
+
+
+def _leaves_for_tag(resolved: dict, node_by_guid: dict, tag: str) -> list:
+    return [
+        (leaf, node_by_guid[leaf.guid])
+        for leaf in resolved.values()
+        if leaf.tag == tag and leaf.guid in node_by_guid
+    ]
+
+
+def round_288a(value: float, nearest: int) -> float:
+    """s.288A: Total Income rounded to the nearest `nearest` (typically 10),
+    standard round-half-up (rupee rounding) -- Python's builtin round() is
+    banker's rounding (round-half-to-even) and would silently round some
+    exact halves down, so this uses floor(x/nearest + 0.5) instead."""
+    if nearest <= 0:
+        return value
+    return float(math.floor(value / nearest + 0.5) * nearest)
+
+
+round_288b = round_288a  # same mechanics, different checkpoint (s.288B)
+
+
+# ---------------------------------------------------------------------------
+# Salary
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SalarySchedule:
+    gross: float = 0.0
+    s10_exempt_total: float = 0.0
+    std_deduction: float = 0.0
+    prof_tax: float = 0.0
+    income_chargeable: float = 0.0
+    source: str = "manual"     # "form16" | "manual" | "book-only"
+    manual_flagged: bool = False
+    # Fail-loud (2026-07-22 salary-gross fix), "banner, no abort" -- mirrors
+    # CapitalGainsSchedule.reconciliation_ok/_diff (see build_capital_gains):
+    # asserts the Salary sheet's OWN displayed arithmetic (gross - s.10
+    # exemptions - std deduction - prof tax == income chargeable) actually
+    # adds up. Only ever set on the Form16 path -- the book-only path
+    # constructs income_chargeable = gross - std_deduction directly, so it is
+    # true by construction.
+    reconciliation_ok: bool = True
+    reconciliation_diff: float = 0.0
+
+
+def build_salary(
+    resolved: dict, node_by_guid: dict, form16, rules: rules_engine.RulesConfig, regime: str,
+) -> SalarySchedule:
+    book_gross = _sum_tag(resolved, node_by_guid, "SALARY_GROSS")
+    if book_gross == 0.0 and not any(leaf.tag == "SALARY_GROSS" for leaf in resolved.values()):
+        return SalarySchedule(source="manual", manual_flagged=True)
+
+    if form16 is not None and form16.s17_1 is not None:
+        # The Salary sheet's displayed "Gross salary" cell is explicitly
+        # labelled "17(1)+17(2)+17(3))" (write_workbook.py), i.e. Form 16's
+        # 1(d) total -- NOT the book's SALARY_GROSS tag, which ties to 17(1)
+        # alone (GnuCash books carry no perquisites/17(2) figure). Using
+        # `book_gross` here understated the displayed gross by the
+        # perquisites amount and made the sheet visibly fail to reconcile
+        # (bug fix, 2026-07-22). `book_gross` remains the independent
+        # cross-check input consumed by verify.py's "17(1) Salary vs
+        # SALARY_GROSS" control, which intentionally keeps comparing the book
+        # against 17(1) alone -- that control is untouched by this fix.
+        gross = form16.total_1d
+        if gross is None:   # defensive: identity check could not confirm 1(d)
+            gross = (form16.s17_1 or 0.0) + (form16.s17_2 or 0.0) + (form16.s17_3 or 0.0)
+        std_deduction = form16.std_deduction_16a or 0.0
+        s10_exempt_total = form16.total_2i or 0.0
+        prof_tax = form16.prof_tax_16c or 0.0
+        income_chargeable = (
+            form16.income_chargeable_6 if form16.income_chargeable_6 is not None else gross
+        )
+        diff = (gross - s10_exempt_total - std_deduction - prof_tax) - income_chargeable
+        return SalarySchedule(
+            gross=gross,
+            s10_exempt_total=s10_exempt_total,
+            std_deduction=std_deduction,
+            prof_tax=prof_tax,
+            income_chargeable=income_chargeable,
+            source="form16",
+            reconciliation_diff=diff,
+            reconciliation_ok=abs(diff) <= 0.01,
+        )
+
+    # Book-only path (CF3): no Form 16 to carry a std deduction figure, so
+    # apply the Rules-driven std_deduction_salary for the selected regime --
+    # still manual_flagged=True since perquisites/s.10 exemptions/prof tax
+    # remain unknown without Form 16.
+    std_deduction = rules.regime(regime)["std_deduction_salary"]
+    income_chargeable = max(0.0, book_gross - std_deduction)
+    return SalarySchedule(
+        gross=book_gross, std_deduction=std_deduction, income_chargeable=income_chargeable,
+        source="book-only", manual_flagged=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Business P&L (ITR-3 only)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class BusinessSchedule:
+    remuneration: float = 0.0
+    expenses_total: float = 0.0   # negative, HTML sign convention
+    net: float = 0.0
+
+
+def build_business(resolved: dict, node_by_guid: dict) -> BusinessSchedule:
+    remuneration = _sum_tag(resolved, node_by_guid, "BUS_REMUNERATION")
+    expenses = _sum_tag(resolved, node_by_guid, "BUS_EXPENSE")
+    return BusinessSchedule(remuneration=remuneration, expenses_total=expenses, net=remuneration + expenses)
+
+
+# ---------------------------------------------------------------------------
+# House Property (OQ-1 order: GAV - municipal tax = NAV; -30% NAV; -interest)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HousePropertySchedule:
+    gav: float = 0.0
+    municipal_tax: float = 0.0
+    nav: float = 0.0
+    std_deduction_24a: float = 0.0
+    interest_24b: float = 0.0
+    income: float = 0.0
+
+
+def build_house_property(resolved: dict, node_by_guid: dict, rules: rules_engine.RulesConfig) -> HousePropertySchedule:
+    gav = _sum_tag(resolved, node_by_guid, "HP_RENT")
+    municipal_tax = _sum_tag(resolved, node_by_guid, "HP_MUNICIPAL_TAX")
+    interest = _sum_tag(resolved, node_by_guid, "HP_INTEREST")
+    if gav == 0.0 and municipal_tax == 0.0 and interest == 0.0:
+        return HousePropertySchedule()
+
+    # municipal_tax/interest are booked as negative expenses (HTML convention);
+    # the Rules-driven order operates on their absolute (paid) amounts.
+    municipal_tax_paid = abs(municipal_tax)
+    interest_paid = abs(interest)
+    nav = gav - municipal_tax_paid
+    pct = rules.common["house_property"]["std_deduction_pct_of_nav"]
+    std_ded = nav * pct
+    income = nav - std_ded - interest_paid
+    return HousePropertySchedule(
+        gav=gav, municipal_tax=municipal_tax_paid, nav=nav,
+        std_deduction_24a=std_ded, interest_24b=interest_paid, income=income,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Other Sources
+# ---------------------------------------------------------------------------
+
+@dataclass
+class OtherSourcesSchedule:
+    interest_sb: float = 0.0
+    interest_bank: float = 0.0
+    interest_nbfc: float = 0.0
+    interest_epf_taxable: float = 0.0
+    refund_interest: float = 0.0
+    refund_principal_excluded: float = 0.0
+    dividend_gross: float = 0.0
+    dividend_quarters: list = field(default_factory=lambda: [0.0] * 5)
+    dividend_gross_up_flags: list = field(default_factory=list)
+    dividend_quarters_source: str = "book"   # "book" | "26AS" (CF5)
+    interest_quarters: list = field(default_factory=lambda: [0.0] * 5)
+    interest_gross_up_flags: list = field(default_factory=list)
+    interest_quarters_source: str = "book"   # "book" | "26AS" (CF5)
+    slbs: float = 0.0
+    taxable_total: float = 0.0
+    # Foreign broker report dividends (parse_foreign.py). Whether the ORDINARY
+    # foreign dividend series (never the deemed s.2(22)(f) series -- see
+    # below) is folded into dividend_gross/taxable_total/dividend_quarters
+    # above is controlled by the `foreign_dividends_in_book` flag passed into
+    # build_other_sources (2026-08-19, see EntityProfile.foreign_dividends_in_
+    # book in configs.py): false (the book does NOT yet contain this broker's
+    # activity, today's reality) means it IS added in; true (the book already
+    # tags the same receipts, e.g. under OS_DIVIDEND) means it stays excluded
+    # to avoid double-counting. Either way, these detail fields below stay
+    # populated for the audit trail -- inclusion changes the totals above,
+    # never this detail. Every field here defaults to the "absent" state so a
+    # run with no foreign_report supplied is byte-identical to before this
+    # field set existed.
+    foreign_dividend_gross: float | None = None
+    foreign_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
+    foreign_dividend_quarter_flags: list = field(default_factory=lambda: [None] * 5)
+    # Deemed dividend under s.2(22)(f) -- taxed differently, and NEVER added
+    # into dividend_gross/taxable_total/dividend_quarters under either value
+    # of foreign_dividends_in_book. Strictly a detail-only figure.
+    foreign_deemed_dividend_gross: float | None = None
+    foreign_deemed_dividend_quarters: list = field(default_factory=lambda: [None] * 5)
+    foreign_dividend_source: str | None = None   # "broker report" when populated, else None
+    # The resolved foreign_dividends_in_book flag this schedule was built
+    # with -- carried through purely so presentation/write_workbook can print
+    # it in plain words next to the dividend figures (a wrong setting must be
+    # visible on the sheet, not buried in config).
+    foreign_dividends_in_book: bool = False
+
+
+#: The two dividend series parse_foreign.py's Dividend sheet quarterly block
+#: can carry -- see QuarterlyBucket.series' own docstring. Ordinary foreign
+#: dividend (s.56 Other Sources) vs. deemed dividend under s.2(22)(f), which
+#: is taxed differently and must never be summed into the ordinary series.
+_FOREIGN_DIVIDEND_SERIES_ORDINARY = "Dividend Income"
+_FOREIGN_DIVIDEND_SERIES_DEEMED = "Dividend u/s 2(22)(f)"
+
+_MONTH_ABBR = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _foreign_report_fy_start_year(foreign_report) -> int | None:
+    """The report's financial year (e.g. '2025-26') as its starting
+    calendar year (2025), the same convention parse_gnucash.fy_window uses
+    for `year_key`. Prefers the Dividend sheet's own financial_year (it is
+    what the quarterly labels below actually describe); falls back to the
+    report-level financial_year. Returns None -- never a guess -- when
+    neither is present or the string doesn't start with a 4-digit year."""
+    fy = (foreign_report.dividend.financial_year if foreign_report.dividend else None) \
+        or foreign_report.financial_year
+    if not fy or len(fy) < 4 or not fy[:4].isdigit():
+        return None
+    return int(fy[:4])
+
+
+def _parse_foreign_period_end_date(label: str | None, fy_start_year: int) -> date | None:
+    """Parses a period label like '16-Jun to 15-Sep' into the calendar date
+    of its END ('15-Sep'), which is what determines its 234C window.
+    Jan/Feb/Mar end-dates belong to fy_start_year + 1 (mirrors quarters.py's
+    own threshold convention: the FY's final 234C window straddles the
+    calendar-year boundary). Returns None -- never a guess -- when the label
+    doesn't match the expected 'D-Mon to D-Mon' shape or the month/day is
+    not a real calendar date."""
+    if not label:
+        return None
+    m = re.search(r"to\s*(\d{1,2})-([A-Za-z]{3})", label)
+    if not m:
+        return None
+    month = _MONTH_ABBR.get(m.group(2).lower())
+    if month is None:
+        return None
+    try:
+        day = int(m.group(1))
+        year = fy_start_year + 1 if month in (1, 2, 3) else fy_start_year
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _series_gross(quarterly: list, series_name: str) -> float | None:
+    """Sum of `.amount` over every bucket in `quarterly` whose `.series`
+    matches `series_name`, skipping None (flagged/placeholder) buckets.
+    None (never 0.0) when every matching bucket was flagged, or there were
+    none at all -- a 0 on a tax return is an assertion of fact (parse_
+    foreign.parse_numeric_cell's own rule) and this module never invents
+    one either."""
+    vals = [b.amount for b in quarterly if b.series == series_name and b.amount is not None]
+    return sum(vals) if vals else None
+
+
+def _map_foreign_dividend_quarters(quarterly: list, fy_start_year: int | None, warnings: list):
+    """Maps parse_foreign's flat list of QuarterlyBucket (2 series x up to 5
+    periods, order/completeness not guaranteed by the vendor -- D2) onto the
+    five 234C windows, by parsing each label's END date and resolving it
+    through quarters.bucket_index -- never by position, so there is exactly
+    one definition of the 234C windows in the codebase. A bucket whose
+    amount is None (flag set) stays None in the mapped list; a label that
+    can't be parsed into a date, or an unrecognised series name, is never
+    guessed -- it is skipped and a warning is appended to `warnings` (which
+    callers pass as the live `ForeignIncomeReport.warnings` list, so it
+    surfaces on the ScheduleFA sheet's Parser warnings block same as every
+    other parse_foreign warning). Returns (quarters, flags, deemed_quarters,
+    deemed_flags), each a list[float | None] / list[str | None] of length 5.
+
+    Collision handling: if two buckets of the SAME series ever resolve to the
+    SAME 234C window (e.g. a vendor re-issuing overlapping periods), a plain
+    `target_q[idx] = bucket.amount` would let the second silently clobber the
+    first -- exactly the "silent zero" failure class this feature already
+    had one real defect from. Instead the amounts are SUMMED (both periods'
+    income is real and neither should vanish) and a warning is appended
+    naming both period labels and the window, so the collision is visible
+    even though no income is lost. If either side is None (flagged/
+    placeholder), the numeric side wins and the flag is preserved via
+    `_flag or` fallback rather than being dropped."""
+    quarters: list = [None] * 5
+    flags: list = [None] * 5
+    quarter_labels: list = [None] * 5
+    deemed_quarters: list = [None] * 5
+    deemed_flags: list = [None] * 5
+    deemed_labels: list = [None] * 5
+    for bucket in quarterly:
+        if bucket.series == _FOREIGN_DIVIDEND_SERIES_ORDINARY:
+            target_q, target_f, target_labels = quarters, flags, quarter_labels
+        elif bucket.series == _FOREIGN_DIVIDEND_SERIES_DEEMED:
+            target_q, target_f, target_labels = deemed_quarters, deemed_flags, deemed_labels
+        else:
+            warnings.append(
+                f"Foreign dividends: unrecognised quarterly series {bucket.series!r} "
+                f"(period {bucket.label!r}) -- not summed into either series."
+            )
+            continue
+        if fy_start_year is None:
+            continue   # FY unresolvable -- caller already warned once, not per-bucket
+        end_date = _parse_foreign_period_end_date(bucket.label, fy_start_year)
+        if end_date is None:
+            warnings.append(
+                f"Foreign dividends: could not parse period label {bucket.label!r} into a date -- "
+                "234C window left unfilled rather than guessed."
+            )
+            continue
+        idx = quarters_engine.bucket_index(end_date, fy_start_year)
+        if target_labels[idx] is None:
+            target_q[idx] = bucket.amount
+            target_f[idx] = bucket.flag
+            target_labels[idx] = bucket.label
+        else:
+            # Collision: a prior bucket of this same series already mapped to
+            # this window. Sum rather than overwrite -- see docstring.
+            prior_amount = target_q[idx]
+            if prior_amount is None and bucket.amount is None:
+                combined = None
+            elif prior_amount is None:
+                combined = bucket.amount
+            elif bucket.amount is None:
+                combined = prior_amount
+            else:
+                combined = prior_amount + bucket.amount
+            warnings.append(
+                f"Foreign dividends: periods {target_labels[idx]!r} and {bucket.label!r} "
+                f"both resolved to 234C window Q{idx + 1} for series {bucket.series!r} -- "
+                "amounts summed rather than the second silently overwriting the first."
+            )
+            target_q[idx] = combined
+            target_f[idx] = target_f[idx] or bucket.flag
+            target_labels[idx] = f"{target_labels[idx]} + {bucket.label}"
+    return quarters, flags, deemed_quarters, deemed_flags
+
+
+def build_other_sources(
+    resolved: dict, node_by_guid: dict, book: Book | None, year_key: str | None,
+    rules: rules_engine.RulesConfig | None = None, as26_data=None, foreign_report=None,
+    foreign_dividends_in_book: bool = False,
+) -> OtherSourcesSchedule:
+    """`foreign_dividends_in_book` (2026-08-19, EntityProfile.foreign_
+    dividends_in_book -- see configs.py): false (default) means the GnuCash
+    book does NOT yet contain the foreign broker's dividend activity, so the
+    ORDINARY foreign dividend series (never the deemed s.2(22)(f) series) is
+    ADDED into dividend_gross/taxable_total and its five mapped 234C amounts
+    into dividend_quarters element-wise -- omitting it would simply drop that
+    income from the return. true means the book already tags the same
+    receipts (e.g. under OS_DIVIDEND), so the foreign figures stay excluded
+    from the total (still surfaced on their own detail fields) to avoid
+    double-counting. Either way, a None/placeholder foreign quarter or a None
+    foreign_dividend_gross never turns a real book figure into 0.0/None --
+    only present, numeric foreign amounts are ever added in."""
+    sb = _sum_tag(resolved, node_by_guid, "OS_INTEREST_SB")
+    bank = _sum_tag(resolved, node_by_guid, "OS_INTEREST_BANK")
+    nbfc = _sum_tag(resolved, node_by_guid, "OS_INTEREST_NBFC")
+    epf = _sum_tag(resolved, node_by_guid, "OS_INTEREST_EPF_TAXABLE")
+    refund_interest = _sum_tag(resolved, node_by_guid, "OS_REFUND_INTEREST")
+    refund_principal = _sum_tag(resolved, node_by_guid, "NONTAX_REFUND_PRINCIPAL")
+    dividend = _sum_tag(resolved, node_by_guid, "OS_DIVIDEND")
+    slbs = _sum_tag(resolved, node_by_guid, "OS_SLBS")
+
+    tds_sections = rules.common.get("tds_sections", {}) if rules is not None else {}
+
+    div_quarters = [0.0] * 5
+    div_gross_up_flags: list = []
+    div_source = "book"
+    int_quarters = [0.0] * 5
+    int_gross_up_flags: list = []
+    int_source = "book"
+
+    if as26_data is not None and as26_data.transactions and year_key is not None and tds_sections:
+        # CF5: 26AS transaction dates are the authoritative receipt dates for
+        # 234C bucketing (D17) -- override the book-date buckets when a 26AS
+        # workbook is supplied.
+        div_buckets = quarters_engine.bucket_as26_transactions(
+            as26_data.transactions, year_key, "dividend", tds_sections,
+        )
+        div_quarters, div_gross_up_flags, div_source = div_buckets.buckets, div_buckets.gross_up_flags, "26AS"
+        int_buckets = quarters_engine.bucket_as26_transactions(
+            as26_data.transactions, year_key, "interest", tds_sections,
+        )
+        int_quarters, int_gross_up_flags, int_source = int_buckets.buckets, int_buckets.gross_up_flags, "26AS"
+    elif book is not None and year_key is not None:
+        dividend_guids = {leaf.guid for leaf in resolved.values() if leaf.tag == "OS_DIVIDEND" and leaf.guid in book.accounts}
+        if dividend_guids:
+            buckets = quarters_engine.bucket_receipts(book, dividend_guids, year_key)
+            div_quarters, div_gross_up_flags = buckets.buckets, buckets.gross_up_flags
+        interest_guids = {
+            leaf.guid for leaf in resolved.values()
+            if leaf.tag in ("OS_INTEREST_SB", "OS_INTEREST_BANK", "OS_INTEREST_NBFC") and leaf.guid in book.accounts
+        }
+        if interest_guids:
+            buckets = quarters_engine.bucket_receipts(book, interest_guids, year_key)
+            int_quarters, int_gross_up_flags = buckets.buckets, buckets.gross_up_flags
+
+    # Foreign broker report dividends (D1-D4). These detail fields are always
+    # computed and populated when a report is supplied -- inclusion in the
+    # totals/buckets below is controlled separately by
+    # `foreign_dividends_in_book`, never by whether the detail exists.
+    foreign_dividend_gross = None
+    foreign_dividend_quarters: list = [None] * 5
+    foreign_dividend_quarter_flags: list = [None] * 5
+    foreign_deemed_dividend_gross = None
+    foreign_deemed_dividend_quarters: list = [None] * 5
+    foreign_dividend_source = None
+
+    if foreign_report is not None and foreign_report.dividend is not None:
+        div_data = foreign_report.dividend
+        if div_data.quarterly:
+            foreign_dividend_source = "broker report"
+            foreign_dividend_gross = _series_gross(div_data.quarterly, _FOREIGN_DIVIDEND_SERIES_ORDINARY)
+            foreign_deemed_dividend_gross = _series_gross(div_data.quarterly, _FOREIGN_DIVIDEND_SERIES_DEEMED)
+            fy_start_year = _foreign_report_fy_start_year(foreign_report)
+            if fy_start_year is None:
+                foreign_report.warnings.append(
+                    "Foreign dividends: could not determine the report's financial year -- "
+                    "234C quarter-bucket mapping skipped (gross totals above are still computed)."
+                )
+            (foreign_dividend_quarters, foreign_dividend_quarter_flags,
+             foreign_deemed_dividend_quarters, _deemed_flags) = _map_foreign_dividend_quarters(
+                div_data.quarterly, fy_start_year, foreign_report.warnings,
+            )
+        else:
+            foreign_report.warnings.append(
+                "Foreign dividends: report parsed but yielded zero quarterly dividend buckets."
+            )
+
+    # Inclusion (T2/T3): the deemed s.2(22)(f) series is NEVER added into the
+    # total/buckets, under either value of foreign_dividends_in_book -- it is
+    # strictly a detail-only figure, taxed differently. The ordinary series is
+    # added in only when the book does NOT already contain it, and only where
+    # a real (non-None) foreign figure exists -- a None foreign quarter/gross
+    # must never coerce a book figure to a different value or invent a 0.0.
+    if not foreign_dividends_in_book:
+        if foreign_dividend_gross is not None:
+            dividend = dividend + foreign_dividend_gross
+        div_quarters = [
+            (book_amt + fq) if fq is not None else book_amt
+            for book_amt, fq in zip(div_quarters, foreign_dividend_quarters)
+        ]
+        # 2026-08-19 (coordinator review, defect 2): `div_source` ("book" or
+        # "26AS") describes where dividend_quarters came from BEFORE this
+        # fold. Once a real foreign quarter has actually been added in above,
+        # the label has to say so too -- otherwise a reconciler chasing the
+        # 234C split sees "book" and has no way to know the number no longer
+        # matches the book alone. Only append when a fold actually happened
+        # (report supplied AND at least one non-None foreign quarter got
+        # added) -- flag-true and no-report must leave div_source untouched,
+        # exactly "book"/"26AS", so existing behaviour/tests are unaffected.
+        if foreign_dividend_source is not None and any(fq is not None for fq in foreign_dividend_quarters):
+            div_source = f"{div_source} + broker report"
+
+    taxable_total = sb + bank + nbfc + epf + refund_interest + dividend + slbs
+
+    return OtherSourcesSchedule(
+        interest_sb=sb, interest_bank=bank, interest_nbfc=nbfc, interest_epf_taxable=epf,
+        refund_interest=refund_interest, refund_principal_excluded=refund_principal,
+        dividend_gross=dividend, dividend_quarters=div_quarters, dividend_gross_up_flags=div_gross_up_flags,
+        dividend_quarters_source=div_source,
+        interest_quarters=int_quarters, interest_gross_up_flags=int_gross_up_flags,
+        interest_quarters_source=int_source,
+        slbs=slbs, taxable_total=taxable_total,
+        foreign_dividend_gross=foreign_dividend_gross,
+        foreign_dividend_quarters=foreign_dividend_quarters,
+        foreign_dividend_quarter_flags=foreign_dividend_quarter_flags,
+        foreign_deemed_dividend_gross=foreign_deemed_dividend_gross,
+        foreign_deemed_dividend_quarters=foreign_deemed_dividend_quarters,
+        foreign_dividend_source=foreign_dividend_source,
+        foreign_dividends_in_book=foreign_dividends_in_book,
+    )
+
+
+# ---------------------------------------------------------------------------
+# FMV / scrips lookup (plan section 6.1, OQ-3R, D14a)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FmvTables:
+    nse: dict            # symbol -> {isin, fmv_31jan2018}
+    mf: dict              # scheme_name -> fmv_31jan2018
+    #: ITR-03: corporate actions (split / bonus / ...) with an ex-date AFTER
+    #: 31-Jan-2018, from data/corporate_actions_after_31jan2018.csv.
+    #: symbol -> list of {ex_date, ratio, old_isin, new_isin, note}.
+    actions: dict = field(default_factory=dict)
+
+
+#: Where a lot's FMV came from (the CG schedule's "FMV source" column).
+FMV_SOURCE_OVERRIDE = "override (scrips.yaml)"
+FMV_SOURCE_TABLE = "bundled table"
+FMV_SOURCE_CA_ADJUSTED = "corporate-action adjusted"
+
+#: Grandfathering reference date; a corporate action must fall after it.
+FMV_REFERENCE_DATE = date(2018, 1, 31)
+_CA_HEADER = ("symbol", "ex_date", "ratio", "old_isin", "new_isin", "note")
+
+
+class CorporateActionsFileError(ValueError):
+    """The bundled corporate-actions file is malformed (fail loud)."""
+
+
+#: Name of the private overlay, looked up next to scrips.yaml (Data\itr\).
+CORPORATE_ACTIONS_OVERLAY_NAME = "corporate_actions_overlay.csv"
+
+
+def _read_corporate_action_rows(path: Path) -> dict:
+    """One file -> {(symbol, ex_date): entry}. Lines starting with '#' are
+    comments. Every data row needs symbol, ex_date (ISO, AFTER 31-Jan-2018) and
+    ratio (new shares per old share, > 0). Anything else raises, naming the file,
+    the row number and the symbol -- a half-read file must never quietly switch
+    the protection off. A symbol+ex_date given twice in ONE file is ambiguous
+    and raises as well."""
+    out: dict = {}
+    if not path.is_file():
+        return out
+    with open(path, encoding="utf-8", newline="") as f:
+        lines = [ln for ln in f if ln.strip() and not ln.lstrip().startswith("#")]
+    if not lines:
+        return out
+    reader = csv.DictReader(lines)
+    if tuple(reader.fieldnames or ()) != _CA_HEADER:
+        raise CorporateActionsFileError(
+            f"{path.name}: header must be {','.join(_CA_HEADER)} (got {','.join(reader.fieldnames or ())})")
+    for n, row in enumerate(reader, start=2):
+        sym = (row["symbol"] or "").strip()
+        where = f"{path.name} row {n} ({sym or 'no symbol'})"
+        try:
+            ex = date.fromisoformat((row["ex_date"] or "").strip())
+            ratio = float(row["ratio"])
+        except (TypeError, ValueError) as exc:
+            raise CorporateActionsFileError(f"{where}: bad ex_date or ratio ({exc})") from exc
+        if not sym or not ratio > 0 or ratio != ratio or ex <= FMV_REFERENCE_DATE:
+            raise CorporateActionsFileError(
+                f"{where}: needs a symbol, a ratio > 0 and an ex_date after 31-Jan-2018")
+        if (sym, ex) in out:
+            raise CorporateActionsFileError(
+                f"{where}: {sym} on {ex.isoformat()} is listed twice in the same file")
+        out[(sym, ex)] = {
+            "ex_date": ex, "ratio": ratio, "old_isin": (row["old_isin"] or "").strip(),
+            "new_isin": (row["new_isin"] or "").strip(), "note": (row["note"] or "").strip(),
+        }
+    return out
+
+
+def _by_symbol(entries: dict) -> dict:
+    out: dict = {}
+    for (sym, _ex), entry in sorted(entries.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+        out.setdefault(sym, []).append(entry)
+    return out
+
+
+def load_corporate_actions(path: str | Path, overlay_path: str | Path | None = None) -> dict:
+    """Read the corporate-actions file (and, when given, the private overlay),
+    returned as symbol -> list of actions. The overlay wins on the same
+    symbol + ex_date; an action present in both is applied ONCE. A missing
+    overlay is fine; a malformed one raises."""
+    merged = _read_corporate_action_rows(Path(path))
+    if overlay_path is not None:
+        merged.update(_read_corporate_action_rows(Path(overlay_path)))
+    return _by_symbol(merged)
+
+
+def load_fmv_tables(data_dir: str | Path = DATA_DIR, overlay_path: str | Path | None = None) -> FmvTables:
+    data_dir = Path(data_dir)
+    nse: dict = {}
+    nse_path = data_dir / "nse_bhavcopy_31jan2018.csv"
+    if nse_path.is_file():
+        with open(nse_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                nse[row["symbol"]] = {
+                    "isin": row["isin"],
+                    "fmv_31jan2018": float(row["fmv_31jan2018"]) if row["fmv_31jan2018"] else None,
+                }
+    mf: dict = {}
+    mf_path = data_dir / "mf_nav_31jan2018.csv"
+    if mf_path.is_file():
+        with open(mf_path, encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                mf[row["scheme_name"]] = float(row["fmv_31jan2018"]) if row["fmv_31jan2018"] else None
+    actions = load_corporate_actions(data_dir / "corporate_actions_after_31jan2018.csv", overlay_path)
+    return FmvTables(nse=nse, mf=mf, actions=actions)
+
+
+class FmvNotFoundError(Exception):
+    """Raised (fail-loud, plan D14a) when a scrip has no scrips.yaml override
+    and no bundled NSE/MF row -- e.g. a BSE-only grandfathered scrip."""
+
+
+class FmvCorporateActionError(FmvNotFoundError):
+    """A table value exists but the scrip had a corporate action after
+    31-Jan-2018: the table price is on a different share basis from the lot's
+    quantity, so using it would silently mis-state the grandfathered cost."""
+
+
+def _strip_exchange_suffix(symbol: str) -> str:
+    """'ABC.NS' -> 'ABC'. Only the NSE suffix: a '.BO' (BSE) symbol is never
+    assumed to be the NSE-listed share of the same name."""
+    return symbol[:-3] if symbol.upper().endswith(".NS") else symbol
+
+
+def _corporate_actions_for(symbols: tuple, isin: str | None, fmv_tables: FmvTables) -> list:
+    hits = []
+    for s in symbols:
+        hits.extend(fmv_tables.actions.get(s, []))
+    if isin:
+        for acts in fmv_tables.actions.values():
+            hits.extend(a for a in acts if a["old_isin"] == isin and a not in hits)
+    return hits
+
+
+def resolve_fmv_with_source(symbol: str, scrips: dict, fmv_tables: FmvTables) -> tuple[float, str]:
+    """Resolve FMV as at 31-01-2018 for `symbol` (a GnuCash commodity id, e.g.
+    'SYNCORP.NS') and say where it came from.
+
+    Order: scrips.yaml override (keyed as given OR with the .NS suffix
+    stripped; used as-is, never adjusted) first, else the bundled NSE table
+    (looked up as given, then stripped), else the MF NAV table. A table value
+    for a scrip with a corporate action after 31-Jan-2018 is NEVER returned:
+    it raises FmvCorporateActionError asking for a scrips.yaml override.
+    Fails loud (FmvNotFoundError) when nothing matches -- never fuzzy-matched
+    into a tax figure (plan D14a)."""
+    bare = _strip_exchange_suffix(symbol)
+    ref = scrips.get(symbol)
+    if ref is None and bare != symbol:
+        ref = scrips.get(bare)
+    if ref is not None and ref.fmv_31jan2018 is not None:
+        return ref.fmv_31jan2018, FMV_SOURCE_OVERRIDE
+    table_ref = ref.table_ref if ref is not None else None
+
+    nse_key = symbol
+    if table_ref and table_ref.startswith("bundled-fmv-table:"):
+        nse_key = table_ref.split(":", 1)[1]
+    nse_row = (fmv_tables.nse.get(nse_key) or fmv_tables.nse.get(symbol)
+               or fmv_tables.nse.get(_strip_exchange_suffix(nse_key)) or fmv_tables.nse.get(bare))
+    if nse_row is not None and nse_row["fmv_31jan2018"] is not None:
+        acts = _corporate_actions_for(
+            tuple({symbol, bare, nse_key, _strip_exchange_suffix(nse_key)}), nse_row.get("isin"), fmv_tables)
+        if acts:
+            first = min(acts, key=lambda a: a["ex_date"])
+            raise FmvCorporateActionError(
+                f"the bundled 31-01-2018 price for {symbol!r} is on the pre-corporate-action share basis "
+                f"(ex-date {first['ex_date'].isoformat()}, ratio {first['ratio']:g}); it is not used "
+                f"silently. Add a scrips.yaml entry for {symbol!r} with fmv_31jan2018 stated on the "
+                "basis of the shares you hold today."
+            )
+        return nse_row["fmv_31jan2018"], FMV_SOURCE_TABLE
+
+    mf_key = table_ref.split(":", 1)[1] if table_ref else symbol
+    if mf_key in fmv_tables.mf and fmv_tables.mf[mf_key] is not None:
+        return fmv_tables.mf[mf_key], FMV_SOURCE_TABLE
+
+    raise FmvNotFoundError(
+        f"no FMV-31-01-2018 found for {symbol!r} -- add an override to scrips.yaml "
+        f"(NSE-only bundled coverage; BSE-only scrips need manual FMV)"
+    )
+
+
+def resolve_fmv(symbol: str, scrips: dict, fmv_tables: FmvTables) -> float:
+    """The FMV alone; see resolve_fmv_with_source."""
+    return resolve_fmv_with_source(symbol, scrips, fmv_tables)[0]
+
+
+# ---------------------------------------------------------------------------
+# Capital Gains
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CGLotRow:
+    scrip: str
+    sale_date: date
+    buy_date: date | None
+    term: str              # "LT" | "ST"
+    qty: float
+    cost: float
+    proceeds: float
+    booked_gain: float
+    grandfathered: bool
+    fmv_used: float | None
+    taxable_gain: float
+    attribution: str
+    fmv_source: str = ""        # ITR-03: override / bundled table / corporate-action adjusted
+
+
+@dataclass
+class CGNonSaleRow:
+    """ITR-19: a disposal that is not a sale (gift / no consideration). Listed
+    for review only; never in any CG total."""
+    scrip: str
+    date: date
+    buy_date: date | None
+    qty: float
+    cost: float
+    reason: str
+
+
+@dataclass
+class CapitalGainsSchedule:
+    lt_control: float = 0.0
+    st_control: float = 0.0
+    lot_rows: list = field(default_factory=list)          # list[CGLotRow]
+    non_sale_rows: list = field(default_factory=list)     # list[CGNonSaleRow] (ITR-19)
+    lt_taxable_gross: float = 0.0
+    st_taxable_gross: float = 0.0
+    lt_exemption_used: float = 0.0
+    lt_taxable_before_split: float = 0.0
+    lt_taxable_on_after_split: float = 0.0
+    st_taxable_before_split: float = 0.0
+    st_taxable_on_after_split: float = 0.0
+    reconciliation_ok: bool = True
+    reconciliation_diff: float = 0.0
+    unresolved_scrips: list = field(default_factory=list)  # symbols with no FMV
+    fmv_failures: list = field(default_factory=list)       # ITR-03: reason text per failed scrip
+    split_year_exemption_prorated: bool = False   # CF4: True when the 112A
+                                                    # exemption was allocated
+                                                    # pro-rata across the
+                                                    # before/after split-date
+                                                    # buckets (regression-year
+                                                    # runs with a split_date
+                                                    # AND a partial exemption)
+    split_year_exemption_ratio: float = 1.0        # taxable-after-exemption /
+                                                    # taxable-before-exemption,
+                                                    # applied to both buckets
+
+
+def _cg_split_date(rules: rules_engine.RulesConfig) -> date | None:
+    sd = rules.common["capital_gains"].get("split_date")
+    return date.fromisoformat(sd) if sd else None
+
+
+def _apply_split_year_exemption_prorata(
+    lt_gross_total: float, exempt_used: float, lt_before_split: float, lt_on_after_split: float,
+    split_date: date | None,
+) -> tuple:
+    """CF4: when the 112A exemption only partially offsets LT taxable gains,
+    allocate the unabsorbed exemption pro-rata across the before/after
+    split-date buckets (by taxable-gain share) -- a documented simplification
+    since the law doesn't mandate an ordering between the two in-year rate
+    buckets. Returns (lt_before_split, lt_on_after_split, prorated, ratio);
+    `prorated` is only ever True for regression-year runs (split_date set)."""
+    taxable_after_exemption = lt_gross_total - exempt_used
+    if lt_gross_total > 0 and taxable_after_exemption != lt_gross_total:
+        ratio = taxable_after_exemption / lt_gross_total if lt_gross_total else 0.0
+        prorated = split_date is not None
+        return lt_before_split * ratio, lt_on_after_split * ratio, prorated, ratio
+    return lt_before_split, lt_on_after_split, False, 1.0
+
+
+def build_capital_gains(
+    resolved: dict, node_by_guid: dict, book: Book | None, year_key: str | None,
+    rules: rules_engine.RulesConfig, scrips: dict, fmv_tables: FmvTables,
+) -> CapitalGainsSchedule:
+    lt_control = _sum_tag(resolved, node_by_guid, "CG_LT_CONTROL")
+    st_control = _sum_tag(resolved, node_by_guid, "CG_ST_CONTROL")
+
+    sched = CapitalGainsSchedule(lt_control=lt_control, st_control=st_control)
+    if book is None or year_key is None:
+        return sched
+
+    cg = rules.common["capital_gains"]
+    cutoff = date.fromisoformat(cg["s112a_ltcg_equity_stt"]["grandfathering"]["cutoff"])
+    split_date = _cg_split_date(rules)
+
+    reconciliations = lots_engine.reconstruct_lots(book, year_key)
+    unresolved: list = []
+    lt_gross_total = 0.0
+    st_gross_total = 0.0
+    lt_before_split = 0.0
+    lt_on_after_split = 0.0
+
+    for lot, reason in lots_engine.non_sale_lots(reconciliations):
+        sched.non_sale_rows.append(CGNonSaleRow(
+            scrip=lot.scrip, date=lot.sale_date, buy_date=lot.buy_date,
+            qty=lot.qty, cost=lot.cost, reason=reason,
+        ))
+
+    for recon in reconciliations:
+        for lot in lots_engine.all_lots([recon]):
+            term = _term(lot, book)
+            grandfathered = False
+            fmv_used = None
+            fmv_source = ""
+            taxable = lot.gain
+
+            if term == "LT" and lot.buy_date is not None and lot.buy_date <= cutoff:
+                grandfathered = True
+                symbol = book.accounts[lot.account_guid].commodity_id or lot.scrip
+                try:
+                    fmv, fmv_source = resolve_fmv_with_source(symbol, scrips, fmv_tables)
+                except FmvNotFoundError as exc:
+                    if symbol not in unresolved:
+                        unresolved.append(symbol)
+                        if isinstance(exc, FmvCorporateActionError):
+                            sched.fmv_failures.append(f"{symbol}: {exc}")
+                    fmv = None
+                if fmv is not None:
+                    fmv_used = fmv
+                    fmv_value = fmv * lot.qty
+                    taxable = lot.proceeds - max(lot.cost, min(lot.proceeds, fmv_value))
+
+            sched.lot_rows.append(CGLotRow(
+                scrip=lot.scrip, sale_date=lot.sale_date, buy_date=lot.buy_date, term=term,
+                qty=lot.qty, cost=lot.cost, proceeds=lot.proceeds, booked_gain=lot.gain,
+                grandfathered=grandfathered, fmv_used=fmv_used, taxable_gain=taxable,
+                attribution=lot.attribution, fmv_source=fmv_source,
+            ))
+
+            if term == "LT":
+                lt_gross_total += taxable
+                if split_date is not None and lot.sale_date <= split_date:
+                    lt_before_split += taxable
+                elif split_date is not None:
+                    lt_on_after_split += taxable
+                else:
+                    lt_on_after_split += taxable
+            else:
+                st_gross_total += taxable
+                if split_date is not None and lot.sale_date <= split_date:
+                    sched.st_taxable_before_split += taxable
+                elif split_date is not None:
+                    sched.st_taxable_on_after_split += taxable
+                else:
+                    sched.st_taxable_on_after_split += taxable
+
+    exemption = cg["s112a_ltcg_equity_stt"].get("exemption_limit", 0) or 0
+    exempt_used = min(exemption, max(lt_gross_total, 0.0))
+    lt_before_split, lt_on_after_split, sched.split_year_exemption_prorated, sched.split_year_exemption_ratio = (
+        _apply_split_year_exemption_prorata(lt_gross_total, exempt_used, lt_before_split, lt_on_after_split, split_date)
+    )
+
+    sched.lt_taxable_gross = lt_gross_total
+    sched.st_taxable_gross = st_gross_total
+    sched.lt_exemption_used = exempt_used
+    sched.lt_taxable_before_split = lt_before_split
+    sched.lt_taxable_on_after_split = lt_on_after_split
+    sched.unresolved_scrips = unresolved
+
+    booked_lt_sum = sum(r.booked_gain for r in sched.lot_rows if r.term == "LT")
+    booked_st_sum = sum(r.booked_gain for r in sched.lot_rows if r.term == "ST")
+    diff = (booked_lt_sum - lt_control) + (booked_st_sum - st_control) if (lt_control or st_control) else 0.0
+    sched.reconciliation_diff = diff
+    sched.reconciliation_ok = abs(diff) <= 0.01
+    return sched
+
+
+def _term(lot, book: Book) -> str:
+    if lot.buy_date is None:
+        return "ST"  # unattributed -- conservative default, always flagged for review anyway
+    return "LT" if (lot.sale_date - lot.buy_date).days >= 365 else "ST"
+
+
+# ---------------------------------------------------------------------------
+# Exempt Income
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExemptIncomeSchedule:
+    ppf_interest: float = 0.0
+    share_of_firm_profit: float = 0.0
+    tax_free_bond_interest: float = 0.0
+    other_exempt: float = 0.0
+    #: Sum of the four book-tagged buckets above. Deliberately EXCLUDES
+    #: agricultural income and any other purely-manual disclosure item --
+    #: those have no book tag and live only as a `Schedule EI`-sheet input
+    #: cell (see `write_schedule_ei`), never in this dataclass, so this total
+    #: stays exactly what the `ExemptIncome` engine sheet's own SUM proves.
+    total: float = 0.0
+
+
+def build_exempt_income(resolved: dict, node_by_guid: dict) -> ExemptIncomeSchedule:
+    ppf_interest = _sum_tag(resolved, node_by_guid, "EXEMPT_PPF_INTEREST")
+    share_of_firm_profit = _sum_tag(resolved, node_by_guid, "EXEMPT_10_2A")
+    tax_free_bond_interest = _sum_tag(resolved, node_by_guid, "EXEMPT_TAXFREE_BOND_INTEREST")
+    other_exempt = _sum_tag(resolved, node_by_guid, "EXEMPT_OTHER")
+    return ExemptIncomeSchedule(
+        ppf_interest=ppf_interest,
+        share_of_firm_profit=share_of_firm_profit,
+        tax_free_bond_interest=tax_free_bond_interest,
+        other_exempt=other_exempt,
+        total=ppf_interest + share_of_firm_profit + tax_free_bond_interest + other_exempt,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Taxes Paid
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TaxesPaidSchedule:
+    advance_tax: float = 0.0
+    self_assessment_tax: float = 0.0
+    tds_salary: float = 0.0
+    tds_interest: float = 0.0
+    tds_dividend: float = 0.0
+    tds_partner: float = 0.0                   # ITR-02: s.194T, own line
+    tds_other: float = 0.0                     # ITR-02: any other named section
+    tds_other_items: list = field(default_factory=list)      # [{path, section, amount}]
+    tds_other_warnings: list = field(default_factory=list)
+    as26_tds_partner: float = 0.0
+    as26_tds_salary: float = 0.0
+    #: ITR-12 RED FLAG: a book TDS bucket that is the SAME money as a 26AS line
+    #: already entering the credit (the s.194T partner TDS tagged as salary or
+    #: other TDS), or salary TDS with no 26AS s.192 behind it. Shown on the
+    #: TaxesPaid sheet and on the 234 credit; never silently netted.
+    double_count_warnings: list = field(default_factory=list)
+    tcs: float = 0.0
+    total: float = 0.0
+    as26_available: bool = False               # CF5
+    as26_tds_interest: float = 0.0
+    as26_tds_dividend: float = 0.0
+    tie_out_ok: bool = True
+    tie_out_conflicts: list = field(default_factory=list)   # list[dict]
+    #: Fail-loud-but-not-fatal (2026-07-23 26AS s.193-drop fix, downgraded to
+    #: a WARNING 2026-07-24): as26.classify_section returns None for any TDS
+    #: section code not present in ANY category of the Rules-config
+    #: tds_sections map. tds_sections carries several categories --
+    #: dividend/interest (which DO feed this tie-out) and salary (which does
+    #: NOT -- it reconciles separately through Form16 / the Salary schedule)
+    #: -- and a section landing in any of them counts as recognised, not
+    #: unclassified. This field only ever holds sections in NONE of those
+    #: categories: every such transaction that carries non-zero tax_deducted
+    #: is captured here so the next genuinely unrecognised section produces
+    #: a visible warning instead of a silent understatement. A zero-TDS
+    #: unknown section (nothing at stake) is NOT recorded. This is a WARNING,
+    #: not an ERROR -- unlike the CG-reconciliation banner it must NOT set a
+    #: non-zero exit code (a false positive here -- e.g. treating every
+    #: salaried taxpayer's ordinary s.192 rows as unclassified -- would have
+    #: blocked a completely correct workbook).
+    unclassified_sections: list = field(default_factory=list)   # list[dict]:
+    #: {"section", "amount", "deductor_name", "tan"}
+    #: s.234C needs advance tax CUMULATIVE as at each instalment due date
+    #: (15 Jun / 15 Sep / 15 Dec / 15 Mar), not the annual total -- an
+    #: instalment paid late is still a deferment even though the year-end
+    #: figure looks complete. Derived by bucketing the TAXPAID_ADV accounts'
+    #: own posting dates through quarters.py.
+    advance_tax_cumulative: list = field(default_factory=lambda: [0.0] * 4)
+    #: True when the book actually carried dated advance-tax postings. When
+    #: False the cumulative figures above are all zero and 234C would be
+    #: computed as if nothing was paid until year end -- the workbook says so
+    #: rather than presenting an overstated charge as determined.
+    advance_tax_dates_available: bool = False
+    #: Form16<->26AS cross-check (GAP B, verify.cross_check_form16_26as_salary):
+    #: populated by agent.py AFTER build_all_schedules returns -- it needs
+    #: form16_data + as26_data + rules.common["tds_sections"], all already in
+    #: scope there, and verify.py deliberately does not import schedules.py.
+    #: See unclassified_sections' docstring above, which noted salary
+    #: "reconciles separately through Form16 / the Salary schedule"; this
+    #: field is that reconciliation. Empty when there is nothing to compare
+    #: (no Form16, or no 26AS data). A TAN present in 26AS section 192/192A
+    #: with no successfully parsed Form16 certificate is still one of these
+    #: results (form16_tds=None, .ok False) -- never silently dropped.
+    form16_26as_salary_results: list = field(default_factory=list)   # list[verify.Form16As26SalaryResult]
+
+
+_TIE_OUT_TOLERANCE = 1.0   # rupee-rounding tolerance between book and 26AS TDS totals
+
+
+def build_advance_tax_cumulative(
+    resolved: dict, book: Book | None, year_key: str | None,
+) -> tuple[list[float], bool]:
+    """Cumulative advance tax as at each of the four s.234C instalment due
+    dates, from the TAXPAID_ADV accounts' own posting dates.
+
+    quarters.bucket_receipts returns five windows (<=15 Jun, 16 Jun-15 Sep,
+    16 Sep-15 Dec, 16 Dec-15 Mar, 16-31 Mar); the running sum of the first
+    four is exactly "paid by" each instalment date. The fifth window is
+    deliberately dropped -- money paid after 15 March cannot cure the March
+    instalment.
+
+    Returns ([0,0,0,0], False) when there is no book or no dated advance-tax
+    posting, so the caller can flag the gap instead of silently treating it
+    as "nothing was paid on time".
+    """
+    zero = [0.0] * 4
+    if book is None or year_key is None:
+        return zero, False
+
+    guids = {
+        leaf.guid for leaf in resolved.values()
+        if leaf.tag == "TAXPAID_ADV" and leaf.guid
+    }
+    if not guids:
+        return zero, False
+
+    buckets = quarters_engine.bucket_receipts(book, guids, year_key).buckets
+    running = 0.0
+    cumulative = []
+    for b in buckets[:4]:
+        running += abs(b)
+        cumulative.append(running)
+    return cumulative, running > 0
+
+
+_SECTION_RE = re.compile(r"\b(19\d[A-Z]{0,2}|206C[A-Z]{0,2})\b", re.IGNORECASE)
+
+
+def _tds_other_items(resolved: dict, node_by_guid: dict) -> tuple[list, list]:
+    """TAXPAID_TDS_OTHER leaves, each with the section named in its path
+    (e.g. "TDS 194J"). A leaf with no section named is still credited but
+    warned about -- the credit cannot be tied to a 26AS section otherwise."""
+    items, warnings = [], []
+    for leaf, node in _leaves_for_tag(resolved, node_by_guid, "TAXPAID_TDS_OTHER"):
+        amount = abs(node.total or 0.0)
+        m = _SECTION_RE.search(leaf.path or "")
+        section = m.group(1).upper() if m else "(section not named)"
+        items.append({"path": leaf.path, "section": section, "amount": amount})
+        if not m and amount:
+            warnings.append(
+                f"{leaf.path}: TDS credited under 'other sections' but no section is named in the "
+                "account name; rename it (e.g. 'TDS 194J') so it can be tied to 26AS."
+            )
+    return items, warnings
+
+
+def build_taxes_paid(
+    resolved: dict, node_by_guid: dict,
+    rules: rules_engine.RulesConfig | None = None, as26_data=None,
+    book: Book | None = None, year_key: str | None = None,
+) -> TaxesPaidSchedule:
+    adv = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_ADV"))
+    sat = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_SAT"))
+    tds_sal = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_SALARY"))
+    tds_int = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_INTEREST"))
+    tds_div = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_DIVIDEND"))
+    tds_partner = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TDS_PARTNER"))
+    tcs = abs(_sum_tag(resolved, node_by_guid, "TAXPAID_TCS"))
+    tds_other_items, tds_other_warnings = _tds_other_items(resolved, node_by_guid)
+    tds_other = sum(i["amount"] for i in tds_other_items)
+    total = adv + sat + tds_sal + tds_int + tds_div + tds_partner + tds_other + tcs
+
+    as26_available = False
+    as26_tds_int = 0.0
+    as26_tds_div = 0.0
+    as26_tds_partner = 0.0
+    as26_tds_salary = 0.0
+    double_count_warnings: list = []
+    conflicts: list = []
+    unclassified_sections: list = []
+    if as26_data is not None and as26_data.transactions and rules is not None:
+        tds_sections = rules.common.get("tds_sections", {})
+        as26_available = True
+        for txn in as26_data.transactions:
+            category = as26_engine.classify_section(txn.section, tds_sections)
+            if category == "interest":
+                as26_tds_int += txn.tax_deducted
+            elif category == "dividend":
+                as26_tds_div += txn.tax_deducted
+            elif category == "partner":
+                as26_tds_partner += txn.tax_deducted
+            elif category is not None:
+                # Recognised (e.g. "salary") but deliberately NOT part of
+                # this interest/dividend tie-out -- reconciled elsewhere
+                # (Form16 / Salary schedule). Accounted for; not unclassified.
+                if category == "salary":
+                    as26_tds_salary += txn.tax_deducted
+            elif txn.tax_deducted:
+                # Section code in NONE of the tds_sections categories,
+                # carrying real TDS -- warn loud (see
+                # TaxesPaidSchedule.unclassified_sections docstring) rather
+                # than silently dropping it from the tie-out. A zero-TDS
+                # unknown section is not noise-worthy and is skipped.
+                unclassified_sections.append({
+                    "section": txn.section or "(blank)",
+                    "amount": txn.tax_deducted,
+                    "deductor_name": txn.deductor_name,
+                    "tan": txn.tan,
+                })
+
+        if abs(as26_tds_int - tds_int) > _TIE_OUT_TOLERANCE:
+            conflicts.append({
+                "category": "TDS on interest", "book": tds_int, "as26": as26_tds_int,
+                "diff": tds_int - as26_tds_int,
+            })
+        if abs(as26_tds_div - tds_div) > _TIE_OUT_TOLERANCE:
+            conflicts.append({
+                "category": "TDS on dividend", "book": tds_div, "as26": as26_tds_div,
+                "diff": tds_div - as26_tds_div,
+            })
+
+        # ITR-02: partner TDS ties to 26AS section 194T -- only when the rules
+        # carry a "partner" category (AY2026-27 onward); on earlier years a
+        # 194T row stays unrecognised and nothing is compared.
+        if "partner" in tds_sections and abs(as26_tds_partner - tds_partner) > _TIE_OUT_TOLERANCE:
+            conflicts.append({
+                "category": "TDS on partner remuneration (194T)", "book": tds_partner,
+                "as26": as26_tds_partner, "diff": tds_partner - as26_tds_partner,
+            })
+
+        # ITR-12: the 26AS 194T figure enters the credit on its own. If a book
+        # bucket that is ALSO added to the credit holds the same money, it is
+        # counted twice.
+        if "partner" in tds_sections and as26_tds_partner > _TIE_OUT_TOLERANCE:
+            for label, amt in (("salary TDS", tds_sal - as26_tds_salary), ("salary TDS", tds_sal),
+                               ("other-section TDS", tds_other)):
+                if amt > _TIE_OUT_TOLERANCE and abs(amt - as26_tds_partner) <= _TIE_OUT_TOLERANCE:
+                    msg = (f"RED FLAG: the book's {label} (Rs {amt:,.2f}) equals the 26AS s.194T partner TDS "
+                           f"(Rs {as26_tds_partner:,.2f}). It looks like partner TDS tagged as {label}; the "
+                           "credit would count it twice and understate 234B/234C interest. Retag the account "
+                           "as TAXPAID_TDS_PARTNER and re-run before filing.")
+                    if msg not in double_count_warnings and not any(
+                            w.startswith(f"RED FLAG: the book's {label}") for w in double_count_warnings):
+                        double_count_warnings.append(msg)
+        if tds_sal > _TIE_OUT_TOLERANCE and as26_tds_salary <= _TIE_OUT_TOLERANCE:
+            double_count_warnings.append(
+                f"WARNING: the book has salary TDS of Rs {tds_sal:,.2f} but 26AS shows no s.192 salary TDS "
+                "behind it. If this is really another kind of TDS (for example s.194T), it is mis-tagged.")
+
+    adv_cumulative, adv_dated = build_advance_tax_cumulative(resolved, book, year_key)
+
+    return TaxesPaidSchedule(
+        advance_tax=adv, self_assessment_tax=sat, tds_salary=tds_sal,
+        tds_interest=tds_int, tds_dividend=tds_div, tcs=tcs, total=total,
+        tds_partner=tds_partner, tds_other=tds_other, tds_other_items=tds_other_items,
+        tds_other_warnings=tds_other_warnings, as26_tds_partner=as26_tds_partner,
+        as26_tds_salary=as26_tds_salary, double_count_warnings=double_count_warnings,
+        as26_available=as26_available, as26_tds_interest=as26_tds_int, as26_tds_dividend=as26_tds_div,
+        tie_out_ok=not conflicts, tie_out_conflicts=conflicts,
+        advance_tax_cumulative=adv_cumulative, advance_tax_dates_available=adv_dated,
+        unclassified_sections=unclassified_sections,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Interest u/s 234A / 234B / 234C
+# ---------------------------------------------------------------------------
+
+#: Fallback s.139(1) furnishing due dates, month-day, used ONLY when the rules
+#: file omits common.filing_due_dates. The rules files live under untracked
+#: Data/, so a REQUIRED key would hard-fail every pre-existing book -- hence a
+#: fallback rather than a mandatory key. 31 July for non-audit individuals,
+#: 31 October for audit cases (audit_case flag on the entity). The various
+#: CBDT-extended dates are set per-AY in the rules file, not auto-detected;
+#: the filer can still override the resolved default on the workbook.
+_DUE_DATE_FALLBACK = {"non_audit": (7, 31), "audit": (10, 31)}
+
+
+def resolve_due_date(
+    rules: "rules_engine.RulesConfig | None", year_key: str, audit_case: bool = False,
+) -> date:
+    """Statutory furnishing due date, resolved from rules.common.filing_due_dates
+    (keys 'non_audit'/'audit', values 'MM-DD') with a hardcoded fallback. Nothing
+    hardcodes the date when the rules file supplies it; the fallback exists only
+    so a rules file predating the block still builds."""
+    key = "audit" if audit_case else "non_audit"
+    month, day = _DUE_DATE_FALLBACK[key]
+    if rules is not None:
+        spec = (rules.common.get("filing_due_dates") or {}).get(key)
+        if spec:
+            try:
+                m, d = str(spec).split("-")
+                month, day = int(m), int(d)
+            except (ValueError, TypeError):
+                pass          # malformed entry -- keep the statutory fallback
+    return date(int(year_key[:4]) + 1, month, day)
+
+
+def cg_proviso_exclusions(
+    capital_gains: "CapitalGainsSchedule", cg_tax: float, year_key: str,
+) -> tuple[list[float], bool]:
+    """Per-instalment s.234C first-proviso exclusion, derived from the lots'
+    ACTUAL sale dates rather than assumed.
+
+    The proviso excludes capital gains that arose AFTER an instalment's due
+    date, so for each due date the excluded amount is the special-rate CG tax
+    apportioned by the share of taxable gain realised after that date. Every
+    lot already carries `sale_date` and `taxable_gain`, so no assumption
+    about WHEN the gains arose is needed -- an earlier draft assumed all CG
+    arose after 15 December, which is right only by luck.
+
+    Note the fourth instalment is no longer forced to zero: a gain realised
+    between 16 and 31 March genuinely does escape the March instalment.
+
+    Returns ([0,0,0,0], False) when the gains cannot be dated (no lot rows)
+    while CG tax exists -- the conservative direction, since granting relief
+    that cannot be evidenced would understate the charge.
+    """
+    zero = [0.0] * 4
+    rows = capital_gains.lot_rows or []
+    if cg_tax <= 0:
+        return zero, True          # nothing to exclude; not a data gap
+    if not rows:
+        return zero, False         # cannot date the gains -- no relief, flagged
+
+    fy_start = int(year_key[:4])
+    due_dates = [
+        date(fy_start, 6, 15), date(fy_start, 9, 15),
+        date(fy_start, 12, 15), date(fy_start + 1, 3, 15),
+    ]
+    total = sum(r.taxable_gain for r in rows)
+    if total <= 0:
+        return zero, True          # net loss -- no special-rate tax to defer
+
+    out = []
+    for d in due_dates:
+        after = sum(r.taxable_gain for r in rows if r.sale_date > d)
+        ratio = max(0.0, min(1.0, after / total))
+        out.append(cg_tax * ratio)
+    return out, True
+
+
+@dataclass
+class Interest234Schedule:
+    result: object = None            # interest_234.Interest234
+    total: float = 0.0
+    due_date: date | None = None
+    filing_date: date | None = None
+    warnings: list = field(default_factory=list)
+    computed: bool = False
+    due_date_reason: str = ""        # descriptive wording for WHY this due date applies
+                                     # (audit cases only). Rendered next to the due-date
+                                     # label; never an input to the date itself.
+
+
+def build_interest_234(
+    computation: "ComputationSchedule", taxes_paid: TaxesPaidSchedule,
+    year_key: str | None, filing_date: date | None = None,
+    due_date: date | None = None,
+    capital_gains: "CapitalGainsSchedule | None" = None,
+    rules: "rules_engine.RulesConfig | None" = None,
+    audit_case: bool = False,
+    audit_case_basis: str = "",
+) -> Interest234Schedule:
+    """Assemble the inputs s.234A/B/C need out of the already-built model.
+
+    Two deliberate choices, both of which move the number:
+
+    * **TDS credit comes from 26AS when available**, not the book -- 234B and
+      234C are charged on tax LESS TDS, so crediting TDS that 26AS does not
+      support understates the interest the department will compute. See
+      interest_234.resolve_tds_credit.
+    * **The 234C first proviso is applied** to special-rate capital gains,
+      which is what stops a March capital gain from retrospectively shorting
+      the June instalment. Without it a book like this one is materially
+      overstated.
+    """
+    if year_key is None:
+        return Interest234Schedule()
+
+    due = due_date or resolve_due_date(rules, year_key, audit_case)
+
+    # Creditable TDS/TCS. The book's own TDS lines are the fallback basis;
+    # 26AS overrides them when present -- but ONLY for interest and dividend,
+    # which is all the 26AS reader classifies. Salary TDS (s.192, 26AS Part I)
+    # and TCS (26AS Part VI) stay on their book figures, so the "26AS" total is
+    # really a hybrid. book_only carries that un-corroborated slice through to
+    # resolve_tds_credit, which discloses it rather than letting the sheet
+    # present a book number as a 26AS-supported one.
+    book_tds = (
+        taxes_paid.tds_salary + taxes_paid.tds_interest
+        + taxes_paid.tds_dividend + taxes_paid.tds_partner + taxes_paid.tds_other
+        + taxes_paid.tcs
+    )
+    # Partner TDS is corroborated by 26AS (194T) so it is NOT book-only; other
+    # sections are not read from 26AS and stay on their book figures.
+    book_only = taxes_paid.tds_salary + taxes_paid.tds_other + taxes_paid.tcs
+    as26_tds = (
+        taxes_paid.tds_salary + taxes_paid.as26_tds_interest
+        + taxes_paid.as26_tds_dividend + taxes_paid.as26_tds_partner
+        + taxes_paid.tds_other + taxes_paid.tcs
+    )
+    labels = []
+    if taxes_paid.tds_salary > 0:
+        labels.append("salary TDS")
+    if taxes_paid.tds_other > 0:
+        labels.append("other-section TDS")
+    if taxes_paid.tcs > 0:
+        labels.append("TCS")
+    credit = interest_234.resolve_tds_credit(
+        book_tds=book_tds, as26_tds=as26_tds, as26_available=taxes_paid.as26_available,
+        book_only=book_only, book_only_label=" + ".join(labels),
+    )
+    credit.warnings = list(getattr(taxes_paid, "double_count_warnings", [])) + list(credit.warnings)
+
+    # s.234C first proviso, computed from the lots' ACTUAL sale dates -- see
+    # cg_proviso_exclusions. Direct attribute access, deliberately not
+    # getattr-with-default: if this field is ever renamed the proviso must
+    # fail loudly rather than silently degrade to "no relief", which would
+    # overstate 234C without a trace. This is the base special-rate tax; its
+    # share of surcharge/cess is not excluded, erring towards a slightly
+    # HIGHER charge.
+    cg_tax = computation.tax_block.tax_on_special_rate_income or 0.0
+    cg_dated = True
+    if capital_gains is not None:
+        unforeseeable, cg_dated = cg_proviso_exclusions(capital_gains, cg_tax, year_key)
+    else:
+        unforeseeable = [0.0] * 4
+        cg_dated = cg_tax <= 0
+
+    result = interest_234.compute_all(
+        tax_on_total_income=computation.tax_block.tax_liability,
+        tds_tcs_and_reliefs=credit.amount,
+        advance_tax_paid=taxes_paid.advance_tax,
+        cumulative_advance_tax=taxes_paid.advance_tax_cumulative,
+        year_key=year_key, due_date=due, filing_date=filing_date,
+        unforeseeable_by_quarter=unforeseeable, tds_credit=credit,
+    )
+
+    warnings = list(result.warnings)
+    if not taxes_paid.advance_tax_dates_available and taxes_paid.advance_tax > 0:
+        warnings.append(
+            f"Advance tax of {taxes_paid.advance_tax:,.2f} is in the book but carries no "
+            "dated posting that could be attributed to an instalment, so s.234C is "
+            "computed as if NOTHING was paid on time. Enter the instalment-wise figures "
+            "in the Workings section to correct this -- the charge shown is an upper bound."
+        )
+    if cg_tax > 0 and not cg_dated:
+        warnings.append(
+            f"s.234C first-proviso relief NOT applied to {cg_tax:,.2f} of special-rate "
+            "capital gains tax: the gains carry no lot-level sale dates, so the date they "
+            "arose cannot be evidenced. 234C is therefore an UPPER BOUND -- if the gains "
+            "arose late in the year the real charge is lower."
+        )
+    elif cg_tax > 0 and any(unforeseeable):
+        warnings.append(
+            f"s.234C first proviso applied from actual sale dates: of {cg_tax:,.2f} "
+            f"special-rate capital gains tax, {unforeseeable[0]:,.2f} is excluded from the "
+            f"June instalment, {unforeseeable[1]:,.2f} from September, "
+            f"{unforeseeable[2]:,.2f} from December and {unforeseeable[3]:,.2f} from March."
+        )
+
+    # Descriptive only, and only when the extended date actually applies: a
+    # 31 July filer has nothing to explain. `due_date=` passed explicitly
+    # overrides audit_case, so don't claim a reason for a date we didn't derive.
+    reason = ""
+    if audit_case and due_date is None:
+        reason = configs.audit_basis_label(audit_case_basis)
+
+    return Interest234Schedule(
+        result=result, total=result.total, due_date=due,
+        filing_date=filing_date, warnings=warnings, computed=True,
+        due_date_reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deductions (Chapter VI-A candidates)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class DeductionCandidate:
+    path: str
+    amount: float
+
+
+@dataclass
+class DeductionsSchedule:
+    candidates_80c: list = field(default_factory=list)
+    candidates_80d: list = field(default_factory=list)
+    candidates_80g: list = field(default_factory=list)
+    total_80c_claimed: float = 0.0
+    total_80d_claimed: float = 0.0
+    total_80tta_ttb_claimed: float = 0.0
+    total_80g_claimed: float = 0.0
+    total: float = 0.0
+    regime_na: bool = False
+    regime_na_note: str = ""
+
+
+def build_deductions(
+    resolved: dict, node_by_guid: dict, other_sources: OtherSourcesSchedule,
+    rules: rules_engine.RulesConfig, regime: str, status: str, agti: float,
+    age_cls: str = "general",
+) -> DeductionsSchedule:
+    def _candidates(tag: str) -> list:
+        return [
+            DeductionCandidate(path=leaf.path, amount=abs(node.total or 0.0))
+            for leaf, node in _leaves_for_tag(resolved, node_by_guid, tag)
+        ]
+
+    c80c = _candidates("DED_80C_CANDIDATE")
+    c80d = _candidates("DED_80D_CANDIDATE")
+    c80g = _candidates("DED_80G_CANDIDATE")
+    sched = DeductionsSchedule(candidates_80c=c80c, candidates_80d=c80d, candidates_80g=c80g)
+
+    if regime == "new":
+        sched.regime_na = True
+        sched.regime_na_note = rules.regime("new").get(
+            "deductions_na_note", "N/A under New regime -- candidates shown for comparison only."
+        )
+        return sched
+
+    caps = rules.regime("old")["vi_a_caps"]
+    sched.total_80c_claimed = min(sum(c.amount for c in c80c), caps.get("80C_combined", 0))
+    sched.total_80d_claimed = min(sum(c.amount for c in c80d), caps.get("80D_self", 0))
+
+    # 80TTB (senior/super-senior, resolved from status+dob -- CF2/CF6) covers
+    # savings + bank/co-op/post-office FD interest; 80TTA (general) covers
+    # savings-account interest only. Neither covers NBFC/HFC deposit
+    # interest at any age -- that is fully taxable with no 80TTA/80TTB relief
+    # (2026-07-19 mapping-precedence prompt, section 0/1c).
+    if age_cls in ("senior", "super_senior"):
+        ded_base = other_sources.interest_sb + other_sources.interest_bank
+        tta_ttb_cap = caps.get("80TTB", 0)
+    else:
+        ded_base = other_sources.interest_sb
+        tta_ttb_cap = caps.get("80TTA", 0)
+    sched.total_80tta_ttb_claimed = min(ded_base, tta_ttb_cap)
+
+    g_cap = agti * caps.get("80G_qualifying_cap_pct_of_agti", 0)
+    sched.total_80g_claimed = min(sum(c.amount for c in c80g), g_cap)
+
+    sched.total = (
+        sched.total_80c_claimed + sched.total_80d_claimed
+        + sched.total_80tta_ttb_claimed + sched.total_80g_claimed
+    )
+    return sched
+
+
+# ---------------------------------------------------------------------------
+# Schedule AL
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScheduleALSchedule:
+    buckets: dict = field(default_factory=dict)   # tag -> total (at cost)
+    total_assets: float = 0.0
+    total_liabilities: float = 0.0
+    net: float = 0.0
+    threshold: float = 0.0
+    required: bool = False
+    firm_pan: str = ""                 # ITR-05: PAN of the firm/LLP/AOP (entity setting), "" when unset
+
+    @property
+    def firm_interest(self) -> float:
+        return self.buckets.get("AL_FIRM_INTEREST", 0.0)
+
+    @property
+    def firm_pan_missing(self) -> bool:
+        return bool(self.firm_interest) and not self.firm_pan
+
+
+def build_schedule_al(resolved: dict, node_by_guid: dict, rules: rules_engine.RulesConfig, total_income: float,
+                      firm_pan: str = "") -> ScheduleALSchedule:
+    import tags as tag_vocab
+
+    buckets = {tag: _sum_tag(resolved, node_by_guid, tag) for tag in tag_vocab.AL_ASSET_TAGS}
+    liabilities = _sum_tag(resolved, node_by_guid, "AL_LIABILITY")
+    total_assets = sum(buckets.values())
+    threshold = rules.common["schedule_al"]["total_income_threshold"]
+    return ScheduleALSchedule(
+        buckets=buckets, total_assets=total_assets, total_liabilities=liabilities,
+        net=total_assets - liabilities, threshold=threshold, required=total_income > threshold,
+        firm_pan=(firm_pan or "").strip().upper(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Schedule FA
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ScheduleFARow:
+    path: str
+    amount: float
+
+
+@dataclass
+class ScheduleFASchedule:
+    rows: list = field(default_factory=list)
+    # Optional parse_foreign.ForeignIncomeReport, set only when a foreign
+    # broker consolidated tax report was supplied for this run. `rows`
+    # above (the AL_FOREIGN book roll-up) keeps running unchanged either
+    # way, as an independent, separately-labelled cross-check -- it is
+    # never merged into the parsed report's own figures. Left untyped here
+    # (rather than importing parse_foreign) to keep this module's existing
+    # bare-name import list free of a new dependency it doesn't otherwise
+    # need; write_workbook.py imports parse_foreign directly where the
+    # object's fields are actually read.
+    foreign_report: object | None = None
+
+
+def build_schedule_fa(resolved: dict, node_by_guid: dict, foreign_report=None) -> ScheduleFASchedule:
+    rows = [
+        ScheduleFARow(path=leaf.path, amount=node.total or 0.0)
+        for leaf in resolved.values()
+        for node in [node_by_guid.get(leaf.guid)]
+        if node is not None and "AL_FOREIGN" in leaf.flags
+    ]
+    return ScheduleFASchedule(rows=rows, foreign_report=foreign_report)
+
+
+# ---------------------------------------------------------------------------
+# Unclassified / Review bucket (2026-07-16 Part 1: best-effort workbook)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class UnclassifiedItem:
+    path: str
+    guid: str | None
+    amount: float
+    section: str
+    is_income_type: bool   # True only for RetainedEarnings-Income leaves --
+                            # drives the worst-case upper-bound tax base.
+    held: bool = False      # ITR-07: put on HOLD on purpose (still unclassified)
+    reason: str | None = None
+
+
+@dataclass
+class UnclassifiedSchedule:
+    items: list = field(default_factory=list)   # list[UnclassifiedItem]
+    count: int = 0
+    total_amount: float = 0.0            # signed sum, every section (BS + P&L)
+    income_type_total: float = 0.0       # signed sum, RetainedEarnings-Income leaves only
+
+    @property
+    def held_count(self) -> int:
+        return sum(1 for i in self.items if i.held)
+
+
+def build_unclassified(tree: pe.ParsedBalanceSheet, unmapped: list) -> UnclassifiedSchedule:
+    """Every unmapped leaf (mapping.py's ResolutionResult.unmapped) routes
+    here instead of being silently dropped (plan decision locked
+    2026-07-16, Part 1 -- "block-to-nothing" replaced by "build-with-
+    call-outs"). `is_income_type` (True only for RetainedEarnings-Income
+    leaves) is the base for the IT working's worst-case upper bound;
+    unclassified expense/deduction/BS-side items are NOT assumed to reduce
+    tax (conservative -- they simply don't count toward the worst case)."""
+    node_by_guid = _node_by_guid(tree)
+    items: list[UnclassifiedItem] = []
+    total = 0.0
+    income_total = 0.0
+    for leaf in unmapped:
+        node = node_by_guid.get(leaf.guid) if leaf.guid else None
+        section = node.section if node is not None else "Unknown"
+        amount = (node.total if node is not None and node.total is not None else leaf.total) or 0.0
+        is_income = section == "RetainedEarnings-Income"
+        items.append(UnclassifiedItem(
+            path=leaf.path, guid=leaf.guid, amount=amount, section=section, is_income_type=is_income,
+            held=bool(getattr(leaf, "held", False)), reason=getattr(leaf, "reason", None),
+        ))
+        total += amount
+        if is_income:
+            income_total += amount
+    return UnclassifiedSchedule(items=items, count=len(items), total_amount=total, income_type_total=income_total)
+
+
+# ---------------------------------------------------------------------------
+# Computation backbone (plan section 2.1 / 3.3)
+# ---------------------------------------------------------------------------
+
+#: The single tax core (slabs -> rebate 87A -> surcharge -> cess) now lives
+#: in tax_core.py, shared with the mid-year advance-tax estimator
+#: (2026-08 advance-tax-estimator work). These names are re-exported
+#: unchanged so every existing caller/test in this codebase (`sch.TaxBlock`,
+#: `sch.compute_tax`, `sch._slab_tax`, `sch._surcharge_rate_and_threshold`)
+#: keeps working without modification -- there is exactly ONE implementation
+#: of this arithmetic, in tax_core.py.
+TaxBlock = tax_core.TaxBlock
+_slab_tax = tax_core._slab_tax
+_surcharge_rate_and_threshold = tax_core._surcharge_rate_and_threshold
+_surcharge = tax_core._surcharge
+compute_tax = tax_core.compute_tax_on
+
+
+@dataclass
+class ComputationSchedule:
+    salary_income: float
+    house_property_income: float
+    business_income: float
+    capital_gains_lt: float
+    capital_gains_st: float
+    other_sources_income: float
+    gti: float
+    via_deductions: float
+    total_income_raw: float
+    total_income_rounded: float
+    tax_block: TaxBlock
+    taxes_paid: float
+    refund_or_payable: float   # positive == refund, negative == payable
+    unclassified_count: int = 0
+    unclassified_total: float = 0.0
+    unclassified_income_type_total: float = 0.0
+    worst_case_extra_tax: float = 0.0    # additional tax+cess on unclassified income-type
+                                           # items, taxed at the top slab rate (upper bound)
+    worst_case_tax_liability: float = 0.0  # tax_block.tax_liability + worst_case_extra_tax;
+                                             # == tax_block.tax_liability when nothing unclassified
+    #: ITR-06: relief for tax paid abroad, already subtracted inside
+    #: tax_block.tax_liability (0.0 when none is claimed).
+    foreign_tax_relief: float = 0.0
+
+
+def build_computation(
+    salary: SalarySchedule, business: BusinessSchedule, house_property: HousePropertySchedule,
+    other_sources: OtherSourcesSchedule, capital_gains: CapitalGainsSchedule,
+    deductions: DeductionsSchedule, taxes_paid: TaxesPaidSchedule,
+    rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None, fy_end: date,
+    unclassified: "UnclassifiedSchedule | None" = None, residency: str | None = None,
+    foreign_tax: "foreign_tax_engine.ForeignTaxSchedule | None" = None,
+) -> ComputationSchedule:
+    cg_cfg = rules.common["capital_gains"]
+
+    def _rate(block: dict, key: str) -> tuple:
+        """Returns (before_split_rate, after_split_rate) whether the block is
+        split-shaped ({before_split, on_after_split}) or flat ({rate: x})."""
+        sub = block[key]
+        if "rate" in sub:
+            return sub["rate"], sub["rate"]
+        return sub["before_split"], sub["on_after_split"]
+
+    ltcg_before_rate, ltcg_after_rate = _rate(cg_cfg, "s112a_ltcg_equity_stt")
+    stcg_before_rate, stcg_after_rate = _rate(cg_cfg, "s111a_stcg_equity_stt")
+
+    tax_special = (
+        capital_gains.lt_taxable_before_split * ltcg_before_rate
+        + capital_gains.lt_taxable_on_after_split * ltcg_after_rate
+        + capital_gains.st_taxable_before_split * stcg_before_rate
+        + capital_gains.st_taxable_on_after_split * stcg_after_rate
+    )
+    cg_total = capital_gains.lt_taxable_gross + capital_gains.st_taxable_gross - capital_gains.lt_exemption_used
+
+    normal_income = (
+        salary.income_chargeable + house_property.income + business.net + other_sources.taxable_total
+    )
+    gti = normal_income + cg_total
+    via = deductions.total if not deductions.regime_na else 0.0
+    total_income_raw = gti - via
+    nearest = rules.common["rounding"]["total_income"]["nearest"]
+    total_income_rounded = round_288a(total_income_raw, nearest)
+
+    tax_block = compute_tax(
+        normal_income=max(0.0, total_income_rounded - cg_total),
+        special_rate_tax=tax_special, special_rate_income_amount=cg_total,
+        rules=rules, regime=regime, status=status, dob=dob, fy_end=fy_end,
+        residency=residency,
+    )
+
+    # ITR-06: relief for tax paid abroad (Form 67). Per country, the LOWER of
+    # the foreign tax and the Indian tax on that income; subtracted from the
+    # liability here, so 234B/C, the refund/payable and the Computation sheet
+    # all see the reduced figure. Foreign tax is never added to taxes_paid.
+    if foreign_tax is not None and foreign_tax.active:
+        before = tax_block.tax_liability
+        relief = foreign_tax_engine.apply_relief(foreign_tax, before, total_income_rounded)
+        if relief > 0:
+            tax_block = dataclasses.replace(
+                tax_block, tax_liability=max(0.0, before - relief), foreign_tax_relief=relief,
+                tax_liability_before_foreign_relief=before,
+            )
+
+    refund_or_payable_raw = taxes_paid.total - tax_block.tax_liability
+    nearest_tax = rules.common["rounding"]["tax_payable_refund"]["nearest"]
+    refund_or_payable = round_288b(refund_or_payable_raw, nearest_tax)
+
+    uncl = unclassified or UnclassifiedSchedule()
+    # Worst-case upper bound (plan decision locked 2026-07-16): every
+    # unclassified INCOME-type leaf assumed fully taxable at the top slab
+    # rate for this regime/status/age-band; unclassified expense/deduction
+    # (or BS-side) items are never assumed to reduce tax, so they don't
+    # enter this figure at all. max(0.0, ...) so a negative income-type
+    # total (unusual, but possible on a mis-signed leaf) can never pull the
+    # worst-case figure below the DRAFT tax liability.
+    top_slab_rate = rules_engine.resolve_slabs(rules, regime, status, dob, fy_end, residency=residency)[-1]["rate"]
+    cess_rate = rules.common["cess_rate"]
+    extra_income = max(0.0, uncl.income_type_total)
+    worst_case_extra_tax = extra_income * top_slab_rate * (1 + cess_rate)
+    worst_case_tax_liability = tax_block.tax_liability + worst_case_extra_tax
+
+    return ComputationSchedule(
+        salary_income=salary.income_chargeable, house_property_income=house_property.income,
+        business_income=business.net, capital_gains_lt=capital_gains.lt_taxable_gross,
+        capital_gains_st=capital_gains.st_taxable_gross, other_sources_income=other_sources.taxable_total,
+        gti=gti, via_deductions=via, total_income_raw=total_income_raw,
+        total_income_rounded=total_income_rounded, tax_block=tax_block,
+        taxes_paid=taxes_paid.total, refund_or_payable=refund_or_payable,
+        unclassified_count=uncl.count, unclassified_total=uncl.total_amount,
+        unclassified_income_type_total=uncl.income_type_total,
+        worst_case_extra_tax=worst_case_extra_tax, worst_case_tax_liability=worst_case_tax_liability,
+        foreign_tax_relief=tax_block.foreign_tax_relief,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ITRModel:
+    salary: SalarySchedule
+    business: BusinessSchedule
+    house_property: HousePropertySchedule
+    other_sources: OtherSourcesSchedule
+    capital_gains: CapitalGainsSchedule
+    exempt_income: ExemptIncomeSchedule
+    taxes_paid: TaxesPaidSchedule
+    deductions: DeductionsSchedule
+    schedule_al: ScheduleALSchedule
+    schedule_fa: ScheduleFASchedule
+    computation: ComputationSchedule
+    unclassified: UnclassifiedSchedule = field(default_factory=UnclassifiedSchedule)
+    interest_234: Interest234Schedule = field(default_factory=Interest234Schedule)
+    #: ITR-01: True when the mapping resolved ZERO accounts (empty/cold-start
+    #: mapping). Set by agent.py; drives a loud "not fileable" banner.
+    mapping_empty: bool = False
+    #: ITR-06: foreign tax credit schedule (None only for models built by hand).
+    foreign_tax: "foreign_tax_engine.ForeignTaxSchedule | None" = None
+
+
+def build_all_schedules(
+    tree: pe.ParsedBalanceSheet, resolved: dict, book: Book | None, form16, year_key: str | None,
+    rules: rules_engine.RulesConfig, regime: str, status: str, dob: str | None,
+    scrips: dict, fmv_tables: FmvTables, as26_data=None, unmapped: list | None = None,
+    residency: str | None = None, filing_date: date | None = None,
+    audit_case: bool = False, audit_case_basis: str = "",
+    foreign_report=None, foreign_dividends_in_book: bool = False, firm_pan: str = "",
+) -> ITRModel:
+    node_by_guid = _node_by_guid(tree)
+    # ITR-06: never count the same foreign dividends from the book AND the
+    # broker report. A hard stop, not a warning.
+    _dup = foreign_tax_engine.double_count_error(
+        resolved, node_by_guid, foreign_dividends_in_book,
+        _series_gross(foreign_report.dividend.quarterly, _FOREIGN_DIVIDEND_SERIES_ORDINARY)
+        if foreign_report is not None and foreign_report.dividend is not None
+        and foreign_report.dividend.quarterly else None,
+    )
+    if _dup:
+        raise foreign_tax_engine.ForeignDoubleCountError(_dup)
+    fy_end = fy_window(year_key)[1] if year_key else date.today()
+    age_cls = rules_engine.resolve_age_class(status, dob, fy_end, residency=residency)
+
+    salary = build_salary(resolved, node_by_guid, form16, rules, regime)
+    business = build_business(resolved, node_by_guid)
+    house_property = build_house_property(resolved, node_by_guid, rules)
+    other_sources = build_other_sources(
+        resolved, node_by_guid, book, year_key, rules, as26_data, foreign_report=foreign_report,
+        foreign_dividends_in_book=foreign_dividends_in_book,
+    )
+    capital_gains = build_capital_gains(resolved, node_by_guid, book, year_key, rules, scrips, fmv_tables)
+    exempt_income = build_exempt_income(resolved, node_by_guid)
+    taxes_paid = build_taxes_paid(resolved, node_by_guid, rules, as26_data, book, year_key)
+    unclassified = build_unclassified(tree, unmapped or [])
+
+    agti_estimate = (
+        salary.income_chargeable + house_property.income + business.net + other_sources.taxable_total
+        + capital_gains.lt_taxable_gross + capital_gains.st_taxable_gross
+    )
+    deductions = build_deductions(
+        resolved, node_by_guid, other_sources, rules, regime, status, agti_estimate, age_cls,
+    )
+    foreign_tax = foreign_tax_engine.build_foreign_tax(resolved, node_by_guid, foreign_report)
+    computation = build_computation(
+        salary, business, house_property, other_sources, capital_gains, deductions, taxes_paid,
+        rules, regime, status, dob, fy_end, unclassified, residency=residency,
+        foreign_tax=foreign_tax,
+    )
+    schedule_al = build_schedule_al(resolved, node_by_guid, rules, computation.total_income_rounded, firm_pan=firm_pan)
+    schedule_fa = build_schedule_fa(resolved, node_by_guid, foreign_report=foreign_report)
+    interest = build_interest_234(
+        computation, taxes_paid, year_key, filing_date, capital_gains=capital_gains,
+        rules=rules, audit_case=audit_case, audit_case_basis=audit_case_basis,
+    )
+
+    return ITRModel(
+        salary=salary, business=business, house_property=house_property, other_sources=other_sources,
+        capital_gains=capital_gains, exempt_income=exempt_income, taxes_paid=taxes_paid,
+        deductions=deductions, schedule_al=schedule_al, schedule_fa=schedule_fa, computation=computation,
+        unclassified=unclassified, interest_234=interest, foreign_tax=foreign_tax,
+    )

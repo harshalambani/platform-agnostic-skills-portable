@@ -1,0 +1,131 @@
+# skill.yaml -- Coverage Gap Detector manifest.
+# Finds months with no transactions in the bank and credit-card accounts of
+# a book's financial year -- a likely sign a statement was never imported.
+# No import ledger exists in this codebase, so this is inferred purely from
+# the transaction dates already posted. Read-only, never modifies your
+# .gnucash files.
+
+name: "gnucash_coverage"
+display_name: "Coverage Gap Detector"
+description: >
+  Checks each bank and credit-card account in the selected GnuCash book(s)
+  for months with no transactions in the book's financial year (1 April to
+  31 March, up to today) -- a likely sign a statement was never imported.
+  Lists the empty months in plain words, account by account. Optionally also
+  checks other asset and liability accounts, in a separate section.
+  Read-only -- never modifies your .gnucash files.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  # UI-only (no {inputs.entities} token in run_args): its whole job is to
+  # fill the books field below it, which is why it can lead the form
+  # without becoming the output-filename source. See
+  # tests/test_entity_book_wiring.py.
+  - name: "entities"
+    type: "select"
+    label: "Entities (pick one or more -- fills their registered books below)"
+    options_from: "itr_entities"
+    multiselect: true
+    required: false
+  - name: "books"
+    type: "files"
+    label: "GnuCash books (.gnucash) -- one or more; all must be closed in GnuCash"
+    file_types: [".gnucash"]
+    book_from: "entities"
+    required: true
+
+  - name: "include_other"
+    type: "select"
+    label: "Also check other asset and liability accounts (loans, deposits, investments...)? Default no"
+    options: ["no", "yes"]
+    required: false
+
+run_args:
+  books: "{inputs.books}"
+  include_other: "{inputs.include_other}"
+  output_path: "{output_path}"
+  entities_path: "{data_root}/itr/entities.yaml"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "Coverage-Gaps"
+  download_label: "Download Coverage Gap Report"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    This codebase has no ledger of which statements were ever imported, so
+    this skill infers likely-missing months from the dates already posted. It
+    looks only at accounts that receive a monthly statement -- the bank
+    accounts and credit cards in the book -- and only inside the book's
+    financial year (1 April to 31 March, or up to today if the year is still
+    running). Earlier years are never checked, however long the book's
+    history. Every month in that year with no transactions is listed by name,
+    for example "Jun 2025, Jul 2025". Months after an account's last
+    transaction come first ("no transactions since Oct 2025"), because that
+    usually means the latest statement was never imported. An account with
+    very few transactions (under one a month on average) is marked quiet:
+    its empty months may simply be months with no activity, so check before
+    importing. If the book is not registered to a financial year, the year of
+    its latest transaction is used and the report says so. A month at the
+    start or end of the year is first checked against the neighbouring year's
+    registered book for the same entity, since postings are sometimes filed on
+    the wrong side of a year rollover.
+  when_to_use: >
+    Run periodically (e.g. monthly, or before filing) to catch a bank or
+    credit-card statement that was never imported into GnuCash -- something
+    the per-statement opening-balance check in the GnuCash Pipeline skill
+    cannot see, because it only ever compares one statement against one
+    account and has nothing to compare against when a whole month's
+    statement is simply missing.
+  inputs:
+    - name: "entities"
+      tooltip: "Pick the people/entities to scan; their registered books fill in below."
+      accepts: "One or more entities from the Entities tab. Optional -- you can Browse to the books instead."
+      gotchas: "Only entities with a registered book fill in; any that have none are named under the field, and you can Browse to those. 'X HUF' is a separate entity from 'X'."
+    - name: "books"
+      tooltip: "One or more GnuCash books to scan, one path per line."
+      accepts: "Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse."
+      gotchas: "Close each book in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Selecting several entities produces one consolidated report."
+    - name: "include_other"
+      tooltip: "Also check loans, deposits, investments and other non-statement accounts. Off by default."
+      accepts: "no (default) or yes."
+      gotchas: "These accounts have no monthly statement, so empty months there are often normal. They are reported in a separate, clearly labelled section."
+  steps:
+    - "Pick the entities to scan -- their registered books fill in automatically."
+    - "Browse to any book that did not fill in (closed in GnuCash)."
+    - "Leave 'Also check other asset and liability accounts' on no, unless you want them."
+    - "Click Run. The result lists the months with no transactions; download the report for the same list plus every account checked."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Coverage-Gaps.xlsx"
+        tooltip: >
+          "Missing months" sheet: an opening line, then one row per account
+          with empty months (account, the months, and what it means). "Accounts
+          checked" sheet: one row per account checked, including those with
+          nothing missing -- transactions in the year, months with
+          transactions out of months checked, and the first and last
+          transaction in the year.
+  tips: >
+    Start with the accounts that say "no transactions since ..." -- the latest
+    statement is the most likely one to be missing. For an account marked
+    quiet, look at the Accounts checked sheet first: a savings account that
+    only pays interest now and then often has empty months that are normal.
+  troubleshooting:
+    - problem: "An account I expect to see is not listed."
+      fix: "Only bank and credit-card accounts are checked unless you turn on 'Also check other asset and liability accounts'. Accounts with no transactions up to the end of the year, and hidden or placeholder accounts, are never checked."
+    - problem: "The report covers a year I did not expect."
+      fix: "The year comes from the entity's registered book (or the book's file name). If the book is not registered to a year, the year of its latest transaction is used, and the first line of the report says so."
+    - problem: "A gap I know about did not show up."
+      fix: "It may have been left out because the neighbouring year's registered book has a transaction for the same account in that exact month -- a sign it was filed on the wrong side of the year rollover rather than missing."

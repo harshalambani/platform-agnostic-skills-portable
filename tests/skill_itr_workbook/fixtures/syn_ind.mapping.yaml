@@ -1,0 +1,45 @@
+# Starter mapping for the synthetic SYN-IND fixture (committed, synthetic --
+# see fixture_gen.build_syn_ind_html/build_syn_ind_gnucash). Every leaf in
+# the HTML tree is tagged, including "Misc Holding (unmapped)" -- planted in
+# Batch 1 as the deliberate unmapped-account test case. Tests that want the
+# BLOCKED-FOR-REVIEW path simply drop that one entry before loading.
+- guid: 2af1901149441464ce63bf4184a66e15
+  path: "Assets/Cash and Bank/Cash"
+  tag: AL_CASH_BANK
+- guid: da1d98074f1846d68855bfed18673557
+  path: "Assets/Cash and Bank/HDFC Bank - SYN001"
+  tag: AL_CASH_BANK
+- guid: a892f15fe43fd86af7512ba45740ec6a
+  path: "Assets/Investments/SynthCorp Shares"
+  tag: AL_SECURITIES
+- guid: ca85f6240bb66d5d38a0e4f40d908525
+  path: "Assets/Misc Holding (unmapped)"
+  tag: AL_CASH_BANK
+  note: "planted in B1 as the deliberate unmapped-account test case"
+- guid: 84486cc24c1d61165711e1b881ef1bab
+  path: "Equity/Capital Account"
+  tag: EQUITY_CAPITAL
+- guid: e605d8704bc37ebb37e724769e83bfb6
+  path: "Income/Business Remuneration"
+  tag: BUS_REMUNERATION
+- guid: 11fc5a724efb9eb161ac039825b3e6dd
+  path: "Income/Bank Interest"
+  tag: OS_INTEREST_BANK
+- guid: c5c2ae4db662a860303859d190b3e93b
+  path: "Income/Salary"
+  tag: SALARY_GROSS
+- guid: 0403526e9bfd848676046e7c26556bb9
+  path: "Income/IT Refund Principal"
+  tag: NONTAX_REFUND_PRINCIPAL
+- guid: f1cba329edfd1b9bb836eb67534b93f4
+  path: "Income/IT Refund Interest"
+  tag: OS_REFUND_INTEREST
+- guid: 2239368f6b27f15392c15b66544ca0f2
+  path: "Expense/Business Expenses"
+  tag: BUS_EXPENSE
+- guid: 3b305b86a4a5d6c626c6234b129ea174
+  path: "Expense/TDS on Interest"
+  tag: TAXPAID_TDS_INTEREST
+- guid: cd3bba82ab4dbdba3bc02d6b8f97ff76
+  path: "Expense/TDS on Salary"
+  tag: TAXPAID_TDS_SALARY

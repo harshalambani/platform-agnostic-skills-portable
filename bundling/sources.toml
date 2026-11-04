@@ -1,0 +1,22 @@
+# bundling/sources.toml — source for build.py step 7 (agents/).
+#
+# The agents/ tree now lives in this repo (src/agents) and is the source of
+# truth, so the default is "vendored": step 7 does nothing and the build uses
+# the in-repo agents directly. The old "git" mode cloned the now-retired
+# (archived, private) platform-agnostic-skills repo and OVERWROTE src/agents
+# with its stale copy — which lacked registry.py and crashed the frozen app.
+# Don't reintroduce "git" unless that repo is revived as the source of truth.
+
+[upstream]
+kind = "vendored"       # one of: "vendored" (no-op, use src/agents), "local", "git"
+
+# Used when kind = "local". Path is resolved relative to this file.
+local_path = "../../platform-agnostic-skills/agents"
+
+# Used when kind = "git". Ignored otherwise. (Retired repo — see note above.)
+git_url = "https://github.com/harshalambani/platform-agnostic-skills.git"
+git_ref = "main"        # tag, branch, or commit SHA
+
+# What gets copied. Filenames matching any glob in `exclude` are skipped.
+include = ["**/*.py", "**/*.md", "**/*.txt", "**/*.yaml", "**/*.yml"]
+exclude = ["**/__pycache__/**", "**/.pytest_cache/**", "**/*.pyc"]

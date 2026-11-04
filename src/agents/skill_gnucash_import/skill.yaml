@@ -1,0 +1,9 @@
+# skill_gnucash_import — internal pipeline step.
+# NOT registered as a UI skill — superseded by skill_gnucash_pipeline for end-user use.
+# To restore as a standalone tab, add: name, display_name, mode, entry_point fields.
+
+description: >
+  Convert bank/financial statements (CSV/XLSX) to GnuCash-importable CSV format.
+  Uses deterministic pre-parse + LLM spec-generation + deterministic row transform.
+category: "gnucash"
+version: "1.0.0"

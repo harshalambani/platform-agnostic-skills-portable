@@ -1,0 +1,17 @@
+# =============================================================================
+# scrips.example.yaml -- SYNTHETIC example of Data/itr/scrips.yaml (plan
+# section 4.2 / 6.1). Copy this file to scrips.yaml and fill in real
+# ISIN + FMV-as-at-31-01-2018 values per scrip; scrips.yaml itself is user
+# data and is gitignored (see .gitignore). Bundled FMV lookup tables land
+# in a later batch (B6) -- table_ref is the seam for that.
+# =============================================================================
+SYNCORP.NS:
+  isin: "INE000A00000"
+  fmv_31jan2018: 150.00
+
+OLDTECH.NS:
+  isin: "INE000B00000"
+  fmv_31jan2018: 220.00   # OLDTECH.NS is synthetic -- never in the real bundled NSE
+                          # table, so it needs a direct override, not table_ref
+                          # (table_ref is exercised in test_schedules.py against a
+                          # constructed FmvTables instead of the real bundled CSVs)

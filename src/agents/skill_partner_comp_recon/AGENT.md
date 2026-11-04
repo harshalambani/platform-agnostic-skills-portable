@@ -1,0 +1,721 @@
+# Partner Compensation Reconciliation
+
+## Role
+
+A partner in an Indian LLP is paid through several parallel streams that
+no single document reconciles: remuneration (taxable as PGBP u/s 28(v)),
+share of profit (exempt u/s 10(2A)), a performance incentive awarded for
+one financial year but paid out in instalments across the next one or two,
+a compulsory capital contribution deducted out of those instalments,
+one-off incentives (shown net of the firm's tax on a single month's
+advice), and -- where part of the year was spent as an employee -- a
+payroll stream with its own Form 16.
+
+This skill takes one financial year's figures for those streams and
+reports where they agree and where they do not, across seven independent
+"legs":
+
+1. Year-end position -- Compensation Advisory + the LLP capital/current account statement.
+2. Incentive schedule -- the firm's payment-schedule PDF (per-month grid).
+3. Monthly payouts -- 12 monthly payout advices, plus payslips for any payroll months.
+4. Capital contribution -- derived by rule, cross-checked to the Advisory's stated closing.
+5. Bank -- the partner's bank statement credits.
+6. One-offs -- special incentive / ex-gratia, appearing on a single month's advice.
+7. The return -- filed ITR + computation + Form 26AS + Form 16.
+
+Each pairing is reported agree / variance / cannot-reconcile, in the same
+Reconciliation/Exceptions sheet idiom as `skill_mf_cas`: a missing source
+is reported explicitly with the reason, never silently treated as a match.
+
+## N1 -- every rate, percentage and period is an input, never a constant
+
+This is the single most load-bearing design rule in this package. The
+firm's-tax rate, the capital-contribution rate, the capital accretion
+period (months), and the remuneration-TDS section/rate/start-date all
+change by financial year -- the capital rate has changed *mid-year* at
+least once -- so none of them may ever be a module-level constant, a
+default parameter, or an `or 0.40`-style fallback anywhere in `engine.py`
+or `writer.py`. Every one of them is read out of the `drivers` block of
+that financial year's structured input. A missing value produces an
+explicit `CANNOT RECONCILE -- <thing> not supplied for FY<x>` result, not
+a computed guess -- see `engine.driver()` and `engine.field_or_reason()`,
+which every computation in this package routes through for exactly this
+reason. `tests/test_skill_partner_comp_recon.py` has a dedicated test that
+constructs an input with a driver missing and asserts the result is a
+cannot-reconcile row, not a number.
+
+## Stage 1 (this build) vs Stage 2 (not this build)
+
+**Stage 1**, shipped first: the computation engine (`engine.py`), the
+workbook writer (`writer.py`), the manifest (`skill.yaml`), and the tests.
+`run()` takes a path to a structured YAML or JSON file for one financial
+year (see skill.yaml's help text for the exact shape) -- the same shape a
+Stage 2 parser would eventually produce.
+
+**Stage 1b**, shipped after Stage 1: the GnuCash journal CSV emitter
+(`jv_emitter.py`), optional and additive -- see its own section below.
+
+**Stage 2, originally NOT this build, now all shipped**: the PDF parsers
+under `parsers/` (`advisory.py`, `payment_schedule.py`, `payout_advice.py`,
+`llp_statement.py`) and the two tie-out readers (`gnucash_tieout.py`,
+`xlsx_26as_reader.py`). Every source document for this skill is a
+free-form, unpublished layout and a personal financial record -- none are
+in this repo, and only one partner's one (incomplete) year of them has
+ever been seen. Writing layout/regex parsing logic from a prose
+description of a document instead of a real specimen produces code that
+passes its own tests and fails on the real document -- that exact failure
+mode has already shipped once in this codebase (see the MF CAS skill's
+history), so each of these four parsers was written and is documented
+(see each module's own docstring) as **transcribed from first-hand
+reading of a real specimen**, never from an invented fixture -- no real
+specimen is ever committed to the repo or used in tests; only synthetic,
+self-consistent fixtures are. `payout_advice.py` (L1), `advisory.py`
+(L3), `llp_statement.py` (L5), and `payment_schedule.py` (L4) are all
+real parsers on this basis -- **none of the four remains a guarded
+`NotImplementedError` placeholder any more.** (Historical note: earlier
+revisions of this document described `payment_schedule.py` specifically
+as still a placeholder pending a specimen; that specimen has since been
+seen and the parser implemented against it, and this document is now
+brought in line with `agent.py`'s own comments and
+`parsers/payment_schedule.py`'s own docstring, both of which already say
+so.)
+
+`payout_advice.py`, `advisory.py`, and `llp_statement.py` were the first
+three implemented. Their documents -- the "L1" monthly partner payout
+certificate (a one-page, password-protected PDF headed "To Whomsoever It
+may concern" with a two-column Particulars/AMOUNTS table), the "L3"
+annual Compensation Advisory letter (a component build-up, a PAYMENTS
+block, and a forward SCHEDULE of instalments), and the "L5" LLP Statement
+of Account (a one-page, two-column CAPITAL ACCOUNT / CURRENT ACCOUNT
+statement issued months after year-end) -- were all read first-hand from
+real specimens and are documented authoritatively enough (see each
+module's own docstring) that they have been implemented against
+synthetic, self-consistent fixtures, each split into a pure
+`parse_l1_text(text)` / `parse_l3_text(text)` / `parse_l5_words(words,
+source_name)` core and a thin pdfplumber-opening shell (`parse(path,
+password)`), mirroring `skill_mf_cas/parser.py`'s split. `payment_schedule.py`
+(L4, the incentive payment schedule) followed the same pattern once its
+own specimen was seen -- `parse_l4_words(words, source_name)` / `parse(path,
+password)`, per its own module docstring.
+
+`agent.py`'s document-driven path parses both REQUIRED documents (the
+advices and the advisory) for real, and fails loud (naming the document
+and the reason) if either is missing, unreadable, or doesn't match its
+expected layout. The L5 statement of account and the L4 payment schedule
+are OPTIONAL legs (each may not exist yet for the current FY) and degrade
+to an explicit "not available" note when their input path is absent or
+their document fails to parse -- never a crash, never a fabricated
+figure. `gnucash_path` (the GnuCash books tie-out, Sections B/C of
+`gnucash_tieout.py`) and `xlsx_26as` (the 26AS TDS-credit tie-out,
+Section A of `xlsx_26as_reader.py`) are likewise optional and degrade the
+same way when absent.
+
+## Inputs
+
+`input_path` -- a `.yaml`/`.yml` or `.json` file for one financial year,
+with these top-level keys (see `tests/fixtures/` for a full worked
+example and `skill.yaml`'s `help.inputs` for the user-facing description):
+
+- `financial_year` -- e.g. `"2025-26"`.
+- `drivers` -- the per-FY rates/periods described in N1 above.
+- `monthly` -- 12 entries, one per calendar month, each with remuneration,
+  share_of_profit_gross, additional_share_of_profit (the one-off, net),
+  firms_tax, tds, capital_transferred, and total_paid. `misc` is never
+  read from here -- it is always derived (see `engine.derive_misc()`).
+  Three further fields are optional, default `0.0`, and only matter to
+  Stage 1b (see below): `interest_on_capital` (positive, PGBP s.28(v)
+  income), `medical_topup` (negative, a recovery from the payout), and
+  `prior_cohort_drawdown` (positive -- the net amount of a prior-year
+  incentive instalment received this year; cash in, adds to `total_paid`,
+  and credits down the current-account balance owed by the firm -- it is
+  a current-account drawdown, not current-year income).
+- `cohorts` -- the incentive cohort ledger: each cohort has an award FY,
+  a gross award, and a list of instalments (`date`, `gross`, `firms_tax`,
+  `capital`, `net`). Every instalment is assigned to the FY of its
+  *payment* date, never its award FY -- see `engine.classify_cohort_instalments()`.
+- `advisory` -- the Advisory's own stated figures for the year (currently
+  `stated_closing_capital`).
+- `external` -- the other four legs' totals to reconcile against:
+  `bank_credits_total`, `form_26as_total_credit`,
+  `return_exempt_share_of_profit`, `return_closing_capital`.
+- `payroll` -- optional; a list of `{month, gross_salary, tds, net_paid}`
+  rows for any months spent as a payroll employee. Not present in the
+  spec's own illustrative example, but the workbook layout calls for a
+  conditional "Payroll stream" sheet (written only when the input
+  supplies this list), and there was no other field this could plausibly
+  come from -- flagged here as an addition to the input shape rather than
+  left undocumented.
+- `firm_name` -- optional; used only in the Stage 1b journal CSV's monthly
+  transaction descriptions (`"<firm name> - monthly payout YYYY-MM"`).
+  Never hardcoded -- if omitted, the description drops the firm-name
+  prefix rather than substituting a placeholder.
+- `accounts` -- optional; required only if `journal_path` is set (Stage
+  1b, see below). Maps the GnuCash account for each journal leg.
+- `opening_reclass` -- optional; required only if a Stage 1b opening
+  reclassification entry is wanted (see below).
+
+## Process
+
+1. `agent._load_input()` (the only filesystem-touching function in this
+   package besides the output write) reads and parses the structured
+   input file.
+2. `engine.build_report()` (pure, no I/O) computes every derived quantity:
+   the monthly `misc` line, the one-off gross-ups (with the
+   CONFIRMED/SUSPECT roundness check), the capital rule and its mid-year
+   rate-change detector, the cohort FY-straddle classification, the
+   remuneration-TDS-applicability check, the firm's-tax-not-in-26AS check,
+   and the leg-vs-leg reconciliation categories.
+3. `writer.write_report_workbook()` (the only openpyxl-touching function)
+   writes the 10-sheet workbook.
+
+## Output
+
+A single `.xlsx` workbook under `Data/outputs/`, with ten sheets: Logic,
+Drivers, Monthly grid, Payroll stream (only if payroll rows were
+supplied), One-offs, Cohorts, Capital, Reconciliation, Exceptions, and
+Open items. Every rate/period/date is a literal on the Drivers sheet only;
+every other sheet either reproduces a leaf figure from the input as-is or
+computes a live Excel formula off Drivers (see `writer.py`'s module
+docstring for the exact style vocabulary and the "=" trap it guards
+against).
+
+## Stage 1b -- GnuCash journal emitter (`jv_emitter.py`)
+
+The reconciled year this skill produces always implies a set of journal
+entries; Stage 1b (`jv_emitter.py`) makes that implication explicit,
+tested and importable, as a GnuCash multi-split journal CSV, when
+`journal_path` is supplied to `run()` (or the corresponding `skill.yaml`
+input in the UI). It never opens or writes a `.gnucash` file itself --
+only a plain CSV for GnuCash's own importer to read.
+
+**The CSV dialect** is the same one `skill_26as_journal`'s
+`build_tds_journals.py` uses, restated in full in `jv_emitter.py`'s module
+docstring: `Date, Transaction ID, Number, Description, Account, Amount,
+Currency`, one row per split with the transaction-level fields repeated on
+every row, a single signed Amount column (Debit positive / Credit
+negative) summing to zero per transaction, Account as a colon path
+without the `Root Account:` prefix, `Currency` always `"INR"`, and
+Transaction ID / Number an FY-prefixed series (e.g. `2526-M01`,
+`2526-RECT`) unique per transaction and across financial years. A naive
+emitter gets this wrong in three specific ways this dialect exists to
+rule out: emitting blank-date continuation rows (GnuCash treats them as
+parse errors, not attached splits), emitting Deposit/Withdrawal column
+pairs instead of one signed Amount column, and reusing Transaction IDs
+across financial years (silently fusing two different years' same-numbered
+transactions in GnuCash's multi-split importer).
+
+**Importing into GnuCash**: File > Import > Import Transactions from CSV.
+Tick the Multi-split box. Skip 1 header line. Map the Date column as ISO
+(YYYY-MM-DD). Map the single Amount column to the importer's "Amount"
+column type (or "Amount (Negated)" if a build reverses the sign
+convention). Do not map Transfer Amount / Transfer Account -- this file
+never uses them (every transaction here has three or more splits).
+
+**The monthly journal** (one transaction per `monthly` entry, dated that
+month's last day):
+
+```
+Dr  bank                     = total_paid
+Dr  tds_expense              = -tds                     (tds is negative -> Dr positive)
+Dr  capital_contribution     = -capital_transferred      (negative -> Dr positive)
+Dr  medical_expense          = -medical_topup             (negative -> Dr positive)
+Cr  remuneration_income      = -remuneration
+Cr  share_of_profit_income   = -(share_of_profit_gross + firms_tax + additional_share_of_profit)
+Cr  interest_on_capital      = -interest_on_capital
+Cr  current_account          = -prior_cohort_drawdown
+```
+
+A split whose amount rounds to 0.00 is omitted, not emitted as a zero row.
+
+**Firm's tax is never booked as an expense in this ledger, in any year.**
+The share-of-profit credit above is NET of `firms_tax` (which is negative,
+so adding it nets the credit down) precisely because the firm already
+deducted its own tax before paying out -- that deduction is a permanent
+cost already netted into the income figure this ledger (and the firm's
+own statement of account, and the filed return) all report. Grossing it
+back up and booking the gross as income with firm's tax as a matching
+expense would create a permanent, non-deductible add-back that puts this
+ledger on a different basis from both of those other records. The gross
+amount and the firm's-tax rate belong in the workbook's working paper
+(Monthly grid / One-offs sheets) only -- do not "fix" this by grossing the
+credit back up.
+
+**Interest on capital and remuneration are both PGBP income under s.28(v)**,
+not Income from Other Sources -- `interest_on_capital` and
+`remuneration_income` in the `accounts` block name PGBP-side ledger
+accounts. Do not "correct" this placement.
+
+**s.194T TDS on partner remuneration and interest on capital is booked as
+an EXPENSE leg** -- `tds_expense` in the `accounts` block names an expense
+account, not an asset/tax-credit account, consistent with every other
+deducted-tax account in this ledger. Do not "correct" this placement to an
+Assets tax-credit bucket.
+
+**`prior_cohort_drawdown` is positive** -- a prior-year incentive
+instalment *received* this year: cash in, adds to `total_paid`. It books
+as a credit to `current_account` (a balance-sheet account, the firm's
+running balance owed to the partner), reducing that balance, and never as
+income -- the income, and the firm's tax on it, were already recognised in
+the award year's own monthly/cohort journal. Booking it again here as
+income would double-count it.
+
+**The account map** (`accounts` in the input) is required, per key, only
+if the corresponding split is non-zero somewhere in the year: `bank`,
+`tds_expense`, `interest_on_capital`, `current_account`,
+`capital_contribution`, `medical_expense`, `remuneration_income`,
+`share_of_profit_income`. A key needed by a non-zero month that is missing
+or empty comes back from `run()` as `"ERROR: ..."` naming the key and the
+month -- never a traceback.
+
+**The optional opening reclassification entry** (`opening_reclass` in the
+input: `date`, `description`, `splits: [{account, amount}, ...]`) is
+emitted first, with Transaction ID `<FY-prefix>-RECT`, subject to the same
+zero-sum balance check as every other transaction. This exists because a
+closed, filed year is corrected by a prior-period reclassification booked
+in the *following* year, never by reopening the closed year and never by
+crediting current-year income.
+
+## H35-02 -- the L5 Statement of Account is the final authority for
+year-end figures, and its own year-end accrual journal
+
+User ruling: "Y-3 should come from the Statement of account as the final
+say." The L5 (LLP Statement of Account, `llp_statement.py`) is passed
+through whole to `engine.build_report()` (as `Report.llp_record`, when
+supplied and parseable) and is now the sole source for four things:
+
+1. **Four L5 tie-out reconciliation rows**, each `Booked (monthly)` vs
+   `LLP Statement (L5)`, at the shared Re 1 tolerance
+   (`engine.RECONCILIATION_TOLERANCE`, the same constant item 3.2 named):
+   closing capital (added as a fourth source alongside Rule/Advisory/
+   Return, in that existing row), current-account closing balance,
+   remuneration for the year, and interest on capital. A missing/
+   unparseable L5 fails these loud (`CANNOT RECONCILE`, naming the L5 as
+   required) -- no other document substitutes for it.
+2. **The "Exempt share of profit (s.10(2A)) vs the filed return" row now
+   reads the L5's own "Profit Share for the Year" figure, never the
+   monthly total.** Before H35-02 this row compared the monthly total
+   against the return; that fallback is gone -- an absent/unparseable L5
+   fails this row loud instead of silently substituting the monthly
+   figure, and no year-end accrual journal (below) is produced either, for
+   the same reason.
+3. **A separate year-end accrual journal** (`jv_emitter.build_accrual_journal()`
+   / `write_accrual_journal_csv()`, its own CSV file via `run()`'s
+   `accrual_journal_path` parameter -- never merged into the monthly
+   journal CSV `journal_path` produces). Dated 31 March of the FY END year
+   (e.g. FY "2025-26" -> 2026-03-31, never 2025-03-31 -- the accrual
+   belongs in the year being reconciled, not the prior, already-closed
+   year). Posts:
+
+   ```
+   Dr  current_account          = L5 profit share - already-booked monthly SoP total
+   Cr  share_of_profit_income   = -(the same amount)
+   ```
+
+   "Already-booked monthly SoP total" is the SAME formula the monthly
+   journal's `share_of_profit_income` leg uses
+   (`share_of_profit_gross + firms_tax_sop + additional_share_of_profit`),
+   summed across the whole year (arrears included -- one lump comparison,
+   not booked per month). This function posts to `current_account` /
+   `share_of_profit_income` ONLY -- it never touches `tds_expense` or any
+   other account, so it cannot create or duplicate a TDS posting: s.194T
+   TDS is deducted at source on each monthly payout and is already fully
+   booked by the monthly journal; this accrual is a pure profit-recognition
+   entry with no cash movement, so there is nothing here for TDS to apply
+   to. Skipped (no journal, a note explaining why) when: no L5 supplied;
+   the L5's profit-share figure is unparseable; the difference is within
+   Re 1 of zero (already ties); or the difference is negative (the monthly
+   total already booked EXCEEDS the L5 figure) -- that last case is
+   FLAGGED for manual review, never a silent reversing/negative entry.
+4. **A residual current-account comparison after the accrual**
+   (`engine.residual_current_account_check()`, always computed and
+   returned as the third element of `build_accrual_journal()`'s tuple,
+   even when no accrual was booked): the L5's `current_closing_balance`
+   vs. the booked current-account balance rolled forward from the L5's own
+   opening balance plus whatever the accrual (if any) applied. A residual
+   beyond Re 1 is reported as a VARIANCE -- it is never booked or
+   corrected automatically by any function in this package. H35-16: a
+   difference above Re 1 and up to Rs 10 (`WITHIN_TOLERANCE_LIMIT`) is an
+   amber "AGREE within Rs 10 (difference Rs N)", counted apart from
+   variances; it applies to reconciliation verdicts only (never bank
+   matching, journal amounts or RED FLAG checks).
+
+See `tests/test_skill_partner_comp_recon.py`'s "H35-02" test section for
+the negative-test proof that monthly-booked share of profit plus this
+accrual equals the L5 figure exactly (no doubling), that the accrual CSV
+is always a separate file leaving the monthly CSV byte-for-byte unchanged,
+and the other required-negative-test categories.
+
+## H35-04 -- the L5 Statement of Account is the REFERENCE, and disagreements
+are flagged loudly, not just row-by-row
+
+H35-02 (above) made the L5 the sole *source* for four figures. H35-04 goes
+further: everywhere the L5 carries a figure, it is now the **reference**
+that every other source is measured against -- not one equal peer among
+several, and no longer silently averaged in.
+
+1. **`engine.statement_reference_row()`** replaces the old
+   all-sources-equal `reconcile_category()` idiom for every L5-carried
+   row: closing capital (`Rule (Drivers)` / `Advisory` / `Return`, all
+   three now measured against the L5, not averaged in as a fourth equal
+   source the way H35-02 left it), the current-account closing balance,
+   remuneration for the year, interest on capital, and the exempt share of
+   profit. A disagreement is spelled out explicitly -- "Statement says X;
+   \<source> says Y; difference Z" -- never a generic "variance across
+   sources" note. When no L5 was supplied for a row, this degrades to the
+   exact pre-H35-04 all-sources-equal comparison, with a note stating
+   plainly that no statement was supplied -- it never silently promotes
+   another source to be the reference.
+
+   **Rework (this pass): compare against book PLUS this skill's own
+   pending journals, not the book alone.** `statement_reference_row()`
+   takes an optional `pending_journal` dict
+   (`{"applies_to", "amount", "journal_ids", "description"}`). Only the
+   current-account-closing-balance row is ever given one, computed via
+   the shared `year_end_accrual_diff()` helper and gated on
+   `> RECONCILIATION_TOLERANCE` (a zero, negative, or sub-tolerance diff
+   is never offered as a closing journal -- a negative diff is a
+   manual-review case in `jv_emitter.build_accrual_journal()`, never
+   booked). If applying the named journal(s) closes the Statement-vs-book
+   gap to within Re 1, the row is treated as **reconciled**, `agree=True`,
+   and the note starts with the constant `PENDING_JOURNAL_VERDICT`
+   (`"PENDING JOURNAL POSTING (provided by this skill)"`), naming the
+   journal id(s) and amount -- it is never a disagreement and never enters
+   the LOUD block. If the journal only closes PART of the gap, the row
+   stays a genuine disagreement (`agree=False`, note starts
+   `"STATEMENT DISAGREES"`, and DOES enter the LOUD block), but the
+   figure reported as the gap is the **residual left after the journal**,
+   not the raw pre-journal difference -- the raw difference still appears
+   earlier in the note as context/build-up, but it is the residual that
+   is the standing disagreement figure. `PENDING_JOURNAL_VERDICT` is never
+   used for a partial closure.
+2. **The LOUD block (`Report.statement_flags`).** Every row whose note
+   starts `STATEMENT DISAGREES` (an L5-referenced row beyond the Re 1
+   tolerance), plus every `ERROR:`-level entry in the L5 parser's own
+   `diagnostics` (item 3, below), is collected into `Report.statement_flags`
+   and surfaced TWICE, always ahead of anything else: at the very top of
+   `agent._summarize_report()`'s text (before the "Partner Compensation
+   Reconciliation for FY..." line), and as a highlighted block above the
+   header row of the Reconciliation sheet in the workbook. This is in
+   addition to, never instead of, the existing per-row AGREE/VARIANCE/
+   CANNOT RECONCILE status.
+3. **The L5's own arithmetic is surfaced, not re-derived.**
+   `parsers/llp_statement.py`'s `_balance_check()` / `_section_sum_check()`
+   already verify, per column (capital and current): opening +
+   total_additions + total_withdrawals == closing, and that the addition/
+   withdrawal rows sum to the printed totals -- appending `"ERROR: ..."` to
+   the parsed record's `diagnostics` list on failure. `build_report()`
+   reads that list (never recomputes the arithmetic itself) and turns each
+   `ERROR:` entry into a `statement_flags` line prefixed `"Statement
+   arithmetic -- "`.
+4. **D1 -- drawings vs payouts vs TDS vs other deductions vs interest on
+   capital (reworked this pass).** The reconciliation row "Current-account
+   drawings: statement vs (net monthly payouts + TDS + other payslip
+   deductions - gross interest on capital)" checks the L5's
+   current-account Drawings figure against the full identity:
+
+   ```
+   statement current drawings = net payouts + TDS
+       + other payslip deductions paid on the partner's behalf
+         (medical top-up, and any other such field the payout model carries)
+       - interest on capital paid out, GROSS
+   ```
+
+   Payouts ALONE, without adding back the TDS withheld at source, is
+   never treated as agreeing with the statement -- TDS is deducted before
+   the partner sees the cash, but it was still money drawn out of the
+   partner's account on the firm's books. Other payslip deductions (e.g.
+   medical top-up) are likewise added back for the same reason. Interest
+   on capital is credited to/drawn from the CAPITAL column of the
+   statement, not the current account, so it is backed OUT of this
+   current-account identity -- and it must be the GROSS figure: in the
+   monthly payouts it arrives net of its own s.194T TDS (that TDS is
+   already inside the TDS total above), so subtracting the net figure
+   would double-count that TDS. Every component (payouts, TDS, other
+   deductions, gross interest, and the resulting total) is appended to the
+   row's note as an explicit build-up string, so a gap is traceable
+   without re-deriving the arithmetic by hand. Sign note: the L5 prints
+   Drawings parenthesised (negative); this row negates it to a positive
+   "cash drawn" magnitude before comparing, and labels the source
+   accordingly, so the comparison is never a spurious full-statement-value
+   mismatch.
+5. **D2 -- the bank leg, deliberately never scored (reworked this pass).**
+   `external["bank_credits_total"]` (the "Total cash received (monthly
+   payouts) vs Bank" row) is meant to be the PARTNER's own bank statement
+   credit total; no parser or document flow in this skill produces that
+   figure, and `gnucash_tieout.py`'s `build_balance_tieout()` "bank" leg
+   (compared separately, appended onto `report.reconciliation` by
+   `agent.py`) is NOT a substitute -- it compares the FIRM's own book bank
+   account FY movement against this run's implied journal, a figure that
+   includes every other partner's and every trade cash flow, not this
+   partner's own receipts. (An earlier draft of this doc wrongly called
+   the comparison book here "the firm's own book" for this row too -- to
+   be precise: the L5/monthly-payout side of this specific row is the
+   PARTNER's OWN GnuCash book, never the firm's; it is the *bank* leg,
+   described above, that would be firm-wide if wired in.) Wiring the
+   firm-wide figure into this partner-specific row would misstate scope,
+   so this row is now unconditionally
+   `agree=None`, note `NOT_CHECKED_YET` ("NOT CHECKED YET (bank credits
+   are matched in H35-05)") -- regardless of whether
+   `bank_credits_total` was supplied or matches. This is a deliberate
+   behaviour CHANGE from the original CANNOT-RECONCILE wiring: this row
+   is never a failure and never enters the LOUD block, because matching
+   payouts to bank credits is a fuzzy per-transaction match (H35-05's
+   job), not a numeric comparison this skill can adjudicate. The computed
+   and (if supplied) bank figures still print on the row.
+6. **E -- the FJ3.7 incentive-instalment cross-check is TRULY
+   informational (reworked this pass).** "Incentive instalments:
+   award-year Advisory vs payment schedule" (Advisory's
+   `schedule_instalments` vs the payment-schedule cohort ledger) is
+   superseded by D1's statement-referenced identity for the "did the cash
+   match" question, but it is not removed: it checks a genuinely different
+   pair of upstream sources (Advisory vs schedule, neither of which is the
+   L5), and several existing tests assert its exact `agree`/note behaviour
+   by category name. Every branch of this row now sets the new
+   `ReconciliationResult.informational = True` flag (in addition to the
+   existing `"INFORMATIONAL (superseded by ...)"` note prefix); `agree`
+   values, `category`, and `sources` are unchanged. `informational=True`
+   rows are excluded from `agent._summarize_report()`'s `variances`/
+   `undecidable` counts and from the summary verdict, and are skipped in
+   the LOUD-block assembly loop, regardless of what `agree` value they
+   carry on a given run -- the flag, not the `agree` value, is what
+   decides "informational-ness", since this row can legitimately be
+   `True`, `False`, or `None` depending on data and all three must stay
+   out of the totals. Its figures still print on the Reconciliation
+   sheet.
+
+## H35-04 round 2 -- the pending-journal rule applies to EVERY row, not just
+one
+
+Round 1 (above) applied "compare against the book PLUS this skill's own
+pending journals" to exactly one row (the current-account-closing L5
+tie-out, via `statement_reference_row()`'s `pending_journal` argument). A
+read-only run against real documents showed the other 8 GnuCash tie-out
+rows (`gnucash_tieout.build_balance_tieout()`, one per
+`jv_emitter.ACCOUNT_KEYS`) still printed VARIANCE/CANNOT RECONCILE whenever
+this run's own monthly journal for that account simply had not been
+posted yet -- exactly the gap round 1 already knew how to close for the L5
+rows, just not wired up here. Round 2 closes that gap, plus three smaller
+Status-column/labelling issues found on the same real-data run.
+
+1. **`build_balance_tieout()` now takes an optional `posted_check`
+   parameter** -- the SAME list of `PostedCheckResult` objects
+   `build_posted_check()` (Section B, unchanged) already produces for the
+   "posted already?" per-journal check, threaded through from
+   `agent.py`'s existing call site. For each of the 8 accounts, this run's
+   own journal splits touching that account are split into "already
+   posted" and "not yet posted" using that same classification (`status ==
+   NOT_POSTED`). When any are not yet posted:
+   - The book is compared against **this run's computed figure minus the
+     not-yet-posted portion** (i.e. the posted-only slice of what this run
+     implies). If that ties to the book within `RECONCILIATION_TOLERANCE`,
+     the row is `agree=True`, and the note starts with
+     `PENDING_JOURNAL_VERDICT`, naming the pending journal id(s) and the
+     amount per account -- reconciled, not a gap.
+   - If a genuine residual remains even after crediting the pending
+     journal(s), the row is a real `agree=False` VARIANCE -- and, mirroring
+     round 1's L5 rule, the note LEADS with the genuine residual ("Genuine
+     residual after posting <ids>: <amount> -- ...", never the raw
+     pre-journal difference), naming the pending journal(s) as only
+     explaining part of the gap.
+   - When every journal touching an account is already posted (or
+     `posted_check` was not supplied at all, e.g. by the pre-round-2 test
+     call sites, which are all still valid with the new parameter
+     defaulting to `None`), the row falls straight back to today's plain
+     `reconcile_category()` comparison, unchanged -- including the
+     existing closed-book income-sweep-to-Equity downgrade.
+2. **A posted prior-period reclassification journal is recognised and
+   folded into the computed side, never into the variance, on
+   `current_account`/`capital_contribution` specifically.** The real book's
+   FY movement on these two accounts can include a separate
+   reclassification journal (this skill's own, from a PRIOR run of this
+   skill posting `report.opening_reclass` -- see `jv_emitter.py`'s
+   `_opening_reclass_journal()`) dated the first day of the FY, moving an
+   amount from capital to the current account. **Recognition rule chosen:
+   an EXACT match** of a book transaction's `num` field against
+   `journal_txn_id(fy_prefix(year_key), report.firm_name, "RECT")` -- the
+   SAME deterministic Transaction-ID convention `build_posted_check()`'s
+   Section B already relies on for its own trn:num hits, never a
+   fuzzy/prefix match on the Num string. This lookup is skipped entirely
+   when THIS run's own `journals` already contains a journal under that
+   exact id (i.e. `report.opening_reclass` was supplied this run --
+   `build_journals()` would have produced it itself, and double-counting
+   the book's copy on top would be wrong). When found, its split amount for
+   the account is added to the "Computed (this run's journal)" side as an
+   explicitly-named line in the note (e.g. "; plus posted reclassification
+   journal <id> (<amount>)") -- it never appears as, or contributes to, a
+   variance figure, on either the AGREE or the pending-journal branch.
+3. **Status column vs Status derivation.** `ReconciliationResult` gained
+   two fields: `not_checked: bool = False` (same contract as
+   `informational` -- never a genuine gap, never counted, never LOUD, but
+   semantically distinct: the comparison genuinely has not happened yet,
+   vs. superseded by a better check) and `status_label: str | None = None`
+   (when set, the EXACT Status-column text `writer._status_fill()` shows,
+   overriding the derived AGREE/VARIANCE/CANNOT RECONCILE text). D2 (item
+   5 above) now sets `not_checked=True, status_label="NOT CHECKED YET"`;
+   the exempt-share-of-profit row, when only the filed return is missing
+   (see item 4 next), sets `not_checked=True, status_label="NOT CHECKED
+   (return not supplied)"`. `writer._status_fill()` now takes the full
+   `ReconciliationResult` (not a bare `agree` value) so it can check
+   `informational`/`not_checked`/`status_label` first, before falling back
+   to deriving AGREE/VARIANCE/CANNOT RECONCILE from `agree`. The
+   Exceptions and Open-items sheets now also exclude `informational`/
+   `not_checked` rows from their inclusion filters, the same way the
+   summary counts already did from round 1.
+4. **A missing filed return is not a reconciliation gap.** "Exempt share of
+   profit (s.10(2A)) vs the filed return" used to read CANNOT RECONCILE
+   whenever the return wasn't supplied, even though the L5 Statement's
+   Profit Share for the Year (the reference for this row) was present and
+   correct -- a missing SOURCE, not a genuine disagreement. This one branch
+   of the row (return not supplied, `llp_record` present) now sets
+   `not_checked=True, status_label="NOT CHECKED (return not supplied)"`
+   with an explanatory note; the other branch (no `llp_record` at all, a
+   required L5 figure genuinely missing) is unchanged, still plain CANNOT
+   RECONCILE -- and the closing-capital row (item 6, unchanged, still
+   LOUD by design: a genuine disagreement between the firm's own
+   documents).
+
+## H35-05 -- stop double-booking a payout the bank import already booked
+
+**The defect.** `_monthly_journal()` used to book `Dr bank = total_paid` on
+every monthly payout, unconditionally. The bank import (a separate,
+upstream process) already books that same cash credit into the same bank
+account, under its own counter-account. Posting both means the money lands
+twice in the book -- a double booking, which the user ruled is ALWAYS a
+defect, never a design question, regardless of scope.
+
+**The fix.** The bank import always runs first; this skill runs last and
+*matches* against what is already posted, instead of booking a second bank
+leg. `gnucash_tieout.match_payouts_to_bank()` (new, Section D of that
+module) reads the book read-only (via the same `parse_gnucash.parse_book()`
+Sections B/C already use -- this skill never opens a write handle on
+`gnucash_path`, in Stage 1b or here) and, for each monthly payout, looks for
+a deposit already posted to `accounts["bank"]`:
+
+- **amount** within `RECONCILIATION_TOLERANCE` (Re 1);
+- **date** within `+/- bank_match_window` days of the payout's month-end
+  date (`bank_match_window` is a new skill setting, default 7, mirroring
+  `skill_gnucash_intercompany`'s `date_tolerance` idiom -- see `agent.py`'s
+  `_window_days()` helper and `skill.yaml`'s `bank_match_window` input);
+- **one-to-one**: a bank credit satisfies at most one payout, a payout at
+  most one credit -- enforced by consuming a credit the moment it is
+  assigned, payouts processed in `report.monthly`'s own chronological
+  order;
+- **nearer date wins** among the remaining eligible candidates for a given
+  payout;
+- **a tie is never auto-picked.** Two or more candidates equally close to a
+  payout leaves that payout with outcome `TIE`, naming every candidate
+  (date/amount/account) -- treated exactly like a no-match for posting
+  purposes: no journal, but a distinct LOUD label.
+
+**Outcomes**, per payout:
+
+- **Matched** -- `_monthly_journal()`'s cash leg posts to
+  `bank_match.credit_account` (the bank import's OWN counter-account for
+  that credit, via the new `_add_leg_raw()`), never a second leg on
+  `accounts["bank"]` itself.
+- **No bank credit found** -- no journal is emitted for that payout at all
+  (`_monthly_journal()` returns `None`); a LOUD note: `"payout <month> on
+  <date>: no bank credit found -- genuine gap."`.
+- **Tie** -- no journal; a LOUD note naming every candidate.
+- **No GnuCash book, or no `accounts.bank` configured** -- matching does
+  not run at all (`match_payouts_to_bank()` returns `({}, [])`); the
+  monthly journal falls back to the pre-H35-05 behaviour of booking
+  `accounts["bank"]` unconditionally, since there is then no book to check
+  a double-booking risk against. No clearing account is used anywhere
+  (considered and rejected) -- a matched leg always lands on the REAL
+  counter-account the bank import already chose.
+
+**Where this surfaces:**
+
+- `report.reconciliation`'s "Total cash received (monthly payouts) vs
+  Bank" row (previously a permanent `NOT_CHECKED_YET` placeholder written
+  by `engine.build_report()` in anticipation of this build) is replaced,
+  post-hoc in `agent.py`, with a real AGREE / CANNOT RECONCILE verdict
+  once matching has actually run; it is left as `NOT_CHECKED_YET` exactly
+  when matching could not run (no book / no `accounts.bank`).
+- The run summary gets a new, separate "BANK MATCH -- N payout(s) could
+  not be matched..." LOUD block (`agent._summarize_report()`'s new
+  `bank_match_notes` parameter) -- kept structurally parallel to, but
+  never merged into, the existing "STATEMENT DISAGREES" block, since that
+  one is specifically about the LLP Statement of Account (L5) and folding
+  bank-match findings into it would mislabel them.
+- The workbook gets a new "Bank match" sheet (`writer._write_bank_match_sheet()`,
+  mirroring the existing "Posted check" sheet's pattern) -- one row per
+  monthly payout: month, payout date/amount, outcome, matched credit
+  date/amount/account, and (TIE only) every candidate.
+
+**Purity preserved.** `jv_emitter.build_journals()` remains pure (no I/O,
+no openpyxl) per its own architectural contract -- the actual book read
+happens in `gnucash_tieout.match_payouts_to_bank()`, called by `agent.py`
+*before* `build_journals()`, with the result threaded in as a new optional
+`bank_matches: dict[int, PayoutMatch] | None` parameter (keyed by the same
+1-based index `build_journals()`'s own `enumerate(report.monthly, start=1)`
+uses). `bank_matches=None` (the default) keeps the exact pre-H35-05
+behaviour, used only by the internal Section C tie-out helper
+(`gnucash_tieout._journals_safely()`), which still needs the OLD
+unconditional-bank-leg journal shape to compare against the book in its own
+existing (unrelated) check -- Section C's own "bank" `ACCOUNT_KEYS` leg is
+therefore unchanged by this build and should be re-examined separately.
+
+**H35-12 -- a payout paid as several bank credits.** Sometimes the firm
+pays one monthly payout as 2 or 3 separate bank credits. Single-credit
+matching (above) runs first for every payout and is unchanged. Only a payout
+still unmatched is then tried against SETS of credits, using only credits no
+single match consumed. A set is 2 or 3 credits (`MAX_SPLIT_PARTS`), all on
+the bank account, all posted to the SAME counter-account, each dated in the
+payout's calendar month or within the window of the payout date, adding up
+to the payout within Re 1. Exactly one such set is MATCHED ("split, N
+credits") and its credits are used up. Two or more different sets are a TIE:
+no journal, and a loud note names every set. Nothing is ever auto-picked.
+The journal's cash side lands on the counter-account at the payout amount
+(never on the bank account), so it balances and a within-Re-1 difference
+stays in the bank import's own postings, exactly as for a single match. The
+Bank match sheet lists every part and Total cash received counts them all.
+The reply text says how many payouts were matched as a set.
+
+**Excluded months on the GnuCash tie-out rows.** A payout month with no
+unique bank match (no match or a tie) has no journal, so a tie-out row's
+Computed figure leaves it out. Each row now names the months it leaves out
+whenever that month's would-be legs touch the row's account for a non-zero
+amount. Such a row reads "AGREE excl. <months>" instead of AGREE, is listed
+on the Exceptions and Open items sheets, and counts as undecidable. The
+left-out amount is only described in the note; it is never added to the
+Computed figure. A skipped month that would not touch the account (for
+example no capital that month) changes nothing, so a plain AGREE stays plain.
+
+See `tests/test_skill_partner_comp_recon.py`'s "H35-05" test section for
+every case above, plus a regression test asserting the total amount posted
+to the bank account across a full `build_journals()` emit is exactly 0.
+
+## Non-goals (explicit, not deferred silently)
+
+- **No tax computation.** No slab, surcharge, cess, or exemption
+  arithmetic is performed anywhere in this package -- only the derivations
+  the spec this package was built from explicitly names (misc, gross-up,
+  the capital rule) are computed.
+- **No `.gnucash` writes.** This skill never opens or modifies a GnuCash
+  book, even in Stage 1b -- the journal emitter writes a plain CSV for
+  GnuCash's own importer, not a `.gnucash` file.
+- **No ITR workbook injection.** Output is a standalone workbook only.
+- **`payment_schedule.py` is no longer a placeholder** (see Stage 1/Stage
+  2 above) -- it was implemented against a real specimen, the same as the
+  other three document parsers in this package.
+- **Every rate, percentage and period is an input** (see N1) -- there is
+  no scenario in which a later change should reintroduce a constant or a
+  fallback default for one of these values.
+
+## Safety
+
+No PII of any kind appears in this package's code, tests, or fixtures --
+every figure in `tests/fixtures/` is invented and self-consistent, chosen
+to exercise every arithmetic rule in this package's design spec, not
+copied or derived from any real document.
+
+## Award-year documents (H35-14)
+
+The optional "Award-year documents" field takes the Compensation summary of each earlier year whose incentive instalments were paid in the reporting year. The award year is read from inside each document, never from its file name. Each instalment paid this year is matched to the same award year's schedule by gross and compared on gross, firm's tax and capital deducted (AGREE, DIFFERS, or CANNOT RECONCILE when no document, no unique match, or the latest revision cannot be told apart). Several revisions of one year: the latest letter date wins, else the highest revision number; if neither settles it, the row says so and none is used. A Target compensation letter is accepted but is not an instalment source. Award FY, firm's-tax FY and payment FY are shown separately. Recon only; the journal is unchanged.
+
+## Statement of Account vs book, and the profit share (H35-15)
+
+The statement's closing capital and closing current account are compared with the book's balance at 31 March for the entity's partner capital and current accounts, plus this skill's own unposted journals. A gap fully explained by those journals gets the pending-posting verdict; any other gap is a DIFFERS and is never plugged. A separate row compares the statement's profit share with the schedule's gross share of profit less firm's tax plus additional share of profit, shows both readings (before and after firm's tax), and says which one agrees; with neither, it reports both gaps.
+

@@ -1,0 +1,883 @@
+#!/usr/bin/env python3
+"""
+Extract and Sort CC PDFs - Implementation v3.0 with CDFV2 Support
+
+This script handles:
+1. MIME-format MSG file parsing (v2.0)
+2. CDFV2 binary MAPI MSG file parsing (NEW in v3.0)
+3. Auto-detection of MSG format (MIME vs CDFV2)
+4. PDF attachment extraction from both formats
+5. Folder-based organization from email metadata
+6. PDF decryption using qpdf
+7. Bank/card type extraction from filenames
+8. Duplicate detection using MD5 hashes
+9. Organized folder structure creation
+10. Verification checksums generation
+"""
+
+import os
+import re
+import subprocess
+import sys
+import json
+import hashlib
+from pathlib import Path
+from collections import defaultdict
+import shutil
+from datetime import datetime
+
+# This script always runs as a standalone subprocess (spawned via
+# ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
+# never inherits a caller's sys.path/PYTHONPATH. Bootstrap our own path to
+# ``src`` (or _MEIPASS, in frozen mode) so ``agents._native_resolve`` is
+# importable regardless of how this script was invoked. Same convention as
+# skill_hsbc/scripts/parse_tsv.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+from agents._native_resolve import resolve_qpdf  # noqa: E402
+
+def calculate_md5(filepath):
+    """Calculate MD5 hash of a file."""
+    md5_hash = hashlib.md5()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(4096), b''):
+            md5_hash.update(chunk)
+    return md5_hash.hexdigest()
+
+def detect_input_type(input_path):
+    """
+    Detect input type: MSG files, PDF files, or mixed.
+    Returns: ('msg', 'pdf', or 'mixed')
+    """
+    input_path = Path(input_path)
+
+    msg_count = len(list(input_path.rglob('*.msg')))
+    pdf_count = len(list(input_path.rglob('*.pdf')))
+    csv_count = len(list(input_path.rglob('*.csv')))
+    if csv_count > 0 and msg_count == 0 and pdf_count == 0:
+        return 'csv'   # CC-22: ICICI statement CSV exports only
+
+    if msg_count > 0 and pdf_count == 0:
+        return 'msg'
+    elif pdf_count > 0 and msg_count == 0:
+        return 'pdf'
+    elif msg_count > 0 and pdf_count > 0:
+        return 'mixed'
+    else:
+        return None
+
+def detect_msg_format(msg_file):
+    """
+    Detect if MSG file is MIME format or CDFV2 binary MAPI format.
+    Returns: ('mime', 'cdfv2', or None)
+    """
+    try:
+        with open(msg_file, 'rb') as f:
+            # Read first few bytes
+            header = f.read(4)
+
+            # CDFV2 starts with: 0xD0 0xCF 0x11 0xE0
+            if header[:4] == b'\xd0\xcf\x11\xe0':
+                return 'cdfv2'
+
+            # MIME format typically starts with text
+            if header[:5] == b'From ' or header[:1] in [b'R', b'D', b'S', b'C']:
+                return 'mime'
+
+            # Try reading as text
+            try:
+                f.seek(0)
+                data = f.read(200).decode('utf-8', errors='ignore')
+                if 'MIME-Version' in data or 'Content-Type' in data or 'From:' in data:
+                    return 'mime'
+            except:
+                pass
+
+            # If it looks like CDFV2 binary, classify as such
+            if header[:4] == b'\xd0\xcf\x11\xe0':
+                return 'cdfv2'
+
+            return None
+    except Exception as e:
+        return None
+
+def _unique_pdf_name(msg_file, attachment_filename, index=0):
+    """
+    Build a guaranteed-unique output filename:
+      <msg_stem_60chars>_<4-char hash of full path>[_index]__<attachment_name>
+
+    The 4-char hash of the full MSG path ensures files from different emails
+    never collide even when their names truncate to the same 60 characters.
+    """
+    msg_stem = re.sub(r'[<>:"/\\|?*]', '_', Path(msg_file).stem)[:60]
+    # Short hash of the full path so same-named emails get distinct prefixes
+    path_hash = hashlib.md5(str(msg_file).encode()).hexdigest()[:4]
+    att_name = Path(attachment_filename).name
+    suffix = f"_{index}" if index else ""
+    return f"{msg_stem}_{path_hash}{suffix}__{att_name}"
+
+
+def extract_pdfs_from_cdfv2_msg(msg_file, extract_folder, folder_structure=None):
+    """
+    Extract PDF attachments from CDFV2 binary MAPI MSG format.
+
+    Requires: pip install extract-msg (pure Python, works well with CDFV2)
+    """
+    try:
+        import extract_msg as _extract_msg
+    except ImportError:
+        print(f"  [WARN] CDFV2 format detected but extract-msg not installed")
+        print(f"     Install with: pip install extract-msg")
+        print(f"     Skipping: {msg_file.name}")
+        return []
+
+    extracted_files = []
+
+    try:
+        # Parse CDFV2 MSG file (compatible with extract-msg 0.41+)
+        msg = _extract_msg.openMsg(str(msg_file))
+
+        # Extract metadata
+        subject = msg.subject if hasattr(msg, 'subject') else 'Unknown'
+        sender = msg.sender if hasattr(msg, 'sender') else 'Unknown'
+        date = msg.date if hasattr(msg, 'date') else ''
+
+        # Create subfolder based on metadata if requested
+        if folder_structure == 'by_date' and date:
+            try:
+                # date may be a datetime object (extract-msg 0.41+) or a string
+                if hasattr(date, 'strftime'):
+                    msg_date = date
+                else:
+                    from email.utils import parsedate_to_datetime
+                    msg_date = parsedate_to_datetime(str(date))
+                subfolder = extract_folder / msg_date.strftime('%Y-%m')
+            except:
+                subfolder = extract_folder
+        elif folder_structure == 'by_sender' and sender:
+            # Extract sender name
+            sender_name = re.sub(r'[<>:"/\\|?*]', '', sender.split('<')[0].strip())[:50]
+            subfolder = extract_folder / sender_name if sender_name else extract_folder
+        elif folder_structure == 'by_subject' and subject:
+            # Extract subject keyword
+            subject_name = re.sub(r'[<>:"/\\|?*]', '', subject)[:50]
+            subfolder = extract_folder / subject_name if subject_name else extract_folder
+        else:
+            subfolder = extract_folder
+
+        subfolder.mkdir(parents=True, exist_ok=True)
+
+        # Extract attachments from CDFV2
+        if hasattr(msg, 'attachments') and msg.attachments:
+            for attachment in msg.attachments:
+                try:
+                    # extract-msg 0.41+: use longFilename; fall back to shortFilename or filename
+                    filename = (
+                        getattr(attachment, 'longFilename', None)
+                        or getattr(attachment, 'shortFilename', None)
+                        or getattr(attachment, 'filename', None)
+                    )
+
+                    if filename and filename.lower().endswith('.pdf'):
+                        # extract-msg 0.41+: .data is bytes; older versions used .binary
+                        data = getattr(attachment, 'data', None)
+                        if data is None:
+                            data = getattr(attachment, 'binary', None)
+                        if data is None:
+                            continue
+
+                        # Prefix with MSG stem to avoid name collisions across emails
+                        unique_name = _unique_pdf_name(msg_file, filename)
+                        output_file = subfolder / unique_name
+                        with open(output_file, 'wb') as f:
+                            f.write(data)
+
+                        extracted_files.append(output_file)
+                except Exception as e:
+                    pass  # Skip problematic attachments
+
+        msg.close()
+
+    except Exception as e:
+        print(f"  [ERROR] Error extracting from CDFV2 {msg_file.name}: {str(e)[:50]}")
+
+    return extracted_files
+
+def extract_pdfs_from_mime_msg(msg_file, extract_folder, folder_structure=None):
+    """
+    Extract PDF attachments from MIME-format MSG file (v2.0 logic).
+    """
+    from email import policy
+    from email.parser import BytesParser
+
+    extracted_files = []
+
+    try:
+        with open(msg_file, 'rb') as f:
+            msg = BytesParser(policy=policy.default).parse(f)
+
+        # Extract metadata
+        subject = msg.get('subject', 'Unknown')
+        sender = msg.get('from', 'Unknown')
+        date = msg.get('date', '')
+
+        # Create subfolder based on metadata if requested
+        if folder_structure == 'by_date' and date:
+            try:
+                from email.utils import parsedate_to_datetime
+                msg_date = parsedate_to_datetime(date)
+                subfolder = extract_folder / msg_date.strftime('%Y-%m')
+            except:
+                subfolder = extract_folder
+        elif folder_structure == 'by_sender' and sender:
+            sender_name = re.sub(r'[<>:"/\\|?*]', '', sender.split('<')[0].strip())[:50]
+            subfolder = extract_folder / sender_name if sender_name else extract_folder
+        elif folder_structure == 'by_subject' and subject:
+            subject_name = re.sub(r'[<>:"/\\|?*]', '', subject)[:50]
+            subfolder = extract_folder / subject_name if subject_name else extract_folder
+        else:
+            subfolder = extract_folder
+
+        subfolder.mkdir(parents=True, exist_ok=True)
+
+        # Extract attachments
+        if msg.is_multipart():
+            for part in msg.iter_parts():
+                filename = part.get_filename()
+
+                if filename and filename.lower().endswith('.pdf'):
+                    payload = part.get_payload(decode=True)
+                    # Prefix with MSG stem to avoid name collisions across emails
+                    unique_name = _unique_pdf_name(msg_file, filename)
+                    output_file = subfolder / unique_name
+
+                    with open(output_file, 'wb') as f:
+                        f.write(payload)
+
+                    extracted_files.append(output_file)
+
+    except Exception as e:
+        pass  # Handled by caller
+
+    return extracted_files
+
+def extract_pdfs_from_msg(msg_file, extract_folder, folder_structure=None):
+    """
+    Extract PDF attachments from MSG file (auto-detects format).
+    Supports both MIME and CDFV2 formats.
+    """
+    # Detect MSG format
+    msg_format = detect_msg_format(msg_file)
+
+    if msg_format == 'cdfv2':
+        return extract_pdfs_from_cdfv2_msg(msg_file, extract_folder, folder_structure)
+    elif msg_format == 'mime':
+        return extract_pdfs_from_mime_msg(msg_file, extract_folder, folder_structure)
+    else:
+        # Try MIME first, then CDFV2
+        result = extract_pdfs_from_mime_msg(msg_file, extract_folder, folder_structure)
+        if result:
+            return result
+        return extract_pdfs_from_cdfv2_msg(msg_file, extract_folder, folder_structure)
+
+def extract_all_pdfs_from_msgs(msg_folder, extract_folder, folder_structure=None):
+    """
+    Extract PDFs from all MSG files in folder (supports both MIME and CDFV2).
+    """
+    extract_folder = Path(extract_folder)
+    extract_folder.mkdir(parents=True, exist_ok=True)
+
+    msg_folder = Path(msg_folder)
+    all_extracted = []
+
+    msg_files = list(msg_folder.rglob('*.msg'))
+    print(f"Found {len(msg_files)} MSG files (auto-detecting format)")
+
+    mime_count = 0
+    cdfv2_count = 0
+
+    for i, msg_file in enumerate(msg_files, 1):
+        msg_format = detect_msg_format(msg_file)
+
+        if msg_format == 'cdfv2':
+            cdfv2_count += 1
+        elif msg_format == 'mime':
+            mime_count += 1
+
+        extracted = extract_pdfs_from_msg(msg_file, extract_folder, folder_structure)
+
+        status = f"[{msg_format.upper()}]" if msg_format else "[?]"
+        if extracted:
+            print(f"  [{i:3d}/{len(msg_files)}] {status} {msg_file.name[:50]}: {len(extracted)} PDFs")
+            all_extracted.extend(extracted)
+
+    print(f"\nFormat breakdown: {mime_count} MIME, {cdfv2_count} CDFV2, {len(msg_files)-mime_count-cdfv2_count} unknown")
+    print(f"Total PDFs extracted: {len(all_extracted)}")
+    return all_extracted
+
+def _pw_label(pw, passwords):
+    """
+    Describe WHICH password matched, without ever printing the password.
+
+    A statement password is a live credential: it is reused across all of a
+    cardholder's PDFs and is often derived from name + date of birth, so
+    echoing it to stdout puts it into any log capture, crash report, console
+    scrollback or screen-share of a run. The position in the caller's list
+    identifies it unambiguously to someone who already holds the list, and is
+    worthless to anyone who does not.
+    """
+    if not pw or pw == '(empty)':
+        return 'no password needed'
+    try:
+        return f"password #{list(passwords).index(pw) + 1}"
+    except ValueError:
+        return 'password (not from the supplied list)'
+
+def find_passwords(search_folder):
+    """
+    Find passwords from the input folder. Supports two formats:
+
+    Format 1 - Single password: a .txt file whose filename stem is the password.
+        e.g.  EXAMPLE01.txt  ->  password list = ['EXAMPLE01']
+
+    Format 2 - Multiple passwords: a file named 'passwords.txt' with one password
+        per line (blank lines and lines starting with # are ignored).
+        e.g.  passwords.txt containing:
+                  EXAMPLE01
+                  EXAMPLE02
+                  EXAMPLE04
+                  EXAMPLE03
+
+    Returns a list of passwords to try, or an empty list if none found.
+    """
+    search_path = Path(search_folder)
+
+    # Check for passwords.txt (multi-password file) first.
+    # Search input folder, its parent, and grandparent — so passwords.txt is
+    # found regardless of whether input is TestMails, TestMails/CCEmails,
+    # or TestMails_Output/CCEmails, etc.
+    for search_dir in [search_path, search_path.parent, search_path.parent.parent]:
+        pw_file = search_dir / 'passwords.txt'
+        if pw_file.exists():
+            lines = pw_file.read_text(encoding='utf-8').splitlines()
+            passwords = [l.strip() for l in lines if l.strip() and not l.strip().startswith('#')]
+            if passwords:
+                print(f"Found {len(passwords)} passwords in {pw_file}")
+                return passwords
+
+    # Fall back to single-password .txt filename stem
+    for search_dir in [search_path, search_path.parent, search_path.parent.parent]:
+        for txt_file in search_dir.glob('*.txt'):
+            if txt_file.stem:
+                # The stem IS the password, so it is deliberately not echoed.
+                print(f"Found 1 password from a .txt filename in {search_dir}")
+                return [txt_file.stem]
+
+    return []
+
+def extract_bank_and_card_type(filename):
+    """Extract bank name and card type from the WORDS in a PDF filename. Card digits are
+    not matched here: they come from the card list (cc_cards.yaml), see choose_folder_why."""
+    filename_lower = filename.lower()
+
+    # Check MSG-prefixed filename (has __ separator) — also check the attachment part alone
+    # e.g. "Your Indian Oil Axis Bank..._a1b2__Credit Card Statement.pdf"
+    # We match against the full unique name so MSG subject keywords help identify the bank.
+    patterns = {
+        ('Axis', 'Flipkart'):   r'flipkart.*axis|axis.*flipkart|flipkart',
+        ('Axis', 'IndianOil'):  r'indian\s*oil.*axis|axis.*indian\s*oil|indian.?oil',
+        ('HDFC', 'Regalia'):    r'hdfc.*regalia|regalia.*hdfc|regalia',
+        ('HDFC', 'TataNeu'):    r'hdfc.*tata\s*neu|tata\s*neu.*hdfc|tata.?neu',
+        ('ICICI', 'Amazon'):    r'amazon.*icici|icici.*amazon|amazon.*pay',
+        ('ICICI', 'Sapphiro'):  r'icici.*sapphiro|sapphiro.*icici|sapphiro',
+        ('SBI', 'BPCL-Octane'): r'bpcl|sbi.*octane|octane.*sbi',
+        ('SBM', 'Global'):      r'sbm.*global|global.*sbm|niyo.*global|sbniyocr|global.credit|your.global.credit',
+        ('HSBC', 'Premier'):    r'hsbc.*premier|premier.*hsbc|hsbc',
+        ('YES', 'Reserv'):      r'yes.?bank.*reserv|reserv.*yes|yes_bank_reserv',
+    }
+
+    for (bank, card_type), pattern in patterns.items():
+        if re.search(pattern, filename_lower):
+            return bank, card_type
+
+    return None, None
+
+CARDS_ENV = 'PASK_CC_SETTINGS_PATH'
+
+
+def load_card_list():
+    """(cards, problem). cards is None when no card list is available; problem then
+    says why (None when the script was run without a settings path). Never digits."""
+    sp = os.environ.get(CARDS_ENV, '').strip()
+    if not sp:
+        return None, None
+    from agents import cc_cards
+    try:
+        return cc_cards.load_for_settings(sp), None
+    except cc_cards.CardListError as exc:
+        return None, str(exc)
+
+
+def choose_folder_why(original_name, decrypted_pdf, cards=None):
+    """(bank, card_type, refusal). refusal is None, or the reason the file was NOT placed
+    (then the folder is Unknown-Unknown). Never silent: a disagreement is a refusal.
+
+    With a card list: the file name's digits (an exact 4-digit token) and a masked card
+    number printed in the PDF are both read against it. A printed number that is not
+    listed, or that points at a different card than the file name, is refused; nothing
+    printed falls back to the name."""
+    bank, card_type = extract_bank_and_card_type(original_name)
+    name_folder = (bank, card_type) if bank and card_type else None
+    if cards:
+        from agents import cc_cards
+        named = {c.folder for c in cc_cards.cards_named_in(original_name, cards)}
+        if len(named) > 1:
+            return 'Unknown', 'Unknown', 'the file name carries digits of more than one listed card'
+        if named:
+            f = next(iter(named))
+            if name_folder and name_folder != f:
+                return 'Unknown', 'Unknown', 'the file name words and its card digits point at different cards'
+            name_folder = f
+        try:
+            from agents.skill_cc_sort.completeness import read_page1_text
+            printed = cc_cards.printed_last4s(read_page1_text(decrypted_pdf) or '')
+        except Exception:
+            printed = []
+        if printed:
+            idx = cc_cards.index_by_last4(cards)
+            folders = set()
+            for d in printed:
+                c = idx.get(d)
+                if c is None:
+                    return 'Unknown', 'Unknown', 'a card number printed in the statement is not on the card list'
+                folders.add(c.folder)
+            if len(folders) > 1:
+                return 'Unknown', 'Unknown', 'the card numbers printed in the statement belong to different cards'
+            f = next(iter(folders))
+            if name_folder and name_folder != f:
+                return 'Unknown', 'Unknown', 'the card number printed in the statement disagrees with the file name'
+            return f[0], f[1], None
+    if name_folder:
+        return name_folder[0], name_folder[1], None
+    try:
+        from agents.skill_cc_sort.completeness import non_statement_title
+        if non_statement_title(decrypted_pdf):
+            return 'Not', 'A-Statement', None
+    except Exception:
+        pass
+    return 'Unknown', 'Unknown', None
+
+
+def choose_folder(original_name, decrypted_pdf, cards=None):
+    """(bank, card_type) for the destination folder <bank>-<card_type>.
+
+    CC-07: a file whose bank/card is not recognised is checked against the
+    shared "not a statement" rule (Credit Card Transactions' non_statement_reason:
+    terms leaflets, year-end summaries). Those go to Not-A-Statement, never to
+    Unknown-Unknown, so they are not reported as "bank not recognised"."""
+    b, c, _why = choose_folder_why(original_name, decrypted_pdf, cards)
+    return b, c
+
+def find_statement_csvs(input_path):
+    """CC-22: ICICI statement CSV exports under the input folder. A CSV is not encrypted, so it is
+    copied, not decrypted. A file that merely looks like one is still taken (Credit Card
+    Transactions refuses it later with a reason); a CSV that is not one is ignored."""
+    from agents.skill_cc_sort.icici_csv import looks_like_icici_csv
+    return [p for p in sorted(Path(input_path).rglob('*.csv')) if looks_like_icici_csv(p)]
+
+
+def decrypt_pdf(pdf_path, passwords, output_path):
+    """
+    Decrypt PDF using qpdf, trying each password in the list until one succeeds.
+    Returns the password that worked, or None if all failed.
+    """
+    if isinstance(passwords, str):
+        passwords = [passwords]  # backward compatibility
+
+    # Always try empty password first (handles unencrypted or owner-only PDFs)
+    all_passwords = [''] + list(passwords)
+
+    # Resolve the vendored qpdf by absolute path (not a bare name trusted to
+    # PATH) once per call; raises loudly if neither the vendored copy nor a
+    # PATH fallback is found.
+    qpdf_path = resolve_qpdf()
+
+    last_error = ''
+    for password in all_passwords:
+        # Try each password with multiple qpdf flag combinations to handle malformed PDFs
+        flag_sets = [
+            [],                              # standard
+            ['--warning-exit-0'],            # ignore warnings that inflate exit code
+            ['--ignore-xref-streams'],       # malformed xref
+            ['--warning-exit-0', '--ignore-xref-streams'],
+        ]
+        for extra_flags in flag_sets:
+            try:
+                # A statement password is a live credential, reused across all
+                # of a cardholder's PDFs. Passing it as a '--password=...' argv
+                # element used to put it in this process's command line, which
+                # on Windows any other local, unprivileged process can read out
+                # of the process table (e.g. via Process Explorer or WMI) for
+                # as long as qpdf is running. '--password-file=-' instead reads
+                # the password from stdin, so it never appears in argv. An
+                # empty password needs no option at all (qpdf's default), which
+                # also sidesteps any ambiguity about what an empty first line
+                # on stdin would mean.
+                stdin_input = None
+                if password:
+                    cmd = [qpdf_path, '--password-file=-'] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
+                    stdin_input = password + '\n'
+                else:
+                    cmd = [qpdf_path] + extra_flags + ['--decrypt', str(pdf_path), str(output_path)]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, input=stdin_input)
+                # Exit code 0 = success, 3 = success with warnings
+                if result.returncode in (0, 3):
+                    return password if password else '(empty)'
+                last_error = (result.stderr or result.stdout or '').strip()
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+    return None  # all passwords failed
+
+def find_duplicates(pdf_folder):
+    """Find duplicate PDFs using MD5 hash comparison."""
+    hashes = defaultdict(list)
+
+    for pdf_file in Path(pdf_folder).rglob('*.pdf'):
+        file_hash = calculate_md5(str(pdf_file))
+        hashes[file_hash].append(pdf_file)
+
+    duplicates = {h: files for h, files in hashes.items() if len(files) > 1}
+    return duplicates
+
+def organize_pdfs(input_folder, output_folder, password=None, extract_msg=False, folder_structure=None):
+    """
+    Main workflow:
+    1. Extract PDFs from MSG files (both MIME and CDFV2 formats, if needed)
+    2. Decrypt PDFs
+    3. Organize by bank/card type
+    4. Remove duplicates
+    5. Generate checksums
+    """
+
+    input_path = Path(input_folder)
+    output_path = Path(output_folder)
+
+    results = {
+        'total_analyzed': 0,
+        'msg_files_processed': 0,
+        'msg_format_breakdown': {'mime': 0, 'cdfv2': 0, 'unknown': 0},
+        'pdfs_extracted_from_msg': 0,
+        'successfully_decrypted': 0,
+        'failed_decryption': [],
+        'duplicates_found': 0,
+        'duplicates_removed': 0,
+        'organization': defaultdict(int),
+        'checksums': {},
+        'refused': [],
+        'input_type': None
+    }
+
+    # CC-28: the card list. Without it PDFs are placed by the words in the file name only
+    # and CSVs are refused (a CSV can only be placed by its card digits).
+    cards, cards_problem = load_card_list()
+    if cards_problem:
+        print(f"[WARN] Card list not usable: {cards_problem}")
+
+    # Detect input type
+    input_type = detect_input_type(input_path)
+    results['input_type'] = input_type
+    print(f"Input type detected: {input_type}")
+
+    # Extract PDFs from MSG if needed
+    if input_type in ['msg', 'mixed'] or extract_msg:
+        print(f"\nExtracting PDFs from MSG files (auto-detecting format)...")
+        temp_extract = output_path / '_temp_msg_extract'
+        # Always start fresh to avoid stale files from a previous run
+        if temp_extract.exists():
+            shutil.rmtree(temp_extract)
+        extracted_pdfs = extract_all_pdfs_from_msgs(input_path, temp_extract, folder_structure)
+
+        results['msg_files_processed'] = len(list(input_path.rglob('*.msg')))
+        results['pdfs_extracted_from_msg'] = len(extracted_pdfs)
+
+        # Count format breakdown
+        for msg_file in input_path.rglob('*.msg'):
+            fmt = detect_msg_format(msg_file)
+            if fmt == 'mime':
+                results['msg_format_breakdown']['mime'] += 1
+            elif fmt == 'cdfv2':
+                results['msg_format_breakdown']['cdfv2'] += 1
+            else:
+                results['msg_format_breakdown']['unknown'] += 1
+
+        pdf_files = extracted_pdfs
+        search_folder = input_path  # always search original input folder for passwords.txt
+    else:
+        pdf_files = list(input_path.rglob('*.pdf'))
+        search_folder = input_path
+        temp_extract = None
+
+    # Clean output directories — wipe previous run's results so we never
+    # accumulate stale files across runs (same logic as temp folder wiping).
+    decrypted_dir = output_path / 'Decrypted_PDFs_Correct'
+    duplicates_dir = output_path / 'Duplicates_Backup'
+    for clean_dir in [decrypted_dir, duplicates_dir]:
+        if clean_dir.exists():
+            shutil.rmtree(clean_dir)
+            print(f"[Cleanup] Removed previous: {clean_dir.name}/")
+    decrypted_dir.mkdir(parents=True, exist_ok=True)
+    duplicates_dir.mkdir(parents=True, exist_ok=True)
+
+    csv_files = find_statement_csvs(input_path)
+    results['csv_files'] = len(csv_files)
+    results['total_analyzed'] = len(pdf_files)
+    print(f"\nProcessing {len(pdf_files)} PDFs...")
+    if csv_files:
+        print(f"Found {len(csv_files)} ICICI statement CSV export(s) (no decryption needed).")
+
+    # Build password list
+    if not pdf_files:
+        passwords = []     # CC-22: CSV-only input needs no password
+    elif password:
+        # Password(s) passed via CLI: allow comma-separated or single value
+        passwords = [p.strip() for p in password.split(',') if p.strip()]
+    else:
+        passwords = find_passwords(search_folder)
+        if not passwords:
+            raise ValueError(
+                "No passwords found. Either:\n"
+                "  1. Pass --password PW1,PW2,PW3 on the command line, or\n"
+                "  2. Create a 'passwords.txt' file in the input folder with one password per line"
+            )
+
+    if pdf_files:
+        print(f"Will try {len(passwords)} password(s) per PDF.")
+
+    # Create temporary decrypted folder — always start fresh to avoid stale-file collisions
+    temp_decrypted = output_path / '_temp_decrypted'
+    if temp_decrypted.exists():
+        shutil.rmtree(temp_decrypted)
+    temp_decrypted.mkdir(parents=True, exist_ok=True)
+
+    # Decrypt PDFs - try each password until one works
+    decrypted_map = {}
+
+    for i, pdf_path in enumerate(pdf_files, 1):
+        temp_output = temp_decrypted / pdf_path.name
+
+        working_pw = decrypt_pdf(str(pdf_path), passwords, str(temp_output))
+        if working_pw:
+            decrypted_map[pdf_path] = temp_output
+            results['successfully_decrypted'] += 1
+            print(f"  [{i}/{len(pdf_files)}] [OK] Decrypted: {pdf_path.name[:50]} ({_pw_label(working_pw, passwords)})")
+        else:
+            results['failed_decryption'].append(pdf_path.name)
+            print(f"  [{i}/{len(pdf_files)}] [FAIL] All passwords failed: {pdf_path.name[:50]}")
+
+    # Find duplicates
+    duplicates = find_duplicates(str(temp_decrypted))
+    results['duplicates_found'] = sum(len(files) - 1 for files in duplicates.values())
+
+    # Process files: organize and handle duplicates
+    processed_hashes = set()
+
+    for original_pdf in pdf_files:
+        if original_pdf not in decrypted_map:
+            continue
+
+        decrypted_pdf = decrypted_map[original_pdf]
+        if not decrypted_pdf.exists():
+            print(f"  [WARN] Decrypted file missing (skipping): {decrypted_pdf.name}")
+            continue
+        file_hash = calculate_md5(str(decrypted_pdf))
+
+        # Extract bank and card type
+        bank, card_type, refusal = choose_folder_why(original_pdf.name, decrypted_pdf, cards)
+        if refusal:
+            results['refused'].append({'file': original_pdf.name, 'reason': refusal})
+            print(f"  [REFUSED] {original_pdf.name[:50]}: {refusal}")
+
+        bank_folder = decrypted_dir / f"{bank}-{card_type}"
+        bank_folder.mkdir(parents=True, exist_ok=True)
+
+        # Check if this is a duplicate
+        is_duplicate = False
+        for hash_val, files in duplicates.items():
+            if file_hash == hash_val and len(files) > 1:
+                if hash_val not in processed_hashes:
+                    processed_hashes.add(hash_val)
+                    final_output = bank_folder / decrypted_pdf.name
+                    shutil.move(str(decrypted_pdf), str(final_output))
+                else:
+                    is_duplicate = True
+                    results['duplicates_removed'] += 1
+                break
+
+        if is_duplicate:
+            dup_folder = duplicates_dir / f"{bank}-{card_type}"
+            dup_folder.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(decrypted_pdf), str(dup_folder / decrypted_pdf.name))
+        elif original_pdf not in decrypted_map or file_hash not in processed_hashes:
+            if original_pdf in decrypted_map:
+                final_output = bank_folder / decrypted_pdf.name
+                if not final_output.exists():
+                    shutil.move(str(decrypted_pdf), str(final_output))
+
+        results['organization'][f"{bank}-{card_type}"] += 1
+        results['checksums'][str(decrypted_pdf.relative_to(output_path))] = file_hash
+
+    # CC-22: route each CSV by the masked card numbers inside it (never by name or row count).
+    from agents.skill_cc_sort.icici_csv import card_folder_why
+    csv_hashes = set()
+    for csv_path in csv_files:
+        file_hash = calculate_md5(str(csv_path))
+        bank, card_type, refusal = card_folder_why(csv_path, cards)
+        if refusal:
+            results['refused'].append({'file': csv_path.name, 'reason': refusal})
+            print(f"  [REFUSED] {csv_path.name[:50]}: {refusal}")
+        if file_hash in csv_hashes:
+            dup_folder = duplicates_dir / f"{bank}-{card_type}"
+            dup_folder.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(csv_path), str(dup_folder / csv_path.name))
+            results['duplicates_removed'] += 1
+            continue
+        csv_hashes.add(file_hash)
+        bank_folder = decrypted_dir / f"{bank}-{card_type}"
+        bank_folder.mkdir(parents=True, exist_ok=True)
+        target = bank_folder / csv_path.name
+        if target.exists():
+            target = bank_folder / f"{csv_path.parent.name}__{csv_path.name}"
+        shutil.copy2(str(csv_path), str(target))
+        results['organization'][f"{bank}-{card_type}"] += 1
+        results['checksums'][str(target.relative_to(output_path))] = file_hash
+
+    # Cleanup temp folders
+    shutil.rmtree(temp_decrypted, ignore_errors=True)
+    if temp_extract:
+        shutil.rmtree(temp_extract, ignore_errors=True)
+
+    # Save checksums
+    checksums_file = output_path / 'verification_checksums.json'
+    with open(checksums_file, 'w') as f:
+        json.dump(results['checksums'], f, indent=2)
+
+    # CC-01: the agent's completeness check needs to know what failed to
+    # decrypt (file names only -- no passwords, no contents).
+    with open(output_path / 'sort_results.json', 'w') as f:
+        json.dump({'failed_decryption': list(results['failed_decryption']),
+                   'refused': list(results['refused']),
+                   'cards_problem': cards_problem}, f, indent=2)
+
+    return results
+
+if __name__ == "__main__":
+    import sys
+
+    if len(sys.argv) < 2:
+        print("Usage: python extract_sort_cc_pdfs.py <input_folder> [output_folder] [password] [--extract-msg] [--folder-by-date|--folder-by-sender|--folder-by-subject]")
+        print("\nPassword options (pick one):")
+        print("  Single password:    pass as 3rd argument, e.g. EXAMPLE01")
+        print("  Multiple passwords: pass comma-separated, e.g. EXAMPLE01,EXAMPLE02,EXAMPLE03")
+        print("  From file:          place 'passwords.txt' in input folder, one password per line")
+        print("  Single from file:   place EXAMPLE01.txt in input folder (filename stem = password)")
+        print("\nOptions:")
+        print("  --extract-msg         Extract PDFs from MSG files")
+        print("  --folder-by-date      Organize extracted PDFs by date (YYYY-MM)")
+        print("  --folder-by-sender    Organize extracted PDFs by sender")
+        print("  --folder-by-subject   Organize extracted PDFs by subject")
+        print("\nv3.0 Features:")
+        print("  - Supports both MIME and CDFV2 binary MSG formats")
+        print("  - Auto-detects MSG format automatically")
+        print("  - Multi-password support: tries all passwords per PDF")
+        print("  - Requires extract-msg for CDFV2 support: pip install extract-msg")
+        sys.exit(1)
+
+    input_folder = sys.argv[1]
+    output_folder = sys.argv[2] if len(sys.argv) > 2 else None
+    password = sys.argv[3] if len(sys.argv) > 3 else None
+    if password is not None and password.startswith('--'):
+        password = None   # a flag, not a password (e.g. --password-stdin)
+    if '--password-stdin' in sys.argv:
+        # SEC-15: the agent passes the password on stdin, not in argv.
+        password = sys.stdin.readline().rstrip('\r\n') or None
+
+    extract_msg = '--extract-msg' in sys.argv
+    folder_structure = None
+
+    if '--folder-by-date' in sys.argv:
+        folder_structure = 'by_date'
+    elif '--folder-by-sender' in sys.argv:
+        folder_structure = 'by_sender'
+    elif '--folder-by-subject' in sys.argv:
+        folder_structure = 'by_subject'
+
+    if not output_folder:
+        output_folder = Path(input_folder).parent / 'Organized_PDFs'
+
+    input_type = detect_input_type(input_folder)
+    if input_type in ['msg', 'mixed']:
+        extract_msg = True
+
+    results = organize_pdfs(input_folder, output_folder, password, extract_msg, folder_structure)
+
+    print("\n" + "=" * 70)
+    print("EXTRACTION & ORGANIZATION SUMMARY")
+    print("=" * 70)
+    print(f"\nInput type: {results['input_type']}")
+
+    if results['msg_files_processed'] > 0:
+        print(f"MSG files processed: {results['msg_files_processed']}")
+        print(f"  MIME format: {results['msg_format_breakdown']['mime']}")
+        print(f"  CDFV2 format: {results['msg_format_breakdown']['cdfv2']}")
+        print(f"  Unknown format: {results['msg_format_breakdown']['unknown']}")
+        print(f"PDFs extracted from MSG: {results['pdfs_extracted_from_msg']}")
+
+    print(f"\nTotal PDFs analyzed: {results['total_analyzed']}")
+    print(f"Successfully decrypted: {results['successfully_decrypted']}")
+    print(f"Failed decryption: {len(results['failed_decryption'])}")
+
+    if results['failed_decryption']:
+        print(f"\nFailed files:")
+        for fname in results['failed_decryption'][:10]:
+            print(f"  - {fname}")
+        if len(results['failed_decryption']) > 10:
+            print(f"  ... and {len(results['failed_decryption'])-10} more")
+
+    print(f"\nDuplicates found: {results['duplicates_found']}")
+    print(f"Duplicates removed: {results['duplicates_removed']}")
+
+    print(f"\nOrganization summary:")
+    for bank_card, count in sorted(results['organization'].items()):
+        print(f"  {bank_card}: {count} PDFs")
+
+    print(f"\nOutput structure:")
+    print(f"  Decrypted_PDFs_Correct/ - {sum(results['organization'].values())} organized PDFs")
+    print(f"  Duplicates_Backup/ - {results['duplicates_removed']} archived duplicates")
+    print(f"  verification_checksums.json - MD5 hashes for {len(results['checksums'])} files")
+
+    # PROMINENT (not fatal) warning: PDFs were found but NONE decrypted
+    # successfully. This is the "zero result" case analogous to zero
+    # transactions in create_cc_transaction_list.py -- it can legitimately
+    # happen (e.g. every password tried is wrong), but it looks identical to
+    # a broken qpdf resolution, so it must never pass by quietly. Carries
+    # the same diagnostics style: resolved binary path.
+    if results['total_analyzed'] > 0 and results['successfully_decrypted'] == 0:
+        try:
+            resolved_qpdf = resolve_qpdf()
+        except FileNotFoundError as e:
+            resolved_qpdf = f"<could not resolve: {e}>"
+        print(
+            "\n"
+            "*" * 80 + "\n"
+            "*** WARNING: ZERO PDFs SUCCESSFULLY DECRYPTED ***\n"
+            "*" * 80 + "\n"
+            f"  PDFs analyzed        : {results['total_analyzed']}\n"
+            f"  Successfully decrypted: 0\n"
+            f"  Resolved qpdf binary : {resolved_qpdf}\n"
+            "  This can legitimately happen if every password tried is wrong for\n"
+            "  every PDF in this batch -- but it is ALSO exactly what a broken qpdf\n"
+            "  resolution would produce. Verify the password list and the qpdf\n"
+            "  binary above before trusting an empty Decrypted_PDFs_Correct/.\n"
+            + "*" * 80 + "\n"
+        )

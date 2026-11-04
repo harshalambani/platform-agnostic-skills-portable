@@ -1,0 +1,76 @@
+# skill.yaml — ICICI skill manifest
+
+name: "ICICI"
+display_name: "ICICI"
+description: >
+  Convert ICICI Bank statement XLS downloads to GnuCash-importable CSV.
+  Hardcoded ICICI parsing — no LLM needed. Handles preamble/legend stripping,
+  DD,Mon,YYYY dates, description cleanup with reference number extraction
+  to cheque column, and running balance reconciliation.
+  Uses xlrd (pure Python) to read XLS — no LibreOffice required.
+category: "banks"
+version: "1.1.0"
+bank: true
+bank_key: "icici"
+
+mode: "agent"
+entry_point: "agent:run"
+
+inputs:
+  - name: "statement_files"
+    type: "files"
+    label: "ICICI statement XLS file(s)"
+    file_types: [".xls"]
+    required: true
+
+run_args:
+  statement_files: "{inputs.statement_files}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "ICICI_GnuCash"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []
+
+help:
+  overview: >
+    Converts ICICI net-banking statement downloads (the .xls files) into a
+    GnuCash-importable CSV in canonical columns.
+  when_to_use: >
+    Use this for the .xls statements ICICI lets you download from net-banking.
+    To also map rows to GnuCash accounts in one step, use Banks > Convert to
+    GnuCash and choose ICICI instead.
+  inputs:
+    - name: "statement_files"
+      tooltip: "One or more ICICI .xls statement downloads."
+      accepts: "Excel 97-2003 (.xls) — one or many."
+      gotchas: >
+        Re-saving in Excel is fine — a re-saved .xls (where dates/amounts
+        become real Excel cells) parses the same as the original download,
+        and an accidental .xlsx re-save is read automatically too. If it
+        still fails to parse, export a fresh .xls from ICICI net-banking.
+  steps:
+    - "Download your statement(s) as .xls from ICICI net-banking."
+    - "Select the file(s)."
+    - "Click Run and download the CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-ICICI_GnuCash.csv"
+        tooltip: >
+          The statement in canonical date / description / amount / balance
+          columns — the same shape every bank skill emits, ready for the GnuCash
+          account-mapping pipeline.
+  tips: >
+    Selecting several months at once produces one combined CSV in statement order.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "ICICI currently uses an LLM step. Start Ollama or set an endpoint in Settings."
+    - problem: "Parsing fails or columns are off."
+      fix: "Confirm it is the genuine net-banking .xls, not a converted/edited copy."

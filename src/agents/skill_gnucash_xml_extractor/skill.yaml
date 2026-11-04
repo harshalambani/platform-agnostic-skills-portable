@@ -1,0 +1,9 @@
+# skill_gnucash_xml_extractor — internal pipeline step.
+# NOT registered as a UI skill — used programmatically by skill_gnucash_account_mapper.
+# To restore as a standalone tab, add: name, display_name, mode, entry_point fields.
+
+description: >
+  Parse a GnuCash (.gnucash) file and extract account hierarchy + transaction mappings.
+  Outputs JSON with all description→account patterns from your financial history.
+category: "gnucash"
+version: "1.0.0"

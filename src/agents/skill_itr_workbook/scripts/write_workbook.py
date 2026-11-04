@@ -1,0 +1,1594 @@
+"""
+write_workbook.py -- openpyxl writer for the standardized ITR output workbook
+(plan section 2.2). Maximally formula-driven: every Computation figure is
+`='<sheet>'!<cell>`; the tax block itself is built as two parallel formula
+columns (New regime / Old regime), each referencing ONLY Rules-sheet cells
+for its rates/caps/slabs (never a literal rate in a formula) -- flipping the
+Entity sheet's regime cell re-drives which column the final Tax Liability /
+Refund-or-Payable rows select (plan's "visible both-regimes comparison block
+with a chooser cell", an explicitly acceptable implementation).
+
+Hard constants (no formula) are confined to: the Entity sheet (profile
+input), the Rules sheet (the versioned config dump), and the schedule
+sheets' own detail rows (parsed input values -- these ARE the traceable
+source data, plan section 3). Schedule-sheet SUBTOTAL cells are SUM
+formulas over that sheet's own detail rows wherever there is more than one
+contributing row.
+
+Indian digit grouping is applied via a custom number_format; paise are kept
+on every schedule sheet; the ONLY rounding is at the two statutory
+checkpoints (s.288A on Total Income, s.288B on Tax Payable/Refund), both via
+Excel MROUND() referencing the Rules sheet's rounding-nearest cells (never a
+hardcoded ROUND(...,-1) in the workbook).
+"""
+from __future__ import annotations
+
+from datetime import date
+from pathlib import Path
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill
+
+import foreign_tax as foreign_tax_engine
+import presentation
+import rules as rules_engine
+import schedules as sch
+import tags as tag_vocab
+
+INR_FORMAT = "#,##,##0.00"
+
+_MAX_SLAB_ROWS = 8
+_MAX_SURCHARGE_ROWS = 4
+
+_UNMAPPED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_UNMAPPED_FONT = Font(color="9C0006", bold=True)
+
+# Line label shown on the Mapping Review sheet's Destination column, one per
+# tag -- kept in sync BY HAND with the row labels write_*_sheet() above
+# actually writes for that tag's contribution (this sheet is a read-only
+# review surface; it doesn't reuse the writer functions' own row-label
+# strings since several tags feed into one summed row there).
+_TAG_LINE_LABEL: dict[str, str] = {
+    "SALARY_GROSS": "Gross salary (17(1)+17(2)+17(3))",
+    "BUS_REMUNERATION": "Partner/proprietor remuneration",
+    "BUS_EXPENSE": "Business expenses (net)",
+    "OS_INTEREST_SB": "Savings bank interest",
+    "OS_INTEREST_BANK": "Bank FD interest",
+    "OS_INTEREST_NBFC": "NBFC/HFC interest",
+    "OS_INTEREST_EPF_TAXABLE": "EPF taxable interest",
+    "OS_REFUND_INTEREST": "Interest on IT refund (taxable -- RULE-1)",
+    "OS_DIVIDEND": "Dividend income (gross)",
+    "OS_SLBS": "SLBS income",
+    "NONTAX_REFUND_PRINCIPAL": "IT refund principal (excluded, not income -- RULE-1)",
+    "CG_LT_CONTROL": "Books LTCG control total",
+    "CG_ST_CONTROL": "Books STCG control total",
+    "EXEMPT_PPF_INTEREST": "PPF interest",
+    "EXEMPT_10_2A": "Share of firm profit (s.10(2A))",
+    "EXEMPT_TAXFREE_BOND_INTEREST": "Tax-free bond interest",
+    "EXEMPT_OTHER": "Other exempt income",
+    "HP_RENT": "Gross Annual Value (rent)",
+    "HP_MUNICIPAL_TAX": "Municipal taxes paid by owner",
+    "HP_INTEREST": "Interest on housing loan (s.24(b))",
+    "TAXPAID_ADV": "Advance tax",
+    "TAXPAID_SAT": "Self-assessment tax",
+    "TAXPAID_TDS_SALARY": "TDS on salary",
+    "TAXPAID_TDS_INTEREST": "TDS on interest",
+    "TAXPAID_TDS_PARTNER": "TDS on partner remuneration / interest (s.194T)",
+    "TAXPAID_TDS_OTHER": "TDS under other sections",
+    "TAXPAID_FOREIGN": "Foreign tax paid (not TDS; relief via Form 67)",
+    "TAXPAID_TDS_DIVIDEND": "TDS on dividend",
+    "TAXPAID_TCS": "TCS",
+    "PERSONAL": "(non-deductible / non-taxable, shown for completeness only)",
+    "DED_80C_CANDIDATE": "80C candidate",
+    "DED_80D_CANDIDATE": "80D candidate",
+    "DED_80G_CANDIDATE": "80G candidate",
+    "EQUITY_CAPITAL": "(balancing figure)",
+    "TRADING": "(balancing figure)",
+}
+for _tag in tag_vocab.AL_TAGS:
+    _TAG_LINE_LABEL.setdefault(_tag, _tag)
+
+
+def _bold(cell) -> None:
+    cell.font = Font(bold=True)
+
+
+class _SheetWriter:
+    """Thin row-cursor helper around an openpyxl worksheet."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.row = 1
+
+    def cell(self, col: int, value=None, *, bold: bool = False, number_format: str | None = None):
+        c = self.ws.cell(row=self.row, column=col, value=value)
+        if bold:
+            _bold(c)
+        if number_format:
+            c.number_format = number_format
+        return c
+
+    def label_value(self, label: str, value=None, *, number_format: str | None = INR_FORMAT):
+        self.cell(1, label)
+        c = self.cell(2, value, number_format=number_format)
+        self.row += 1
+        return c
+
+    def header(self, text: str):
+        self.cell(1, text, bold=True)
+        self.row += 1
+
+    def blank(self):
+        self.row += 1
+
+
+_NOT_FOUND = "(not found)"
+
+
+def _str_cell(sw: "_SheetWriter", col: int, value: str | None) -> None:
+    """Render an optional string field -- never a blank cell for a field the
+    parser looked for and didn't find; distinguishes that from a genuinely
+    empty sheet region."""
+    sw.cell(col, value if value is not None else _NOT_FOUND)
+
+
+def _num_cell(sw: "_SheetWriter", col: int, obj, field_name: str) -> None:
+    """Render an optional numeric field parsed by parse_foreign.py. When the
+    source cell was a placeholder glyph or free-text prose rather than a real
+    number, parse_foreign leaves the field None and records why in
+    obj.flags[field_name] -- render that flag string verbatim instead of a
+    blank or a coerced 0, so a reader can see the source said "*" or
+    "Lower of (c) or (d)" instead of losing that information."""
+    flag = getattr(obj, "flags", {}).get(field_name)
+    if flag:
+        sw.cell(col, flag)
+    else:
+        value = getattr(obj, field_name)
+        sw.cell(col, value, number_format=INR_FORMAT)
+
+
+# ---------------------------------------------------------------------------
+# Rules sheet
+# ---------------------------------------------------------------------------
+
+def _write_slab_block(sw: _SheetWriter, slabs: list) -> dict:
+    """Write a slab table padded to _MAX_SLAB_ROWS rows (extra rows repeat
+    the last upto/0-rate so they contribute nothing); returns {row_index:
+    (upto_cell, rate_cell)}."""
+    refs = {}
+    padded = list(slabs) + [{"upto": slabs[-1]["upto"] if slabs else 0, "rate": 0.0}] * (_MAX_SLAB_ROWS - len(slabs))
+    for i, band in enumerate(padded[:_MAX_SLAB_ROWS]):
+        sw.cell(1, f"Slab {i + 1} upto")
+        sw.cell(2, band["upto"] if band["upto"] is not None else 999999999)
+        sw.cell(3, "rate")
+        sw.cell(4, band["rate"])
+        refs[i] = (f"B{sw.row}", f"D{sw.row}")
+        sw.row += 1
+    return refs
+
+
+def _write_surcharge_block(sw: _SheetWriter, bands: list) -> dict:
+    refs = {}
+    padded = list(bands) + [{"above": 10**12, "rate": 0.0}] * (_MAX_SURCHARGE_ROWS - len(bands))
+    for i, band in enumerate(padded[:_MAX_SURCHARGE_ROWS]):
+        sw.cell(1, f"Surcharge band {i + 1} above")
+        sw.cell(2, band["above"])
+        sw.cell(3, "rate")
+        sw.cell(4, band["rate"])
+        refs[i] = (f"B{sw.row}", f"D{sw.row}")
+        sw.row += 1
+    return refs
+
+
+def write_rules_sheet(wb: Workbook, rules: rules_engine.RulesConfig, user_rules: list, status: str, dob: str | None, fy_end: date, residency: str | None = None) -> dict:
+    """Dumps the versioned rules config (plan row 2). Returns a `layout` dict
+    of A1 cell references the Computation sheet formulas key off of."""
+    ws = wb.create_sheet("Rules")
+    sw = _SheetWriter(ws)
+    layout: dict = {}
+
+    sw.header(f"Rules -- {rules.year_label} (act {rules.act}, config version {rules.version})")
+    sw.blank()
+
+    sw.header("New Regime")
+    new_block = rules.regime("new")
+    layout["new_slabs"] = _write_slab_block(sw, new_block["slabs"])
+    layout["new_std_deduction"] = sw.label_value("Std deduction (salary)", new_block["std_deduction_salary"])
+    layout["new_rebate_max_ti"] = sw.label_value("87A max total income", new_block["rebate_87a"]["max_total_income"])
+    layout["new_rebate_max_amt"] = sw.label_value("87A max rebate", new_block["rebate_87a"]["max_rebate"])
+    layout["new_rebate_marginal"] = sw.label_value("87A marginal relief", new_block["rebate_87a"].get("marginal_relief", False), number_format=None)
+    layout["new_rebate_excl_special"] = sw.label_value(
+        "87A excludes special-rate income", new_block["rebate_87a"].get("excludes_special_rate_income", False), number_format=None,
+    )
+    layout["new_surcharge"] = _write_surcharge_block(sw, new_block["surcharge"]["bands"])
+    layout["new_surcharge_cg_cap"] = sw.label_value("Surcharge cap on CG/dividend", new_block["surcharge"]["cap_on_cg_dividend"])
+    sw.blank()
+
+    sw.header("Old Regime (resolved slab table for this entity's age/status)")
+    old_block = rules.regime("old")
+    old_slabs = rules_engine.resolve_slabs(rules, "old", status, dob, fy_end, residency=residency)
+    layout["old_slabs"] = _write_slab_block(sw, old_slabs)
+    layout["old_std_deduction"] = sw.label_value("Std deduction (salary)", old_block["std_deduction_salary"])
+    layout["old_rebate_max_ti"] = sw.label_value("87A max total income", old_block["rebate_87a"]["max_total_income"])
+    layout["old_rebate_max_amt"] = sw.label_value("87A max rebate", old_block["rebate_87a"]["max_rebate"])
+    layout["old_rebate_marginal"] = sw.label_value("87A marginal relief", old_block["rebate_87a"].get("marginal_relief", False), number_format=None)
+    layout["old_surcharge"] = _write_surcharge_block(sw, old_block["surcharge"]["bands"])
+    layout["old_surcharge_cg_cap"] = sw.label_value("Surcharge cap on CG/dividend", old_block["surcharge"]["cap_on_cg_dividend"])
+    sw.blank()
+
+    sw.header("Chapter VI-A caps (old regime)")
+    for key, val in old_block.get("vi_a_caps", {}).items():
+        layout[f"cap_{key}"] = sw.label_value(key, val)
+    sw.blank()
+
+    sw.header("Common")
+    common = rules.common
+    layout["cess_rate"] = sw.label_value("Cess rate", common["cess_rate"], number_format="0.00%")
+    layout["round_ti_nearest"] = sw.label_value("Total Income rounding (s.288A), nearest", common["rounding"]["total_income"]["nearest"])
+    layout["round_tax_nearest"] = sw.label_value("Tax payable/refund rounding (s.288B), nearest", common["rounding"]["tax_payable_refund"]["nearest"])
+    layout["hp_std_ded_pct"] = sw.label_value("House property std deduction % of NAV", common["house_property"]["std_deduction_pct_of_nav"], number_format="0.00%")
+    layout["al_threshold"] = sw.label_value("Schedule AL total-income threshold", common["schedule_al"]["total_income_threshold"])
+    sw.blank()
+
+    sw.header("Capital gains rates (regime-independent -- 111A/112A)")
+    cg = common["capital_gains"]
+
+    def _rate_pair(block: dict) -> tuple:
+        if "rate" in block:
+            return block["rate"], block["rate"]
+        return block["before_split"], block["on_after_split"]
+
+    ltcg_before, ltcg_after = _rate_pair(cg["s112a_ltcg_equity_stt"])
+    stcg_before, stcg_after = _rate_pair(cg["s111a_stcg_equity_stt"])
+    layout["ltcg_rate_before"] = sw.label_value("112A LTCG rate -- before split date", ltcg_before, number_format="0.00%")
+    layout["ltcg_rate_after"] = sw.label_value("112A LTCG rate -- on/after split date", ltcg_after, number_format="0.00%")
+    layout["stcg_rate_before"] = sw.label_value("111A STCG rate -- before split date", stcg_before, number_format="0.00%")
+    layout["stcg_rate_after"] = sw.label_value("111A STCG rate -- on/after split date", stcg_after, number_format="0.00%")
+    layout["ltcg_exemption"] = sw.label_value("112A exemption limit", cg["s112a_ltcg_equity_stt"].get("exemption_limit", 0))
+    if cg.get("split_date"):
+        sw.label_value(
+            "ASSUMPTION -- split-year 112A exemption allocation", (
+                "When the 125,000 exemption only partially offsets LTCG (112A) gains "
+                "spanning the split date, the unabsorbed exemption is allocated "
+                "PRO-RATA across the before/after split-date buckets (by taxable-gain "
+                "share), not to one bucket first -- the law does not mandate an "
+                "ordering between the two in-year rate buckets. See Reconciliation "
+                "for whether this allocation engaged on this run."
+            ), number_format=None,
+        )
+    sw.blank()
+
+    sw.header("Applied user rules")
+    for r in user_rules:
+        sw.label_value(r.id, r.statement, number_format=None)
+
+    return layout
+
+
+# ---------------------------------------------------------------------------
+# Entity sheet
+# ---------------------------------------------------------------------------
+
+def write_entity_sheet(wb: Workbook, entity, year_key: str, rules: rules_engine.RulesConfig, regime: str, form16_election: str | None) -> dict:
+    ws = wb.create_sheet("Entity")
+    sw = _SheetWriter(ws)
+    layout = {}
+
+    sw.header("Entity")
+    # These cells are the single source the presentation layer's header block
+    # formulas point at -- captured, not duplicated (presentation.py).
+    layout["name"] = sw.label_value("Name", entity.name, number_format=None)
+    layout["pan"] = sw.label_value("PAN", entity.pan, number_format=None)
+    layout["status"] = sw.label_value("Status", entity.status, number_format=None)
+    layout["residency"] = sw.label_value("Residency", entity.residency, number_format=None)
+    layout["dob"] = sw.label_value("DOB", entity.dob, number_format=None)
+    layout["address"] = sw.label_value("Address", entity.address, number_format=None)
+    layout["father_name"] = sw.label_value("Father's Name", entity.father_name, number_format=None)
+    layout["aadhaar"] = sw.label_value("Aadhaar", entity.aadhaar, number_format=None)
+    layout["year_label"] = sw.label_value("Year", rules.year_label, number_format=None)
+    layout["regime"] = sw.label_value("Regime (flip this cell: new / old)", regime, number_format=None)
+    if form16_election is not None:
+        sw.label_value("Form16 115BAC(1A) opt-out election", form16_election, number_format=None)
+    sw.label_value(
+        "Suggested ITR form",
+        "=IF('BusinessPL'!B2<>0,\"ITR-3\",\"ITR-2\")", number_format=None,
+    )
+    return layout
+
+
+# ---------------------------------------------------------------------------
+# Schedule sheets (data rows + SUM subtotals)
+# ---------------------------------------------------------------------------
+
+def write_salary_sheet(wb: Workbook, salary: sch.SalarySchedule) -> dict:
+    ws = wb.create_sheet("Salary")
+    sw = _SheetWriter(ws)
+    layout = {}
+    if not salary.reconciliation_ok:
+        # Fail-loud (2026-07-22 salary-gross fix) -- see
+        # presentation._write_salary_error_banner for the deliverable-page
+        # copy of this banner; this is the same "banner, no abort" mismatch
+        # made impossible to miss on the raw working sheet too.
+        banner = ws.cell(row=sw.row, column=1, value=presentation.salary_mismatch_banner_text(salary))
+        banner.font = _UNMAPPED_FONT
+        banner.fill = _UNMAPPED_FILL
+        ws.merge_cells(start_row=sw.row, start_column=1, end_row=sw.row, end_column=2)
+        sw.row += 2
+    sw.header("Salary")
+    layout["gross"] = sw.label_value("Gross salary (17(1)+17(2)+17(3))", salary.gross)
+    sw.label_value("Source", salary.source, number_format=None)
+    layout["s10_exempt"] = sw.label_value("s.10 exemptions total", salary.s10_exempt_total)
+    layout["std_deduction"] = sw.label_value("Standard deduction (s.16(ia))", salary.std_deduction)
+    layout["prof_tax"] = sw.label_value("Professional tax (s.16(iii))", salary.prof_tax)
+    layout["income_chargeable"] = sw.label_value("Income chargeable under Salaries", salary.income_chargeable)
+    if salary.manual_flagged:
+        sw.label_value("Flag", "manual entry -- no Form16 supplied, CA to confirm", number_format=None)
+    return layout
+
+
+def write_business_sheet(wb: Workbook, business: sch.BusinessSchedule) -> dict:
+    ws = wb.create_sheet("BusinessPL")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Business P&L (ITR-3 only)")
+    layout["remuneration"] = sw.label_value("Partner/proprietor remuneration", business.remuneration)
+    layout["expenses"] = sw.label_value("Business expenses (net)", business.expenses_total)
+    sw.cell(1, "Net business income")
+    sw.cell(2, f"=B{sw.row - 2}+B{sw.row - 1}", number_format=INR_FORMAT)
+    layout["net"] = f"B{sw.row}"
+    sw.row += 1
+    return layout
+
+
+def write_house_property_sheet(wb: Workbook, hp: sch.HousePropertySchedule) -> dict:
+    ws = wb.create_sheet("HouseProperty")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("House Property")
+    layout["gav"] = sw.label_value("Gross Annual Value (rent)", hp.gav)
+    layout["municipal_tax"] = sw.label_value("Municipal taxes paid by owner", hp.municipal_tax)
+    layout["nav"] = sw.label_value("Net Annual Value (GAV - municipal tax)", hp.nav)
+    layout["std_deduction"] = sw.label_value("Standard deduction 30% of NAV (s.24(a))", hp.std_deduction_24a)
+    layout["interest"] = sw.label_value("Interest on housing loan (s.24(b))", hp.interest_24b)
+    layout["income"] = sw.label_value("Income from house property", hp.income)
+    return layout
+
+
+def write_other_sources_sheet(wb: Workbook, os_: sch.OtherSourcesSchedule) -> dict:
+    ws = wb.create_sheet("OtherSources")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Other Sources")
+    layout["sb"] = sw.label_value("Savings bank interest", os_.interest_sb)
+    layout["bank"] = sw.label_value("Bank FD interest", os_.interest_bank)
+    layout["nbfc"] = sw.label_value("NBFC/HFC interest", os_.interest_nbfc)
+    layout["epf"] = sw.label_value("EPF taxable interest", os_.interest_epf_taxable)
+    layout["refund_interest"] = sw.label_value("Interest on IT refund (taxable -- RULE-1)", os_.refund_interest)
+    layout["refund_principal"] = sw.label_value("IT refund principal (excluded, not income -- RULE-1)", os_.refund_principal_excluded)
+    layout["dividend"] = sw.label_value("Dividend income (gross)", os_.dividend_gross)
+    sw.label_value("  Dividend quarter-bucket source", os_.dividend_quarters_source, number_format=None)
+    # 2026-08-19: a wrong foreign_dividends_in_book setting must be visible
+    # right next to the figure it changes, not buried in config -- plain
+    # words, no jargon, so a reader who has never heard of the flag by name
+    # can still tell whether foreign dividends are folded into the number
+    # just above or not.
+    # 2026-08-19 (coordinator review, defect 1): this question only makes
+    # sense when a foreign broker report was actually supplied. With no
+    # report, foreign_dividends_in_book still defaults to False, and the old
+    # unconditional line asserted "Yes -- book does not yet record them" on
+    # every entity/year that has no foreign broker activity at all -- a false
+    # statement pointing at a block that itself says "no report supplied".
+    # If there's no report, the question does not arise: omit the row.
+    if os_.foreign_dividend_source is not None:
+        sw.label_value(
+            "  Foreign broker dividends folded into this total?",
+            "Yes -- book does not yet record them (see 'Foreign dividends' block below)"
+            if not os_.foreign_dividends_in_book
+            else "No -- book already records them, so they are excluded here to avoid double-counting",
+            number_format=None,
+        )
+    # 2026-07-26 Build B (Interest/Dividend/TDS detail schedules) -- these
+    # quarter cells were always written but never captured into `layout`
+    # before; the new `Dividend Schedule` / `Interest Schedule` presentation
+    # sheets need their coordinates to render the 234C quarter split as a
+    # formula tie-back rather than restating the numbers.
+    layout["dividend_q"] = [
+        sw.label_value(f"  Dividend Q{i} (234C bucket)", q).coordinate
+        for i, q in enumerate(os_.dividend_quarters, start=1)
+    ]
+    sw.label_value("  Interest quarter-bucket source", os_.interest_quarters_source, number_format=None)
+    layout["interest_q"] = [
+        sw.label_value(f"  Interest Q{i} (234C bucket)", q).coordinate
+        for i, q in enumerate(os_.interest_quarters, start=1)
+    ]
+    layout["slbs"] = sw.label_value("SLBS income", os_.slbs)
+
+    # Foreign broker report dividends (parse_foreign.py). Whether the ordinary
+    # series above is folded into "Dividend income (gross)"/"Taxable Other
+    # Sources total" is controlled by foreign_dividends_in_book (2026-08-19)
+    # -- see the label just above. The deemed s.2(22)(f) series is NEVER
+    # folded in either way; it is taxed differently and stays detail-only.
+    sw.blank()
+    sw.header(
+        "Foreign dividends (broker report) -- NOT included in the Other Sources total above"
+        if os_.foreign_dividends_in_book else
+        "Foreign dividends (broker report) -- ordinary series IS included in the Other Sources "
+        "total above; deemed dividend below is never included"
+    )
+    if os_.foreign_dividend_source is None:
+        sw.label_value("Source", "(no foreign broker report supplied, or none parsed)", number_format=None)
+    else:
+        sw.label_value("Source", os_.foreign_dividend_source, number_format=None)
+        layout["foreign_dividend"] = sw.label_value(
+            "  Ordinary foreign dividend (gross, s.56)",
+            os_.foreign_dividend_gross if os_.foreign_dividend_gross is not None else "(no numeric total -- see quarter flags below)",
+            number_format=INR_FORMAT if os_.foreign_dividend_gross is not None else None,
+        ).coordinate
+        fq_cells = []
+        for i in range(5):
+            flag = os_.foreign_dividend_quarter_flags[i]
+            value = flag if flag else os_.foreign_dividend_quarters[i]
+            fq_cells.append(sw.label_value(
+                f"  Foreign dividend Q{i + 1} (234C bucket)", value,
+                number_format=None if flag else INR_FORMAT,
+            ).coordinate)
+        layout["foreign_dividend_q"] = fq_cells
+        layout["foreign_deemed_dividend"] = sw.label_value(
+            "  Deemed dividend (s.2(22)(f), gross -- kept separate, taxed differently)",
+            os_.foreign_deemed_dividend_gross if os_.foreign_deemed_dividend_gross is not None else "(no numeric total)",
+            number_format=INR_FORMAT if os_.foreign_deemed_dividend_gross is not None else None,
+        ).coordinate
+        fdq_cells = []
+        for i in range(5):
+            value = os_.foreign_deemed_dividend_quarters[i]
+            fdq_cells.append(sw.label_value(
+                f"  Deemed dividend Q{i + 1} (234C bucket)",
+                value if value is not None else "(none/flagged)",
+                number_format=INR_FORMAT if value is not None else None,
+            ).coordinate)
+        layout["foreign_deemed_dividend_q"] = fdq_cells
+    sw.cell(1, "Taxable Other Sources total")
+    sw.cell(2, os_.taxable_total, number_format=INR_FORMAT)
+    layout["taxable_total"] = f"B{sw.row}"
+    sw.row += 1
+    return layout
+
+
+def write_capital_gains_sheet(wb: Workbook, cg: sch.CapitalGainsSchedule, rules_layout: dict) -> dict:
+    ws = wb.create_sheet("CapitalGains")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Capital Gains")
+    layout["lt_control"] = sw.label_value("Books LTCG control total", cg.lt_control)
+    layout["st_control"] = sw.label_value("Books STCG control total", cg.st_control)
+    layout["lt_taxable_gross"] = sw.label_value("LTCG taxable (before 112A exemption)", cg.lt_taxable_gross)
+    layout["lt_exemption"] = sw.label_value("112A exemption used", cg.lt_exemption_used)
+    layout["lt_before_split"] = sw.label_value("LTCG taxable -- before split date", cg.lt_taxable_before_split)
+    layout["lt_after_split"] = sw.label_value("LTCG taxable -- on/after split date", cg.lt_taxable_on_after_split)
+    layout["st_before_split"] = sw.label_value("STCG taxable -- before split date", cg.st_taxable_before_split)
+    layout["st_after_split"] = sw.label_value("STCG taxable -- on/after split date", cg.st_taxable_on_after_split)
+    layout["st_taxable_gross"] = sw.label_value("STCG taxable (total)", cg.st_taxable_gross)
+
+    sw.cell(1, "112A/111A tax on special-rate CG (regime-independent)")
+    special_tax_cell = sw.cell(
+        2,
+        f"={layout['lt_before_split'].coordinate}*'Rules'!{rules_layout['ltcg_rate_before'].coordinate}"
+        f"+{layout['lt_after_split'].coordinate}*'Rules'!{rules_layout['ltcg_rate_after'].coordinate}"
+        f"+{layout['st_before_split'].coordinate}*'Rules'!{rules_layout['stcg_rate_before'].coordinate}"
+        f"+{layout['st_after_split'].coordinate}*'Rules'!{rules_layout['stcg_rate_after'].coordinate}",
+        number_format=INR_FORMAT,
+    )
+    layout["special_tax_cell"] = special_tax_cell.coordinate
+    sw.row += 1
+
+    sw.label_value("Reconciliation OK", cg.reconciliation_ok, number_format=None)
+    sw.label_value("Reconciliation diff (lot sum - control)", cg.reconciliation_diff)
+    if cg.unresolved_scrips:
+        sw.label_value("Unresolved FMV scrips (fail-loud, review)", ", ".join(cg.unresolved_scrips), number_format=None)
+        for msg in cg.fmv_failures:
+            sw.label_value("  corporate action", msg, number_format=None)
+    sw.blank()
+
+    sw.header("Lot detail")
+    lot_headers = ["Scrip", "Sale date", "Buy date", "Term", "Qty", "Cost", "Proceeds",
+                   "Booked gain", "Grandfathered", "FMV used", "Taxable gain", "Attribution", "FMV source"]
+    for col, h in enumerate(lot_headers, start=1):
+        sw.cell(col, h)
+    sw.row += 1
+    # First lot-detail data row -- the presentation `CG` sheet is a pure view
+    # over these rows (it reads FMV from column J rather than restating a
+    # 31-Jan-2018 price as a literal, as the CA reference does).
+    layout["lot_start_row"] = sw.row
+    for lot in cg.lot_rows:
+        sw.cell(1, lot.scrip)
+        sw.cell(2, lot.sale_date.isoformat())
+        sw.cell(3, lot.buy_date.isoformat() if lot.buy_date else None)
+        sw.cell(4, lot.term)
+        sw.cell(5, lot.qty)
+        sw.cell(6, lot.cost, number_format=INR_FORMAT)
+        sw.cell(7, lot.proceeds, number_format=INR_FORMAT)
+        sw.cell(8, lot.booked_gain, number_format=INR_FORMAT)
+        sw.cell(9, lot.grandfathered)
+        sw.cell(10, lot.fmv_used)
+        sw.cell(11, lot.taxable_gain, number_format=INR_FORMAT)
+        sw.cell(12, lot.attribution)
+        sw.cell(13, lot.fmv_source)
+        sw.row += 1
+    if cg.non_sale_rows:
+        # ITR-19: disposals that are not a sale. Below the lot rows so the lot
+        # range the CG view reads is untouched; never in any total above.
+        sw.blank()
+        sw.header("Disposals that are not a sale (not in Schedule CG)")
+        for col, h in enumerate(["Scrip", "Date", "Buy date", "Qty", "Cost", "Reason"], start=1):
+            sw.cell(col, h)
+        sw.row += 1
+        for r in cg.non_sale_rows:
+            sw.cell(1, r.scrip)
+            sw.cell(2, r.date.isoformat())
+            sw.cell(3, r.buy_date.isoformat() if r.buy_date else None)
+            sw.cell(4, r.qty)
+            sw.cell(5, r.cost, number_format=INR_FORMAT)
+            sw.cell(6, r.reason)
+            sw.row += 1
+    return layout
+
+
+def write_exempt_income_sheet(wb: Workbook, ei: sch.ExemptIncomeSchedule) -> dict:
+    ws = wb.create_sheet("ExemptIncome")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Exempt Income")
+    layout["ppf"] = sw.label_value("PPF interest", ei.ppf_interest)
+    layout["firm_profit"] = sw.label_value("Share of firm profit (s.10(2A))", ei.share_of_firm_profit)
+    layout["taxfree_bond"] = sw.label_value("Tax-free bond interest", ei.tax_free_bond_interest)
+    layout["other"] = sw.label_value("Other exempt income", ei.other_exempt)
+    sw.cell(1, "Total exempt income (book-sourced)")
+    sw.cell(2, ei.total, number_format=INR_FORMAT)
+    layout["total"] = f"B{sw.row}"
+    sw.row += 1
+    return layout
+
+
+def write_taxes_paid_sheet(wb: Workbook, tp: sch.TaxesPaidSchedule) -> dict:
+    ws = wb.create_sheet("TaxesPaid")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Taxes Paid")
+    layout["advance"] = sw.label_value("Advance tax", tp.advance_tax)
+    layout["sat"] = sw.label_value("Self-assessment tax", tp.self_assessment_tax)
+    layout["tds_salary"] = sw.label_value("TDS on salary", tp.tds_salary)
+    layout["tds_interest"] = sw.label_value("TDS on interest", tp.tds_interest)
+    layout["tds_dividend"] = sw.label_value("TDS on dividend", tp.tds_dividend)
+    layout["tds_partner"] = sw.label_value("TDS on partner remuneration / interest (s.194T)", tp.tds_partner)
+    layout["tds_other"] = sw.label_value("TDS under other sections", tp.tds_other)
+    for it in tp.tds_other_items:
+        sw.label_value(f"  other TDS -- {it['path']} (section {it['section']})", it["amount"])
+    for w in tp.tds_other_warnings:
+        sw.label_value("WARNING", w, number_format=None)
+    for w in tp.double_count_warnings:
+        sw.label_value("RED FLAG" if w.startswith("RED FLAG") else "WARNING", w, number_format=None)
+    layout["tcs"] = sw.label_value("TCS", tp.tcs)
+    layout["unclassified_rows"] = []   # populated below only when non-empty
+    sw.blank()
+    sw.header("26AS tie-out")
+    if not tp.as26_available:
+        sw.label_value("26AS tie-out", "no 26AS workbook supplied -- skipped", number_format=None)
+    else:
+        sw.label_value("26AS TDS on interest (194A)", tp.as26_tds_interest)
+        sw.label_value("26AS TDS on dividend (194/194K)", tp.as26_tds_dividend)
+        sw.label_value("26AS TDS on partner remuneration (194T)", tp.as26_tds_partner)
+        sw.label_value("Tie-out status", "OK" if tp.tie_out_ok else f"{len(tp.tie_out_conflicts)} CONFLICT(S)", number_format=None)
+        for c in tp.tie_out_conflicts:
+            sw.label_value(
+                f"  CONFLICT -- {c['category']}",
+                f"book={c['book']:.2f} 26AS={c['as26']:.2f} diff={c['diff']:.2f}",
+                number_format=None,
+            )
+        if tp.unclassified_sections:
+            sw.label_value(
+                "UNRECOGNISED TDS section(s) (fail-loud, add to Rules tds_sections)",
+                ", ".join(f"{i['section']} Rs{i['amount']:.2f}" for i in tp.unclassified_sections),
+                number_format=None,
+            )
+            # 2026-07-26 Build B (TDS detail schedule) -- one real row per
+            # unclassified item, each cell its own reference so the new `TDS
+            # Schedule` presentation sheet can tie back to these by formula
+            # instead of re-parsing the joined summary string above (which
+            # stays, for a human skimming this working sheet directly).
+            for item in tp.unclassified_sections:
+                section_c = sw.cell(1, f"  unclassified -- {item['section']}")
+                deductor_c = sw.cell(2, item["deductor_name"], number_format=None)
+                amount_c = sw.cell(3, item["amount"], number_format=INR_FORMAT)
+                tan_c = sw.cell(4, item["tan"], number_format=None)
+                layout["unclassified_rows"].append({
+                    "section": item["section"], "section_ref": section_c.coordinate,
+                    "deductor_name": item["deductor_name"], "deductor_ref": deductor_c.coordinate,
+                    "tan": item["tan"], "tan_ref": tan_c.coordinate,
+                    "amount_ref": amount_c.coordinate,
+                })
+                sw.row += 1
+    sw.blank()
+    sw.cell(1, "Total taxes paid")
+    sw.cell(2, tp.total, number_format=INR_FORMAT)
+    layout["total"] = f"B{sw.row}"
+    sw.row += 1
+    return layout
+
+
+def write_foreign_tax_sheet(wb: Workbook, ft) -> None:
+    """ITR-06: the foreign tax credit working. Written only when there is
+    foreign activity. The relief total is a value worked out in Python (lower
+    of foreign and Indian tax per country), so it does not recompute if the
+    regime is flipped in Excel -- the sheet says so."""
+    ws = wb.create_sheet("ForeignTax")
+    sw = _SheetWriter(ws)
+    sw.header("Foreign tax credit (s.90 / 90A / 91) -- Form 67")
+    sw.label_value(
+        "Not TDS", "Foreign tax is never added to Taxes Paid and never tied to 26AS; "
+        "it is relief against the tax liability.", number_format=None)
+    for h, col in (("Country", 1), ("Income (Rs)", 2), ("Foreign tax paid (Rs)", 3),
+                   ("Indian tax on that income (Rs)", 4), ("Relief = lower of the two (Rs)", 5),
+                   ("Source", 6), ("Note", 7)):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for r in ft.rows:
+        sw.cell(1, r.country, number_format=None)
+        sw.cell(2, r.income, number_format=INR_FORMAT)
+        sw.cell(3, r.foreign_tax, number_format=INR_FORMAT)
+        sw.cell(4, r.indian_tax, number_format=INR_FORMAT)
+        sw.cell(5, r.relief, number_format=INR_FORMAT)
+        sw.cell(6, r.source, number_format=None)
+        sw.cell(7, r.note, number_format=None)
+        sw.row += 1
+    sw.blank()
+    sw.cell(1, "Total relief claimed", bold=True)
+    c = sw.cell(2, ft.relief_total, number_format=INR_FORMAT, bold=True)
+    ft.relief_cell = c.coordinate if ft.relief_claimed else None
+    sw.row += 1
+    sw.label_value("Average rate of Indian tax used", ft.average_rate, number_format="0.00%")
+    sw.label_value(
+        "Basis", "Relief is computed for the regime selected when the workbook was built; "
+        "it does not recompute if the regime is changed in Excel. Foreign tax is not capped "
+        "at the DTAA rate here: check the DTAA article before filing.", number_format=None)
+    if ft.relief_claimed:
+        sw.label_value("FORM 67", foreign_tax_engine.FORM_67_LINE, number_format=None)
+    for w in ft.warnings:
+        sw.label_value("WARNING", w, number_format=None)
+
+
+def write_deductions_sheet(wb: Workbook, ded: sch.DeductionsSchedule) -> dict:
+    ws = wb.create_sheet("Deductions")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header("Deductions (Chapter VI-A)")
+    if ded.regime_na:
+        sw.label_value("Status", ded.regime_na_note, number_format=None)
+    for label, candidates in (("80C", ded.candidates_80c), ("80D", ded.candidates_80d), ("80G", ded.candidates_80g)):
+        for c in candidates:
+            sw.label_value(f"{label} candidate -- {c.path} (CA to confirm)", c.amount)
+    layout["80c"] = sw.label_value("80C claimed (capped)", ded.total_80c_claimed)
+    layout["80d"] = sw.label_value("80D claimed (capped)", ded.total_80d_claimed)
+    layout["80tta_ttb"] = sw.label_value("80TTA/80TTB claimed (capped)", ded.total_80tta_ttb_claimed)
+    layout["80g"] = sw.label_value("80G claimed (capped)", ded.total_80g_claimed)
+    sw.cell(1, "Total VI-A deductions")
+    sw.cell(2, 0 if ded.regime_na else ded.total, number_format=INR_FORMAT)
+    layout["total"] = f"B{sw.row}"
+    sw.row += 1
+    return layout
+
+
+def write_schedule_al_sheet(wb: Workbook, al: sch.ScheduleALSchedule) -> dict:
+    ws = wb.create_sheet("ScheduleAL")
+    sw = _SheetWriter(ws)
+    layout = {}
+    sw.header(f"Schedule AL (required if Total Income > {al.threshold:,.2f}: {al.required})")
+    for tag, total in al.buckets.items():
+        sw.label_value(tag, total)
+    if al.firm_interest or al.firm_pan:
+        sw.header("Interest in firm / AOP (own line; never part of shares and securities)")
+        sw.label_value("Interest in firm / AOP (at cost)", al.firm_interest)
+        sw.label_value("PAN of the firm / AOP", al.firm_pan or "NOT SET", number_format=None)
+        if al.firm_pan_missing:
+            sw.label_value(
+                "WARNING", "Firm interest is mapped but the entity has no partner_firm_pan; "
+                "set it in entities.yaml before filing Schedule AL.", number_format=None)
+    layout["total_assets"] = sw.label_value("Total assets (at cost)", al.total_assets)
+    layout["total_liabilities"] = sw.label_value("Total liabilities", al.total_liabilities)
+    layout["net"] = sw.label_value("Net", al.net)
+    return layout
+
+
+def _write_al_foreign_crosscheck_block(sw: "_SheetWriter", fa: sch.ScheduleFASchedule) -> None:
+    for col, h in enumerate(["Account", "Amount", "Country", "Peak balance", "Details"], start=1):
+        sw.cell(col, h)
+    sw.row += 1
+    for r in fa.rows:
+        sw.cell(1, r.path)
+        sw.cell(2, r.amount, number_format=INR_FORMAT)
+        sw.row += 1
+
+
+def write_schedule_fa_sheet(wb: Workbook, fa: sch.ScheduleFASchedule) -> None:
+    ws = wb.create_sheet("ScheduleFA")
+    sw = _SheetWriter(ws)
+    rep = fa.foreign_report
+
+    if rep is None:
+        # No foreign broker report was supplied for this run -- unchanged
+        # from before parse_foreign.py existed.
+        sw.header("Schedule FA -- pre-seeded from AL_FOREIGN-flagged holdings; detail cells manual")
+        _write_al_foreign_crosscheck_block(sw, fa)
+        return
+
+    fa_data = rep.schedule_fa
+    sw.header("Schedule FA -- parsed from foreign broker consolidated tax report (calendar year)")
+    sw.label_value("Source file", Path(rep.source_path).name, number_format=None)
+    sw.label_value("Report as on", fa_data.report_as_on or _NOT_FOUND, number_format=None)
+
+    if not fa_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {fa_data.unparsed_reason}", number_format=None)
+    else:
+        sw.blank()
+        sw.header("A2 -- Foreign Depository/Custodial Accounts")
+        for col, h in enumerate(
+            ["Country", "Institution", "Account number", "Status", "Opening date",
+             "Peak balance", "Closing balance", "Nature", "Gross amount"], start=1,
+        ):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+        for acct in fa_data.custodial_accounts:
+            _str_cell(sw, 1, acct.country)
+            _str_cell(sw, 2, acct.institution)
+            _str_cell(sw, 3, acct.account_number)
+            _str_cell(sw, 4, acct.status)
+            _str_cell(sw, 5, acct.opening_date)
+            _num_cell(sw, 6, acct, "peak_balance")
+            _num_cell(sw, 7, acct, "closing_balance")
+            _str_cell(sw, 8, acct.gross_amount_nature)
+            _num_cell(sw, 9, acct, "gross_amount")
+            sw.row += 1
+
+        sw.blank()
+        sw.header("A3 -- Foreign Equity/Debt Interest -- one row per acquisition lot (never deduped by entity)")
+        for col, h in enumerate(
+            ["Country", "Entity", "Nature of entity", "Date acquired", "Initial value",
+             "Peak value", "Closing value", "Gross amount credited", "Gross proceeds", "Broker"], start=1,
+        ):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+        for lot in fa_data.equity_lots:
+            _str_cell(sw, 1, lot.country)
+            _str_cell(sw, 2, lot.entity)
+            _str_cell(sw, 3, lot.nature_of_entity)
+            _str_cell(sw, 4, lot.date_acquired)
+            _num_cell(sw, 5, lot, "initial_value")
+            _num_cell(sw, 6, lot, "peak_value")
+            _num_cell(sw, 7, lot, "closing_value")
+            _num_cell(sw, 8, lot, "gross_amount_credited")
+            _num_cell(sw, 9, lot, "gross_proceeds")
+            _str_cell(sw, 10, lot.broker)
+            sw.row += 1
+
+    sw.blank()
+    sw.header("Vendor limitations disclosed by source report")
+    for vl in rep.vendor_limits:
+        sw.label_value(
+            vl.description,
+            "present" if vl.present else "EXPECTED BUT NOT FOUND IN SOURCE -- verify manually",
+            number_format=None,
+        )
+
+    if rep.warnings:
+        sw.blank()
+        sw.header("Parser warnings")
+        for w in rep.warnings:
+            sw.cell(1, w)
+            sw.row += 1
+
+    sw.blank()
+    sw.header("AL_FOREIGN book roll-up -- independent cross-check, NOT merged into the parsed figures above")
+    _write_al_foreign_crosscheck_block(sw, fa)
+
+
+def write_schedule_fsi_sheet(
+    wb: Workbook, fsi_data, dividend_data, interest_data,
+) -> None:
+    ws = wb.create_sheet("ScheduleFSI")
+    sw = _SheetWriter(ws)
+    sw.header(f"Schedule FSI -- foreign source income (FY {fsi_data.financial_year or '?'})")
+    if not fsi_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {fsi_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Head of income", "Country", "TIN", "Income", "Tax paid outside",
+         "Tax payable India", "Tax relief", "DTAA article"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in fsi_data.rows:
+        _str_cell(sw, 1, row.head_of_income)
+        _str_cell(sw, 2, row.country)
+        _str_cell(sw, 3, row.tin)
+        _num_cell(sw, 4, row, "income")
+        _num_cell(sw, 5, row, "tax_paid_outside")
+        _num_cell(sw, 6, row, "tax_payable_india")
+        _num_cell(sw, 7, row, "tax_relief")
+        _str_cell(sw, 8, row.dtaa_article)
+        sw.row += 1
+
+    sw.blank()
+    sw.header("Tie-out check -- Schedule FSI 'Other Sources' income vs Dividend + Interest sheet totals (FY, should tie)")
+    other = fsi_data.other_sources_income
+    div_total = dividend_data.total
+    int_total = interest_data.total
+    combined = div_total + int_total if div_total is not None and int_total is not None else None
+    sw.label_value("Schedule FSI -- Other Sources income", other)
+    sw.label_value("Dividend sheet total", div_total)
+    sw.label_value("Interest sheet total", int_total)
+    sw.label_value("Dividend + Interest combined", combined)
+    if other is not None and combined is not None:
+        sw.label_value("Difference (Other Sources - combined)", other - combined)
+
+
+def write_form67_sheet(wb: Workbook, form67_data) -> None:
+    ws = wb.create_sheet("Form67")
+    sw = _SheetWriter(ws)
+    sw.header(f"Form 67 -- foreign tax credit claim (FY {form67_data.financial_year or '?'})")
+    if not form67_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {form67_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Sr no", "Country", "Source of income", "Income", "Tax paid amount",
+         "Tax paid rate", "DTAA article", "DTAA rate"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in form67_data.rows:
+        _num_cell(sw, 1, row, "sr_no")
+        _str_cell(sw, 2, row.country)
+        _str_cell(sw, 3, row.source_of_income)
+        _num_cell(sw, 4, row, "income")
+        _num_cell(sw, 5, row, "tax_paid_amount")
+        _str_cell(sw, 6, row.tax_paid_rate)
+        _str_cell(sw, 7, row.dtaa_article)
+        _str_cell(sw, 8, row.dtaa_rate)
+        sw.row += 1
+        if row.other_cells:
+            sw.cell(1, "  additional columns (verbatim from source -- header/sub-header labels disagree here)")
+            sw.row += 1
+            for label, val in row.other_cells.items():
+                sw.cell(2, label)
+                sw.cell(3, val)
+                sw.row += 1
+
+
+def write_schedule_tr_sheet(wb: Workbook, tr_data) -> None:
+    ws = wb.create_sheet("ScheduleTR")
+    sw = _SheetWriter(ws)
+    sw.header(f"Schedule TR -- tax relief summary (FY {tr_data.financial_year or '?'})")
+    if not tr_data.parsed:
+        sw.label_value("Status", f"NOT PARSED -- {tr_data.unparsed_reason}", number_format=None)
+        return
+
+    for col, h in enumerate(
+        ["Country", "TIN", "Total taxes paid outside", "Total relief available",
+         "Relief claimed u/s", "DTAA relief", "Non-DTAA relief", "Refunded/credited"], start=1,
+    ):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    for row in tr_data.rows:
+        _str_cell(sw, 1, row.country)
+        _str_cell(sw, 2, row.tin)
+        _num_cell(sw, 3, row, "total_taxes_paid_outside")
+        _str_cell(sw, 4, row.total_relief_available)  # usually prose, e.g. "From 'Schedule FSI' sheet: ..."
+        _num_cell(sw, 5, row, "relief_claimed_under_section")
+        _str_cell(sw, 6, row.dtaa_relief)  # usually prose
+        _num_cell(sw, 7, row, "non_dtaa_relief")
+        _str_cell(sw, 8, row.refunded_or_credited)
+        sw.row += 1
+
+
+def write_is_transcript(wb: Workbook, tree) -> list:
+    """Returns [(account path, amount-cell A1 ref), ...] -- the presentation
+    layer's `IS` sheet rebuilds the GnuCash hierarchy by splitting each path
+    on '/' and links every leaf amount back to the cell named here."""
+    ws = wb.create_sheet("IS_Transcript")
+    sw = _SheetWriter(ws)
+    entries = []
+    sw.header("Retained Earnings -- verbatim transcript")
+    for col, h in enumerate(["Path", "Total", "GUID"], start=1):
+        sw.cell(col, h)
+    sw.row += 1
+    for n in tree.all_nodes():
+        if n.section.startswith("RetainedEarnings") and not n.children:
+            sw.cell(1, n.path)
+            sw.cell(2, n.total, number_format=INR_FORMAT)
+            sw.cell(3, n.guid)
+            entries.append((n.path, f"B{sw.row}"))
+            sw.row += 1
+    return entries
+
+
+def write_bs_transcript(wb: Workbook, tree) -> list:
+    """Returns [(account path, amount-cell A1 ref), ...] -- see
+    write_is_transcript."""
+    ws = wb.create_sheet("BS_Transcript")
+    sw = _SheetWriter(ws)
+    entries = []
+    sw.header("Balance Sheet -- verbatim transcript")
+    for col, h in enumerate(["Path", "Total", "GUID", "Section"], start=1):
+        sw.cell(col, h)
+    sw.row += 1
+    for n in tree.all_nodes():
+        if not n.section.startswith("RetainedEarnings") and not n.children:
+            sw.cell(1, n.path)
+            sw.cell(2, n.total, number_format=INR_FORMAT)
+            sw.cell(3, n.guid)
+            sw.cell(4, n.section)
+            entries.append((n.path, f"B{sw.row}"))
+            sw.row += 1
+    return entries
+    sw.blank()
+    sw.label_value("Assets - Equity - NetIncome (self-check, should be 0)", tree.section_totals.get("Assets Accounts", 0.0)
+                    - tree.section_totals.get("Equity, Trading, and Liabilities", 0.0)
+                    - tree.section_totals.get("Retained Earnings", 0.0))
+
+
+# ---------------------------------------------------------------------------
+# Unclassified / Review sheet (2026-07-16 Part 1: best-effort workbook)
+# ---------------------------------------------------------------------------
+
+def write_unclassified_sheet(wb: Workbook, uncl: sch.UnclassifiedSchedule) -> None:
+    """Only created when uncl.count > 0 (see write_workbook orchestrator) --
+    a fully-mapped run gets no Unclassified sheet at all, keeping that run
+    byte-for-behaviour identical to a pre-Part-1 workbook (gate 3)."""
+    ws = wb.create_sheet("Unclassified")
+    sw = _SheetWriter(ws)
+    header_row = sw.row
+    sw.header(
+        f"UNCLASSIFIED / REVIEW -- {uncl.count} item(s), Rs {uncl.total_amount:,.2f} total -- "
+        "NOT filing-ready. Every unmapped leaf lands here instead of being dropped."
+    )
+    ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
+    ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+    n_held = uncl.held_count
+    if n_held:
+        # ITR-07: accounts held on purpose are listed first, with the reason.
+        sw.label_value(
+            "HELD ON PURPOSE",
+            f"{n_held} account(s) put on HOLD -- they feed no schedule and keep this workbook "
+            "NOT filing-ready until each gets a real tag",
+            number_format=None,
+        )
+    sw.blank()
+
+    headers = ["Account path", "Amount", "Section", "Income-type (worst-case tax base)"]
+    if n_held:
+        headers.append("Held (reason)")
+    for col, h in enumerate(headers, start=1):
+        sw.cell(col, h, bold=True)
+    sw.row += 1
+    ordered = sorted(uncl.items, key=lambda i: not i.held) if n_held else uncl.items
+    for item in ordered:
+        row = sw.row
+        sw.cell(1, item.path)
+        sw.cell(2, item.amount, number_format=INR_FORMAT)
+        sw.cell(3, item.section)
+        sw.cell(4, item.is_income_type)
+        if n_held:
+            sw.cell(5, f"HELD: {item.reason}" if item.held else "")
+        for col in range(1, 5 + (1 if n_held else 0)):
+            ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
+        sw.row += 1
+
+    sw.blank()
+    sw.label_value("TOTAL unclassified (all sections)", uncl.total_amount)
+    sw.label_value("  of which income-type (worst-case tax base -- see Computation)", uncl.income_type_total)
+
+
+# ---------------------------------------------------------------------------
+# Computation sheet -- the formula-driven backbone
+# ---------------------------------------------------------------------------
+
+# `_slab_tax_formula` / `_surcharge_formula` moved to presentation.py
+# (2026-07-21 on-page-totals change) -- that module now needs them too, to
+# write the on-page tax block, and since this module already `import
+# presentation`s, the dependency can only run one way. Referenced below as
+# `presentation._slab_tax_formula` / `presentation._surcharge_formula`.
+
+
+def _rebate_formula(normal_income_cell: str, tax_normal_cell: str, max_ti_ref: str, max_amt_ref: str, marginal_ref: str) -> str:
+    base = f"MIN('Rules'!{max_amt_ref},{tax_normal_cell})"
+    marginal = f"MAX(0,{tax_normal_cell}-({normal_income_cell}-'Rules'!{max_ti_ref}))"
+    return (
+        f"IF({normal_income_cell}<='Rules'!{max_ti_ref},{base},"
+        f"IF('Rules'!{marginal_ref},{marginal},0))"
+    )
+
+
+def _q_computation(expr: str) -> str:
+    """Qualify a bare Computation-sheet cell/expression for use from another
+    sheet, e.g. 'B45+B46' -> "'Computation'!B45+'Computation'!B46"."""
+    return "+".join(f"'Computation'!{part}" for part in expr.split("+"))
+
+
+def write_computation_leaf_cells(
+    wb: Workbook, salary_layout: dict, business_layout: dict, hp_layout: dict,
+    os_layout: dict, cg_layout: dict,
+):
+    """Creates the `Computation` sheet and writes ONLY the per-head leaf
+    cells (2026-07-20 on-page-totals change, design doc section 7 step 2).
+
+    These are written FIRST -- before the `Statement of Income` page -- so
+    the page's own leaf line-items (`comp("salary")`, `comp("cg_lt")`, ...)
+    can reference them. Everything cross-section (GTI, Total Income, the
+    slab-tax machinery) has moved off this sheet's "always compute from
+    leaves" path: GTI/Total Income are now owned by the page, and the slab
+    formulas are re-anchored to read the page's normal-income-base cell --
+    see `write_computation_tail`, called from inside
+    `presentation.write_statement_of_income` once the page has written that
+    cell.
+
+    Returns `(sw, leaf)`: `sw` is the same row-cursor the caller hands back
+    into `write_computation_tail` to keep writing at the correct row, and
+    `leaf` holds the six Cell objects (salary/hp/biz/os/cg_lt/cg_st) both
+    the page and the tail need.
+    """
+    ws = wb.create_sheet("Computation")
+    sw = _SheetWriter(ws)
+    sw.header("Computation")
+    salary_cell = sw.label_value("Salary income", f"='Salary'!{salary_layout['income_chargeable'].coordinate}")
+    hp_cell = sw.label_value("Income from house property", f"='HouseProperty'!{hp_layout['income'].coordinate}")
+    biz_cell = sw.label_value("Business/profession income", f"='BusinessPL'!{business_layout['net']}")
+    os_cell = sw.label_value("Other sources income", f"='OtherSources'!{os_layout['taxable_total']}")
+    cg_lt_cell = sw.label_value("Capital gains -- LT (special rate)", f"='CapitalGains'!{cg_layout['lt_taxable_gross'].coordinate}-'CapitalGains'!{cg_layout['lt_exemption'].coordinate}")
+    cg_st_cell = sw.label_value("Capital gains -- ST (special rate)", f"='CapitalGains'!{cg_layout['st_taxable_gross'].coordinate}")
+    sw.blank()
+    leaf = {
+        "salary_cell": salary_cell, "hp_cell": hp_cell, "biz_cell": biz_cell,
+        "os_cell": os_cell, "cg_lt_cell": cg_lt_cell, "cg_st_cell": cg_st_cell,
+    }
+    return sw, leaf
+
+
+def leaf_comp_layout(leaf: dict) -> dict:
+    """Sheet-qualified formula strings for the page's leaf line-items --
+    the ONLY comp_layout entries `write_statement_of_income` needs before it
+    builds its own on-page GTI/Total Income ladder."""
+    return {
+        "salary": _q_computation(leaf["salary_cell"].coordinate),
+        "hp": _q_computation(leaf["hp_cell"].coordinate),
+        "business": _q_computation(leaf["biz_cell"].coordinate),
+        "os": _q_computation(leaf["os_cell"].coordinate),
+        "cg_lt": _q_computation(leaf["cg_lt_cell"].coordinate),
+        "cg_st": _q_computation(leaf["cg_st_cell"].coordinate),
+    }
+
+
+def write_computation_tail(
+    wb: Workbook, sw: "_SheetWriter", leaf: dict, model: sch.ITRModel, rules_layout: dict,
+    entity_layout: dict, tp_layout: dict, cg_layout: dict, page_layout: dict,
+) -> dict:
+    """Continues the `Computation` sheet started by
+    `write_computation_leaf_cells` with the tax-slab machinery. Called from
+    INSIDE `presentation.write_statement_of_income`, once the page has
+    written its own income ladder and can hand back `page_layout` -- this is
+    the ordering resolution for design doc section 7 step 2 (rather than
+    predicting the page's row layout, which varies with which optional
+    sections render, `Computation`'s tail is written interleaved with the
+    page, right after the coordinate it needs exists).
+
+    Re-anchored (2026-07-20, Option C): the slab/rebate/surcharge formulas
+    read the PAGE's `normal_income_base` cell -- `'Statement of
+    Income'!<page_layout["normal_income_base"]>` -- instead of recomputing
+    GTI/Total Income from source leaves. This is THE re-anchor point: an
+    on-page override (any leaf, Chapter VI-A, or the b/f-loss cell) changes
+    that page cell, which this formula reads, so it flows through tax, cess
+    and refund with no Python-side recomputation. `comp_layout` keys this
+    returns are unchanged from before the split (`selected_liability`,
+    `refund`, `new/old_cess`, `new/old_tax_before_cess`) so the page's own
+    `comp(...)` refs for those keep resolving.
+
+    Special-rate CG tax is untouched -- still `cg_layout['special_tax_cell']`
+    -- so LTCG/STCG never enters the slab base (design doc section 5, THE
+    correctness trap: Total Income on the page INCLUDES special-rate CG, but
+    `normal_income_base` is Total Income minus it, computed on the page).
+    """
+    ws = sw.ws
+    regime_cell = f"'Entity'!{entity_layout['regime'].coordinate}"
+    cg_lt_cell = leaf["cg_lt_cell"]
+    cg_st_cell = leaf["cg_st_cell"]
+
+    # Cross-sheet ref into the page's own derived normal-income-base cell --
+    # NOT recomputed here. See module docstring above.
+    normal_for_slab_cell = f"'Statement of Income'!{page_layout['normal_income_base']}"
+
+    def _regime_block(prefix: str, slab_refs: dict, rebate_max_ti: str, rebate_max_amt: str,
+                       rebate_marginal: str, surcharge_refs: dict) -> str:
+        sw.header(f"{prefix} regime")
+        tax_normal_cell = sw.cell(2, f"={presentation._slab_tax_formula(normal_for_slab_cell, slab_refs)}", number_format=INR_FORMAT)
+        sw.cell(1, "Tax on normal-rate income")
+        tax_normal_ref = tax_normal_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "112A/111A tax on special-rate CG")
+        cg_tax_cell = sw.cell(2, f"='CapitalGains'!{cg_layout['special_tax_cell']}", number_format=INR_FORMAT)
+        cg_tax_ref = cg_tax_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "87A rebate")
+        rebate_cell = sw.cell(2, f"={_rebate_formula(normal_for_slab_cell, tax_normal_ref, rebate_max_ti, rebate_max_amt, rebate_marginal)}", number_format=INR_FORMAT)
+        rebate_ref = rebate_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "Tax after rebate + special-rate tax")
+        after_rebate_cell = sw.cell(2, f"=MAX(0,{tax_normal_ref}-{rebate_ref})+{cg_tax_ref}", number_format=INR_FORMAT)
+        after_rebate_ref = after_rebate_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "Surcharge")
+        surcharge_cell = sw.cell(2, f"={presentation._surcharge_formula(f'({normal_for_slab_cell}+{cg_lt_cell.coordinate}+{cg_st_cell.coordinate})', after_rebate_ref, surcharge_refs)}", number_format=INR_FORMAT)
+        surcharge_ref = surcharge_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "Cess")
+        cess_cell = sw.cell(2, f"=({after_rebate_ref}+{surcharge_ref})*'Rules'!{rules_layout['cess_rate'].coordinate}", number_format=INR_FORMAT)
+        cess_ref = cess_cell.coordinate
+        sw.row += 1
+
+        sw.cell(1, "Tax liability")
+        liability_cell = sw.cell(2, f"={after_rebate_ref}+{surcharge_ref}+{cess_ref}", number_format=INR_FORMAT)
+        sw.row += 1
+        return {
+            "liability": liability_cell.coordinate,
+            "cess": cess_ref,
+            # Tax before cess = tax after rebate + special-rate CG tax + surcharge.
+            "tax_before_cess": f"{after_rebate_ref}+{surcharge_ref}",
+        }
+
+    new_block = _regime_block(
+        "New", rules_layout["new_slabs"],
+        rules_layout["new_rebate_max_ti"].coordinate, rules_layout["new_rebate_max_amt"].coordinate,
+        rules_layout["new_rebate_marginal"].coordinate, rules_layout["new_surcharge"],
+    )
+    old_block = _regime_block(
+        "Old", rules_layout["old_slabs"],
+        rules_layout["old_rebate_max_ti"].coordinate, rules_layout["old_rebate_max_amt"].coordinate,
+        rules_layout["old_rebate_marginal"].coordinate, rules_layout["old_surcharge"],
+    )
+    new_liability = new_block["liability"]
+    old_liability = old_block["liability"]
+    sw.blank()
+
+    sw.cell(1, "Selected regime (from Entity sheet)")
+    sw.cell(2, f"={regime_cell}", number_format=None)
+    sw.row += 1
+
+    uncl = model.unclassified
+    liability_label = "Tax liability (selected regime)"
+    refund_label = "Refund (+) / Payable (-), s.288B rounded"
+    if uncl.count > 0:
+        liability_label += " -- DRAFT (not filing-ready; see call-out below)"
+        refund_label += " -- DRAFT (not filing-ready; see call-out below)"
+
+    _ft = getattr(model, "foreign_tax", None)
+    _relief_claimed = bool(_ft is not None and _ft.relief_claimed and _ft.relief_cell)
+    if _relief_claimed:
+        # ITR-06: relief comes off the liability HERE, so the refund below,
+        # and everything that reads it, sees the reduced figure.
+        sw.cell(1, "Tax liability before foreign tax relief (selected regime)")
+        pre_relief_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, "Less - foreign tax relief (s.90/91) -- Form 67 must be filed")
+        relief_cell_c = sw.cell(2, f"='ForeignTax'!{_ft.relief_cell}", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=MAX(0,{pre_relief_cell}-{relief_cell_c})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+    else:
+        sw.cell(1, liability_label)
+        selected_liability_cell = sw.cell(2, f"=IF({regime_cell}=\"old\",{old_liability},{new_liability})", number_format=INR_FORMAT).coordinate
+        sw.row += 1
+
+    taxes_paid_cell = sw.label_value("Taxes paid", f"='TaxesPaid'!{tp_layout['total']}")
+
+    sw.cell(1, refund_label)
+    # Sign-safe s.288B rounding (see presentation.mround_safe): Excel's
+    # MROUND(x,m) raises #NUM! whenever x and m have opposite signs, which is
+    # exactly the tax-payable (x < 0, m > 0) case -- bug fix, 2026-07-22.
+    round_tax_ref = f"'Rules'!{rules_layout['round_tax_nearest'].coordinate}"
+    refund_cell = sw.cell(
+        2, f"={presentation.mround_safe(f'{taxes_paid_cell.coordinate}-{selected_liability_cell}', round_tax_ref)}",
+        number_format=INR_FORMAT,
+    )
+    sw.row += 1
+
+    comp_tail = {
+        "selected_liability": _q_computation(selected_liability_cell),
+        "refund": _q_computation(refund_cell.coordinate),
+        "new_cess": _q_computation(new_block["cess"]),
+        "old_cess": _q_computation(old_block["cess"]),
+        "new_tax_before_cess": _q_computation(new_block["tax_before_cess"]),
+        "old_tax_before_cess": _q_computation(old_block["tax_before_cess"]),
+    }
+
+    if uncl.count > 0:
+        sw.blank()
+        header_row = sw.row
+        sw.header(
+            f"BEST-EFFORT CALL-OUT -- {uncl.count} item(s) unclassified, NOT filing-ready"
+        )
+        ws.cell(row=header_row, column=1).fill = _UNMAPPED_FILL
+        ws.cell(row=header_row, column=1).font = _UNMAPPED_FONT
+        sw.label_value("Unclassified item(s) -- count", uncl.count, number_format=None)
+        sw.label_value("Unclassified item(s) -- total amount (Rs, all sections)", uncl.total_amount)
+        sw.label_value(
+            "Unclassified income-type total (Rs) -- worst-case tax base", uncl.income_type_total,
+        )
+        draft_row = sw.row
+        sw.cell(
+            1,
+            f"DRAFT tax liability (selected regime) -- {uncl.count} item(s) unclassified "
+            f"(Rs {uncl.total_amount:,.2f} total), NOT filing-ready",
+        )
+        sw.cell(2, model.computation.tax_block.tax_liability, number_format=INR_FORMAT)
+        for col in (1, 2):
+            ws.cell(row=draft_row, column=col).font = _UNMAPPED_FONT
+        sw.row += 1
+        worst_case_row = sw.row
+        sw.cell(
+            1,
+            "Worst-case upper bound tax liability -- assumes every unclassified income-type "
+            "item is fully taxable at the top slab rate (expenses/deductions NOT assumed to "
+            "reduce tax); true liability sits between DRAFT and this figure",
+        )
+        sw.cell(2, model.computation.worst_case_tax_liability, number_format=INR_FORMAT)
+        for col in (1, 2):
+            ws.cell(row=worst_case_row, column=col).font = _UNMAPPED_FONT
+        sw.row += 1
+
+    return comp_tail
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation sheet
+# ---------------------------------------------------------------------------
+
+def write_reconciliation_sheet(
+    wb: Workbook, tree, identity_failures: list, book_cross_check: list, form16_cross_check: list,
+    unmapped: list, mapping_version: str, rules_version: str, run_timestamp: str, input_hashes: dict,
+    cg_reconciliation_ok: bool,
+    split_year_exemption_prorated: bool = False, split_year_exemption_ratio: float = 1.0,
+    as26_available: bool = False, as26_tie_out_ok: bool = True, as26_conflicts: list | None = None,
+    resolved: dict | None = None, mapping_entries: dict | None = None,
+    salary_reconciliation_ok: bool = True,
+    form16_26as_salary: list | None = None,
+) -> None:
+    ws = wb.create_sheet("Reconciliation")
+    sw = _SheetWriter(ws)
+    sw.header("Reconciliation")
+    sw.label_value("Imbalance Amount", tree.imbalance)
+    sw.label_value("Identity checks", "OK" if not identity_failures else f"{len(identity_failures)} FAILURE(S)", number_format=None)
+    for f in identity_failures:
+        sw.label_value("  failure", f, number_format=None)
+    sw.label_value("Capital Gains reconciliation (lots vs control)", "OK" if cg_reconciliation_ok else "MISMATCH", number_format=None)
+    # Salary sheet's OWN arithmetic (gross - s.10 exempt - std deduction -
+    # prof tax vs income chargeable) -- a DIFFERENT check to the "17(1)
+    # Salary vs SALARY_GROSS" line below, which compares the book's 17(1)-only
+    # SALARY_GROSS tag against Form 16's 17(1) alone. Both are correct and
+    # intentionally independent (2026-07-22 salary-gross fix): this line
+    # would have caught the sheet's own gross-vs-income_chargeable mismatch.
+    sw.label_value(
+        "Salary sheet reconciliation (gross - exemptions - deductions vs income chargeable)",
+        "OK" if salary_reconciliation_ok else "MISMATCH", number_format=None,
+    )
+    if split_year_exemption_prorated:
+        sw.label_value(
+            "ASSUMPTION APPLIED -- split-year 112A exemption pro-rated across "
+            "before/after split-date buckets (see Rules sheet)",
+            split_year_exemption_ratio, number_format="0.0000",
+        )
+    if as26_available:
+        sw.label_value("Book<->26AS TDS tie-out (see TaxesPaid sheet)", "OK" if as26_tie_out_ok else f"{len(as26_conflicts)} CONFLICT(S)", number_format=None)
+        for c in as26_conflicts or []:
+            sw.label_value(
+                f"  CONFLICT -- {c['category']}",
+                f"book={c['book']:.2f} 26AS={c['as26']:.2f} diff={c['diff']:.2f}",
+                number_format=None,
+            )
+    sw.blank()
+
+    if resolved:
+        counts = provenance_counts(resolved, mapping_entries)
+        heuristic_n = counts.get("heuristic", 0)
+        approved_n = counts.get("approved", 0)
+        sw.header("Mapping provenance (fail-loud -- 2026-07-19)")
+        sw.label_value(
+            "Tag provenance",
+            f"{approved_n} approved, {heuristic_n} heuristic (unverified), "
+            f"{counts.get('llm', 0)} llm-suggested, {counts.get('inherited', 0)} inherited "
+            f"-- {len(resolved)} leaf(ves) total",
+            number_format=None,
+        )
+        income_leaves = heuristic_income_leaves(tree, resolved, mapping_entries)
+        if income_leaves:
+            row = sw.row
+            sw.label_value(
+                "WARNING -- unverified INCOME tag(s)",
+                f"{len(income_leaves)} income account(s) resolved via an unreviewed heuristic "
+                "guess, not a human-approved mapping -- verify before filing:",
+                number_format=None,
+            )
+            ws.cell(row=row, column=1).fill = _UNMAPPED_FILL
+            ws.cell(row=row, column=1).font = _UNMAPPED_FONT
+            for path, tag, amount in income_leaves:
+                row = sw.row
+                sw.label_value(f"  {path} ({tag})", amount)
+                ws.cell(row=row, column=1).font = _UNMAPPED_FONT
+        sw.blank()
+
+    sw.header("Book<->HTML cross-check")
+    for r in book_cross_check:
+        sw.label_value(r.name, "OK" if r.ok else f"MISMATCH html={r.html_total:.2f} book={r.book_total:.2f}", number_format=None)
+    sw.blank()
+
+    sw.header("Book<->Form16 cross-check")
+    for r in form16_cross_check:
+        sw.label_value(r.label, "OK" if r.ok else f"MISMATCH mapped={r.mapped_total:.2f} form16={r.form16_total:.2f}", number_format=None)
+    sw.blank()
+
+    sw.header("Form16<->26AS cross-check (s.192 salary TDS)")
+    for r in form16_26as_salary or []:
+        form16_str = f"{r.form16_tds:.2f}" if r.form16_tds is not None else "no parsed Form16 certificate"
+        sw.label_value(
+            f"TAN {r.tan}",
+            "OK" if r.ok else f"MISMATCH form16={form16_str} 26AS={r.as26_tds:.2f}",
+            number_format=None,
+        )
+    sw.blank()
+
+    sw.header(f"Unmapped accounts ({len(unmapped)})")
+    if unmapped:
+        sw.label_value(
+            "BEST-EFFORT BUILD",
+            f"{len(unmapped)} item(s) unclassified -- routed to the Unclassified sheet + "
+            "Computation DRAFT/worst-case tax figures, NOT filing-ready",
+            number_format=None,
+        )
+    for leaf in unmapped:
+        held_mark = f"  [HELD: {leaf.reason}]" if getattr(leaf, "held", False) else ""
+        sw.label_value(leaf.path + held_mark, leaf.total)
+    sw.blank()
+
+    sw.label_value("Mapping version", mapping_version, number_format=None)
+    sw.label_value("Rules version", rules_version, number_format=None)
+    sw.label_value("Run timestamp", run_timestamp, number_format=None)
+    for name, digest in input_hashes.items():
+        sw.label_value(f"Input hash -- {name}", digest, number_format=None)
+
+
+# ---------------------------------------------------------------------------
+# Mapping Review sheet
+# ---------------------------------------------------------------------------
+
+_REVIEW_HEADERS = [
+    "Account path", "FY amount", "Tag", "Destination", "Treatment", "Suggested-by", "Correction", "GUID",
+]
+
+
+def _suggested_by(guid: str, mapping_entries: dict | None) -> str:
+    """Best-effort provenance label for one resolved leaf. A leaf with no
+    entry of its own inherited its tag from an ancestor (mapping.py's
+    nearest-ancestor rule); a leaf WITH an entry is heuristic/llm/approved
+    depending on how that entry got there (bootstrap_mappings.py's
+    heuristic scratch script vs. an LLM suggestion vs. a human-approved
+    entry with neither marker)."""
+    if not mapping_entries or guid not in mapping_entries:
+        return "inherited"
+    entry = mapping_entries[guid]
+    if entry.suggested_by_llm:
+        return "llm"
+    if "heuristic" in (entry.note or "").lower():
+        return "heuristic"
+    return "approved"
+
+
+def provenance_counts(resolved: dict, mapping_entries: dict | None) -> dict:
+    """Tally every resolved leaf's `_suggested_by` provenance label (fail-loud,
+    2026-07-19 mapping-precedence prompt item 1b): {"heuristic": N, "approved": N,
+    "llm": N, "inherited": N}. Missing categories are omitted (never zero-padded),
+    so callers can do `counts.get("heuristic", 0)`."""
+    counts: dict[str, int] = {}
+    for guid in resolved:
+        label = _suggested_by(guid, mapping_entries)
+        counts[label] = counts.get(label, 0) + 1
+    return counts
+
+
+def heuristic_income_leaves(tree, resolved: dict, mapping_entries: dict | None) -> list:
+    """Every resolved RetainedEarnings-Income leaf whose tag provenance is
+    "heuristic" (an unverified keyword-guess, never reviewed by a human) --
+    fail-loud item 1b: these must be surfaced prominently (run summary +
+    Reconciliation sheet), not buried only in the Mapping Review sheet's
+    Suggested-by column, since a wrong tag here can silently misstate
+    taxable income. Returns [(path, tag, amount), ...] sorted by path."""
+    income_sections = {n.guid: n.section for n in tree.all_nodes() if n.guid and not n.children}
+    guid_amount = {n.guid: (n.total or 0.0) for n in tree.all_nodes() if n.guid and not n.children}
+    out = []
+    for guid, rl in resolved.items():
+        if income_sections.get(guid) != "RetainedEarnings-Income":
+            continue
+        if _suggested_by(guid, mapping_entries) != "heuristic":
+            continue
+        out.append((rl.path, rl.tag, guid_amount.get(guid, 0.0)))
+    return sorted(out)
+
+
+def _destination(tag: str) -> tuple:
+    meta = tag_vocab.TAGS.get(tag)
+    if meta is None:
+        return "?", tag, ""
+    return meta.target, _TAG_LINE_LABEL.get(tag, tag), meta.treatment
+
+
+def write_mapping_review_sheet(
+    wb: Workbook, tree, resolved: dict, unmapped: list, mapping_entries: dict | None = None,
+) -> None:
+    """One row per mapped leaf (plus a highlighted unmapped block at top),
+    grouped by destination sheet with a subtotal per group -- an
+    Excel-native surface for a non-technical reviewer to sanity-check every
+    mapping.yaml tag against the plain-English treatment it drives, and
+    record corrections for scripts/apply_mapping_corrections.py to apply
+    back to the mapping file."""
+    ws = wb.create_sheet("Mapping Review")
+    sw = _SheetWriter(ws)
+
+    guid_amount = {n.guid: (n.total or 0.0) for n in tree.all_nodes() if n.guid and not n.children}
+
+    def _header_row():
+        for col, h in enumerate(_REVIEW_HEADERS, start=1):
+            sw.cell(col, h, bold=True)
+        sw.row += 1
+
+    if unmapped:
+        sw.header(
+            f"UNMAPPED ({len(unmapped)}) -- routed to the UNCLASSIFIED/REVIEW bucket (see "
+            "'Unclassified' sheet); the workbook still builds best-effort. Add a mapping entry "
+            "to move an item out of DRAFT/worst-case status."
+        )
+        _header_row()
+        for leaf in unmapped:
+            row = sw.row
+            sw.cell(1, leaf.path)
+            sw.cell(2, leaf.total, number_format=INR_FORMAT)
+            is_held = getattr(leaf, "held", False)
+            sw.cell(3, "HOLD" if is_held else "REPLACE_ME")
+            sw.cell(4, "(on hold)" if is_held else "(unresolved)")
+            sw.cell(5, f"(held on purpose: {leaf.reason})" if is_held
+                    else "(unresolved -- pick a tag from tags.py)")
+            sw.cell(6, "held" if is_held else "unmapped")
+            sw.cell(7, None)
+            sw.cell(8, leaf.guid)
+            for col in range(1, 9):
+                ws.cell(row=row, column=col).fill = _UNMAPPED_FILL
+                ws.cell(row=row, column=col).font = _UNMAPPED_FONT
+            sw.row += 1
+        sw.blank()
+
+    groups: dict[str, list] = {}
+    for guid, rl in resolved.items():
+        target, _, _ = _destination(rl.tag)
+        groups.setdefault(target, []).append(rl)
+
+    for target in sorted(groups):
+        sw.header(f"Destination: {target}")
+        _header_row()
+        subtotal = 0.0
+        for rl in sorted(groups[target], key=lambda r: r.path):
+            _, line_label, treatment = _destination(rl.tag)
+            amount = guid_amount.get(rl.guid, 0.0)
+            subtotal += amount
+            sw.cell(1, rl.path)
+            sw.cell(2, amount, number_format=INR_FORMAT)
+            sw.cell(3, rl.tag)
+            sw.cell(4, f"{target} - {line_label}")
+            sw.cell(5, treatment)
+            sw.cell(6, _suggested_by(rl.guid, mapping_entries))
+            sw.cell(7, None)
+            sw.cell(8, rl.guid)
+            sw.row += 1
+        sw.cell(1, f"Subtotal -- {target}", bold=True)
+        sw.cell(2, subtotal, bold=True, number_format=INR_FORMAT)
+        sw.row += 1
+        sw.blank()
+
+
+# ---------------------------------------------------------------------------
+# Top-level orchestrator
+# ---------------------------------------------------------------------------
+
+def write_workbook(
+    output_path: str, tree, model: sch.ITRModel, rules: rules_engine.RulesConfig, user_rules: list,
+    entity, regime: str, year_key: str, form16_election: str | None,
+    identity_failures: list, book_cross_check: list, form16_cross_check: list,
+    unmapped: list, mapping_version: str, run_timestamp: str, input_hashes: dict,
+    resolved: dict | None = None, mapping_entries: dict | None = None,
+) -> None:
+    fy_end = date(int(year_key[:4]) + 1, 3, 31) if year_key else date.today()
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    rules_layout = write_rules_sheet(wb, rules, user_rules, entity.status, entity.dob, fy_end, residency=entity.residency)
+    entity_layout = write_entity_sheet(wb, entity, year_key, rules, regime, form16_election)
+    salary_layout = write_salary_sheet(wb, model.salary)
+    business_layout = write_business_sheet(wb, model.business)
+    hp_layout = write_house_property_sheet(wb, model.house_property)
+    write_schedule_fa_sheet(wb, model.schedule_fa)
+    if model.schedule_fa.foreign_report is not None:
+        _rep = model.schedule_fa.foreign_report
+        write_schedule_fsi_sheet(wb, _rep.schedule_fsi, _rep.dividend, _rep.interest)
+        write_form67_sheet(wb, _rep.form_67)
+        write_schedule_tr_sheet(wb, _rep.schedule_tr)
+    if getattr(model, "foreign_tax", None) is not None and model.foreign_tax.active:
+        write_foreign_tax_sheet(wb, model.foreign_tax)
+    os_layout = write_other_sources_sheet(wb, model.other_sources)
+    cg_layout = write_capital_gains_sheet(wb, model.capital_gains, rules_layout)
+    ei_layout = write_exempt_income_sheet(wb, model.exempt_income)
+    tp_layout = write_taxes_paid_sheet(wb, model.taxes_paid)
+    ded_layout = write_deductions_sheet(wb, model.deductions)
+    write_schedule_al_sheet(wb, model.schedule_al)
+    if model.unclassified.count > 0:
+        write_unclassified_sheet(wb, model.unclassified)
+    is_entries = write_is_transcript(wb, tree)
+    bs_entries = write_bs_transcript(wb, tree)
+
+    # `Computation` is now written in two passes (2026-07-20 on-page-totals
+    # change) -- leaf cells here, tax-slab machinery ("tail") interleaved
+    # into `presentation.write_statement_of_income` below via
+    # `_computation_tail_fn`, once the page has written the coordinate the
+    # tail needs to read (`normal_income_base`). See write_computation_tail's
+    # docstring for why this ordering was chosen over predicting the page's
+    # row layout up front.
+    comp_sw, comp_leaf = write_computation_leaf_cells(
+        wb, salary_layout, business_layout, hp_layout, os_layout, cg_layout,
+    )
+    comp_layout_leaf = leaf_comp_layout(comp_leaf)
+
+    def _computation_tail_fn(page_layout: dict) -> dict:
+        return write_computation_tail(
+            wb, comp_sw, comp_leaf, model, rules_layout, entity_layout, tp_layout,
+            cg_layout, page_layout,
+        )
+
+    write_reconciliation_sheet(
+        wb, tree, identity_failures, book_cross_check, form16_cross_check, unmapped,
+        mapping_version, rules.version, run_timestamp, input_hashes, model.capital_gains.reconciliation_ok,
+        model.capital_gains.split_year_exemption_prorated, model.capital_gains.split_year_exemption_ratio,
+        model.taxes_paid.as26_available, model.taxes_paid.tie_out_ok, model.taxes_paid.tie_out_conflicts,
+        resolved, mapping_entries,
+        salary_reconciliation_ok=model.salary.reconciliation_ok,
+        form16_26as_salary=model.taxes_paid.form16_26as_salary_results,
+    )
+
+    write_mapping_review_sheet(wb, tree, resolved or {}, unmapped, mapping_entries)
+
+    # Presentation layer -- ADDS four deliverable sheets in front of the 17
+    # calculation sheets and hides the raw working sheets. Every money cell it
+    # writes is a formula into the sheets built above; it recomputes nothing.
+    # The age half of the status line comes from the existing age-class
+    # resolver -- no new age logic anywhere.
+    residency_value, residency_declared = rules_engine.resolve_residency(entity.residency)
+    presentation.build_presentation_layer(
+        wb, model, entity_layout, comp_layout_leaf, os_layout, tp_layout, ded_layout,
+        rules_layout, cg_layout, is_entries, bs_entries, cg_layout["lot_start_row"],
+        rules_engine.resolve_age_class(entity.status, entity.dob, fy_end, residency=entity.residency),
+        year_key, rules.year_label, _computation_tail_fn,
+        father_name=entity.father_name, aadhaar=entity.aadhaar,
+        residency_value=residency_value, residency_declared=residency_declared,
+        business_subtree=entity.business_subtree, ei_layout=ei_layout,
+    )
+
+    wb.save(output_path)

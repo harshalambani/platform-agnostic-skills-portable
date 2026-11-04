@@ -1,0 +1,45 @@
+# Git LFS tracking — see spec section 10.5.
+# Native binaries (Tesseract, Poppler, qpdf) and OCR language data live under vendor/
+# and are tracked via LFS so the repo can be cloned for fully air-gapped builds.
+
+vendor/** filter=lfs diff=lfs merge=lfs -text
+*.exe     filter=lfs diff=lfs merge=lfs -text
+*.dll     filter=lfs diff=lfs merge=lfs -text
+*.traineddata filter=lfs diff=lfs merge=lfs -text
+
+# tessdata/configs/ is required RUNTIME CONFIG (tesseract ... tsv reads configs/tsv),
+# not a binary: tiny LF text files, committed as plain text so they can never turn
+# into LFS pointers. Must come after the vendor/** rule so it wins (HSB-01).
+vendor/tesseract/tessdata/configs/** -filter -diff -merge text eol=lf
+
+# Normalise text files to LF in the repo, but keep CRLF in the working tree on Windows
+*           text=auto
+*.py        text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.md        text eol=lf
+*.ini       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Byte-exact test fixtures. `* text=auto` above normalises these to LF in the
+# repo and hands them back as CRLF on Windows but LF on Linux -- and the tests
+# compare them with read_bytes() precisely so a line-terminator regression
+# cannot hide. The checkout must therefore not translate them at all.
+tests/**/golden_*.csv -text
+
+# Binary file types that should never be diffed as text
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.ico       binary
+*.zip       binary
+*.pdf       binary
+*.xlsx      binary
+*.docx      binary
+
+# Vendored PortableApps.com Installer tool (NSIS + 7zip + graphics). Track the
+# whole tree via LFS like vendor/, so its .bmp/.ico/etc. binaries don't bloat
+# regular git history. Placed last so it wins precedence for files under it.
+bundling/installer/** filter=lfs diff=lfs merge=lfs -text

@@ -1,0 +1,16 @@
+# Bank-specific date format configuration
+# Used by the GnuCash import skill for deterministic date parsing
+# Format keys: DD/MM/YYYY, DD/MM/YY, MM/DD/YYYY, DD,Mon,YYYY, DD-MM-YY, etc.
+# VERIFIED 2026-06-11 against real corpus files
+
+date_formats:
+  ICICI: "DD,Mon,YYYY"           # VERIFIED: "01,Apr,2024" (quoted, comma-separated)
+  HDFC: "DD/MM/YY"               # VERIFIED
+  "Karnataka Bank": "DD-MM-YY"
+  Kotak: "DD/MM/YYYY"
+  HSBC: "DD/MM/YYYY"
+  BoB: "DD-MM-YYYY"
+  _default: "DD/MM/YYYY"
+
+# Note: The LLM spec generator can override these per-statement if it detects
+# a different format. This config is primarily a hint/fallback for the "auto" bank_hint.

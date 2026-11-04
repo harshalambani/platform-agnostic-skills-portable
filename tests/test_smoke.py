@@ -1,0 +1,351 @@
+"""
+tests/test_smoke.py — Smoke tests (Phase 1 through 4A).
+
+These run against the project in source mode. They verify imports resolve,
+the buildinfo module is shaped correctly, the skill registry discovers all
+skills, and the Gradio app object can be constructed without raising.
+They do NOT touch a real LLM endpoint, do NOT require Tesseract/Poppler
+binaries to be present, and do NOT spin a port.
+"""
+import importlib
+import sys
+from pathlib import Path
+
+import pytest
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+SRC = PROJECT_ROOT / "src"
+
+# Make src/ importable in source mode (mirrors how the frozen build resolves it)
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+
+
+# ---------------------------------------------------------------------------
+# Build info
+# ---------------------------------------------------------------------------
+
+def test_buildinfo_shape():
+    bi = importlib.import_module("ui._buildinfo")
+    assert hasattr(bi, "VERSION")
+    assert hasattr(bi, "COMMIT_SHA")
+    assert hasattr(bi, "BUILD_DIRTY")
+    assert hasattr(bi, "BUILD_TIMESTAMP")
+    assert isinstance(bi.VERSION, str)
+    assert isinstance(bi.COMMIT_SHA, str)
+
+
+# ---------------------------------------------------------------------------
+# Base agent
+# ---------------------------------------------------------------------------
+
+def test_base_agent_imports():
+    """The 'agents' package must be importable from src/."""
+    mod = importlib.import_module("agents.base_agent")
+    assert hasattr(mod, "load_model")
+    assert hasattr(mod, "build_agent")
+    assert hasattr(mod, "run_direct")
+
+
+# ---------------------------------------------------------------------------
+# Individual skill imports
+# ---------------------------------------------------------------------------
+
+def test_skill_26as_imports():
+    mod = importlib.import_module("agents.skill_26as.agent")
+    assert hasattr(mod, "run")
+
+
+def test_skill_bob_imports():
+    mod = importlib.import_module("agents.skill_bob.agent")
+    assert hasattr(mod, "run")
+
+
+def test_skill_hsbc_imports():
+    """Does NOT require Tesseract on PATH."""
+    mod = importlib.import_module("agents.skill_hsbc.agent")
+    assert hasattr(mod, "run")
+
+
+def test_skill_cc_sort_imports():
+    mod = importlib.import_module("agents.skill_cc_sort.agent")
+    assert hasattr(mod, "run")
+
+
+def test_skill_cc_transactions_imports():
+    mod = importlib.import_module("agents.skill_cc_transactions.agent")
+    assert hasattr(mod, "run")
+
+
+# ---------------------------------------------------------------------------
+# Skill registry (Phase 4A)
+# ---------------------------------------------------------------------------
+
+def test_registry_discovers_all_skills():
+    """Registry must find all 22 skills via skill.yaml manifests."""
+    from agents.registry import discover
+    skills = discover(refresh=True)
+    names = {s.name for s in skills}
+    # Phase 1-3 financial skills
+    assert "26AS" in names
+    assert "BoB" in names
+    assert "HSBC" in names
+    assert "CC Sort" in names
+    assert "CC Transactions" in names
+    # Phase 4C general skills
+    assert "summarize" in names
+    assert "translate" in names
+    assert "CSV Analyzer" in names
+    # Phase 6 skill
+    assert "MSG Parser" in names
+    # v1.1 dev-time skill (exposed as a top-level tab)
+    assert "Parser Generator" in names
+    # GnuCash intercompany reconciliation skills
+    assert "gnucash_intercompany" in names
+    assert "gnucash_intercompany_matrix" in names
+    # ITR Workbook scaffold (batch 1: eguile HTML parser + verification only)
+    assert "ITR Workbook" in names
+    # 5th bank onboarding (P4)
+    assert "Kotak" in names
+    assert "SBM" in names
+    # v3.x dev-time skill: scaffolds new skill packages (exposed as a
+    # top-level tab, category "dev")
+    assert "Skill Scaffold" in names
+    # Coverage Gap Detector: infers suspected missing-statement months from
+    # transaction dates already posted, no import ledger required
+    assert "gnucash_coverage" in names
+    # MF CAS: KFintech Capital Gain / Loss Statement (.xlsx) parser +
+    # three-way reconciliation (standalone artifacts only; directory/skill
+    # name kept as mf_cas for stability -- see AGENT.md)
+    assert "mf_cas" in names
+    # Partner Compensation Reconciliation: LLP partner remuneration / share
+    # of profit / incentive-cohort / capital reconciliation for one FY,
+    # against Advisory, bank, 26AS and the return (structured YAML/JSON
+    # input this build; PDF parsers under parsers/ are Stage 2 placeholders)
+    assert "partner_comp_recon" in names
+    assert len(skills) == 28
+
+
+def test_registry_get_by_name():
+    from agents.registry import get
+    skill = get("26AS")
+    assert skill is not None
+    assert skill.mode == "direct"
+    assert skill.entry_point == "agent:run"
+
+
+def test_registry_get_case_insensitive():
+    from agents.registry import get
+    assert get("bob") is not None
+    assert get("BOB") is not None
+    assert get("BoB") is not None
+
+
+def test_registry_skill_has_inputs():
+    from agents.registry import get
+    skill = get("26AS")
+    assert len(skill.inputs) >= 1
+    assert skill.inputs[0].type == "file"
+
+
+def test_registry_load_run_function():
+    """load_run_function must return a callable for each skill."""
+    from agents.registry import discover, load_run_function
+    for skill in discover():
+        fn = load_run_function(skill)
+        assert callable(fn), f"run function for {skill.name} is not callable"
+
+
+def test_registry_skill_output_config():
+    from agents.registry import get
+    skill = get("26AS")
+    assert skill.output.extension == ".xlsx"
+    assert skill.output.suffix == "26AS"
+
+
+def test_registry_native_requirements():
+    from agents.registry import get
+    hsbc = get("HSBC")
+    assert "tesseract" in hsbc.requires.native_binaries
+    assert "poppler" in hsbc.requires.native_binaries
+
+    bob = get("BoB")
+    assert len(bob.requires.native_binaries) == 0
+
+
+def test_registry_external_tools():
+    from agents.registry import get
+    # CC Sort and KRC Recon both shell out to qpdf but do not vendor their own
+    # copy of it -- correctly declared as native_binaries (not external_tools)
+    # so the vendored qpdf under vendor/qpdf/bin/ wins over any system-PATH
+    # qpdf (the same PATH-resolution bug this fixes for pdftotext). See the
+    # 26AS/Xpdf incident write-up in the skill.yaml correction PR.
+    cc_sort = get("CC Sort")
+    assert "qpdf" in cc_sort.requires.native_binaries
+    assert "qpdf" not in cc_sort.requires.external_tools
+
+    krc_recon = get("KRC Reconcile")
+    assert "qpdf" in krc_recon.requires.native_binaries
+
+
+# ---------------------------------------------------------------------------
+# Native resolver
+# ---------------------------------------------------------------------------
+
+def test_native_resolver_inspection():
+    """ui._native.native_status() must work without binaries being installed."""
+    from ui import _native
+    status = _native.native_status()
+    assert status.mode in ("source", "frozen")
+    assert isinstance(status.ok, bool)
+
+
+def test_native_resolver_idempotent():
+    """ensure_native_path() must be safe to call repeatedly."""
+    from ui import _native
+    a = _native.ensure_native_path()
+    b = _native.ensure_native_path()
+    assert a == b
+
+
+# ---------------------------------------------------------------------------
+# Gradio app construction (Phase 4A: dynamic tabs)
+# ---------------------------------------------------------------------------
+
+def test_webui_constructs():
+    """Gradio app object should construct with dynamic registry-driven tabs."""
+    try:
+        import gradio  # noqa: F401
+        if not hasattr(gradio, "Blocks"):
+            pytest.skip("gradio not fully installed")
+    except ImportError:
+        pytest.skip("gradio not installed")
+    from ui import webui
+    app = webui.build_app(launch=False)
+    assert app is not None
+
+    # ITR (Workbook + Mapping) is nested inside GnuCash as its own "ITR"
+    # sub-tab (mirroring "Banks"), not a flat top-level tab -- see
+    # GROUP_ORDER / _known_cats in webui.py.
+    tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
+    assert "ITR" in tab_labels
+    assert "ITR Workbook" in tab_labels
+    assert "Review Mapping" in tab_labels
+    assert "GnuCash" in tab_labels
+
+    # Entities is app-wide master data (it feeds every Entity dropdown), so it
+    # sits at the GnuCash level as "Entities", NOT inside ITR as "ITR Entities".
+    assert "Entities" in tab_labels
+    assert "ITR Entities" not in tab_labels
+
+
+def test_every_registered_skill_gets_a_tab():
+    """Every skill the registry discovers must be reachable in the UI.
+
+    Regression guard: the ITR group used to render `_itr_skills[0]` only, so
+    AIS Reconcile was registered, documented and help-covered but had no tab
+    at all -- invisible from the day it shipped. Any future group that indexes
+    into its skill list instead of iterating it fails here.
+    """
+    try:
+        import gradio  # noqa: F401
+        if not hasattr(gradio, "Blocks"):
+            pytest.skip("gradio not fully installed")
+    except ImportError:
+        pytest.skip("gradio not installed")
+    from agents import registry
+    from ui import webui
+
+    app = webui.build_app(launch=False)
+    tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
+    missing = [s.display_name for s in registry.discover(refresh=True)
+               if s.display_name not in tab_labels]
+    assert not missing, f"registered skills with no tab in the UI: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Banks sub-tab order (ledger item: Coverage Gap Detector moved to the end
+# of the row). The gr.Tabs() render order is not reliably introspectable
+# from the constructed Blocks object, so the ordering logic is exercised
+# directly via the extracted pure helper, per the standing rule that a
+# tracker fix ships with a negative test proving the wrong behaviour is
+# gone, not just that the new behaviour works.
+# ---------------------------------------------------------------------------
+
+def test_banks_tab_order_puts_coverage_gap_detector_last():
+    from ui import webui
+    before, after = webui._split_banks_tabs(
+        ["Coverage Gap Detector", "Bank - Convert to GnuCash"]
+    )
+    assert before == ["Bank - Convert to GnuCash"]
+    assert after == ["Coverage Gap Detector"]
+
+
+def test_banks_tab_order_coverage_gap_detector_not_before_review():
+    """Negative test: the OLD behaviour (Coverage Gap Detector rendered
+    before the hand-written Review tab, since it iterated _cat_skills in
+    discovery order) must not recur. before_review is exactly what renders
+    ahead of the Review tab in webui.py, so asserting it is absent there
+    directly guards against the regression, not just the happy path."""
+    from ui import webui
+    before, _after = webui._split_banks_tabs(
+        ["Bank - Convert to GnuCash", "Coverage Gap Detector"]
+    )
+    assert "Coverage Gap Detector" not in before
+
+
+def test_banks_tab_order_unknown_skill_defaults_before_review():
+    """A future gnucash skill with no entry in _BANKS_TAB_ORDER must still
+    land before Review, matching pre-existing behaviour for every skill
+    that isn't explicitly pinned last."""
+    from ui import webui
+    before, after = webui._split_banks_tabs(
+        ["Bank - Convert to GnuCash", "Coverage Gap Detector", "Some Future Skill"]
+    )
+    assert "Some Future Skill" in before
+    assert after == ["Coverage Gap Detector"]
+
+
+# ---------------------------------------------------------------------------
+# UI-01: every tab-ordering key in webui.py must name a real display_name.
+#
+# Regression guard: the ITR ordering dict once had "MF CAS": 60, but the
+# skill's actual display_name is "MF Capital Gain Statement" -- the key
+# never matched, so the rank lookup silently fell back to the unknown-skill
+# default (99) instead of the intended 60. Nothing crashed and the skill
+# still got a tab (test_every_registered_skill_gets_a_tab would not have
+# caught this), but the intended ordering was silently lost. This test
+# statically scans every dict literal in webui.py whose variable name looks
+# like a tab-order table (matching a real skill's display_name in at least
+# one key) and asserts every one of its string keys is a real, registered
+# display_name.
+# ---------------------------------------------------------------------------
+
+def test_every_tab_ordering_key_matches_a_real_display_name():
+    import ast
+    from agents import registry
+
+    webui_path = PROJECT_ROOT / "ui" / "webui.py"
+    tree = ast.parse(webui_path.read_text(encoding="utf-8"), filename=str(webui_path))
+
+    real_names = {s.display_name for s in registry.discover(refresh=True)}
+    # "Review"/"Review Mapping"/"Advance Tax" etc. are hand-written tabs,
+    # not registered skills -- an ordering dict is only in scope for this
+    # check if at least one of its keys is a genuine skill display_name,
+    # which is what distinguishes _itr_order/_krc_order/_BANKS_TAB_ORDER
+    # from an unrelated dict literal elsewhere in the file.
+    bad: dict[str, list[str]] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        keys = [k.value for k in node.keys
+                if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+        if not keys:
+            continue
+        if not any(k in real_names for k in keys):
+            continue  # not a tab-order-by-display_name dict at all
+        unknown = [k for k in keys if k not in real_names]
+        if unknown:
+            bad[repr(keys)] = unknown
+
+    assert not bad, f"tab-ordering dict(s) with keys matching no registered display_name: {bad}"

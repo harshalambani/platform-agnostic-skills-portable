@@ -1,0 +1,654 @@
+# skill.yaml -- Partner Compensation Reconciliation manifest.
+#
+# This skill now takes the raw source documents directly, matching every
+# other skill in the catalogue (26AS takes a PDF, MF CAS takes an .xlsx,
+# AIS Reconcile takes AIS .json) -- it was the only one still requiring a
+# human to hand-key a structured YAML/JSON input first. The manifest below
+# is that reshape. `payout_advice.py` (L1), `advisory.py` (L3),
+# `llp_statement.py` (L5) and `payment_schedule.py` (L4) are now implemented
+# parsers. Every optional leg still degrades to an explicit "not available" note
+# rather than failing the run or fabricating a figure. The
+# structured YAML/JSON input (`input_path`) this skill used to expose is
+# retained ONLY as a test-only run() parameter -- it is deliberately absent
+# from `inputs:` below so it no longer renders in the UI (see
+# tests/test_skill_partner_comp_recon.py's manifest-shape guard test).
+
+name: "partner_comp_recon"
+display_name: "Partner Compensation Reconciliation"
+description: >
+  Reconciles an LLP partner's remuneration, exempt share of profit,
+  performance-incentive cohorts (awarded in one financial year, paid out
+  in instalments across the next one or two), compulsory capital
+  contribution, one-off incentives, and any payroll-stream months for a
+  single financial year, against the Compensation Advisory, the bank, Form
+  26AS, and the filed return. Reports agree / variance / cannot-reconcile
+  per category -- a missing source is never silently treated as a match.
+  No tax computation is performed, no .gnucash book is written, and no
+  ITR workbook is touched. Takes the monthly payout advices and the
+  Compensation Advisory letter as PDFs, plus optional documents for the
+  LLP capital tie-out (the LLP Statement of Account), the books tie-out,
+  and the TDS-credit tie-out; every one of these optional legs is a real,
+  implemented reader (see AGENT.md) -- a leg only degrades to an explicit
+  "not available" note when its own input is absent or its document fails
+  to parse, never failing this build.
+category: "partner"
+version: "0.2.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+# UI-25: named sections of the form. An input with `group: <name>` is drawn
+# inside a collapsed accordion carrying that title; its value is still
+# submitted exactly like any other input.
+input_groups:
+  - name: "manual_picks"
+    title: "Pick files by hand instead (optional: a file picked here always wins over the drop zone)"
+
+inputs:
+  # Form standard (UI-15): Entity first, then the source documents, the one
+  # password that opens them, the book, the 26AS workbook, the outputs, and
+  # the advanced options last. `entity` is consumed by run() but never names
+  # the output file: ui/tabs/_generic.py's _output_name_source() skips entity
+  # selects, so the output is still named after the first document.
+  # Picking an entity also fills in the GnuCash book input below (book_from).
+  - name: "entity"
+    type: "select"
+    label: "Entity"
+    options_from: "itr_entities"
+    required: true
+  # UI-18: the financial year the run is for. It narrows the 26AS picker to
+  # that year's workbooks and is handed to the run, which refuses documents
+  # that disagree with it. Same option source as the ITR Workbook's year
+  # select, so it sits in the Entity block and never names the output file.
+  - name: "fy"
+    type: "select"
+    label: "Financial year"
+    options_from: "itr_ay_years"
+    required: true
+  # UI-23: drop the whole folder (or a zip of it) here. The skill reads each
+  # file's CONTENT, never its name, and sorts it into the roles below. The six
+  # pickers stay as manual overrides: a manual pick always wins. They are no
+  # longer marked required here because the drop zone can supply them; the
+  # agent still enforces that each required role was found one way or the other.
+  - name: "firm_documents"
+    type: "files"
+    label: "All of the firm's documents (folder or zip) -- the pickers below are only for overriding"
+    file_types: [".pdf", ".eml", ".zip"]
+    required: false
+    # UI-25: one panel under the drop zone gathering these inputs' samples
+    # (from the help: entries below -- nothing is copied).
+    gather_samples: ["advices_dir", "advisory_path", "llp_statement", "award_year_documents", "payment_schedule"]
+    gather_samples_title: "What do the firm's documents look like?"
+  - name: "advices_dir"
+    type: "files"
+    label: 'Override: monthly payout certificates -- the "payout details for the month of ..." PDFs, one per month (or the newer payout statements)'
+    file_types: [".pdf"]
+    required: false
+    group: "manual_picks"
+  - name: "advisory_path"
+    type: "file"
+    label: 'Override: Advisory -- the "Compensation summary : Year ended 31 March ..." PDF (not the "Target compensation advice" letter)'
+    file_types: [".pdf"]
+    required: false
+    group: "manual_picks"
+  - name: "llp_statement"
+    type: "file"
+    label: 'LLP "Statement of Account ... AS ON 31 MARCH" -- the PDF, or the .eml e-mail it arrived in (not the Target compensation advice letter; enables leg 1, the capital sign-off)'
+    file_types: [".pdf", ".eml"]
+    required: false
+    group: "manual_picks"
+  - name: "award_year_documents"
+    type: "files"
+    label: 'Award-year documents (optional): the "Compensation summary" of each earlier year whose incentive instalments were paid this year (any year; the year is read from inside each document)'
+    file_types: [".pdf"]
+    required: false
+    group: "manual_picks"
+  - name: "payment_schedule"
+    type: "file"
+    label: 'Payment schedule: the "Payment Schedule FY ..." PDF (enables the schedule leg -- takes precedence over the payout advices when both agree, and reports any disagreement)'
+    file_types: [".pdf"]
+    required: false
+    group: "manual_picks"
+  - name: "doc_password"
+    type: "password"
+    label: "Document password (optional -- ONE password opens all of the firm's PDFs: certificates, advisory, statement and schedule)"
+    required: false
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (READ ONLY -- enables the books tie-out)"
+    file_types: [".gnucash"]
+    required: false
+    book_from: "entity"
+  - name: "xlsx_26as"
+    type: "output_file"
+    label: "26AS workbook (enables the TDS-credit tie-out)"
+    match: "*-26AS.xlsx"
+    entity_from: "entity"
+    fy_from: "fy"
+    required: false
+  - name: "journal_path"
+    type: "text"
+    label: "GnuCash journal CSV output path (default: auto = named for entity and FY, beside the workbook; clear it to write no journal)"
+    required: false
+    default: "auto"
+  - name: "accrual_journal_path"
+    type: "text"
+    label: "Year-end share-of-profit accrual journal CSV output path (default: auto = named for entity and FY; needs the journal above and the LLP statement of account)"
+    required: false
+    default: "auto"
+  - name: "bank_match_window"
+    type: "text"
+    label: "Bank-match date window in days (optional -- H35-05, default 7)"
+    required: false
+
+# UI-23: "Check my files" -- sorts the dropped documents and shows the Inputs
+# table without running the reconciliation (no book read, no file written).
+check:
+  function: "check_documents"
+  label: "Check my files"
+
+run_args:
+  entity: "{inputs.entity}"
+  financial_year: "{inputs.fy}"
+  firm_documents: "{inputs.firm_documents}"
+  advices_dir: "{inputs.advices_dir}"
+  doc_password: "{inputs.doc_password}"
+  advisory_path: "{inputs.advisory_path}"
+  award_year_documents: "{inputs.award_year_documents}"
+  llp_statement: "{inputs.llp_statement}"
+  payment_schedule: "{inputs.payment_schedule}"
+  gnucash_path: "{inputs.gnucash_path}"
+  xlsx_26as: "{inputs.xlsx_26as}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  entities_path: "{data_root}/itr/entities.yaml"
+  model_override: "{model_override}"
+  journal_path: "{inputs.journal_path}"
+  accrual_journal_path: "{inputs.accrual_journal_path}"
+  bank_match_window: "{inputs.bank_match_window}"
+
+output:
+  extension: ".xlsx"
+  suffix: "partner-comp-recon"
+  download_label: "Download Partner Compensation Reconciliation"
+  extra_outputs:
+    - key: "journal_csv"
+      label: "Monthly journal"
+      download_label: "Download journal CSV"
+    - key: "accrual_journal_csv"
+      label: "Year-end accrual journal"
+      download_label: "Download accrual journal CSV"
+
+requires:
+  native_binaries: []
+  python_packages: ["openpyxl", "pyyaml"]
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Takes one financial year's partner-compensation documents -- the
+    monthly payout advices, the Compensation Advisory letter, and
+    optionally the LLP's own capital-account statement, a GnuCash book
+    (read only), and a 26AS workbook -- and cross-checks the figures they
+    carry against each other. Every rate, percentage and period this skill
+    uses (the firm's-tax rate, the capital-contribution rate, the capital
+    accretion period, the remuneration-TDS section/rate/start-date) comes
+    from that year's own entity/tax-rules config, never hardcoded, since
+    all of them change by year and the capital rate has been known to
+    change mid-year. A missing rate or a missing source figure produces an
+    explicit "cannot reconcile" row naming what is missing, never a
+    default or a silently-assumed match. The two required documents (the
+    monthly advices and the Advisory) and the optional LLP statement of
+    account now parse for real; a document that fails to open/parse
+    (unreadable/malformed PDF, wrong password, or content that doesn't
+    match the expected layout) still fails the whole run loud, naming the
+    document and the reason (the LLP statement is the exception, since it
+    is optional -- see its own gotcha below). Every optional document's
+    leg (the LLP statement, the incentive payment schedule, the GnuCash
+    books tie-out, the 26AS TDS-credit tie-out) degrades to an explicit
+    "not available" note when its input is absent, or when its document
+    fails to parse -- every one of these readers is real and implemented
+    (see AGENT.md), not a placeholder.
+
+    Run order for a year: (1) import the bank statement, (2) run 26AS
+    Convert on the entity's 26AS PDF (it only reads the PDF into a
+    workbook and books nothing), (3) run this skill, (4) run the 26AS
+    journal. The order the entries are BOOKED in is unchanged: bank, then
+    partner compensation, then 26AS. The 26AS workbook picker below lists
+    only the selected entity's own workbooks, and a workbook that belongs
+    to someone else is refused with a message, never used.
+  when_to_use: >
+    Use this once a financial year's partner-compensation documents are in
+    hand and you want a single reconciliation across remuneration, share
+    of profit, the incentive cohort ledger, capital contribution, one-offs,
+    and (if relevant) a payroll stint -- particularly useful for catching
+    a mid-year capital-rate change (which shows up as unequal
+    capital-deducted amounts within one incentive cohort) or a one-off
+    incentive that was grossed up at the wrong year's tax rate. Not a
+    substitute for tax computation or return preparation -- it only
+    reconciles the streams against each other and the return's own
+    figures; it does not compute tax due.
+  inputs:
+    - name: "entity"
+      tooltip: "The partner/entity this reconciliation is for."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "Required -- also selects the GnuCash book below when one is registered for this entity."
+    - name: "fy"
+      tooltip: "The financial year this reconciliation is for, e.g. 2025-26."
+      accepts: "One of the years the tax rules cover, via dropdown (newest first)."
+      gotchas: >
+        Required. Narrows the 26AS workbook list to this year, and the run is
+        refused if the advisory, payout documents or the 26AS workbook belong
+        to a different year.
+    - name: "firm_documents"
+      tooltip: "Drop the firm's whole folder, or a zip of it. Each file is read by its CONTENT and sorted for you; the six pickers below are only for overriding."
+      accepts: "PDF files, .eml e-mails (the LLP statement) or a .zip of those. A zip is checked for unsafe paths, links, file count and total size; nested archives and other file types are listed as skipped."
+      gotchas: >
+        Optional. The result starts with an Inputs table: each file, what it
+        was recognised as, the year read from inside it, and whether it was
+        used or skipped (with the reason). Look-alikes such as a Target
+        compensation letter or next year's forward summary are skipped. If
+        two revisions of the same document cannot be ordered by letter date
+        or revision number the run stops and names both files so you can
+        pick one by hand. A file picked by hand in a picker below always
+        wins over the drop zone. The Document password applies to the dropped
+        files too.
+    - name: "advices_dir"
+      heading: "Monthly payout documents"
+      tooltip: "All of this financial year's monthly payout certificates (each titled \"payout details for the month of ...\"), one per month."
+      accepts: "One or more PDF files. A month must come from ONE document: do not add both the certificate and the newer payout statement for the same month."
+      gotchas: >
+        Required. Each PDF is dispatched on its CONTENT, never its
+        filename, to the monthly payout-advice parser -- a PDF that fails
+        to open/parse, or whose content doesn't match that layout, fails
+        the whole run loud, naming the file and the reason.
+      sample_html: |
+        <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
+        <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div style="color:#222;"><b style="color:#222;">Payout details for the month of June (CY)</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the month is worded in the title</span></div>
+        <div style="color:#222;">Partner: Example Partner &nbsp;|&nbsp; Firm: Example Advisory LLP</div>
+        <table style="border-collapse:collapse;margin-top:6px;color:#222;border-color:#999;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Particulars</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Amount (Rs)</th></tr><tr><td style="padding:2px 8px;color:#222;">Share of profit (gross)</td><td style="padding:2px 8px;color:#222;">1,00,000</td></tr><tr><td style="padding:2px 8px;color:#222;">Tax deducted</td><td style="padding:2px 8px;color:#222;">10,000</td></tr><tr><td style="padding:2px 8px;color:#222;">Net payout</td><td style="padding:2px 8px;color:#222;">90,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; table rows</span></td></tr></table>
+        </div>
+      looks_like: >
+        Each file starts with a title naming one month ("payout details for the month of ..."), then a header block with the partner and firm, then a small table of amounts. The newer monthly payout statements have a different layout; either kind is accepted, but give ONE document per month.
+      not_these:
+        - "The Target compensation advice letter."
+        - "A forward-looking Compensation summary for a coming year."
+        - "An older certificate format that is no longer used."
+        - "The same month supplied twice (the certificate and the newer statement)."
+      filename_note: >
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
+    - name: "doc_password"
+      tooltip: "Password for the payout certificates, advisory, LLP statement and payment schedule, if they are protected."
+      accepts: "The one open password the firm uses for all of its PDFs, if any."
+      gotchas: "Optional -- leave blank if the PDFs are not password-protected. Never logged, never included in any output file."
+    - name: "advisory_path"
+      heading: "This year's Advisory"
+      tooltip: "The \"Compensation summary : Year ended 31 March\" document for this financial year (not the \"Target compensation advice\" letter)."
+      accepts: "A single PDF file."
+      gotchas: >
+        Required. Shares a directory with the monthly payout advices at
+        some firms -- this skill dispatches on document CONTENT, never
+        filename, since filenames are not a reliable way to tell the two
+        document families apart. A PDF that fails to open/parse, or whose
+        content doesn't match the Advisory's expected layout, fails the
+        whole run loud, naming the file and the reason.
+      sample_html: |
+        <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
+        <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div style="color:#222;"><b style="color:#222;">Compensation summary : Year ended 31 March [end of CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line; the year is the year ENDED</span></div>
+        <div style="color:#222;">Partner: Example Partner &nbsp;|&nbsp; Letter date: April, after CY ends &nbsp;|&nbsp; Revision: (1)</div>
+        <table style="border-collapse:collapse;margin-top:6px;color:#222;border-color:#999;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Component</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Amount (Rs)</th></tr><tr><td style="padding:2px 8px;color:#222;">Fixed share</td><td style="padding:2px 8px;color:#222;">12,00,000</td></tr><tr><td style="padding:2px 8px;color:#222;">Variable share</td><td style="padding:2px 8px;color:#222;">6,00,000</td></tr><tr><td style="padding:2px 8px;color:#222;">Total compensation</td><td style="padding:2px 8px;color:#222;">18,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; table of components</span></td></tr></table>
+        </div>
+      looks_like: >
+        The title line reads "Compensation summary : Year ended 31 March <year>"; the year printed is the year the period ENDS (the Advisory for CY prints the year CY ends in). Under the header block sits a table of compensation components.
+      not_these:
+        - "The Target compensation advice letter (a plan for a coming year, not this year's result)."
+        - "A forward-looking Compensation summary preview for the next year."
+        - "An older certificate format."
+        - "An Advisory superseded by a revised copy: the one marked (2), or with the later letter date, is the one to use."
+      filename_note: >
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
+    - name: "award_year_documents"
+      heading: "Award-year documents"
+      tooltip: "The Compensation summary of each EARLIER year whose incentive instalments were paid in this financial year. Used to check each paid instalment's gross, firm's tax and capital deducted."
+      accepts: "One or more PDF files, any years. Several revisions of the same year may be added: the latest letter date (else the highest revision number) is used."
+      gotchas: >
+        Optional. The award year is read from inside each document, never
+        from its file name. A different year's document is never used for an
+        instalment. If the latest revision cannot be told apart, or no
+        document is supplied for a year, the row says CANNOT RECONCILE and
+        names why. A "Target compensation advice" letter is accepted but
+        carries no instalment schedule, so it is not used. Recon only: the
+        journal is the same with or without these documents.
+      sample_html: |
+        <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
+        <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div style="color:#222;"><b style="color:#222;">Compensation summary : Year ended 31 March [end of PY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; an EARLIER year, read from inside</span></div>
+        <div style="color:#222;">Partner: Example Partner &nbsp;|&nbsp; Letter date: April, after PY ends</div>
+        <table style="border-collapse:collapse;margin-top:6px;color:#222;border-color:#999;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Instalment</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Due</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Gross (Rs)</th></tr><tr><td style="padding:2px 8px;color:#222;">1st</td><td style="padding:2px 8px;color:#222;">July (CY)</td><td style="padding:2px 8px;color:#222;">2,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; instalment schedule</span></td></tr><tr><td style="padding:2px 8px;color:#222;">2nd</td><td style="padding:2px 8px;color:#222;">October (CY)</td><td style="padding:2px 8px;color:#222;">2,00,000</td></tr></table>
+        </div>
+      looks_like: >
+        The same layout as the Advisory, for an EARLIER year; the year is read from inside the document. It carries a schedule of incentive instalments.
+      not_these:
+        - "This year's own Advisory (it goes in the Advisory picker)."
+        - "The Target compensation advice letter (accepted but it carries no instalment schedule)."
+        - "An earlier revision when a later (2) copy of the same year exists."
+      filename_note: >
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
+    - name: "llp_statement"
+      heading: "LLP statement"
+      tooltip: "The LLP's \"Statement of Account ... AS ON 31 MARCH\" for this partner, this financial year."
+      accepts: "A single PDF file, or the .eml e-mail it arrived in (its PDF attachment is read)."
+      gotchas: >
+        Optional -- enables the capital sign-off leg (leg 1). Absent, or
+        supplied but unreadable/malformed/not actually an LLP statement of
+        account (wrong document filed here), this leg degrades to an
+        explicit "not available" note naming the reason; it never fails
+        the whole run and never falls back to a zero or a default. The
+        statement is often issued months after the financial year ends, so
+        it is common for it to be genuinely unavailable at filing time.
+      sample_html: |
+        <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
+        <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div style="color:#222;"><b style="color:#222;">Statement of Account of Example Partner AS ON 31 MARCH [end of CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
+        <div style="color:#222;">Firm: Example Advisory LLP</div>
+        <table style="border-collapse:collapse;margin-top:6px;color:#222;border-color:#999;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Account</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Debit</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Credit</th></tr><tr><td style="padding:2px 8px;color:#222;">Capital account</td><td style="padding:2px 8px;color:#222;"></td><td style="padding:2px 8px;color:#222;">25,00,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; capital has its own block</span></td></tr><tr><td style="padding:2px 8px;color:#222;">Current account</td><td style="padding:2px 8px;color:#222;">1,00,000</td><td style="padding:2px 8px;color:#222;"></td></tr></table>
+        </div>
+      looks_like: >
+        A "Statement of Account ... AS ON 31 MARCH" laid out as side-by-side columns, with the capital account in its own block. The e-mail it arrived in (.eml) is also accepted.
+      not_these:
+        - "The Target compensation advice letter."
+        - "The Advisory or a payout document."
+        - "A statement for a different year."
+      filename_note: >
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
+    - name: "payment_schedule"
+      heading: "Payment schedule"
+      tooltip: "The \"Payment Schedule FY ...\" document for this financial year (the L4 document)."
+      accepts: "A single PDF file."
+      gotchas: >
+        Optional -- enables the schedule leg, and takes PRECEDENCE over the
+        payout advices for gross share of profit and both firm's-tax
+        figures (firm_tax_on_sop, firm_tax_others) when supplied. Absent,
+        or supplied but unreadable/malformed/not actually a payment
+        schedule, this leg degrades to an explicit "not available" note
+        naming the reason; it never fails the whole run. A disagreement
+        between the schedule and a payout advice is reported as a
+        diagnostic note, not a run failure.
+      sample_html: |
+        <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
+        <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
+        <div style="font-size:0.75em;color:#a00;">CY = the financial year you are reconciling; PY = the year before it.</div>
+        <div style="color:#222;"><b style="color:#222;">Payment Schedule FY [CY]</b> <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; title line</span></div>
+        <div style="color:#222;">Partner: Example Partner</div>
+        <table style="border-collapse:collapse;margin-top:6px;color:#222;border-color:#999;"><tr><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Month</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Gross (Rs)</th><th style="text-align:left;border-bottom:1px solid #999;padding:2px 8px;color:#222;">Tax (Rs)</th></tr><tr><td style="padding:2px 8px;color:#222;">April (CY)</td><td style="padding:2px 8px;color:#222;">1,00,000</td><td style="padding:2px 8px;color:#222;">10,000 <span style="background:#fde68a;color:#78350f;padding:0 4px;border-radius:3px;font-size:0.8em;">&larr; one row per month</span></td></tr><tr><td style="padding:2px 8px;color:#222;">May (CY)</td><td style="padding:2px 8px;color:#222;">1,00,000</td><td style="padding:2px 8px;color:#222;">10,000</td></tr></table>
+        </div>
+      looks_like: >
+        A "Payment Schedule FY ..." document: title line, header block, then one table row per month.
+      not_these:
+        - "A monthly payout document."
+        - "A schedule for a different year."
+      filename_note: >
+        File names carry the START year of the financial year (a file named with the year CY starts in is the CY document), and a name is never used to decide what a document is -- the skill reads the content.
+    - name: "gnucash_path"
+      tooltip: "This entity's GnuCash book, opened READ ONLY for the books tie-out."
+      accepts: "GnuCash XML book (.gnucash), optionally gzip-compressed."
+      gotchas: "Optional. Never opened for writing by this skill. Absent (or unreadable/malformed), the books tie-out leg is reported 'not available', never defaulted."
+    - name: "xlsx_26as"
+      tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
+      accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
+      gotchas: >
+        Optional. Lists only the selected entity's own 26AS workbooks for the
+        selected financial year (the workbook's own assessee PAN/name and year
+        are matched, not the file name), newest first, and defaults to the
+        newest. Choose (none) to skip the tie-out. If there is none yet the
+        picker says so: run 26AS Convert first. A workbook typed in by hand
+        that belongs to another entity or another year, or that does not
+        state whose it is, is refused with a clear message. Absent (or unreadable/malformed), the TDS-credit tie-out
+        leg is reported 'not available', never defaulted.
+    - name: "journal_path"
+      tooltip: >
+        Optional. When set, also writes a GnuCash multi-split journal CSV
+        of the year's implied journal entries (Stage 1b) to this path --
+        one monthly-payout transaction per month, plus an opening
+        reclassification entry if the input's opening_reclass: block is
+        present. Leave blank to only produce the workbook.
+      accepts: "A full output file path ending in .csv, or the default auto."
+      gotchas: >
+        The form opens with auto: the file is named for the entity and
+        financial year (for example ENTITY-FY2025-26-partner-journal.csv) and
+        written beside the workbook, but only when the entity has its
+        partner_comp_accounts and a GnuCash book is supplied -- otherwise
+        the journal is skipped with a note, not an error. Clear the box to
+        write no journal; type a path to choose the file yourself (an
+        explicit path keeps the strict rules below). Requires an accounts: block naming the GnuCash account for every
+        non-zero split (bank, tds_expense, interest_on_capital,
+        current_account, capital_contribution, medical_expense,
+        remuneration_income, share_of_profit_income) -- a missing account
+        needed by a non-zero month comes back as an "ERROR: ..." naming
+        the key and the month, not a traceback. As of H35-05 round 2: the
+        journal CSV is ONLY ever written when a GnuCash book (with
+        accounts.bank present and resolvable in it) is also supplied, so
+        this run's cash leg can be matched against what the bank import
+        already posted rather than booking a second, unconditional bank
+        leg. Whenever matching cannot run for any reason -- no
+        gnucash_path, no accounts.bank configured, the book cannot be
+        read, or accounts.bank's path is not found in the book -- the
+        journal CSV is refused with an "ERROR: cannot write the journal
+        CSV -- ..." message naming the reason, and NO file is written at
+        all, even a partial one. The recon workbook (and the accrual
+        journal from accrual_journal_path, below, which has no bank leg
+        and is unaffected) are still written as normal in this case --
+        only the monthly journal CSV is refused.
+    - name: "accrual_journal_path"
+      tooltip: >
+        Optional (H35-02). Requires journal_path to also be set. When set,
+        and the LLP statement of account (llp_statement) parsed and its
+        "Profit Share for the Year" figure is available, writes a SEPARATE
+        one-transaction CSV -- never merged into journal_path's file --
+        dated 31 March of the financial year's END year (e.g. FY "2025-26"
+        -> 2026-03-31, never the FY start year), accruing the difference
+        between the L5 statement's own year-end profit-share figure and
+        the total already booked by the monthly journal (Dr
+        current_account / Cr share_of_profit_income). No file is written,
+        and a note explains why, when: no LLP statement was supplied or it
+        didn't parse; its profit-share figure is missing; the difference
+        is within Rs 1.00 (already ties); or the difference is negative
+        (the monthly total already booked exceeds the L5 figure --
+        FLAGGED for manual review, never reversed automatically).
+      accepts: "A full output file path ending in .csv, different from journal_path."
+      gotchas: >
+        Reuses the same accounts: block as journal_path -- specifically
+        current_account and share_of_profit_income must both be supplied.
+        A residual current-account comparison against the L5 statement is
+        always performed after this accrual and reported in the run
+        summary; it is never booked, even when it shows a variance.
+    - name: "bank_match_window"
+      tooltip: >
+        Optional (H35-05). How many days either side of a monthly payout's
+        month-end date to look for a matching bank credit already posted in
+        the book. Defaults to 7 when left blank or unparsable.
+      accepts: "A whole number of days, e.g. 7 or 14."
+      gotchas: >
+        Only used when both gnucash_path and accounts.bank are available
+        and resolvable in the book. As of H35-05 round 2, that
+        availability is no longer optional for journal_path: when a book
+        cannot be used for matching (missing, unreadable, or
+        accounts.bank absent/not found in it) AND journal_path was
+        requested, the journal CSV is refused outright rather than
+        falling back to the pre-H35-05 unconditional bank leg -- see
+        journal_path's own gotchas above. The recon workbook alone (no
+        journal_path) still runs and reports the bank-match leg as "not
+        available" in that case, exactly as before. When a book IS
+        available: each payout is matched to a bank credit within Re 1
+        and within this window, one-to-one, nearer date wins; two
+        equally-close candidates are NEVER auto-picked -- that payout
+        gets no journal and is flagged TIE (candidates listed) instead. A
+        deposit split across two or more counter-accounts is also never
+        auto-picked -- that payout gets no journal and is flagged SPLIT
+        (naming every counter-account the bank import spread it across),
+        distinct from a genuine NO_MATCH gap, since a matching credit WAS
+        found, just not one this skill can route a single journal leg
+        to. A matched payout's cash leg posts to the bank import's OWN
+        counter-account for that credit, never a second leg on the bank
+        account itself. See the workbook's "Bank match" sheet and the run
+        summary's "BANK MATCH" block for full detail, per payout.
+  steps:
+    - "Pick the entity."
+    - "Pick this financial year's monthly payout advices (one or more PDFs) and the Compensation Advisory letter."
+    - "Optionally supply the LLP statement, the incentive payment schedule, a GnuCash book, and/or a 26AS workbook to enable their tie-out legs."
+    - "Click Run."
+    - "Download the workbook and review the Reconciliation and Exceptions sheets first, then Capital for any mid-year rate-change warning."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-partner-comp-recon.xlsx"
+        tooltip: >
+          Ten sheets: Logic (the seven reconciled legs and the governing
+          identity, in prose), Drivers (every rate/period/date as a
+          labelled input cell -- the only sheet where one appears as a
+          literal), Monthly grid, Payroll stream (only present if the
+          input supplied payroll months), One-offs (the gross-up and its
+          roundness check), Cohorts (the incentive ledger with its
+          reporting/prior/future FY-assignment column), Capital (the rule
+          as a formula off Drivers, the Advisory cross-check, and the
+          mid-year rate-change detector), Interest on capital (H35-06 --
+          the computed simple-interest schedule per capital tranche added
+          this year -- informational; its basis is not established against
+          the LLP Statement's own method), CTC check (H35-08 -- the informational Target
+          Compensation walk-down), Reconciliation (agree / variance
+          / cannot-reconcile per category -- topped by a highlighted
+          "STATEMENT DISAGREES" block when the LLP Statement of Account
+          disagrees with another source or fails its own arithmetic; see
+          the tip below), Exceptions (every non-agreeing or
+          non-reconcilable row collected together), and Open items
+          (anything left unresolved and what would close it). A "Bank
+          match" sheet (H35-05) is also added whenever a GnuCash book and
+          accounts.bank are both available: one row per monthly payout
+          showing which bank credit already posted in the book it matched
+          to (date/amount/account), or why it did not (no bank credit
+          found, a TIE naming every equally-close candidate, or a SPLIT
+          naming every counter-account a matching-but-unroutable deposit
+          was spread across).
+      - name: "<journal_path> (optional -- Stage 1b, only written if journal_path is set)"
+        tooltip: >
+          A GnuCash multi-split journal CSV: one balanced transaction per
+          monthly payout (dated month-end), plus an opening
+          reclassification entry if opening_reclass: was supplied. Import
+          via File > Import > Import Transactions from CSV with Multi-split
+          ticked, skipping the 1 header line, Date mapped as ISO, and the
+          Amount column mapped to the importer's Amount column type.
+      - name: "<accrual_journal_path> (optional -- H35-02, only written if accrual_journal_path is set AND an accrual was computed)"
+        tooltip: >
+          A SEPARATE one-transaction GnuCash multi-split journal CSV,
+          dated 31 March of the financial year's END year (e.g. FY
+          "2025-26" -> 2026-03-31): the year-end share-of-profit accrual
+          per the LLP statement of account. Same
+          import settings as journal_path's file, above. Never contains
+          the monthly transactions -- import both files if both were
+          produced.
+  tips: >
+    The computed Interest on Capital schedule (H35-06, its own workbook
+    sheet) applies simple interest, actual days / 365, to every capital
+    tranche added this financial year, from an interest-from-date
+    defaulting to the first day of that tranche's own payslip month. The
+    rate defaults to 6% p.a. unless the entity's partner_comp_drivers config
+    sets drivers.capital_interest_rate for this financial year explicitly
+    (e.g. the year the LLP actually changed its rate) -- this default is
+    never applied inside the reconciliation engine itself, only here, and a
+    per-tranche interest-from-date can likewise be overridden via
+    drivers.capital_interest_from_date_overrides ({"YYYY-MM": "YYYY-MM-DD"},
+    keyed by the tranche's own payslip month). This schedule's total is
+    shown against the LLP Statement's own interest-on-capital figure as its
+    own reconciliation row, but that row is always INFORMATIONAL (H35-06
+    correction): this schedule's BASIS (rate, day-count convention,
+    interest-from date) is not established to be the same one the LLP
+    Statement itself uses, so a gap here -- of any size -- is never a
+    disagreement with the statement and never enters the "STATEMENT
+    DISAGREES" block or the reconciliation counts. The statement's
+    interest-on-capital figure is independently checked by the "L5
+    tie-out: interest on capital" row instead (that row ties the payslip's
+    own printed figure to the statement). This schedule sheet only models
+    one possible (the firm's) computation method.
+
+    Separately, "s.194T TDS on interest on capital" (H35-06 correction) IS
+    a real, non-informational check: it isolates the TDS withheld on
+    interest alone by taking, for each month interest on capital was paid,
+    the payment schedule's tds_on_rem_ioc less the payslip's own tds (the
+    schedule additionally covers interest; the payslip does not), and
+    compares the total against the configured s.194T rate times the LLP
+    Statement's interest-on-capital figure. The rate is read from
+    drivers.capital_interest_tds_rate for the financial year; if that is
+    not set, it falls back to drivers.remuneration_tds_rate (both are, in
+    substance, the same partner-payments withholding rate) -- never a
+    hardcoded rate. A month that paid interest but is missing either TDS
+    figure is CANNOT RECONCILE, never assumed to be 0. This check never
+    adds a journal leg of its own: the monthly journal's single
+    tds_expense leg already carries the COMBINED remuneration+interest TDS
+    (the schedule's tds_on_rem_ioc takes precedence over the payslip's own
+    figure -- see mapper.py), and reuses that same figure whether or not
+    this check runs.
+
+    The CTC structuring check (H35-08, its
+    own workbook sheet) walks Target Compensation down to the cash pool
+    actually paid (remuneration + gross share of profit + CTC structuring
+    components + arrears) using the same incentive payment schedule already
+    supplied above (payment_schedule) -- no separate input is needed; it is
+    purely informational and never enters the "STATEMENT DISAGREES" block.
+
+    Start with the Reconciliation sheet, then Exceptions -- a
+    "CANNOT RECONCILE" status names exactly which source figure for that
+    category was not supplied, so a "cannot reconcile" row is something to
+    fix in the input, not a defect in the workbook. On Capital, a "RATE
+    CHANGE SUSPECTED" row means the incentive cohort's instalments show
+    unequal capital-deducted amounts -- re-read that year's Compensation
+    Advisory, since it will have been reissued at a new rate part-way
+    through the cohort. The LLP Statement of Account (L5), when supplied,
+    is the REFERENCE for every row it carries a figure for (closing
+    capital, current-account closing, remuneration, interest on capital,
+    profit share, drawings) -- every other source is measured against it,
+    never averaged in as an equal peer. Any disagreement beyond the Re 1
+    tolerance, or a failure in the statement's own arithmetic, is flagged
+    both at the top of the run summary text and in a highlighted
+    "STATEMENT DISAGREES" block above the Reconciliation sheet's table --
+    check that block first, before the per-row statuses below it.
+  troubleshooting:
+    - problem: "A category shows 'CANNOT RECONCILE' with a reason naming a driver or a figure."
+      fix: "That figure isn't available for this financial year -- this skill never guesses or falls back to a prior year's value."
+    - problem: "A 'STATEMENT DISAGREES' block appears at the top of the run summary / Reconciliation sheet."
+      fix: "The LLP Statement of Account (L5) is the reference for that row, and another supplied source (or the statement's own printed arithmetic) disagrees with it beyond the Re 1 tolerance -- the note spells out 'Statement says X; <source> says Y; difference Z' or names the failed arithmetic check. Investigate the disagreement; this skill never picks a winner for you."
+    - problem: "'Total cash received (monthly payouts) vs Bank' still shows 'NOT CHECKED YET (bank credits are matched in H35-05)'."
+      fix: "As of H35-05, this row is only left as NOT CHECKED YET when there is nothing to check against -- no GnuCash book was supplied, or no accounts.bank is configured for this entity. Whenever both are available, this row is replaced with a real per-payout bank match result: AGREE when every monthly payout matched a bank credit already posted in the book (within Re 1 and the bank_match_window), or CANNOT RECONCILE naming how many payouts did not (see the 'BANK MATCH' block in the run summary and the workbook's 'Bank match' sheet for the per-payout detail, including any TIE candidates)."
+    - problem: "The run summary shows a 'BANK MATCH -- N payout(s) could not be matched...' block, or the 'Bank match' sheet shows NO_MATCH / TIE / SPLIT rows."
+      fix: "NO_MATCH means no bank credit within Re 1 and bank_match_window days of that payout's month-end date was found in the book at all -- a genuine gap, never silently booked; investigate the bank statement/book for that period. TIE means two or more equally-close bank credits qualified and none was auto-picked (the user's ruling: a tie is never auto-picked) -- the candidates are listed with date/amount/account; either narrow bank_match_window, or resolve the ambiguity in the book, then re-run. SPLIT (H35-05 round 2) means a matching credit WAS found, but the bank import posted it across two or more counter-accounts, so there is no single account to route this skill's journal leg to -- the counter-accounts are named; this is never reported as a genuine gap (a credit did match) and is never auto-routed to any one of them. None of NO_MATCH / TIE / SPLIT ever gets a journal line for that payout's cash leg -- see journal_path's output, which simply omits that month's transaction rather than guessing (the OTHER, matched payouts' journal lines are written normally). This is different from matching being UNAVAILABLE altogether (no book, no accounts.bank, an unreadable book, or accounts.bank not found in it) -- that case is a structural refusal, not a per-payout gap, and as of H35-05 round 2 it refuses the WHOLE journal CSV with an ERROR rather than falling back to the pre-H35-05 unconditional bank leg -- see journal_path's own gotchas."
+    - problem: "The D1 drawings row ('Current-account drawings: statement vs (net monthly payouts + TDS + other payslip deductions - gross interest on capital)') shows a gap I can't explain."
+      fix: "The identity is: statement current drawings = net monthly payouts + s.194T TDS withheld + other payslip deductions paid on the partner's behalf (e.g. medical top-up) - interest on capital, GROSS. Interest on capital is credited to/drawn from the CAPITAL column of the LLP Statement, not the current account, so it is backed OUT of this current-account identity -- and it must be the GROSS figure, not the net-of-its-own-s.194T-TDS amount that lands in the payout (that TDS is already inside the TDS total above, so subtracting the net figure would double-count it). The row's note spells out the full build-up (each component and its value) so you can see exactly where a gap comes from."
+    - problem: "A row's note starts with 'PENDING JOURNAL POSTING (provided by this skill)'."
+      fix: "This is not a disagreement. The Statement and the books gap by more than Re 1 today, but this skill's own not-yet-posted journal (its monthly lines or its year-end share-of-profit accrual) closes that gap to within Re 1 once posted -- the note names the journal id(s) and amount. Post the journal(s) named and the row is reconciled; nothing further to investigate. If posting the journal only closes PART of the gap, the row instead reports the genuine residual left over (as a normal disagreement) rather than the pre-journal gap or this pending-journal wording."
+    - problem: "A GnuCash tie-out row (bank, TDS, interest on capital, current account, capital contribution, medical expense, remuneration income, or share of profit income) shows 'PENDING JOURNAL POSTING (provided by this skill)' instead of a plain AGREE/VARIANCE."
+      fix: "Same rule as the L5 rows above, extended to every GnuCash tie-out row: when this run's own posted-check finds that account's monthly journal not yet posted in the book, the row is compared against the book PLUS that journal rather than the book alone, and is reconciled once the named journal id(s) are posted. A row on 'current_account' or 'capital_contribution' may also name a separately posted prior-period reclassification journal (Num starting with this firm-FY's prefix, e.g. '<FIRM>-<FY>-RECT') -- that journal is a real posted movement from capital to the current account from an earlier run of this skill, folded into the computed side as its own named line, never counted toward a variance."
+    - problem: "'Exempt share of profit (s.10(2A)) vs the filed return' shows 'NOT CHECKED (return not supplied)' instead of AGREE."
+      fix: "This is expected, not a defect. The LLP Statement's Profit Share for the Year is present and correct -- only the comparison against the filed income tax return is skipped because the return wasn't supplied. It never counts as a failure and never appears in the 'STATEMENT DISAGREES' block; supply the filed return to get an actual comparison."
+    - problem: "'Incentive instalments: award-year Advisory vs payment schedule' note now starts with 'INFORMATIONAL (superseded by ...)'."
+      fix: "This category is no longer the primary drawings check -- see the new 'Current-account drawings: statement vs (net monthly payouts + s.194T TDS withheld)' row for that. This one still reports a genuine Advisory-vs-schedule disagreement when it fires; it is informational, not retired."
+    - problem: "'Interest on capital: computed (schedule, ...) vs LLP Statement' shows INFORMATIONAL with a large gap, even though the LLP Statement is otherwise agreeing everywhere else."
+      fix: "This is expected (H35-06 correction), not a defect. This schedule models one possible (the firm's) simple-interest computation off the payslip's own capital movements; its basis (rate, day-count, interest-from date) is not established to be the same one the LLP Statement uses, so it is never compared as a genuine disagreement, however large the gap. The statement's own interest-on-capital figure is independently checked by the 'L5 tie-out: interest on capital' row instead -- check that row for the real tie-out."
+    - problem: "'s.194T TDS on interest on capital' shows CANNOT RECONCILE even though interest on capital was paid this year."
+      fix: "This check needs, for every month interest on capital was paid, BOTH the payment schedule's tds_on_rem_ioc and the payslip's own tds figure (to isolate the interest-only TDS by difference), plus a configured rate (drivers.capital_interest_tds_rate, or drivers.remuneration_tds_rate as a fallback) and the LLP Statement's own interest-on-capital figure (to compute the expected TDS). The reason names exactly which of these is missing for which month; supply it rather than assuming the TDS was 0."
+    - problem: "Reconciliation shows AGREE for two sources that are not byte-for-byte equal."
+      fix: "Every reconciliation in this skill (including the L5 tie-out rows) uses a Re 1 tolerance: two sources within Rs 1.00 of each other tie. A difference above Re 1 and up to Rs 10 is shown amber as \"AGREE within Rs 10 (difference Rs N)\" with the difference always printed, counted separately from variances; anything above Rs 10 is a VARIANCE. The Rs 10 limit is shown on the Drivers sheet. Both are fixed, named constants (engine.RECONCILIATION_TOLERANCE, engine.WITHIN_TOLERANCE_LIMIT), never per-run settings. The Rs 10 band applies to reconciliation verdicts only: bank matching, journal amounts and red-flag checks still use Re 1, and nothing is ever plugged."
+    - problem: "Reconciliation shows VARIANCE on the incentive schedule leg."
+      fix: "A VARIANCE means the supplied payment schedule and a payout advice genuinely disagree on gross share of profit or a firm's-tax figure for that month -- check the Note column for the exact numbers. The schedule's own figure is what is used; the disagreement is reported, not silently resolved."
+    - problem: "'ERROR: could not parse ...' naming the advisory letter or a payout advice."
+      fix: "The PDF is unreadable/malformed, password-protected without the right password, or its content doesn't match the expected layout (e.g. an L1 payout certificate misfiled as the Advisory) -- fix the underlying document/password, not the filename."
+    - problem: "Incentive payment schedule leg shows 'not available' even though payment_schedule was supplied."
+      fix: "The document failed to open/parse, or its content didn't match the payment schedule's expected layout -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document."
+    - problem: "LLP capital sign-off leg (leg 1) shows 'not available' even though llp_statement was supplied."
+      fix: "The document failed to open/parse, or its content didn't match the LLP Statement of Account layout (e.g. it doesn't carry a combined CAPITAL ACCOUNT / CURRENT ACCOUNT header and a 'STATEMENT OF ACCOUNT OF ... AS ON <date> MARCH, <year>' phrase) -- the reason is named in the note itself; this leg degrades rather than failing the run, so check the note text and re-supply the correct document."

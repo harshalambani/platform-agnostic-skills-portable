@@ -1,0 +1,141 @@
+# skill.yaml — KR Choksey -> GnuCash (Part III) manifest.
+# Renders as a third sub-tab under GnuCash > KRChoksey (category "krc").
+
+name: "KRC GnuCash"
+display_name: "Convert to GnuCash"
+description: >
+  Convert the Part II KR Choksey "Bills" workbook into importable GnuCash
+  multi-split CSVs: Purchase (Dr security / Cr broker, with share quantity),
+  SLBM (Dr broker / Cr Income from SLBS), and Sale (Dr broker / Cr security at
+  FIFO cost basis / Cr Long & Short Term Capital Gain). FIFO cost basis and the
+  long-term holding threshold come from the .gnucash book and an editable config
+  in Data/settings/. Outputs Purchase.csv, SLBM.csv, Sale.csv.
+category: "krc"
+version: "1.0.0"
+
+# Deterministic — no LLM.
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  # Entity leads the form: picking someone here fills in the GnuCash book
+  # below, so it belongs before the field it answers for. Safe to declare
+  # first because it is UI-only (absent from run_args) and ui/tabs/_generic.py
+  # only lets inputs the skill actually consumes name the output file.
+  - name: "entity"
+    type: "select"
+    label: "Entity (optional) -- fills in the GnuCash book below from the registry"
+    options_from: "itr_entities"
+    required: false
+  - name: "bills_xlsx"
+    type: "output_file"
+    label: "Part II Bills workbook"
+    match: "*-KRC-Bills-Recon.xlsx"
+    file_types: [".xlsx"]
+    required: true
+  - name: "gnucash_path"
+    type: "file"
+    label: "GnuCash book (.gnucash)"
+    file_types: [".gnucash"]
+    required: true
+    book_from: "entity"
+  - name: "demat_expense_account"
+    type: "select"
+    label: "Demat charges expense account (remembered per entity)"
+    options_from: "expense_accounts"
+    depends_on: ["gnucash_path"]
+    required: false
+
+run_args:
+  bills_xlsx: "{inputs.bills_xlsx}"
+  gnucash_path: "{inputs.gnucash_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  entity: "{inputs.entity}"
+  demat_expense_account: "{inputs.demat_expense_account}"
+
+output:
+  type: "directory"
+  suffix: "KRC-GnuCash"
+  download_label: "Open output folder"
+  extra_outputs:
+    - key: "purchase_csv"
+      label: "Purchase.csv"
+      download_label: "Download Purchase.csv"
+    - key: "slbm_csv"
+      label: "SLBM.csv"
+      download_label: "Download SLBM.csv"
+    - key: "sale_csv"
+      label: "Sale.csv"
+      download_label: "Download Sale.csv"
+    - key: "charges_csv"
+      label: "Charges.csv"
+      download_label: "Download Charges.csv"
+    - key: "new_securities_csv"
+      label: "NewSecurities.csv"
+      download_label: "Download NewSecurities.csv"
+    - key: "review_csv"
+      label: "Review.csv"
+      download_label: "Download Review.csv"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Part III of the KR Choksey → GnuCash flow. Converts the Part II Bills workbook
+    into importable GnuCash multi-split CSVs — Purchase, SLBM and Sale — using
+    FIFO cost basis and the long-term holding threshold from your .gnucash book
+    and an editable config in Data/settings/. Runs fully offline.
+  when_to_use: >
+    Run this last of the three KRChoksey tabs, after Reconcile (Part II). It
+    produces the CSVs you import into GnuCash.
+  inputs:
+    - name: "bills_xlsx"
+      tooltip: "The Part II Bills workbook — pick it from the list of prior outputs."
+      accepts: "Excel (.xlsx) matching *-KRC-Bills-Recon.xlsx."
+      gotchas: "Run Part II first; the picker only lists Bills workbooks from earlier runs."
+    - name: "gnucash_path"
+      tooltip: "Your GnuCash book — used for account paths and FIFO cost basis."
+      accepts: "GnuCash file (.gnucash)."
+      gotchas: "Close the book in GnuCash before running. It is read only, never modified."
+    - name: "demat_expense_account"
+      tooltip: "The expense account demat (DP) charges are booked to. Without one, Charges.csv is not written and the run is flagged incomplete."
+      accepts: "An expense account from the book picked above (hidden and placeholder accounts are not offered)."
+      gotchas: "Remembered per entity, so pick the entity too. The list fills once the GnuCash book is chosen."
+    - name: "entity"
+      tooltip: "Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity."
+      accepts: "One of the entities defined in entities.yaml, via dropdown."
+      gotchas: "UI convenience only; leave unset to pick the file manually as before."
+  steps:
+    - "Pick the Part II Bills workbook from the dropdown."
+    - "Select your .gnucash book (closed in GnuCash)."
+    - "Click Run, then open the output folder."
+    - "Import each CSV into GnuCash (File > Import > Import Transactions from CSV)."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "Purchase.csv"
+        tooltip: "One transaction per purchase: Dr the security account (with share quantity), Cr the KR Choksey broker account, for the net/bill amount."
+      - name: "SLBM.csv"
+        tooltip: "One transaction per SLBM bill: Dr KR Choksey broker, Cr Income from SLBS (net lending proceeds, offered to tax as income)."
+      - name: "Sale.csv"
+        tooltip: "Multi-split per sale: Dr broker (proceeds), Cr security at FIFO cost basis (negative shares), Cr Long/Short Term Capital Gain (a loss appears as a debit)."
+      - name: "Charges.csv"
+        tooltip: "One transaction per demat charge: Dr the demat-charges expense account, Cr the KR Choksey broker account. Only written once an expense account is picked."
+      - name: "NewSecurities.csv"
+        tooltip: "Purchases of a security with no account in the book yet: suggested account path, type Stock. Those purchases are NOT in Purchase.csv - create the commodity and account, then re-run."
+      - name: "Review.csv"
+        tooltip: "Only created when something needs attention — an unmatched security name, or a sale with insufficient FIFO lots."
+  tips: >
+    Every transaction's Amount column sums to zero, so each imports as a balanced
+    GnuCash transaction. The long-term threshold and account paths come from your
+    book plus the editable config in Data/settings/.
+  troubleshooting:
+    - problem: "A Review.csv appears."
+      fix: "Open it: either a security name didn't match an account (add/rename it) or a sale lacked enough FIFO lots (check earlier purchases were imported)."
+    - problem: "Capital gain looks wrong."
+      fix: "Confirm the holding-period threshold and account paths in Data/settings/ match your setup."

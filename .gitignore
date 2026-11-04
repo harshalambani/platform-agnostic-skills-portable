@@ -1,0 +1,75 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+*.egg
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual envs ---
+.venv/
+venv/
+env/
+
+# --- Build artifacts ---
+build/
+staging/
+dist/
+# The PortableApps.com Installer emits <AppID>_<version>.paf.exe into the repo
+# root before build.py moves it into dist/; ignore any stray root artifact so an
+# interrupted build never leaves a committable one behind.
+/*.paf.exe
+*.spec.bak
+
+# --- PyInstaller ---
+# (paskills.spec IS tracked; only PyInstaller-generated work-dirs are not)
+build_pyinstaller/
+
+# --- IDE / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Logs / outputs (build-time scratch) ---
+*.log
+.coverage
+tests/e2e_results.txt
+
+# --- Local dev overrides ---
+.env
+.env.*
+!.env.example
+
+CmdResult/
+Error/
+
+# --- User data (personal bank statements, GnuCash books, outputs) ---
+# Data/ is 100% real user data (PII) and stays fully untracked. The ITR
+# Workbook skill's statutory rules and *.example.yaml templates ship inside
+# App\ instead (bundling/canonical/itr/ -- see
+# 2026-07-24-itr-rules-ship-in-app-handover-prompt.md); Data\itr\rules is
+# now a pure, normally-empty read-time overlay, never git-tracked.
+Data/*
+!Data/.gitkeep
+ICICI/
+outputs/
+!outputs/.gitkeep
+
+# --- Bundling logs ---
+bundling/launcher-gen/*/Data/
+bundling/installer/*/Data/
+
+# --- Runtime artifacts (written by the app at launch, not source) ---
+ui_port.json
+
+# --- Ad-hoc dated planning / test files at repo root ---
+2026-*.md
+2026-*.py
+HDFC_BUILD_PLAN.md
+PHASE3_USAGE_GUIDE.md

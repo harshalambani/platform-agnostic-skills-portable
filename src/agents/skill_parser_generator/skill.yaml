@@ -1,0 +1,117 @@
+# skill.yaml - Parser Generator (DEV-TIME) manifest.
+#
+# A dev-time tool that creates / corrects / edits the embedded fuzzy
+# deterministic parsers under src/agents/skill_<X>/scripts/. Exposed in the UI
+# as its own top-level "Parser Generator" tab: category "dev" is not in
+# webui.py's GROUP_ORDER/_known_cats, so the fallback loop renders it as a flat
+# top-level tab (no webui.py change needed). It is still a developer tool, not
+# an end-user feature - keep it that way.
+#
+# It can also be driven from the command line (deterministic, no LLM):
+#   python -m agents.skill_parser_generator --help
+
+name: "Parser Generator"
+display_name: "Parser Generator"
+description: >
+  DEV-TIME tool. Create, correct, or edit the project's embedded fuzzy
+  deterministic parsers (src/agents/skill_<X>/scripts/parse_<format>.py).
+  Template-based: the model may only fill the format-specific blanks (column x0
+  ranges, regexes, row-boundary and skip rules); the balance oracle and the
+  0/1/2 exit contract are off-limits. Use the "Fix" task when a parser's tie-out
+  fails (oracle exits 2); use "Create" to scaffold a new parser from the shared
+  template. Every result must pass the quality gate (validate -> tie-out exit 0)
+  before you commit it. See docs/guides/Parser-Generator-Guide.md.
+category: "dev"
+version: "1.1.0"
+
+mode: "agent"
+entry_point: "agent:run_ui"
+
+inputs:
+  - name: "task"
+    type: "select"
+    label: "Task"
+    options: ["Fix a failing parser", "Create a new parser"]
+    required: true
+  - name: "parser_path"
+    type: "parser_file"
+    label: "Parser (pick a known parser to Fix, or type a new path to Create)"
+    required: true
+  - name: "parser_args"
+    type: "text"
+    label: "Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf PASSWORD out.xlsx')"
+    required: false
+  - name: "notes"
+    type: "text"
+    label: "Notes (Fix: the symptom / expected closing balance; Create: the format / FORMAT_NAME)"
+    required: false
+
+run_args:
+  task: "{inputs.task}"
+  parser_path: "{inputs.parser_path}"
+  parser_args: "{inputs.parser_args}"
+  notes: "{inputs.notes}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  type: "directory"
+  suffix: "parser-gen"
+  download_label: "Download report"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: true
+
+help:
+  overview: >
+    A developer-time tool that creates or repairs the project's embedded
+    deterministic parsers (src/agents/skill_<X>/scripts/parse_<format>.py). It is
+    template-based: the model may only fill format-specific blanks (column ranges,
+    regexes, row-boundary and skip rules); the balance oracle and the 0/1/2 exit
+    contract are off-limits. Every result must pass the quality gate
+    (validate -> tie-out exit 0) before you commit it.
+  when_to_use: >
+    Use "Fix a failing parser" when a statement format changed and a parser's
+    tie-out fails (the oracle exits 2). Use "Create a new parser" to scaffold one
+    for a new format from the shared template. This is for maintainers, not
+    end-of-day statement processing. See docs/guides/Parser-Generator-Guide.md.
+  inputs:
+    - name: "task"
+      tooltip: "Whether to repair an existing parser or scaffold a new one."
+      accepts: "One of: Fix a failing parser, Create a new parser."
+      gotchas: "Pick 'Fix' to point at a known parser; 'Create' to start a new one from the template."
+    - name: "parser_path"
+      tooltip: "The parser to fix, or the new path to create."
+      accepts: "A known parser (pick from the list) or a new parse_<format>.py path."
+      gotchas: "For Fix, choose an existing parser; for Create, type the target path."
+    - name: "parser_args"
+      tooltip: "Fix only — the parser's tie-out CLI args."
+      accepts: "Text, e.g. 'statement.pdf PASSWORD out.xlsx'. Optional."
+      gotchas: "Needed so the tool can run the parser's tie-out while repairing it."
+    - name: "notes"
+      tooltip: "Context for the task."
+      accepts: "Text. Fix: the symptom / expected closing balance. Create: the format / FORMAT_NAME. Optional."
+      gotchas: "Giving the expected closing balance makes Fix converge faster."
+  steps:
+    - "Choose Fix or Create."
+    - "Select the parser (or type the new path)."
+    - "For Fix, provide the tie-out args and the symptom / expected balance in Notes."
+    - "Click Run; review the report, and only commit once tie-out exits 0."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-parser-gen/  (a folder)"
+        tooltip: >
+          A report folder with the proposed parser change and the
+          validate / tie-out results. Inspect it before committing the parser.
+  tips: >
+    The runtime stays deterministic — this tool only edits the format-specific
+    blanks of a parser; the balance oracle and exit contract are never touched.
+  troubleshooting:
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "This dev tool uses an LLM. Start Ollama or set an endpoint in Settings."
+    - problem: "Tie-out still exits non-zero."
+      fix: "Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak."

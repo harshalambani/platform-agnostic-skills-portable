@@ -1,0 +1,46 @@
+; appinfo.ini — rendered by bundling/build.py.
+; Template variables: ${VERSION_3}, ${VERSION_4}.
+
+[Format]
+Type=PortableApps.comFormat
+Version=3.7.1
+
+[Details]
+Name=PA Skills Portable
+AppID=PASkillsPortable
+Publisher=Harshal
+Homepage=https://github.com/harshalambani/platform-agnostic-skills-portable
+Category=Office
+; Describes what is in the box TODAY, which is why it names a domain the
+; architecture itself does not: the skill registry is generic, and the shipped
+; skills merely all happen to be accounting and tax ones. Broaden this line when
+; that stops being true -- it is the only place that needs it. The splash
+; (bundling/icons/make_splash.py) deliberately makes the general claim instead,
+; so it never goes stale.
+; Note "any LLM" rather than "offline": the active endpoint can be a cloud one.
+Description=Platform-agnostic accounting and tax skills, powered by any LLM - local, LAN or cloud. No install; runs from a folder.
+Language=Multilingual
+Trademarks=
+InstallType=Portable
+
+[License]
+Shareable=true
+OpenSource=true
+Freeware=true
+CommercialUse=true
+EULAVersion=
+
+[Version]
+PackageVersion=${VERSION_4}
+DisplayVersion=${VERSION_3}
+
+[Control]
+Icons=1
+Start=PASkillsPortable.exe
+
+[SpecialPaths]
+Plugins=NONE
+
+[Dependencies]
+UsesJava=false
+UsesDotNetVersion=

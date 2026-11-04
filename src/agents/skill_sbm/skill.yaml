@@ -1,0 +1,92 @@
+# skill.yaml - SBM skill manifest
+
+name: "SBM"
+display_name: "SBM"
+description: >
+  Convert an SBM Bank India savings-account statement (password-protected
+  .xlsx) into the canonical CSV. Decrypts in memory, re-orders same-day rows
+  by the running-balance chain and fails loudly if no consistent chain exists.
+  Pure Python, deterministic - no LLM.
+category: "banks"
+version: "1.0.0"
+
+bank: true
+bank_key: "sbm"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "xlsx_path"
+    type: "file"
+    label: "SBM statement (.xlsx)"
+    file_types: [".xlsx"]
+    required: true
+  - name: "pdf_password"
+    type: "password"
+    label: "Statement password (the workbook's open password)"
+    required: false
+
+run_args:
+  xlsx_path: "{inputs.xlsx_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  pdf_password: "{inputs.pdf_password}"
+
+output:
+  extension: ".csv"
+  suffix: "SBM_canonical"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  python_packages: ["msoffcrypto-tool", "openpyxl"]
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Turns an SBM Bank India account statement (a password-protected .xlsx with
+    a single Transaction-Statement sheet) into a GnuCash-ready canonical CSV.
+    The file is decrypted in memory; the password is never logged or stored.
+    The statement carries no opening-balance row and rows within a day can be
+    out of time order, so the parser orders them by the running-balance chain
+    and derives the opening balance from the first row.
+  when_to_use: >
+    Use this to get a clean CSV from an SBM statement. To also map the rows to
+    GnuCash accounts in one step, use the GnuCash Import skill and choose SBM.
+  inputs:
+    - name: "xlsx_path"
+      tooltip: "Your SBM statement workbook."
+      accepts: "Excel (.xlsx) - one file."
+      gotchas: >
+        The workbook is encrypted; enter its open password in the password field.
+    - name: "pdf_password"
+      tooltip: "The workbook's open password."
+      accepts: "Text. Not stored."
+      gotchas: >
+        A wrong password stops the run with a clear message; it never produces
+        an empty CSV.
+  steps:
+    - "Pick the SBM statement .xlsx."
+    - "Enter the statement password."
+    - "Click Run and download the CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-SBM_canonical.csv"
+        tooltip: >
+          One row per transaction in balance-chain order: Date, Transaction ID
+          (RRN), Description, Account, Deposit, Withdrawal, Balance, Currency.
+  tips: >
+    The account number is read from the interest narrations (the statement has
+    no header block), so a statement with no interest row has no account number.
+  troubleshooting:
+    - problem: "Run stops saying the workbook is password-protected."
+      fix: >
+        Supply the statement password; check it for typos.
+    - problem: "Run stops saying the balance chain is broken."
+      fix: >
+        A row is missing or altered in the workbook, so the balances cannot be
+        chained. Download the statement again; do not edit it.

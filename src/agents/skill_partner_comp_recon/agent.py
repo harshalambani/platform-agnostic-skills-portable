@@ -1,0 +1,1524 @@
+"""
+agent.py -- Partner Compensation Reconciliation. DIRECT mode, no LLM, no
+network.
+
+Stage 1 of this skill (see AGENT.md): the computation engine, the workbook
+writer, and the tests. Stage 2 is the PDF parsers under parsers/ --
+`payout_advice.py` (L1), `advisory.py` (L3) and `llp_statement.py` (L5)
+are all implemented; `xlsx_26as` now has a real reader
+(xlsx_26as_reader.py, Section A of the tie-out work); `gnucash_path` now
+has a real, read-only tie-out (gnucash_tieout.py, Sections B and C): a
+posted-already detector for every journal this run would emit, and a
+balance tie-out for each of jv_emitter.ACCOUNT_KEYS's configured account
+paths against the book's actual FY movement. See parsers/__init__.py.
+
+run() has two entry paths:
+
+  - Document-driven (the skill.yaml-facing path, and the only one exposed
+    in the UI): entity/advices_dir/doc_password/advisory_path/
+    llp_statement/gnucash_path/xlsx_26as. Required inputs missing fail
+    loud, naming the input. Every OPTIONAL input (llp_statement,
+    gnucash_path, xlsx_26as) that is absent -- or present but backed by a
+    parser/reader that is still a Stage 2 placeholder, or fails its own
+    content-dispatch check -- degrades its own reconciliation leg to an
+    explicit "not available" note; it never fails the run, and never
+    substitutes a zero or a default figure. The two REQUIRED documents
+    (advices_dir, advisory_path) parse for real; a document that fails to
+    open/parse (an unreadable/malformed PDF, a wrong password, or content
+    that doesn't match the expected L1/L3 layout) still fails the whole
+    run loud, naming the document and the reason -- see
+    _run_from_documents()'s docstring. Once both required documents (and
+    the optional L5 leg, if resolvable) parse, this path assembles them
+    (mapper.build_input_data), computes the reconciliation
+    (engine.build_report), writes the workbook, and -- if journal_path is
+    supplied -- resolves/validates the entity's GnuCash account map and
+    emits the journal CSV, exactly like the structured-input path below.
+  - Structured-input (input_path): TEST-ONLY. Retained so the existing
+    engine/writer/jv_emitter test suite keeps exercising build_report()
+    directly without needing real PDF specimens. Deliberately absent from
+    skill.yaml's `inputs:` so it never renders in the UI (see
+    tests/test_skill_partner_comp_recon.py's manifest-shape guard test).
+
+Architecture mirrors skill_mf_cas: `_load_input` is the ONLY function in
+this package that touches the filesystem for the structured input path.
+`mapper.build_input_data()` is pure (no I/O) and converts parsed L1/L3/L5
+document records into `engine.build_report()`'s input shape.
+`engine.build_report()` is pure (no I/O); `writer.write_report_workbook()`
+is the only function that touches openpyxl; `jv_emitter.write_journal_csv()`
+(Stage 1b, optional) is the only function that touches the journal CSV.
+gnucash_path is READ ONLY everywhere in this package -- no function here
+ever opens a write handle on a .gnucash file; account-path validation
+(`_validate_accounts_against_book`) only ever calls
+gnucash_accounts.read_postable_paths()/read_special_paths()/load_accounts(),
+and the Section B/C tie-out (`gnucash_tieout.py`) only ever calls
+skill_itr_workbook's parse_gnucash.parse_book() -- never anything that
+could write.
+"""
+from __future__ import annotations
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+import yaml
+
+from .. import gnucash_accounts
+from ..entity_scope import check_26as_fy as check_fy_26as
+from ..entity_scope import check_26as_owner as check_owner_26as
+from .engine import (
+    CANNOT_RECONCILE,
+    WITHIN_TOLERANCE_LIMIT,
+    ReconciliationResult,
+    build_report,
+)
+from .gnucash_tieout import (
+    accrual_book_gap,
+    accrual_txn_id,
+    restate_posted_accrual_rows,
+    build_statement_book_check,
+    DEFAULT_BANK_MATCH_WINDOW_DAYS,
+    MATCHED,
+    build_balance_tieout,
+    build_posted_check,
+    match_payouts_to_bank,
+    partition_by_posted,
+)
+from .jv_emitter import (
+    ACCOUNT_KEYS,
+    ROUNDING_KEY,
+    JournalValidationError,
+    build_accrual_journal,
+    build_journals,
+    write_accrual_journal_csv,
+    write_journal_csv,
+)
+from ..outputs import ReplyWithOutputs, extra_output
+from .mapper import FinancialYearMismatchError, build_input_data
+from . import award_year as _award_year
+from . import intake as _intake
+from . import precheck as _precheck
+from .parsers import advisory as _advisory_parser
+from .parsers import llp_statement as _llp_statement_parser
+from .parsers import payment_schedule as _payment_schedule_parser
+from .parsers import payout_advice as _payout_advice_parser
+from .writer import write_report_workbook
+from .xlsx_26as_reader import read_form_26as_tds_credit
+
+# H35-06: the documented default rate for the computed capital-interest
+# schedule (see skill.yaml's help text) -- 6% simple interest. This is the
+# ONE place in this whole skill a rate is ever applied as a fallback
+# default rather than failing loud; engine.py's own governing rule (see its
+# module docstring) forbids that inside engine.py itself, so it lives here,
+# applied into data["drivers"]["capital_interest_rate"] only when the
+# entity's own partner_comp_drivers config does not already set it for this
+# financial year -- an explicit per-year override in that config always
+# wins over this default.
+_DEFAULT_CAPITAL_INTEREST_RATE = 0.06
+
+# H35-19: s.194T withholding rate on payments to a partner. Used for the TDS
+# check only (never any journal amount), and only when the entity sets neither
+# capital_interest_tds_rate nor remuneration_tds_rate for the year.
+_DEFAULT_S194T_TDS_RATE = 0.10
+
+# H35-20: the capital rule (required capital = target compensation x months
+# completed / total months x rate). The entity sets none of these by hand
+# any more: the rate and total default here, and months completed come from
+# the entity's "Date admitted as partner". Anything the entity sets
+# explicitly in partner_comp_drivers for the year wins over all of it.
+_DEFAULT_CAPITAL_RATE = 0.40
+_DEFAULT_CAPITAL_MONTHS_TOTAL = 48
+
+
+def apply_capital_rule_defaults(data: dict, admission_date) -> None:
+    """Fill capital_rate / capital_months_total / capital_months_achieved in
+    data["drivers"] only where the entity left them unset. Feeds the
+    informational capital row only; never touches a journal amount."""
+    from .engine import capital_months_from_admission
+    drivers = data.setdefault("drivers", {})
+    sources = data.setdefault("driver_sources", {})
+    fy = data.get("financial_year") or ""
+    if drivers.get("capital_rate") is None:
+        drivers["capital_rate"] = _DEFAULT_CAPITAL_RATE
+        sources["capital_rate"] = "Default (40% of target compensation over 48 months)"
+    elif "capital_rate" not in sources:
+        sources["capital_rate"] = f"Entity setting for {fy}"
+    if drivers.get("capital_months_total") is None:
+        drivers["capital_months_total"] = _DEFAULT_CAPITAL_MONTHS_TOTAL
+        sources["capital_months_total"] = "Default (48 months)"
+    elif "capital_months_total" not in sources:
+        sources["capital_months_total"] = f"Entity setting for {fy}"
+    if drivers.get("capital_months_achieved") is None:
+        months, note = capital_months_from_admission(
+            admission_date, data.get("financial_year") or "",
+            drivers.get("capital_months_total"))
+        if months is not None:
+            drivers["capital_months_achieved"] = months
+        sources["capital_months_achieved"] = note
+
+# skill_itr_workbook/scripts is a separate package (not importable via the
+# agents.* package path) that carries the entities.yaml loader this skill
+# reuses rather than re-implementing its own -- same sys.path pattern
+# skill_ais_reconcile/agent.py uses for the same reason. `entities_path` is
+# the path to that entities.yaml-shaped file (the app passes
+# {data_root}/itr/entities.yaml). `config_path` is the AI-model settings file
+# the app hands every skill; it is accepted but NEVER read as entity settings
+# (H35-11: reading it made every app run fail to load the entity). Each
+# entity's `partner_comp_accounts` field supplies its GnuCash account
+# map (see configs.py / bundling/canonical/itr/entities.example.yaml), and
+# its generic `extra_items["partner_comp_drivers"][<financial_year>]`
+# supplies this skill's own rate/period drivers (firm's tax rate, capital
+# rate, TDS section/rate/start-date, etc.) -- there is no dedicated
+# tax-rules loader for these values anywhere else in the codebase, and
+# entities.yaml's own closed-dataclass shape already carries a generic
+# passthrough dict for exactly this kind of skill-specific extension.
+_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
+if str(_ITR_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_ITR_SCRIPTS))
+import configs  # noqa: E402
+
+
+def _load_input(input_path: str) -> dict:
+    """The ONLY function in this package that touches the filesystem for
+    the structured input file. Accepts .yaml/.yml or .json."""
+    path = Path(input_path)
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() in (".yaml", ".yml"):
+        return yaml.safe_load(text)
+    if path.suffix.lower() == ".json":
+        return json.loads(text)
+    raise ValueError(
+        f"Unsupported input file type '{path.suffix}'. Supply a .yaml, .yml, "
+        "or .json structured input file (see skill.yaml's help text for the shape)."
+    )
+
+
+def _require(value: str, input_name: str, label: str) -> str | None:
+    """Return a clear 'ERROR: ...' string naming `input_name` if a REQUIRED
+    input is blank/missing, else None. Mirrors this codebase's convention
+    (see AIS Reconcile / MF CAS agent.py) of never raising for a
+    user-facing problem."""
+    if not value or not str(value).strip():
+        return f"ERROR: required input '{input_name}' ({label}) was not supplied."
+    return None
+
+
+def _resolve_optional_leg(label: str, path: str, parse_fn, password: str | None = None) -> str:
+    """Resolve one OPTIONAL document-backed reconciliation leg to a status
+    note. Never used for a required input -- those fail the whole run via
+    _require() instead. An absent path degrades the leg to "not
+    available", never a zero or a default. A path that IS supplied but
+    whose parser is still a Stage 2 NotImplementedError placeholder
+    degrades identically, naming that reason instead of crashing."""
+    if not path:
+        return f"{label}: not available (no document supplied)."
+    try:
+        parse_fn(path, password)
+        return f"{label}: parsed from {path}."
+    except NotImplementedError as e:
+        return f"{label}: not available ({e})"
+
+
+def _resolve_llp_leg(path: str, password: str | None) -> tuple[str, dict | None]:
+    """Resolve the OPTIONAL L5 (LLP statement of account) leg to a
+    (status note, parsed record or None) pair. Unlike _resolve_optional_leg
+    (kept as-is for whatever else calls it), this also hands back the
+    parsed record on success, since the mapper needs it for
+    `interest_on_capital`. `llp_statement.py`'s parser is now real, so a
+    genuinely malformed/wrong-content/wrong-password PDF can raise
+    NotAnL5DocumentError (or a pdfplumber-level exception) rather than
+    NotImplementedError -- both degrade this leg to a "not available"
+    note, never an uncaught traceback and never a crash of the whole run."""
+    label = "LLP statement of account"
+    if not path:
+        return f"{label}: not available (no document supplied).", None
+    try:
+        pdf_path = path
+        if path.lower().endswith(".eml"):
+            # UI-17: the statement arrives as an e-mail; take its PDF attachment.
+            pdf_path = _precheck.extract_pdf_from_eml(path)
+        record = _llp_statement_parser.parse(pdf_path, password)
+        return f"{label}: parsed from {path}.", record
+    except NotImplementedError as e:
+        return f"{label}: not available ({e})", None
+    except _llp_statement_parser.NotAnL5DocumentError as e:
+        # H35-13: the parser's message already names the file and what the
+        # document is; pass it through whole instead of wrapping it in
+        # "could not parse", which reads as if the statement were unreadable.
+        return f"{label}: not available ({e})", None
+    except Exception as e:
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
+
+
+def _read_award_year_documents(value, password):
+    """(docs, notes) for the optional award_year_documents input: a
+    directory, a single file, or a list of files. A file that cannot be read
+    is named in a note and skipped; it never stops the run."""
+    if not value:
+        return [], []
+    if isinstance(value, (list, tuple)):
+        paths = [Path(v) for v in value]
+    else:
+        p = Path(value)
+        paths = sorted(q for q in p.iterdir() if q.suffix.lower() == ".pdf") if p.is_dir() else [p]
+    docs, notes = [], []
+    for path in paths:
+        d = _award_year.read_award_year_document(str(path), password, _advisory_parser)
+        docs.append(d)
+        if d["error"]:
+            notes.append(f"Award-year document {d['name']}: {d['error']} -- skipped.")
+        elif d["kind"] == _award_year.KIND_TARGET:
+            notes.append(f"Award-year document {d['name']}: a Target compensation letter; "
+                         "it is recorded but carries no instalment schedule, so it is not used.")
+        elif not d["fy"]:
+            notes.append(f"Award-year document {d['name']}: financial year not found in the "
+                         "document body -- skipped (the file name is never used).")
+    return docs, notes
+
+
+def _resolve_schedule_leg(path: str, password: str | None) -> tuple[str, dict | None]:
+    """Resolve the OPTIONAL L4 (incentive payment schedule) leg to a
+    (status note, parsed record or None) pair -- same degradation contract
+    as _resolve_llp_leg. `payment_schedule.py`'s parser is now real (see
+    its own module docstring); a genuinely malformed/wrong-content/
+    wrong-password PDF raises NotAPaymentScheduleError (or a
+    pdfplumber-level exception), both of which degrade this leg to a "not
+    available" note, never an uncaught traceback and never a crash of the
+    whole run. Absent path degrades identically -- never a fabricated
+    figure, never a block on the rest of the run."""
+    label = "Incentive payment schedule"
+    if not path:
+        return f"{label}: not available (no document supplied).", None
+    try:
+        record = _payment_schedule_parser.parse(path, password)
+        return f"{label}: parsed from {path}.", record
+    except NotImplementedError as e:
+        return f"{label}: not available ({e})", None
+    except Exception as e:
+        return (f"{label}: not available (could not parse {path}: "
+                f"{_precheck.explain_pdf_error(e, password)})"), None
+
+
+def _resolve_entity_config(entity: str, entities_path: str | None) -> tuple["configs.EntityProfile | None", str | None]:
+    """Look up `entity` in the entities.yaml-shaped file at `entities_path`.
+    Returns (profile, None) on success, (None, note) otherwise -- a note
+    "entity settings could not be loaded from <path> (<reason>)" (no path
+    supplied, file missing/invalid, or entity key not found), never an
+    exception. Absence
+    of an entity profile is not itself a run-ending error: it simply means
+    `accounts`/`drivers` stay unset, and every account-key/rate that would
+    have come from it degrades to its own explicit CANNOT-RECONCILE/ERROR
+    downstream (never guessed)."""
+    if not entities_path:
+        return None, (
+            "entity settings could not be loaded (no entities file path was "
+            "supplied)."
+        )
+    try:
+        entities = configs.load_entities(entities_path)
+    except Exception as e:  # unreadable / invalid file: report, never raise
+        return None, (
+            f"entity settings could not be loaded from {entities_path} ({e})."
+        )
+    profile = entities.get(entity)
+    if profile is None:
+        return None, (
+            f"entity settings could not be loaded from {entities_path} "
+            f"(entity {entity!r} is not in that file)."
+        )
+    return profile, None
+
+
+def _validate_accounts_against_book(accounts: dict, gnucash_path: str) -> list[str]:
+    """Validate every configured account path against the GnuCash book at
+    `gnucash_path` BEFORE anything is written. Returns a list of "ERROR:
+    ..." strings (empty if every configured path is a valid posting
+    target) -- one per account key that is missing, or resolves to a
+    placeholder/hidden (non-postable) account, each naming the account
+    key, the configured path, the reason, and (when a same-leaf-name
+    account exists elsewhere in the book) the closest candidate path as a
+    rename hint. Read-only: only ever calls
+    gnucash_accounts.read_postable_paths()/read_special_paths()/
+    load_accounts() -- never opens a write handle, never touches a
+    .gnucash.LOG/backup file."""
+    # IMP-09: the shared guard -- ONLY hidden (own or inherited) and
+    # placeholder block a configured account. A tax-related account is a
+    # valid posting target again.
+    guard = gnucash_accounts.TargetGuard.from_book(gnucash_path)
+    all_accounts = gnucash_accounts.load_accounts(gnucash_path)
+    known = {a.path for a in all_accounts if a.path}
+    by_leaf: dict[str, list[str]] = {}
+    for acc in all_accounts:
+        if acc.path:
+            by_leaf.setdefault(acc.leaf, []).append(acc.path)
+
+    errors = []
+    for key, path in accounts.items():
+        blocked = guard.blocked_target_reason(path)
+        if path in known and not blocked:
+            continue
+        if blocked:
+            reason = f"is a placeholder/hidden account and cannot be a posting target ({blocked})"
+        else:
+            reason = "does not exist in the supplied GnuCash book"
+        leaf = path.rsplit(":", 1)[-1] if ":" in path else path
+        candidates = [p for p in by_leaf.get(leaf, []) if p != path]
+        hint = ""
+        if candidates:
+            hint = f" Closest candidate(s) by leaf name: {', '.join(sorted(candidates))}."
+        errors.append(
+            f"ERROR: partner_comp_accounts['{key}'] = {path!r} {reason}.{hint}"
+        )
+    return errors
+
+
+def _window_days(value, default: int = DEFAULT_BANK_MATCH_WINDOW_DAYS) -> int:
+    """H35-05's bank-match date window, as a skill setting: the same
+    string-in/int-out conversion idiom skill_gnucash_intercompany/agent.py
+    uses for its own `date_tolerance` run() parameter (that skill's `_tol`
+    helper) -- an out-of-range or unparsable value falls back to `default`
+    (DEFAULT_BANK_MATCH_WINDOW_DAYS, gnucash_tieout.py) rather than raising,
+    since this is a UI text field."""
+    try:
+        return max(0, int(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
+def _resolve_accounts_for_journal(
+    entity_profile: "configs.EntityProfile | None",
+    entity: str,
+    gnucash_path: str,
+    settings_error: str | None = None,
+) -> tuple[dict, list[str], str | None]:
+    """Section 4.3's three degradation rules for the journal leg, given
+    that journal_path IS supplied (the caller only calls this when it is).
+    Returns (accounts, book_validation_notes, error_or_None):
+
+      - no partner_comp_accounts configured -> error naming the entity and
+        every required account key (jv_emitter.ACCOUNT_KEYS).
+      - accounts configured, no gnucash_path -> (accounts, [an explicit
+        NOTE that paths could not be verified], None).
+      - accounts configured, gnucash_path supplied -> validated against the
+        book; any bad path returns an error naming it (before any write);
+        all-good returns (accounts, [], None).
+    """
+    accounts = dict(entity_profile.partner_comp_accounts) if entity_profile else {}
+    if not accounts and entity_profile is None and settings_error:
+        return (
+            {},
+            [],
+            f"ERROR: journal_path was supplied but {settings_error} The journal "
+            "needs the entity's account paths, so nothing was written.",
+        )
+    if not accounts:
+        return (
+            {},
+            [],
+            "ERROR: journal_path was supplied but entity "
+            f"{entity!r} has no partner_comp_accounts configured -- the "
+            f"following account keys are required: {', '.join(ACCOUNT_KEYS)}.",
+        )
+    if not gnucash_path:
+        return (
+            accounts,
+            [
+                "NOTE: journal accounts could not be verified against a GnuCash "
+                "book -- no gnucash_path was supplied. The journal CSV below uses "
+                "the paths configured in entities.yaml as-is."
+            ],
+            None,
+        )
+    validation_errors = _validate_accounts_against_book(accounts, gnucash_path)
+    if validation_errors:
+        return {}, [], "\n".join(validation_errors)
+    return accounts, [], None
+
+
+def _summarize_report(
+    report, output_path: str, journal_line: str = "", bank_match_notes: list[str] | None = None,
+    bank_matches: dict | None = None,
+) -> str:
+    """The shared reporting tail for both entry paths: variance WARNINGs,
+    undecidable NOTEs, rate-change-suspect WARNINGs, one-off-roundness
+    WARNINGs (or the single "all agree" line), the Workbook: line, and the
+    Journal CSV: line if a journal was written. Factored out of the
+    (pre-existing) structured-input path so the document-driven path
+    reuses it verbatim rather than duplicating it.
+
+    bank_match_notes (H35-05, optional): gnucash_tieout.match_payouts_to_bank()'s
+    per-payout NO_MATCH/TIE notes. Rendered as a SEPARATE loud block from
+    the "STATEMENT DISAGREES" one below -- these are never a disagreement
+    with the LLP Statement of Account, so folding them into that block
+    would mislabel them. Never populated for a MATCHED payout (matching
+    cleanly is not loud) and never populated at all when no GnuCash book
+    was supplied (see match_payouts_to_bank()'s own contract).
+
+    bank_matches (H35-05 round 5, optional): the SAME {month: PayoutMatch}
+    mapping match_payouts_to_bank() returned. The loud block's header count
+    is derived from THIS, never from len(bank_match_notes) -- since round 4
+    (defect 1), an entire FY of unmatched payouts collapses to ONE note (the
+    "bank import does not appear to have run" line), so len(bank_match_notes)
+    undercounts the actual number of unmatched payouts whenever that
+    collapse fires. bank_matches gives the true payout-level count: the
+    number of PayoutMatch entries whose outcome is not MATCHED, out of the
+    total number of payouts."""
+    # H35-04 item D: informational rows (e.g. the incentive-instalment
+    # cross-check, superseded by D1's drawings identity) are excluded from
+    # every count and from the summary verdict below -- they are never a
+    # "variance" or an "undecidable", no matter what `agree` they carry on
+    # a given run. Their figures still print on the Reconciliation sheet
+    # itself; only this aggregation ignores them.
+    # H35-04 round 2 item 3: a `not_checked` row (D2's bank-credit match,
+    # deferred to H35-05; the exempt-share-of-profit row when only the
+    # filed return is missing) is excluded from these counts the same way
+    # an `informational` row already is -- neither is a genuine gap.
+    variances = [
+        r for r in report.reconciliation
+        if r.agree is False and not r.informational and not r.not_checked
+    ]
+    undecidable = [
+        r for r in report.reconciliation
+        if (r.agree is None or (r.agree is True and r.excluded_months))
+        and not r.informational and not r.not_checked
+    ]
+    # H35-16: rows that agree only within Rs 10 are counted on their own line,
+    # never under "variance".
+    within = [
+        r for r in report.reconciliation
+        if r.agree is True and r.within_tolerance_diff is not None
+        and not r.informational and not r.not_checked
+    ]
+    suspects = len(report.rate_change_suspects)
+    suspect_one_offs = [o for o in report.one_offs if o.status == "SUSPECT"]
+
+    lines_out: list[str] = []
+    # H35-04 item B: the LOUD block. Any disagreement with the LLP
+    # Statement of Account (L5) -- the reference for every row it carries a
+    # figure for -- or a failure in the statement's own arithmetic, is
+    # surfaced here, at the very top, ahead of even the headline
+    # "Partner Compensation Reconciliation for FY..." line. This is in
+    # ADDITION to the per-row status already covered by the variances/
+    # undecidable counts below, never a replacement for it. Nothing is
+    # shown here when report.statement_flags is empty (statement agrees
+    # everywhere and its own arithmetic checks out, or no statement was
+    # supplied at all).
+    if report.statement_within:
+        lines_out.append(
+            f"  Statement agrees within Rs {WITHIN_TOLERANCE_LIMIT:g} (not a disagreement): "
+            + "; ".join(report.statement_within)
+        )
+    if report.statement_flags:
+        lines_out.append("=" * 72)
+        lines_out.append(
+            f"STATEMENT DISAGREES -- {len(report.statement_flags)} issue(s) with the "
+            "LLP Statement of Account (L5), the reference for this reconciliation:"
+        )
+        for flag in report.statement_flags:
+            lines_out.append(f"  ! {flag}")
+        lines_out.append("=" * 72)
+
+    # H35-05: a second, separate loud block for bank-match NO_MATCH/TIE
+    # findings -- never merged into the "STATEMENT DISAGREES" block above
+    # (that one is specifically about the LLP Statement of Account, L5;
+    # this one is about a monthly payout that could not be tied to a bank
+    # credit already in the book). Only rendered when non-empty.
+    if bank_match_notes:
+        lines_out.append("=" * 72)
+        # H35-05 round 5: N must be the number of PAYOUTS not matched, not
+        # the number of NOTE lines -- since round 4, when the bank import
+        # has not run at all, every unmatched payout for the FY collapses
+        # into ONE note ("does not appear to have run"), so
+        # len(bank_match_notes) would misreport, e.g., 12 unmatched payouts
+        # as "1 payout(s)". Derive the count from bank_matches itself
+        # (every payout's own outcome) when available; fall back to the
+        # note count only when bank_matches was not supplied (defensive --
+        # every real caller supplies both together).
+        if bank_matches:
+            unmatched = sum(1 for m in bank_matches.values() if m.outcome != MATCHED)
+            total = len(bank_matches)
+            header_count = f"{unmatched} of {total}"
+        else:
+            header_count = str(len(bank_match_notes))
+        lines_out.append(
+            f"BANK MATCH -- {header_count} payout(s) could not be matched "
+            "to a bank credit already posted in the book (H35-05):"
+        )
+        for flag in bank_match_notes:
+            lines_out.append(f"  ! {flag}")
+        lines_out.append("=" * 72)
+
+    # H35-12: say plainly which payouts were matched as a set of bank credits.
+    split_matches = [m for m in (bank_matches or {}).values()
+                     if getattr(m, "is_split_match", False)]
+    if split_matches:
+        lines_out.append(
+            f"BANK MATCH -- {len(split_matches)} payout(s) were paid as several "
+            "bank credits and matched as a set:"
+        )
+        for m in split_matches:
+            parts_text = " + ".join(f"{p.amount:,.2f} on {p.date}" for p in m.parts)
+            lines_out.append(
+                f"  {m.month}: payout {m.payout_amount:,.2f} = {parts_text} "
+                f"(all posted to {m.credit_account})."
+            )
+
+    lines_out.append(
+        f"Partner Compensation Reconciliation for FY{report.financial_year} -- "
+        f"{len(report.monthly)} month(s), {len(report.cohort_instalments)} cohort "
+        "instalment(s)."
+    )
+    if variances:
+        lines_out.append(
+            f"  WARNING: reconciliation variance in {len(variances)} category(ies) "
+            "-- see Reconciliation/Exceptions sheets."
+        )
+    if within:
+        lines_out.append(
+            f"  NOTE: {len(within)} category(ies) agree only within Rs {WITHIN_TOLERANCE_LIMIT:g} "
+            "(not a variance; the difference is printed on each row) -- see the Reconciliation sheet."
+        )
+    if undecidable:
+        lines_out.append(
+            f"  NOTE: {len(undecidable)} category(ies) could not be reconciled -- "
+            "see Reconciliation/Exceptions sheets for the explicit reason."
+        )
+    if suspects:
+        lines_out.append(
+            f"  WARNING: mid-year capital rate change suspected in {suspects} "
+            "cohort(s) -- see Capital/Exceptions sheets."
+        )
+    if suspect_one_offs:
+        lines_out.append(
+            f"  WARNING: {len(suspect_one_offs)} one-off gross-up(s) failed the "
+            "roundness check -- see One-offs/Exceptions sheets."
+        )
+    if not variances and not undecidable and not suspects and not suspect_one_offs:
+        lines_out.append("  All reconciliation categories agree; no exceptions raised.")
+    lines_out.append(f"  Workbook: {output_path}")
+    if journal_line:
+        lines_out.append(journal_line)
+    return "\n".join(lines_out)
+
+
+def run(
+    entity: str = "",
+    advices_dir: str = "",
+    doc_password: str | None = None,
+    advisory_path: str = "",
+    llp_statement: str = "",
+    payment_schedule: str = "",
+    gnucash_path: str = "",
+    xlsx_26as: str = "",
+    output_path: str = "",
+    config_path: str | None = None,
+    model_override: str | None = None,
+    journal_path: str = "",
+    accrual_journal_path: str = "",
+    input_path: str = "",
+    bank_match_window: str = "7",
+    financial_year: str = "",
+    entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
+    firm_documents: str | list | None = None,
+) -> str:
+    """Skill entry point -- see the module docstring for the two entry
+    paths. `input_path`, when supplied, takes the TEST-ONLY structured
+    YAML/JSON path (unchanged from before this reshape); it is not part of
+    skill.yaml's `inputs:` and never renders in the UI. Otherwise, this
+    is the document-driven path described in _run_from_documents().
+
+    `accrual_journal_path` (H35-02, optional): when set AND journal_path is
+    also set, also writes the year-end share-of-profit accrual journal (a
+    SEPARATE CSV, never merged into journal_path's monthly journal --see
+    jv_emitter.build_accrual_journal()) to this path, if the L5 statement
+    supports it. Left blank, behaviour is unchanged from before H35-02.
+
+    `bank_match_window` (H35-05, optional, default "7"): the +/- day window
+    used to match a monthly payout against a bank credit already posted in
+    the book (see gnucash_tieout.match_payouts_to_bank()) -- this skill's
+    setting for that match, converted via _window_days() (an unparsable/
+    negative value falls back to DEFAULT_BANK_MATCH_WINDOW_DAYS, mirroring
+    skill_gnucash_intercompany's own `date_tolerance` UI setting). Only
+    consulted when journal_path AND gnucash_path are both supplied -- see
+    _run_from_documents().
+    """
+    if input_path:
+        return _run_from_structured_input(
+            input_path=input_path,
+            output_path=output_path,
+            config_path=config_path,
+            model_override=model_override,
+            journal_path=journal_path,
+            accrual_journal_path=accrual_journal_path,
+            entities_path=entities_path,
+        )
+    inputs_rows = None
+    sorted_docs = None
+    table = ""
+    if firm_documents:
+        # UI-23: the drop zone. Files are sorted by their CONTENT into the
+        # roles the pickers cover; a picker that was filled in always wins.
+        sorted_docs = _intake.sort_documents(
+            firm_documents, financial_year, doc_password,
+            manual=_manual_picks(advices_dir, advisory_path, award_year_documents,
+                                 llp_statement, payment_schedule))
+        table = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            _intake.cleanup(sorted_docs)
+            return table + f"\nERROR: {sorted_docs.stop}"
+        inputs_rows = sorted_docs.table_rows()
+        if sorted_docs.advices:
+            pdir = Path(sorted_docs.workdir) / "payouts"
+            pdir.mkdir(exist_ok=True)
+            for k, src in enumerate(sorted_docs.advices, start=1):
+                name = Path(src).name
+                if (pdir / name).exists():
+                    name = f"{k:03d}_{name}"
+                shutil.copy2(src, pdir / name)
+            advices_dir = str(pdir)
+        advisory_path = advisory_path or sorted_docs.advisory
+        llp_statement = llp_statement or sorted_docs.llp
+        payment_schedule = payment_schedule or sorted_docs.schedule
+        if not award_year_documents and sorted_docs.award:
+            award_year_documents = list(sorted_docs.award)
+        # A required role the folder did not hold: say so with the table.
+        for value, role in ((advices_dir, "monthly payout documents"),
+                            (advisory_path, "this year's Advisory")):
+            if not value:
+                _intake.cleanup(sorted_docs)
+                return table + f"\nERROR: no {role} were found in the documents. Add them to the folder, or pick them by hand."
+    try:
+        reply = _run_from_documents(
+        entity=entity,
+        advices_dir=advices_dir,
+        doc_password=doc_password,
+        advisory_path=advisory_path,
+        llp_statement=llp_statement,
+        payment_schedule=payment_schedule,
+        gnucash_path=gnucash_path,
+        xlsx_26as=xlsx_26as,
+        output_path=output_path,
+        config_path=config_path,
+        model_override=model_override,
+        journal_path=journal_path,
+        accrual_journal_path=accrual_journal_path,
+        bank_match_window=bank_match_window,
+        financial_year=financial_year,
+        entities_path=entities_path,
+        award_year_documents=award_year_documents,
+        inputs_rows=inputs_rows,
+    )
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
+    if not table:
+        return reply
+    text = table + "\n" + str(reply)
+    if isinstance(reply, ReplyWithOutputs):
+        return ReplyWithOutputs(text, reply.extra_outputs)
+    return text
+
+
+def _manual_picks(advices_dir, advisory_path, award_year_documents,
+                  llp_statement, payment_schedule) -> dict:
+    """Which roles the user filled in by hand (those always win)."""
+    return {"payout": bool(advices_dir), "advisory": bool(advisory_path),
+            "award": bool(award_year_documents), "llp": bool(llp_statement),
+            "schedule": bool(payment_schedule)}
+
+
+def check_documents(inputs: dict) -> str:
+    """UI-23 "Check my files": run ONLY the intake sort on the dropped files
+    and any manual picks, and return the same Inputs table a run shows.
+    Reads no GnuCash book, parses nothing beyond what intake needs, writes
+    no workbook or journal, and removes its own temp files."""
+    docs = inputs.get("firm_documents")
+    if not docs:
+        return ("Nothing to check: drop the firm's documents (a folder, files or a zip) "
+                "into the \"All of the firm's documents\" box first.")
+    sorted_docs = None
+    try:
+        sorted_docs = _intake.sort_documents(
+            docs, str(inputs.get("fy") or inputs.get("financial_year") or ""),
+            inputs.get("doc_password") or None,
+            manual=_manual_picks(inputs.get("advices_dir"), inputs.get("advisory_path"),
+                                 inputs.get("award_year_documents"),
+                                 inputs.get("llp_statement"), inputs.get("payment_schedule")))
+        text = _intake.inputs_text(sorted_docs)
+        if sorted_docs.stop:
+            return text + f"\nERROR: {sorted_docs.stop}"
+        return text
+    except Exception as e:  # noqa: BLE001 -- a check never shows a traceback
+        return f"ERROR: the files could not be checked ({type(e).__name__}: {e})"
+    finally:
+        if sorted_docs is not None:
+            _intake.cleanup(sorted_docs)
+
+
+def _run_from_documents(
+    *,
+    entity: str,
+    advices_dir: str,
+    doc_password: str | None,
+    advisory_path: str,
+    llp_statement: str,
+    payment_schedule: str,
+    gnucash_path: str,
+    xlsx_26as: str,
+    output_path: str,
+    config_path: str | None,
+    model_override: str | None,
+    journal_path: str,
+    accrual_journal_path: str = "",
+    bank_match_window: str = "7",
+    financial_year: str = "",
+    entities_path: str | None = None,
+    award_year_documents: str | list | None = None,
+    inputs_rows: list | None = None,
+) -> str:
+    """Document-driven entry point (the skill.yaml-facing path).
+
+    `parsers/advisory.py` (L3), `parsers/payout_advice.py` (L1),
+    `parsers/llp_statement.py` (L5) and `parsers/payment_schedule.py` (L4)
+    are all implemented (see their own module docstrings). `entity`,
+    `gnucash_path` and `xlsx_26as` do not have a parser under parsers/ at
+    all in this build -- they read an existing structured format rather
+    than parse a free-form PDF. `xlsx_26as` is read by
+    xlsx_26as_reader.read_form_26as_tds_credit() (Section A), feeding
+    external["form_26as_total_credit"]. `gnucash_path` now feeds a real,
+    read-only books tie-out (gnucash_tieout.py, Sections B and C: a
+    posted-already check plus a per-account balance tie-out) once the
+    report is built; it is separately used later, read-only, to validate
+    configured account paths before a journal is written.
+
+    Required inputs (entity, advices_dir, advisory_path) missing fail loud
+    by name, before any parsing is attempted. Optional inputs
+    (llp_statement, payment_schedule, gnucash_path, xlsx_26as) resolve to
+    a per-leg status note FIRST, independent of whether the required
+    documents can be parsed yet, so their "not available" degrade
+    behaviour is observable even while a required leg fails. The two
+    required documents then attempt to parse; ANY exception from that
+    attempt (a document that fails its content-dispatch check, or
+    pdfplumber choking on an unreadable/malformed/wrong-password PDF) is
+    caught and turned into an "ERROR: ..." string naming the document and
+    the underlying reason -- this function never raises for a user-facing
+    problem. The optional L5 and L4 legs degrade the same way (see
+    _resolve_llp_leg / _resolve_schedule_leg) rather than aborting the
+    run. When the L4 schedule parses, its record takes precedence over
+    the payout advices for `gross_share_of_profit` / `firm_tax_on_sop` /
+    `firm_tax_others` inside mapper.build_input_data() -- any disagreement
+    with the payout advices is reported as a mapper diagnostic, never
+    blocking the run.
+
+    Once both required documents (and the optional L5 leg, if resolvable)
+    parse, their records are assembled by mapper.build_input_data() into
+    engine.build_report()'s input shape (a financial-year disagreement
+    between documents -- mapper.FinancialYearMismatchError, or plain
+    ValueError if no year at all -- becomes an "ERROR: ..." string here,
+    not a traceback), the reconciliation is computed, and the workbook is
+    written (creating output_path's parent directories). If journal_path
+    is supplied, the entity's `partner_comp_accounts` (from the
+    entities.yaml-shaped file at entities_path) are resolved and -- if
+    gnucash_path is also supplied -- validated against that book (see
+    _validate_accounts_against_book) BEFORE anything is written; a missing
+    config or an invalid account path is an "ERROR: ..." string, never a
+    partially-written journal. A JournalValidationError from
+    jv_emitter.build_journals() is likewise turned into an "ERROR: ..."
+    string. The final summary reuses _summarize_report() (the same
+    reporting tail the structured-input path uses) plus the optional
+    legs' status notes. Never opens a write handle on gnucash_path --
+    read-only account-path validation and the Section B/C books tie-out
+    only.
+    """
+    for value, name, label in (
+        (entity, "entity", "Entity"),
+        (advices_dir, "advices_dir", "Monthly partner payout certificates / payslips"),
+        (advisory_path, "advisory_path", "Compensation advisory / target compensation advice"),
+    ):
+        err = _require(value, name, label)
+        if err:
+            return err
+
+    advices_path = Path(advices_dir)
+    if not advices_path.is_dir():
+        return f"ERROR: advices_dir does not point to a directory: {advices_dir}"
+    advice_pdfs = sorted(p for p in advices_path.iterdir() if p.suffix.lower() == ".pdf")
+    if not advice_pdfs:
+        return f"ERROR: no PDF files found in advices_dir: {advices_dir}"
+
+    # Optional legs resolve first -- independent of whether the required
+    # legs below can be parsed yet in this build.
+    llp_note, llp_record = _resolve_llp_leg(llp_statement, doc_password)
+    schedule_note, schedule_record = _resolve_schedule_leg(payment_schedule, doc_password)
+    # gnucash_note starts as a placeholder here because the required
+    # documents (advisory/advices) haven't been parsed yet, so `report`
+    # (needed by build_posted_check/build_balance_tieout below) doesn't
+    # exist yet -- this placeholder is only ever seen by an early-exit
+    # ERROR path below. Once `report` is built successfully, this slot is
+    # overwritten in place (via _gnucash_note_idx) with the real posted-
+    # check note; the balance tie-out results are appended straight onto
+    # report.reconciliation instead of surfacing as a single note.
+    if not gnucash_path:
+        gnucash_note = "GnuCash books tie-out: not available (no book supplied)."
+    else:
+        gnucash_note = f"GnuCash books tie-out: pending ({gnucash_path} not yet checked)."
+    # xlsx_note/form_26as_total_credit start as placeholders: the real read
+    # needs firm_name (xlsx_26as_reader.py's A2 fix filters Part I to this
+    # firm's own s.194T rows, not the whole sheet), which isn't resolved
+    # until after the required documents parse below. Overwritten in place
+    # via _xlsx_note_idx once firm_name is known -- same pattern gnucash_note
+    # uses via _gnucash_note_idx. Any early-exit ERROR path below (before
+    # firm_name resolves) only ever shows this placeholder, which is
+    # correct: the 26AS read genuinely hasn't happened yet at that point.
+    # Mirrors gnucash_note's own pattern immediately above: when no workbook
+    # was supplied at all, that is already the final answer ("not
+    # available") and must say so even on an early-exit ERROR path below --
+    # only a SUPPLIED-but-not-yet-read workbook shows "pending".
+    if not xlsx_26as:
+        xlsx_note = "26AS TDS-credit tie-out: not available (no workbook supplied)."
+    else:
+        xlsx_note = f"26AS TDS-credit tie-out: pending ({xlsx_26as} not yet computed)."
+    form_26as_total_credit = None
+    optional_notes = [llp_note, schedule_note, gnucash_note, xlsx_note]
+    _gnucash_note_idx = 2
+    _xlsx_note_idx = 3
+    # UI-17: WARN-only check that the advisory slot holds the Compensation
+    # summary and not a target-compensation letter. Appended (never inserted)
+    # so the note indexes above stay put; it never stops or alters the run.
+    optional_notes.extend(_precheck.check_advisory_slot(
+        _precheck.read_first_page_text(advisory_path, doc_password)))
+
+    # Required legs: the Advisory letter, then every monthly payout advice.
+    # Any exception here (Stage 2 placeholder, content-dispatch mismatch,
+    # or a pdfplumber-level failure to open/read the PDF) is a user-facing
+    # problem, never a crash -- turned into an "ERROR: ..." string naming
+    # the document and the reason.
+    try:
+        advisory_record = _advisory_parser.parse(advisory_path, doc_password)
+    except Exception as e:
+        lines = [
+            f"ERROR: could not parse the Compensation advisory ({advisory_path}): "
+            f"{_precheck.explain_pdf_error(e, doc_password)}",
+            "  Optional-leg status (unaffected by the error above):",
+        ]
+        lines.extend(f"  - {note}" for note in optional_notes)
+        return "\n".join(lines)
+
+    advice_records = []
+    for pdf in advice_pdfs:
+        try:
+            advice_records.append(_payout_advice_parser.parse(str(pdf), doc_password))
+        except Exception as e:
+            lines = [
+                f"ERROR: could not parse payout advice ({pdf}): "
+                f"{_precheck.explain_pdf_error(e, doc_password)}",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+
+    # UI-17: WARN-only checks on the payout set (out-of-year month, same month
+    # twice, months missing). They read the parsed records and change nothing.
+    _check_fy = (advisory_record.get("financial_year")
+                 or (schedule_record or {}).get("financial_year"))
+    _sched_months = None
+    if schedule_record:
+        from .mapper import _schedule_month_map  # noqa: PLC0415
+        _sched_months = set(_schedule_month_map(schedule_record))
+    optional_notes.extend(_precheck.check_payout_set(advice_records, _check_fy, _sched_months))
+
+    # Both required documents (and the optional L5 leg, if it resolved)
+    # parsed successfully. Resolve the entity's config (accounts/drivers),
+    # assemble the parsed records into engine.build_report()'s input
+    # shape, compute the reconciliation, and write the workbook.
+    # H35-11: entity settings come ONLY from entities_path. config_path is the
+    # AI-model settings file and is never read as entity settings.
+    entity_profile, entity_config_note = _resolve_entity_config(entity, entities_path)
+    if entity_config_note:
+        optional_notes.append(entity_config_note)
+    # A failed load is reported as such everywhere downstream (never as "not
+    # configured"), and again at the very top of the reply.
+    settings_error = entity_config_note if entity_profile is None else None
+
+    if entity_profile is not None:
+        drivers_by_fy = entity_profile.extra_items.get("partner_comp_drivers") or {}
+    else:
+        drivers_by_fy = {}
+
+    # firm_name is the FIRM's name (the LLP/partnership that pays out the
+    # compensation), never the taxpayer's own name -- entity_profile.name
+    # identifies the partner whose return/books this run is for, which is
+    # a different entity entirely and must never be used here. The payment
+    # schedule (L4) prints the firm's own name on its letterhead, so it is
+    # the preferred source; a payout advice (L1) also prints it, so the
+    # first advice record with a non-empty entity_name is the fallback.
+    # Absent both, firm_name is "" -- never silently defaulted to the
+    # taxpayer's name.
+    firm_name = ""
+    if schedule_record and schedule_record.get("entity_name"):
+        firm_name = schedule_record["entity_name"]
+    else:
+        for rec in advice_records:
+            if rec.get("entity_name"):
+                firm_name = rec["entity_name"]
+                break
+
+    # UI-16: a 26AS workbook that is not the selected entity's is refused
+    # outright -- its TDS credit would be booked against the wrong person.
+    if xlsx_26as and entity_profile is not None:
+        _verdict, _why = check_owner_26as(
+            xlsx_26as, entity, entity_profile.name, getattr(entity_profile, "pan", ""))
+        if _verdict == "mismatch":
+            lines = [
+                f"ERROR: {_why}. Pick {entity}'s own 26AS workbook (run 26AS "
+                "Convert on its PDF first), or choose (none) to skip the "
+                "TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+        if _verdict == "unknown":
+            # UI-18: a workbook that does not say whose it is matches nobody,
+            # so the run agrees with the picker and refuses it.
+            lines = [
+                f"ERROR: {_why}. Pick {entity}'s own 26AS workbook (run 26AS "
+                "Convert on its PDF first), or choose (none) to skip the "
+                "TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+    elif xlsx_26as:
+        optional_notes.append(
+            "26AS ownership: not checked ("
+            + (settings_error or "the entity's PAN/name are not available")
+            + ").")
+
+    # UI-18: a 26AS workbook for another financial year is refused too -- the
+    # selected year, or failing that the year the documents state.
+    if xlsx_26as:
+        _fy_verdict, _fy_why = check_fy_26as(xlsx_26as, financial_year or _check_fy)
+        if _fy_verdict == "mismatch":
+            lines = [
+                f"ERROR: {_fy_why}. Pick the 26AS workbook for that year, or choose "
+                "(none) to skip the TDS-credit tie-out.",
+                "  Optional-leg status (unaffected by the error above):",
+            ]
+            lines.extend(f"  - {note}" for note in optional_notes)
+            return "\n".join(lines)
+
+    # Now that firm_name is known, do the real 26AS read (filtered to
+    # s.194T rows for this firm's deductor -- see xlsx_26as_reader.py).
+    xlsx_note, form_26as_total_credit = read_form_26as_tds_credit(xlsx_26as, firm_name)
+    optional_notes[_xlsx_note_idx] = xlsx_note
+
+    try:
+        data = build_input_data(
+            financial_year=(financial_year or None),
+            advisory_record=advisory_record,
+            advice_records=advice_records,
+            llp_record=llp_record,
+            schedule_record=schedule_record,
+            firm_name=firm_name,
+        )
+    except (FinancialYearMismatchError, ValueError) as e:
+        lines = [f"ERROR: {e}", "  Optional-leg status (unaffected by the error above):"]
+        lines.extend(f"  - {note}" for note in optional_notes)
+        return "\n".join(lines)
+
+    mapper_diagnostics = data.pop("_diagnostics", [])
+    # H35-14: award-year documents (any year). Read, never trusted by file
+    # name; selection and the per-instalment check happen in the engine.
+    _ay_docs, _ay_notes = _read_award_year_documents(award_year_documents, doc_password)
+    data["award_year_documents"] = _ay_docs
+    optional_notes.extend(_ay_notes)
+    drivers = drivers_by_fy.get(data["financial_year"])
+    if drivers is not None:
+        data["drivers"] = drivers
+    # H35-06: the only rate this skill ever applies a documented DEFAULT
+    # for, rather than failing loud on a missing driver -- 6% simple
+    # interest on capital, per skill.yaml's own help text for this input.
+    # This is applied HERE, never inside engine.py (see engine.py's
+    # governing rule: no rate is ever a module-level constant or fallback
+    # default there) -- build_report() itself always treats a missing
+    # drivers["capital_interest_rate"] as CANNOT RECONCILE, exactly like
+    # every other driver, whether called from here or directly from a test.
+    # An entity's own partner_comp_drivers config always wins when it sets
+    # this key explicitly (including to a different rate for a year the LLP
+    # actually changed it) -- this default only fills a genuine gap.
+    data.setdefault("drivers", {})
+    if data["drivers"].get("capital_interest_rate") is None:
+        data["drivers"]["capital_interest_rate"] = _DEFAULT_CAPITAL_INTEREST_RATE
+        data.setdefault("driver_sources", {})["capital_interest_rate"] = (
+            "Default (6% simple interest, inferred -- not a figure from any document)"
+        )
+    apply_capital_rule_defaults(
+        data, getattr(entity_profile, "partner_admission_date", None))
+    if (data["drivers"].get("capital_interest_tds_rate") is None
+            and data["drivers"].get("remuneration_tds_rate") is None):
+        data["drivers"]["capital_interest_tds_rate"] = _DEFAULT_S194T_TDS_RATE
+        data.setdefault("driver_sources", {})["capital_interest_tds_rate"] = (
+            "statutory default 10% (s.194T) -- not set for this entity")
+    # Section A: feed the 26AS reader's result into the existing
+    # external["form_26as_total_credit"] reconciliation leg (engine.py's
+    # field_or_reason() treats a None value the same as the key being
+    # absent, so this is safe to set unconditionally -- a failed/absent
+    # read degrades the leg exactly as before, never a silent 0.0).
+    data.setdefault("external", {})
+    data["external"]["form_26as_total_credit"] = form_26as_total_credit
+
+    try:
+        report = build_report(data)
+    except KeyError as e:
+        return f"ERROR: input is missing required field {e}"
+
+    # Section B/C: GnuCash tie-out. Both legs reuse jv_emitter.build_journals
+    # to compute this run's implied journal (purely, no I/O) and compare it
+    # read-only against gnucash_path -- see gnucash_tieout.py. Neither leg
+    # can raise: every unavailable input (no book, no accounts configured,
+    # an unresolvable account path, an unbuildable journal) degrades to an
+    # explicit note/CANNOT-RECONCILE result rather than aborting the run.
+    accounts_for_tieout = (
+        dict(entity_profile.partner_comp_accounts)
+        if (entity_profile and entity_profile.partner_comp_accounts) else {}
+    )
+
+    # H35-05 round 2, item 2: run the bank match FIRST and thread the SAME
+    # `bank_matches` into build_posted_check() and build_balance_tieout()
+    # below, so every check sees exactly the journals this run will
+    # actually write (a NO_MATCH/TIE/SPLIT payout's journal never exists;
+    # a MATCHED payout's cash leg is the bank import's own counter-
+    # account). Running this before the tie-out/posted checks (the
+    # pre-round-2 order was the other way around) is what fixes the
+    # wrong-scope totals defect -- see match_payouts_to_bank()'s own
+    # docstring for the full contract, including `unavailable_reason`.
+    bank_matches, bank_match_notes, bank_match_unavailable = match_payouts_to_bank(
+        report, accounts_for_tieout, gnucash_path,
+        window_days=_window_days(bank_match_window),
+        settings_error=settings_error,
+    )
+
+    posted_check, gnucash_note = build_posted_check(
+        report, accounts_for_tieout, gnucash_path, report.financial_year,
+        bank_matches=bank_matches or None, settings_error=settings_error,
+    )
+    optional_notes[_gnucash_note_idx] = gnucash_note
+    # H35-04 round 2 item 1: build_balance_tieout() now needs the SAME
+    # posted-check results to tell "this skill's own journal for this
+    # account is not yet posted" (-> PENDING JOURNAL POSTING, reconciled)
+    # apart from a genuine gap on an already-posted journal (-> today's
+    # plain VARIANCE/CANNOT-RECONCILE comparison, unchanged).
+    report.reconciliation.extend(
+        build_balance_tieout(
+            report, accounts_for_tieout, gnucash_path, report.financial_year,
+            posted_check=posted_check, bank_matches=bank_matches or None,
+            settings_error=settings_error,
+        )
+    )
+
+    # H35-15: statement closing capital / current vs the book at 31 March.
+    report.reconciliation.extend(
+        build_statement_book_check(
+            report, accounts_for_tieout, gnucash_path, report.financial_year,
+            posted_check=posted_check, bank_matches=bank_matches or None,
+            settings_error=settings_error,
+        )
+    )
+
+    # H35-21: rows built before the book was read offer the year-end accrual
+    # as pending; when the book already holds it, say so instead.
+    restate_posted_accrual_rows(report.reconciliation, posted_check, report)
+
+    # H35-05: per-payout fuzzy match result reported above. `bank_matches`
+    # is {} whenever matching could not run at all (see
+    # `bank_match_unavailable`) -- in that case the engine.py
+    # NOT_CHECKED_YET placeholder row (built into report.reconciliation by
+    # build_report() already) is left exactly as-is, there is nothing to
+    # check yet. Only when a real match ran do we replace that row with a
+    # real verdict.
+    if bank_matches:
+        total_computed = sum(m.payout_amount for m in bank_matches.values())
+        total_matched_credits = sum(
+            m.credit_amount for m in bank_matches.values() if m.outcome == MATCHED
+        )
+        gap_count = sum(1 for m in bank_matches.values() if m.outcome != MATCHED)
+        if gap_count == 0:
+            bank_row = ReconciliationResult(
+                category="Total cash received (monthly payouts) vs Bank",
+                sources={
+                    "Computed (monthly payouts)": total_computed,
+                    "Bank (matched credits)": total_matched_credits,
+                },
+                agree=True,
+                note=(
+                    "All monthly payouts matched to a bank credit already posted "
+                    "in the book (H35-05) -- see the Bank match sheet for detail."
+                ),
+            )
+        else:
+            bank_row = ReconciliationResult(
+                category="Total cash received (monthly payouts) vs Bank",
+                sources={
+                    "Computed (monthly payouts)": total_computed,
+                    "Bank (matched credits)": total_matched_credits,
+                },
+                agree=None,
+                note=(
+                    f"{CANNOT_RECONCILE} -- {gap_count} of {len(bank_matches)} "
+                    "monthly payout(s) could not be matched to a bank credit "
+                    "already posted in the book (H35-05) -- see the BANK MATCH "
+                    "notes below and the Bank match sheet."
+                ),
+            )
+        report.reconciliation = [
+            r for r in report.reconciliation
+            if r.category != "Total cash received (monthly payouts) vs Bank"
+        ]
+        report.reconciliation.append(bank_row)
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_report_workbook(
+        report, str(out_path), posted_check=posted_check, bank_matches=bank_matches or None,
+        inputs_rows=inputs_rows,
+    )
+
+    journal_line = ""
+    account_notes: list[str] = []
+    # UI-24: which journal files THIS run wrote, handed to the UI as structured
+    # data (agents.outputs) -- never scraped from the reply text.
+    monthly_out: str | None = None
+    monthly_why = ("No journal written: the journal path was left blank, or the default "
+                   "path was skipped (see Optional-leg status).")
+    accrual_out: str | None = None
+    accrual_why = "No accrual journal written: needs the journal above and its own path."
+    red_flags: list[str] = []  # IMP-18: printed first in the reply
+    # UI-17: "auto" asks for the default CSV names (entity + FY, beside the
+    # workbook). Unlike an explicit path it is best-effort: with no journal
+    # accounts configured for the entity, or no LLP statement for the accrual,
+    # that journal is skipped with a note instead of failing the run.
+    if str(journal_path).strip().lower() == "auto" or str(accrual_journal_path).strip().lower() == "auto":
+        _auto_j, _auto_a = _precheck.default_journal_paths(
+            entity, data["financial_year"], output_path)
+        if str(journal_path).strip().lower() == "auto":
+            if entity_profile is not None and entity_profile.partner_comp_accounts and gnucash_path:
+                journal_path = _auto_j
+            else:
+                journal_path = ""
+                if settings_error:
+                    optional_notes.append(
+                        f"Journal CSV: skipped (default path requested, but {settings_error})")
+                else:
+                    optional_notes.append(
+                        "Journal CSV: skipped (default path requested, but it needs both "
+                        "this entity's partner_comp_accounts and a GnuCash book to match "
+                        "the bank credits against).")
+        if str(accrual_journal_path).strip().lower() == "auto":
+            if journal_path and llp_record:
+                accrual_journal_path = _auto_a
+            else:
+                accrual_journal_path = ""
+                if journal_path:
+                    optional_notes.append(
+                        "Accrual journal CSV: skipped (needs the LLP statement of account).")
+    if journal_path:
+        accounts, account_notes, accounts_error = _resolve_accounts_for_journal(
+            entity_profile, entity, gnucash_path, settings_error,
+        )
+        if accounts_error:
+            return accounts_error
+
+        # H35-02: the accrual journal (Dr current_account / Cr
+        # share_of_profit_income, see jv_emitter.build_accrual_journal())
+        # has NO bank leg at all -- it is structurally immune to the
+        # double-booking defect this section's bank-match gate exists for,
+        # so it is written here, independently and FIRST, regardless of
+        # whether bank matching is available. Its own journal_line text is
+        # assembled now and prefixed onto whatever this block returns
+        # below, so it is never lost even when the monthly journal itself
+        # is refused.
+        accrual_line = ""
+        accrual_why = "No accrual journal written: the accrual journal path was left blank."
+        if accrual_journal_path:
+            # H35-22: the rounding line goes against the salary clearing
+            # account only; never a Drawings account of this entity.
+            _clearing = str(accounts.get(ROUNDING_KEY) or "").strip()
+            _drawings = {str(d).strip() for d in (entity_profile.drawings_accounts if entity_profile else [])}
+            if _clearing and (_clearing in _drawings or _clearing.split(":", 1)[-1] in _drawings):
+                return (f"ERROR: partner_comp_accounts['{ROUNDING_KEY}'] = {_clearing!r} is one of this "
+                        "entity's Drawings accounts and cannot take the rounding line. Nothing was written.")
+            # H35-22: size the rounding against the book (None when the
+            # accrual is already posted: a posted journal is final).
+            _gap = accrual_book_gap(
+                report, accounts, gnucash_path, report.financial_year,
+                posted_check=posted_check, bank_matches=bank_matches or None)
+            try:
+                accrual_journal, accrual_note, residual = build_accrual_journal(
+                    report, accounts, book_gap=_gap)
+            except JournalValidationError as e:
+                return f"ERROR: {e}"
+            if accrual_journal is not None:
+                # IMP-18: an accrual already in the book is left OUT of the CSV.
+                _part = partition_by_posted([accrual_journal], posted_check)
+                _flags, _info, _why = _posted_report(_part, gnucash_note)
+                red_flags.extend(_flags)
+                if not _part["write"]:
+                    accrual_line = (
+                        f"  Accrual journal: not written. {_why}"
+                        + "".join(f"\n  {x}" for x in _info))
+                    _stale = _blank_stale_csv(accrual_journal_path)
+                    if _stale:
+                        accrual_line += "\n  " + _stale
+                    accrual_why = f"No accrual journal written: {_why}"
+                else:
+                    write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+                    accrual_out = accrual_journal_path
+                    accrual_line = (
+                        f"  Accrual journal CSV: {accrual_journal_path} "
+                        f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                    )
+                    accrual_line += "".join(f"\n  {x}" for x in _info)
+                    accrual_why = _why
+            else:
+                accrual_line = f"  Accrual journal: not written. {accrual_note}"
+                accrual_why = f"No accrual journal written: {accrual_note}"
+            # H35-02 item 4: the residual current-account comparison after
+            # whatever the accrual applied -- reported here, never booked.
+            residual_status = (
+                "AGREE" if residual.agree else
+                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
+            )
+            accrual_line += f"\n  {residual.category}: {residual_status}. {residual.note}"
+
+        # H35-05 round 2, item 1 (RED FLAG fix): the pre-H35-05
+        # unconditional "Dr bank = total_paid on every payout" leg must be
+        # UNREACHABLE from any path that writes a journal CSV. The bank
+        # import always runs first, so a monthly journal with its own bank
+        # leg -- written whenever bank matching could not run, for ANY
+        # reason -- double-books the exact same cash movement. Refuse the
+        # write and say why, naming the reason match_payouts_to_bank()
+        # itself returned; the recon workbook (and the accrual journal
+        # above, which has no bank leg and is unaffected) are already
+        # written by this point.
+        if bank_match_unavailable is not None:
+            lines = [
+                f"ERROR: cannot write the journal CSV -- {bank_match_unavailable}",
+                (
+                    "  The recon workbook has already been written to "
+                    f"{output_path}."
+                ),
+            ]
+            if accrual_line:
+                lines.append(accrual_line)
+            return ReplyWithOutputs("\n".join(lines), [
+                extra_output("journal_csv", None, f"No journal written: {bank_match_unavailable}"),
+                extra_output("accrual_journal_csv", accrual_out, accrual_why),
+            ])
+
+        try:
+            journals = build_journals(report, accounts, bank_matches=bank_matches or None)
+        except JournalValidationError as e:
+            return f"ERROR: {e}"
+        # IMP-18: journals already in the book are left OUT of the CSV.
+        _part = partition_by_posted(journals, posted_check)
+        _flags, _info, _why = _posted_report(_part, gnucash_note)
+        red_flags.extend(_flags)
+        journals = _part["write"]
+        if journals:
+            write_journal_csv(journals, journal_path)
+            monthly_out = journal_path
+            row_count = sum(len(j.splits) for j in journals)
+            journal_line = (
+                f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
+                f"{row_count} row(s))."
+            )
+            monthly_why = _why
+        else:
+            journal_line = ("  Journal CSV: not written. "
+                            + (_why or "No monthly journals are implied by this run."))
+            _stale = _blank_stale_csv(journal_path)
+            if _stale:
+                journal_line += "\n  " + _stale
+            monthly_why = ("No journal written: "
+                           + (_why or "no monthly journals are implied by this run."))
+        journal_line += "".join(f"\n  {x}" for x in _info)
+        if accrual_line:
+            journal_line += f"\n{accrual_line}"
+
+    summary = _summarize_report(
+        report, output_path, journal_line, bank_match_notes=bank_match_notes or None,
+        bank_matches=bank_matches or None,
+    )
+    lines = [summary, "  Optional-leg status:"]
+    lines.extend(f"  - {note}" for note in optional_notes)
+    lines.extend(f"  - {note}" for note in account_notes)
+    lines.extend(f"  - {note}" for note in mapper_diagnostics)
+    if settings_error:
+        # Near the top of the reply, not buried in the optional-leg list.
+        lines.insert(0, f"WARNING: {settings_error} The journal, the posted-already "
+                        "check, the bank match, the GnuCash tie-out and the 26AS "
+                        "ownership check were NOT run with this entity's settings.")
+    for _rf in reversed(red_flags):  # IMP-18: RED FLAGs lead the reply
+        lines.insert(0, _rf)
+    return ReplyWithOutputs("\n".join(lines), [
+        extra_output("journal_csv", monthly_out, monthly_why),
+        extra_output("accrual_journal_csv", accrual_out, accrual_why),
+    ])
+
+
+def _blank_stale_csv(path: str) -> str:
+    """IMP-18: when every journal is left out nothing is written, so a CSV from
+    an EARLIER run at the same path would still hold journals that are now in
+    the book and could be imported twice. Replace such a file with a
+    header-only CSV (never delete it). Returns the reply line, or "" when no
+    older file existed."""
+    if not path or not Path(path).exists():
+        return ""
+    write_journal_csv([], path)
+    return (f"Older CSV at {path} replaced with an empty one: everything in it "
+            "is already in the book.")
+
+
+def _posted_report(part: dict, gnucash_note: str) -> tuple[list[str], list[str], str]:
+    """IMP-18: turn a partition_by_posted() result into (red flags, info lines,
+    one-line why for extra_output). Num and date only -- no amounts."""
+    def _ref(js):
+        return ", ".join(f"{j.txn_id} ({j.date})" for j in js)
+
+    flags: list[str] = []
+    info: list[str] = []
+    why: list[str] = []
+    if part["mismatch"]:
+        flags.append(
+            f"RED FLAG: {_ref(part['mismatch'])} is already in the book with DIFFERENT "
+            "amounts from the journal this run computes - the book and the computed "
+            "journal disagree. It was left out of the CSV; resolve it before posting "
+            "anything for it.")
+        why.append(f"left out (book and computed journal disagree): {_ref(part['mismatch'])}")
+    if part["unchecked"]:
+        reason = (gnucash_note or "").strip() or "no GnuCash book was read."
+        flags.append(
+            "RED FLAG: NOT CHECKED against the book - "
+            f"{reason} Every journal was written; any of them may already be in the "
+            "book, so check before import.")
+        why.append("NOT CHECKED against the book - any journal may already be posted")
+    if part["left_out"]:
+        info.append(
+            f"Already in the book (left out): {len(part['left_out'])} journal(s) - "
+            f"{_ref(part['left_out'])}")
+        why.append(f"already in the book, left out: {_ref(part['left_out'])}")
+    if part["possible"]:
+        info.append(
+            f"Possible already in the book - check before import: {_ref(part['possible'])}")
+        why.append(f"possible already in the book - check before import: {_ref(part['possible'])}")
+    return flags, info, "; ".join(why)
+
+
+def _run_from_structured_input(
+    *,
+    input_path: str,
+    output_path: str,
+    config_path: str | None,
+    model_override: str | None,
+    journal_path: str,
+    accrual_journal_path: str = "",
+    entities_path: str | None = None,
+) -> str:
+    """TEST-ONLY entry path (see module docstring). Read the structured
+    YAML/JSON input for one financial year, compute the reconciliation
+    (engine.build_report), write the 10-sheet workbook
+    (writer.write_report_workbook) to output_path, and return a text
+    summary. Never raises for a user-facing problem -- returns an
+    "ERROR: ..." string instead, mirroring skill_mf_cas's convention.
+
+    journal_path is optional (Stage 1b). When non-empty, also builds and
+    writes the GnuCash multi-split journal CSV implied by the reconciled
+    year (jv_emitter.build_journals / write_journal_csv) to that path, and
+    mentions it (with transaction/row counts) in the returned summary. When
+    empty, behaviour is byte-identical to before Stage 1b existed -- no CSV
+    is written.
+
+    accrual_journal_path is optional (H35-02). When non-empty AND
+    journal_path is also non-empty, also builds and writes the year-end
+    share-of-profit accrual journal (jv_emitter.build_accrual_journal /
+    write_accrual_journal_csv) to this SEPARATE path -- never merged into
+    journal_path's CSV -- if the input's llp_record supports it.
+    """
+    in_path = Path(input_path)
+    if not in_path.is_file():
+        return f"ERROR: file not found: {input_path}"
+
+    try:
+        data = _load_input(str(in_path))
+    except (ValueError, OSError) as e:
+        return f"ERROR: {e}"
+    except Exception as e:  # malformed YAML/JSON
+        return f"ERROR: could not parse '{input_path}' as structured input: {e}"
+
+    if not isinstance(data, dict) or "financial_year" not in data:
+        return (
+            "ERROR: input file must be a mapping with at least a "
+            "'financial_year' key (see skill.yaml's help text for the shape)."
+        )
+
+    # H35-10: the same month twice would be counted twice -- refuse.
+    _seen_months: set = set()
+    for _m in (data.get("monthly") or []):
+        _mk = _m.get("month") if isinstance(_m, dict) else None
+        if _mk is not None and _mk in _seen_months:
+            return (f"ERROR: the structured input lists the month {_mk} more than once. "
+                    "A month must appear ONCE; nothing was written.")
+        _seen_months.add(_mk)
+
+    try:
+        report = build_report(data)
+    except KeyError as e:
+        return f"ERROR: input is missing required field {e}"
+
+    out_path = Path(output_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    write_report_workbook(report, str(out_path))
+
+    journal_line = ""
+    not_checked_flag = ""
+    if journal_path:
+        accounts = data.get("accounts") or {}
+        try:
+            journals = build_journals(report, accounts)
+        except JournalValidationError as e:
+            return f"ERROR: {e}"
+        write_journal_csv(journals, journal_path)
+        row_count = sum(len(j.splits) for j in journals)
+        not_checked_flag = (
+            "RED FLAG: NOT CHECKED against the book - this structured-input entry "
+            "path has no GnuCash book, so the posted-already check did not run; any "
+            "journal below may already be in the book."
+        )
+        journal_line = (
+            f"  Journal CSV: {journal_path} ({len(journals)} transaction(s), "
+            f"{row_count} row(s))."
+        )
+        if accrual_journal_path:
+            accrual_journal, accrual_note, residual = build_accrual_journal(report, accounts)
+            write_accrual_journal_csv(accrual_journal, accrual_journal_path)
+            if accrual_journal is not None:
+                journal_line += (
+                    f"\n  Accrual journal CSV: {accrual_journal_path} "
+                    f"(1 transaction, {len(accrual_journal.splits)} row(s)). {accrual_note}"
+                )
+            else:
+                journal_line += f"\n  Accrual journal: not written. {accrual_note}"
+            # H35-02 item 4: the residual current-account comparison after
+            # whatever the accrual applied -- reported here, never booked.
+            residual_status = (
+                "AGREE" if residual.agree else
+                "CANNOT RECONCILE" if residual.agree is None else "VARIANCE"
+            )
+            journal_line += (
+                f"\n  {residual.category}: {residual_status}. {residual.note}"
+            )
+
+    summary = _summarize_report(report, output_path, journal_line)
+    return f"{not_checked_flag}\n{summary}" if not_checked_flag else summary

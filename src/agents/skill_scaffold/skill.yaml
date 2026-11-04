@@ -1,0 +1,147 @@
+# skill.yaml -- Skill Scaffolder manifest.
+#
+# A deterministic, source-checkout-only dev tool: no LLM, no network, no
+# timestamps. Renders fixed templates by plain {{TOKEN}} string substitution
+# to create a brand-new skill package under src/agents/, plus a starter test
+# module under tests/. Every prose field it generates carries a fixed
+# placeholder marker so a guard test catches anyone who ships a scaffolded
+# skill without filling it in -- see tests/test_help_coverage.py and
+# AGENT.md for the full rationale.
+#
+# category "dev" is not in webui.py's GROUP_ORDER/_known_cats, so this
+# renders as a flat top-level tab automatically (same precedent as the
+# Parser Generator skill) -- no webui.py change needed.
+
+name: "Skill Scaffold"
+display_name: "Skill Scaffolder"
+description: >
+  Scaffold a brand-new skill package (skill.yaml, agent.py stub, AGENT.md,
+  a starter test module) from fixed templates -- deterministic, no LLM, no
+  network. Every generated prose field is a marked placeholder for a human
+  to fill in before the skill ships; only structural fields (names, types,
+  entry_point, version) are set for real.
+category: "dev"
+version: "0.1.0"
+
+mode: "direct"
+entry_point: "agent:run_ui"
+
+inputs:
+  - name: "skill_dir"
+    type: "text"
+    label: "New package directory name (e.g. skill_foo -- must start with skill_, lowercase)"
+    required: true
+  - name: "display_name"
+    type: "text"
+    label: "Display name for the new skill's UI tab"
+    required: true
+  - name: "category"
+    type: "select"
+    label: "Category for the new skill"
+    options: ["dev", "utilities", "banks", "credit_card", "gnucash", "itr", "26as", "krc", "intercompany"]
+    required: true
+  - name: "mode"
+    type: "select"
+    label: "Mode for the new skill (direct = plain function, agent = LLM-driven)"
+    options: ["direct", "agent"]
+    required: true
+  - name: "output_type"
+    type: "select"
+    label: "Output type for the new skill (file or directory)"
+    options: ["file", "directory"]
+    required: true
+  - name: "needs_llm"
+    type: "select"
+    label: "Does the new skill need an LLM endpoint?"
+    options: ["no", "yes"]
+    required: true
+
+run_args:
+  skill_dir: "{inputs.skill_dir}"
+  display_name: "{inputs.display_name}"
+  category: "{inputs.category}"
+  mode: "{inputs.mode}"
+  output_type: "{inputs.output_type}"
+  needs_llm: "{inputs.needs_llm}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  type: "directory"
+  suffix: "skill-scaffold"
+  download_label: "Download Skill Scaffold Report"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Scaffolds a brand-new skill package under src/agents/ -- skill.yaml (a
+    complete manifest with a full help: block), an agent.py stub, an
+    AGENT.md, and a starter test module under tests/ -- entirely by plain
+    text-template substitution. There is no LLM anywhere in the generation
+    path and no network access, so the same inputs always render the exact
+    same bytes. Every piece of prose in the generated files (descriptions,
+    tooltips, steps, troubleshooting, the AGENT.md body) is a fixed
+    placeholder marker rather than invented-sounding text -- a repo-wide
+    guard test fails loudly if a scaffolded skill ever ships with that
+    marker still in it, so a half-finished skill can never slip through
+    silently.
+  when_to_use: >
+    Use this to start a new skill instead of hand-copying an existing
+    package. It gets the manifest shape, the help: block structure, and the
+    starter test right on the first try, then leaves clearly marked gaps
+    for a human (or an LLM working under review) to fill in with the real
+    behaviour.
+  inputs:
+    - name: "skill_dir"
+      tooltip: "The new package's directory name under src/agents/."
+      accepts: "Must start with skill_ and contain only lowercase letters, digits and underscores after that."
+      gotchas: "Refuses outright if this directory already exists -- it never overwrites or merges into an existing skill."
+    - name: "display_name"
+      tooltip: "The label the new skill's tab will show once the app is restarted."
+      accepts: "Any non-blank text."
+      gotchas: "Every scaffolded skill is UI-registered -- there is no 'internal pipeline step' option here."
+    - name: "category"
+      tooltip: "Which group the new skill's tab is filed under."
+      accepts: "One of the categories already used elsewhere in this repo."
+      gotchas: "Picking 'dev' renders as a flat top-level tab, same as this skill; other categories may nest under a group tab depending on webui.py."
+    - name: "mode"
+      tooltip: "direct = a plain Python function; agent = wired through the LangGraph agent machinery for LLM-driven work."
+      accepts: "direct or agent."
+      gotchas: "Most new skills should start as direct -- switch to agent later if the skill genuinely needs multi-step LLM reasoning."
+    - name: "output_type"
+      tooltip: "Whether the new skill's run produces a single file or a folder of files."
+      accepts: "file or directory."
+      gotchas: "This only sets the manifest's output.type -- the generated agent.py stub still just writes one placeholder artifact either way."
+    - name: "needs_llm"
+      tooltip: "Whether the new skill's manifest declares requires.llm true."
+      accepts: "no or yes."
+      gotchas: "Deterministic, no-LLM skills (like this one) should stay 'no' -- it changes whether the UI shows a Model dropdown and runs an LLM health check before Run."
+  steps:
+    - "Fill in skill_dir, display_name, category, mode, output_type and needs_llm."
+    - "Click Run -- it writes the new package under src/agents/ and a starter test under tests/, then runs scripts/gen_docs.py and reports its exit code."
+    - "Restart the app -- the new tab only appears after a restart, since the skill registry caches its scan for the life of the process."
+    - "Open the new skill's files and replace every placeholder marker with the real implementation, description, and help text before it ships."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "skill-scaffold-report.md"
+        tooltip: "Lists exactly which files were created, the gen_docs.py exit code, and the restart reminder."
+  tips: >
+    Run the full test suite after filling in the placeholders -- the
+    scaffolded test module and the repo-wide help-coverage/marker-guard
+    tests will tell you exactly what is still incomplete.
+  troubleshooting:
+    - problem: "\"Refused: ... already exists\"."
+      fix: "Pick a different skill_dir -- this tool never overwrites or merges into an existing skill package."
+    - problem: "\"Refused: skill_dir ... is invalid\"."
+      fix: "skill_dir must match skill_[a-z0-9_]+ -- lowercase, starting with skill_, no path separators."
+    - problem: "The new tab doesn't show up after Run."
+      fix: "Expected -- restart the app. The skill registry only rescans agents/ once per process."
+    - problem: "\"Error: the Skill Scaffolder is a source-checkout-only dev tool ...\"."
+      fix: "You're running a frozen/packaged build. Run this from a source checkout instead -- the shipped app's agents/ tree is read-only."

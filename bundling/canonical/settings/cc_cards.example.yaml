@@ -1,0 +1,29 @@
+# cc_cards.example.yaml - SYNTHETIC example. Copy to cc_cards.yaml in the settings folder and
+# replace the made-up values. The digits and entity key below are fake.
+#
+# cc_cards.yaml - the one list of credit cards the CC skills read.
+#
+# One entry per card:
+#   bank    the bank, as text, e.g. "ICICI"
+#   card    the card, as text, e.g. "Sapphiro"; the bank and card must match a CC Sort
+#           folder (the folder is named <bank>-<card>)
+#   last4   a LIST of the card's last 4 digits, each one in quotes: ["1234"]. A card with
+#           two numbers on one bill lists both. Never the full card number.
+#   holder  the entity key from entities.yaml whose card this is, or "" when not set
+#   active  true or false; a card that is false is still recognised, it is just not in use
+#
+# Write every value in double quotes. Without quotes YAML turns YES into true and
+# 0123 into a number, and the file is then refused. No other keys are allowed.
+# A last4 may appear on one card only. Keep this comment block; the Cards screen keeps it.
+
+cards:
+  - bank: "ICICI"
+    card: "Sapphiro"
+    last4: ["0001", "0002"]
+    holder: "entity_a"
+    active: true
+  - bank: "ICICI"
+    card: "Amazon"
+    last4: ["0003"]
+    holder: ""
+    active: false

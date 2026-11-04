@@ -1,0 +1,82 @@
+# skill.yaml — 26AS skill manifest
+# This file is read by the skill registry (agents/registry.py) at startup.
+
+name: "26AS"
+display_name: "Convert"
+description: >
+  Convert an Indian Income Tax Form 26AS (TRACES Annual Tax Statement) into
+  a single Excel workbook with one sheet per Part. Per-party sub-totals are
+  inserted inline; a Grand Total row closes Part I (TDS) and Part VI (TCS).
+category: "26as"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "pdf_path"
+    type: "file"
+    label: "Form 26AS PDF"
+    file_types: [".pdf"]
+    required: true
+
+run_args:
+  pdf_path: "{inputs.pdf_path}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".xlsx"
+  suffix: "26AS"
+  download_label: "Download Excel"
+
+requires:
+  native_binaries: ["poppler"]
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured
+    Excel workbook with one sheet per Part (Part I through Part X). The two
+    parts that carry your tax credits are laid out in full as sortable tables
+    with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The
+    remaining parts get their column headers so the workbook is predictable.
+    Note that a modern 26AS carries NO advance tax or self-assessment tax —
+    those were dropped from Part C in AY 2023-24 and now live only in the AIS.
+    Runs fully offline.
+  when_to_use: >
+    Use this when you have your 26AS PDF from the TRACES portal and want it as
+    Excel to review or reconcile against your ITR. To then post the TDS into
+    GnuCash as journal entries, run "Convert to GnuCash" (GnuCash > 26AS > Convert to GnuCash) on the workbook this produces.
+    Do not use it for AIS or TIS — those are different documents.
+  inputs:
+    - name: "pdf_path"
+      tooltip: "Your Form 26AS PDF, exactly as downloaded from TRACES."
+      accepts: "PDF (.pdf) — a single TRACES-issued 26AS."
+      gotchas: >
+        Must be the genuine 26AS (PAN like ABCDE1234F, parts labelled PART-I to
+        PART-X). AIS / TIS PDFs have a different layout and will not parse here.
+  steps:
+    - "Pick your 26AS PDF."
+    - "Click Run — it processes offline in a few seconds."
+    - "Open the Excel workbook and use the per-Part sheets."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-26AS.xlsx"
+        tooltip: >
+          One worksheet per Part (I–X). Each transaction is a flat row; each
+          deductor block ends with a sub-total row so you can tie figures back
+          to the source statement without re-adding them.
+  tips: >
+    Amounts are kept verbatim from the statement (no rounding). Cross-check the
+    Part I TDS total against the TDS you are claiming in your return, and the
+    Part VI TCS total too — TCS on a foreign tour package or LRS remittance is
+    a credit like any other, and leaving it out understates your refund.
+  troubleshooting:
+    - problem: "Sheets are empty or the text is garbled."
+      fix: "The PDF is a scan. Re-download the text 26AS from TRACES; this skill does not OCR."
+    - problem: "Columns look wrong / parts are missing."
+      fix: "The file is likely an AIS or TIS, not a 26AS. Use the correct 26AS PDF."

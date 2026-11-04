@@ -1,0 +1,9 @@
+# skill_gnucash_mapping_generator — internal pipeline step.
+# NOT registered as a UI skill — used programmatically by skill_gnucash_account_mapper.
+# To restore as a standalone tab, add: name, display_name, mode, entry_point fields.
+
+description: >
+  Generate mapping rules (YAML) from extracted GnuCash data.
+  Creates categorized rules (by bank) with confidence levels.
+category: "gnucash"
+version: "1.0.0"

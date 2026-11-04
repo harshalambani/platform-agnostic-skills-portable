@@ -1,0 +1,1192 @@
+"""
+bundling/build.py — PA Skills Portable build orchestrator.
+
+Phase 1 scope: steps 1–4 of spec §10.2.
+    1. Resolve version (from latest Git tag).
+    2. Wipe staging/ and recreate the PortableApps.com folder skeleton.
+    3. Create a clean Python venv in build_pyinstaller/venv/, pip-install
+       requirements.txt (plus pyinstaller).
+    4. Run PyInstaller against ui/webui.py via bundling/paskills.spec.
+       Output lands in staging/App/PASkills/.
+
+Phase 2a added steps 5–7 (native binary vendoring + agent pull).
+    Step 7 reads bundling/sources.toml to decide where to pull agents/
+    from: "local" (sibling folder) or "git" (clone from upstream URL).
+    Git clones are cached in build_pyinstaller/.agents_cache/.
+    Use --skip-pull to skip this step entirely.
+
+Phase 2b adds steps 8–11:
+    8.  Render appinfo.ini + Launcher INI from bundling/templates/, and
+        ensure staging/App/AppInfo/ has icon files (placeholder if real
+        artwork is absent — the Launcher Generator aborts otherwise).
+    9.  Copy bundling/templates/DefaultData → staging/App/DefaultData.
+    10. Invoke the PortableApps.com Launcher Generator (Windows-only,
+        warn-and-skip if not installed).
+    11. Build a deterministic dist/PASkillsPortable_<version>.zip.
+
+Invocation (from repo root):
+    python bundling\\build.py
+    python bundling\\build.py --version 0.1.0
+    python bundling\\build.py --allow-dirty
+    python bundling\\build.py --skip-venv     # reuse existing build venv
+    python bundling\\build.py --skip-pull     # don't re-pull agents/
+    python bundling\\build.py --skip-launcher # skip step10 + step11
+    python bundling\\build.py --launcher-gen <path-to-generator.exe>
+    python bundling\\build.py --clean         # delete agents cache and exit
+
+Exit codes:
+    0  success
+    1  precondition failed (dirty tree, missing tool, etc.)
+    2  subprocess (venv / pip / pyinstaller / agents-pull) failed
+"""
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import hashlib
+import os
+import platform
+import re
+import shutil
+import string
+import subprocess
+import sys
+import time
+import zipfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, Sequence
+
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+STAGING       = PROJECT_ROOT / "staging"
+DIST          = PROJECT_ROOT / "dist"
+BUILD_VENV_DIR = PROJECT_ROOT / "build_pyinstaller"
+BUILD_VENV    = BUILD_VENV_DIR / "venv"
+
+SRC_AGENTS    = PROJECT_ROOT / "src" / "agents"
+AGENTS_CACHE  = BUILD_VENV_DIR / ".agents_cache"
+UI_DIR        = PROJECT_ROOT / "ui"
+BUILDINFO_PY  = UI_DIR / "_buildinfo.py"
+PASKILLS_SPEC = PROJECT_ROOT / "bundling" / "paskills.spec"
+REQUIREMENTS      = PROJECT_ROOT / "requirements.txt"
+REQUIREMENTS_LOCK = PROJECT_ROOT / "requirements-lock.txt"
+SOURCES_TOML  = PROJECT_ROOT / "bundling" / "sources.toml"
+
+TEMPLATES_DIR    = PROJECT_ROOT / "bundling" / "templates"
+APPINFO_TMPL     = TEMPLATES_DIR / "appinfo.ini.tmpl"
+LAUNCHER_TMPL    = TEMPLATES_DIR / "PASkillsPortable.ini.tmpl"
+DEFAULTDATA_TMPL = TEMPLATES_DIR / "DefaultData"
+
+LAUNCHER_GEN_HINTS = (
+    # Bundled copy (CI + local fallback) — checked first
+    PROJECT_ROOT / "bundling" / "launcher-gen" / "2.2.4",
+    # Common local install paths
+    Path(r"C:\PortableApps\PortableApps.com"),
+    Path(r"C:\PortableApps\PortableApps.comLauncher"),
+    Path(r"C:\PortableApps"),
+)
+LAUNCHER_GEN_EXE = "PortableApps.comLauncherGenerator.exe"
+
+# PortableApps.com Installer — turns the staging tree into an installable
+# <AppID>_<version>.paf.exe. Vendored under bundling/installer so CI can build it.
+INSTALLER_HINTS = (
+    PROJECT_ROOT / "bundling" / "installer" / "3.9.16",
+    Path(r"C:\PortableApps\PortableApps.comInstaller"),
+    Path(r"C:\PortableApps"),
+)
+INSTALLER_EXE = "PortableApps.comInstaller.exe"
+HELP_HTML_TMPL = TEMPLATES_DIR / "help.html"
+
+
+# ---------------------------------------------------------------------------
+# Pretty logging.
+# ---------------------------------------------------------------------------
+
+class _Log:
+    """Tiny, dependency-free coloured logger."""
+    BLUE   = "\033[94m"
+    GREEN  = "\033[92m"
+    YELLOW = "\033[93m"
+    RED    = "\033[91m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+
+    def __init__(self, use_color: bool):
+        self.use_color = use_color and sys.stdout.isatty()
+
+    def _c(self, code: str, text: str) -> str:
+        return f"{code}{text}{self.RESET}" if self.use_color else text
+
+    def step(self, n: int | str, msg: str) -> None:
+        print(self._c(self.BLUE, f"[step {n}] ") + msg, flush=True)
+
+    def info(self, msg: str) -> None:
+        print(self._c(self.DIM, "       ") + msg, flush=True)
+
+    def ok(self, msg: str) -> None:
+        print(self._c(self.GREEN, "  ok   ") + msg, flush=True)
+
+    def warn(self, msg: str) -> None:
+        print(self._c(self.YELLOW, " warn  ") + msg, flush=True)
+
+    def err(self, msg: str) -> None:
+        print(self._c(self.RED, " err   ") + msg, flush=True, file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Helpers.
+# ---------------------------------------------------------------------------
+
+def _run(cmd: Sequence[str | Path], *, cwd: Path | None = None, env: dict | None = None,
+         check: bool = True, log: _Log) -> subprocess.CompletedProcess:
+    cmd_str = [str(c) for c in cmd]
+    log.info("$ " + " ".join(cmd_str))
+    res = subprocess.run(cmd_str, cwd=cwd, env=env, check=False)
+    if check and res.returncode != 0:
+        log.err(f"command failed (exit {res.returncode})")
+        sys.exit(2)
+    return res
+
+
+def _display_path(p) -> str:
+    """LEG-14: a path for a log line. Relative to the project when it can be (same drive, under the
+    project); otherwise the path as given. os.path.relpath raises ValueError across drives and
+    Path.relative_to raises when the path is outside the project; a log line must never crash a build."""
+    try:
+        return os.path.relpath(p, PROJECT_ROOT)
+    except ValueError:
+        return str(p)
+
+
+def _rmtree(path: Path) -> None:
+    if not path.exists():
+        return
+
+    def _on_error(func, p, exc_info):
+        try:
+            os.chmod(p, 0o700)
+            func(p)
+        except Exception:
+            raise
+
+    shutil.rmtree(path, onerror=_on_error)
+
+
+def _venv_python(venv: Path) -> Path:
+    if platform.system() == "Windows":
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
+def _git_describe(log: _Log) -> tuple[str, str, bool]:
+    git = shutil.which("git")
+    if not git:
+        log.warn("git not on PATH; using fallback version 0.0.0+local.")
+        return "0.0.0+local", "unknown", True
+
+    try:
+        sha = subprocess.check_output(
+            [git, "rev-parse", "--short=7", "HEAD"], cwd=PROJECT_ROOT
+        ).decode().strip()
+    except subprocess.CalledProcessError:
+        log.warn("no git history yet; using fallback version 0.0.0+local.")
+        return "0.0.0+local", "unknown", True
+
+    dirty = bool(
+        subprocess.run(
+            [git, "diff-index", "--quiet", "HEAD", "--", ":(exclude)ui/_buildinfo.py"], cwd=PROJECT_ROOT
+        ).returncode
+    )
+
+    try:
+        tag = subprocess.check_output(
+            [git, "describe", "--tags", "--abbrev=0", "--match", "v*"], cwd=PROJECT_ROOT,
+            stderr=subprocess.DEVNULL,
+        ).decode().strip()
+        version = tag.lstrip("v")
+    except subprocess.CalledProcessError:
+        version = f"0.0.0+{sha}"
+
+    if dirty:
+        version = f"{version}+dirty"
+
+    return version, sha, dirty
+
+
+# ---------------------------------------------------------------------------
+# Steps.
+# ---------------------------------------------------------------------------
+
+def step1_resolve_version(args: argparse.Namespace, log: _Log) -> tuple[str, str, bool]:
+    log.step(1, "Resolve version")
+
+    if args.version:
+        version = args.version
+        sha = "manual"
+        dirty = False
+        log.info(f"version forced via --version: {version}")
+    else:
+        version, sha, dirty = _git_describe(log)
+        log.info(f"git: tag-derived version={version}  sha={sha}  dirty={dirty}")
+
+    if dirty and not args.allow_dirty:
+        log.err("working tree is dirty. Commit or pass --allow-dirty.")
+        sys.exit(1)
+
+    BUILDINFO_PY.write_text(
+        '"""Generated by bundling/build.py. Do not edit by hand."""\n'
+        f'VERSION: str = {version!r}\n'
+        f'COMMIT_SHA: str = {sha!r}\n'
+        f'BUILD_DIRTY: bool = {dirty!r}\n'
+        f'BUILD_TIMESTAMP: str = {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")!r}\n',
+        encoding="utf-8",
+    )
+    log.ok(f"wrote {_display_path(BUILDINFO_PY)} ({version})")
+    return version, sha, dirty
+
+
+def step2_reset_staging(log: _Log) -> None:
+    log.step(2, "Reset staging tree")
+    _rmtree(STAGING)
+
+    skeleton = [
+        STAGING,
+        STAGING / "App",
+        STAGING / "App" / "AppInfo",
+        STAGING / "App" / "AppInfo" / "Launcher",
+        STAGING / "App" / "PASkills",
+        STAGING / "App" / "DefaultData",
+        STAGING / "App" / "DefaultData" / "settings",
+        STAGING / "Data",
+        STAGING / "Other",
+        STAGING / "Other" / "Source",
+        STAGING / "Other" / "Help",
+    ]
+    for d in skeleton:
+        d.mkdir(parents=True, exist_ok=True)
+    DIST.mkdir(parents=True, exist_ok=True)
+    log.ok(f"staging/ recreated with {len(skeleton)} folders")
+
+
+def _lock_has_hashes(lock_path: Path) -> bool:
+    """
+    Return True if *lock_path* contains at least one ``--hash=sha256:`` entry.
+
+    Also handles UTF-16 encoded files (the legacy encoding of our lock file)
+    by detecting the BOM before decoding.
+    """
+    try:
+        raw = lock_path.read_bytes()
+        # Detect UTF-16 LE/BE BOM.
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            text = raw.decode("utf-16")
+        else:
+            text = raw.decode("utf-8", errors="replace")
+        return "--hash=sha256:" in text
+    except Exception:
+        return False
+
+
+def step3_create_venv(args: argparse.Namespace, log: _Log) -> Path:
+    log.step(3, "Build venv + pip install")
+    py = _venv_python(BUILD_VENV)
+
+    if args.skip_venv and py.exists():
+        log.info(f"reusing existing venv: {BUILD_VENV}")
+        return py
+
+    _rmtree(BUILD_VENV)
+    BUILD_VENV_DIR.mkdir(parents=True, exist_ok=True)
+    _run([sys.executable, "-m", "venv", BUILD_VENV], log=log)
+
+    py = _venv_python(BUILD_VENV)
+    if not py.exists():
+        log.err(f"venv python not found at {py}")
+        sys.exit(2)
+
+    _run([py, "-m", "pip", "install", "--upgrade", "pip", "wheel", "setuptools"], log=log)
+
+    # Install dependencies with the strictest mode the lock file supports.
+    #
+    #   Lock file present + hashes  → --require-hashes --no-deps  (secure, reproducible)
+    #   Lock file present, no hashes → warn loudly, install unhashed  (transition state)
+    #   No lock file                 → warn, use loose requirements.txt  (dev only)
+    #
+    # To move from transition to secure: run `python scripts\regen_lock.py`
+    # which regenerates requirements-lock.txt with full SHA-256 hashes.
+    if REQUIREMENTS_LOCK.is_file():
+        if _lock_has_hashes(REQUIREMENTS_LOCK):
+            log.info(f"installing from hashed lock (--require-hashes): {REQUIREMENTS_LOCK.name}")
+            _run(
+                [py, "-m", "pip", "install",
+                 "--require-hashes", "--no-deps",
+                 "-r", REQUIREMENTS_LOCK],
+                log=log,
+            )
+        else:
+            log.warn("=" * 60)
+            log.warn("SECURITY: requirements-lock.txt has NO hashes.")
+            log.warn("  This build is NOT integrity-verified.")
+            log.warn("  Regenerate with: python scripts\\regen_lock.py")
+            log.warn("=" * 60)
+            _run([py, "-m", "pip", "install", "-r", REQUIREMENTS_LOCK], log=log)
+    else:
+        log.warn("requirements-lock.txt not found — using loose pins from requirements.txt")
+        log.warn("  Run `python scripts\\regen_lock.py` to create a hashed lock file.")
+        _run([py, "-m", "pip", "install", "-r", REQUIREMENTS], log=log)
+
+    _run([py, "-m", "pip", "install", "pyinstaller>=6.10"], log=log)
+    log.ok(f"venv ready at {_display_path(BUILD_VENV)}")
+    return py
+
+
+def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
+    log.step(4, "PyInstaller --onedir against paskills.spec")
+
+    if not PASKILLS_SPEC.exists():
+        log.err(f"spec not found: {PASKILLS_SPEC}")
+        sys.exit(1)
+
+    work = PROJECT_ROOT / "build_pyinstaller" / "work"
+    pyi_dist = PROJECT_ROOT / "build_pyinstaller" / "dist"
+    _rmtree(work)
+    _rmtree(pyi_dist)
+
+    _run(
+        [py, "-m", "PyInstaller",
+         "--noconfirm", "--clean",
+         "--workpath", work,
+         "--distpath", pyi_dist,
+         PASKILLS_SPEC],
+        cwd=PROJECT_ROOT,
+        log=log,
+    )
+
+    src_dir = pyi_dist / "pa_skills"
+    if not src_dir.is_dir():
+        log.err(f"PyInstaller output missing: {src_dir}")
+        sys.exit(2)
+
+    dest = STAGING / "App" / "PASkills"
+    if dest.exists():
+        _rmtree(dest)
+    shutil.copytree(src_dir, dest)
+    log.ok(f"frozen build copied to {_display_path(dest)}")
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a — native binaries + agent pull.
+# ---------------------------------------------------------------------------
+
+def _copy_vendor_subtree(src: Path, dest: Path, label: str, log: "_Log") -> int:
+    if not src.is_dir():
+        log.warn(f"vendor source missing: {src} - {label} not bundled")
+        log.warn("  run: python bundling\\refresh_binaries.py --target " + label)
+        return 0
+    if dest.exists():
+        _rmtree(dest)
+    shutil.copytree(src, dest)
+    count = sum(1 for _ in dest.rglob("*") if _.is_file())
+    log.info(f"  {label}: {count} files copied to {_display_path(dest)}")
+    return count
+
+
+def verify_tesseract_bundle(dest: Path) -> list[str]:
+    """Return the problems with a STAGED Tesseract tree (empty list = fine).
+
+    HSB-01: v3.10.0 and v3.11.0 shipped a Tesseract without tessdata/configs/,
+    because vendor/ was never regenerated after refresh_binaries.py was fixed.
+    Without configs/tsv, `tesseract <img> <out> tsv` warns "Can't open tsv",
+    exits 0 and writes a .txt -- HSBC OCR dies. This checks what actually
+    ships (the staged output), not the script that is supposed to produce it.
+    """
+    problems: list[str] = []
+    if not (dest / "tesseract.exe").is_file():
+        problems.append(f"{dest / 'tesseract.exe'} is missing")
+    if not (dest / "tessdata" / "eng.traineddata").is_file():
+        problems.append(f"{dest / 'tessdata' / 'eng.traineddata'} is missing")
+    tsv = dest / "tessdata" / "configs" / "tsv"
+    if not tsv.is_file() or tsv.stat().st_size == 0:
+        problems.append(
+            f"{tsv} is missing or empty -- OCR to TSV would silently write .txt "
+            "(run: python bundling\refresh_binaries.py --target tesseract)"
+        )
+    return problems
+
+
+def step5_native_binaries(log: _Log) -> None:
+    log.step(5, "Native binaries - Tesseract")
+    src = PROJECT_ROOT / "vendor" / "tesseract"
+    dest = STAGING / "App" / "PASkills" / "tesseract"
+    n = _copy_vendor_subtree(src, dest, "tesseract", log)
+    problems = verify_tesseract_bundle(dest)
+    if problems:
+        for p in problems:
+            log.err(f"tesseract bundle check FAILED: {p}")
+        sys.exit(2)
+    log.ok(f"tesseract bundled ({n} files; tessdata/configs/tsv present)")
+
+
+def step6_poppler(log: _Log) -> None:
+    log.step(6, "Native binaries - Poppler")
+    src = PROJECT_ROOT / "vendor" / "poppler"
+    dest = STAGING / "App" / "PASkills" / "poppler"
+    n = _copy_vendor_subtree(src, dest, "poppler", log)
+    if n:
+        log.ok(f"poppler bundled ({n} files)")
+
+
+def step6b_qpdf(log: _Log) -> None:
+    log.step("6b", "Native binaries - qpdf")
+    src = PROJECT_ROOT / "vendor" / "qpdf"
+    dest = STAGING / "App" / "PASkills" / "qpdf"
+    n = _copy_vendor_subtree(src, dest, "qpdf", log)
+    if n:
+        log.ok(f"qpdf bundled ({n} files)")
+
+
+# ---------------------------------------------------------------------------
+# Step 7 — Pull agents/ from upstream (local copy or git clone).
+# ---------------------------------------------------------------------------
+
+def _parse_sources_toml(path: Path) -> dict:
+    """Parse bundling/sources.toml. Uses tomllib/tomli if available,
+    otherwise a minimal regex parser for the flat key=value format."""
+    text = path.read_text(encoding="utf-8")
+    if tomllib is not None:
+        return tomllib.loads(text)
+
+    # Minimal fallback — handles our simple single-section TOML.
+    result: dict = {}
+    section: dict = result
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            key = line[1:-1].strip()
+            section = result.setdefault(key, {})
+            continue
+        if "=" in line:
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            # Handle arrays: ["*.py", "*.md"]
+            if v.startswith("[") and v.endswith("]"):
+                items = [
+                    i.strip().strip('"').strip("'")
+                    for i in v[1:-1].split(",")
+                    if i.strip()
+                ]
+                section[k] = items
+            else:
+                section[k] = v
+    return result
+
+
+def _matches_globs(rel_path: str, patterns: list[str]) -> bool:
+    """True if rel_path matches any of the glob patterns."""
+    for pat in patterns:
+        if fnmatch.fnmatch(rel_path, pat):
+            return True
+    return False
+
+
+def _sync_agents(source_dir: Path, dest_dir: Path,
+                 includes: list[str], excludes: list[str],
+                 log: _Log) -> int:
+    """Copy files from source_dir to dest_dir, filtered by include/exclude
+    globs. Returns the number of files copied."""
+    if not source_dir.is_dir():
+        log.err(f"source directory not found: {source_dir}")
+        sys.exit(2)
+
+    # Wipe dest and recreate
+    if dest_dir.exists():
+        _rmtree(dest_dir)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for src_file in sorted(source_dir.rglob("*")):
+        if not src_file.is_file():
+            continue
+        rel = src_file.relative_to(source_dir).as_posix()
+
+        if not _matches_globs(rel, includes):
+            continue
+        if _matches_globs(rel, excludes):
+            continue
+
+        dst = dest_dir / src_file.relative_to(source_dir)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_file, dst)
+        copied += 1
+
+    return copied
+
+
+def _pull_agents_local(cfg: dict, log: _Log) -> Path:
+    """Resolve the local source path for agents/."""
+    local_path = cfg.get("local_path", "")
+    if not local_path:
+        log.err("sources.toml: kind='local' but local_path is empty")
+        sys.exit(1)
+    # Resolve relative to sources.toml location
+    resolved = (SOURCES_TOML.parent / local_path).resolve()
+    if not resolved.is_dir():
+        log.err(f"local agents source not found: {resolved}")
+        log.err("Ensure the sibling platform-agnostic-skills repo exists, "
+                "or switch sources.toml to kind='git'.")
+        sys.exit(2)
+    log.info(f"source: local  {resolved}")
+    return resolved
+
+
+def _cache_key(url: str, ref: str) -> str:
+    """Deterministic short hash for a (url, ref) pair, used as cache dir name."""
+    return hashlib.sha256(f"{url}@{ref}".encode()).hexdigest()[:12]
+
+
+def _pull_agents_git(cfg: dict, log: _Log) -> Path:
+    """Clone or update the upstream repo into .agents_cache/ and return
+    the path to the agents/ subtree inside the clone."""
+    url = cfg.get("git_url", "")
+    ref = cfg.get("git_ref", "") or "main"
+    if not url:
+        log.err("sources.toml: kind='git' but git_url is empty")
+        sys.exit(1)
+
+    cache_dir = AGENTS_CACHE / _cache_key(url, ref)
+    clone_ok = False
+
+    if cache_dir.is_dir() and (cache_dir / ".git").is_dir():
+        # Cache exists — try to update
+        log.info(f"cache hit: {_display_path(cache_dir)}")
+        try:
+            subprocess.run(
+                ["git", "fetch", "--depth", "1", "origin", ref],
+                cwd=cache_dir, check=True,
+                capture_output=True, timeout=120,
+            )
+            subprocess.run(
+                ["git", "checkout", "FETCH_HEAD"],
+                cwd=cache_dir, check=True,
+                capture_output=True, timeout=30,
+            )
+            clone_ok = True
+            log.info(f"updated cache to {ref}")
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            log.warn(f"git fetch failed ({exc!r}); using stale cache")
+            clone_ok = True  # stale but usable
+    else:
+        # Fresh clone. Retry a few times — hosted CI runners hit transient
+        # GitHub/network blips, and with no cache to fall back on a single-shot
+        # failure aborts the whole release build.
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            log.info(f"cloning {url}  (ref={ref}) [attempt {attempt}/{max_attempts}]")
+            try:
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", "--branch", ref, url, str(cache_dir)],
+                    check=True, capture_output=True, timeout=300,
+                )
+                clone_ok = True
+                log.info("clone complete")
+                break
+            except FileNotFoundError as exc:
+                # git binary missing — retrying will not help.
+                log.err(f"git not found: {exc!r}")
+                break
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                log.warn(f"git clone attempt {attempt}/{max_attempts} failed: {exc!r}")
+                # Clean up any partial clone before retrying.
+                if cache_dir.exists():
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+                if attempt < max_attempts:
+                    backoff = 2 ** attempt  # 2s, then 4s
+                    log.info(f"retrying in {backoff}s...")
+                    time.sleep(backoff)
+
+    if not clone_ok:
+        log.err("upstream unreachable and no cached clone available")
+        sys.exit(2)
+
+    # The agents/ subtree is expected at the repo root
+    agents_in_clone = cache_dir / "agents"
+    if not agents_in_clone.is_dir():
+        # Try src/agents/ as fallback
+        agents_in_clone = cache_dir / "src" / "agents"
+    if not agents_in_clone.is_dir():
+        log.err(f"agents/ directory not found in cloned repo at {cache_dir}")
+        sys.exit(2)
+
+    log.info(f"source: git  {url} @ {ref}")
+    return agents_in_clone
+
+
+def step7_pull_agents(args: argparse.Namespace, log: _Log) -> None:
+    log.step(7, "Pull agents/ from upstream")
+    if args.skip_pull:
+        log.info("--skip-pull set; agents/ not refreshed")
+        return
+
+    cfg = _parse_sources_toml(SOURCES_TOML).get("upstream", {})
+    kind = cfg.get("kind", "vendored")
+
+    # "vendored": agents/ already live in src/agents (the repo is the source of
+    # truth). Do nothing — no clone, no overwrite. This is the default so that a
+    # plain `build.py` never reaches for the retired upstream repo and never
+    # clobbers the in-repo agents.
+    if kind in ("vendored", "none"):
+        log.info(f"kind='{kind}'; agents/ vendored in src/agents — nothing to pull")
+        return
+
+    includes = cfg.get("include", ["**/*.py", "**/*.md", "**/*.yaml"])
+    excludes = cfg.get("exclude", ["**/__pycache__/**", "**/*.pyc"])
+
+    if kind == "local":
+        source_dir = _pull_agents_local(cfg, log)
+    elif kind == "git":
+        source_dir = _pull_agents_git(cfg, log)
+    else:
+        log.err(f"sources.toml: unknown kind '{kind}' "
+                "(expected 'vendored', 'local', or 'git')")
+        sys.exit(1)
+
+    count = _sync_agents(source_dir, SRC_AGENTS, includes, excludes, log)
+    log.ok(f"synced {count} files into src/agents/")
+
+
+# ---------------------------------------------------------------------------
+# Phase 2b - INI rendering, icons, launcher generator, zip.
+# ---------------------------------------------------------------------------
+
+_VERSION_CORE_RE = re.compile(r"^(\d+\.\d+\.\d+)")
+
+
+def _portable_versions(version: str) -> tuple[str, str]:
+    """
+    VERSION_3 is the dotted-3 form (e.g. 0.2.0); VERSION_4 is dotted-4
+    (e.g. 0.2.0.0). +dirty/+sha suffixes are stripped because the PA Launcher
+    INI parser dislikes +.
+    """
+    m = _VERSION_CORE_RE.match(version)
+    core = m.group(1) if m else "0.0.0"
+    return core, f"{core}.0"
+
+
+def _write_ini(dest: Path, text: str) -> None:
+    """Write an INI string with CRLF line endings, parents created."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    normalised = text.replace("\r\n", "\n").replace("\n", "\r\n")
+    dest.write_bytes(normalised.encode("utf-8"))
+
+
+# Project palette per locked decision 2026-05-01.
+_ICON_BG     = (10, 10, 10, 255)         # #0A0A0A
+_ICON_ACCENT = (59, 130, 246, 255)       # #3B82F6
+_PNG_SIZES   = {
+    "appicon_16.png":  16,
+    "appicon_32.png":  32,
+    "appicon_75.png":  75,
+    "appicon_128.png": 128,
+}
+_ICO_SIZES   = [(16, 16), (32, 32), (48, 48), (256, 256)]
+
+
+def _draw_placeholder_master(size: int):
+    """
+    Render a 256-px master image in the project palette: dark square with a
+    centred electric-blue circle. Returns a Pillow Image (RGBA).
+    """
+    from PIL import Image, ImageDraw  # type: ignore[import-not-found]
+    img = Image.new("RGBA", (size, size), _ICON_BG)
+    draw = ImageDraw.Draw(img)
+    margin = max(1, size // 8)
+    draw.ellipse([margin, margin, size - margin, size - margin], fill=_ICON_ACCENT)
+    return img
+
+
+def _ensure_appinfo_icons(log: _Log) -> None:
+    """
+    Populate staging/App/AppInfo/ with the five icon files the
+    PortableApps.com Launcher Generator expects:
+      appicon.ico, appicon_16.png, appicon_32.png, appicon_75.png,
+      appicon_128.png.
+
+    Real artwork at bundling/icons/<name> overrides placeholders.
+    """
+    appinfo_dir = STAGING / "App" / "AppInfo"
+    appinfo_dir.mkdir(parents=True, exist_ok=True)
+
+    icons_src = PROJECT_ROOT / "bundling" / "icons"
+    targets = ["appicon.ico"] + list(_PNG_SIZES.keys())
+    real_present = [n for n in targets if (icons_src / n).is_file()]
+    missing = [n for n in targets if n not in real_present]
+
+    for name in real_present:
+        shutil.copy2(icons_src / name, appinfo_dir / name)
+    if real_present:
+        log.info(f"copied {len(real_present)} real icon(s) from {_display_path(icons_src)}")
+
+    if not missing:
+        log.ok("appicon set complete (all real artwork)")
+        return
+
+    try:
+        master = _draw_placeholder_master(256)
+    except ModuleNotFoundError:
+        log.err(
+            "Pillow not installed in the build venv; cannot synthesise placeholder icons. "
+            "Either drop real artwork into bundling/icons/, or `pip install Pillow` in .venv."
+        )
+        sys.exit(1)
+
+    from PIL import Image  # type: ignore[import-not-found]
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+
+    for name in missing:
+        dest = appinfo_dir / name
+        if name.lower() == "appicon.ico":
+            master.save(dest, format="ICO", sizes=_ICO_SIZES)
+        else:
+            px = _PNG_SIZES[name]
+            master.resize((px, px), resample).save(dest, format="PNG")
+    log.warn(f"generated {len(missing)} placeholder icon(s) - drop real artwork into bundling/icons/ to override")
+
+
+def _ensure_launcher_splash(version: str, py: Path, log: _Log) -> None:
+    """
+    Place App\\AppInfo\\Launcher\\splash.jpg, which is the ONLY thing that makes
+    the launcher show a splash at all -- see the generator's SplashScreen.nsh:
+    a missing splash.jpg silently sets DisableSplashScreen and the app starts
+    with no visible feedback for the several seconds Gradio takes to come up.
+
+    The splash carries a baked-in version line -- the launcher paints the JPEG
+    and nothing else, so anything the user is meant to read has to be in the
+    image. Redraw it here, straight into the staging tree, so the line names
+    THIS build.
+
+    Rendered by *py*, the BUILD VENV's interpreter, not our own: Pillow is a
+    locked dependency of the app and so is present there, while the interpreter
+    running this script is whatever invoked it -- on the CI runner, a bare
+    setup-python with no packages at all. v3.4.0 shipped a splash reading
+    "Version 3.3.0" for exactly that reason: the in-process import raised
+    ModuleNotFoundError and the fallback below copied the committed image.
+
+    That fallback stays, because a stale version line is a much smaller problem
+    than a blank screen and -- unlike the icons -- this must never fail a
+    release build. It is just no longer the path CI takes.
+    """
+    dest_dir = STAGING / "App" / "AppInfo" / "Launcher"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / "splash.jpg"
+    script = PROJECT_ROOT / "bundling" / "icons" / "make_splash.py"
+
+    if script.is_file():
+        try:
+            # Explicit out-path: rendering into staging keeps the tracked
+            # bundling/icons/splash.jpg untouched, so a build never dirties the
+            # working tree.
+            subprocess.run(
+                [str(py), str(script), version, str(dest)],
+                check=True, capture_output=True, text=True,
+            )
+            log.ok(f"rendered splash for {version} -> App\\AppInfo\\Launcher\\splash.jpg")
+            return
+        except subprocess.CalledProcessError as exc:
+            log.warn(f"could not render splash (exit {exc.returncode}); using committed image")
+            if exc.stderr:
+                log.info(exc.stderr.strip().splitlines()[-1])
+        except OSError as exc:
+            log.warn(f"could not render splash ({type(exc).__name__}); using committed image")
+
+    src = PROJECT_ROOT / "bundling" / "icons" / "splash.jpg"
+    if not src.is_file():
+        log.warn("no splash.jpg available - launcher will start with no splash")
+        return
+    shutil.copy2(src, dest)
+    log.warn(
+        f"copied committed splash -> App\\AppInfo\\Launcher\\splash.jpg "
+        f"(its version line may not read {version})"
+    )
+
+
+def step8_render_inis(version: str, py: Path, log: _Log) -> None:
+    log.step(8, "Render appinfo.ini + Launcher INI + icons")
+
+    v3, v4 = _portable_versions(version)
+    log.info(f"VERSION_3={v3}  VERSION_4={v4}")
+
+    if not APPINFO_TMPL.is_file():
+        log.err(f"missing template: {APPINFO_TMPL}")
+        sys.exit(1)
+    if not LAUNCHER_TMPL.is_file():
+        log.err(f"missing template: {LAUNCHER_TMPL}")
+        sys.exit(1)
+
+    mapping = {"VERSION_3": v3, "VERSION_4": v4}
+
+    appinfo_txt  = string.Template(APPINFO_TMPL.read_text(encoding="utf-8")).safe_substitute(mapping)
+    launcher_txt = string.Template(LAUNCHER_TMPL.read_text(encoding="utf-8")).safe_substitute(mapping)
+
+    appinfo_out  = STAGING / "App" / "AppInfo" / "appinfo.ini"
+    launcher_out = STAGING / "App" / "AppInfo" / "Launcher" / "PASkillsPortable.ini"
+
+    _write_ini(appinfo_out, appinfo_txt)
+    _write_ini(launcher_out, launcher_txt)
+
+    log.ok(f"wrote {_display_path(appinfo_out)}")
+    log.ok(f"wrote {_display_path(launcher_out)}")
+
+    _ensure_appinfo_icons(log)
+    _ensure_launcher_splash(version, py, log)
+
+
+def step9_copy_defaults(log: _Log) -> None:
+    log.step(9, "Copy DefaultData -> staging")
+
+    if not DEFAULTDATA_TMPL.is_dir():
+        log.warn(f"no DefaultData template at {DEFAULTDATA_TMPL} - skipping")
+        return
+
+    dest = STAGING / "App" / "DefaultData"
+    if dest.exists():
+        _rmtree(dest)
+    shutil.copytree(DEFAULTDATA_TMPL, dest)
+    count = sum(1 for _ in dest.rglob("*") if _.is_file())
+    log.ok(f"DefaultData copied -> {_display_path(dest)} ({count} files)")
+
+    # help.html at the app root is required by the PortableApps.com Installer and
+    # is good to ship in the zip too.
+    if HELP_HTML_TMPL.is_file():
+        shutil.copy2(HELP_HTML_TMPL, STAGING / "help.html")
+        log.ok("help.html copied -> staging/help.html")
+    else:
+        log.warn(f"no help.html template at {HELP_HTML_TMPL} - installer step will fail")
+
+
+def _find_launcher_generator(override: str | None, log: _Log) -> Path | None:
+    def _from(p: Path) -> Path | None:
+        if p.is_file() and p.name.lower() == LAUNCHER_GEN_EXE.lower():
+            return p
+        if p.is_dir():
+            direct = p / LAUNCHER_GEN_EXE
+            if direct.is_file():
+                return direct
+            for found in p.rglob(LAUNCHER_GEN_EXE):
+                return found
+        return None
+
+    if override:
+        c = _from(Path(override))
+        if c is not None:
+            return c
+        log.warn(f"--launcher-gen path did not resolve: {override}")
+
+    env_val = os.environ.get("PASKILLS_LAUNCHER_GEN")
+    if env_val:
+        c = _from(Path(env_val))
+        if c is not None:
+            return c
+
+    on_path = shutil.which(LAUNCHER_GEN_EXE)
+    if on_path:
+        return Path(on_path)
+
+    for hint in LAUNCHER_GEN_HINTS:
+        c = _from(hint)
+        if c is not None:
+            return c
+
+    return None
+
+
+def _find_installer(override: str | None, log: _Log) -> Path | None:
+    def _from(p: Path) -> Path | None:
+        if p.is_file() and p.name.lower() == INSTALLER_EXE.lower():
+            return p
+        if p.is_dir():
+            direct = p / INSTALLER_EXE
+            if direct.is_file():
+                return direct
+            for found in p.rglob(INSTALLER_EXE):
+                return found
+        return None
+
+    if override:
+        c = _from(Path(override))
+        if c is not None:
+            return c
+        log.warn(f"--installer path did not resolve: {override}")
+
+    env_val = os.environ.get("PASKILLS_INSTALLER")
+    if env_val:
+        c = _from(Path(env_val))
+        if c is not None:
+            return c
+
+    on_path = shutil.which(INSTALLER_EXE)
+    if on_path:
+        return Path(on_path)
+
+    for hint in INSTALLER_HINTS:
+        c = _from(hint)
+        if c is not None:
+            return c
+
+    return None
+
+
+def step10_launcher_gen(args: argparse.Namespace, log: _Log) -> bool:
+    log.step(10, "Invoke PortableApps Launcher Generator")
+
+    gen = _find_launcher_generator(args.launcher_gen, log)
+    if gen is None:
+        log.warn("PortableApps.comLauncherGenerator.exe not found.")
+        log.warn("  Install: https://portableapps.com/apps/development/portableapps.com_launcher")
+        log.warn("  Or pass: --launcher-gen <path-to-generator.exe>")
+        log.warn("  Skipping; staging/PASkillsPortable.exe will not be created.")
+        return False
+
+    log.info(f"using launcher generator: {gen}")
+
+    if platform.system() != "Windows":
+        log.warn("Launcher Generator is a Windows .exe; current platform isn't Windows.")
+        log.warn("  Skipping; rerun this step on Windows to wrap pa_skills.exe.")
+        return False
+
+    res = subprocess.run([str(gen), str(STAGING)], cwd=PROJECT_ROOT, check=False)
+    if res.returncode != 0:
+        log.warn(f"launcher generator exited {res.returncode} - wrapper exe may not be present")
+
+    wrapper = STAGING / "PASkillsPortable.exe"
+    if wrapper.is_file():
+        log.ok(f"wrapper produced: {_display_path(wrapper)}")
+        return True
+
+    # Surface the launcher's own log when it bails - the generator writes
+    # PortableApps.comLauncherGeneratorLog.txt next to its exe.
+    gen_log = gen.parent / "PortableApps.comLauncherGeneratorLog.txt"
+    if gen_log.is_file():
+        log.warn(f"see: {gen_log}")
+    log.warn(f"expected wrapper not found at {wrapper}")
+    return False
+
+
+def _iter_staging_files() -> Iterable[Path]:
+    for p in sorted(STAGING.rglob("*")):
+        if p.is_file():
+            yield p
+
+
+def step11_zip(version: str, log: _Log, *, launcher_ok: bool) -> Path | None:
+    """
+    Produce dist/PASkillsPortable_<version>.zip from staging/.
+
+    Deterministic: sorted file order, fixed (2026,1,1,0,0,0) timestamp on
+    each entry, so identical inputs produce a byte-identical archive.
+    """
+    log.step(11, "Zip staging -> dist")
+
+    if not launcher_ok:
+        log.warn("launcher wrapper missing - skipping zip. Run step10 successfully, then re-build.")
+        return None
+
+    if not STAGING.is_dir():
+        log.err(f"staging missing: {STAGING}")
+        sys.exit(2)
+
+    v3, _ = _portable_versions(version)
+    DIST.mkdir(parents=True, exist_ok=True)
+    out = DIST / f"PASkillsPortable_{v3}.zip"
+    if out.exists():
+        out.unlink()
+
+    fixed_time = (2026, 1, 1, 0, 0, 0)
+    count = 0
+    total_bytes = 0
+    top = "PASkillsPortable"
+
+    with zipfile.ZipFile(out, mode="w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as zf:
+        for path in _iter_staging_files():
+            rel = path.relative_to(STAGING).as_posix()
+            arcname = f"{top}/{rel}"
+            info = zipfile.ZipInfo(filename=arcname, date_time=fixed_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o644 & 0xFFFF) << 16
+            data = path.read_bytes()
+            zf.writestr(info, data)
+            count += 1
+            total_bytes += len(data)
+
+    mb = total_bytes / (1024 * 1024)
+    log.ok(f"wrote {_display_path(out)}  ({count} files, {mb:.1f} MiB uncompressed)")
+    return out
+
+
+def step12_installer(args: argparse.Namespace, log: _Log, *, launcher_ok: bool) -> Path | None:
+    """
+    Build an installable PASkillsPortable_<version>.paf.exe from staging/ using
+    the PortableApps.com Installer, and move it into dist/.
+
+    Runs last (after the zip) because the installer writes a log into the source
+    tree; keeping it last leaves the zip's contents clean.
+    """
+    log.step(12, "Build .paf.exe installer")
+
+    if args.skip_installer:
+        log.info("--skip-installer set; no .paf.exe built")
+        return None
+    if not launcher_ok:
+        log.warn("launcher wrapper missing - skipping installer")
+        return None
+    if platform.system() != "Windows":
+        log.warn("PortableApps.com Installer is a Windows .exe; skipping on this platform.")
+        return None
+
+    inst = _find_installer(args.installer, log)
+    if inst is None:
+        log.warn("PortableApps.comInstaller.exe not found.")
+        log.warn("  Expected vendored at bundling/installer/3.9.16/, or pass --installer <path>.")
+        log.warn("  Skipping; no .paf.exe produced.")
+        return None
+    if not (STAGING / "help.html").is_file():
+        log.err("staging/help.html missing - the installer requires it (see step 9).")
+        return None
+
+    log.info(f"using installer: {inst}")
+
+    # The installer emits <AppID>_<version>.paf.exe into the parent of the source
+    # folder (PROJECT_ROOT, since the source is staging/).
+    before = set(PROJECT_ROOT.glob("*.paf.exe"))
+    res = subprocess.run([str(inst), str(STAGING)], cwd=PROJECT_ROOT, check=False)
+    if res.returncode != 0:
+        log.warn(f"installer exited {res.returncode}")
+
+    produced = sorted(set(PROJECT_ROOT.glob("*.paf.exe")) - before)
+    if not produced:
+        log.err("installer produced no .paf.exe")
+        inst_log = inst.parent / "Data" / "PortableApps.comInstallerLog.txt"
+        if inst_log.is_file():
+            log.warn(f"see installer log: {inst_log}")
+        return None
+
+    paf = produced[-1]
+    DIST.mkdir(parents=True, exist_ok=True)
+    dest = DIST / paf.name
+    if dest.exists():
+        dest.unlink()
+    shutil.move(str(paf), str(dest))
+    mb = dest.stat().st_size / (1024 * 1024)
+    log.ok(f"wrote {_display_path(dest)}  ({mb:.1f} MiB)")
+    return dest
+
+
+# ---------------------------------------------------------------------------
+# Main.
+# ---------------------------------------------------------------------------
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    p = argparse.ArgumentParser(prog="build.py", description=__doc__.splitlines()[1] if __doc__ else "")
+    p.add_argument("--version", help="Force a specific version string; otherwise derived from git tag.")
+    p.add_argument("--allow-dirty", action="store_true", help="Allow a dirty working tree.")
+    p.add_argument("--skip-venv", action="store_true", help="Reuse the existing build venv if present.")
+    p.add_argument("--skip-pull", action="store_true", help="Don't refresh src/agents/ from upstream.")
+    p.add_argument("--no-color", action="store_true", help="Disable ANSI colour output.")
+    p.add_argument(
+        "--launcher-gen",
+        metavar="PATH",
+        help="Path to PortableApps.comLauncherGenerator.exe (or its folder). "
+             "Otherwise PASKILLS_LAUNCHER_GEN env var, PATH, and standard install hints are searched.",
+    )
+    p.add_argument(
+        "--skip-launcher",
+        action="store_true",
+        help="Don't invoke the launcher generator (also skips the zip step).",
+    )
+    p.add_argument(
+        "--installer",
+        metavar="PATH",
+        help="Path to PortableApps.comInstaller.exe (or its folder). Otherwise "
+             "PASKILLS_INSTALLER env var, PATH, and standard install hints are searched.",
+    )
+    p.add_argument(
+        "--skip-installer",
+        action="store_true",
+        help="Don't build the installable .paf.exe.",
+    )
+    p.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete the agents cache directory (build_pyinstaller/.agents_cache/) and exit.",
+    )
+    return p.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    log = _Log(use_color=not args.no_color)
+
+    # --clean: nuke the agents cache and exit.
+    if args.clean:
+        if AGENTS_CACHE.is_dir():
+            import shutil as _shutil
+            _shutil.rmtree(AGENTS_CACHE)
+            log.ok(f"Deleted agents cache: {AGENTS_CACHE}")
+        else:
+            log.info(f"Nothing to clean — {AGENTS_CACHE} does not exist.")
+        return 0
+
+    log.info(f"project root: {PROJECT_ROOT}")
+    log.info(f"python:       {sys.executable} ({sys.version.split()[0]})")
+    log.info(f"platform:     {platform.system()} {platform.release()}")
+
+    version, sha, dirty = step1_resolve_version(args, log)
+    step2_reset_staging(log)
+    step7_pull_agents(args, log)
+    py = step3_create_venv(args, log)
+    step4_run_pyinstaller(py, log)
+
+    step5_native_binaries(log)
+    step6_poppler(log)
+    step6b_qpdf(log)
+    step8_render_inis(version, py, log)
+    step9_copy_defaults(log)
+
+    if args.skip_launcher:
+        log.step(10, "Invoke PortableApps Launcher Generator - skipped (--skip-launcher)")
+        log.step(11, "Zip staging -> dist - skipped (no launcher)")
+        log.step(12, "Build .paf.exe installer - skipped (no launcher)")
+        launcher_ok = False
+        zip_path: Path | None = None
+        paf_path: Path | None = None
+    else:
+        launcher_ok = step10_launcher_gen(args, log)
+        zip_path = step11_zip(version, log, launcher_ok=launcher_ok)
+        paf_path = step12_installer(args, log, launcher_ok=launcher_ok)
+
+    log.ok(f"build complete (version {version}, sha {sha})")
+    log.info(f"Frozen output: {STAGING / 'App' / 'PASkills' / 'pa_skills.exe'}")
+    if launcher_ok:
+        log.info(f"Wrapper:       {STAGING / 'PASkillsPortable.exe'}")
+    if zip_path is not None:
+        log.info(f"Release zip:   {zip_path}")
+    if paf_path is not None:
+        log.info(f"Installer:     {paf_path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

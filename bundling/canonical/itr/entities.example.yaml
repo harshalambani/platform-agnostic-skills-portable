@@ -1,0 +1,221 @@
+# =============================================================================
+# entities.example.yaml -- SYNTHETIC example of Data/itr/entities.yaml (plan
+# section 4.2). Copy this file to entities.yaml and fill in real profiles;
+# entities.yaml itself is user data and is gitignored (see .gitignore).
+# No real names/PANs/DOBs/Aadhaar appear here -- SYN-IND and SYN-HUF match the
+# synthetic fixtures under tests/skill_itr_workbook/fixtures/. father_name and
+# aadhaar are OPTIONAL fields (2026-07-19 residency prompt, section 1).
+# `residency` only takes effect when set to exactly one of R/OR, RNOR, NR --
+# any other value (including the legacy free text below) is undeclared and
+# defaults to R/OR (rules.resolve_residency()).
+#
+# `books:` (GnuCash book registry, v3.0.0) maps a financial year -- the bare
+# 'YYYY-YY' key, e.g. "2025-26", NOT "FY 2025-26" -- to that entity's
+# `.gnucash` book path. Register a book once per FY on the Entities tab
+# and the app fills the book in for you wherever one is asked for (ITR
+# Workbook, Convert to GnuCash, Review, Inter-entity, 26AS, KRChoksey);
+# every file field stays overridable via Browse. `workbook_match` is DERIVED
+# from the registered book's filename (trailing year digits stripped), so an
+# explicit `workbook_match:` is only an override.
+# Resolution precedence (ui/_book_registry.py::resolve_book): books[fy] ->
+# newest FY in `books` (keys sort lexically == chronologically) -> the legacy
+# top-level `book:` single path -> nothing. The legacy `book:` form is still
+# honoured for entities that predate `books:` (see SYN-IND-NR below).
+# =============================================================================
+SYN-IND:
+  name: "Synthetic Individual"
+  pan: "AAAAA0000A"
+  status: "Individual"
+  residency: "Resident"
+  father_name: "Synthetic Father"
+  aadhaar: "000011112222"
+  dob: "1980-01-01"
+  address: "123 Example Street, Example City"
+  books:
+    "2025-26": "C:/Example/Books/SynIndividual2526.gnucash"
+    "2026-27": "C:/Example/Books/SynIndividual2627.gnucash"
+  default_regime: "new"
+  regime_by_ay:
+    "2026-27": "new"
+    "2025-26": "old"
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []
+
+SYN-HUF:
+  name: "Synthetic HUF"
+  pan: "BBBBB1111B"
+  status: "HUF"
+  residency: "Resident"
+  doi: "1975-06-15"    # date of incorporation -- password material for docs like 26AS PDFs; never age-class input (CF6)
+  default_regime: "new"
+  extra_items:
+    bf_losses: []
+    clubbing_notes:
+      - "example: minor's interest income clubbed under s.64(1A) -- illustrative only"
+
+SYN-IND-BIZ:
+  # Illustrates `business_subtree` (2026-07-19 "PL for Business" prompt): a
+  # GnuCash account path prefix, not a keyword/name match, that the `PL for
+  # Business` sheet walks as a subtree. Only set this for an entity whose
+  # books actually have such a group -- an entity with the field set but no
+  # matching accounts for a given FY will fail loudly (BusinessSubtreeError)
+  # rather than silently render a blank sheet.
+  name: "Synthetic Business Individual"
+  pan: "DDDDD3333D"
+  status: "Individual"
+  residency: "Resident"
+  dob: "1978-01-01"
+  address: "789 Example Lane, Example City"
+  business_subtree: "Income/xBusiness Income"
+  # workbook_match: the ITR Mapping Review Layer A attribution token -- the
+  # name portion of the workbook filename WITHOUT the year (e.g. a workbook
+  # named "SynIndBiz2026.gnucash" would use "SynIndBiz"). Matching is
+  # longest-match-wins, so a more specific HUF token (e.g. "SynIndBizHUF")
+  # beats a shorter individual-name token ("SynIndBiz") when both could
+  # match the same workbook filename.
+  workbook_match: "SynIndBiz"
+  default_regime: "new"
+  # audit_case: the s.139(1) due date is 31 October rather than 31 July, which
+  # changes 234A/234B/234C interest. Defaults to false when omitted. Use
+  # audit_case_by_ay for a per-year override, e.g. only one AY was extended:
+  audit_case: true
+  audit_case_by_ay:
+    "2025-26": false
+  # audit_case_basis (OPTIONAL): WHY the 31 October date applies. s.139(1)
+  # Explanation 2 reaches the same date by several routes, so this is purely
+  # descriptive -- it changes the wording printed beside the due date in the
+  # workbook and NEVER the date itself. Omit it and the workbook reads as the
+  # s.44AB case, which is what a bare `audit_case: true` has always meant.
+  #   self_44ab                 -- own accounts liable to audit u/s 44AB
+  #   partner_of_audited_firm   -- working partner of a firm whose accounts are
+  #                                liable to audit; he gets 31 Oct without being
+  #                                an audit case himself
+  audit_case_basis: "self_44ab"
+  # foreign_dividends_in_book: false (default, and the correct value when the
+  # GnuCash book does NOT yet contain a foreign broker's dividend activity) --
+  # a supplied broker report's ordinary foreign dividend series is then ADDED
+  # into Other Sources' dividend total and 234C buckets, since it would
+  # otherwise simply be missing from the return. Set true once the book
+  # starts recording that income too (e.g. under OS_DIVIDEND), so the broker
+  # figures stay excluded from the total instead of double-counting it. Use
+  # foreign_dividends_in_book_by_ay for a per-year override, e.g. importing
+  # starts partway through:
+  foreign_dividends_in_book: false
+  foreign_dividends_in_book_by_ay:
+    "2026-27": true
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []
+
+SYN-IND-NR:
+  # Illustrates a DECLARED residency (2026-07-19 residency prompt, section 2):
+  # exactly "NR" gates senior-citizen age-class benefits off entirely, and
+  # the Assumptions footnote is dropped from the Statement of Income header.
+  name: "Synthetic Non-Resident"
+  pan: "CCCCC2222C"
+  status: "Individual"
+  residency: "NR"
+  father_name: "Synthetic Father NR"
+  aadhaar: "333344445555"
+  dob: "1955-01-01"
+  address: "456 Example Avenue, Example Town"
+  # Legacy single-book form, kept working for entities registered before
+  # `books:` existed. Prefer `books:` (see SYN-IND) -- this one is not
+  # FY-keyed, so it is only consulted after `books:` is exhausted, and it is
+  # deliberately NOT reported by list_books(). It is not an EntityProfile
+  # field, so saving this entity from the Entities tab DROPS it -- one
+  # more reason to move to `books:`.
+  book: "C:/Example/Books/SynNonResident.gnucash"
+  default_regime: "new"
+  extra_items:
+    bf_losses: []
+    clubbing_notes: []
+  # MAP-34 / MAP-35 (GnuCash mapper). Optional; absent == mapper behaves as before.
+  # Editable on the Entities tab (blank removes the key). Money IN reaches a drawings
+  # account only via a History match or the reimbursement rule; hidden/placeholder
+  # or not-in-book paths are ignored.
+  # drawings_accounts:  # money IN to these is not a direction clash; an employer
+  #   - "Equity:Drawings"  # reimbursement credit goes here when exactly one is listed
+  # reimbursement_markers:  # SEC-20: whole-word tags on an employer NEFT credit that reimburses the
+  #   - "ABCD"              # owner (MAP-34). Per entity; empty/absent = the rule never fires.
+  # partner_admission_date: "2020-04-01"  # date admitted as a partner (YYYY-MM-DD); drives the partner skill's capital rule
+  # card_spend_default_account: "Equity:Drawings"  # card spends nothing else matched (low confidence)
+  # bank_service_charge_account: "Expenses:Bank Service Charge"  # CC-03: card fees, interest and GST on fees. Missing = the card-spend booking skill stops with a named error.
+  # card_emi_interest_account: "Expenses:Card EMI Interest"  # CC-03: card EMI interest only (never mixed into Bank Service Charge)
+
+SYN-PARTNER:
+  # UI-35: ONE entity that spells out every remaining field, with synthetic
+  # values, so this file documents every EntityProfile field (the Entities tab
+  # has a control for each; tests/test_ui35_entities_all_fields.py checks both).
+  name: "Synthetic Partner"
+  pan: "EEEEE4444E"
+  status: "Individual"
+  residency: "Resident"
+  default_regime: "new"
+  books:
+    "2025-26": "C:/Example/Books/SynPartner2526.gnucash"
+  # Money IN to these is not a direction clash; an employer reimbursement
+  # credit goes here when exactly one is listed.
+  drawings_accounts:
+    - "Equity:Drawings"
+  reimbursement_markers:
+    - "ABCD"
+  card_spend_default_account: "Equity:Drawings"
+  # CC-03: card fees, interest and GST on fees / card EMI interest only (never
+  # mixed into the Bank Service Charge account).
+  bank_service_charge_account: "Expenses:Bank Service Charge"
+  card_emi_interest_account: "Expenses:Card EMI Interest"
+  # ITR-09: the three accounts the foreign-dividend journal posts to (cash Dr net, tax Dr withheld,
+  # income Cr gross). All three are required for the journal; none may be hidden or a placeholder.
+  foreign_dividend_cash_account: "Assets:Broker:Cash"
+  foreign_dividend_tax_account: "Assets:Foreign Tax Withheld"
+  foreign_dividend_income_account: "Income:Foreign Dividends"
+  # CC-14: this entity's own large-spend (possible asset) limit in rupees; blank = the global setting.
+  cc_large_spend_threshold: 15000
+  # CC-31: the most (rupees, 0 to 500) a CRED payment line on a statement may exceed the bank amount and
+  # still be matched. Missing = 50. Anything else than a number from 0 to 500 stops the card-spend run.
+  cc_cred_max_overage: 50
+  # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
+  partner_firm_pan: "FFFFF1234F"
+  # Partner of a firm (Partner Compensation skill). Date admitted drives the
+  # capital rule (40% of target compensation over 48 months).
+  partner_admission_date: "2020-04-01"
+  # The nine account keys: eight required plus the optional salary_clearing
+  # (takes the year-end rounding line). Full colon paths, no "Root Account:".
+  partner_comp_accounts:
+    bank: "Assets:Bank:Firm Account"
+    tds_expense: "Expenses:Tax:TDS"
+    interest_on_capital: "Income:Firm:Interest on Capital"
+    current_account: "Assets:Firm:Current Account"
+    capital_contribution: "Assets:Firm:Capital"
+    medical_expense: "Expenses:Medical"
+    remuneration_income: "Income:Firm:Remuneration"
+    share_of_profit_income: "Income:Firm:Share of Profit"
+    salary_clearing: "Assets:Firm:Salary Clearing"
+  # Foreign broker dividends already recorded in the book? false = the broker
+  # report's figures are ADDED to Other Sources; true = they stay out of the
+  # total. The per-AY switch overrides the default for one year.
+  foreign_dividends_in_book: false
+  foreign_dividends_in_book_by_ay:
+    "2026-27": true
+  extra_items:
+    bf_losses:
+      - "example: brought-forward business loss, illustrative only"
+    clubbing_notes: []
+    # Per-FY drivers for the Partner Compensation skill. Known keys:
+    # firms_tax_rate, capital_rate, capital_interest_rate, capital_interest_tds_rate,
+    # remuneration_tds_rate (fractions, 0.25 = 25%); capital_months_total,
+    # capital_months_achieved (whole months); target_compensation (rupees);
+    # remuneration_tds_section (text); remuneration_tds_start_date (YYYY-MM-DD);
+    # capital_interest_from_date_overrides ({month: YYYY-MM-DD}).
+    partner_comp_drivers:
+      "2025-26":
+        firms_tax_rate: 0.25
+        target_compensation: 1200000
+        remuneration_tds_section: "194T"
+        remuneration_tds_start_date: "2024-04-01"
+        # The capital rule (informational only). Both are optional: unset means 0.40 and 48,
+        # shown as "Default" in the run. Editable on the Entities screen (as a percent there).
+        capital_rate: 0.40
+        capital_months_total: 48
