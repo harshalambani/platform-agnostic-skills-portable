@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents.skill_scaffold.scaffold import is_frozen
 from agents.skill_parser_generator.tools import (
     apply_template_edit,
     create_parser_from_template,
@@ -24,6 +25,12 @@ from agents.skill_parser_generator.tools import (
     run_tieout,
     typed_tieout_args,
     validate_parser,
+)
+
+FROZEN_MESSAGE = (
+    "Error: the Parser Generator is a source-checkout-only dev tool -- the "
+    "shipped app's parser files are read-only, so there is nowhere for it to "
+    "write an edit or a new parser. Run this from a source checkout instead."
 )
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
@@ -56,6 +63,9 @@ def run(
     gate via tools; it must not claim success unless run_tieout reports exit 0.
     Returns the agent's final message. Does not commit.
     """
+    if is_frozen():
+        return FROZEN_MESSAGE
+
     from agents.base_agent import build_agent
 
     agent = build_agent(TOOLS, SYSTEM_PROMPT, config_path, model_override)
@@ -81,6 +91,9 @@ def run_ui(
     powered-by-LLM step honest: the tab still only edits blanks and runs the
     gate via the deterministic tools.
     """
+    if is_frozen():
+        return FROZEN_MESSAGE
+
     task_l = (task or "").lower()
     parser_path = (parser_path or "").strip()
     parser_args = (parser_args or "").strip()
