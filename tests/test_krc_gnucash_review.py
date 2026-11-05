@@ -553,3 +553,26 @@ def test_scan_review_csvs_no_output_dir_is_safe(monkeypatch):
         raise RuntimeError("no config")
     monkeypatch.setattr(m._config_mod, "output_dir", _boom)
     assert m._scan_review_csvs() == []
+
+
+@pytest.mark.parametrize("bad_text", ["key: [unclosed\n  - : :", "- just\n- a list\n", "plain scalar"])
+def test_save_changes_leaves_an_unreadable_config_untouched(tmp_path, monkeypatch, bad_text):
+    review_p = _write_review_csv(tmp_path, [ROW_ACCOUNT_MAPPING])
+    data_root = tmp_path / "Data"
+    monkeypatch.setattr(m._config_mod, "data_root_dir", lambda: data_root)
+    monkeypatch.setattr(
+        m, "_extract_stock_accounts", lambda gnucash_path: ["Assets:Investments:SYNCORP LTD"]
+    )
+    cfg_path = data_root / "settings" / "krc_gnucash_config.yaml"
+    cfg_path.parent.mkdir(parents=True)
+    cfg_path.write_text(bad_text, encoding="utf-8")
+
+    payload = _payload(str(review_p), [
+        {"_idx": 0, "CN No": "CN1", "Account": "Assets:Investments:SYNCORP LTD"},
+    ], gnucash_path=str(tmp_path / "book.gnucash"))
+    msg = m._save_changes(payload)
+
+    assert msg.startswith("Error")
+    assert "nothing was saved" in msg
+    assert cfg_path.read_text(encoding="utf-8") == bad_text
+    assert [p.name for p in cfg_path.parent.iterdir()] == [cfg_path.name]  # no backup, no new file

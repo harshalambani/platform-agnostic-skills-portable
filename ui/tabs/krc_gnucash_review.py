@@ -460,22 +460,26 @@ def _save_changes(changes_json: str) -> str:
         return "\n\n".join(lines)
 
     cfg_path = _config_path()
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
 
     backup_msg = "No existing config file — nothing to back up (cold start)."
     existing_cfg: dict = {}
     if cfg_path.is_file():
+        # An existing config that cannot be read as a mapping is left exactly
+        # as it is: rewriting it would replace every other setting in it.
         try:
             existing_cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-            if not isinstance(existing_cfg, dict):
-                existing_cfg = {}
         except Exception:
-            existing_cfg = {}
+            existing_cfg = None
+        if not isinstance(existing_cfg, dict):
+            return (f"Error: {cfg_path} could not be read as settings -- "
+                    "nothing was saved and the file was left as it is. "
+                    "Fix or move it, then save again.")
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         backup_path = cfg_path.with_name(f"{cfg_path.name}.bak-{stamp}")
         shutil.copy2(cfg_path, backup_path)
         backup_msg = f"Backup written: {backup_path}"
 
+    cfg_path.parent.mkdir(parents=True, exist_ok=True)
     aliases = dict(existing_cfg.get("security_aliases") or {})
     aliases.update(new_aliases)
     existing_cfg["security_aliases"] = aliases
