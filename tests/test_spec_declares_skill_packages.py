@@ -23,7 +23,7 @@ _DIST_TO_IMPORT = {
     "pyyaml": "yaml",
     "pillow": "PIL",
     "python-dotenv": "dotenv",
-    "extract-msg": "extract_msg",
+    "beautifulsoup4": "bs4",
 }
 
 
@@ -100,3 +100,12 @@ def test_dist_to_import_mapping():
     assert import_name("pyyaml") == "yaml"
     assert import_name("pillow") == "PIL"
     assert import_name("openpyxl") == "openpyxl"
+
+
+def test_guard_reports_bs4_when_stripped_from_spec():
+    # beautifulsoup4 is declared by skill_itr_workbook; a spec without "bs4" must be flagged.
+    assert "beautifulsoup4" in declared_packages()
+    real = SPEC.read_text(encoding="utf-8")
+    assert not any(m.startswith("beautifulsoup4") for m in missing_from_spec(real))
+    stripped = "\n".join(ln for ln in real.splitlines() if '"bs4"' not in ln)
+    assert any(m.startswith("beautifulsoup4") for m in missing_from_spec(stripped))

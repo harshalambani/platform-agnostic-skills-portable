@@ -240,6 +240,14 @@ jobs:
       - name: No real credentials or account data
         run: python scripts/check_no_real_data.py
 
+      # Licence gate: every package in requirements-lock.txt is looked up among
+      # the packages installed above, and the step fails if any declares GPL,
+      # LGPL or AGPL. No allowlist. The two packages the install step leaves out
+      # (pywebview, pythonnet) are the only ones allowed to be absent; any other
+      # missing package fails too, so the check cannot silently shrink.
+      - name: Licence gate (no GPL, LGPL or AGPL in the lock)
+        run: python scripts/license_gate.py
+
       # No tolerance here at all. These two files import cleanly with the deps
       # installed above, so any non-zero exit is a real security regression.
       - name: Security static checks

@@ -41,4 +41,4 @@ Attachments are listed (names), so you can see what was enclosed without opening
 
 | If… | Then… |
 |------|-------|
-| Body text looks empty. | Some HTML-only emails store the body differently; check the JSON fields — the text may be under the HTML body. |
+| Body text looks empty. | For .msg files only the plain-text body is read. A .msg that keeps its text only as rich text (RTF) or HTML gives an empty body, and when a rich-text body is present the JSON carries a "warnings" entry saying so; open the original email to read it. .eml files fall back to the HTML body with tags stripped. |

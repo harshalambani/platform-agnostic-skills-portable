@@ -5,7 +5,7 @@ Parses .msg (Outlook CDFV2) or .eml (RFC 5322) files and writes a
 structured JSON file with: sender, date, subject, body, attachments.
 
 Dependencies:
-  - extract-msg (already in requirements.txt) for .msg files.
+  - olefile (via agents.msg_reader) for .msg files.
   - Python stdlib `email` for .eml files.
 """
 from __future__ import annotations
@@ -13,59 +13,49 @@ from __future__ import annotations
 import email
 import email.policy
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 
 # ---------------------------------------------------------------------------
-# .msg extraction (via extract-msg)
+# .msg extraction (via agents.msg_reader, olefile)
 # ---------------------------------------------------------------------------
 
 def _parse_msg(path: Path) -> dict[str, Any]:
-    """Parse an Outlook .msg file and return structured fields."""
-    import extract_msg
+    """Parse an Outlook .msg file and return structured fields.
 
-    msg = extract_msg.Message(str(path))
+    Raises ``MsgReadError`` (naming the file) when the file is not a readable
+    .msg. A "warnings" list is added to the result only when a warning fired.
+    """
+    from agents.msg_reader import MsgReadError, read_msg
+
     try:
-        # Sender
-        sender = msg.sender or ""
+        msg = read_msg(path)
+    except MsgReadError as exc:
+        raise MsgReadError(f"Cannot read {path.name} as an Outlook .msg: {exc}") from exc
 
-        # Date — extract-msg exposes a datetime or a string.
-        raw_date = msg.date
-        if isinstance(raw_date, datetime):
-            date_str = raw_date.isoformat()
-        elif raw_date:
-            date_str = str(raw_date)
-        else:
-            date_str = ""
+    # Date: aware datetime in the local zone, or empty when unsent/unknown.
+    date_str = msg.date.isoformat() if msg.date else ""
 
-        # Subject
-        subject = msg.subject or ""
+    attachments = []
+    for att in msg.attachments:
+        attachments.append({
+            "filename": att.filename or "unnamed",
+            "size_bytes": len(att.data) if att.data else 0,
+        })
 
-        # Body — prefer plain text.
-        body = msg.body or ""
-
-        # Attachments
-        attachments = []
-        for att in msg.attachments:
-            att_info: dict[str, Any] = {"filename": att.longFilename or att.shortFilename or "unnamed"}
-            # Size: extract-msg stores attachment data; len gives bytes.
-            try:
-                att_info["size_bytes"] = len(att.data) if att.data else 0
-            except Exception:
-                att_info["size_bytes"] = 0
-            attachments.append(att_info)
-
-        return {
-            "sender": sender,
-            "date": date_str,
-            "subject": subject,
-            "body": body,
-            "attachments": attachments,
-        }
-    finally:
-        msg.close()
+    result: dict[str, Any] = {
+        "sender": msg.sender or "",
+        "date": date_str,
+        "subject": msg.subject or "",
+        "body": msg.body or "",
+        "attachments": attachments,
+    }
+    if msg.warnings:
+        for w in msg.warnings:
+            print(f"[msg_parser] WARNING ({path.name}): {w}")
+        result["warnings"] = list(msg.warnings)
+    return result
 
 
 # ---------------------------------------------------------------------------

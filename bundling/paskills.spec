@@ -62,14 +62,13 @@ hiddenimports = [
     "pandas",
     "langchain_core",
     "langchain_core.tools",
-    # MSG parser dependency (local import inside _parse_msg).
-    "extract_msg",
     # Lazy imports inside skill agents (BNK-07). agents/ is excluded from
     # Analysis, so a package imported only from agents/*.py is invisible to
     # PyInstaller unless declared here. tests/test_spec_declares_skill_packages.py
     # fails if any skill.yaml python_packages entry is missing from this spec.
     "msoffcrypto",       # skill_sbm, skill_mf_cas (password-protected .xlsx)
-    "olefile",           # msoffcrypto runtime dependency
+    "olefile",           # msoffcrypto runtime dependency; also agents/msg_reader.py (skill_cc_sort, skill_msg_parser)
+    "bs4",               # skill_itr_workbook (parse_eguile); declared directly, no longer via extract-msg
     "xlrd",              # skill_hdfc / ICICI BIFF .xls reader
     # Native window (v2, #40). ui/webui.py imports these LAZILY (inside
     # _run_native_window / _native_window_available), so PyInstaller's static
