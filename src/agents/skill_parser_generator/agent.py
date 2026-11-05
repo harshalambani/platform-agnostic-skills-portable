@@ -22,6 +22,7 @@ from agents.skill_parser_generator.tools import (
     create_parser_from_template,
     extract_blanks,
     run_tieout,
+    typed_tieout_args,
     validate_parser,
 )
 
@@ -108,7 +109,8 @@ def run_ui(
             "success unless run_tieout reports exit 0. Do not commit."
         )
 
-    report = run(instruction, config_path=config_path, model_override=model_override)
+    with typed_tieout_args(parser_args):
+        report = run(instruction, config_path=config_path, model_override=model_override)
 
     if output_path:
         out_dir = Path(output_path)

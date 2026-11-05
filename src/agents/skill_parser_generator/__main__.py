@@ -17,6 +17,7 @@ import sys
 
 from agents.skill_parser_generator.tools import (
     run_tieout_impl,
+    typed_tieout_args,
     validate_parser_impl,
     extract_blanks_impl,
 )
@@ -54,7 +55,8 @@ def _cmd_fix(args: argparse.Namespace) -> int:
         f"the tie-out with args: {arg_str}. Report the gate result and the diff; "
         f"do not claim success unless run_tieout reports exit 0. Do not commit."
     )
-    print(run(instruction, config_path=args.config, model_override=args.model))
+    with typed_tieout_args(arg_str):
+        print(run(instruction, config_path=args.config, model_override=args.model))
     return 0
 
 
