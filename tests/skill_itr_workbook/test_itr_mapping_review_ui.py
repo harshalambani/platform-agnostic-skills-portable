@@ -477,7 +477,7 @@ def _files_under(root: Path) -> set[str]:
 
 @pytest.mark.parametrize("bad_key", [
     "../../outside",
-    r"....outside",
+    r"..\..\outside",
     "ABS",          # replaced with an absolute path in the test body
     "SYN-OTHER",    # well-formed but not configured
     "SYN-IND/../SYN-IND",
