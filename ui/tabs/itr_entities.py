@@ -718,6 +718,12 @@ def _save_entity(
 
     if not new_key:
         return "Error: entity key is required -- nothing was saved."
+    if (any(c in new_key for c in ("/", "\\", ":", "\x00")) or ".." in new_key
+            or new_key == "."):
+        return (
+            "Error: entity key cannot contain / \\ : or '..', and cannot be '.' "
+            "-- nothing was saved."
+        )
 
     regime_by_ay, kv_errors_1 = _parse_kv_lines(regime_by_ay_text)
     audit_case_by_ay, kv_errors_2 = _parse_kv_lines(audit_case_by_ay_text, as_bool=True)
