@@ -214,7 +214,8 @@ def build_msg(
     omit_unicode_flag=False,
 ) -> bytes:
     """attachments: iterable of (long_name|None, short_name|None, bytes).
-    embedded: iterable of (display name, subject) for OLE embedded messages."""
+    embedded: iterable of (display name, subject[, [(name, bytes), ...]]) for OLE
+    embedded messages; the optional third item is attachments nested inside."""
     tree: dict = {}
     props = []
     if not unicode_:
@@ -261,7 +262,9 @@ def build_msg(
         folder["__substg1.0_37010102"] = data
         tree[f"__attach_version1.0_#{idx:08X}"] = folder
         idx += 1
-    for disp, subj in embedded:
+    for emb in embedded:
+        disp, subj = emb[0], emb[1]
+        nested = emb[2] if len(emb) > 2 else ()
         inner = {"__properties_version1.0": props_stream([int_prop(0x340D, 0x00040000)], 24)}
         inner["__substg1.0_0037001F"] = subj.encode("utf-16-le")
         inner["__substg1.0_001A001F"] = "IPM.Note".encode("utf-16-le")
@@ -270,6 +273,11 @@ def build_msg(
             "__substg1.0_00030102": b"",
             "__substg1.0_00040102": b"",
         }
+        for k, (nlong, ndata) in enumerate(nested):
+            nf: dict = {"__properties_version1.0": props_stream([int_prop(0x3705, 1)], 8)}
+            put(nf, 0x3707, nlong)
+            nf["__substg1.0_37010102"] = ndata
+            inner[f"__attach_version1.0_#{k:08X}"] = nf
         folder = {
             "__properties_version1.0": props_stream([int_prop(0x3705, 5)], 8),
             "__substg1.0_3701000D": inner,

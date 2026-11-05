@@ -158,6 +158,7 @@ output:
 requires:
   native_binaries: []
   external_tools: []
+  python_packages: ["beautifulsoup4"]
   llm: true   # ITR-01: unmapped accounts get an AI tag suggestion (capped, stops on first failure)
   # The AI step is optional: a failed pre-run check is a loud WARNING, not a stop. The
   # run itself reports how many unmapped accounts got no suggestion.

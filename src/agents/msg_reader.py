@@ -135,8 +135,10 @@ def _filetime_to_local(raw: int) -> Optional[datetime]:
 def _unwrap_mime(blob: bytes):
     """Breadth-first walk of a MIME tree, not entering message/* parts.
 
-    Returns (attachments, plain_body_bytes, warnings). A data node counts as an
-    attachment only when it carries a filename."""
+    Returns (attachments, plain_body_text, warnings). plain_body_text is the
+    decoded str of the first unnamed text/plain part, or None. A root with no
+    Content-Type header is not MIME (opaque S/MIME), so it offers no body.
+    A data node counts as an attachment only when it carries a filename."""
     warnings: list = []
     root = email.message_from_bytes(blob, policy=email.policy.default)
     queue = collections.deque((root,))
@@ -154,13 +156,16 @@ def _unwrap_mime(blob: bytes):
 
     attachments = []
     plain = None
+    is_mime = root.get("Content-Type") is not None
     for node in data_nodes:
         name = node.get_filename()
+        text = None
         try:
             data = node.get_content()
             if isinstance(data, email.message.Message):
                 data = data.as_bytes()
             elif isinstance(data, str):
+                text = data
                 data = data.encode(node.get_content_charset("utf-8"))
             elif not isinstance(data, bytes):
                 raise TypeError(type(data).__name__)
@@ -169,8 +174,8 @@ def _unwrap_mime(blob: bytes):
             continue
         if name:
             attachments.append(MsgAttachment(filename=name, data=data))
-        elif node.get_content_type() == "text/plain" and plain is None:
-            plain = data
+        elif is_mime and node.get_content_type() == "text/plain" and plain is None:
+            plain = text
     return attachments, plain, warnings
 
 
@@ -290,8 +295,8 @@ def _read(ole) -> MsgMessage:
             msg.warnings.extend(warns)
             msg.attachments = inner
             if body is None and plain is not None:
-                body = plain.decode("utf-8", errors="replace")
-            if not inner:
+                body = plain
+            if not inner and plain is None:
                 msg.warnings.append(
                     "signed/encrypted message has no readable MIME attachments "
                     f"(opaque S/MIME, {raw_atts[0].filename or 'unnamed attachment'}); "

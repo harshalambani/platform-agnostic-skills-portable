@@ -109,10 +109,11 @@ class TestAttachments:
         assert m.attachments[0].data == big
 
     def test_embedded_message_not_recursed(self, tmp_path):
-        m = read_msg(write(tmp_path, embedded=[("Fwd: x", "inner")]))
+        m = read_msg(write(tmp_path, embedded=[("Fwd: x", "inner", [("nested.pdf", PDF)])]))
         assert len(m.attachments) == 1
         assert m.attachments[0].embedded is True
         assert m.attachments[0].data is None
+        assert "nested.pdf" not in [a.filename for a in m.attachments]
 
 
 class TestDate:
@@ -187,11 +188,38 @@ class TestSigned:
         inner.set_content("x")
         outer = EmailMessage()
         outer.set_content("body")
+        inner.add_attachment(PDF, maintype="application", subtype="pdf",
+                             filename="inner.pdf")
         outer.add_attachment(inner)  # message/rfc822 part
         outer.add_attachment(PDF, maintype="application", subtype="pdf", filename="k.pdf")
         m = read_msg(write(tmp_path, msg_class="IPM.Note.SMIME",
                            attachments=[("smime.p7m", None, outer.as_bytes())]))
-        assert "k.pdf" in [a.filename for a in m.attachments]
+        names = [a.filename for a in m.attachments]
+        assert "k.pdf" in names
+        assert "inner.pdf" not in names
+
+    def test_opaque_with_no_body_stream_gives_empty_body_and_warning(self, tmp_path):
+        m = read_msg(write(tmp_path, msg_class="IPM.Note.SMIME", no_body=True,
+                           attachments=[("smime.p7m", None, b"\x30\x82\x01\x00opaque")]))
+        assert m.body == ""
+        assert any("opaque S/MIME" in w for w in m.warnings)
+
+    def test_signed_text_only_gets_body_and_no_opaque_warning(self, tmp_path):
+        blob = signed_mime([])  # text part only, no files
+        m = read_msg(write(tmp_path, msg_class="IPM.Note.SMIME.MultipartSigned",
+                           no_body=True, attachments=[("smime.p7m", None, blob)]))
+        assert m.body == "Please find attached."
+        assert not any("opaque S/MIME" in w for w in m.warnings)
+
+    def test_mime_body_charset_round_trip(self, tmp_path):
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        outer = MIMEMultipart("mixed")
+        outer.attach(MIMEText("Caf\u00e9 statement", "plain", "iso-8859-1"))
+        m = read_msg(write(tmp_path, msg_class="IPM.Note.SMIME", no_body=True,
+                           attachments=[("smime.p7m", None, outer.as_bytes())]))
+        assert m.body.strip() == "Caf\u00e9 statement"
+        assert "\ufffd" not in m.body
 
 
 class TestFailures:
@@ -234,6 +262,12 @@ class TestFailures:
             read_msg(bad)
         bad.unlink()
         assert not bad.exists()
+        junk = tmp_path / "junk.msg"
+        junk.write_bytes(b"not an ole file" * 50)
+        with pytest.raises(MsgReadError):
+            read_msg(junk)
+        junk.unlink()  # fails on Windows if the handle leaked
+        assert not junk.exists()
 
     def test_unknown_class_real_msg_is_read(self, tmp_path):
         m = read_msg(write(tmp_path, msg_class="IPM.Appointment", subject="Meet"))
@@ -266,7 +300,8 @@ class TestCcSortExtraction:
         assert files == [] and [f for f in out.rglob("*") if f.is_file()] == []
 
     def test_embedded_message_writes_nothing(self, tmp_path):
-        out, files = self.run(tmp_path, write(tmp_path, embedded=[("Fwd", "x")]))
+        out, files = self.run(
+            tmp_path, write(tmp_path, embedded=[("Fwd", "x", [("nested.pdf", PDF)])]))
         assert files == [] and [f for f in out.rglob("*") if f.is_file()] == []
 
     def test_signed_extracts_pdf_not_p7m(self, tmp_path):
