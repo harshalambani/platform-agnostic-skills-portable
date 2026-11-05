@@ -7,11 +7,17 @@ Usage (from project root):
     python bundling\\refresh_binaries.py --target poppler
     python bundling\\refresh_binaries.py --target all
 
-Bootstrap mode:
-    If a SHA-256 entry in binaries.toml is still the placeholder
-    "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2", the script downloads the file
-    once, computes the SHA, prints it for you to paste into binaries.toml,
-    and exits without populating vendor/. Re-run after editing the TOML.
+Pinning a new URL:
+    Put the text "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2" in the entry's
+    sha256. The script downloads the file, prints its real SHA-256 for you to
+    paste into binaries.toml, extracts NOTHING, and exits with code 2. A
+    placeholder is never accepted as a pin: re-run after pasting the real hash.
+    A wrong SHA-256 also extracts nothing and exits with code 2.
+
+Installer targets:
+    An entry with kind = "installer" (Tesseract) points at a Windows installer,
+    not a zip. Asking for it by name exits with code 2 and a message pointing
+    at --from-tesseract; under --target all it is skipped with that message.
 
 What lands where:
     Tesseract zip → extracted, then *.exe / *.dll / *.tessdata.eng.traineddata
@@ -44,6 +50,14 @@ BINARIES_TOML = PROJECT_ROOT / "bundling" / "binaries.toml"
 VENDOR = PROJECT_ROOT / "vendor"
 
 PLACEHOLDER_SHA = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+
+
+class PlaceholderShaError(RuntimeError):
+    """binaries.toml still holds the placeholder SHA for a target."""
+
+
+class InstallerTargetError(RuntimeError):
+    """The target is a Windows installer; the fetch step cannot unpack it."""
 
 
 # ---------------------------------------------------------------------------
@@ -281,11 +295,22 @@ def _load_binaries() -> dict:
 
 
 def refresh_one(name: str, meta: dict) -> bool:
-    """Process a single target. Returns True if vendor/ was populated, False if we only printed a bootstrap SHA."""
+    """Process a single target and populate vendor/. Returns True on success.
+
+    Raises (and extracts nothing) on a placeholder SHA, a wrong SHA, or an
+    installer-kind target.
+    """
     print(f"\n[{name}]")
     print(f"  version: {meta.get('version')}")
     print(f"  url:     {meta.get('url')}")
     print(f"  pinned:  {meta.get('sha256')}")
+
+    if meta.get("kind") == "installer":
+        raise InstallerTargetError(
+            f"'{name}' is pinned to a Windows installer ({Path(meta['url']).name}), "
+            "not a zip, so this step cannot unpack it. Install it by hand and run:\n"
+            f"    python bundling\\refresh_binaries.py --target {name} --from-{name} <install dir>"
+        )
 
     url = meta["url"]
     expected_sha = meta["sha256"]
@@ -302,7 +327,10 @@ def refresh_one(name: str, meta: dict) -> bool:
             print(f"     Copy this line into binaries.toml under [{name}]:\n")
             print(f"         sha256 = \"{actual_sha}\"\n")
             print(f"     Then re-run: python bundling\\refresh_binaries.py --target {name}")
-            return False
+            raise PlaceholderShaError(
+                f"binaries.toml has a placeholder SHA for '{name}'; nothing was extracted. "
+                "Paste the actual SHA-256 printed above and re-run."
+            )
 
         if actual_sha.lower() != expected_sha.lower():
             raise RuntimeError(
@@ -466,12 +494,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 ok = refresh_one(name, dict(config[name]))
             all_ok = all_ok and ok
+        except InstallerTargetError as e:
+            if args.target != "all":
+                _eprint(f"  ✗  {name} refused: {e}")
+                return 2
+            _eprint(f"  -  {name} skipped under --target all: {e}")
         except Exception as e:  # noqa: BLE001
             _eprint(f"  ✗  {name} failed: {e}")
             return 2
 
     if not all_ok:
-        print("\nOne or more targets need a SHA paste; see messages above. Exiting non-zero to flag.")
+        print("\nOne or more targets did not complete; see messages above.")
         return 1
 
     print("\nDone. vendor/ is ready for the build pipeline.")

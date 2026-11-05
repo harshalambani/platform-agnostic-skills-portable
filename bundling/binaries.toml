@@ -1,22 +1,41 @@
-# bundling/binaries.toml — pinned native-binary sources for Phase 2.
+# bundling/binaries.toml -- pinned native-binary sources.
 #
-# build.py reads this file when --pull-binaries is passed (Phase 2 only).
-# In Phase 1 the file is present but unused. The fields below match what
-# bundling/refresh_binaries.py will consume.
+# Read by:
+#   * bundling/refresh_binaries.py     (downloads + verifies + fills vendor/)
+#   * bundling/build.py                (refuses to build if any entry still holds
+#                                       a placeholder or a malformed sha256)
+#   * scripts/native_binary_updates.py (weekly upstream-version check)
 #
-# Each entry: stable URL + SHA-256 of the archive + the inner subpath that
-# gets extracted into vendor/.
+# Each entry: version, stable URL, SHA-256 of the file at that URL, and where it
+# lands. vendor/ is committed (Git LFS); the build copies vendor/ and does not
+# download anything. These pins record where the vendored files came from.
+#
+# A sha256 must be 64 hex characters. The text
+# "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2" is only the temporary value used
+# while pinning a new URL: refresh_binaries.py downloads the file, prints its
+# real hash and exits non-zero; build.py fails on it.
+#
+# kind = "installer": the URL is a Windows installer, not a zip. The fetch step
+# refuses it (it cannot open an .exe as a zip); install the file by hand and
+# copy the result in with `refresh_binaries.py --from-tesseract <install dir>`.
 
 [tesseract]
-version       = "5.4.0"
-url           = "https://github.com/UB-Mannheim/tesseract/releases/download/v5.4.0.20240606/tesseract-ocr-w64-portable-5.4.0.20240606.zip"
-sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+# The vendored vendor/tesseract/tesseract.exe reports "tesseract v5.5.0.20241111".
+# Its files were NOT compared with the installer's contents: this pin records the
+# release that the vendored version string matches, and the installer's hash.
+version       = "5.5.0.20241111"
+url           = "https://github.com/tesseract-ocr/tesseract/releases/download/5.5.0/tesseract-ocr-w64-setup-5.5.0.20241111.exe"
+sha256        = "f3fc4236425b690c8be756f35793f77394ee004be0a6460a440c754d892f68bc"
+kind          = "installer"
 extract_into  = "tesseract"
 
 [poppler]
 version       = "24.07.0"
 url           = "https://github.com/oschwartz10612/poppler-windows/releases/download/v24.07.0-0/Release-24.07.0-0.zip"
 sha256        = "112899b5e13f241a0c4c4d7d95467cf70fb12025b0951ec34a66cf68d4e50a2e"
+# Corresponding source (Poppler is GPL; NOTICE points here).
+source_url    = "https://poppler.freedesktop.org/poppler-24.07.0.tar.xz"
+source_sha256 = "19eb4f49198e4ae3fd9e5a6cf24d0fc7e674e8802046a7de14baab1e40cc2f1d"
 extract_into  = "poppler"
 
 [qpdf]
@@ -26,7 +45,9 @@ sha256        = "b5061e09aa45b63a36200c130b4cce15dc322338ea91f698760c3b8732fc41e
 extract_into  = "qpdf"
 
 [tessdata.eng]
+# tessdata_fast 4.1.0 (4,113,088 bytes), the file vendored under
+# vendor/tesseract/tessdata/. NOT the larger file from the plain "tessdata" repo.
 version       = "4.1.0"
-url           = "https://github.com/tesseract-ocr/tessdata/raw/4.1.0/eng.traineddata"
-sha256        = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
+url           = "https://github.com/tesseract-ocr/tessdata_fast/raw/4.1.0/eng.traineddata"
+sha256        = "7d4322bd2a7749724879683fc3912cb542f19906c83bcc1a52132556427170b2"
 extract_into  = "tesseract/tessdata"
