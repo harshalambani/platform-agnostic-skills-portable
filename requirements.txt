@@ -24,7 +24,7 @@ xlrd>=1.2.0                 # BIFF .xls reader (ICICI statements; avoids LibreOf
 pandas>=2.2.0
 
 # --- Misc ---
-extract-msg>=0.41.0           # CDFV2 binary Outlook MSG (used by cc_sort skill)
+olefile>=0.46                 # Outlook .msg reader (agents/msg_reader.py: cc_sort, msg_parser)
 pyyaml>=6.0
 python-dotenv>=1.0.0
 cryptography>=44              # AES-256-CBC/PBKDF2 decryption of AIS JSON (skill_ais_reconcile)

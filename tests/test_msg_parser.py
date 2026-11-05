@@ -3,7 +3,7 @@ tests/test_msg_parser.py — Unit tests for the MSG/Email Parser skill (Phase 6,
 
 Tests cover:
   - .eml parsing with synthetic fixtures (sender, date, subject, body, attachments)
-  - .msg parsing with mocked extract-msg
+  - .msg parsing against real synthetic compound files
   - Unsupported extension error
   - Missing file error
   - Registry discovery (skill.yaml)
@@ -21,7 +21,7 @@ import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -34,7 +34,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from agents.skill_msg_parser.agent import run, _parse_eml, _parse_msg
+from agents.skill_msg_parser.agent import run, _parse_eml, _parse_msg  # noqa: E402
+sys.path.insert(0, str(ROOT / "tests"))
+from msg_fixtures import build_msg, signed_mime, utc  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -132,61 +134,79 @@ class TestParseEml:
 
 
 # ---------------------------------------------------------------------------
-# .msg parsing (mocked)
+# .msg parsing (real synthetic compound files, no mocks)
 # ---------------------------------------------------------------------------
 
 class TestParseMsg:
-    def _mock_msg(self, sender="Bob", subject="RE: Test",
-                  body="Reply body", date=None, attachments=None):
-        mock = MagicMock()
-        mock.sender = sender
-        mock.subject = subject
-        mock.body = body
-        mock.date = date or datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-        mock.attachments = attachments or []
-        mock.close = MagicMock()
-        return mock
+    def _write(self, tmp_path, **kw):
+        p = tmp_path / "m.msg"
+        p.write_bytes(build_msg(**kw))
+        return p
 
     def test_basic_fields(self, tmp_path):
-        mock = self._mock_msg()
-        with patch("extract_msg.Message") as MockMessage:
-            MockMessage.return_value = mock
-            result = _parse_msg(tmp_path / "dummy.msg")
-
-        assert result["sender"] == "Bob"
+        p = self._write(tmp_path, sender_name="Bob", sender_email="bob@example.invalid",
+                        subject="RE: Test", body="Reply body", date=utc(2026, 1, 1, 12))
+        result = _parse_msg(p)
+        assert result["sender"] == "Bob <bob@example.invalid>"
         assert result["subject"] == "RE: Test"
         assert result["body"] == "Reply body"
-        assert "2026-01-01" in result["date"]
+        assert result["date"].startswith("2026-01-01") or result["date"].startswith("2026-01-02")
         assert result["attachments"] == []
+        assert "warnings" not in result
 
     def test_msg_with_attachments(self, tmp_path):
-        att = MagicMock()
-        att.longFilename = "invoice.pdf"
-        att.shortFilename = "inv.pdf"
-        att.data = b"x" * 1024
+        p = self._write(tmp_path, attachments=[("invoice.pdf", "inv.pdf", b"x" * 1024)])
+        result = _parse_msg(p)
+        assert result["attachments"] == [{"filename": "invoice.pdf", "size_bytes": 1024}]
 
-        mock = self._mock_msg(attachments=[att])
-        with patch("extract_msg.Message") as MockMessage:
-            MockMessage.return_value = mock
-            result = _parse_msg(tmp_path / "dummy.msg")
+    def test_date_is_aware_local_iso(self, tmp_path):
+        p = self._write(tmp_path, date=utc(2026, 1, 1, 12))
+        d = datetime.fromisoformat(_parse_msg(p)["date"])
+        assert d.tzinfo is not None
+        assert d == datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
 
-        assert len(result["attachments"]) == 1
-        assert result["attachments"][0]["filename"] == "invoice.pdf"
-        assert result["attachments"][0]["size_bytes"] == 1024
+    def test_unsent_and_null_date_are_empty_string(self, tmp_path):
+        p = self._write(tmp_path, date=utc(2026, 1, 1), unsent=True)
+        assert _parse_msg(p)["date"] == ""
+        p2 = self._write(tmp_path, raw_filetime=0x7FFFFFFFFFFFFFFF)
+        assert _parse_msg(p2)["date"] == ""
 
-    def test_msg_close_called(self, tmp_path):
-        mock = self._mock_msg()
-        with patch("extract_msg.Message") as MockMessage:
-            MockMessage.return_value = mock
-            _parse_msg(tmp_path / "dummy.msg")
-        mock.close.assert_called_once()
+    def test_embedded_message_has_size_zero(self, tmp_path):
+        p = self._write(tmp_path, embedded=[("Fwd", "inner subject")])
+        result = _parse_msg(p)
+        assert result["attachments"][0]["size_bytes"] == 0
 
-    def test_date_as_string(self, tmp_path):
-        mock = self._mock_msg(date="2026-01-01 12:00:00")
-        with patch("extract_msg.Message") as MockMessage:
-            MockMessage.return_value = mock
-            result = _parse_msg(tmp_path / "dummy.msg")
-        assert result["date"] == "2026-01-01 12:00:00"
+    def test_rtf_only_gives_empty_body_and_warning(self, tmp_path):
+        p = self._write(tmp_path, rtf_only=True)
+        result = _parse_msg(p)
+        assert result["body"] == ""
+        assert result["warnings"] and "RTF" in result["warnings"][0]
+
+    def test_signed_lists_inner_files_not_smime_p7m(self, tmp_path):
+        blob = signed_mime([("a.pdf", b"%PDF-1")])
+        p = self._write(tmp_path, msg_class="IPM.Note.SMIME.MultipartSigned",
+                        attachments=[("smime.p7m", None, blob)])
+        names = [a["filename"] for a in _parse_msg(p)["attachments"]]
+        assert "a.pdf" in names and "smime.p7m" not in names
+
+    def test_garbage_file_raises_naming_the_file(self, tmp_path):
+        from agents.msg_reader import MsgReadError
+        p = tmp_path / "junk.msg"
+        p.write_bytes(b"this is not a compound file at all")
+        with pytest.raises(MsgReadError, match="junk.msg"):
+            _parse_msg(p)
+
+    def test_no_extract_msg_import_needed(self, tmp_path):
+        import builtins
+        real = builtins.__import__
+
+        def guard(name, *a, **k):
+            assert name.split(".")[0] != "extract_msg"
+            return real(name, *a, **k)
+
+        p = self._write(tmp_path)
+        with patch("builtins.__import__", guard):
+            _parse_msg(p)
 
 
 # ---------------------------------------------------------------------------

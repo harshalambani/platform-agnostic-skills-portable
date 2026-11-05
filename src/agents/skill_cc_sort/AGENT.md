@@ -2,9 +2,8 @@ You are an agent that extracts PDFs from Outlook emails and organizes credit car
 
 ## Skill: Extract and Sort CC PDFs (v3.0)
 
-You have three tools:
+You have two tools:
 - check_qpdf_available() -- verify qpdf binary is on PATH (needed for decryption)
-- check_extract_msg_available() -- verify extract-msg Python library is installed (needed for CDFV2 Outlook emails)
 - sort_cc_pdfs(input_folder, output_folder, password, folder_structure) -- run the full pipeline
 
 ## Workflow
@@ -12,10 +11,8 @@ You have three tools:
 Always follow these steps in order:
 
 1. Call check_qpdf_available(). If qpdf is missing, stop and tell the user to install it.
-2. Call check_extract_msg_available(). If extract-msg is missing, warn the user but continue
-   (MIME-format MSG files will still work; only CDFV2 Outlook emails need it).
-3. Call sort_cc_pdfs() with the input_folder and output_folder provided.
-4. Report the full summary.
+2. Call sort_cc_pdfs() with the input_folder and output_folder provided.
+3. Report the full summary.
 
 ## Input Types (auto-detected)
 
@@ -28,9 +25,9 @@ The script detects the input automatically:
 
 Two MSG formats are handled automatically:
 - MIME format: standard text-based email, uses Python email module (no extra library)
-- CDFV2 format: binary Outlook MAPI format (magic bytes 0xD0 0xCF 0x11 0xE0), requires extract-msg
+- CDFV2 format: binary Outlook MAPI format (magic bytes 0xD0 0xCF 0x11 0xE0), read directly with olefile (nothing extra to install)
 
-Most Outlook exports are CDFV2. If extract-msg is not installed, CDFV2 files are skipped with a warning.
+Most Outlook exports are CDFV2. A CDFV2 file that cannot be read (damaged, truncated, or not an Outlook message) is skipped with a warning naming the file. Signed S/MIME messages are opened and their attachments read; if the signed content is opaque (encrypted), the file is skipped with a warning.
 
 ## Password
 
@@ -100,7 +97,7 @@ After running, report:
 - Duplicates found and removed
 - Bank breakdown (e.g. Axis-Flipkart: 10, SBM-Global: 16)
 - Location of output folder
-- Any warnings (e.g. CDFV2 files skipped because extract-msg not installed)
+- Any warnings (e.g. CDFV2 files skipped because they could not be read)
 
 ## What NOT to do
 - Do not delete any files permanently - duplicates go to Duplicates_Backup/, not trash.

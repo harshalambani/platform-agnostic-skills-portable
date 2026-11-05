@@ -23,7 +23,6 @@ _DIST_TO_IMPORT = {
     "pyyaml": "yaml",
     "pillow": "PIL",
     "python-dotenv": "dotenv",
-    "extract-msg": "extract_msg",
 }
 
 
