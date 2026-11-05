@@ -351,6 +351,29 @@ def _apply_book_validation(entity_key: str, snippet_rows: list[dict], accounts=N
 # Workbook tab (Data/itr/entities.yaml via data_root_dir()).
 # ---------------------------------------------------------------------------
 
+def _checked_mapping_path(entity_key: str) -> tuple[Path | None, str]:
+    """Mapping-file path for a save, or (None, error message).
+
+    Only entity keys present in the entities config are accepted, and the
+    resolved path must stay inside the mappings folder. Checked before any
+    folder is created or file written."""
+    configured = {str(v) for _label, v in _entity_choices()}
+    if entity_key not in configured:
+        return None, (f"Error: '{entity_key}' is not a configured entity "
+                      "-- nothing was saved.")
+    try:
+        base = (_config_mod.data_root_dir() / "itr" / "mappings").resolve()
+        target = _mapping_path(entity_key).resolve()
+        target.relative_to(base)
+    except (ValueError, OSError):
+        return None, (f"Error: mapping path for '{entity_key}' is outside the "
+                      "mappings folder -- nothing was saved.")
+    if target.parent != base:
+        return None, (f"Error: mapping path for '{entity_key}' is outside the "
+                      "mappings folder -- nothing was saved.")
+    return _mapping_path(entity_key), ""
+
+
 def _entity_choices() -> list[tuple[str, str]]:
     from . import _generic  # noqa: PLC0415 -- imported lazily; _generic is heavier
     return _generic._options_from_itr_entities()
@@ -1014,7 +1037,9 @@ def _save_changes(changes_json: str) -> str:
 
     _configs, _tag_vocab, amc = _itr_modules()
 
-    mapping_file = _mapping_path(entity_key)
+    mapping_file, path_err = _checked_mapping_path(entity_key)
+    if mapping_file is None:
+        return path_err
     mapping_file.parent.mkdir(parents=True, exist_ok=True)
 
     # Existing mapping-file guids BEFORE this save -- needed to tell a real
