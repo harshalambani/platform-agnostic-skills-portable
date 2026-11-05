@@ -420,33 +420,132 @@ def test_symlinked_folder_out_of_scripts_blocks_create(tmp_path):
     assert not (target_dir / "parse_n.py").exists()
 
 
-def test_tieout_refuses_path_arguments_outside_allowed_folders(tmp_path, scripts):
+def _writer_parser(scripts, started):
+    """Parser that records that it started, then writes its last argument."""
     p = scripts / "parse_ok.py"
     p.write_text(
         "import sys, pathlib\n"
+        f"pathlib.Path({str(started)!r}).write_text('started')\n"
         "pathlib.Path(sys.argv[-1]).write_text('x')\n"
         "print('closing balance 1')\n",
         encoding="utf-8",
     )
+    return p
+
+
+def test_tieout_refuses_untyped_path_arguments_and_parser_never_starts(tmp_path, scripts):
+    started = tmp_path / "started.txt"
+    p = _writer_parser(scripts, started)
     victim = tmp_path / "outside" / "dropped.txt"
     victim.parent.mkdir()
-    for arg in (str(victim), "../../../outside/dropped.txt", "--out=" + str(victim)):
-        out = tools.run_tieout_impl(str(p), ["in", arg])
-        assert out.startswith("ERROR: refusing tie-out argument"), out
+    for arg in (str(victim), "--out=" + str(victim)):
+        out = tools.run_tieout_impl(str(p), ["in", arg], check_args=True)
+        assert out.startswith("ERROR: refusing tie-out argument 2"), out
     assert not victim.exists()
+    assert not started.exists()
 
 
-def test_tieout_allows_plain_tokens_and_arguments_in_skill_folder(scripts):
-    p = scripts / "parse_ok.py"
-    p.write_text(
-        "import sys, pathlib\n"
-        "pathlib.Path(sys.argv[-1]).write_text('x')\n"
-        "print('closing balance 1')\n",
-        encoding="utf-8",
-    )
-    out = tools.run_tieout_impl(str(p), ["sample", "PASSWORD", "result.txt"])
+def test_tieout_refusal_names_the_position_not_the_value(tmp_path, scripts):
+    p = _writer_parser(scripts, tmp_path / "started.txt")
+    secret = str(tmp_path / "outside" / "SecretValue99.pdf")
+    out = tools.run_tieout_impl(str(p), ["in", secret], check_args=True)
+    assert out.startswith("ERROR: refusing")
+    assert "SecretValue99" not in out and str(tmp_path) not in out
+
+
+def test_tieout_refuses_glued_short_option_and_relative_traversal(tmp_path, scripts, monkeypatch):
+    started = tmp_path / "started.txt"
+    p = _writer_parser(scripts, started)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    monkeypatch.chdir(scripts)
+    for arg in ("-o" + str(outside / "x.txt"), "../../../outside/x.txt"):
+        out = tools.run_tieout_impl(str(p), ["in", arg], check_args=True)
+        assert out.startswith("ERROR: refusing tie-out argument 2"), out
+    assert not (outside / "x.txt").exists()
+    assert not started.exists()
+
+
+def test_tieout_allows_plain_tokens_and_in_folder_paths_on_the_model_route(tmp_path, scripts, monkeypatch):
+    p = _writer_parser(scripts, tmp_path / "started.txt")
+    monkeypatch.chdir(scripts.parent)
+    out = tools.run_tieout_impl(str(p), ["sample", "PASSWORD", "result.txt"], check_args=True)
     assert "exit=0" in out
     assert (scripts.parent / "result.txt").read_text() == "x"
+
+
+def test_typed_token_is_trusted_but_not_its_siblings(tmp_path, scripts):
+    started = tmp_path / "started.txt"
+    p = _writer_parser(scripts, started)
+    d = tmp_path / "statements"
+    d.mkdir()
+    a, b = d / "a.pdf", d / "b.pdf"
+    with tools.typed_tieout_args(f"{a}"):
+        ok = tools.run_tieout_impl(str(p), [str(a)], check_args=True)
+        assert "exit=0" in ok
+        started.unlink()
+        refused = tools.run_tieout_impl(str(p), [str(b)], check_args=True)
+        assert refused.startswith("ERROR: refusing")
+        assert not started.exists() and not b.exists()
+        # nor files inside a typed folder
+        refused = tools.run_tieout_impl(str(p), [str(d / "c.txt")], check_args=True)
+        assert refused.startswith("ERROR: refusing")
+
+
+def test_typed_set_is_cleared_after_a_run_and_after_an_exception():
+    with tools.typed_tieout_args("a.pdf pw"):
+        assert tools._TYPED_ARGS == {"a.pdf", "pw"}
+    assert tools._TYPED_ARGS == set()
+    with pytest.raises(RuntimeError):
+        with tools.typed_tieout_args("a.pdf"):
+            raise RuntimeError("boom")
+    assert tools._TYPED_ARGS == set()
+
+
+def test_relative_output_lands_in_the_process_cwd_not_the_skill_folder(tmp_path, scripts, monkeypatch):
+    p = _writer_parser(scripts, tmp_path / "started.txt")
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    out = tools.run_tieout_impl(str(p), ["in.pdf", "rel-out.txt"])
+    assert "exit=0" in out
+    assert (work / "rel-out.txt").read_text() == "x"
+    assert not (scripts.parent / "rel-out.txt").exists()
+    assert not (scripts / "rel-out.txt").exists()
+
+
+def test_gate_trusts_what_the_developer_typed(tmp_path, scripts, capsys):
+    from agents.skill_parser_generator import __main__ as pg_main
+    started = tmp_path / "started.txt"
+    p = _writer_parser(scripts, started)
+    target = tmp_path / "outside" / "typed.txt"
+    target.parent.mkdir()
+    pg_main.main(["gate", str(p), "--", "in.pdf", str(target)])
+    assert started.exists()
+    assert target.read_text() == "x"
+
+
+def test_fix_route_trusts_typed_args_but_not_other_paths(tmp_path, scripts, monkeypatch):
+    from agents.skill_parser_generator import agent as pg_agent
+    started = tmp_path / "started.txt"
+    p = _writer_parser(scripts, started)
+    typed = tmp_path / "outside" / "typed.txt"
+    other = tmp_path / "outside" / "model-chose.txt"
+    typed.parent.mkdir()
+    seen = {}
+
+    def fake_run(instruction, config_path="config.yaml", model_override=None):
+        seen["typed"] = tools.run_tieout_impl(str(p), ["in.pdf", str(typed)], check_args=True)
+        started.unlink()
+        seen["other"] = tools.run_tieout_impl(str(p), ["in.pdf", str(other)], check_args=True)
+        return "REPORT"
+
+    monkeypatch.setattr(pg_agent, "run", fake_run)
+    pg_agent.run_ui("fix", str(p), parser_args=f"in.pdf {typed}")
+    assert "exit=0" in seen["typed"] and typed.read_text() == "x"
+    assert seen["other"].startswith("ERROR: refusing")
+    assert not started.exists() and not other.exists()
+    assert tools._TYPED_ARGS == set()
 
 
 def test_valid_path_inside_scripts_still_works(scripts):

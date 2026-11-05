@@ -14,6 +14,7 @@ plus a thin @tool wrapper that the LangGraph agent calls.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import re
 import subprocess
@@ -77,18 +78,46 @@ def _resolve_parser_path(parser_path: str) -> tuple[Path | None, str]:
     return resolved, ""
 
 
+# Tokens the developer typed themselves (the tab's Tie-out args field, or the
+# CLI args of `fix`). Matched by exact token only; set for the duration of one
+# run by typed_tieout_args() and always cleared afterwards.
+_TYPED_ARGS: set[str] = set()
+
+
+@contextlib.contextmanager
+def typed_tieout_args(text: str):
+    """Mark the whitespace-split tokens of `text` as developer-typed while the
+    block runs. Cleared on exit, including after an exception."""
+    _TYPED_ARGS.clear()
+    _TYPED_ARGS.update((text or "").split())
+    try:
+        yield
+    finally:
+        _TYPED_ARGS.clear()
+
+
 def _check_tieout_args(arglist: list[str], parser: Path) -> str:
-    """Return "" if every path-like argument stays inside the allowed folders,
-    else an error. A relative argument is read against the parser's skill folder
-    (the tie-out runs there). Plain tokens (no separator, no file extension) are
-    left alone, since they can be passwords or flags."""
+    """Return "" if every model-supplied path-like argument stays inside the
+    parser's skill folder, tests/ or the temp folder, else an error naming the
+    argument's position (never its value: it may be a password). Relative
+    arguments are read against the process working directory, as the tie-out
+    run does. Tokens the developer typed are trusted by exact match. Plain
+    tokens (no separator, no file extension) are left alone."""
     root = Path(AGENTS_ROOT).resolve()
     skill_dir = root / parser.relative_to(root).parts[0]
     roots = [skill_dir.resolve()] + [Path(r).resolve() for r in EXTRA_ARG_ROOTS]
-    for tok in arglist:
-        val = tok.split("=", 1)[1] if tok.startswith("-") and "=" in tok else tok
-        if tok.startswith("-") and "=" not in tok:
+    for pos, tok in enumerate(arglist, start=1):
+        if tok in _TYPED_ARGS:
             continue
+        if tok.startswith("-"):
+            if "=" in tok:
+                val = tok.split("=", 1)[1]
+            elif not tok.startswith("--") and len(tok) > 2:
+                val = tok[2:]  # glued short option such as -oPATH
+            else:
+                continue
+        else:
+            val = tok
         if not val:
             continue
         pathlike = (
@@ -98,12 +127,12 @@ def _check_tieout_args(arglist: list[str], parser: Path) -> str:
         if not pathlike:
             continue
         try:
-            target = (skill_dir / val).resolve()  # absolute val wins over the join
+            target = Path(val).resolve()  # relative to the process cwd
         except (OSError, ValueError, RuntimeError):
-            return f"ERROR: cannot resolve tie-out argument {val!r}."
+            return f"ERROR: cannot resolve tie-out argument {pos}."
         if not any(_inside(target, r) for r in roots):
             return (
-                f"ERROR: refusing tie-out argument {val!r} - it resolves outside "
+                f"ERROR: refusing tie-out argument {pos} - it resolves outside "
                 "the parser's skill folder, tests/ and the temp folder."
             )
     return ""
@@ -332,8 +361,11 @@ def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
     )
 
 
-def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180) -> str:
-    """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch)."""
+def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180,
+                    check_args: bool = False) -> str:
+    """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch).
+    `check_args` is set on the model-driven route only: a developer typing the
+    arguments (the gate command) is not checked."""
     p, err = _resolve_parser_path(parser_path)
     if p is None:
         return err
@@ -343,16 +375,14 @@ def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180) -> s
         arglist = args.split()
     else:
         arglist = [str(a) for a in (args or [])]
-    err = _check_tieout_args(arglist, p)
-    if err:
-        return err
-    root = Path(AGENTS_ROOT).resolve()
-    skill_dir = root / p.relative_to(root).parts[0]
+    if check_args:
+        err = _check_tieout_args(arglist, p)
+        if err:
+            return err
     try:
         res = subprocess.run(
             [sys.executable, str(p), *arglist],
             capture_output=True, text=True, timeout=timeout,
-            cwd=str(skill_dir),
         )
     except subprocess.TimeoutExpired:
         return f"TIMEOUT after {timeout}s running {p.name}."
@@ -447,7 +477,7 @@ def run_tieout(parser_path: str, args: list | str) -> str:
     the exit code - 0 (tie-out PASS), 1 (error), or 2 (closing balance
     MISMATCH). `args` are the parser's CLI arguments (e.g. the input and output
     paths). Success requires exit 0."""
-    return run_tieout_impl(parser_path, args)
+    return run_tieout_impl(parser_path, args, check_args=True)
 
 
 @tool
