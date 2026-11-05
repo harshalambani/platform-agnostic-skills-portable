@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -26,6 +27,86 @@ TEMPLATE_PATH = Path(__file__).parent / "templates" / "parser_template.py"
 
 # Decision #1: generated/edited parsers live here and nowhere else.
 _LOCATION_RE = re.compile(r"agents/skill_[^/]+/scripts/parse_[^/]+\.py$")
+
+# Every parser these tools read or write must resolve (symlinks and ".." followed)
+# to a .py file under <AGENTS_ROOT>/skill_<X>/scripts/. Module-level so tests can
+# point it at a temp tree.
+AGENTS_ROOT = Path(__file__).resolve().parent.parent
+
+# Extra places a tie-out argument may point at, besides the parser's own skill
+# folder: the repo's tests/ folder and the system temp folder.
+EXTRA_ARG_ROOTS: list[Path] = [
+    AGENTS_ROOT.parent.parent / "tests",
+    Path(tempfile.gettempdir()),
+]
+
+_SCRIPTS_MSG = "src/agents/skill_<X>/scripts/"
+_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_parser_path(parser_path: str) -> tuple[Path | None, str]:
+    """Resolve first (symlinks, ..), then require a .py file under
+    <AGENTS_ROOT>/skill_<X>/scripts/. Returns (resolved, "") or (None, error)."""
+    try:
+        resolved = Path(parser_path).resolve()
+        root = Path(AGENTS_ROOT).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None, f"ERROR: cannot resolve path {parser_path!r}."
+    rel = None
+    if _inside(resolved, root):
+        rel = resolved.relative_to(root).parts
+    if (
+        rel is None
+        or len(rel) < 3
+        or not rel[0].startswith("skill_")
+        or rel[1] != "scripts"
+        or resolved.suffix != ".py"
+    ):
+        return None, (
+            f"ERROR: refusing {parser_path!r} - parser files must be .py files "
+            f"under {_SCRIPTS_MSG}."
+        )
+    return resolved, ""
+
+
+def _check_tieout_args(arglist: list[str], parser: Path) -> str:
+    """Return "" if every path-like argument stays inside the allowed folders,
+    else an error. A relative argument is read against the parser's skill folder
+    (the tie-out runs there). Plain tokens (no separator, no file extension) are
+    left alone, since they can be passwords or flags."""
+    root = Path(AGENTS_ROOT).resolve()
+    skill_dir = root / parser.relative_to(root).parts[0]
+    roots = [skill_dir.resolve()] + [Path(r).resolve() for r in EXTRA_ARG_ROOTS]
+    for tok in arglist:
+        val = tok.split("=", 1)[1] if tok.startswith("-") and "=" in tok else tok
+        if tok.startswith("-") and "=" not in tok:
+            continue
+        if not val:
+            continue
+        pathlike = (
+            "/" in val or "\\" in val or val in (".", "..")
+            or bool(_EXT_RE.search(val)) or bool(re.match(r"^[A-Za-z]:", val))
+        )
+        if not pathlike:
+            continue
+        try:
+            target = (skill_dir / val).resolve()  # absolute val wins over the join
+        except (OSError, ValueError, RuntimeError):
+            return f"ERROR: cannot resolve tie-out argument {val!r}."
+        if not any(_inside(target, r) for r in roots):
+            return (
+                f"ERROR: refusing tie-out argument {val!r} - it resolves outside "
+                "the parser's skill folder, tests/ and the temp folder."
+            )
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +248,9 @@ def _normalize_blanks(blanks: dict | str) -> "dict[str, str] | str":
 
 def validate_parser_impl(parser_path: str) -> str:
     """AST-parse then ruff-check a parser. Returns OK or the problems."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     src = p.read_text(encoding="utf-8")
@@ -200,7 +283,9 @@ def validate_parser_impl(parser_path: str) -> str:
 
 def extract_blanks_impl(parser_path: str) -> str:
     """List the editable blank constants of a parser with their current values."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     src = p.read_text(encoding="utf-8")
@@ -221,7 +306,9 @@ def extract_blanks_impl(parser_path: str) -> str:
 
 def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
     """Rewrite named blank constants of an existing parser, then re-validate."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     norm = _normalize_blanks(blanks)
@@ -247,17 +334,25 @@ def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
 
 def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180) -> str:
     """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch)."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     if isinstance(args, str):
         arglist = args.split()
     else:
         arglist = [str(a) for a in (args or [])]
+    err = _check_tieout_args(arglist, p)
+    if err:
+        return err
+    root = Path(AGENTS_ROOT).resolve()
+    skill_dir = root / p.relative_to(root).parts[0]
     try:
         res = subprocess.run(
             [sys.executable, str(p), *arglist],
             capture_output=True, text=True, timeout=timeout,
+            cwd=str(skill_dir),
         )
     except subprocess.TimeoutExpired:
         return f"TIMEOUT after {timeout}s running {p.name}."
@@ -296,7 +391,14 @@ def create_parser_from_template_impl(output_path: str, blanks: dict | str) -> st
         return f"ERROR: {e.args[0]}"
     except SyntaxError as e:
         return f"ERROR: filled template is invalid Python: line {e.lineno}: {e.msg}"
-    out = Path(output_path)
+    out, err = _resolve_parser_path(output_path)
+    if out is None:
+        return err
+    if not out.name.startswith("parse_"):
+        return (
+            "ERROR: per the locked layout, parsers must be written to "
+            f"{_SCRIPTS_MSG}parse_<format>.py - got {output_path!r}."
+        )
     if out.exists():
         return f"ERROR: refusing to overwrite existing file {output_path}."
     out.parent.mkdir(parents=True, exist_ok=True)

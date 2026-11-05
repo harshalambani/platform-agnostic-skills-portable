@@ -22,6 +22,20 @@ for _p in (str(SRC), str(ROOT)):
 
 from agents.skill_parser_generator import tools  # noqa: E402
 
+@pytest.fixture(autouse=True)
+def _agents_root(tmp_path, monkeypatch):
+    """Point the tools at a temp agents tree so tests never touch src/agents."""
+    monkeypatch.setattr(tools, "AGENTS_ROOT", tmp_path / "agents")
+    monkeypatch.setattr(tools, "EXTRA_ARG_ROOTS", [])
+
+
+@pytest.fixture
+def scripts(tmp_path):
+    d = tmp_path / "agents" / "skill_t" / "scripts"
+    d.mkdir(parents=True)
+    return d
+
+
 PKG = SRC / "agents" / "skill_parser_generator"
 TEMPLATE = PKG / "templates" / "parser_template.py"
 
@@ -151,8 +165,8 @@ def test_rewrite_rejects_non_literal_blank_value():
         )
 
 
-def test_apply_template_edit_rejects_non_literal_blank(tmp_path):
-    p = tmp_path / "parse_x.py"
+def test_apply_template_edit_rejects_non_literal_blank(scripts):
+    p = scripts / "parse_x.py"
     p.write_text(SAMPLE, encoding="utf-8")
     msg = tools.apply_template_edit_impl(
         str(p), {"BALANCE_X0": "__import__('os').system('x')"}
@@ -174,20 +188,20 @@ def test_create_parser_from_template_rejects_non_literal_blank(tmp_path):
 # validate_parser
 # --------------------------------------------------------------------------
 
-def test_validate_good_file(tmp_path):
-    p = tmp_path / "ok.py"
+def test_validate_good_file(scripts):
+    p = scripts / "ok.py"
     p.write_text("X = 1\n", encoding="utf-8")
     assert tools.validate_parser_impl(str(p)).startswith("OK")
 
 
-def test_validate_syntax_error(tmp_path):
-    p = tmp_path / "bad.py"
+def test_validate_syntax_error(scripts):
+    p = scripts / "bad.py"
     p.write_text("def broken(:\n", encoding="utf-8")
     assert tools.validate_parser_impl(str(p)).startswith("SYNTAX ERROR")
 
 
-def test_validate_missing_file(tmp_path):
-    assert tools.validate_parser_impl(str(tmp_path / "nope.py")).startswith("NOT FOUND")
+def test_validate_missing_file(scripts):
+    assert tools.validate_parser_impl(str(scripts / "nope.py")).startswith("NOT FOUND")
 
 
 # --------------------------------------------------------------------------
@@ -209,19 +223,19 @@ def _fake_parser(tmp_path: Path, exit_code: int) -> Path:
     return p
 
 
-def test_run_tieout_pass(tmp_path):
-    out = tools.run_tieout_impl(str(_fake_parser(tmp_path, 0)), ["in", "out"])
+def test_run_tieout_pass(scripts):
+    out = tools.run_tieout_impl(str(_fake_parser(scripts, 0)), ["in", "out"])
     assert "TIE-OUT PASS" in out and "exit=0" in out
 
 
-def test_run_tieout_mismatch(tmp_path):
-    out = tools.run_tieout_impl(str(_fake_parser(tmp_path, 2)), "in out")
+def test_run_tieout_mismatch(scripts):
+    out = tools.run_tieout_impl(str(_fake_parser(scripts, 2)), "in out")
     assert "TIE-OUT MISMATCH" in out and "exit=2" in out
     assert "balance" in out.lower()
 
 
-def test_run_tieout_error(tmp_path):
-    out = tools.run_tieout_impl(str(_fake_parser(tmp_path, 1)), [])
+def test_run_tieout_error(scripts):
+    out = tools.run_tieout_impl(str(_fake_parser(scripts, 1)), [])
     assert "exit=1" in out
 
 
@@ -229,8 +243,8 @@ def test_run_tieout_error(tmp_path):
 # apply_template_edit (round-trip on a temp parser)
 # --------------------------------------------------------------------------
 
-def test_apply_template_edit_changes_blank(tmp_path):
-    p = tmp_path / "parse_x.py"
+def test_apply_template_edit_changes_blank(scripts):
+    p = scripts / "parse_x.py"
     p.write_text(SAMPLE, encoding="utf-8")
     msg = tools.apply_template_edit_impl(str(p), {"BALANCE_X0": "(1, 2)"})
     assert "Edited 1 blank" in msg
@@ -239,16 +253,16 @@ def test_apply_template_edit_changes_blank(tmp_path):
     assert src[slice(*spans["BALANCE_X0"])] == "(1, 2)"
 
 
-def test_apply_template_edit_rejects_unknown_blank(tmp_path):
-    p = tmp_path / "parse_x.py"
+def test_apply_template_edit_rejects_unknown_blank(scripts):
+    p = scripts / "parse_x.py"
     p.write_text(SAMPLE, encoding="utf-8")
     msg = tools.apply_template_edit_impl(str(p), {"NOPE": "1"})
     assert msg.startswith("ERROR")
     assert p.read_text(encoding="utf-8") == SAMPLE  # unchanged
 
 
-def test_apply_template_edit_accepts_json_string(tmp_path):
-    p = tmp_path / "parse_x.py"
+def test_apply_template_edit_accepts_json_string(scripts):
+    p = scripts / "parse_x.py"
     p.write_text(SAMPLE, encoding="utf-8")
     msg = tools.apply_template_edit_impl(str(p), '{"BALANCE_X0": "(9, 9)"}')
     assert "Edited 1 blank" in msg
@@ -299,3 +313,145 @@ def test_create_refuses_overwrite(tmp_path):
     tools.create_parser_from_template_impl(str(out), {"FORMAT_NAME": '"demo"'})
     msg = tools.create_parser_from_template_impl(str(out), {"FORMAT_NAME": '"demo"'})
     assert "refusing to overwrite" in msg
+
+
+# --------------------------------------------------------------------------
+# File paths stay inside the parser folders (negative tests)
+# --------------------------------------------------------------------------
+
+def _tree(tmp_path):
+    """Return (scripts_dir, outside_file, sibling_file, sibling_dir)."""
+    scripts = tmp_path / "agents" / "skill_t" / "scripts"
+    scripts.mkdir(parents=True)
+    outside = tmp_path / "outside" / "parse_evil.py"
+    outside.parent.mkdir()
+    outside.write_text(SAMPLE, encoding="utf-8")
+    # A sibling whose name shares the prefix of the allowed folder.
+    sib_dir = tmp_path / "agents" / "skill_t" / "scripts_evil"
+    sib_dir.mkdir()
+    sib = sib_dir / "parse_evil.py"
+    sib.write_text(SAMPLE, encoding="utf-8")
+    return scripts, outside, sib, sib_dir
+
+
+def _bad_paths(tmp_path):
+    scripts, outside, sib, _ = _tree(tmp_path)
+    return {
+        "absolute": str(outside),
+        "traversal": str(scripts / ".." / ".." / ".." / "outside" / "parse_evil.py"),
+        "prefix-sibling": str(sib),
+    }
+
+
+@pytest.mark.parametrize("which", ["absolute", "traversal", "prefix-sibling"])
+def test_edit_refuses_paths_outside_scripts_and_writes_nothing(tmp_path, which):
+    path = _bad_paths(tmp_path)[which]
+    before = Path(path).resolve().read_text(encoding="utf-8")
+    msg = tools.apply_template_edit_impl(path, {"BALANCE_X0": "(1, 2)"})
+    assert msg.startswith("ERROR: refusing")
+    assert Path(path).resolve().read_text(encoding="utf-8") == before
+
+
+@pytest.mark.parametrize("which", ["absolute", "traversal", "prefix-sibling"])
+def test_read_and_run_refuse_paths_outside_scripts(tmp_path, which):
+    path = _bad_paths(tmp_path)[which]
+    assert tools.extract_blanks_impl(path).startswith("ERROR: refusing")
+    assert tools.validate_parser_impl(path).startswith("ERROR: refusing")
+    out = tools.run_tieout_impl(path, [])
+    assert out.startswith("ERROR: refusing")
+    assert "exit=" not in out  # the file was never executed
+
+
+@pytest.mark.parametrize("which", ["absolute", "traversal", "prefix-sibling"])
+def test_create_refuses_paths_outside_scripts_and_writes_nothing(tmp_path, which):
+    scripts, outside, sib, sib_dir = _tree(tmp_path)
+    target = {
+        "absolute": tmp_path / "elsewhere" / "agents" / "skill_x" / "scripts" / "parse_n.py",
+        "traversal": scripts / ".." / ".." / ".." / "made" / "agents" / "skill_x" / "scripts" / "parse_n.py",
+        "prefix-sibling": sib_dir / "parse_new.py",
+    }[which]
+    msg = tools.create_parser_from_template_impl(str(target), {"FORMAT_NAME": '"x"'})
+    assert msg.startswith("ERROR")
+    assert not target.resolve().exists()
+    assert not (tmp_path / "elsewhere").exists()
+    assert not (tmp_path / "made").exists()
+
+
+def test_create_refuses_non_parser_name_inside_scripts(scripts):
+    target = scripts / "helper.py"
+    msg = tools.create_parser_from_template_impl(str(target), {"FORMAT_NAME": '"x"'})
+    assert msg.startswith("ERROR")
+    assert not target.exists()
+
+
+def test_symlink_out_of_scripts_is_refused(tmp_path):
+    scripts, outside, _, _ = _tree(tmp_path)
+    link = scripts / "parse_link.py"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not permitted on this platform")
+    before = outside.read_text(encoding="utf-8")
+    msg = tools.apply_template_edit_impl(str(link), {"BALANCE_X0": "(1, 2)"})
+    assert msg.startswith("ERROR: refusing")
+    assert outside.read_text(encoding="utf-8") == before
+    assert tools.run_tieout_impl(str(link), []).startswith("ERROR: refusing")
+
+
+def test_symlinked_folder_out_of_scripts_blocks_create(tmp_path):
+    scripts, outside, _, _ = _tree(tmp_path)
+    target_dir = tmp_path / "linked_target"
+    target_dir.mkdir()
+    link = scripts / "sub"
+    try:
+        link.symlink_to(target_dir, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Windows without symlink rights: a directory junction needs none.
+        import subprocess
+        if sys.platform != "win32" or subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target_dir)],
+            capture_output=True,
+        ).returncode != 0:
+            pytest.skip("symlinks not permitted on this platform")
+    msg = tools.create_parser_from_template_impl(
+        str(link / "parse_n.py"), {"FORMAT_NAME": '"x"'}
+    )
+    assert msg.startswith("ERROR")
+    assert not (target_dir / "parse_n.py").exists()
+
+
+def test_tieout_refuses_path_arguments_outside_allowed_folders(tmp_path, scripts):
+    p = scripts / "parse_ok.py"
+    p.write_text(
+        "import sys, pathlib\n"
+        "pathlib.Path(sys.argv[-1]).write_text('x')\n"
+        "print('closing balance 1')\n",
+        encoding="utf-8",
+    )
+    victim = tmp_path / "outside" / "dropped.txt"
+    victim.parent.mkdir()
+    for arg in (str(victim), "../../../outside/dropped.txt", "--out=" + str(victim)):
+        out = tools.run_tieout_impl(str(p), ["in", arg])
+        assert out.startswith("ERROR: refusing tie-out argument"), out
+    assert not victim.exists()
+
+
+def test_tieout_allows_plain_tokens_and_arguments_in_skill_folder(scripts):
+    p = scripts / "parse_ok.py"
+    p.write_text(
+        "import sys, pathlib\n"
+        "pathlib.Path(sys.argv[-1]).write_text('x')\n"
+        "print('closing balance 1')\n",
+        encoding="utf-8",
+    )
+    out = tools.run_tieout_impl(str(p), ["sample", "PASSWORD", "result.txt"])
+    assert "exit=0" in out
+    assert (scripts.parent / "result.txt").read_text() == "x"
+
+
+def test_valid_path_inside_scripts_still_works(scripts):
+    p = scripts / "nested.py"
+    p.write_text(SAMPLE, encoding="utf-8")
+    assert "Edited 1 blank" in tools.apply_template_edit_impl(
+        str(p), {"BALANCE_X0": "(1, 2)"}
+    )
