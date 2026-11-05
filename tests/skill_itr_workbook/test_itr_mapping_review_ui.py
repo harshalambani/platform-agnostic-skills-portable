@@ -465,3 +465,47 @@ def test_save_round_trip_in_both_layouts(tmp_path, layout):
     assert "Saved" in msg
     updated = configs.load_mapping(mappings_dir / "SYN-IND.mapping.yaml")
     assert updated.entries[UNMAPPED_GUID].tag == "AL_CASH_BANK"
+
+
+# ---------------------------------------------------------------------------
+# Save only writes for configured entity keys, inside the mappings folder.
+# ---------------------------------------------------------------------------
+
+def _files_under(root: Path) -> set[str]:
+    return {str(p.relative_to(root)) for p in root.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("bad_key", [
+    "../../outside",
+    r"....outside",
+    "ABS",          # replaced with an absolute path in the test body
+    "SYN-OTHER",    # well-formed but not configured
+    "SYN-IND/../SYN-IND",
+])
+def test_save_refuses_bad_entity_key_and_writes_nothing(tmp_path, bad_key):
+    data_root = tmp_path / "Data"
+    _entities_yaml(data_root / "itr" / "entities.yaml")
+    if bad_key == "ABS":
+        bad_key = str(tmp_path / "elsewhere" / "SYN-IND")
+    before = _files_under(tmp_path)
+    dirs_before = {p for p in tmp_path.rglob("*") if p.is_dir()}
+
+    payload = _payload(bad_key, [{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}])
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_changes(payload)
+
+    assert msg.startswith("Error")
+    assert "nothing was saved" in msg
+    assert _files_under(tmp_path) == before
+    assert {p for p in tmp_path.rglob("*") if p.is_dir()} == dirs_before
+    assert not (data_root / "itr" / "mappings").exists()
+
+
+def test_save_valid_entity_key_still_saves(tmp_path):
+    data_root = tmp_path / "Data"
+    _entities_yaml(data_root / "itr" / "entities.yaml")
+    payload = _payload("SYN-IND", [{"guid": "g1", "path": "Assets/Cash", "tag": "AL_CASH_BANK"}])
+    with patch("ui._config.data_root_dir", return_value=data_root):
+        msg = ui_mod._save_changes(payload)
+    assert "Saved" in msg
+    assert (data_root / "itr" / "mappings" / "SYN-IND.mapping.yaml").is_file()
