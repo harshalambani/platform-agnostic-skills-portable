@@ -80,6 +80,9 @@ PASKILLS_SPEC = PROJECT_ROOT / "bundling" / "paskills.spec"
 REQUIREMENTS      = PROJECT_ROOT / "requirements.txt"
 REQUIREMENTS_LOCK = PROJECT_ROOT / "requirements-lock.txt"
 SOURCES_TOML  = PROJECT_ROOT / "bundling" / "sources.toml"
+BINARIES_TOML = PROJECT_ROOT / "bundling" / "binaries.toml"
+LICENSES_BUNDLE_PY = PROJECT_ROOT / "bundling" / "licenses_bundle.py"
+PLACEHOLDER_SHA = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
 
 TEMPLATES_DIR    = PROJECT_ROOT / "bundling" / "templates"
 APPINFO_TMPL     = TEMPLATES_DIR / "appinfo.ini.tmpl"
@@ -382,6 +385,59 @@ def step4_run_pyinstaller(py: Path, log: _Log) -> Path:
     shutil.copytree(src_dir, dest)
     log.ok(f"frozen build copied to {_display_path(dest)}")
     return dest
+
+
+def check_binaries_toml(path: Path | None = None) -> list[str]:
+    """Problems found in binaries.toml: a placeholder or malformed sha256 in
+    any entry (sha256 or source_sha256). Empty list = fine. Pure: no output."""
+    path = BINARIES_TOML if path is None else path
+    if tomllib is None:
+        return ["no TOML reader available (need Python 3.11+ or tomli)"]
+    try:
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"{path.name}: cannot be read ({exc})"]
+
+    problems: list[str] = []
+
+    def walk(node: dict, label: str) -> None:
+        for key, val in node.items():
+            if isinstance(val, dict):
+                walk(val, f"{label}.{key}" if label else key)
+            elif key in ("sha256", "source_sha256"):
+                if val == PLACEHOLDER_SHA:
+                    problems.append(f"[{label}] {key} is still the placeholder")
+                elif not (isinstance(val, str) and re.fullmatch(r"[0-9a-f]{64}", val)):
+                    problems.append(f"[{label}] {key} is not 64 lowercase hex characters")
+
+    walk(data, "")
+    return problems
+
+
+def step0_check_binaries_toml(log: _Log) -> None:
+    log.step(0, "Check bundling/binaries.toml pins")
+    problems = check_binaries_toml()
+    if problems:
+        for p in problems:
+            log.err(p)
+        log.err("pin the real SHA-256 first: python bundling\\refresh_binaries.py "
+                "--target <name> prints it.")
+        sys.exit(2)
+    log.ok("no placeholder or malformed sha256 in binaries.toml")
+
+
+def step4b_licenses_bundle(py: Path, log: _Log) -> Path:
+    """Write licenses-bundle.txt beside the frozen exe. Runs with the BUILD
+    venv's python, where the lock is installed. A failure fails the build."""
+    log.step("4b", "Write licenses-bundle.txt")
+    out = STAGING / "App" / "PASkills" / "licenses-bundle.txt"
+    _run([py, LICENSES_BUNDLE_PY, "--lock", REQUIREMENTS_LOCK, "--out", out],
+         cwd=PROJECT_ROOT, log=log)
+    if not out.is_file() or out.stat().st_size == 0:
+        log.err(f"licenses-bundle.txt was not produced: {out}")
+        sys.exit(2)
+    log.ok(f"licence bundle written to {_display_path(out)}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1153,11 +1209,13 @@ def main(argv: list[str] | None = None) -> int:
     log.info(f"python:       {sys.executable} ({sys.version.split()[0]})")
     log.info(f"platform:     {platform.system()} {platform.release()}")
 
+    step0_check_binaries_toml(log)
     version, sha, dirty = step1_resolve_version(args, log)
     step2_reset_staging(log)
     step7_pull_agents(args, log)
     py = step3_create_venv(args, log)
     step4_run_pyinstaller(py, log)
+    step4b_licenses_bundle(py, log)
 
     step5_native_binaries(log)
     step6_poppler(log)
