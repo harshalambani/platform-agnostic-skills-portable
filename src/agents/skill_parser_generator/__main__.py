@@ -17,6 +17,7 @@ import sys
 
 from agents.skill_parser_generator.tools import (
     run_tieout_impl,
+    typed_tieout_args,
     validate_parser_impl,
     extract_blanks_impl,
 )
@@ -54,7 +55,8 @@ def _cmd_fix(args: argparse.Namespace) -> int:
         f"the tie-out with args: {arg_str}. Report the gate result and the diff; "
         f"do not claim success unless run_tieout reports exit 0. Do not commit."
     )
-    print(run(instruction, config_path=args.config, model_override=args.model))
+    with typed_tieout_args(arg_str):
+        print(run(instruction, config_path=args.config, model_override=args.model))
     return 0
 
 
@@ -102,6 +104,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from agents.skill_parser_generator.agent import FROZEN_MESSAGE
+    from agents.skill_scaffold.scaffold import is_frozen
+
+    if is_frozen():
+        print(FROZEN_MESSAGE, file=sys.stderr)
+        return 2
+
     args = build_parser().parse_args(argv)
     # argparse.REMAINDER keeps a leading "--"; drop it.
     if getattr(args, "args", None) and args.args and args.args[0] == "--":

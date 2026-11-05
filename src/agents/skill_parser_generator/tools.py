@@ -14,10 +14,12 @@ plus a thin @tool wrapper that the LangGraph agent calls.
 from __future__ import annotations
 
 import ast
+import contextlib
 import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -26,6 +28,114 @@ TEMPLATE_PATH = Path(__file__).parent / "templates" / "parser_template.py"
 
 # Decision #1: generated/edited parsers live here and nowhere else.
 _LOCATION_RE = re.compile(r"agents/skill_[^/]+/scripts/parse_[^/]+\.py$")
+
+# Every parser these tools read or write must resolve (symlinks and ".." followed)
+# to a .py file under <AGENTS_ROOT>/skill_<X>/scripts/. Module-level so tests can
+# point it at a temp tree.
+AGENTS_ROOT = Path(__file__).resolve().parent.parent
+
+# Extra places a tie-out argument may point at, besides the parser's own skill
+# folder: the repo's tests/ folder and the system temp folder.
+EXTRA_ARG_ROOTS: list[Path] = [
+    AGENTS_ROOT.parent.parent / "tests",
+    Path(tempfile.gettempdir()),
+]
+
+_SCRIPTS_MSG = "src/agents/skill_<X>/scripts/"
+_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_parser_path(parser_path: str) -> tuple[Path | None, str]:
+    """Resolve first (symlinks, ..), then require a .py file under
+    <AGENTS_ROOT>/skill_<X>/scripts/. Returns (resolved, "") or (None, error)."""
+    try:
+        resolved = Path(parser_path).resolve()
+        root = Path(AGENTS_ROOT).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None, f"ERROR: cannot resolve path {parser_path!r}."
+    rel = None
+    if _inside(resolved, root):
+        rel = resolved.relative_to(root).parts
+    if (
+        rel is None
+        or len(rel) < 3
+        or not rel[0].startswith("skill_")
+        or rel[1] != "scripts"
+        or resolved.suffix != ".py"
+    ):
+        return None, (
+            f"ERROR: refusing {parser_path!r} - parser files must be .py files "
+            f"under {_SCRIPTS_MSG}."
+        )
+    return resolved, ""
+
+
+# Tokens the developer typed themselves (the tab's Tie-out args field, or the
+# CLI args of `fix`). Matched by exact token only; set for the duration of one
+# run by typed_tieout_args() and always cleared afterwards.
+_TYPED_ARGS: set[str] = set()
+
+
+@contextlib.contextmanager
+def typed_tieout_args(text: str):
+    """Mark the whitespace-split tokens of `text` as developer-typed while the
+    block runs. Cleared on exit, including after an exception."""
+    _TYPED_ARGS.clear()
+    _TYPED_ARGS.update((text or "").split())
+    try:
+        yield
+    finally:
+        _TYPED_ARGS.clear()
+
+
+def _check_tieout_args(arglist: list[str], parser: Path) -> str:
+    """Return "" if every model-supplied path-like argument stays inside the
+    parser's skill folder, tests/ or the temp folder, else an error naming the
+    argument's position (never its value: it may be a password). Relative
+    arguments are read against the process working directory, as the tie-out
+    run does. Tokens the developer typed are trusted by exact match. Plain
+    tokens (no separator, no file extension) are left alone."""
+    root = Path(AGENTS_ROOT).resolve()
+    skill_dir = root / parser.relative_to(root).parts[0]
+    roots = [skill_dir.resolve()] + [Path(r).resolve() for r in EXTRA_ARG_ROOTS]
+    for pos, tok in enumerate(arglist, start=1):
+        if tok in _TYPED_ARGS:
+            continue
+        if tok.startswith("-"):
+            if "=" in tok:
+                val = tok.split("=", 1)[1]
+            elif not tok.startswith("--") and len(tok) > 2:
+                val = tok[2:]  # glued short option such as -oPATH
+            else:
+                continue
+        else:
+            val = tok
+        if not val:
+            continue
+        pathlike = (
+            "/" in val or "\\" in val or val in (".", "..")
+            or bool(_EXT_RE.search(val)) or bool(re.match(r"^[A-Za-z]:", val))
+        )
+        if not pathlike:
+            continue
+        try:
+            target = Path(val).resolve()  # relative to the process cwd
+        except (OSError, ValueError, RuntimeError):
+            return f"ERROR: cannot resolve tie-out argument {pos}."
+        if not any(_inside(target, r) for r in roots):
+            return (
+                f"ERROR: refusing tie-out argument {pos} - it resolves outside "
+                "the parser's skill folder, tests/ and the temp folder."
+            )
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +277,9 @@ def _normalize_blanks(blanks: dict | str) -> "dict[str, str] | str":
 
 def validate_parser_impl(parser_path: str) -> str:
     """AST-parse then ruff-check a parser. Returns OK or the problems."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     src = p.read_text(encoding="utf-8")
@@ -200,7 +312,9 @@ def validate_parser_impl(parser_path: str) -> str:
 
 def extract_blanks_impl(parser_path: str) -> str:
     """List the editable blank constants of a parser with their current values."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     src = p.read_text(encoding="utf-8")
@@ -221,7 +335,9 @@ def extract_blanks_impl(parser_path: str) -> str:
 
 def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
     """Rewrite named blank constants of an existing parser, then re-validate."""
-    p = Path(parser_path)
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     norm = _normalize_blanks(blanks)
@@ -245,15 +361,24 @@ def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
     )
 
 
-def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180) -> str:
-    """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch)."""
-    p = Path(parser_path)
+def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180,
+                    check_args: bool = False) -> str:
+    """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch).
+    `check_args` is set on the model-driven route only: a developer typing the
+    arguments (the gate command) is not checked."""
+    p, err = _resolve_parser_path(parser_path)
+    if p is None:
+        return err
     if not p.is_file():
         return f"NOT FOUND: {parser_path}"
     if isinstance(args, str):
         arglist = args.split()
     else:
         arglist = [str(a) for a in (args or [])]
+    if check_args:
+        err = _check_tieout_args(arglist, p)
+        if err:
+            return err
     try:
         res = subprocess.run(
             [sys.executable, str(p), *arglist],
@@ -296,7 +421,14 @@ def create_parser_from_template_impl(output_path: str, blanks: dict | str) -> st
         return f"ERROR: {e.args[0]}"
     except SyntaxError as e:
         return f"ERROR: filled template is invalid Python: line {e.lineno}: {e.msg}"
-    out = Path(output_path)
+    out, err = _resolve_parser_path(output_path)
+    if out is None:
+        return err
+    if not out.name.startswith("parse_"):
+        return (
+            "ERROR: per the locked layout, parsers must be written to "
+            f"{_SCRIPTS_MSG}parse_<format>.py - got {output_path!r}."
+        )
     if out.exists():
         return f"ERROR: refusing to overwrite existing file {output_path}."
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +477,7 @@ def run_tieout(parser_path: str, args: list | str) -> str:
     the exit code - 0 (tie-out PASS), 1 (error), or 2 (closing balance
     MISMATCH). `args` are the parser's CLI arguments (e.g. the input and output
     paths). Success requires exit 0."""
-    return run_tieout_impl(parser_path, args)
+    return run_tieout_impl(parser_path, args, check_args=True)
 
 
 @tool
