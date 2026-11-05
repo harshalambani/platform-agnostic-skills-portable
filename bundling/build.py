@@ -81,6 +81,7 @@ REQUIREMENTS      = PROJECT_ROOT / "requirements.txt"
 REQUIREMENTS_LOCK = PROJECT_ROOT / "requirements-lock.txt"
 SOURCES_TOML  = PROJECT_ROOT / "bundling" / "sources.toml"
 BINARIES_TOML = PROJECT_ROOT / "bundling" / "binaries.toml"
+LICENSES_BUNDLE_PY = PROJECT_ROOT / "bundling" / "licenses_bundle.py"
 PLACEHOLDER_SHA = "REPLACE_WITH_PINNED_SHA256_AT_PHASE_2"
 
 TEMPLATES_DIR    = PROJECT_ROOT / "bundling" / "templates"
@@ -423,6 +424,20 @@ def step0_check_binaries_toml(log: _Log) -> None:
                 "--target <name> prints it.")
         sys.exit(2)
     log.ok("no placeholder or malformed sha256 in binaries.toml")
+
+
+def step4b_licenses_bundle(py: Path, log: _Log) -> Path:
+    """Write licenses-bundle.txt beside the frozen exe. Runs with the BUILD
+    venv's python, where the lock is installed. A failure fails the build."""
+    log.step("4b", "Write licenses-bundle.txt")
+    out = STAGING / "App" / "PASkills" / "licenses-bundle.txt"
+    _run([py, LICENSES_BUNDLE_PY, "--lock", REQUIREMENTS_LOCK, "--out", out],
+         cwd=PROJECT_ROOT, log=log)
+    if not out.is_file() or out.stat().st_size == 0:
+        log.err(f"licenses-bundle.txt was not produced: {out}")
+        sys.exit(2)
+    log.ok(f"licence bundle written to {_display_path(out)}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1200,6 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
     step7_pull_agents(args, log)
     py = step3_create_venv(args, log)
     step4_run_pyinstaller(py, log)
+    step4b_licenses_bundle(py, log)
 
     step5_native_binaries(log)
     step6_poppler(log)
