@@ -39,6 +39,7 @@ dependencies = [
     "pytesseract>=0.3.10",
     "openpyxl>=3.1.0",
     "pandas>=2.2.0",
+    "beautifulsoup4>=4.12",    # HTML parsing (skill_itr_workbook/scripts/parse_eguile.py); was only present via extract-msg
     "olefile>=0.46",           # .msg reader (agents/msg_reader.py: skill_cc_sort, skill_msg_parser)
     "msoffcrypto-tool>=5.4.0",  # password-protected .xlsx (skill_sbm, skill_mf_cas)
     "gradio>=6.0,<7.0",

@@ -24,6 +24,7 @@ xlrd>=1.2.0                 # BIFF .xls reader (ICICI statements; avoids LibreOf
 pandas>=2.2.0
 
 # --- Misc ---
+beautifulsoup4>=4.12           # HTML parsing (skill_itr_workbook parse_eguile); was only present via extract-msg
 olefile>=0.46                 # Outlook .msg reader (agents/msg_reader.py: cc_sort, msg_parser)
 pyyaml>=6.0
 python-dotenv>=1.0.0

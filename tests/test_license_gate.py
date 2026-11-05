@@ -159,3 +159,12 @@ def test_extract_msg_chain_is_not_in_the_lock():
     names = {n.lower().replace("_", "-") for n in
              lg.lock_names((ROOT / "requirements-lock.txt").read_text(encoding="utf-8"))}
     assert not names & {"extract-msg", "pcodedmp", "rtfde"}
+
+
+def test_packages_the_app_imports_were_not_only_there_via_the_removed_chain():
+    # bs4 (parse_eguile.py) used to arrive only through extract-msg; removing
+    # that left an import with no declaration and broke every ITR test in CI.
+    reqs = (ROOT / "requirements.txt").read_text(encoding="utf-8").lower()
+    lock = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").lower()
+    assert "beautifulsoup4" in reqs
+    assert "beautifulsoup4==" in lock and "soupsieve==" in lock
