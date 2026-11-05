@@ -102,6 +102,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from agents.skill_parser_generator.agent import FROZEN_MESSAGE
+    from agents.skill_scaffold.scaffold import is_frozen
+
+    if is_frozen():
+        print(FROZEN_MESSAGE, file=sys.stderr)
+        return 2
+
     args = build_parser().parse_args(argv)
     # argparse.REMAINDER keeps a leading "--"; drop it.
     if getattr(args, "args", None) and args.args and args.args[0] == "--":
