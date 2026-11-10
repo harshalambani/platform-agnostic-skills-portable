@@ -87,56 +87,56 @@ _TYPED_ARGS: set[str] = set()
 # typed. They are kept here, never in the model prompt or the report: the
 # prompt carries MASK in their place and run_tieout puts the real value back
 # just before the local tie-out run.
-_SECRETS: list[str] = []
+_TYPED_VALUES: list[str] = []
 
 MASK = "***"
-_SECRET_NAMES = frozenset({"password", "pwd", "pass", "passphrase"})
+_HIDDEN_NAMES = frozenset({"password", "pwd", "pass", "passphrase"})
 
 
-def _is_secret_name(name: str) -> bool:
+def _is_hidden_name(name: str) -> bool:
     """True for password-like option / key names: the last word of the name
     (split on - and _) is one of the secret names, so --pdf-password counts
     and 'compass' does not."""
     parts = [p for p in re.split(r"[-_]+", name.lower()) if p]
-    return bool(parts) and parts[-1] in _SECRET_NAMES
+    return bool(parts) and parts[-1] in _HIDDEN_NAMES
 
 
-def mask_secret_args(text: str) -> tuple[str, list[str]]:
+def mask_typed_args(text: str) -> tuple[str, list[str]]:
     """Return (masked text, secret values in order). The values of password-like
     arguments become MASK. Handles '--opt value', '--opt=value' and 'key=value'.
     A bare positional password cannot be recognised and is left as typed."""
     toks = (text or "").split()
-    secrets: list[str] = []
+    typed_values: list[str] = []
     out: list[str] = []
     i = 0
     while i < len(toks):
         t = toks[i]
         if t.startswith("-") and t.lstrip("-"):
             name, eq, val = t.lstrip("-").partition("=")
-            if _is_secret_name(name):
+            if _is_hidden_name(name):
                 lead = t[: len(t) - len(t.lstrip("-"))]
                 if eq:
                     if val:
-                        secrets.append(val)
+                        typed_values.append(val)
                         t = f"{lead}{name}={MASK}"
                 elif i + 1 < len(toks):
                     out.append(t)
-                    secrets.append(toks[i + 1])
+                    typed_values.append(toks[i + 1])
                     t = MASK
                     i += 1
         elif "=" in t:
             name, _, val = t.partition("=")
-            if val and _is_secret_name(name):
-                secrets.append(val)
+            if val and _is_hidden_name(name):
+                typed_values.append(val)
                 t = f"{name}={MASK}"
         out.append(t)
         i += 1
-    return " ".join(out), secrets
+    return " ".join(out), typed_values
 
 
-def scrub_secrets(text: str, secrets: list[str]) -> str:
+def scrub_typed_values(text: str, typed_values: list[str]) -> str:
     """Replace every occurrence of a secret value in `text` with MASK."""
-    for s in sorted(set(secrets), key=len, reverse=True):
+    for s in sorted(set(typed_values), key=len, reverse=True):
         if s:
             text = text.replace(s, MASK)
     return text
@@ -144,13 +144,13 @@ def scrub_secrets(text: str, secrets: list[str]) -> str:
 
 def _unmask_args(arglist: list[str]) -> list[str]:
     """Put the typed secret values back where the model repeated MASK."""
-    secrets = list(_SECRETS)
+    typed_values = list(_TYPED_VALUES)
     out: list[str] = []
     for tok in arglist:
-        if tok == MASK and secrets:
-            tok = secrets.pop(0)
-        elif tok.endswith("=" + MASK) and secrets:
-            tok = tok[: -len(MASK)] + secrets.pop(0)
+        if tok == MASK and typed_values:
+            tok = typed_values.pop(0)
+        elif tok.endswith("=" + MASK) and typed_values:
+            tok = tok[: -len(MASK)] + typed_values.pop(0)
         out.append(tok)
     return out
 
@@ -160,14 +160,14 @@ def typed_tieout_args(text: str):
     """Mark the whitespace-split tokens of `text` as developer-typed while the
     block runs. Cleared on exit, including after an exception."""
     _TYPED_ARGS.clear()
-    _SECRETS.clear()
+    _TYPED_VALUES.clear()
     _TYPED_ARGS.update((text or "").split())
-    _SECRETS.extend(mask_secret_args(text)[1])
+    _TYPED_VALUES.extend(mask_typed_args(text)[1])
     try:
         yield
     finally:
         _TYPED_ARGS.clear()
-        _SECRETS.clear()
+        _TYPED_VALUES.clear()
 
 
 def _check_tieout_args(arglist: list[str], parser: Path) -> str:
@@ -553,7 +553,7 @@ def run_tieout(parser_path: str, args: list | str) -> str:
     paths). Success requires exit 0."""
     arglist = args.split() if isinstance(args, str) else [str(a) for a in (args or [])]
     result = run_tieout_impl(parser_path, _unmask_args(arglist), check_args=True)
-    return scrub_secrets(result, _SECRETS)
+    return scrub_typed_values(result, _TYPED_VALUES)
 
 
 @tool

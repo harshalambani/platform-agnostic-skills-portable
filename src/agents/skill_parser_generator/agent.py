@@ -23,8 +23,8 @@ from agents.skill_parser_generator.tools import (
     create_parser_from_template,
     extract_blanks,
     run_tieout,
-    mask_secret_args,
-    scrub_secrets,
+    mask_typed_args,
+    scrub_typed_values,
     typed_tieout_args,
     validate_parser,
 )
@@ -99,7 +99,7 @@ def run_ui(
     task_l = (task or "").lower()
     parser_path = (parser_path or "").strip()
     parser_args = (parser_args or "").strip()
-    shown_args, secrets = mask_secret_args(parser_args)
+    shown_args, typed_values = mask_typed_args(parser_args)
     notes = (notes or "").strip()
 
     if not parser_path:
@@ -127,7 +127,7 @@ def run_ui(
 
     with typed_tieout_args(parser_args):
         report = run(instruction, config_path=config_path, model_override=model_override)
-    report = scrub_secrets(report, secrets)
+    report = scrub_typed_values(report, typed_values)
 
     if output_path:
         out_dir = Path(output_path)
