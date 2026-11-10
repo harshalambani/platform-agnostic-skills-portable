@@ -24,7 +24,7 @@ yourself, so you choose the model and your data stays on your machine.
 | Bank Skills | Bank of Baroda | No | Parse a Bank of Baroda transaction-statement PDF into a flat CSV of rows |
 | Bank Skills | HDFC | No | Convert HDFC Bank statements to GnuCash-importable CSV. Supports digital PDF (including password-protected), scanned/garbled-text PDF (OCR via... |
 | Bank Skills | HSBC | No | Consolidate one or more HSBC bank-statement PDFs into a clean Excel workbook with extracted transaction IDs, separate transaction dates, scrubbed... |
-| Bank Skills | ICICI | Yes | Convert ICICI Bank statement XLS downloads to GnuCash-importable CSV. Hardcoded ICICI parsing — no LLM needed |
+| Bank Skills | ICICI | No | Convert ICICI Bank statement XLS downloads to GnuCash-importable CSV. Hardcoded ICICI parsing — no LLM needed |
 | Bank Skills | Kotak | No | Parse a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV of rows |
 | Bank Skills | SBM | No | Convert an SBM Bank India savings-account statement (password-protected .xlsx) into the canonical CSV. Decrypts in memory, re-orders same-day rows by... |
 | Credit Card | Credit Card — Sort PDFs | No | Extract PDFs from Outlook emails (.msg) and organize credit card statement PDFs by bank and card type |
