@@ -170,25 +170,4 @@ jobs:
             dist/PASkillsPortable_*.zip
           generate_release_notes: true
           body: |
-            ## PA Skills Portable ${{ env.VERSION }}
-
-            **Recommended:** download `PASkillsPortable_${{ env.VERSION }}.paf.exe`
-            and run it — the PortableApps.com installer sets the app up in the
-            location you choose, then launch it with `PASkillsPortable.exe`.
-
-            **Alternative (no installer):** download
-            `PASkillsPortable_${{ env.VERSION }}.zip`, extract it anywhere, and
-            double-click `PASkillsPortable.exe`.
-
-            ### Windows SmartScreen / Smart App Control
-
-            This build is not code-signed yet, so Windows 11 may warn or block
-            it on first run. On **SmartScreen** ("Windows protected your PC"),
-            click **More info -> Run anyway** (or run
-            `Unblock-File .\PASkillsPortable_${{ env.VERSION }}.paf.exe` in
-            PowerShell first). **Smart App Control** is stricter and has no
-            per-app override — if it blocks the app you'll need a PC without it,
-            or to turn it off in Windows Security. This is expected for an
-            unsigned build; the source and build are public in this repo.
-
             Built from commit ${{ github.sha }}.
