@@ -1289,21 +1289,54 @@ def test_csv_roundtrips_and_balances(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Optional end-to-end (only if fixtures provided — no PII committed)
+# End-to-end on a wholly synthetic statement and book (no real data)
 # ---------------------------------------------------------------------------
 
-_FX_XLSX = Path(__file__).resolve().parent / "fixtures" / "sample_26as.xlsx"
-_FX_GNC = Path(__file__).resolve().parent / "fixtures" / "sample.gnucash"
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # synthetic_26as helper
+import synthetic_26as as syn  # noqa: E402
 
 
-@pytest.mark.skipif(not (_FX_XLSX.exists() and _FX_GNC.exists()),
-                    reason="No fixtures at tests/fixtures/sample_26as.xlsx + sample.gnucash")
-def test_end_to_end(tmp_path):
+def _synthetic_inputs(tmp_path, monkeypatch, text=None):
+    xlsx = tmp_path / "synthetic_26as.xlsx"
+    args = (text,) if text is not None else ()
+    syn.extract_synthetic_xlsx(syn.load_extractor(), monkeypatch, xlsx, *args)
+    gnc = syn.write_synthetic_book(tmp_path / "synthetic.gnucash")
+    return xlsx, Path(gnc)
+
+
+def test_end_to_end(tmp_path, monkeypatch):
+    xlsx, gnc = _synthetic_inputs(tmp_path, monkeypatch)
     out = tmp_path / "test_tds_e2e.csv"
-    stats = m.run(_FX_XLSX, _FX_GNC, out)
+    stats = m.run(xlsx, gnc, out)
     assert out.exists()
     assert stats["balanced_all"]
-    assert stats["deductors"] >= 1
+    assert stats["deductors"] == 2
+    assert stats["part_ii_deductors"] == 1
+    # Every journal balances to zero, and the credits to the income side add up
+    # to the gross amounts on the statement (30,000 + 50,000 in Part I,
+    # 25,000 in Part II).
+    with open(out, newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    by_txn = {}
+    for r in rows:
+        by_txn.setdefault(r["Transaction ID"], []).append(float(r["Amount"]))
+    assert len(by_txn) == 3
+    for tid, amts in by_txn.items():
+        assert round(sum(amts), 2) == 0.0, tid
+    gross = sum(a for amts in by_txn.values() for a in amts if a < 0)
+    assert round(-gross, 2) == 105000.0
+
+
+def test_end_to_end_a_missing_deductor_changes_the_journal(tmp_path, monkeypatch):
+    """Negative: if a deductor is dropped from the statement the journal total
+    drops with it, so the check above is not passing on a constant."""
+    text = syn.SYNTHETIC_26AS_TEXT
+    cut = text.index("2   SAMPLE FINANCE TWO LIMITED")
+    end = text.index("PART-II")
+    xlsx, gnc = _synthetic_inputs(tmp_path, monkeypatch, text[:cut] + text[end:])
+    out = tmp_path / "test_tds_e2e_cut.csv"
+    stats = m.run(xlsx, gnc, out)
+    assert stats["deductors"] == 1
 
 
 # ---------------------------------------------------------------------------
