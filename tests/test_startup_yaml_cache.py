@@ -47,7 +47,9 @@ def test_c_and_pure_loaders_agree_on_every_tracked_yaml():
 
 
 def test_helper_matches_safe_load_on_every_tracked_yaml():
-    for f in _tracked_yaml_files():
+    files = list(_tracked_yaml_files())
+    assert files, "no tracked yaml files were found: the loop below would check nothing"
+    for f in files:
         assert yaml_cache.load_yaml_file(f) == yaml.safe_load(f.read_text(encoding="utf-8")), f
 
 
@@ -65,7 +67,7 @@ def test_fallback_to_safe_loader_when_c_loader_absent(tmp_path, monkeypatch):
     assert yaml_cache.load_yaml_file(f) == {"a": 1, "b": ["x", "y"]}
 
 
-def test_module_falls_back_when_yaml_has_no_csafeloader():
+def test_module_falls_back_when_yaml_has_no_csafeloader(tmp_path):
     code = textwrap.dedent(f"""
         import sys, yaml
         sys.path.insert(0, r"{(_ROOT / 'src').as_posix()}")
@@ -73,12 +75,12 @@ def test_module_falls_back_when_yaml_has_no_csafeloader():
             del yaml.CSafeLoader
         from agents import yaml_cache
         assert yaml_cache._LOADER is yaml.SafeLoader
-        import pathlib, tempfile
-        p = pathlib.Path(tempfile.mkdtemp()) / "x.yaml"
+        import pathlib, sys
+        p = pathlib.Path(sys.argv[1]) / "x.yaml"
         p.write_text("k: v\\n", encoding="utf-8")
         assert yaml_cache.load_yaml_file(p) == {{"k": "v"}}
     """)
-    r = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+    r = subprocess.run([sys.executable, "-I", "-c", code, str(tmp_path)], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
 
 

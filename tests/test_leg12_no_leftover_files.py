@@ -60,3 +60,34 @@ def test_hsbc_single_pdf_run_leaves_no_hsbc_run_folder(tmp_path, monkeypatch):
         pass
 
     assert snap() - before == set(), "hsbc_run_* folder leaked into the temp dir"
+
+
+def _app_named(root):
+    return {p.name for p in Path(root).iterdir()
+            if p.name.startswith(("pa-skills-", "hsbc_bankskill_", "hsbc_run_", "pask-eml-"))}
+
+
+def test_app_scratch_folders_are_routed_under_the_pytest_base_temp(tmp_path_factory):
+    """Every prefix the app uses lands under pytest's base temp, and the system
+    temp folder gains no new pa-skills-*, hsbc_* or pask-eml-* name."""
+    base = tmp_path_factory.getbasetemp().resolve()
+    sys_tmp = Path(tempfile.gettempdir()).resolve()
+    before = _app_named(sys_tmp)
+    made = [tempfile.mkdtemp(prefix=p) for p in
+            ("pa-skills-bob-batch-", "hsbc_bankskill_", "pask-eml-", "pa-skills-cfg-")]
+    with tempfile.TemporaryDirectory(prefix="pa-skills-icici-parse-") as tmp:
+        made.append(tmp)
+    for d in made:
+        assert base in Path(d).resolve().parents, f"{d} escaped the pytest base temp"
+    assert _app_named(sys_tmp) - before == set(), "new app scratch names appeared in the system temp"
+
+
+def test_routing_is_narrow_other_prefixes_and_explicit_dirs_are_untouched(tmp_path):
+    """NEGATIVE: an unrelated prefix is not rerouted, and an explicit dir wins."""
+    other = tempfile.mkdtemp(prefix="unrelated-probe-")
+    try:
+        assert Path(other).resolve().parent == Path(tempfile.gettempdir()).resolve()
+    finally:
+        Path(other).rmdir()
+    mine = tempfile.mkdtemp(prefix="pa-skills-x-", dir=str(tmp_path))
+    assert Path(mine).resolve().parent == tmp_path.resolve()

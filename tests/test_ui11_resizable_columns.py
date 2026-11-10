@@ -449,14 +449,54 @@ def _page(tmp):
     return f.as_uri()
 
 
+def _close_browser(port, timeout=15):
+    """Ask the browser itself to quit (CDP Browser.close), then wait until its
+    debugging port stops answering. On Windows the process started by Popen can
+    be a launcher, so terminate() on it leaves the real browser (and its profile
+    folder lock) behind."""
+    import aiohttp
+
+    async def _go():
+        info = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=2))
+        async with aiohttp.ClientSession() as sess:
+            async with sess.ws_connect(info["webSocketDebuggerUrl"]) as ws:
+                await ws.send_str(json.dumps({"id": 1, "method": "Browser.close"}))
+                try:
+                    await asyncio.wait_for(ws.receive(), 5)
+                except Exception:
+                    pass
+    try:
+        asyncio.run(_go())
+    except Exception:
+        pass
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=1)
+        except Exception:
+            return
+        time.sleep(0.2)
+
+
+def _remove_dir_with_retry(path, attempts=20, delay=0.25):
+    for _ in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not Path(path).exists():
+            return
+        time.sleep(delay)
+    shutil.rmtree(path, ignore_errors=True)
+
+
 @pytest.fixture(scope="module")
 def browser_run():
     if not _have_stack():
         pytest.skip("no headless Edge/Chrome or aiohttp")
-    # ignore_cleanup_errors: headless Chrome's helper processes can still be
-    # flushing into the profile dir when the parent exits (ENOTEMPTY on Linux);
-    # a leftover temp profile must not fail the test run.
-    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+    # Headless Chrome's helper processes can still be flushing into the profile
+    # dir just after the parent exits (ENOTEMPTY on Linux), so the directory is
+    # removed by hand once the browser has exited, with a short retry, rather
+    # than by a TemporaryDirectory that would silently leave it behind.
+    tmp = tempfile.mkdtemp(prefix="pask-ui11-")
+    try:
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -477,6 +517,7 @@ def browser_run():
                 pytest.skip("browser did not start")
             yield asyncio.run(_scenario(_page(tmp), port, tmp))
         finally:
+            _close_browser(port)
             proc.terminate()
             try:
                 proc.wait(timeout=10)
@@ -484,8 +525,11 @@ def browser_run():
                 pass
             try:
                 proc.kill()  # reap any straggler before the profile dir is removed
+                proc.wait(timeout=5)
             except Exception:
                 pass
+    finally:
+        _remove_dir_with_retry(tmp)
 
 
 @needs_browser

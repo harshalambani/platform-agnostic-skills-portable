@@ -76,19 +76,27 @@ def _pin_rules_path_out_of_the_repo(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(pr, "rules_path", _guarded)
 
 
+# Prefixes the app's own code uses for scratch folders it never removes (or
+# removes only on a clean path). Under test they are all routed into pytest's
+# base temp, which pytest prunes, so none are left in the system temp folder.
+APP_TEMP_PREFIXES = ("pa-skills-", "hsbc_bankskill_", "hsbc_run_", "pask-eml-", "pask-intake-")
+
+
 @pytest.fixture(autouse=True)
-def _hsbc_stage_dirs_under_tmp_path(tmp_path_factory, monkeypatch):
-    """LEG-12(b): skill_hsbc.agent stages a single PDF in
-    tempfile.mkdtemp(prefix="hsbc_run_") and never removes it, so every test
-    reaching that path left a folder in the system temp dir. Route that prefix
-    (and only that prefix) under pytest's own base temp, which pytest prunes."""
+def _app_stage_dirs_under_tmp_path(tmp_path_factory, monkeypatch):
+    """LEG-12(b): the app stages uploads and parser runs in
+    tempfile.mkdtemp(prefix="pa-skills-..." / "hsbc_bankskill_" / "pask-eml-")
+    and some paths never remove them, so every test reaching them left a folder
+    in the system temp dir. Route those prefixes (and only those, and only when
+    no explicit dir was given) under pytest's own base temp. TemporaryDirectory
+    calls mkdtemp through the module global, so it is covered too."""
     import tempfile
 
     real = tempfile.mkdtemp
-    base = tmp_path_factory.getbasetemp().resolve() / "_hsbc_stage"
+    base = tmp_path_factory.getbasetemp().resolve() / "_app_stage"
 
     def _mkdtemp(suffix=None, prefix=None, dir=None):
-        if prefix == "hsbc_run_" and dir is None:
+        if dir is None and isinstance(prefix, str) and prefix.startswith(APP_TEMP_PREFIXES):
             base.mkdir(parents=True, exist_ok=True)
             dir = str(base)
         return real(suffix=suffix, prefix=prefix, dir=dir)

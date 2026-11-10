@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -69,7 +68,7 @@ def test_script_exists():
 # Sub-totals must be real numbers (the regression that was fixed)
 # ---------------------------------------------------------------------------
 
-def test_subtotals_are_numeric_in_data_only():
+def test_subtotals_are_numeric_in_data_only(tmp_path):
     """Sub-total and grand-total cells must read back as numbers when the file
     is opened with data_only=True (i.e. without recalculating formulas)."""
     deductors = [
@@ -82,7 +81,7 @@ def test_subtotals_are_numeric_in_data_only():
     ws = wb.create_sheet("Part I")
     m.build_part_i(ws, m.Assessee(name="X", pan="ABCDE1234F"), deductors)
 
-    out = Path(tempfile.gettempdir()) / "test_26as_subtotals.xlsx"
+    out = tmp_path / "test_26as_subtotals.xlsx"
     wb.save(out)
 
     ws2 = load_workbook(out, data_only=True)["Part I"]
@@ -184,7 +183,7 @@ def test_part_vi_column_geometry_matches_part_i():
     assert len(m.P6_HEADERS) == len(m.P1_HEADERS) == 15
 
 
-def test_build_part_vi_renders_numeric_subtotals():
+def test_build_part_vi_renders_numeric_subtotals(tmp_path):
     collectors = [_deductor(1, "THOMAS COOK INDIA LIMITED", "ABCD12345E",
                             500000, 25000, 25000,
                             [(300000, 15000, 15000), (200000, 10000, 10000)])]
@@ -192,7 +191,7 @@ def test_build_part_vi_renders_numeric_subtotals():
     wb.remove(wb.active)
     ws = wb.create_sheet("Part VI")
     m.build_part_vi(ws, m.Assessee(name="X", pan="ABCDE1234F"), collectors)
-    out = Path(tempfile.gettempdir()) / "test_26as_part_vi.xlsx"
+    out = tmp_path / "test_26as_part_vi.xlsx"
     wb.save(out)
 
     ws2 = load_workbook(out, data_only=True)["Part VI"]
@@ -286,7 +285,7 @@ def test_part_ii_column_geometry_shares_the_shared_prefix_with_part_i():
         assert field_at(headers, 8) == "Section"
 
 
-def test_build_part_ii_renders_numeric_subtotals():
+def test_build_part_ii_renders_numeric_subtotals(tmp_path):
     d = m.P2Deductor(sr=1, name="BAJAJ FINANCE LIMITED", tan="ABCD12345E",
                      tot_amt=50000, tot_tax=0, tot_tds=0)
     d.txns = [
@@ -301,7 +300,7 @@ def test_build_part_ii_renders_numeric_subtotals():
     wb.remove(wb.active)
     ws = wb.create_sheet("Part II")
     m.build_part_ii(ws, m.Assessee(name="X", pan="ABCDE1234F"), [d])
-    out = Path(tempfile.gettempdir()) / "test_26as_part_ii.xlsx"
+    out = tmp_path / "test_26as_part_ii.xlsx"
     wb.save(out)
 
     ws2 = load_workbook(out, data_only=True)["Part II"]
@@ -401,12 +400,12 @@ def test_check_extraction_not_vacuous_part_vi_legitimately_zero_does_not_raise()
     m.check_extraction_not_vacuous(stats, "some text", "/fake/path/pdftotext")  # no raise
 
 
-def test_run_raises_before_writing_output_when_all_parts_empty(monkeypatch):
+def test_run_raises_before_writing_output_when_all_parts_empty(monkeypatch, tmp_path):
     """run() must call the vacuous-extraction gate BEFORE building/writing the
     workbook, so a broken extraction never produces a misleading .xlsx file,
     and the caller never gets a chance to print a vacuous '0/0 OK' summary."""
     monkeypatch.setattr(m, "pdf_to_text", lambda pdf_path: ("no matching rows here", "/fake/pdftotext"))
-    out = Path(tempfile.gettempdir()) / "test_26as_vacuous_run.xlsx"
+    out = tmp_path / "test_26as_vacuous_run.xlsx"
     if out.exists():
         out.unlink()
     with pytest.raises(m.Empty26ASExtractionError):
@@ -414,12 +413,12 @@ def test_run_raises_before_writing_output_when_all_parts_empty(monkeypatch):
     assert not out.exists(), "workbook must not be written when extraction is vacuous"
 
 
-def test_vacuous_0_0_ok_message_can_no_longer_be_emitted(monkeypatch, capsys):
+def test_vacuous_0_0_ok_message_can_no_longer_be_emitted(monkeypatch, capsys, tmp_path):
     """End-to-end through main(): an all-empty extraction must print a FATAL
     diagnostic to stderr and return a non-zero exit code -- never the old
     reassuring '0/0 deductors OK' reconciliation success message."""
     monkeypatch.setattr(m, "pdf_to_text", lambda pdf_path: ("", "/fake/pdftotext"))
-    out = Path(tempfile.gettempdir()) / "test_26as_vacuous_main.xlsx"
+    out = tmp_path / "test_26as_vacuous_main.xlsx"
     if out.exists():
         out.unlink()
     rc = m.main(["extract_26as_to_xlsx.py", "unused.pdf", str(out)])
@@ -431,7 +430,7 @@ def test_vacuous_0_0_ok_message_can_no_longer_be_emitted(monkeypatch, capsys):
     assert not out.exists()
 
 
-def test_wrong_pdftotext_flavour_prints_clean_fatal_and_exit_4(monkeypatch, capsys):
+def test_wrong_pdftotext_flavour_prints_clean_fatal_and_exit_4(monkeypatch, capsys, tmp_path):
     """End-to-end through main(): a WrongPdftextFlavourError raised from
     pdf_to_text()'s binary resolution (e.g. Xpdf found instead of Poppler)
     must print a clean 'FATAL: <message>' line to stderr -- NOT a raw Python
@@ -445,7 +444,7 @@ def test_wrong_pdftotext_flavour_prints_clean_fatal_and_exit_4(monkeypatch, caps
         raise RuntimeError(f"pdftotext resolution failed: {message}")
 
     monkeypatch.setattr(m, "pdf_to_text", fake_pdf_to_text)
-    out = Path(tempfile.gettempdir()) / "test_26as_wrong_flavour_main.xlsx"
+    out = tmp_path / "test_26as_wrong_flavour_main.xlsx"
     if out.exists():
         out.unlink()
     rc = m.main(["extract_26as_to_xlsx.py", "unused.pdf", str(out)])
@@ -458,13 +457,13 @@ def test_wrong_pdftotext_flavour_prints_clean_fatal_and_exit_4(monkeypatch, caps
     assert not out.exists()
 
 
-def test_empty_extraction_error_still_wins_exit_code_3_not_4(monkeypatch, capsys):
+def test_empty_extraction_error_still_wins_exit_code_3_not_4(monkeypatch, capsys, tmp_path):
     """Empty26ASExtractionError is itself a RuntimeError subclass -- the
     generic RuntimeError except-clause added for WrongPdftextFlavourError
     must not shadow it. This pins the ordering: exit code 3 (empty
     extraction) must still be returned, never 4."""
     monkeypatch.setattr(m, "pdf_to_text", lambda pdf_path: ("", "/fake/pdftotext"))
-    out = Path(tempfile.gettempdir()) / "test_26as_empty_still_3.xlsx"
+    out = tmp_path / "test_26as_empty_still_3.xlsx"
     if out.exists():
         out.unlink()
     rc = m.main(["extract_26as_to_xlsx.py", "unused.pdf", str(out)])
@@ -477,8 +476,8 @@ def test_empty_extraction_error_still_wins_exit_code_3_not_4(monkeypatch, capsys
 
 @pytest.mark.skipif(not FIXTURE.exists(),
                     reason="No fixture PDF at tests/fixtures/sample_26as.pdf")
-def test_extract_end_to_end():
-    out = Path(tempfile.gettempdir()) / "test_26as_e2e.xlsx"
+def test_extract_end_to_end(tmp_path):
+    out = tmp_path / "test_26as_e2e.xlsx"
     stats = m.run(FIXTURE, out)
     assert out.exists()
     assert stats["part_i_deductors"] >= 1

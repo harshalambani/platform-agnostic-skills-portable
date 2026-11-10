@@ -221,10 +221,7 @@ jobs:
         run: |
           cd src
           set +e
-          python -m pytest ../tests/ \
-            --ignore=../tests/test_phase4_build.py \
-            --ignore=../tests/test_phase4b_webui.py \
-            -q > "$RUNNER_TEMP/pytest-out.txt" 2>&1
+          python -m pytest ../tests/ > "$RUNNER_TEMP/pytest-out.txt" 2>&1
           rc=$?
           set -e
           tail -120 "$RUNNER_TEMP/pytest-out.txt"
@@ -255,5 +252,4 @@ jobs:
           cd src
           python -m pytest \
             ../tests/test_csv_analyzer_security.py \
-            ../tests/test_dispatcher_security.py \
-            -q
+            ../tests/test_dispatcher_security.py
