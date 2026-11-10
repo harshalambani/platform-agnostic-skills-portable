@@ -5,9 +5,12 @@ Supports both Ollama (local) and Claude API (remote).
 """
 
 import json
+import logging
 import os
 import requests
 from typing import Optional, Callable
+
+log = logging.getLogger(__name__)
 
 
 def _get_available_ollama_models(base_url: str = "http://localhost:11434") -> list:
@@ -70,7 +73,7 @@ def create_ollama_llm(
     # Auto-select model if not specified
     if model is None:
         model = _select_best_ollama_model(base_url)
-        print(f"Auto-selected Ollama model: {model}")
+        log.info("Auto-selected Ollama model: %s", model)
 
     def llm_fn(prompt: str, temperature: float = 0) -> str:
         """Call Ollama and return raw response text."""

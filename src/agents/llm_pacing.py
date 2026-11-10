@@ -17,12 +17,15 @@ before.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Dict, Optional
+
+log = logging.getLogger(__name__)
 
 _SLICE_SECONDS = 0.5          # how often a wait re-checks for Stop
 _REMIND_SECONDS = 60.0        # long waits re-announce this often
@@ -48,7 +51,7 @@ def _default_emit(message: str) -> None:
         q = None
     if q is not None:
         q.put({"step": 5, "type": "pipeline", "snippet": f"pacing: {message}"})
-    print(f"[pacing] {message}")
+    log.info("[pacing] %s", message)
 
 
 def _default_cancel() -> bool:

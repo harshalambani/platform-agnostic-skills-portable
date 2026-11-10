@@ -13,7 +13,6 @@ no content from the gitignored Data/ directory appears in this file.
 """
 from __future__ import annotations
 
-import csv
 import json
 import re
 import sys

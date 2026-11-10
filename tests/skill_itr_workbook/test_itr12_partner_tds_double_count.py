@@ -14,8 +14,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_itr02_partner_tds_194t as base  # noqa: E402
 from test_itr02_partner_tds_194t import (  # noqa: E402,F401
-    NEW, TDS_INT_GUID, _retag, _rules, _txn, as26_engine, sch, world,
+    NEW, TDS_INT_GUID, _retag, _rules, _txn, as26_engine, sch,
 )
+world = base.world  # re-export the fixture so pytest finds it here
 
 
 def _flags(tp):

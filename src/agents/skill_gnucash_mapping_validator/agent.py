@@ -33,7 +33,7 @@ def parse_amount(amt_str):
     amt_str = amt_str.replace(',', '').strip()
     try:
         return float(amt_str)
-    except:
+    except (TypeError, ValueError):
         return 0.0
 
 def build_eval_set(extractor_output, bank_statement):

@@ -39,7 +39,7 @@ def declared_packages() -> dict[str, list[str]]:
         data = yaml.safe_load(y.read_text(encoding="utf-8")) or {}
         pk = []
 
-        def walk(node):
+        def walk(node, pk=pk):
             if isinstance(node, dict):
                 for k, v in node.items():
                     if k == "python_packages" and isinstance(v, list):
