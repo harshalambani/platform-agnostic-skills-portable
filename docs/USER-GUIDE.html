@@ -734,7 +734,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Attachments are listed (names), so you can see what was enclosed without opening the mail.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Body text looks empty.</td><td>Some HTML-only emails store the body differently; check the JSON fields — the text may be under the HTML body.</td></tr>
+<tr><td>Body text looks empty.</td><td>For .msg files only the plain-text body is read. A .msg that keeps its text only as rich text (RTF) or HTML gives an empty body, and when a rich-text body is present the JSON carries a &quot;warnings&quot; entry saying so; open the original email to read it. .eml files fall back to the HTML body with tags stripped.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_parser_generator" class="skill">

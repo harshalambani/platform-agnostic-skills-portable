@@ -24,7 +24,6 @@ import hashlib
 from pathlib import Path
 from collections import defaultdict
 import shutil
-from datetime import datetime
 
 # This script always runs as a standalone subprocess (spawned via
 # ``sys.executable``, both in dev and in the PyInstaller-frozen build) -- it
@@ -120,38 +119,33 @@ def extract_pdfs_from_cdfv2_msg(msg_file, extract_folder, folder_structure=None)
     """
     Extract PDF attachments from CDFV2 binary MAPI MSG format.
 
-    Requires: pip install extract-msg (pure Python, works well with CDFV2)
+    Reads the .msg directly with olefile (agents.msg_reader); nothing else to
+    install. A file that cannot be read as a .msg is reported and skipped.
     """
-    try:
-        import extract_msg as _extract_msg
-    except ImportError:
-        print(f"  [WARN] CDFV2 format detected but extract-msg not installed")
-        print(f"     Install with: pip install extract-msg")
-        print(f"     Skipping: {msg_file.name}")
-        return []
+    from agents.msg_reader import MsgReadError, read_msg
 
     extracted_files = []
 
     try:
-        # Parse CDFV2 MSG file (compatible with extract-msg 0.41+)
-        msg = _extract_msg.openMsg(str(msg_file))
+        msg = read_msg(msg_file)
+    except MsgReadError as e:
+        print(f"  [WARN] Could not read {msg_file.name} as an Outlook .msg: {str(e)[:120]}")
+        print(f"     Skipping: {msg_file.name}")
+        return []
 
-        # Extract metadata
-        subject = msg.subject if hasattr(msg, 'subject') else 'Unknown'
-        sender = msg.sender if hasattr(msg, 'sender') else 'Unknown'
-        date = msg.date if hasattr(msg, 'date') else ''
+    for w in msg.warnings:
+        print(f"  [WARN] {msg_file.name}: {w}")
+
+    try:
+        subject = msg.subject
+        sender = msg.sender
+        date = msg.date
 
         # Create subfolder based on metadata if requested
         if folder_structure == 'by_date' and date:
             try:
-                # date may be a datetime object (extract-msg 0.41+) or a string
-                if hasattr(date, 'strftime'):
-                    msg_date = date
-                else:
-                    from email.utils import parsedate_to_datetime
-                    msg_date = parsedate_to_datetime(str(date))
-                subfolder = extract_folder / msg_date.strftime('%Y-%m')
-            except:
+                subfolder = extract_folder / date.strftime('%Y-%m')
+            except Exception:
                 subfolder = extract_folder
         elif folder_structure == 'by_sender' and sender:
             # Extract sender name
@@ -166,36 +160,21 @@ def extract_pdfs_from_cdfv2_msg(msg_file, extract_folder, folder_structure=None)
 
         subfolder.mkdir(parents=True, exist_ok=True)
 
-        # Extract attachments from CDFV2
-        if hasattr(msg, 'attachments') and msg.attachments:
-            for attachment in msg.attachments:
-                try:
-                    # extract-msg 0.41+: use longFilename; fall back to shortFilename or filename
-                    filename = (
-                        getattr(attachment, 'longFilename', None)
-                        or getattr(attachment, 'shortFilename', None)
-                        or getattr(attachment, 'filename', None)
-                    )
-
-                    if filename and filename.lower().endswith('.pdf'):
-                        # extract-msg 0.41+: .data is bytes; older versions used .binary
-                        data = getattr(attachment, 'data', None)
-                        if data is None:
-                            data = getattr(attachment, 'binary', None)
-                        if data is None:
-                            continue
-
-                        # Prefix with MSG stem to avoid name collisions across emails
-                        unique_name = _unique_pdf_name(msg_file, filename)
-                        output_file = subfolder / unique_name
-                        with open(output_file, 'wb') as f:
-                            f.write(data)
-
-                        extracted_files.append(output_file)
-                except Exception as e:
-                    pass  # Skip problematic attachments
-
-        msg.close()
+        for attachment in msg.attachments:
+            filename = attachment.filename
+            if not (filename and filename.lower().endswith('.pdf')):
+                continue
+            if attachment.data is None:
+                continue
+            try:
+                # Prefix with MSG stem to avoid name collisions across emails
+                unique_name = _unique_pdf_name(msg_file, filename)
+                output_file = subfolder / unique_name
+                with open(output_file, 'wb') as f:
+                    f.write(attachment.data)
+                extracted_files.append(output_file)
+            except Exception as e:
+                print(f"  [WARN] Could not save attachment {filename} from {msg_file.name}: {str(e)[:50]}")
 
     except Exception as e:
         print(f"  [ERROR] Error extracting from CDFV2 {msg_file.name}: {str(e)[:50]}")
@@ -790,7 +769,7 @@ if __name__ == "__main__":
         print("  - Supports both MIME and CDFV2 binary MSG formats")
         print("  - Auto-detects MSG format automatically")
         print("  - Multi-password support: tries all passwords per PDF")
-        print("  - Requires extract-msg for CDFV2 support: pip install extract-msg")
+        print("  - CDFV2 .msg files are read directly (olefile); nothing extra to install")
         sys.exit(1)
 
     input_folder = sys.argv[1]

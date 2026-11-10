@@ -65,11 +65,6 @@ def run(
     if shutil.which("qpdf") is None:
         return "ERROR: qpdf not found on PATH. Install qpdf and retry."
     notes = []
-    try:
-        import extract_msg  # noqa: F401
-    except Exception:
-        notes.append("Note: extract-msg not importable — .msg inputs will be "
-                     "skipped; PDFs are still processed.")
 
     # SEC-15: the password goes to the script on stdin, never in its argv.
     args = [input_folder, output_folder]
