@@ -1035,27 +1035,25 @@ def test_excel_writer_no_differences_green_banner(tmp_path):
     assert flags["A2"].value == "No flagged elements."
 
 
-def test_excel_writer_creates_one_sheet_per_section_present():
+def test_excel_writer_creates_one_sheet_per_section_present(tmp_path):
     tds = _element("tdsTcs", "Interest")
     sft = _element("sft", "Sale of securities")
     other = _element("other-info", "Salary")
     report = _reco_report([tds, sft, other])
 
-    import tempfile
-    out = Path(tempfile.gettempdir()) / "test_ais_reco_sections.xlsx"
+    out = tmp_path / "test_ais_reco_sections.xlsx"
     X.write_reco_workbook(report, str(out))
     wb = load_workbook(out)
     assert {"Summary", "tdsTcs", "sft", "other-info", "Flags"} <= set(wb.sheetnames)
 
 
-def test_excel_writer_unknown_future_section_still_gets_a_sheet():
+def test_excel_writer_unknown_future_section_still_gets_a_sheet(tmp_path):
     """A sectionKey this writer has never seen (e.g. a future GST section)
     must still get its own detail sheet, not be dropped."""
     el = _element("futureBusinessReceipts", "GST turnover")
     report = _reco_report([el])
 
-    import tempfile
-    out = Path(tempfile.gettempdir()) / "test_ais_reco_future_section.xlsx"
+    out = tmp_path / "test_ais_reco_future_section.xlsx"
     X.write_reco_workbook(report, str(out))
     wb = load_workbook(out)
     assert "futureBusinessReceipts" in wb.sheetnames

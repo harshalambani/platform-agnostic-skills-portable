@@ -113,13 +113,16 @@ def _descs(n, n_rules, seed=11):
 
 
 def test_compiled_pass_maps_exactly_the_same_rows():
-    rules = _synthetic(600)
+    # 80 rules x 80 rows: the same seven deliberate breakages of the compiled pass
+    # (reversed order, dropped literal / regex / fallback entries, lost lower-casing,
+    # dropped catch-all) fail here exactly as they did at 600 x 400, in well under a second.
+    rules = _synthetic(80)
     rules += [{"patterns": ["("], "account": "Expenses:Broken", "confidence": "low"},   # invalid regex
               {"patterns": [r"A\.B.*"], "account": "Expenses:Esc", "confidence": "low"},
               {"patterns": [".*"], "account": "Expenses:Catchall", "confidence": "low"}]
     rules.sort(key=lambda r: ({"high": 0, "medium": 1, "low": 2}[r["confidence"]], -r.get("frequency", 0)))
     compiled = m.CompiledRules(rules)
-    for d in _descs(400, 600) + ["A.B", "AxB", "x(y", ""]:
+    for d in _descs(80, 80) + ["A.B", "AxB", "x(y", ""]:
         assert m.match_rule(d, compiled) == m.match_rule(d, rules), d
 
 

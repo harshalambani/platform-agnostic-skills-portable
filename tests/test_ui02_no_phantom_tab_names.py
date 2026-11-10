@@ -54,8 +54,9 @@ def _phantoms():
 
 def test_no_skill_yaml_names_a_tab_that_does_not_render():
     bad = []
+    phantoms = _phantoms()      # read the manifests once, not once per manifest
     for p, text in _manifests():
-        for ph, owner in _phantoms().items():
+        for ph, owner in phantoms.items():
             if owner == p:
                 continue    # a skill's own registry name in its own file
             for i, line in enumerate(text.splitlines(), 1):

@@ -410,10 +410,33 @@ def test_a_prune_error_does_not_fail_the_run(env, monkeypatch):    # NEGATIVE
     tmp, d, state, put, run = env
     put("a.pdf")
     run()
-    monkeypatch.setattr(m.os.path, "exists", lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    # Narrow patch: only THIS module's view of os.path.exists fails. Patching
+    # os.path itself would break every other module (and pytest) for the test.
+    import os as _os
+    import types
+
+    class _Path(types.SimpleNamespace):
+        def __getattr__(self, name):
+            return getattr(_os.path, name)
+
+    calls = []
+
+    def _boom(p):
+        calls.append(p)
+        raise RuntimeError("boom")
+
+    class _Os:
+        path = _Path(exists=_boom)
+
+        def __getattr__(self, name):
+            return getattr(_os, name)
+
+    monkeypatch.setattr(m, "os", _Os())
     (d / "b.pdf").write_bytes(b"%PDF-1.4 synthetic B")
     res = run()
     assert res.rows and res.read_fresh == 1
+    assert calls, "the failing os.path.exists was never reached: the test proves nothing"
+    assert _os.path.exists(str(d)), "os.path.exists must still work outside the module"
 
 
 # ---------------------------------------------------------------------------

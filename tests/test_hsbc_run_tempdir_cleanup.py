@@ -19,7 +19,7 @@ from agents.skill_hsbc import agent  # noqa: E402
 def scratch(tmp_path, monkeypatch):
     t = tmp_path / "tmp"
     t.mkdir()
-    # tests/conftest.py already reroutes the hsbc_run_ prefix under pytest's
+    # tests/conftest.py already reroutes the app scratch prefixes under pytest's
     # base temp; override that here so leftovers are counted in a folder of
     # our own.
     real = tempfile.mkdtemp

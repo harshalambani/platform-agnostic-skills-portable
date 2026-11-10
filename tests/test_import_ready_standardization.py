@@ -111,12 +111,27 @@ def _rows_transfer_account_last() -> list[dict]:
     }]
 
 
-def _save(tmp_path: Path, all_rows: list[dict]) -> Path:
+def _save(tmp_path: Path, all_rows: list[dict], monkeypatch) -> Path:
     # NOTE: gnucash_review.py migrated onto ui/_review_engine — _save_changes
     # now reads the engine's payload shape (context/changes/all_rows, with
     # changes keyed by Column KEY, e.g. "Account" not "account"), not the old
     # bespoke {gnucash_file, csv_path, changes:[{description, account}]} shape.
     from ui.tabs import gnucash_review as gr_review  # noqa: PLC0415
+    from agents.skill_gnucash_account_mapper import persistent_rules as pr  # noqa: PLC0415
+    # Never resolve the live/default config (which may sit inside the repo or in
+    # Data\): point the save at a config under tmp_path and record what it read.
+    cfg = tmp_path / "settings" / "config.yaml"
+    cfg.parent.mkdir()
+    cfg.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(gr_review._config_mod, "PORTABLE_CONFIG_PATH", cfg)
+    seen = []
+    real_load = pr.load_overrides
+
+    def spy_load(gnucash_file, config_path=None, **kw):
+        seen.append(config_path)
+        return real_load(gnucash_file, config_path=config_path, **kw)
+
+    monkeypatch.setattr(pr, "load_overrides", spy_load)
     csv_p = tmp_path / "2026-01-01-TEST-GnuCash_import_ready.csv"
     csv_p.write_text("placeholder\n", encoding="utf-8")
     payload = {
@@ -130,11 +145,12 @@ def _save(tmp_path: Path, all_rows: list[dict]) -> Path:
         "all_rows": all_rows,
     }
     gr_review._save_changes(json.dumps(payload))
+    assert seen == [str(cfg)], f"rules were resolved against {seen}, not the test config"
     return csv_p
 
 
-def test_review_save_reorders_transfer_account_after_account(tmp_path):
-    csv_p = _save(tmp_path, _rows_transfer_account_last())
+def test_review_save_reorders_transfer_account_after_account(tmp_path, monkeypatch):
+    csv_p = _save(tmp_path, _rows_transfer_account_last(), monkeypatch)
     with open(csv_p, encoding="utf-8") as f:
         header = next(csv.reader(f))
     # Re-saved layout matches the shared import-ready schema exactly (MAP-27: with
@@ -144,13 +160,13 @@ def test_review_save_reorders_transfer_account_after_account(tmp_path):
     assert header.index("Transfer Account") == header.index("Account") + 1
 
 
-def test_review_save_keeps_blank_transfer_account_column(tmp_path):
+def test_review_save_keeps_blank_transfer_account_column(tmp_path, monkeypatch):
     """A blank Transfer Account value is still emitted in its canonical slot
     (the mapper's 'always emit, blank when unresolved' invariant survives a
     round-trip through the review save)."""
     rows = _rows_transfer_account_last()
     rows[0]["Transfer Account"] = ""  # unresolved-bank case
-    csv_p = _save(tmp_path, rows)
+    csv_p = _save(tmp_path, rows, monkeypatch)
     with open(csv_p, encoding="utf-8") as f:
         reader = csv.DictReader(f)
         header = reader.fieldnames

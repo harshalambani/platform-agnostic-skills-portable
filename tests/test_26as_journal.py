@@ -15,7 +15,6 @@ import csv
 import datetime as dt
 import importlib.util
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -255,13 +254,13 @@ def test_build_15g_journals_tied_candidates_flagged_ambiguous_too():
     assert j.balanced
 
 
-def test_write_review_appends_tied_candidates_as_last_column():
+def test_write_review_appends_tied_candidates_as_last_column(tmp_path):
     """The review CSV has "Tied Candidates" then "TAN" as its last two
     columns (TDS-11 added TAN after Tied Candidates); every earlier column
     keeps its original position."""
     d = _deductor(1, "ZENITH LIMITED", "194A", 100000.0, 10000.0, tan="AAAA00000A")
     journals = m.build_journals([d], _tie_accounts())
-    out = Path(tempfile.gettempdir()) / "test_tds06_review.csv"
+    out = tmp_path / "test_tds06_review.csv"
     m.write_review(journals, out, _tie_accounts())
     with out.open(newline="", encoding="utf-8") as f:
         rows = list(csv.reader(f))
@@ -616,14 +615,14 @@ def test_build_csv_rows_drops_whole_transaction_when_all_splits_are_zero():
     assert rows == []
 
 
-def test_write_csv_zero_amount_row_fails_on_pre_fix_build_csv_rows():
+def test_write_csv_zero_amount_row_fails_on_pre_fix_build_csv_rows(tmp_path):
     """Negative-test anchor: proves the zero-amount split really did reach
     write_csv()'s output before the fix (guards against a future change
     that reintroduces zero rows by writing straight from j.splits again
     instead of through the filtered build_csv_rows())."""
     d = _deductor(4, "BANK OF BARODA", "194A", 50000, 0)
     j = m.build_journals([d], _accounts())[0]
-    out = Path(tempfile.gettempdir()) / "test_zero_amount_row.csv"
+    out = tmp_path / "test_zero_amount_row.csv"
     m.write_csv([j], out, "2025-26")
     with out.open(newline="", encoding="utf-8") as f:
         amounts = [float(row["Amount"]) for row in csv.DictReader(f)]
@@ -663,7 +662,7 @@ def test_category_g_nonzero_tax_three_split_like_category_a():
     assert j.balanced
 
 
-def test_category_g_never_collides_with_category_a_tdsj_series():
+def test_category_g_never_collides_with_category_a_tdsj_series(tmp_path):
     """A Part II 194A deductor must NOT become Category A / TDSJ -- category
     is decided by which Part the row came from, never by a section lookup."""
     part_i = _deductor(1, "BANK OF BARODA", "194A", 1000, 100)
@@ -672,7 +671,7 @@ def test_category_g_never_collides_with_category_a_tdsj_series():
     journals += m.build_15g_journals([part_ii], _accounts())
     assert [j.category for j in journals] == ["A", "G"]
 
-    out = Path(tempfile.gettempdir()) / "test_category_g_ids.csv"
+    out = tmp_path / "test_category_g_ids.csv"
     m.write_csv(journals, out, "2025-26")
     txns = {}
     with out.open(newline="", encoding="utf-8") as f:
@@ -1188,8 +1187,8 @@ def _make_workbook(path, parts):
     return path
 
 
-def test_parse_parts_reads_both_tds_and_tcs():
-    p = Path(tempfile.gettempdir()) / "test_26as_both.xlsx"
+def test_parse_parts_reads_both_tds_and_tcs(tmp_path):
+    p = tmp_path / "test_26as_both.xlsx"
     _make_workbook(p, {
         "Part I": [(1, "BANK OF BARODA", "194A", 1000.0, 100.0)],
         "Part VI": [(1, "THOMAS COOK INDIA LIMITED", "206CQ", 500000.0, 25000.0)],
@@ -1203,19 +1202,19 @@ def test_parse_parts_reads_both_tds_and_tcs():
     assert collectors[0].sections == ("206CQ",)
 
 
-def test_parse_parts_accepts_tcs_only_workbook():
+def test_parse_parts_accepts_tcs_only_workbook(tmp_path):
     """A 26AS with TCS but no TDS is valid and must not be rejected."""
-    p = Path(tempfile.gettempdir()) / "test_26as_tcs_only.xlsx"
+    p = tmp_path / "test_26as_tcs_only.xlsx"
     _make_workbook(p, {"Part VI": [(1, "X TOURS", "206CQ", 100.0, 10.0)]})
     deductors, g_deductors, collectors, fy = m.parse_parts(p)
     assert deductors == [] and g_deductors == [] and len(collectors) == 1
     assert fy == "2025-26"
 
 
-def test_parse_parts_reads_part_ii_15g_15h():
+def test_parse_parts_reads_part_ii_15g_15h(tmp_path):
     """A 26AS with only 15G/15H (Part II) deductors is valid — no TDS/TCS
     required — and Part II shares columns 1/2/4/5/6/8 with Part I/VI."""
-    p = Path(tempfile.gettempdir()) / "test_26as_part_ii_only.xlsx"
+    p = tmp_path / "test_26as_part_ii_only.xlsx"
     _make_workbook(p, {
         "Part II": [(1, "BAJAJ FINANCE LIMITED", "194A", 50000.0, 0.0)],
     })
@@ -1227,21 +1226,21 @@ def test_parse_parts_reads_part_ii_15g_15h():
     assert fy == "2025-26"
 
 
-def test_parse_parts_rejects_workbook_with_neither_part():
-    p = Path(tempfile.gettempdir()) / "test_26as_neither.xlsx"
+def test_parse_parts_rejects_workbook_with_neither_part(tmp_path):
+    p = tmp_path / "test_26as_neither.xlsx"
     _make_workbook(p, {"Part VII": []})
     with pytest.raises(ValueError, match="Part I"):
         m.parse_parts(p)
 
 
-def test_tcs_and_tds_transaction_ids_never_collide():
+def test_tcs_and_tds_transaction_ids_never_collide(tmp_path):
     """Part I Sr.1 and Part VI Sr.1 are different parties — a shared ID would
     make GnuCash fuse their splits into one unbalanced transaction."""
     journals = m.build_journals([_deductor(1, "BANK OF BARODA", "194A", 1000, 100)],
                                 _tcs_accounts())
     journals += m.build_tcs_journals([_collector(1, "X TOURS", "206CQ", 500, 50)],
                                      _tcs_accounts())
-    out = Path(tempfile.gettempdir()) / "test_tcs_ids.csv"
+    out = tmp_path / "test_tcs_ids.csv"
     m.write_csv(journals, out, "2025-26")
 
     txns = {}
@@ -1262,13 +1261,13 @@ def test_journal_date_is_march_31_current_year():
     assert m.journal_date() == f"{dt.date.today().year}-03-31"
 
 
-def test_csv_roundtrips_and_balances():
+def test_csv_roundtrips_and_balances(tmp_path):
     deds = [
         _deductor(4, "BANK OF BARODA", "194A", 250237, 25024),
         _deductor(2, "ZENITH ORCHARD LABORATORIES LTD.", "194", 100000, 10000),
     ]
     journals = m.build_journals(deds, _accounts())
-    out = Path(tempfile.gettempdir()) / "test_tds_journals.csv"
+    out = tmp_path / "test_tds_journals.csv"
     m.write_csv(journals, out, "2025-26")
 
     # Re-parse: splits group by Transaction ID (repeated on every row); each
@@ -1299,8 +1298,8 @@ _FX_GNC = Path(__file__).resolve().parent / "fixtures" / "sample.gnucash"
 
 @pytest.mark.skipif(not (_FX_XLSX.exists() and _FX_GNC.exists()),
                     reason="No fixtures at tests/fixtures/sample_26as.xlsx + sample.gnucash")
-def test_end_to_end():
-    out = Path(tempfile.gettempdir()) / "test_tds_e2e.csv"
+def test_end_to_end(tmp_path):
+    out = tmp_path / "test_tds_e2e.csv"
     stats = m.run(_FX_XLSX, _FX_GNC, out)
     assert out.exists()
     assert stats["balanced_all"]
@@ -1370,10 +1369,10 @@ def test_normalize_overrides_bad_string_returns_error():
     assert isinstance(out, str) and out.startswith("ERROR")
 
 
-def test_run_apply_none_is_noop_and_touches_nothing():
+def test_run_apply_none_is_noop_and_touches_nothing(tmp_path):
     # Dummy, nonexistent paths: run_apply must short-circuit on the empty
     # override BEFORE it ever reads the workbook or rebuilds the CSV.
-    missing = str(Path(tempfile.gettempdir()) / "does-not-exist-26as.csv")
+    missing = str(tmp_path / "does-not-exist-26as.csv")
     out = tl.run_apply(missing, missing, missing, None)
     assert out == "No overrides supplied; the existing CSV is unchanged and valid."
     assert not Path(missing).exists()
@@ -1802,10 +1801,10 @@ def _write_194t_workbook(path, rows, fy="2025-26"):
     return path
 
 
-def test_parse_194t_monthly_sums_two_rows_same_month():
+def test_parse_194t_monthly_sums_two_rows_same_month(tmp_path):
     """26AS can carry two rows in one month (e.g. an interest-on-capital row
     and a remuneration row) -- brief 1.2 -- these must sum per month."""
-    p = Path(tempfile.gettempdir()) / "test_194t_two_rows.xlsx"
+    p = tmp_path / "test_194t_two_rows.xlsx"
     _write_194t_workbook(p, [
         (1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 500.0),
         (1, "PARTNERSHIP FIRM", "194T", "20-Jun-2025", 700.0),
@@ -1813,8 +1812,8 @@ def test_parse_194t_monthly_sums_two_rows_same_month():
     assert m.parse_194t_monthly(p) == {"2025-06": 1200.0}
 
 
-def test_parse_194t_monthly_ignores_non_194t_sections():
-    p = Path(tempfile.gettempdir()) / "test_194t_ignores_other.xlsx"
+def test_parse_194t_monthly_ignores_non_194t_sections(tmp_path):
+    p = tmp_path / "test_194t_ignores_other.xlsx"
     _write_194t_workbook(p, [(1, "BANK OF BARODA", "194A", "12-Jun-2025", 100.0)])
     assert m.parse_194t_monthly(p) == {}
 
@@ -1836,9 +1835,9 @@ def _reco(p, months_book, fy="2025-26",
         m.monthly_debits_for_account = orig
 
 
-def test_reconcile_s194t_nothing_posted_is_open_and_loud():
+def test_reconcile_s194t_nothing_posted_is_open_and_loud(tmp_path):
     """(a) Nothing posted is never MATCH, and it is loud."""
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_open.xlsx"
+    p = tmp_path / "test_194t_reco_open.xlsx"
     _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
     reco = _reco(p, {})
     assert reco is not None
@@ -1848,9 +1847,9 @@ def test_reconcile_s194t_nothing_posted_is_open_and_loud():
     assert "partner recon" in reco.message
 
 
-def test_reconcile_s194t_variance_over_re1_is_loud():
+def test_reconcile_s194t_variance_over_re1_is_loud(tmp_path):
     """(b) A variance over Re 1 is loud."""
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_variance.xlsx"
+    p = tmp_path / "test_194t_reco_variance.xlsx"
     _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
     reco = _reco(p, {"2025-06": 998.0})  # diff 2.00, over the Re 1 tolerance
     assert reco.status == "VARIANCE"
@@ -1858,21 +1857,21 @@ def test_reconcile_s194t_variance_over_re1_is_loud():
     assert "2025-06" in reco.message
 
 
-def test_reconcile_s194t_within_re1_is_match_and_not_loud():
+def test_reconcile_s194t_within_re1_is_match_and_not_loud(tmp_path):
     """(b) Re 1 or less is not loud."""
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_within_tolerance.xlsx"
+    p = tmp_path / "test_194t_reco_within_tolerance.xlsx"
     _write_194t_workbook(p, [(1, "PARTNERSHIP FIRM", "194T", "12-Jun-2025", 1000.0)])
     reco = _reco(p, {"2025-06": 999.50})  # diff 0.50, at the Re 1 tolerance
     assert reco.status == "MATCH"
     assert reco.loud is False
 
 
-def test_reconcile_s194t_two_26as_rows_reconcile_against_one_posting():
+def test_reconcile_s194t_two_26as_rows_reconcile_against_one_posting(tmp_path):
     """(d) Two 26AS rows in one month reconcile against one combined monthly
     posting -- the partner journal books a single monthly transaction, so the
     sum of 26AS's interest-on-capital + remuneration rows for that month must
     match it, not either row alone."""
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_two_rows.xlsx"
+    p = tmp_path / "test_194t_reco_two_rows.xlsx"
     _write_194t_workbook(p, [
         (1, "PARTNERSHIP FIRM", "194T", "05-Jun-2025", 500.0),
         (1, "PARTNERSHIP FIRM", "194T", "25-Jun-2025", 700.0),
@@ -1882,8 +1881,8 @@ def test_reconcile_s194t_two_26as_rows_reconcile_against_one_posting():
     assert reco.status == "MATCH"
 
 
-def test_reconcile_s194t_partial_names_missing_months():
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_partial.xlsx"
+def test_reconcile_s194t_partial_names_missing_months(tmp_path):
+    p = tmp_path / "test_194t_reco_partial.xlsx"
     _write_194t_workbook(p, [
         (1, "PARTNERSHIP FIRM", "194T", "05-Jun-2025", 500.0),
         (1, "PARTNERSHIP FIRM", "194T", "05-Jul-2025", 600.0),
@@ -1894,11 +1893,11 @@ def test_reconcile_s194t_partial_names_missing_months():
     assert "2025-07" in reco.message
 
 
-def test_reconcile_s194t_returns_none_when_26as_has_no_194t():
+def test_reconcile_s194t_returns_none_when_26as_has_no_194t(tmp_path):
     """26AS with no s.194T amounts at all -- nothing to reconcile, and this
     must be distinguishable from OPEN (which means 194T IS present but
     nothing is posted for it yet)."""
-    p = Path(tempfile.gettempdir()) / "test_194t_reco_none.xlsx"
+    p = tmp_path / "test_194t_reco_none.xlsx"
     _write_194t_workbook(p, [(1, "BANK OF BARODA", "194A", "12-Jun-2025", 100.0)])
     assert _reco(p, {}) is None
 
@@ -1924,7 +1923,7 @@ def test_194t_never_reaches_either_csv_regardless_of_reco_state():
         del fake_reco  # constructed only to prove it plays no part above
 
 
-def test_no_partner_comp_accounts_entity_shows_no_reco_item():
+def test_no_partner_comp_accounts_entity_shows_no_reco_item(tmp_path):
     """(e) An entity without partner_comp_accounts behaves as today (26AS
     books s.194T itself, with the existing double-booking warning) and shows
     NO reco item at all. tds_expense_account is "" for such an entity
@@ -1940,10 +1939,10 @@ def test_no_partner_comp_accounts_entity_shows_no_reco_item():
     rows = m.build_csv_rows(journals, "2025-26")
     assert len(rows) == 2  # both splits still emitted, exactly as before
 
-    out = Path(tempfile.gettempdir()) / "test_194t_no_partner_comp.csv"
+    out = tmp_path / "test_194t_no_partner_comp.csv"
     m.write_csv(journals, out, "2025-26")
 
-    xlsx = Path(tempfile.gettempdir()) / "test_194t_no_partner_comp.xlsx"
+    xlsx = tmp_path / "test_194t_no_partner_comp.xlsx"
     _write_194t_workbook(xlsx, [(1, "ACME CONSULTING LLP", "194T", "12-Jun-2025", 365628.0)])
 
     summary = tl.final_summary(str(out), "", str(xlsx), "")  # tds_expense_account=""
