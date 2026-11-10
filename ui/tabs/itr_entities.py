@@ -1057,6 +1057,17 @@ def _save_entity(
 # Delete (double-confirm required; archive, never silent-delete).
 # ---------------------------------------------------------------------------
 
+def _confirm_gate(confirm_1: bool, confirm_2: bool) -> tuple[bool, bool, bool]:
+    """The two delete boxes are ticked in order.
+
+    Returns (box2_value, box2_interactive, delete_interactive): box 2 is only
+    usable once box 1 is ticked, unticking box 1 clears box 2, and the Delete
+    button is only usable with both ticked."""
+    c1 = bool(confirm_1)
+    c2 = bool(confirm_2) and c1
+    return c2, c1, c1 and c2
+
+
 def _delete_entity(key: str, confirm_1: bool, confirm_2: bool) -> str:
     key = (key or "").strip()
     if not key:
@@ -1469,8 +1480,8 @@ def render(container_tab=None) -> None:
             gr.Markdown("---\n**Delete** (double-confirm required):")
             with gr.Row():
                 confirm_1_cb = gr.Checkbox(label="I understand this removes the entity from entities.yaml", value=False)
-                confirm_2_cb = gr.Checkbox(label="I confirm I want to delete this entity", value=False)
-            delete_btn = gr.Button("Delete Entity", variant="stop")
+                confirm_2_cb = gr.Checkbox(label="I confirm I want to delete this entity", value=False, interactive=False)
+            delete_btn = gr.Button("Delete Entity", variant="stop", interactive=False)
 
     _form_outputs = [
         key_box, name_box, pan_box, status_dd, residency_box,
@@ -1518,13 +1529,33 @@ def render(container_tab=None) -> None:
         entities = _load_entities()
         values = _entity_to_form(key or "", entities)
         status_msg = f"_Loaded `{key}`. Edit and Save, or Delete._" if key else "_New entity -- fill in the fields and Save._"
-        return (*values, *_new_form_updates(key), key or "", status_msg)
+        return (*values, *_new_form_updates(key), key or "", status_msg, *_reset_confirm_updates())
+
+    def _reset_confirm_updates():
+        return (
+            gr.update(value=False),
+            gr.update(value=False, interactive=False),
+            gr.update(interactive=False),
+        )
 
     entity_dropdown.change(
         fn=_on_select,
         inputs=[entity_dropdown],
-        outputs=[*_form_outputs, *_new_outputs, orig_key_state, save_status],
+        outputs=[*_form_outputs, *_new_outputs, orig_key_state, save_status,
+                 confirm_1_cb, confirm_2_cb, delete_btn],
     )
+
+    def _on_confirm_1(c1, c2):
+        v2, i2, d = _confirm_gate(c1, c2)
+        return gr.update(value=v2, interactive=i2), gr.update(interactive=d)
+
+    def _on_confirm_2(c1, c2):
+        return gr.update(interactive=_confirm_gate(c1, c2)[2])
+
+    confirm_1_cb.change(fn=_on_confirm_1, inputs=[confirm_1_cb, confirm_2_cb],
+                        outputs=[confirm_2_cb, delete_btn])
+    confirm_2_cb.change(fn=_on_confirm_2, inputs=[confirm_1_cb, confirm_2_cb],
+                        outputs=[delete_btn])
 
     def _on_save(
         orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -1585,13 +1616,14 @@ def render(container_tab=None) -> None:
         blanks = _entity_to_form(new_value, _load_entities())
         return (
             msg, gr.update(choices=new_choices, value=new_value), new_value,
-            *blanks, *_new_form_updates(new_value), False, False,
+            *blanks, *_new_form_updates(new_value), *_reset_confirm_updates(),
         )
 
     delete_btn.click(
         fn=_on_delete,
         inputs=[entity_dropdown, confirm_1_cb, confirm_2_cb],
-        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs, confirm_1_cb, confirm_2_cb],
+        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs,
+                 confirm_1_cb, confirm_2_cb, delete_btn],
     )
 
     # --- Credit cards (CC-28): settings/cc_cards.yaml, the one card list ----
