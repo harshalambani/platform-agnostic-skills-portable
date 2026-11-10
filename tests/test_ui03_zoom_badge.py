@@ -3,7 +3,6 @@ page, so the real _ZOOM_HEAD code is what is tested."""
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,13 +14,40 @@ NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node is not installed")
 
 
+def _extract_script(head: str) -> str:
+    """The text between the one <script> and the one </script> of the head snippet.
+    Each tag must occur exactly once: a changed snippet fails loudly, never a wrong span."""
+    if head.count("<script>") != 1 or head.count("</script>") != 1:
+        raise ValueError("_ZOOM_HEAD must hold exactly one <script> and one </script>")
+    a = head.index("<script>") + len("<script>")
+    b = head.index("</script>")
+    if b < a:
+        raise ValueError("_ZOOM_HEAD has </script> before <script>")
+    return head[a:b]
+
+
 def _script() -> str:
     src = (ROOT / "ui" / "webui.py").read_text(encoding="utf-8")
     start = src.index("_ZOOM_HEAD = ")
     a = src.index('"""', start) + 3
     b = src.index('"""', a)
-    m = re.search(r"<script>(.*)</script>", src[a:b], re.S)
-    return m.group(1)
+    return _extract_script(src[a:b])
+
+
+def test_a_head_without_a_closing_script_tag_raises_not_a_partial_script():   # NEGATIVE
+    with pytest.raises(ValueError):
+        _extract_script("<script>var a = 1;")
+    with pytest.raises(ValueError):
+        _extract_script("var a = 1;</script>")
+
+
+def test_a_head_with_two_script_blocks_raises():                              # NEGATIVE
+    with pytest.raises(ValueError):
+        _extract_script("<script>a</script><script>b</script>")
+
+
+def test_the_script_between_the_tags_is_returned_whole():
+    assert _extract_script("x<script>var a = 1;</script>y") == "var a = 1;"
 
 
 HARNESS = r"""
