@@ -1,9 +1,0 @@
-# skill_gnucash_mapping_validator — internal pipeline step.
-# NOT registered as a UI skill — used programmatically for rule evaluation.
-# To restore as a standalone tab, add: name, display_name, mode, entry_point fields.
-
-description: >
-  Test mapping rules against a bank statement to measure accuracy.
-  Validates that your rules correctly predict GnuCash accounts.
-category: "gnucash"
-version: "1.0.0"

@@ -43,8 +43,6 @@ Not registered as UI tabs (no `display_name`). Used programmatically by `skill_g
 | Step (dir) | Category | LLM | What it does |
 |------------|----------|-----|--------------|
 | `skill_gnucash_account_mapper` | gnucash | no | Build account-mapping rules from your GnuCash book, then apply them to a canonical CSV. Chains: XML extraction → recency-weighted rule generation → account mapping. Rules and history decide first; an optional AI step (when an endpoint is configured) takes only the rows they leave open, and every AI match passes the same guards. |
-| `skill_gnucash_import` | gnucash | no | Convert bank/financial statements (CSV/XLSX) to GnuCash-importable CSV format. Uses deterministic pre-parse + LLM spec-generation + deterministic row transform. |
 | `skill_gnucash_mapping_generator` | gnucash | no | Generate mapping rules (YAML) from extracted GnuCash data. Creates categorized rules (by bank) with confidence levels. |
-| `skill_gnucash_mapping_validator` | gnucash | no | Test mapping rules against a bank statement to measure accuracy. Validates that your rules correctly predict GnuCash accounts. |
 | `skill_gnucash_reconciler` | gnucash | no | Compare a canonical CSV against your GnuCash book before importing. Flags: duplicates (date+amount match), balance gaps, and missing transactions. Read-only — never modifies your .gnucash file. Run this after mapping accounts and before GnuCash import to catch issues early. |
 | `skill_gnucash_xml_extractor` | gnucash | no | Parse a GnuCash (.gnucash) file and extract account hierarchy + transaction mappings. Outputs JSON with all description→account patterns from your financial history. |
