@@ -8,8 +8,8 @@ in CI. They guard the specific regression that was fixed: deductor sub-total
 cells must hold COMPUTED NUMERIC VALUES, not bare =SUM formulas — a bare formula
 reads back as blank in any data_only consumer (the app preview, pandas, etc.).
 
-An optional end-to-end test runs only when a fixture PDF is dropped at
-tests/fixtures/sample_26as.pdf (none is committed, to avoid storing a real PAN).
+The end-to-end tests run the real extractor on a wholly synthetic statement
+(tests/synthetic_26as.py), so they never skip and no real PAN is stored.
 
 Run with:
     cd src && python -m pytest ../tests/test_26as.py -v
@@ -25,8 +25,8 @@ from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # synthetic_26as helper
 SCRIPT = SRC / "agents" / "skill_26as" / "scripts" / "extract_26as_to_xlsx.py"
-FIXTURE = Path(__file__).resolve().parent / "fixtures" / "sample_26as.pdf"
 
 
 def _load_module():
@@ -471,22 +471,53 @@ def test_empty_extraction_error_still_wins_exit_code_3_not_4(monkeypatch, capsys
 
 
 # ---------------------------------------------------------------------------
-# Optional end-to-end (only if a fixture PDF is provided)
+# End-to-end on a wholly synthetic statement (no PDF, no real data)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not FIXTURE.exists(),
-                    reason="No fixture PDF at tests/fixtures/sample_26as.pdf")
-def test_extract_end_to_end(tmp_path):
+def test_extract_end_to_end(tmp_path, monkeypatch):
+    import synthetic_26as as syn
     out = tmp_path / "test_26as_e2e.xlsx"
-    stats = m.run(FIXTURE, out)
+    stats = syn.extract_synthetic_xlsx(m, monkeypatch, out)
     assert out.exists()
-    assert stats["part_i_deductors"] >= 1
-    assert "reconciliation" in stats
+    assert stats["part_i_deductors"] == 2
+    assert stats["part_i_transactions"] == 3
+    assert stats["part_ii_deductors"] == 1
+    assert stats["assessee"]["pan"] == syn.TEST_PAN
+    assert stats["reconciliation"]["mismatches"] == []
     # Sub-totals must be numeric in a data_only read.
     ws = load_workbook(out, data_only=True)["Part I"]
+    seen_subtotal = False
     for r in range(4, ws.max_row + 1):
         label = ws.cell(r, 2).value
         if isinstance(label, str) and label.startswith(("Sub-total", "GRAND TOTAL")):
+            seen_subtotal = True
             for c in (13, 14, 15):
                 v = ws.cell(r, c).value
                 assert v is None or isinstance(v, (int, float))
+    assert seen_subtotal, "no Sub-total row found: the loop above checked nothing"
+
+
+def test_extract_end_to_end_flags_a_mismatched_deductor_total(tmp_path, monkeypatch):
+    """Negative: when a deductor's printed total disagrees with its rows, the
+    run reports the mismatch instead of passing silently."""
+    import synthetic_26as as syn
+    bad = syn.SYNTHETIC_26AS_TEXT.replace("30,000.00   3,000.00   3,000.00",
+                                          "31,000.00   3,000.00   3,000.00")
+    assert bad != syn.SYNTHETIC_26AS_TEXT
+    stats = syn.extract_synthetic_xlsx(m, monkeypatch, tmp_path / "bad.xlsx", bad)
+    assert len(stats["reconciliation"]["mismatches"]) == 1
+
+
+def test_synthetic_statement_holds_only_the_test_pattern_pan():
+    """The fixture must never carry a real PAN: every PAN-shaped token is the
+    test pattern, and the repo's real-data scanner finds nothing in it."""
+    import re
+    import synthetic_26as as syn
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import check_no_real_data as guard
+    pans = set(re.findall(r"\b[A-Z]{5}\d{4}[A-Z]\b", syn.SYNTHETIC_26AS_TEXT))
+    assert pans == {syn.TEST_PAN}
+    assert guard.scan_text(syn.SYNTHETIC_26AS_TEXT) == []
+    # The pattern check itself bites: another PAN-shaped token is not the test one.
+    other = re.findall(r"\b[A-Z]{5}\d{4}[A-Z]\b", "PAN QWERT5678Z")
+    assert set(other) - {syn.TEST_PAN} == {"QWERT5678Z"}
