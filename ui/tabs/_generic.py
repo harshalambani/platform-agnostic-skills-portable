@@ -354,38 +354,6 @@ def _refresh_folder_choice(source: str, current):
     return gr.update(choices=choices, value=(choices[0][1] if choices else None))
 
 
-def _is_pacing_event(event) -> bool:
-    """AI pacing notes ride the same progress stream as step lines; llm_pacing prefixes them."""
-    if not isinstance(event, dict):
-        return False
-    return str(event.get("snippet", "")).startswith("pacing:")
-
-
-def _note_direct_event(latest: dict, event, line: str) -> None:
-    """UI-45: keep the STEP line and the PACING line apart. A pacing note sits under the step
-    line and never replaces it; a new step line clears the (now stale) pacing note."""
-    if _is_pacing_event(event):
-        latest["pacing"] = line
-    else:
-        latest["line"] = line
-        latest["pacing"] = ""
-
-
-def _direct_panel_text(elapsed: int, latest: dict, stopping: bool = False) -> str:
-    """The direct-mode Running panel: elapsed time, newest step line, pacing note under it.
-    After Stop it says so at once."""
-    if stopping:
-        text = (f"**Stopping...** — finishing the current step ({elapsed}s elapsed); "
-                "nothing more will be written")
-    else:
-        text = f"**Running** — still working ({elapsed}s elapsed)"
-    if latest.get("line"):
-        text += "\n\n" + latest["line"]
-    if latest.get("pacing"):
-        text += "\n\n" + latest["pacing"]
-    return text
-
-
 def _newest_cc_sort_pdfs() -> str | None:
     """The newest CC-Sort run's Decrypted_PDFs_Correct folder (9f), or None."""
     runs = _cc_sort_runs()
@@ -828,6 +796,38 @@ def _colorize_status(md: str) -> str:
 # ---------------------------------------------------------------------------
 # Generic run handler (generator — yields (markdown, download_update) tuples).
 # ---------------------------------------------------------------------------
+
+def _is_pacing_event(event) -> bool:
+    """AI pacing notes ride the same progress stream as step lines; llm_pacing prefixes them."""
+    if not isinstance(event, dict):
+        return False
+    return str(event.get("snippet", "")).startswith("pacing:")
+
+
+def _note_direct_event(latest: dict, event, line: str) -> None:
+    """UI-45: keep the STEP line and the PACING line apart. A pacing note sits under the step
+    line and never replaces it; a new step line clears the (now stale) pacing note."""
+    if _is_pacing_event(event):
+        latest["pacing"] = line
+    else:
+        latest["line"] = line
+        latest["pacing"] = ""
+
+
+def _direct_panel_text(elapsed: int, latest: dict, stopping: bool = False) -> str:
+    """The direct-mode Running panel: elapsed time, newest step line, pacing note under it.
+    After Stop it says so at once."""
+    if stopping:
+        text = (f"**Stopping...** — finishing the current step ({elapsed}s elapsed); "
+                "nothing more will be written")
+    else:
+        text = f"**Running** — still working ({elapsed}s elapsed)"
+    if latest.get("line"):
+        text += "\n\n" + latest["line"]
+    if latest.get("pacing"):
+        text += "\n\n" + latest["pacing"]
+    return text
+
 
 def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict | None:
     """UI-24: the extra files (e.g. journal CSVs) THIS run reports writing.
