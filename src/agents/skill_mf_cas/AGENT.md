@@ -34,7 +34,7 @@ artifact files.
 Unchanged from v1. This skill's output lands as **standalone artifacts
 only**. It does **not**:
 - write into any `.gnucash` book,
-- extend `skill_gnucash_import`,
+- extend the GnuCash import pipeline,
 - auto-inject anything into the ITR Workbook.
 
 GnuCash books in this codebase hold mutual funds only as **cash transfers
