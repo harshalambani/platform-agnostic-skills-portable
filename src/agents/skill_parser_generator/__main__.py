@@ -16,7 +16,9 @@ import argparse
 import sys
 
 from agents.skill_parser_generator.tools import (
+    mask_secret_args,
     run_tieout_impl,
+    scrub_secrets,
     typed_tieout_args,
     validate_parser_impl,
     extract_blanks_impl,
@@ -48,15 +50,18 @@ def _cmd_fix(args: argparse.Namespace) -> int:
     from agents.skill_parser_generator.agent import run
 
     arg_str = " ".join(args.args)
+    shown_args, secrets = mask_secret_args(arg_str)
     note = f" {args.note}" if args.note else ""
     instruction = (
         f"The parser {args.parser} failed its tie-out (exit 2).{note} "
         f"Inspect its blanks, fix only the wrong blank constant(s), then re-run "
-        f"the tie-out with args: {arg_str}. Report the gate result and the diff; "
+        f"the tie-out with args: {shown_args}. Report the gate result and the diff; "
         f"do not claim success unless run_tieout reports exit 0. Do not commit."
     )
     with typed_tieout_args(arg_str):
-        print(run(instruction, config_path=args.config, model_override=args.model))
+        print(scrub_secrets(
+            run(instruction, config_path=args.config, model_override=args.model),
+            secrets))
     return 0
 
 

@@ -39,7 +39,7 @@ inputs:
     required: true
   - name: "parser_args"
     type: "text"
-    label: "Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf PASSWORD out.xlsx')"
+    label: "Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf out.xlsx'; do not type a password here)"
     required: false
   - name: "notes"
     type: "text"
@@ -89,7 +89,7 @@ help:
       gotchas: "For Fix, choose an existing parser; for Create, type the target path."
     - name: "parser_args"
       tooltip: "Fix only — the parser's tie-out CLI args."
-      accepts: "Text, e.g. 'statement.pdf PASSWORD out.xlsx'. Optional."
+      accepts: "Text, e.g. 'statement.pdf out.xlsx'. Use a sample without a password; do not type one here. Optional."
       gotchas: "Needed so the tool can run the parser's tie-out while repairing it."
     - name: "notes"
       tooltip: "Context for the task."

@@ -80,7 +80,7 @@ Open the **Parser Generator** tab. Fields:
 |-------|---------------|
 | **Task** | `Fix a failing parser` or `Create a new parser`. |
 | **Parser** | A dropdown of the project's known parsers (with a ↻ refresh). Fix: pick the failing `parse_<format>.py`. Create: type a brand-new path (must be `src/agents/skill_<X>/scripts/parse_<format>.py`) - the field accepts custom values. |
-| **Tie-out args** | *(Fix only)* the parser's own CLI arguments, used to re-run the tie-out - e.g. `statement.pdf MYPASSWORD out.xlsx`. Arguments you type here are used exactly as typed. |
+| **Tie-out args** | *(Fix only)* the parser's own CLI arguments, used to re-run the tie-out - e.g. `statement.pdf out.xlsx`. Do not type a password here; use a sample statement that has none. Arguments you type here are used exactly as typed. |
 | **Notes** | Fix: the symptom or the expected closing balance. Create: the format / `FORMAT_NAME`. |
 | **Model** | Your configured LLM (Ollama or OpenAI-compatible). Required - this tab uses the agent. |
 
@@ -93,7 +93,7 @@ also saved as `parser-generator-report.md` in the run's output folder (use
 
 - **Task:** `Fix a failing parser`
 - **Parser path:** `src/agents/skill_krc/scripts/parse_krc_ledger.py`
-- **Tie-out args:** `AC109.pdf hunter2 ac109-out.xlsx`
+- **Tie-out args:** `AC109.pdf ac109-out.xlsx`
 - **Notes:** `recomputed closing 123456.50 vs printed 123452.50`
 
 The agent will typically find a shifted `BALANCE_X0`/`CREDIT_X0` band, edit just
@@ -117,12 +117,12 @@ cd "<path to the repo>\src"
 
 **Run the quality gate (validate + tie-out) - exits with the tie-out code:**
 ```
-..\.venv\Scripts\python.exe -m agents.skill_parser_generator gate agents/skill_krc/scripts/parse_krc_ledger.py -- AC109.pdf hunter2 out.xlsx
+..\.venv\Scripts\python.exe -m agents.skill_parser_generator gate agents/skill_krc/scripts/parse_krc_ledger.py -- AC109.pdf out.xlsx
 ```
 
 **LLM-driven fix / create** (needs a configured model in `config.yaml`):
 ```
-..\.venv\Scripts\python.exe -m agents.skill_parser_generator fix agents/skill_krc/scripts/parse_krc_ledger.py --note "recomputed 123456.50 vs printed 123452.50" -- AC109.pdf hunter2 out.xlsx
+..\.venv\Scripts\python.exe -m agents.skill_parser_generator fix agents/skill_krc/scripts/parse_krc_ledger.py --note "recomputed 123456.50 vs printed 123452.50" -- AC109.pdf out.xlsx
 ..\.venv\Scripts\python.exe -m agents.skill_parser_generator create agents/skill_demo/scripts/parse_demo.py --format demo
 ```
 

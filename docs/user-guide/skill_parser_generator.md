@@ -17,7 +17,7 @@ Use "Fix a failing parser" when a statement format changed and a parser's tie-ou
 - **Parser (pick a known parser to Fix, or type a new path to Create)** (required) — accepts: A known parser (pick from the list) or a new parse_<format>.py path.
   - The parser to fix, or the new path to create.
   - ⚠️ For Fix, choose an existing parser; for Create, type the target path.
-- **Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf PASSWORD out.xlsx')** (optional) — accepts: Text, e.g. 'statement.pdf PASSWORD out.xlsx'. Optional.
+- **Tie-out args (Fix only: the parser's CLI args, e.g. 'statement.pdf out.xlsx'; do not type a password here)** (optional) — accepts: Text, e.g. 'statement.pdf out.xlsx'. Use a sample without a password; do not type one here. Optional.
   - Fix only — the parser's tie-out CLI args.
   - ⚠️ Needed so the tool can run the parser's tie-out while repairing it.
 - **Notes (Fix: the symptom / expected closing balance; Create: the format / FORMAT_NAME)** (optional) — accepts: Text. Fix: the symptom / expected closing balance. Create: the format / FORMAT_NAME. Optional.
