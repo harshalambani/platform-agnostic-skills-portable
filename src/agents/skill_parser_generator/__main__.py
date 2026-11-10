@@ -16,9 +16,9 @@ import argparse
 import sys
 
 from agents.skill_parser_generator.tools import (
-    mask_typed_args,
+    mask_secret_args,
     run_tieout_impl,
-    scrub_typed_values,
+    scrub_secrets,
     typed_tieout_args,
     validate_parser_impl,
     extract_blanks_impl,
@@ -50,7 +50,7 @@ def _cmd_fix(args: argparse.Namespace) -> int:
     from agents.skill_parser_generator.agent import run
 
     arg_str = " ".join(args.args)
-    shown_args, typed_values = mask_typed_args(arg_str)
+    shown_args, secrets = mask_secret_args(arg_str)
     note = f" {args.note}" if args.note else ""
     instruction = (
         f"The parser {args.parser} failed its tie-out (exit 2).{note} "
@@ -59,9 +59,9 @@ def _cmd_fix(args: argparse.Namespace) -> int:
         f"do not claim success unless run_tieout reports exit 0. Do not commit."
     )
     with typed_tieout_args(arg_str):
-        print(scrub_typed_values(
+        print(scrub_secrets(
             run(instruction, config_path=args.config, model_override=args.model),
-            typed_values))
+            secrets))
     return 0
 
 

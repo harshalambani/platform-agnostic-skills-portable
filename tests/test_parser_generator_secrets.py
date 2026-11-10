@@ -52,22 +52,22 @@ def parser(tmp_path):
     (f"in.pdf --PASSWORD {SECRET}", "in.pdf --PASSWORD ***"),
 ])
 def test_password_values_are_masked(typed, shown):
-    masked, typed_values = tools.mask_typed_args(typed)
+    masked, secrets = tools.mask_secret_args(typed)
     assert masked == shown
     assert SECRET not in masked
-    assert typed_values == [SECRET]
+    assert secrets == [SECRET]
 
 
 def test_non_secret_arguments_are_unchanged():
     typed = "in.pdf out.xlsx --year 2025 --bypass x compass=7 --verbose"
-    masked, typed_values = tools.mask_typed_args(typed)
+    masked, secrets = tools.mask_secret_args(typed)
     assert masked == typed
-    assert typed_values == []
-    assert tools.mask_typed_args("") == ("", [])
+    assert secrets == []
+    assert tools.mask_secret_args("") == ("", [])
 
 
 def test_a_secret_name_does_not_swallow_the_wrong_value():
-    masked, _ = tools.mask_typed_args(f"--password {SECRET} --year 2025")
+    masked, _ = tools.mask_secret_args(f"--password {SECRET} --year 2025")
     assert masked == "--password *** --year 2025"
 
 
@@ -102,7 +102,7 @@ def test_prompt_and_report_never_hold_the_password_but_tieout_gets_it(
     assert SECRET not in seen["tool"]
     assert SECRET not in report
     assert SECRET not in (out_dir / "parser-generator-report.md").read_text(encoding="utf-8")
-    assert tools._TYPED_VALUES == []
+    assert tools._SECRETS == []
 
 
 def test_equals_form_is_restored_for_the_tieout(tmp_path, parser, monkeypatch):
