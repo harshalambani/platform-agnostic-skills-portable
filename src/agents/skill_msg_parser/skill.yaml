@@ -47,7 +47,7 @@ help:
   overview: >
     Parses an Outlook .msg or standard .eml email into structured JSON: sender,
     date, subject, body text and the list of attachments. Pure deterministic
-    extraction — no LLM, fully offline.
+    extraction. Works offline and does not use the LLM.
   when_to_use: >
     Use this when you need an email's fields as data (for a script, a record, or
     further processing) rather than reading it in a mail client.
@@ -69,7 +69,13 @@ help:
           attachments list — easy to read into any script or tool.
   tips: >
     Attachments are listed (names), so you can see what was enclosed without
-    opening the mail.
+    opening the mail. In a digitally signed .msg the real attachments are
+    unwrapped and listed. An attached email inside a .msg is listed by name
+    but not opened.
   troubleshooting:
     - problem: "Body text looks empty."
       fix: "For .msg files only the plain-text body is read. A .msg that keeps its text only as rich text (RTF) or HTML gives an empty body, and when a rich-text body is present the JSON carries a \"warnings\" entry saying so; open the original email to read it. .eml files fall back to the HTML body with tags stripped."
+    - problem: "A signed or encrypted .msg shows no attachments, and the JSON has a \"warnings\" entry."
+      fix: "The message is opaque-signed S/MIME, so its contents sit inside a sealed envelope that is not opened. Open the original email in Outlook and save the attachments from there."
+    - problem: "The run stops with \"Cannot read ... as an Outlook .msg\"."
+      fix: "The file is not a real .msg (for example a renamed .eml or a download that was cut short). Re-save or re-download the email and run again."

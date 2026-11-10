@@ -80,8 +80,8 @@ padding-top:14px}
 <p class="overview">Every skill writes to the <code>Data/outputs/</code> folder with a
 timestamped filename. Hover the ℹ️ icons for input tips and how to read each output.</p>
 <section id="skill_ais_reconcile" class="skill">
-<h2>AIS Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Decrypts an AIS (Annual Information Statement) JSON export entirely in-process -- no manual password entry. The entity is resolved from the export&#x27;s own filename (the portal names it with a masked PAN prefix, e.g. &quot;XXXDE1234X_2025-26_AIS.json&quot;); that masked prefix is matched against entities.yaml&#x27;s real PANs, and the decrypt password is derived from the resolved entity&#x27;s PAN plus DOB (Individual) or DOI (HUF). Always runs the AIS-internal check (l1 detail vs l2 aggregate per element, cross-section TDS-credit total). If a 26AS workbook (this repo&#x27;s own &quot;26AS&quot; skill output) is also supplied, ties out AIS-reported TDS credit against 26AS&#x27;s tds_deposited at the aggregate, per-quarter, and per-income-category grain. If a GnuCash book for the SAME financial year is also supplied, ties out AIS income (interest/dividend/salary) and TDS credit against what&#x27;s actually posted in the books -- this is the primary reconciliation, since the books are the taxpayer&#x27;s own record of truth. A book for the wrong FY still produces a tie-out sheet but the summary carries an impossible-to-miss WARNING banner. Finally, every flagged delta across all three reconciliations is distilled into a set of ADVISORY suggestions for the AIS portal&#x27;s own feedback mechanism (e.g. &quot;Information is correct&quot;, &quot;Information is not fully correct&quot;) -- these are for a human to review before acting on the portal; nothing is ever auto-submitted, and confidence is always capped at low/medium, never high.</p>
+<h2>AIS Reconcile <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Decrypts an AIS (Annual Information Statement) JSON export entirely in-process -- no manual password entry. The entity is resolved from the export&#x27;s own filename (the portal names it with a masked PAN prefix, e.g. &quot;XXXDE1234X_2025-26_AIS.json&quot;); that masked prefix is matched against entities.yaml&#x27;s real PANs, and the decrypt password is derived from the resolved entity&#x27;s PAN plus DOB (Individual) or DOI (HUF). Always runs the AIS-internal check (l1 detail vs l2 aggregate per element, cross-section TDS-credit total). If a 26AS workbook (this repo&#x27;s own &quot;26AS&quot; skill output) is also supplied, ties out AIS-reported TDS credit against 26AS&#x27;s tds_deposited at the aggregate, per-quarter, and per-income-category grain. If a GnuCash book for the SAME financial year is also supplied, ties out AIS income (interest/dividend/salary) and TDS credit against what&#x27;s actually posted in the books -- this is the primary reconciliation, since the books are the taxpayer&#x27;s own record of truth. A book for the wrong FY still produces a tie-out sheet but the summary carries an impossible-to-miss WARNING banner. Finally, every flagged delta across all three reconciliations is distilled into a set of ADVISORY suggestions for the AIS portal&#x27;s own feedback mechanism (e.g. &quot;Information is correct&quot;, &quot;Information is not fully correct&quot;) -- these are for a human to review before acting on the portal; nothing is ever auto-submitted, and confidence is always capped at low/medium, never high. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use once you&#x27;ve downloaded your AIS JSON export from the income-tax portal, to check it against itself and (when available) your 26AS and your GnuCash books before relying on it for filing. The books tie-out is the most useful check if your books are kept current -- it&#x27;s the only one of the three that can actually tell you the AIS is missing or overstating something, not just disagreeing with another government document.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Entity -- the AIS export must be this entity&#x27;s; fills in the GnuCash book below from the registry</b> <em>(required)</em> <span class="pa-tip" data-tip="The entity this reconciliation is for. Also auto-fills the GnuCash book field from the registered book for that entity. ⚠️ Required. The AIS export&#x27;s own entity is still inferred from the AIS filename&#x27;s masked PAN, and the run is refused when that is not the entity picked here. The 26AS list below shows only this entity&#x27;s workbooks.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
@@ -92,7 +92,7 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 <h3>How to run</h3><ol>
 <li>Pick the AIS JSON export.</li>
 <li>Optionally supply the matching-FY GnuCash book and/or the entity&#x27;s 26AS workbook.</li>
-<li>Click Run -- it decrypts and reconciles offline in a few seconds.</li>
+<li>Click Run -- it decrypts and reconciles in a few seconds.</li>
 <li>Open the Excel workbook: Books Reconciliation and 26AS Tie-out sheets first, then Feedback Suggestions.</li>
 </ol>
 <h3>Output</h3>
@@ -109,8 +109,8 @@ timestamped filename. Hover the ℹ️ icons for input tips and how to read each
 </tbody></table>
 </section>
 <section id="skill_gnucash_pipeline" class="skill">
-<h2>Bank - Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically (no LLM) across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
+<h2>Bank - Convert to GnuCash <span class="badge warn">Uses the LLM</span> <span class="badge">agent</span></h2>
+<p class="overview">The one-click, end-to-end importer: upload a raw bank statement and your GnuCash book and get back a GnuCash-ready, account-mapped CSV — no intermediate steps. It chains bank extraction, conversion to canonical format, and account mapping for you. HDFC statements are handled fully deterministically, without the LLM, across all four input shapes it accepts — normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports — including automatic OCR fallback if a PDF&#x27;s text layer is garbled.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when your goal is to get transactions into GnuCash. Use the individual bank skills (BoB, HDFC, etc.) instead only when you want the extracted CSV without account mapping.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Entity (optional) -- fills in the GnuCash book below from the registry</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before. A line under the dropdown tells you whether a registered book was found.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
@@ -158,7 +158,7 @@ Amount (Negated) column types, not &quot;Transfer Amount&quot; - GnuCash 5&#x27;
 needs an Amount column. Save the mapping as a preset in the importer so the
 next import is one click.
 
-**Closing-balance gate and the bank-base file (BNK-09).** Before anything is
+**Closing-balance gate and the bank-base file.** Before anything is
 released the pipeline checks that the book would end at the statement closing
 balance (and at every month end). A statement row may be left out as &quot;already
 booked&quot; only when its twin is in THIS bank&#x27;s own account, same amount, within
@@ -183,21 +183,21 @@ daily book balance with the statement&#x27;s running balance, names the first da
 they drift apart and the closing difference, and writes a `_missing_rows` CSV of
 only the rows absent from this bank&#x27;s account. It never writes to the book.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
 <tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_bob" class="skill">
-<h2>Bank of Baroda <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Turns one or more Bank of Baroda transaction-statement PDFs into a single flat CSV — one row per transaction. Runs fully offline (no LLM, no internet) and correctly stitches tables that overflow across pages without repeating the column header, so a transaction that wraps from the bottom of one page to the top of the next is captured as a single clean row.</p>
+<h2>Bank of Baroda <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Turns one or more Bank of Baroda transaction-statement PDFs into a single flat CSV — one row per transaction. Works offline and does not use the LLM. It correctly stitches tables that overflow across pages without repeating the column header, so a transaction that wraps from the bottom of one page to the top of the next is captured as a single clean row.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Convert to GnuCash&quot; pipeline (choose &quot;Bank of Baroda&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Bank of Baroda statement PDF(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your BoB statement PDF(s). You can select several at once. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one or many, in any order.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Click the input and pick one or more Bank of Baroda statement PDFs.</li>
-<li>Click Run — it processes offline in a few seconds.</li>
+<li>Click Run — it finishes in a few seconds.</li>
 <li>Download the CSV, or open it from the outputs folder (see below).</li>
 </ol>
 <h3>Output</h3>
@@ -214,7 +214,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_csv_analyzer" class="skill">
-<h2>CSV Data Analyzer <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<h2>CSV Data Analyzer <span class="badge warn">Uses the LLM</span> <span class="badge">agent</span></h2>
 <p class="overview">Ask a plain-English question about any CSV and get a written answer with the numbers worked out. The agent loads the file, reasons over the rows, and returns a short Markdown report.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for quick, ad-hoc analysis (&quot;average revenue by region?&quot;, &quot;which month had the most refunds?&quot;) without writing spreadsheet formulas. For a formatted spreadsheet deliverable, use Excel directly instead.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -234,20 +234,20 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Treat the answer as a first pass — spot-check any number that drives a decision, since the model reasons over the data rather than running fixed formulas.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill needs an LLM. Start Ollama or configure an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or configure an endpoint in Settings.</td></tr>
 <tr><td>Answer seems to ignore part of the data.</td><td>Large CSVs may be sampled; narrow the file or the question and re-run.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_26as" class="skill">
-<h2>Convert <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X). The two parts that carry your tax credits are laid out in full as sortable tables with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The remaining parts get their column headers so the workbook is predictable. Note that a modern 26AS carries NO advance tax or self-assessment tax — those were dropped from Part C in AY 2023-24 and now live only in the AIS. Runs fully offline.</p>
+<h2>Convert <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Converts a Form 26AS PDF (the TRACES Annual Tax Statement) into a structured Excel workbook with one sheet per Part (Part I through Part X). The two parts that carry your tax credits are laid out in full as sortable tables with inline per-party sub-totals: Part I (TDS) and Part VI (TCS). The remaining parts get their column headers so the workbook is predictable. Note that a modern 26AS carries NO advance tax or self-assessment tax — those were dropped from Part C in AY 2023-24 and now live only in the AIS. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have your 26AS PDF from the TRACES portal and want it as Excel to review or reconcile against your ITR. To then post the TDS into GnuCash as journal entries, run &quot;Convert to GnuCash&quot; (GnuCash &gt; 26AS &gt; Convert to GnuCash) on the workbook this produces. Do not use it for AIS or TIS — those are different documents.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Form 26AS PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Form 26AS PDF, exactly as downloaded from TRACES. ⚠️ Must be the genuine 26AS (PAN like ABCDE1234F, parts labelled PART-I to PART-X). AIS / TIS PDFs have a different layout and will not parse here.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — a single TRACES-issued 26AS.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Pick your 26AS PDF.</li>
-<li>Click Run — it processes offline in a few seconds.</li>
+<li>Click Run — it finishes in a few seconds.</li>
 <li>Open the Excel workbook and use the per-Part sheets.</li>
 </ol>
 <h3>Output</h3>
@@ -263,8 +263,8 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_krc" class="skill">
-<h2>Convert <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey broker ledger-statement PDF into a clean, tied-out &quot;Simplified Ledger&quot; Excel workbook. Runs fully offline (deterministic, no LLM).</p>
+<h2>Convert <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey broker ledger-statement PDF into a clean, tied-out &quot;Simplified Ledger&quot; Excel workbook. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Run this first of the three KRChoksey sub-tabs. Its workbook is the input to &quot;Reconcile&quot; (Part II), which in turn feeds &quot;Convert to GnuCash&quot; (Part III).</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>KR Choksey Ledger Statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your KR Choksey annual ledger statement PDF. ⚠️ The PDF is password-protected; you must supply the password below.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — the ledger statement.</span></li>
@@ -288,7 +288,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_26as_journal" class="skill">
-<h2>Convert to GnuCash <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<h2>Convert to GnuCash <span class="badge warn">Uses the LLM</span> <span class="badge">agent</span></h2>
 <p class="overview">Builds GnuCash journal entries from a 26AS workbook plus your GnuCash book. It reads Part I (TDS) and Part VI (TCS), matches each deductor to one of your accounts (deterministic fuzzy match first, LLM fallback for the hard cases), and writes a balanced journal CSV ready to import. TCS entries debit your TCS account and credit Drawings — only the tax moves, since the spend it was collected on is already in your books. For an entity with a Partner Compensation Reconciliation book configured, s.194T (partnership) TDS is left out of the CSV — that TDS is already booked month-by-month by the Partner Compensation Reconciliation journal — and the summary instead shows a read-only reconciliation of the 26AS s.194T figures against what that journal has actually posted (MATCH / OPEN / PARTIAL / VARIANCE), so a gap or a mismatch is never silent.</p>
 <p class="whenuse"><b>When to use it.</b> Use this after &quot;26AS Convert&quot;, when you want the TDS and TCS recorded in GnuCash as journal entries instead of typing each one by hand. Getting TCS into the book matters: it is a credit against your tax, and if it never reaches the books your return understates the refund due.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -311,14 +311,14 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again. If the s.194T reconciliation reports OPEN, run &quot;Partner Compensation Reconciliation&quot; (GnuCash &gt; Partner) first, then re-run this skill — the expected order is bank, then Partner Compensation Reconciliation, then this skill.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
 <tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
 <tr><td>s.194T reconciliation shows OPEN or VARIANCE.</td><td>OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal&#x27;s postings for those months before importing.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_krc_gnucash" class="skill">
-<h2>Convert to GnuCash <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Part III of the KR Choksey → GnuCash flow. Converts the Part II Bills workbook into importable GnuCash multi-split CSVs — Purchase, SLBM and Sale — using FIFO cost basis and the long-term holding threshold from your .gnucash book and an editable config in Data/settings/. Runs fully offline.</p>
+<h2>Convert to GnuCash <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Part III of the KR Choksey → GnuCash flow. Converts the Part II Bills workbook into importable GnuCash multi-split CSVs — Purchase, SLBM and Sale — using FIFO cost basis and the long-term holding threshold from your .gnucash book and an editable config in Data/settings/. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Run this last of the three KRChoksey tabs, after Reconcile (Part II). It produces the CSVs you import into GnuCash.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Entity (optional) -- fills in the GnuCash book below from the registry</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional — pick an entity to auto-fill the GnuCash book field from the registered book for that entity. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
@@ -350,7 +350,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_gnucash_coverage" class="skill">
-<h2>Coverage Gap Detector <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>Coverage Gap Detector <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">This codebase has no ledger of which statements were ever imported, so this skill infers likely-missing months from the dates already posted. It looks only at accounts that receive a monthly statement -- the bank accounts and credit cards in the book -- and only inside the book&#x27;s financial year (1 April to 31 March, or up to today if the year is still running). Earlier years are never checked, however long the book&#x27;s history. Every month in that year with no transactions is listed by name, for example &quot;Jun 2025, Jul 2025&quot;. Months after an account&#x27;s last transaction come first (&quot;no transactions since Oct 2025&quot;), because that usually means the latest statement was never imported. An account with very few transactions (under one a month on average) is marked quiet: its empty months may simply be months with no activity, so check before importing. If the book is not registered to a financial year, the year of its latest transaction is used and the report says so. A month at the start or end of the year is first checked against the neighbouring year&#x27;s registered book for the same entity, since postings are sometimes filed on the wrong side of a year rollover.</p>
 <p class="whenuse"><b>When to use it.</b> Run periodically (e.g. monthly, or before filing) to catch a bank or credit-card statement that was never imported into GnuCash -- something the per-statement opening-balance check in the GnuCash Pipeline skill cannot see, because it only ever compares one statement against one account and has nothing to compare against when a whole month&#x27;s statement is simply missing.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -378,8 +378,8 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_cc_spend_booking" class="skill">
-<h2>Credit Card - Book Spends <span class="badge warn">needs LLM endpoint</span> <span class="badge">direct</span></h2>
-<p class="overview">Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 50 rupees more than the bank amount (the entity&#x27;s cc_cred_max_overage in entities.yaml, 0 to 500), within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement&#x27;s spends, refunds, cashback and fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is still booked (on its settling payment&#x27;s date, or its real dates when no payment settles it) and is reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks&#x27; EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked. Card sub-accounts: a card with an account on the Cards screen, paid on or after ccp_split_from, has each bank payment moved onto its sub-account and its spends booked there; the pool (parent plus sub-accounts) must tie to the unsplit figure or no import file is written. Corporate card prepayments: paste the code printed beside an unmatched payment to book it to the prepayment account; nothing is marked for you.</p>
+<h2>Credit Card - Book Spends <span class="badge warn">Uses the LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Cash basis. A payment line on a card statement settles the PREVIOUS statement of the same card. Each bank payment in the book (a debit on Expense:Withdrawals:Credit Card Payment) is matched to that line one-to-one: exact, or a CRED payment that is up to 50 rupees more than the bank amount (the entity&#x27;s cc_cred_max_overage in entities.yaml, 0 to 500), within 5 days, or a part payment made of 2 to 4 bank payments. Ambiguous, unmatched and partly matched cases are reported, never guessed. The settled statement&#x27;s spends, refunds, cashback and fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is still booked (on its settling payment&#x27;s date, or its real dates when no payment settles it) and is reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks&#x27; EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked. Card sub-accounts: a card with an account on the Cards screen, paid on or after ccp_split_from, has each bank payment moved onto its sub-account and its spends booked there; the pool (parent plus sub-accounts) must tie to the unsplit figure or no import file is written. Corporate card prepayments: paste the code printed beside an unmatched payment to book it to the prepayment account; nothing is marked for you. Uses the LLM to suggest an account for spends the rules cannot place; if that AI pass stops, the rows it did not reach go to suspense and the result says so.</p>
 <p class="whenuse"><b>When to use it.</b> After the bank statements are imported and the card statements are sorted, when you want the card spends booked to their expense accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Entity -- fills in the GnuCash book below and names the Bank Service Charge and Drawings accounts</b> <em>(required)</em> <span class="pa-tip" data-tip="The entity whose book this is. Its Bank Service Charge, Drawings and card default accounts come from entities.yaml. ⚠️ A run with card fees stops with a named error if the entity has no bank_service_charge_account.">ℹ️</span><br><span class="fmt">accepts: One of the entities in entities.yaml.</span></li>
@@ -411,8 +411,8 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
-<h2>Credit Card — Sort PDFs <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Takes a messy folder of credit-card statements and organises it: it pulls PDF attachments out of Outlook .msg emails, decrypts password-protected PDFs (via qpdf), and sorts everything by bank/issuer into a clean folder tree. Runs fully offline.</p>
+<h2>Credit Card — Sort PDFs <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Takes a messy folder of credit-card statements and organises it: it pulls PDF attachments out of Outlook .msg emails, decrypts password-protected PDFs (via qpdf), and sorts everything by bank/issuer into a clean folder tree. Statement CSV exports are placed by card as well. It then checks the sorted folder for gaps in the chosen period. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this as the first step when you have a pile of statement emails and PDFs from several cards. Once sorted, run &quot;Credit Card — Transactions&quot; on the decrypted folder to extract the actual transactions.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Input folder (MSG files and/or PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing your .msg emails and/or statement PDFs (subfolders are fine). Use Browse, or type or paste the path. ⚠️ Point at the folder itself, not an individual file.">ℹ️</span><br><span class="fmt">accepts: A folder of .msg and/or .pdf files.</span></li>
@@ -436,12 +436,15 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <h3>Tips</h3><p>This step never reads transaction amounts; it only unlocks and organises. The folder it produces is the exact input the Credit Card — Transactions skill expects.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>A PDF stays locked / is skipped.</td><td>Enter its password in the password box (comma-separate multiple) and re-run.</td></tr>
+<tr><td>The result says &quot;Sort completed with&quot; followed by a number of issues.</td><td>Each issue is one line: a missing month for a card, a PDF that stayed locked, or a file that could not be placed on a card. Read the lines, fix the cause (password, missing statement, card list) and re-run. The same text is saved as completeness_report.txt in the output folder.</td></tr>
+<tr><td>A file landed in the Unknown-Unknown folder.</td><td>It could not be placed on one card: the file name and the card number printed inside disagree, or the digits are not on your card list. The result names the file and the reason. Fix the card list or rename the file and re-run.</td></tr>
+<tr><td>A .msg is skipped with &quot;Could not read ... as an Outlook .msg&quot;.</td><td>That file is not a readable .msg. The rest of the folder is still processed. Re-save the email and run again.</td></tr>
 <tr><td>Source-mode run fails on decryption.</td><td>qpdf must be on PATH in source mode; the frozen build bundles it.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_transactions" class="skill">
-<h2>Credit Card — Transactions <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every transaction row into one consolidated Excel workbook — one row per transaction across all cards. Runs fully offline.</p>
+<h2>Credit Card — Transactions <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every transaction row into one consolidated Excel workbook — one row per transaction across all cards. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this as the second step, right after &quot;Credit Card — Sort PDFs&quot;. It expects the decrypted, sorted folder that Credit Card — Sort PDFs produced, not raw statement files.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Organized PDFs folder (Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs)</b> <em>(required)</em> <span class="pa-tip" data-tip="The Decrypted_PDFs_Correct/ folder created by Credit Card — Sort PDFs. Type or paste the path, or use Browse. ⚠️ Choose the Decrypted_PDFs_Correct/ subfolder, not the top-level CC-Sort output folder.">ℹ️</span><br><span class="fmt">accepts: A folder of decrypted statement PDFs.</span></li>
@@ -463,11 +466,12 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <h3>Tips</h3><p>Because the PDFs are already grouped by issuer, the consolidated sheet keeps cards together — handy for per-card filtering in Excel.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Few or no transactions extracted.</td><td>You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs.</td></tr>
+<tr><td>The Tie-out sheet shows FAIL, or NOT AVAILABLE (no prior statement), for a statement.</td><td>FAIL means the extracted rows do not add up to the totals printed on that statement, so check it against the PDF before relying on it. NOT AVAILABLE means no earlier statement for the same card ends within 3 days before this one starts, so the opening balance could not be checked: add the missing earlier statement and run again.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_summarize" class="skill">
-<h2>Document Summarizer <span class="badge warn">needs LLM endpoint</span> <span class="badge">direct</span></h2>
-<p class="overview">Summarises any PDF or text file into a concise Markdown summary using your configured LLM.</p>
+<h2>Document Summarizer <span class="badge warn">Uses the LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Summarises any PDF or text file into a concise Markdown summary. Uses the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for a quick readable summary of a document — a report, a long text file, a contract. For asking specific questions of tabular data, use CSV Data Analyzer instead.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Document (PDF or text file)</b> <em>(required)</em> <span class="pa-tip" data-tip="The document to summarise. ⚠️ Scanned (image-only) PDFs have no extractable text and will summarise poorly; use a text PDF.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) or text (.txt, .md, .csv, .log, .json, .xml, .html) — one file.</span></li>
@@ -485,13 +489,13 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Very long documents may be condensed heavily — for a specific section, point the skill at just that text.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill needs an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Summary is thin or generic.</td><td>The PDF may be a scan with no text layer. Use a text-based document.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_hdfc" class="skill">
-<h2>HDFC <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Converts HDFC statements — digital PDF, password-protected PDF, scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a GnuCash-ready canonical CSV. All four shapes are parsed deterministically (no LLM). A garbled/unusable PDF text layer (custom font encoding) is auto-detected and routed to OCR with Tesseract automatically. Runs offline.</p>
+<h2>HDFC <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Converts HDFC statements — digital PDF, password-protected PDF, scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a GnuCash-ready canonical CSV. All four shapes are parsed deterministically. A garbled/unusable PDF text layer (custom font encoding) is auto-detected and routed to OCR with Tesseract automatically. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this to get a clean, consistently-columned CSV from any HDFC statement format. To also map the rows to GnuCash accounts in one step, use the GnuCash Import skill and choose HDFC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>HDFC statement (PDF, XLS, XLSX, or CSV)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export. ⚠️ XLS/XLSX downloads are the most reliable and exact. Digital PDFs work directly; scanned or font-garbled PDFs are OCR&#x27;d automatically and OCR quality depends on the scan. CSV exports with renamed headers (e.g. &quot;Value Date&quot;/&quot;Number&quot;) are auto-mapped via an alias table. Prefer the bank&#x27;s original PDF (the one downloaded straight from net-banking, password-protected or not) over a derived/re-printed copy — e.g. one that was opened, printed to PDF, and re-saved. Re-printing strips the original digital text layer, so the derived copy is treated as scanned and routed to OCR with reduced fidelity even though the original would have parsed directly.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file.</span></li>
@@ -517,7 +521,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_hsbc" class="skill">
-<h2>HSBC <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>HSBC <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel workbook: it OCRs scanned pages (Tesseract + Poppler) while skipping pages that already have text, extracts the transaction ID, splits out the transaction date, scrubs the description, and adds an Extra Information column plus a Summary sheet.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks &gt; Bank - Convert to GnuCash and choose HSBC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -535,14 +539,15 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <ul class="outputs">
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-HSBC.xlsx</code><span class="pa-tip" data-tip="A reconciled workbook: one row per transaction with extracted transaction ID, separate transaction date, scrubbed description and an Extra Information column, plus a Summary sheet that ties the totals out.">ℹ️</span> — A reconciled workbook: one row per transaction with extracted transaction ID, separate transaction date, scrubbed description and an Extra Information column, plus a Summary sheet that ties the totals out.</li>
 </ul>
-<h3>Tips</h3><p>Check the Summary sheet first — if its totals reconcile, the extraction is sound. This skill runs fully offline (no LLM, direct mode).</p>
+<h3>Tips</h3><p>Check the Summary sheet first — if its totals reconcile, the extraction is sound. Works offline and does not use the LLM.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>OCR output is poor or missing.</td><td>Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans.</td></tr>
+<tr><td>The run stops with &quot;No PDF statements found&quot; or says the file is an already-enriched workbook.</td><td>This skill reads statement PDFs. A folder with only .xlsx files, or a workbook this skill already wrote, has nothing to OCR. Point it at the PDFs, or import the workbook through Banks &gt; Bank - Convert to GnuCash and choose HSBC.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_icici" class="skill">
-<h2>ICICI <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
-<p class="overview">Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-importable CSV in canonical columns.</p>
+<h2>ICICI <span class="badge ok">Works offline</span> <span class="badge">agent</span></h2>
+<p class="overview">Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-importable CSV in canonical columns. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use Banks &gt; Convert to GnuCash and choose ICICI instead.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Re-saving in Excel is fine — a re-saved .xls (where dates/amounts become real Excel cells) parses the same as the original download, and an accidental .xlsx re-save is read automatically too. If it still fails to parse, export a fresh .xls from ICICI net-banking.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many.</span></li>
@@ -560,23 +565,22 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Selecting several months at once produces one combined CSV in statement order.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>ICICI currently uses an LLM step. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Parsing fails or columns are off.</td><td>Confirm it is the genuine net-banking .xls, not a converted/edited copy.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_itr_workbook" class="skill">
-<h2>ITR Workbook <span class="badge warn">needs LLM endpoint</span> <span class="badge">direct</span></h2>
-<p class="overview">Builds a formula-driven Indian ITR input workbook from a GnuCash &quot;Balance Sheet (eguile)&quot; HTML export (P&amp;L embedded via Retained Earnings). Always runs the full identity/reconciliation check suite (Imbalance == 0, Assets == Equity+Trading+Liabilities+Retained Earnings, every subtotal == sum of its children). Pick the Entity and Assessment Year from the dropdowns (populated from Data/itr/entities.yaml and Data/itr/rules/tax_rules_*.yaml); the selected AY must match the income year inferred from the HTML&#x27;s own as-of date, or the run hard-fails before any schedule build is attempted. If a matching .gnucash book is also supplied, runs a book&lt;-&gt;HTML cross-check per income/expense account. If an entity mapping is also supplied, resolves every leaf to a tag (nearest-ancestor); any unmapped account sets the run status to BLOCKED-FOR-REVIEW and writes a proposed-mappings snippet (with an LLM suggestion per account when an endpoint is configured) ready to paste into the mapping file. If a Form 16 PDF is also supplied, parses its Part B/Annexure-I salary computation, prints the employer TAN, the 115BAC(1A) opt-out election, and the form&#x27;s own internal consistency checks; an encrypted PDF is decrypted automatically using the selected entity&#x27;s PAN on file (no need to re-type it). When a mapping is also available, additionally cross-checks 17(1) gross salary against SALARY_GROSS and net tax payable against TAXPAID_TDS_SALARY. If a 26AS workbook is also supplied, ties out reported TDS by quarter and feeds the 234C dividend-quarter buckets. If a foreign broker consolidated tax report is also supplied, parses Schedule FA (foreign assets, one row per acquisition lot), Schedule FSI (foreign-sourced income), Form 67 (foreign tax credit claim), and Schedule TR (tax relief summary), and writes them as their own labelled sheets; the book-derived AL_FOREIGN roll-up keeps running unchanged as an independent, separately labelled cross-check beneath, never merged into the parsed figures. Absent this input, Schedule FA output is unchanged from before. The Regime dropdown overrides the entity&#x27;s configured regime for this run only (leave blank to use the entity&#x27;s default for the selected AY). Marginal relief, surcharge caps, age-linked slabs/deductions, and every rate/cap/section referenced in the output are driven entirely from the Rules config for the selected year — nothing is hardcoded.</p>
-<p class="whenuse"><b>When to use it.</b> Use once book, mapping, and (optionally) Form 16 / 26AS inputs are ready for an entity and assessment year, to produce the standardized ITR input workbook for review or handoff to a CA. An unmapped account or a selected-AY/HTML-year mismatch blocks the run rather than silently misstating income.</p>
+<h2>ITR Workbook <span class="badge warn">Uses the LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Builds a formula-driven Indian ITR input workbook from a GnuCash &quot;Balance Sheet (eguile)&quot; HTML export (P&amp;L embedded via Retained Earnings). Always runs the full identity/reconciliation check suite (Imbalance == 0, Assets == Equity+Trading+Liabilities+Retained Earnings, every subtotal == sum of its children). Pick the Entity and Assessment Year from the dropdowns (populated from Data/itr/entities.yaml and Data/itr/rules/tax_rules_*.yaml); the selected AY must match the income year inferred from the HTML&#x27;s own as-of date, or the run hard-fails before any schedule build is attempted. If a matching .gnucash book is also supplied, runs a book&lt;-&gt;HTML cross-check per income/expense account. If an entity mapping is also supplied, resolves every leaf to a tag (nearest-ancestor); any unmapped account still builds the workbook, but the status reads &quot;BUILT -- N REVIEW ITEM(S)&quot;, the tax is marked DRAFT with a worst-case upper bound beside it, and a proposed-mappings snippet is written ready to paste into the mapping file (with a tag suggestion per account from the LLM when its endpoint is up; this is the only place the skill uses the LLM). If a Form 16 PDF is also supplied, parses its Part B/Annexure-I salary computation, prints the employer TAN, the 115BAC(1A) opt-out election, and the form&#x27;s own internal consistency checks; an encrypted PDF is decrypted automatically using the selected entity&#x27;s PAN on file (no need to re-type it). When a mapping is also available, additionally cross-checks 17(1) gross salary against SALARY_GROSS and net tax payable against TAXPAID_TDS_SALARY. If a 26AS workbook is also supplied, ties out reported TDS by quarter and feeds the 234C dividend-quarter buckets. If a foreign broker consolidated tax report is also supplied, parses Schedule FA (foreign assets, one row per acquisition lot), Schedule FSI (foreign-sourced income), Form 67 (foreign tax credit claim), and Schedule TR (tax relief summary), and writes them as their own labelled sheets; the book-derived AL_FOREIGN roll-up keeps running unchanged as an independent, separately labelled cross-check beneath, never merged into the parsed figures. Absent this input, Schedule FA output is unchanged from before. The Regime dropdown overrides the entity&#x27;s configured regime for this run only (leave blank to use the entity&#x27;s default for the selected AY). Marginal relief, surcharge caps, age-linked slabs/deductions, and every rate/cap/section referenced in the output are driven entirely from the Rules config for the selected year — nothing is hardcoded.</p>
+<p class="whenuse"><b>When to use it.</b> Use once book, mapping, and (optionally) Form 16 / 26AS inputs are ready for an entity and assessment year, to produce the standardized ITR input workbook for review or handoff to a CA. A selected-AY/HTML-year mismatch stops the run with a stub workbook. An unmapped account does not stop it: the workbook is built but flagged for review (DRAFT tax, worst-case figure) rather than silently misstating income.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Entity</b> <em>(optional)</em> <span class="pa-tip" data-tip="Which entity (from Data/itr/entities.yaml) this run is for. ⚠️ Also supplies the PAN used to auto-decrypt an encrypted Form 16 — leave unset only for ad hoc/exploratory runs without a Form 16.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
 <li><b>Assessment Year</b> <em>(optional)</em> <span class="pa-tip" data-tip="The Assessment Year (income year) this workbook is for. ⚠️ Must agree with the income year inferred from the Balance Sheet HTML&#x27;s own as-of date, or the run hard-fails with a stub-only workbook.">ℹ️</span><br><span class="fmt">accepts: One of the years found under Data/itr/rules/, via dropdown.</span></li>
 <li><b>Balance Sheet (eguile) HTML</b> <em>(required)</em> <span class="pa-tip" data-tip="The GnuCash &#x27;Balance Sheet (eguile)&#x27; HTML export, as-of 31 March. ⚠️ Must include the trailing &#x27;Imbalance Amount&#x27; row — a truncated export (copy interrupted) is rejected with a hard failure. The as-of date must match the selected Assessment Year, or the run hard-fails before building any schedules.">ℹ️</span><br><span class="fmt">accepts: HTML (.html), one file per entity.</span></li>
-<li><b>Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity&#x27;s PAN if encrypted)</b> <em>(optional)</em> <br><span class="fmt">accepts: .pdf, .PDF</span></li>
-<li><b>26AS workbook (optional, feeds TDS tie-out + 234C quarters)</b> <em>(optional)</em> <br><span class="fmt">accepts: .xlsx</span></li>
-<li><b>Foreign broker consolidated tax report (optional, fills Schedule FA/FSI/Form 67/Schedule TR)</b> <em>(optional)</em> <br><span class="fmt">accepts: .xlsx</span></li>
-<li><b>GnuCash book (optional, enables CG lots + dividend quarters)</b> <em>(optional)</em> <br><span class="fmt">accepts: .gnucash</span></li>
-<li><b>Mapping used (default: the entity&#x27;s saved mapping; pick another only to override)</b> <em>(optional)</em> <br><span class="fmt">accepts: .yaml</span></li>
+<li><b>Form 16 PDF (optional, fills the Salary sheet; password auto-derived from the selected entity&#x27;s PAN if encrypted)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The employer&#x27;s Form 16 (TRACES PDF); fills the Salary sheet. ⚠️ An encrypted PDF is decrypted automatically with the PAN of the selected Entity, so pick the Entity first. Book-to-Form 16 cross-checks run only when a mapping is also available.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf). Optional.</span></li>
+<li><b>26AS workbook (optional, feeds TDS tie-out + 234C quarters)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The 26AS workbook; ties out TDS by quarter and feeds the 234C quarters.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx). Optional.</span></li>
+<li><b>Foreign broker consolidated tax report (optional, fills Schedule FA/FSI/Form 67/Schedule TR)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The foreign broker&#x27;s consolidated tax report; fills Schedule FA, FSI, Form 67 and Schedule TR. ⚠️ A cell the broker left as a placeholder or instructional text is shown as an explicit flagged string, never blank or zero. A report missing a whole expected sheet is rejected.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx). Optional.</span></li>
+<li><b>GnuCash book (optional, enables CG lots + dividend quarters)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The GnuCash book for this entity and year; enables the book-to-HTML cross-check, capital-gain lots and dividend quarters.">ℹ️</span><br><span class="fmt">accepts: GnuCash book (.gnucash). Optional.</span></li>
+<li><b>Mapping used (default: the entity&#x27;s saved mapping; pick another only to override)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The account-to-tag mapping to use; defaults to the entity&#x27;s saved mapping.">ℹ️</span><br><span class="fmt">accepts: YAML mapping chosen from the saved mappings. Optional; pick one only to override the default.</span></li>
 <li><b>Regime (blank = use the entity&#x27;s configured regime)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Overrides the entity&#x27;s configured tax regime for this run only.">ℹ️</span><br><span class="fmt">accepts: &quot;new&quot;, &quot;old&quot;, or blank to use the entity&#x27;s configured regime.</span></li>
 </ul>
 <h3>How to run</h3><ol>
@@ -589,16 +593,16 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <p>Written to <code>Data/outputs/</code>:</p>
 <pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-ITR.xlsx</pre>
 <ul class="outputs">
-<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-ITR.xlsx</code><span class="pa-tip" data-tip="The full ITR input workbook, or a stub with an ERROR summary if the run was blocked.">ℹ️</span> — The full ITR input workbook, or a stub with an ERROR summary if the run was blocked.</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-ITR.xlsx</code><span class="pa-tip" data-tip="The full ITR input workbook, or a stub with an ERROR summary if the run could not start (for example a year mismatch).">ℹ️</span> — The full ITR input workbook, or a stub with an ERROR summary if the run could not start (for example a year mismatch).</li>
 </ul>
-<h3>Tips</h3><p>book_file runs the book&lt;-&gt;HTML cross-check. mapping_file runs the account-tag resolution; an unmapped account blocks the run and emits a proposed-mappings snippet next to the output file. form16_pdf runs the salary parse + internal consistency checks, plus the Book&lt;-&gt;Form16 cross-checks when mapping_file is also supplied; the decryption password is auto-derived from the selected entity&#x27;s PAN. as26_workbook ties out TDS by quarter and feeds 234C dividend-quarter bucketing. foreign_report_xlsx fills Schedule FA/FSI/Form 67/Schedule TR from the broker&#x27;s own report; any cell the source left as a placeholder or instructional prose is rendered as an explicit flagged string, never left blank or coerced to zero. If the Entity/Assessment Year dropdowns look stale after editing entities.yaml or the rules config, use the refresh button beside them. The 31-Jan-2018 price table is never used for a scrip that split or issued bonus shares after that date (the run asks for a scrips.yaml override on today&#x27;s share basis). The app ships the list of NSE splits and bonus issues; to add or correct an action, put rows in the private overlay Data/itr/corporate_actions_overlay.csv (header symbol,ex_date,ratio,old_isin,new_isin,note; ratio is new shares per old share; the overlay wins on the same symbol and ex-date; a missing overlay is fine, a malformed row stops the run and names it).</p>
+<h3>Tips</h3><p>book_file runs the book&lt;-&gt;HTML cross-check. mapping_file runs the account-tag resolution; an unmapped account flags the workbook for review (&quot;BUILT -- N REVIEW ITEM(S)&quot;) and emits a proposed-mappings snippet next to the output file. form16_pdf runs the salary parse + internal consistency checks, plus the Book&lt;-&gt;Form16 cross-checks when mapping_file is also supplied; the decryption password is auto-derived from the selected entity&#x27;s PAN. as26_workbook ties out TDS by quarter and feeds 234C dividend-quarter bucketing. foreign_report_xlsx fills Schedule FA/FSI/Form 67/Schedule TR from the broker&#x27;s own report; any cell the source left as a placeholder or instructional prose is rendered as an explicit flagged string, never left blank or coerced to zero. If the Entity/Assessment Year dropdowns look stale after editing entities.yaml or the rules config, use the refresh button beside them. The 31-Jan-2018 price table is never used for a scrip that split or issued bonus shares after that date (the run asks for a scrips.yaml override on today&#x27;s share basis). The app ships the list of NSE splits and bonus issues; to add or correct an action, put rows in the private overlay Data/itr/corporate_actions_overlay.csv (header symbol,ex_date,ratio,old_isin,new_isin,note; ratio is new shares per old share; the overlay wins on the same symbol and ex-date; a missing overlay is fine, a malformed row stops the run and names it).</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>&quot;file truncated -- re-export&quot; error.</td><td>The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash.</td></tr>
 <tr><td>&quot;ERROR: selected Assessment Year does not match&quot; and only a stub workbook is produced.</td><td>Pick the Assessment Year that matches the uploaded HTML&#x27;s as-of date, or upload the HTML for the selected year, then run again.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_gnucash_intercompany_matrix" class="skill">
-<h2>Inter-entity Matrix <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>Inter-entity Matrix <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">An optional roll-up over the pairwise Inter-entity Reconcile: it reconciles every unordered pair among the books you select and rolls them into one workbook -- a colour-coded owner-by-owner difference grid, a per-pair summary, and one consolidated exceptions list. Same deterministic engine, read-only on your books.</p>
 <p class="whenuse"><b>When to use it.</b> Run at year-end to see, at a glance, which family members&#x27; books agree and which do not -- instead of running the two-book reconciliation for every combination by hand.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -628,8 +632,8 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_gnucash_intercompany" class="skill">
-<h2>Inter-entity Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Reconciles the contra accounts two people keep for each other across their two GnuCash books. It matches the current financial year&#x27;s movements, carries the opening balance forward, and for every unmatched item searches the other book for a probable mis-posting -- then writes an Excel reconciliation statement. Fully offline and deterministic (no LLM); read-only on your books.</p>
+<h2>Inter-entity Reconcile <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Reconciles the contra accounts two people keep for each other across their two GnuCash books. It matches the current financial year&#x27;s movements, carries the opening balance forward, and for every unmatched item searches the other book for a probable mis-posting -- then writes an Excel reconciliation statement. Works offline and does not use the LLM. Read-only on your books.</p>
 <p class="whenuse"><b>When to use it.</b> Run at year-end (or before filing) to confirm that what one person&#x27;s book shows as due to/from the other agrees with the other person&#x27;s book -- and to catch entries one side recorded that the other missed or mis-posted.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>First entity (optional) -- fills in the first GnuCash book below from the registry</b> <em>(optional)</em> <span class="pa-tip" data-tip="Optional -- pick the first person&#x27;s entity to auto-fill their GnuCash book from the registry. ⚠️ UI convenience only; leave unset to pick the file manually as before.">ℹ️</span><br><span class="fmt">accepts: One of the entities defined in entities.yaml, via dropdown.</span></li>
@@ -661,15 +665,15 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_kotak" class="skill">
-<h2>Kotak <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV — one row per transaction. Runs fully offline (no LLM, no internet) and reads the statement&#x27;s ruled/bordered table structure directly, so a table that overflows from one page to the next (without repeating the column header) is still captured correctly, and the trailing abbreviation-legend page is excluded rather than mistaken for transaction rows.</p>
+<h2>Kotak <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV — one row per transaction. Works offline and does not use the LLM. It reads the statement&#x27;s ruled/bordered table structure directly, so a table that overflows from one page to the next (without repeating the column header) is still captured correctly, and the trailing abbreviation-legend page is excluded rather than mistaken for transaction rows.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Bank - Convert to GnuCash&quot; pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Kotak statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Kotak statement PDF. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first, or the run will report the file could not be opened.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one statement per run.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Click the input and pick a Kotak statement PDF.</li>
-<li>Click Run — it processes offline in a few seconds.</li>
+<li>Click Run — it finishes in a few seconds.</li>
 <li>Download the CSV, or open it from the outputs folder (see below).</li>
 </ol>
 <h3>Output</h3>
@@ -686,7 +690,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_mf_cas" class="skill">
-<h2>MF Capital Gain Statement <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>MF Capital Gain Statement <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Reads KFintech&#x27;s &quot;Capital Gain / Loss Statement&quot; -- an RTA-issued, password-protected .xlsx workbook that already lists every acquisition matched against its disposal, with the RTA&#x27;s own short-term/long-term gain figures and grandfathered cost values -- and turns it into a matched-lots ledger, a per-scheme summary, a s.234C period-wise summary (the five advance-tax instalment buckets), and a three-way reconciliation across the statement&#x27;s own Trasaction_Details, Scheme_Level_Summary, and Summary sheets. This is NOT the raw, transaction-wise CAS (Consolidated Account Statement) -- the RTA has already done the buy/sell matching here, so no FIFO reconstruction is performed. Only the figures the statement itself supplies are emitted; no tax rate, slab, exemption, or indexation computation is done -- that is left to the ITR Workbook skill&#x27;s own tax-rules config. Grandfathered cost values (for holdings bought before 2018-02-01) are carried through exactly as KFintech supplies them, since the RTA has already applied the FMV as of 31-Jan-2018 -- this skill never needs and never looks up a separate FMV source for this statement.</p>
 <p class="whenuse"><b>When to use it.</b> Use this after receiving your KFintech Capital Gain / Loss Statement (typically requested/downloaded per financial year) for mutual funds serviced by KFintech, when you need a clean realised-capital-gains feed to review or feed manually into the ITR Workbook. This skill does NOT cover CAMS-serviced funds -- CAMS issues its own, differently-shaped Capital Gain statement, which this skill does not yet support. GnuCash books in this codebase hold mutual funds only as cash transfers to the AMC, so there is no commodity-lot data inside GnuCash for capital gains to be derived from automatically.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -715,8 +719,8 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </tbody></table>
 </section>
 <section id="skill_msg_parser" class="skill">
-<h2>MSG / Email Parser <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Parses an Outlook .msg or standard .eml email into structured JSON: sender, date, subject, body text and the list of attachments. Pure deterministic extraction — no LLM, fully offline.</p>
+<h2>MSG / Email Parser <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Parses an Outlook .msg or standard .eml email into structured JSON: sender, date, subject, body text and the list of attachments. Pure deterministic extraction. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you need an email&#x27;s fields as data (for a script, a record, or further processing) rather than reading it in a mail client.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Email file (.msg or .eml)</b> <em>(required)</em> <span class="pa-tip" data-tip="The email file to parse. ⚠️ Provide the email file itself; this does not connect to a mailbox.">ℹ️</span><br><span class="fmt">accepts: Outlook .msg or RFC-822 .eml — one file.</span></li>
@@ -732,13 +736,15 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <ul class="outputs">
 <li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-email-parsed.json</code><span class="pa-tip" data-tip="Structured JSON with sender, date, subject, body text and an attachments list — easy to read into any script or tool.">ℹ️</span> — Structured JSON with sender, date, subject, body text and an attachments list — easy to read into any script or tool.</li>
 </ul>
-<h3>Tips</h3><p>Attachments are listed (names), so you can see what was enclosed without opening the mail.</p>
+<h3>Tips</h3><p>Attachments are listed (names), so you can see what was enclosed without opening the mail. In a digitally signed .msg the real attachments are unwrapped and listed. An attached email inside a .msg is listed by name but not opened.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>Body text looks empty.</td><td>For .msg files only the plain-text body is read. A .msg that keeps its text only as rich text (RTF) or HTML gives an empty body, and when a rich-text body is present the JSON carries a &quot;warnings&quot; entry saying so; open the original email to read it. .eml files fall back to the HTML body with tags stripped.</td></tr>
+<tr><td>A signed or encrypted .msg shows no attachments, and the JSON has a &quot;warnings&quot; entry.</td><td>The message is opaque-signed S/MIME, so its contents sit inside a sealed envelope that is not opened. Open the original email in Outlook and save the attachments from there.</td></tr>
+<tr><td>The run stops with &quot;Cannot read ... as an Outlook .msg&quot;.</td><td>The file is not a real .msg (for example a renamed .eml or a download that was cut short). Re-save or re-download the email and run again.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_parser_generator" class="skill">
-<h2>Parser Generator <span class="badge warn">needs LLM endpoint</span> <span class="badge">agent</span></h2>
+<h2>Parser Generator <span class="badge warn">Uses the LLM</span> <span class="badge">agent</span></h2>
 <p class="overview">A developer-time tool that creates or repairs the project&#x27;s embedded deterministic parsers (src/agents/skill_&lt;X&gt;/scripts/parse_&lt;format&gt;.py). It is template-based: the model may only fill format-specific blanks (column ranges, regexes, row-boundary and skip rules); the balance oracle and the 0/1/2 exit contract are off-limits. Every result must pass the quality gate (validate -&gt; tie-out exit 0) before you commit it.</p>
 <p class="whenuse"><b>When to use it.</b> Use &quot;Fix a failing parser&quot; when a statement format changed and a parser&#x27;s tie-out fails (the oracle exits 2). Use &quot;Create a new parser&quot; to scaffold one for a new format from the shared template. This is for maintainers, not end-of-day statement processing. See docs/guides/Parser-Generator-Guide.md.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -761,12 +767,12 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>The runtime stays deterministic — this tool only edits the format-specific blanks of a parser; the balance oracle and exit contract are never touched.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This dev tool uses an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This dev tool uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Tie-out still exits non-zero.</td><td>Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_partner_comp_recon" class="skill">
-<h2>Partner Compensation Reconciliation <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>Partner Compensation Reconciliation <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Takes one financial year&#x27;s partner-compensation documents -- the monthly payout advices, the Compensation Advisory letter, and optionally the LLP&#x27;s own capital-account statement, a GnuCash book (read only), and a 26AS workbook -- and cross-checks the figures they carry against each other. Every rate, percentage and period this skill uses (the firm&#x27;s-tax rate, the capital-contribution rate, the capital accretion period, the remuneration-TDS section/rate/start-date) comes from that year&#x27;s own entity/tax-rules config, never hardcoded, since all of them change by year and the capital rate has been known to change mid-year. A missing rate or a missing source figure produces an explicit &quot;cannot reconcile&quot; row naming what is missing, never a default or a silently-assumed match. The two required documents (the monthly advices and the Advisory) and the optional LLP statement of account now parse for real; a document that fails to open/parse (unreadable/malformed PDF, wrong password, or content that doesn&#x27;t match the expected layout) still fails the whole run loud, naming the document and the reason (the LLP statement is the exception, since it is optional -- see its own gotcha below). Every optional document&#x27;s leg (the LLP statement, the incentive payment schedule, the GnuCash books tie-out, the 26AS TDS-credit tie-out) degrades to an explicit &quot;not available&quot; note when its input is absent, or when its document fails to parse -- every one of these readers is real and implemented (see AGENT.md), not a placeholder.
 Run order for a year: (1) import the bank statement, (2) run 26AS Convert on the entity&#x27;s 26AS PDF (it only reads the PDF into a workbook and books nothing), (3) run this skill, (4) run the 26AS journal. The order the entries are BOOKED in is unchanged: bank, then partner compensation, then 26AS. The 26AS workbook picker below lists only the selected entity&#x27;s own workbooks, and a workbook that belongs to someone else is refused with a message, never used.</p>
 <p class="whenuse"><b>When to use it.</b> Use this once a financial year&#x27;s partner-compensation documents are in hand and you want a single reconciliation across remuneration, share of profit, the incentive cohort ledger, capital contribution, one-offs, and (if relevant) a payroll stint -- particularly useful for catching a mid-year capital-rate change (which shows up as unequal capital-deducted amounts within one incentive cohort) or a one-off incentive that was grossed up at the wrong year&#x27;s tax rate. Not a substitute for tax computation or return preparation -- it only reconciles the streams against each other and the return&#x27;s own figures; it does not compute tax due.</p>
@@ -825,8 +831,8 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </tbody></table>
 </section>
 <section id="skill_krc_recon" class="skill">
-<h2>Reconcile <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
-<p class="overview">Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM memos and trade notes) against the Part I Simplified Ledger and produces a &quot;Bills&quot; workbook. Runs fully offline (deterministic, no LLM).</p>
+<h2>Reconcile <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM memos and trade notes) against the Part I Simplified Ledger and produces a &quot;Bills&quot; workbook. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Run this second, after &quot;Convert&quot; (Part I). Its Bills workbook is the input to &quot;Convert to GnuCash&quot; (Part III).</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Part I Simplified Ledger workbook</b> <em>(required)</em> <span class="pa-tip" data-tip="The Part I Simplified Ledger — pick it from the list of prior outputs. ⚠️ Run Part I first; the picker only lists Ledger workbooks from earlier runs.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) matching *-KRC-Ledger.xlsx.</span></li>
@@ -852,7 +858,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </tbody></table>
 </section>
 <section id="skill_sbm" class="skill">
-<h2>SBM <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>SBM <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Turns an SBM Bank India account statement (a password-protected .xlsx with a single Transaction-Statement sheet) into a GnuCash-ready canonical CSV. The file is decrypted in memory; the password is never logged or stored. The statement carries no opening-balance row and rows within a day can be out of time order, so the parser orders them by the running-balance chain and derives the opening balance from the first row.</p>
 <p class="whenuse"><b>When to use it.</b> Use this to get a clean CSV from an SBM statement. To also map the rows to GnuCash accounts in one step, use the GnuCash Import skill and choose SBM.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -877,7 +883,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </tbody></table>
 </section>
 <section id="skill_scaffold" class="skill">
-<h2>Skill Scaffolder <span class="badge ok">offline · no LLM</span> <span class="badge">direct</span></h2>
+<h2>Skill Scaffolder <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Scaffolds a brand-new skill package under src/agents/ -- skill.yaml (a complete manifest with a full help: block), an agent.py stub, an AGENT.md, and a starter test module under tests/ -- entirely by plain text-template substitution. There is no LLM anywhere in the generation path and no network access, so the same inputs always render the exact same bytes. Every piece of prose in the generated files (descriptions, tooltips, steps, troubleshooting, the AGENT.md body) is a fixed placeholder marker rather than invented-sounding text -- a repo-wide guard test fails loudly if a scaffolded skill ever ships with that marker still in it, so a half-finished skill can never slip through silently.</p>
 <p class="whenuse"><b>When to use it.</b> Use this to start a new skill instead of hand-copying an existing package. It gets the manifest shape, the help: block structure, and the starter test right on the first try, then leaves clearly marked gaps for a human (or an LLM working under review) to fill in with the real behaviour.</p>
 <h3>Inputs</h3><ul class="inputs">
@@ -909,8 +915,8 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </tbody></table>
 </section>
 <section id="skill_translate" class="skill">
-<h2>Text Translator <span class="badge warn">needs LLM endpoint</span> <span class="badge">direct</span></h2>
-<p class="overview">Translates text between languages using your configured LLM, and saves the translation as a text file.</p>
+<h2>Text Translator <span class="badge warn">Uses the LLM</span> <span class="badge">direct</span></h2>
+<p class="overview">Translates text between languages and saves the translation as a text file. Uses the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for quick text translation. Pick &#x27;auto&#x27; as the source language to let the model detect it.</p>
 <h3>Inputs</h3><ul class="inputs">
 <li><b>Text to translate</b> <em>(required)</em> <span class="pa-tip" data-tip="The text you want translated. ⚠️ Paste the text directly; this translates text, not files.">ℹ️</span><br><span class="fmt">accepts: Free text.</span></li>
@@ -930,7 +936,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </ul>
 <h3>Tips</h3><p>Translation quality depends on the model you have connected — a larger model generally handles nuance and less-common languages better.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill needs an LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>

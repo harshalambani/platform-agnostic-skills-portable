@@ -129,7 +129,7 @@ help:
     then this skill.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill uses an LLM for fallback matching. Start Ollama (or set an endpoint in Settings)."
+      fix: "This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings)."
     - problem: "A deductor was assigned the wrong account."
       fix: "Rename/add the account in GnuCash so its name is closer to the deductor, then re-run."
     - problem: "s.194T reconciliation shows OPEN or VARIANCE."

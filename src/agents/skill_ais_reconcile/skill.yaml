@@ -107,7 +107,7 @@ help:
     mechanism (e.g. "Information is correct", "Information is not fully
     correct") -- these are for a human to review before acting on the
     portal; nothing is ever auto-submitted, and confidence is always capped
-    at low/medium, never high.
+    at low/medium, never high. Works offline and does not use the LLM.
   when_to_use: >
     Use once you've downloaded your AIS JSON export from the income-tax
     portal, to check it against itself and (when available) your 26AS and
@@ -144,7 +144,7 @@ help:
   steps:
     - "Pick the AIS JSON export."
     - "Optionally supply the matching-FY GnuCash book and/or the entity's 26AS workbook."
-    - "Click Run -- it decrypts and reconciles offline in a few seconds."
+    - "Click Run -- it decrypts and reconciles in a few seconds."
     - "Open the Excel workbook: Books Reconciliation and 26AS Tie-out sheets first, then Feedback Suggestions."
   outputs:
     folder: "Data/outputs/"

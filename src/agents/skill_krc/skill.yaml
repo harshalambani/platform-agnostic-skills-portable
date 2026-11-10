@@ -48,7 +48,7 @@ help:
   overview: >
     Part I of the KR Choksey → GnuCash flow. Simplifies the annual KR Choksey
     broker ledger-statement PDF into a clean, tied-out "Simplified Ledger"
-    Excel workbook. Runs fully offline (deterministic, no LLM).
+    Excel workbook. Works offline and does not use the LLM.
   when_to_use: >
     Run this first of the three KRChoksey sub-tabs. Its workbook is the input to
     "Reconcile" (Part II), which in turn feeds "Convert to GnuCash" (Part III).

@@ -47,9 +47,9 @@ help:
   overview: >
     Converts HDFC statements — digital PDF, password-protected PDF,
     scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a
-    GnuCash-ready canonical CSV. All four shapes are parsed deterministically
-    (no LLM). A garbled/unusable PDF text layer (custom font encoding) is
-    auto-detected and routed to OCR with Tesseract automatically. Runs offline.
+    GnuCash-ready canonical CSV. All four shapes are parsed deterministically.
+    A garbled/unusable PDF text layer (custom font encoding) is
+    auto-detected and routed to OCR with Tesseract automatically. Works offline and does not use the LLM.
   when_to_use: >
     Use this to get a clean, consistently-columned CSV from any HDFC statement
     format. To also map the rows to GnuCash accounts in one step, use the GnuCash

@@ -75,7 +75,9 @@ help:
           Extra Information column, plus a Summary sheet that ties the totals out.
   tips: >
     Check the Summary sheet first — if its totals reconcile, the extraction is
-    sound. This skill runs fully offline (no LLM, direct mode).
+    sound. Works offline and does not use the LLM.
   troubleshooting:
     - problem: "OCR output is poor or missing."
       fix: "Ensure Tesseract and Poppler are available (PATH in source mode); use better-quality scans."
+    - problem: "The run stops with \"No PDF statements found\" or says the file is an already-enriched workbook."
+      fix: "This skill reads statement PDFs. A folder with only .xlsx files, or a workbook this skill already wrote, has nothing to OCR. Point it at the PDFs, or import the workbook through Banks > Bank - Convert to GnuCash and choose HSBC."

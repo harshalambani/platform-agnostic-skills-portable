@@ -101,7 +101,7 @@ help:
     two GnuCash books. It matches the current financial year's movements, carries
     the opening balance forward, and for every unmatched item searches the other
     book for a probable mis-posting -- then writes an Excel reconciliation
-    statement. Fully offline and deterministic (no LLM); read-only on your books.
+    statement. Works offline and does not use the LLM. Read-only on your books.
   when_to_use: >
     Run at year-end (or before filing) to confirm that what one person's book
     shows as due to/from the other agrees with the other person's book -- and to

@@ -79,8 +79,8 @@ requires:
 
 help:
   overview: >
-    Translates text between languages using your configured LLM, and saves the
-    translation as a text file.
+    Translates text between languages and saves the translation as a text
+    file. Uses the LLM.
   when_to_use: >
     Use this for quick text translation. Pick 'auto' as the source language to
     let the model detect it.
@@ -111,6 +111,6 @@ help:
     generally handles nuance and less-common languages better.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill needs an LLM. Start Ollama or set an endpoint in Settings."
+      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings."
     - problem: "Output mixes languages or is off."
       fix: "Set the source language explicitly instead of 'auto', or try a larger model."

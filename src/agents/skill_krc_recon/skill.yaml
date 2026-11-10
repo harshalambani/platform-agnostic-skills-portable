@@ -59,7 +59,7 @@ help:
   overview: >
     Part II of the KR Choksey → GnuCash flow. Matches the contract notes (SLBM
     memos and trade notes) against the Part I Simplified Ledger and produces a
-    "Bills" workbook. Runs fully offline (deterministic, no LLM).
+    "Bills" workbook. Works offline and does not use the LLM.
   when_to_use: >
     Run this second, after "Convert" (Part I). Its Bills workbook is the input
     to "Convert to GnuCash" (Part III).

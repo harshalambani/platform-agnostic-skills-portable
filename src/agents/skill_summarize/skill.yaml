@@ -45,8 +45,8 @@ requires:
 
 help:
   overview: >
-    Summarises any PDF or text file into a concise Markdown summary using your
-    configured LLM.
+    Summarises any PDF or text file into a concise Markdown summary.
+    Uses the LLM.
   when_to_use: >
     Use this for a quick readable summary of a document — a report, a long text
     file, a contract. For asking specific questions of tabular data, use CSV
@@ -70,6 +70,6 @@ help:
     the skill at just that text.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill needs an LLM. Start Ollama or set an endpoint in Settings."
+      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings."
     - problem: "Summary is thin or generic."
       fix: "The PDF may be a scan with no text layer. Use a text-based document."

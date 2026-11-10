@@ -56,7 +56,7 @@ help:
   overview: >
     Reads the organised credit-card PDFs from the Credit Card — Sort PDFs step and extracts every
     transaction row into one consolidated Excel workbook — one row per
-    transaction across all cards. Runs fully offline.
+    transaction across all cards. Works offline and does not use the LLM.
   when_to_use: >
     Use this as the second step, right after "Credit Card — Sort PDFs". It expects the decrypted,
     sorted folder that Credit Card — Sort PDFs produced, not raw statement files.
@@ -94,3 +94,5 @@ help:
   troubleshooting:
     - problem: "Few or no transactions extracted."
       fix: "You probably pointed at the wrong folder. Use Decrypted_PDFs_Correct/ from Credit Card — Sort PDFs."
+    - problem: "The Tie-out sheet shows FAIL, or NOT AVAILABLE (no prior statement), for a statement."
+      fix: "FAIL means the extracted rows do not add up to the totals printed on that statement, so check it against the PDF before relying on it. NOT AVAILABLE means no earlier statement for the same card ends within 3 days before this one starts, so the opening balance could not be checked: add the missing earlier statement and run again."
