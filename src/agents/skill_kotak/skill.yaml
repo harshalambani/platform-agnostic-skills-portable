@@ -46,8 +46,8 @@ requires:
 help:
   overview: >
     Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into
-    a flat CSV — one row per transaction. Runs fully offline (no LLM, no
-    internet) and reads the statement's ruled/bordered table structure
+    a flat CSV — one row per transaction. Works offline and does not use the LLM.
+    It reads the statement's ruled/bordered table structure
     directly, so a table that overflows from one page to the next (without
     repeating the column header) is still captured correctly, and the
     trailing abbreviation-legend page is excluded rather than mistaken for
@@ -68,7 +68,7 @@ help:
         be opened.
   steps:
     - "Click the input and pick a Kotak statement PDF."
-    - "Click Run — it processes offline in a few seconds."
+    - "Click Run — it finishes in a few seconds."
     - "Download the CSV, or open it from the outputs folder (see below)."
   outputs:
     folder: "Data/outputs/"

@@ -48,8 +48,8 @@ requires:
 help:
   overview: >
     Turns one or more Bank of Baroda transaction-statement PDFs into a single
-    flat CSV — one row per transaction. Runs fully offline (no LLM, no internet)
-    and correctly stitches tables that overflow across pages without repeating
+    flat CSV — one row per transaction. Works offline and does not use the LLM.
+    It correctly stitches tables that overflow across pages without repeating
     the column header, so a transaction that wraps from the bottom of one page
     to the top of the next is captured as a single clean row.
   when_to_use: >
@@ -67,7 +67,7 @@ help:
         PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.
   steps:
     - "Click the input and pick one or more Bank of Baroda statement PDFs."
-    - "Click Run — it processes offline in a few seconds."
+    - "Click Run — it finishes in a few seconds."
     - "Download the CSV, or open it from the outputs folder (see below)."
   outputs:
     folder: "Data/outputs/"

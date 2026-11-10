@@ -89,7 +89,7 @@ help:
     GnuCash book and get back a GnuCash-ready, account-mapped CSV — no
     intermediate steps. It chains bank extraction, conversion to canonical
     format, and account mapping for you. HDFC statements are handled fully
-    deterministically (no LLM) across all four input shapes it accepts —
+    deterministically, without the LLM, across all four input shapes it accepts —
     normal PDF, password-protected PDF, XLS/XLSX exports, and CSV exports —
     including automatic OCR fallback if a PDF's text layer is garbled.
   when_to_use: >
@@ -161,7 +161,7 @@ help:
     needs an Amount column. Save the mapping as a preset in the importer so the
     next import is one click.
 
-    **Closing-balance gate and the bank-base file (BNK-09).** Before anything is
+    **Closing-balance gate and the bank-base file.** Before anything is
     released the pipeline checks that the book would end at the statement closing
     balance (and at every month end). A statement row may be left out as "already
     booked" only when its twin is in THIS bank's own account, same amount, within
@@ -188,7 +188,7 @@ help:
 
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "Mapping (and 'Other Bank' normalisation) uses an LLM. Start Ollama or set an endpoint in Settings."
+      fix: "Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings."
     - problem: "Extraction fails immediately."
       fix: "The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both."
     - problem: "Some rows mapped to the wrong account."

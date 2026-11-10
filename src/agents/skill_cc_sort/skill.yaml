@@ -61,7 +61,8 @@ help:
     Takes a messy folder of credit-card statements and organises it: it pulls
     PDF attachments out of Outlook .msg emails, decrypts password-protected PDFs
     (via qpdf), and sorts everything by bank/issuer into a clean folder tree.
-    Runs fully offline.
+    Statement CSV exports are placed by card as well. It then checks the sorted
+    folder for gaps in the chosen period. Works offline and does not use the LLM.
   when_to_use: >
     Use this as the first step when you have a pile of statement emails and PDFs
     from several cards. Once sorted, run "Credit Card — Transactions" on the decrypted
@@ -106,5 +107,11 @@ help:
   troubleshooting:
     - problem: "A PDF stays locked / is skipped."
       fix: "Enter its password in the password box (comma-separate multiple) and re-run."
+    - problem: "The result says \"Sort completed with\" followed by a number of issues."
+      fix: "Each issue is one line: a missing month for a card, a PDF that stayed locked, or a file that could not be placed on a card. Read the lines, fix the cause (password, missing statement, card list) and re-run. The same text is saved as completeness_report.txt in the output folder."
+    - problem: "A file landed in the Unknown-Unknown folder."
+      fix: "It could not be placed on one card: the file name and the card number printed inside disagree, or the digits are not on your card list. The result names the file and the reason. Fix the card list or rename the file and re-run."
+    - problem: "A .msg is skipped with \"Could not read ... as an Outlook .msg\"."
+      fix: "That file is not a readable .msg. The rest of the folder is still processed. Re-save the email and run again."
     - problem: "Source-mode run fails on decryption."
       fix: "qpdf must be on PATH in source mode; the frozen build bundles it."

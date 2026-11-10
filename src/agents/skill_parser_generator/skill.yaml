@@ -112,6 +112,6 @@ help:
     blanks of a parser; the balance oracle and exit contract are never touched.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This dev tool uses an LLM. Start Ollama or set an endpoint in Settings."
+      fix: "This dev tool uses the LLM. Start Ollama or set an endpoint in Settings."
     - problem: "Tie-out still exits non-zero."
       fix: "Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak."

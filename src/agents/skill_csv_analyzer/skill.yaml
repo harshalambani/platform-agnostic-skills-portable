@@ -81,6 +81,6 @@ help:
     decision, since the model reasons over the data rather than running fixed formulas.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill needs an LLM. Start Ollama or configure an endpoint in Settings."
+      fix: "This skill uses the LLM. Start Ollama or configure an endpoint in Settings."
     - problem: "Answer seems to ignore part of the data."
       fix: "Large CSVs may be sampled; narrow the file or the question and re-run."

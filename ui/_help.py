@@ -273,7 +273,9 @@ EDIT_HELP_MD = (
     "`docs/dev/skills-reference.md`.\n\n"
     "Full details: `docs/dev/help-block-schema.md` and "
     "`docs/dev/editing-help.md`. The CI check `tests/test_help_coverage.py` "
-    "fails if a skill ships without help or if the generated docs are stale."
+    "fails if a skill ships without help, if help and manifest inputs disagree, "
+    "if help names a tab, field or status the app does not have, if the offline "
+    "or LLM wording drifts, or if the generated docs are stale."
 )
 
 

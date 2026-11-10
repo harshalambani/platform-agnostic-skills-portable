@@ -178,10 +178,12 @@ help:
     before any schedule build is attempted. If a matching .gnucash book is
     also supplied, runs a book<->HTML cross-check per income/expense account.
     If an entity mapping is also supplied, resolves every leaf to a tag
-    (nearest-ancestor); any unmapped account sets the run status to
-    BLOCKED-FOR-REVIEW and writes a proposed-mappings snippet (with an LLM
-    suggestion per account when an endpoint is configured) ready to paste
-    into the mapping file. If a Form 16 PDF is also supplied, parses its
+    (nearest-ancestor); any unmapped account still builds the workbook,
+    but the status reads "BUILT -- N REVIEW ITEM(S)", the tax is marked
+    DRAFT with a worst-case upper bound beside it, and a proposed-mappings
+    snippet is written ready to paste into the mapping file (with a tag
+    suggestion per account from the LLM when its endpoint is up; this is the
+    only place the skill uses the LLM). If a Form 16 PDF is also supplied, parses its
     Part B/Annexure-I salary computation, prints the employer TAN, the
     115BAC(1A) opt-out election, and the form's own internal consistency
     checks; an encrypted PDF is decrypted automatically using the selected
@@ -205,9 +207,10 @@ help:
   when_to_use: >
     Use once book, mapping, and (optionally) Form 16 / 26AS inputs are
     ready for an entity and assessment year, to produce the standardized
-    ITR input workbook for review or handoff to a CA. An unmapped account
-    or a selected-AY/HTML-year mismatch blocks the run rather than
-    silently misstating income.
+    ITR input workbook for review or handoff to a CA. A selected-AY/HTML-year
+    mismatch stops the run with a stub workbook. An unmapped account does
+    not stop it: the workbook is built but flagged for review (DRAFT tax,
+    worst-case figure) rather than silently misstating income.
   inputs:
     - name: "bs_html"
       tooltip: "The GnuCash 'Balance Sheet (eguile)' HTML export, as-of 31 March."
@@ -230,6 +233,29 @@ help:
         Must agree with the income year inferred from the Balance Sheet
         HTML's own as-of date, or the run hard-fails with a stub-only
         workbook.
+    - name: "form16_pdf"
+      tooltip: "The employer's Form 16 (TRACES PDF); fills the Salary sheet."
+      accepts: "PDF (.pdf). Optional."
+      gotchas: >
+        An encrypted PDF is decrypted automatically with the PAN of the
+        selected Entity, so pick the Entity first. Book-to-Form 16
+        cross-checks run only when a mapping is also available.
+    - name: "as26_workbook"
+      tooltip: "The 26AS workbook; ties out TDS by quarter and feeds the 234C quarters."
+      accepts: "Excel (.xlsx). Optional."
+    - name: "foreign_report_xlsx"
+      tooltip: "The foreign broker's consolidated tax report; fills Schedule FA, FSI, Form 67 and Schedule TR."
+      accepts: "Excel (.xlsx). Optional."
+      gotchas: >
+        A cell the broker left as a placeholder or instructional text is
+        shown as an explicit flagged string, never blank or zero. A report
+        missing a whole expected sheet is rejected.
+    - name: "book_file"
+      tooltip: "The GnuCash book for this entity and year; enables the book-to-HTML cross-check, capital-gain lots and dividend quarters."
+      accepts: "GnuCash book (.gnucash). Optional."
+    - name: "mapping_file"
+      tooltip: "The account-to-tag mapping to use; defaults to the entity's saved mapping."
+      accepts: "YAML mapping chosen from the saved mappings. Optional; pick one only to override the default."
     - name: "regime"
       tooltip: "Overrides the entity's configured tax regime for this run only."
       accepts: "\"new\", \"old\", or blank to use the entity's configured regime."
@@ -242,11 +268,12 @@ help:
     folder: "Data/outputs/"
     files:
       - name: "YYYY-MM-DD-HHMMSS-<input>-ITR.xlsx"
-        tooltip: "The full ITR input workbook, or a stub with an ERROR summary if the run was blocked."
+        tooltip: "The full ITR input workbook, or a stub with an ERROR summary if the run could not start (for example a year mismatch)."
   tips: >
     book_file runs the book<->HTML cross-check. mapping_file runs the
-    account-tag resolution; an unmapped account blocks the run and emits
-    a proposed-mappings snippet next to the output file. form16_pdf runs
+    account-tag resolution; an unmapped account flags the workbook for
+    review ("BUILT -- N REVIEW ITEM(S)") and emits a proposed-mappings
+    snippet next to the output file. form16_pdf runs
     the salary parse + internal consistency checks, plus the Book<->Form16
     cross-checks when mapping_file is also supplied; the decryption
     password is auto-derived from the selected entity's PAN. as26_workbook

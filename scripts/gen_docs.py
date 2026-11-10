@@ -131,7 +131,7 @@ def internal_steps() -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def render_skill_md(v: dict) -> str:
-    badge = "🔌 offline (no LLM)" if v["offline"] else "🤖 needs an LLM endpoint"
+    badge = "Works offline" if v["offline"] else "Uses the LLM"
     deps = ""
     if v["native"] or v["external"]:
         alldeps = ", ".join(v["native"] + v["external"])
@@ -198,7 +198,7 @@ def _h(s: str) -> str:
 
 
 def render_skill_html(v: dict) -> str:
-    badge = "offline · no LLM" if v["offline"] else "needs LLM endpoint"
+    badge = "Works offline" if v["offline"] else "Uses the LLM"
     badge_cls = "ok" if v["offline"] else "warn"
     parts = [f'<section id="{_h(v["dir"])}" class="skill">']
     parts.append(f'<h2>{_h(v["display_name"])} '

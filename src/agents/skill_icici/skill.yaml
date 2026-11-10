@@ -35,13 +35,15 @@ output:
   download_label: "Download CSV"
 
 requires:
+  llm: false   # hardcoded parser; agent.py never calls a model
   native_binaries: []
   external_tools: []
 
 help:
   overview: >
     Converts ICICI net-banking statement downloads (the .xls files) into a
-    GnuCash-importable CSV in canonical columns.
+    GnuCash-importable CSV in canonical columns. Works offline and does not
+    use the LLM.
   when_to_use: >
     Use this for the .xls statements ICICI lets you download from net-banking.
     To also map rows to GnuCash accounts in one step, use Banks > Convert to
@@ -70,7 +72,5 @@ help:
   tips: >
     Selecting several months at once produces one combined CSV in statement order.
   troubleshooting:
-    - problem: "Run errors mentioning the endpoint / model."
-      fix: "ICICI currently uses an LLM step. Start Ollama or set an endpoint in Settings."
     - problem: "Parsing fails or columns are off."
       fix: "Confirm it is the genuine net-banking .xls, not a converted/edited copy."
