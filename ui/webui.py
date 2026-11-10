@@ -689,7 +689,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                         _itr_order = {"ITR Workbook": 0,
                                                       "AIS Reconcile": 50,
                                                       "MF Capital Gain Statement": 60}  # renders after AIS Reconcile
-                                        _rank = lambda s: _itr_order.get(s.display_name, 99)  # noqa: E731
+                                        _rank = lambda s, _o=_itr_order: _o.get(s.display_name, 99)  # noqa: E731
                                         _itr_sorted = sorted(_itr_skills, key=_rank)
                                         for _skill in [s for s in _itr_sorted if _rank(s) < 50]:
                                             with gr.Tab(_skill.display_name) as _t:

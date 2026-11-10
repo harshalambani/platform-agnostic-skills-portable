@@ -1737,7 +1737,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 # line. See _entity_book.book_status().
                 status_md = book_status_md.get(inp.name)
 
-                def _make_book_from_handler(multi=_multi):
+                def _make_book_from_handler(multi=_multi, wiring_inputs=wiring_inputs):
                     # `files` resolves every picked entity into one path per
                     # line and reports which of them had no book; `file`
                     # resolves the one.

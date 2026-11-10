@@ -6735,7 +6735,7 @@ def test_h35_04_informational_row_never_moves_variance_or_undecidable_counts():
 # synthetic, anywhere in this file.
 # ---------------------------------------------------------------------------
 
-def _bank_match_report(advice_records: list) -> "Report":
+def _bank_match_report(advice_records: list) -> "engine.Report":
     """Same idiom as _gc_tieout_report() above, but with caller-supplied
     advice_records so each test can control exactly the total_paid/month
     pairs it needs -- these tests never call build_journals() through this

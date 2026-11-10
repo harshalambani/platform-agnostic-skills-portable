@@ -51,6 +51,7 @@ through tax, cess and refund. See
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 
 import interest_234
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -1948,7 +1949,7 @@ def _cg_block(ws, row: int, banner: str, lot_rows, lot_start_row: int, term: str
         sr += 1
         src = lot_start_row + offset
 
-        def ref(key: str) -> str:
+        def ref(key: str, src: int = src) -> str:
             return f"'CapitalGains'!{_CG_SRC[key]}{src}"
 
         # Sr. No. is a formula too, so "no numeric literal on this sheet"

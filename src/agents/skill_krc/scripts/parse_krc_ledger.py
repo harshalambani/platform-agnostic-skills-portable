@@ -171,11 +171,11 @@ def extract_rows(decrypted_pdf_path: str) -> tuple[list[dict], dict]:
             cur_chqno = ""
             seen_segment_fragment = False
 
-            def flush_no_amount() -> None:
+            def flush_no_amount(row_date: str | None, page_idx: int) -> None:
                 nonlocal cur_vno, cur_particulars, cur_chqno, seen_segment_fragment
                 rows.append(
                     {
-                        "date": cur_date,
+                        "date": row_date,
                         "vno": cur_vno,
                         "particulars": " ".join(cur_particulars),
                         "chqno": cur_chqno,
@@ -183,7 +183,7 @@ def extract_rows(decrypted_pdf_path: str) -> tuple[list[dict], dict]:
                         "credit": None,
                         "balance": None,
                         "drcr": None,
-                        "page": page_no + 1,
+                        "page": page_idx + 1,
                     }
                 )
                 cur_vno, cur_particulars, cur_chqno = "", [], ""
@@ -223,7 +223,7 @@ def extract_rows(decrypted_pdf_path: str) -> tuple[list[dict], dict]:
                         # stop parsing this page entirely - it's never another
                         # ledger row past this point.
                         if cur_particulars:
-                            flush_no_amount()
+                            flush_no_amount(cur_date, page_no)
                         break
                     continue
                 if any(s in line_text for s in SKIP_LINE_SUBSTRINGS):
@@ -299,7 +299,7 @@ def extract_rows(decrypted_pdf_path: str) -> tuple[list[dict], dict]:
                 # an earlier line in this same buffer).
                 if remaining and SEGMENT_TOKEN_RE.match(remaining[0]["text"]):
                     if seen_segment_fragment and len(cur_particulars) > 1:
-                        flush_no_amount()
+                        flush_no_amount(cur_date, page_no)
                     seen_segment_fragment = True
 
                 cur_particulars.extend(w["text"] for w in remaining)

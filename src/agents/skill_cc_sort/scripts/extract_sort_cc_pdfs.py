@@ -88,7 +88,7 @@ def detect_msg_format(msg_file):
                 data = f.read(200).decode('utf-8', errors='ignore')
                 if 'MIME-Version' in data or 'Content-Type' in data or 'From:' in data:
                     return 'mime'
-            except:
+            except Exception:
                 pass
 
             # If it looks like CDFV2 binary, classify as such
@@ -205,7 +205,7 @@ def extract_pdfs_from_mime_msg(msg_file, extract_folder, folder_structure=None):
                 from email.utils import parsedate_to_datetime
                 msg_date = parsedate_to_datetime(date)
                 subfolder = extract_folder / msg_date.strftime('%Y-%m')
-            except:
+            except Exception:
                 subfolder = extract_folder
         elif folder_structure == 'by_sender' and sender:
             sender_name = re.sub(r'[<>:"/\\|?*]', '', sender.split('<')[0].strip())[:50]
