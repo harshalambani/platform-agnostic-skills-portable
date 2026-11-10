@@ -766,6 +766,32 @@ def _is_success_line(s: str, low: str) -> bool:
     return bool(_OK_WORD_RX.search(s))
 
 
+_ATTENTION_RX = re.compile(
+    r"red\s+flag|\bfail(?:s|ed|ure|ures)?\b|\bmissing statements?\b", re.IGNORECASE)
+_ATTENTION_HEAD = "### Needs your attention"
+
+
+def _attention_count(reply) -> int:
+    """UI-41: how many distinct lines of a skill's reply need the user first (RED FLAG, FAIL,
+    a missing statement). The lines themselves stay where the skill put them (at the top)."""
+    seen = set()
+    for ln in str(reply or "").splitlines():
+        t = ln.strip().lstrip("#*-> ").strip()
+        if t and _ATTENTION_RX.search(t):
+            seen.add(t.lower())
+    return len(seen)
+
+
+def _done_heading(reply) -> str:
+    """The heading over a finished run. A reply with a RED FLAG / FAIL / missing statement never
+    opens with a success line: it says so once and the reply, which carries those lines first,
+    follows. Otherwise the plain 'Done'."""
+    n = _attention_count(reply)
+    if n:
+        return f"{_ATTENTION_HEAD} - {n} item(s) below need a decision before you use the output"
+    return "### Done"
+
+
 def _colorize_status(md: str) -> str:
     # Each box is followed by a blank line: a raw HTML block runs to the next
     # blank line in Markdown, so without it every following line (bullets,
@@ -781,6 +807,8 @@ def _colorize_status(md: str) -> str:
             out.append(f'<div class="rag-error">⛔ {s}</div>\n')
         elif low.startswith("warning:"):
             out.append(f'<div class="rag-warn">⚠️ {s[len("warning:"):].strip()}</div>\n')
+        elif s.startswith(_ATTENTION_HEAD):
+            out.append(f'<div class="rag-warn">⚠️ {s.lstrip("#").strip()}</div>\n')
         elif "**cancelled**" in low or low.startswith("cancelled"):
             out.append(f'<div class="rag-warn">{s.replace("**", "")}</div>\n')
         elif _is_success_line(s, low):
@@ -1241,7 +1269,7 @@ def _make_run_handler(skill: SkillInfo):
             extras_md = f"{extras['block']}\n\n" if extras else ""
             outcome(f"Done. Output folder: {out_abs}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
-                f"### Done\n\n"
+                f"{_done_heading(agent_reply)}\n\n"
                 f"**Output folder:** {out_abs}\n\n"
                 f"{extras_md}"
                 f"{review_section}"
@@ -1309,7 +1337,7 @@ def _make_run_handler(skill: SkillInfo):
             extras_md = f"{extras['block']}\n\n" if extras else ""
             outcome(f"Done. File: {out_path.name}\n\n{reply_label(skill)}:\n\n{agent_reply}")
             msg = add(
-                f"### Done\n\n"
+                f"{_done_heading(agent_reply)}\n\n"
                 f"**File:** {out_path.name}\n\n"
                 f"**Saved to:** {out_path.resolve()}\n\n"
                 f"Click **{skill.output.download_label}** below.\n\n"
@@ -1847,7 +1875,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 check_btn = gr.Button(skill.check.label, variant="secondary")
 
         with gr.Column(scale=2):
-            result_md = gr.Markdown("_Awaiting input._", min_height=200)
+            # UI-41: line_breaks keeps a result's single newlines as line breaks (they collapsed)
+            result_md = gr.Markdown("_Awaiting input._", min_height=200, line_breaks=True)
             # NOTE: created visible=True/interactive=False rather than
             # visible=False. Gradio 6's frontend does not reliably reveal a
             # DownloadButton that starts hidden and is later toggled to
