@@ -345,13 +345,25 @@ def _known_folders(source: str) -> list[tuple[str, str]]:
     return fn() if fn else []
 
 
-def _refresh_folder_choice(source: str, current):
+def _refresh_folder_choice(source: str, current, auto=None):
     """Refresh the choices; the value is kept as it is when there is one (a typed
-    or pasted path is never replaced), and is the newest run only when empty."""
+    or pasted path is never replaced), and is the newest run only when empty.
+
+    ``auto`` is the path this box was last filled with by the app itself (UI-44).
+    A value equal to it was never typed or chosen, so it follows the newest run;
+    any other value (typed, pasted, browsed, or picked from the list) is kept."""
     choices = _known_folders(source)
-    if current:
+    if current and (not auto or current != auto):
         return gr.update(choices=choices)
     return gr.update(choices=choices, value=(choices[0][1] if choices else None))
+
+
+def _refresh_folder_tracked(source: str, current, auto):
+    """(dropdown update, new auto-picked value) for the wired refresh."""
+    upd = _refresh_folder_choice(source, current, auto)
+    if "value" in upd:
+        return upd, (upd["value"] or "")
+    return upd, (auto or "")
 
 
 def _newest_cc_sort_pdfs() -> str | None:
@@ -1443,7 +1455,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             parser_pickers = []   # (dropdown, refresh_btn) for type="parser_file"
             dependent_pickers = []  # (dropdown, input) whose choices follow other inputs (depends_on)
             dynamic_pickers = []  # (dropdown, refresh_btn, options_from_key) for type="select" with options_from
-            folder_pickers = []   # (dropdown, refresh_btn, folders_from) UI-33
+            folder_pickers = []   # (dropdown, refresh_btn, folders_from, auto-picked state) UI-33/44
             browse_buttons = []   # (button, file_comp, input_def, multiple) for native Browse…
             folder_buttons = []   # (button, textbox, input_def) for the native folder Browse…
             # Entity selects that drive a `book_from` prefill must NOT pre-select
@@ -1662,7 +1674,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                                 **_help.maybe_info(gr.Dropdown, _info.get(inp.name)),
                             )
                             _frbtn = gr.Button("↻", scale=0, min_width=40)
-                            folder_pickers.append((comp, _frbtn, inp.folders_from))
+                            _fauto = gr.State(_fch[0][1] if _fch else "")
+                            folder_pickers.append((comp, _frbtn, inp.folders_from, _fauto))
                         else:
                             comp = gr.Textbox(
                                 label=inp.label,
@@ -1911,9 +1924,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         )
 
     # UI-33: refresh button of each known-folders dropdown.
-    for _comp, _rbtn, _src in folder_pickers:
-        _rbtn.click(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
-                    inputs=[_comp], outputs=_comp)
+    for _comp, _rbtn, _src, _auto in folder_pickers:
+        _rbtn.click(fn=lambda cur=None, auto=None, s=_src: _refresh_folder_tracked(s, cur, auto),
+                    inputs=[_comp, _auto], outputs=[_comp, _auto])
 
     # Wire each parser picker's refresh button to re-scan the parser tree.
     for _comp, _pbtn in parser_pickers:
@@ -1997,9 +2010,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
     # When this tab is (re)opened, re-scan each output-file picker and
     # auto-select the newest match — picks up a prior step's fresh output.
     if container_tab is not None:
-        for _comp, _rbtn, _src in folder_pickers:
-            container_tab.select(fn=lambda cur=None, s=_src: _refresh_folder_choice(s, cur),
-                                 inputs=[_comp], outputs=[_comp])
+        for _comp, _rbtn, _src, _auto in folder_pickers:
+            container_tab.select(fn=lambda cur=None, auto=None, s=_src: _refresh_folder_tracked(s, cur, auto),
+                                 inputs=[_comp, _auto], outputs=[_comp, _auto])
         for _comp, _rbtn, _match, _fts in output_pickers:
             def _rescan_newest(m=_match, f=_fts):
                 choices = _scan_output_files(m, f)
