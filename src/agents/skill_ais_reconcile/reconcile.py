@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
-from agents.skill_ais_reconcile.normalize import AisRow, NormalizedAis
+from agents.skill_ais_reconcile.normalize import AisRow, NormalizedAis, parse_amount
 
 # Small absolute tolerance for detail-vs-reported comparisons -- AIS amounts
 # are rupee-and-paise decimals and can carry immaterial rounding drift that
@@ -151,12 +151,7 @@ def _l2_field(l2_rows: list[AisRow], field_name: str) -> Any:
 def _as_decimal(value: Any) -> Decimal | None:
     if value is None:
         return None
-    if isinstance(value, Decimal):
-        return value
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
+    return parse_amount(value)
 
 
 def _reco_for_element(key: tuple[str, str, str | None], rows: list[AisRow]) -> ElementReco:
