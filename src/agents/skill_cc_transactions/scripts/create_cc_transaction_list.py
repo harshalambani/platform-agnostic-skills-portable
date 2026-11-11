@@ -1824,10 +1824,13 @@ def no_activity(st: Statement) -> bool:
 
 def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date | None = None,
                    label: str = "all statements", cards=None, cards_problem: str | None = None,
-                   reads: "StatementReads | None" = None) -> Result:
+                   reads: "StatementReads | None" = None, checkpoint=None) -> Result:
     """`cards` is the CC-28 card list (agents.cc_cards.Card objects). A CSV is placed by its
     card digits against it; without it every CSV is refused. `cards_problem` is why the list
-    is not available (shown as an issue)."""
+    is not available (shown as an issue).
+
+    `checkpoint(index, total)`, when given, is called before each PDF is read (UI-45): the
+    caller reports progress there and may raise to stop the run. Nothing is saved when it does."""
     pdf_dir = Path(pdf_dir)
     seen_names, pdfs = set(), []
     for p in sorted(pdf_dir.rglob("*.pdf")) + sorted(pdf_dir.rglob("*.PDF")):
@@ -1854,7 +1857,9 @@ def run_extraction(pdf_dir, output_excel, start: date | None = None, end: date |
     reused_info: dict = {}     # id(statement) -> (cache key, pdf) for a reused read result
     dup_keys: dict = {}        # id(first statement) -> [(cache key, identical duplicate)]
     fresh_info: dict = {}      # id(statement) -> (cache key, pdf) for a statement read from the PDF
-    for pdf in pdfs:
+    for _pdf_idx, pdf in enumerate(pdfs):
+        if checkpoint is not None:
+            checkpoint(_pdf_idx, len(pdfs))
         bank, card = get_bank_and_card_type(pdf)
         ckey = ""
         st = None

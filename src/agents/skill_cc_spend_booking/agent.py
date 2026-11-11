@@ -111,6 +111,52 @@ def _log_line(text: str) -> None:
     print(f"[cc-spend] {text}")
 
 
+_CLOCK = time.monotonic     # tests swap this for a fake clock
+
+
+def _stop_requested() -> bool:
+    """True once the user has pressed Stop (the UI's cancel flag). False outside the UI."""
+    try:
+        from ui._runner import is_cancelled  # noqa: PLC0415
+        return bool(is_cancelled())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class RunStopped(Exception):
+    """The user pressed Stop; the run ends here and writes nothing more."""
+
+
+def _raise_if_stopped(where: str) -> None:
+    """UI-45: end the run at a safe point. Says "Stopping..." at once, then raises the UI's own
+    cancel error (so the panel reports 'Cancelled'), or RunStopped outside the UI."""
+    if not _stop_requested():
+        return
+    _log_line(f"Stopping... ({where}); nothing more is read or written")
+    try:
+        from ui._runner import CancelledError  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        raise RunStopped(where)
+    raise CancelledError(where)
+
+
+def statement_progress_line(i: int, total: int, started: float, now: float) -> str:
+    """UI-45: "Reading statement i of N - about M min left" (i counts from 1).
+
+    The time left is the measured average of the statements already read times those still to
+    read. Before the first one is done there is no estimate, and none is invented."""
+    total = max(int(total), 1)
+    i = min(max(int(i), 1), total)
+    line = f"Reading statement {i} of {total}"
+    done = i - 1
+    if done > 0:
+        per = max(now - started, 0.0) / done
+        left = total - done
+        if per > 0 and left > 0:
+            line += f" - about {max(1, int(round(per * left / 60.0)))} min left"
+    return line
+
+
 def _error(text: str):
     from agents.outputs import ReplyWithOutputs
     return ReplyWithOutputs(text, (), True)
@@ -139,8 +185,14 @@ def _extract(pdf_dir, xlsx, start, end, label, cards=None, cards_problem=None,
     from agents.skill_cc_transactions.agent import _load_script
     mod = _load_script()
     reads = _reads_store(mod, gnucash_path, config_path) if gnucash_path else None
+    started = _CLOCK()
+
+    def checkpoint(i, total):
+        _raise_if_stopped(f"before statement {i + 1} of {total}")
+        _log_line(statement_progress_line(i + 1, total, started, _CLOCK()))
+
     return mod, mod.run_extraction(Path(pdf_dir), Path(xlsx), start, end, label, cards, cards_problem,
-                                   reads=reads)
+                                   reads=reads, checkpoint=checkpoint)
 
 
 def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account, model=None):
@@ -355,6 +407,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         rep.tie_results = {id(s): t.result for s, t in zip(res.statements, res.ties)}
 
         _mark("parse")
+        _raise_if_stopped("after reading the statements")
         passing = [s for s in res.statements if mod.is_pass(ties_by_id[id(s)].result) or id(s) in untied_ids]
 
         # ---- CC-08: fixed-account checks BEFORE any matching work ----------------
@@ -476,6 +529,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                 rep.awaiting.append(st)
 
         _mark("match")
+        _raise_if_stopped("after matching the payments")
         # ---- the EMI interest account (soft: a problem withholds the interest rows only) ----
         emi_acct = _strip_root(getattr(ent, "card_emi_interest_account", "") or "")
         if not emi_acct:
@@ -604,6 +658,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         rep.view_range = (start, end)
 
         _mark("journals")
+        _raise_if_stopped("after building the journals")
         # ---- fixed accounts (backstop: the early check above already covers the normal case) ----
         if any(j.kind in (J.K_FEE, J.K_FEE_REV) for j in journals):
             bsc = _strip_root(ent.bank_service_charge_account)
@@ -637,6 +692,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         J.mark_booked(journals, view.txns, CCP_PATH)
         _reconcile_splits(rep, journals)
         _mark("already-booked check")
+        _raise_if_stopped("before mapping the spends")
 
         # ---- mapper for spends and refunds ---------------------------------
         # CC-12: a row flagged POSSIBLY ALREADY BOOKED is mapped too (IMP-15 4b: it is also written,
@@ -645,6 +701,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         if to_map:
             cin, cout = Path(tmp) / "cc_canonical.csv", Path(tmp) / "cc_mapped_GnuCash_import_ready.csv"
             _canonical_csv(to_map, cin)
+            _log_line(f"Mapping {len(to_map)} spend row(s): your saved rules first, then the AI for the rest")
             _clear_mapper_ai_status()
             try:
                 _run_mapper(gnucash_path, cin, cout, config_path, [_strip_root(d) for d in ent.drawings_accounts],
@@ -678,6 +735,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                         j.match_reason = "refund of an identical purchase in this run"
 
         _mark("map")
+        # a Stop during the AI pass leaves the mapper's partial answers (rest to Suspense): none of it is written
+        _raise_if_stopped("after mapping the spends")
         # ---- guard on every account ------------------------------------------
         suspense = next((p for p in sorted(view.paths) if p.rsplit(":", 1)[-1] == "Suspense"),
                         J.SUSPENSE_DEFAULT)
@@ -767,6 +826,7 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
                    "old_effect": ptie["old_total"], "pool_gap": ptie["gap"], "pool_ok": not rep.pool_failure}
 
         # ---- output ------------------------------------------------------------
+        _raise_if_stopped("before writing the output")
         out = Path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
         ready = [] if rep.pool_failure else rep.ready

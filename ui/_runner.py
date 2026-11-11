@@ -81,6 +81,9 @@ def run_with_progress(
                       skill's own log lines). Without it no queue is installed, so those events
                       go nowhere and a long direct-mode run shows only the elapsed time.
     """
+    # UI-46: a Stop pressed during an earlier run must not cancel this new one
+    # (run_with_streaming and the tab Reset already clear it).
+    reset_cancel()
     result: dict[str, Any] = {}
     progress_q: queue.Queue | None = queue.Queue() if on_event is not None else None
 
@@ -90,6 +93,8 @@ def run_with_progress(
             set_progress_queue(progress_q)
         try:
             result["value"] = work()
+        except CancelledError:
+            result["cancelled"] = True      # UI-45: the skill saw Stop and ended itself
         except BaseException as e:  # noqa: BLE001
             result["error"] = e
         finally:
@@ -121,6 +126,8 @@ def run_with_progress(
         elapsed = int(time.monotonic() - start)
         yield tick_factory(elapsed)
 
+    if result.get("cancelled"):
+        return "__CANCELLED__"
     if "error" in result:
         raise result["error"]
     return result.get("value")
