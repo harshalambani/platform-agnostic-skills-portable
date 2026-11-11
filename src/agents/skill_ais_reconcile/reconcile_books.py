@@ -17,19 +17,16 @@ parent account naturally covers all of its untagged descendants, because
 every descendant's own FY sum is walked up to the same nearest mapped
 ancestor and added to that tag's bucket.
 
-AIS INCOME SOURCE — IMPORTANT DESIGN NOTE (v1 scope limitation):
-  AIS income is taken ONLY from tdsTcs elements' per-category income
-  (ElementReco.detail_sum, i.e. the summed amtPaid on which TDS was
-  deducted), not from sft/other-info. This is deliberate: AIS routinely
-  ECHOES the same underlying income event under more than one info-source
-  (e.g. interest reported once under tdsTcs and again under an sft
-  statement), and summing across sections would double-count it. The
-  consequence: income that had NO TDS deducted at all (exempt income,
-  interest below the TDS threshold, etc.) is OUT OF SCOPE for this income
-  tie-out in v1 — such income won't appear in ais_by_category no matter how
-  it appears in the books. This is a known, intentional v1 gap, not a bug;
-  a future phase could widen the AIS side to include sft/other-info with
-  proper de-duplication against tdsTcs.
+AIS INCOME SOURCE (LEG-02): the AIS side counts the TDS-section (tdsTcs) income of every row with an
+  amount paid, including nil-TDS rows, PLUS interest and dividend reported under the SFT section
+  (dividend; interest from deposit; savings interest; interest from others). AIS routinely echoes one
+  income event under both sections, so each SOURCE is counted ONCE: when the same source (a TAN or a
+  normalised payer name, whichever the rows carry) and the same head appear in both, the TDS-section
+  amount is used and the SFT amount is not added; the report says which section each amount came from.
+  An SFT row whose source cannot be identified is never added on top of a head that already has
+  TDS-section income (it could be the same income); it is listed as not counted. Securities purchase
+  and sale SFT rows never enter income. Callers pass the NormalizedAis as `normalized` for the SFT
+  widening; without it only the TDS section is counted, as before.
 
 Category buckets mirror reconcile_26as.py's categories (interest / dividend
 / salary / other) via the shared _classify_ais_category classifier, imported
@@ -77,6 +74,8 @@ class CategoryBooksTieOut:
     books_income: Decimal
     delta: Decimal
     flagged: bool
+    from_tds_section: Decimal = Decimal("0")     # LEG-02: of ais_income, counted from the TDS section
+    from_sft_only: Decimal = Decimal("0")        # LEG-02: of ais_income, counted from SFT (source not in TDS)
 
 
 @dataclass
@@ -99,6 +98,10 @@ class AisBooksReport:
     # outside the mapping, which the category tie-out above cannot see
     # because it has no tag to bucket into.
     untagged_income_account_count: int = 0
+
+    # LEG-02: one line per source/head saying which section its AIS amount was counted from, and which
+    # SFT amounts were NOT counted (same source already in the TDS section, or source unidentifiable).
+    source_notes: list[str] = field(default_factory=list)
 
     @property
     def flagged_categories(self) -> list[str]:
@@ -176,20 +179,102 @@ def _books_tds_credit(by_tag: dict[str, Decimal]) -> Decimal:
     return total
 
 
-def _ais_by_category(report: AisRecoReport) -> dict[str, Decimal]:
-    out: dict[str, Decimal] = {}
-    for el in report.elements:
-        if el.section_key != "tdsTcs":
-            continue
-        if el.detail_sum is None:
-            continue
-        category = _classify_ais_category(el.category)
-        out[category] = out.get(category, Decimal("0")) + el.detail_sum
+_NAME_FIELDS = ("deductorName", "payerName", "nameOfPayer", "nameOfDeductor", "reportingEntityName",
+                "nameOfReportingEntity", "sourceName", "name", "Name")
+_TAN_FIELDS = ("tan", "TAN", "deductorTan", "payerTan", "reportingEntityTan")
+_SFT_EXCLUDE = ("purchase", "sale", "redemption", "buyback", "buy back")
+
+
+def _norm_name(value: Any) -> str:
+    return " ".join("".join(ch if ch.isalnum() else " " for ch in str(value).upper()).split())
+
+
+def _identities(row: Any) -> set:
+    """The source identities a row carries: a TAN and/or a normalised payer name. Empty = unidentifiable."""
+    out = set()
+    for f in _TAN_FIELDS:
+        v = row.fields.get(f)
+        if v is not None and str(v).strip():
+            out.add("TAN:" + str(v).strip().upper())
+    for f in _NAME_FIELDS:
+        v = row.fields.get(f)
+        if v is not None and _norm_name(v):
+            out.add("NAME:" + _norm_name(v))
     return out
 
 
+def _row_amount(row: Any) -> Decimal | None:
+    if not row.feedback_editable_field:
+        return None
+    return _as_decimal(row.fields.get(row.feedback_editable_field))
+
+
+def _ais_by_category(report: AisRecoReport, normalized: Any = None):
+    """(total by category, TDS-section part, SFT-only part, notes). Each source is counted once."""
+    tds: dict[str, Decimal] = {}
+    for el in report.elements:
+        if el.section_key != "tdsTcs" or el.detail_sum is None:
+            continue
+        category = _classify_ais_category(el.category)
+        tds[category] = tds.get(category, Decimal("0")) + el.detail_sum
+    sft: dict[str, Decimal] = {}
+    notes: list[str] = []
+    if normalized is None:
+        return dict(tds), tds, sft, notes
+
+    tds_ids_by_head: dict[str, set] = {}
+    for r in normalized.rows:
+        if r.section_key == "tdsTcs" and r.level == "l1":
+            tds_ids_by_head.setdefault(_classify_ais_category(r.category), set()).update(_identities(r))
+
+    sft_groups: dict[tuple, Decimal] = {}
+    order: list[tuple] = []
+    for r in normalized.rows:
+        if r.section_key != "sft" or r.level != "l1":
+            continue
+        low = (r.category or "").lower()
+        head = _classify_ais_category(r.category)
+        if head not in ("interest", "dividend") or any(w in low for w in _SFT_EXCLUDE):
+            continue                        # securities purchase/sale and everything else stays OUT
+        amt = _row_amount(r)
+        if amt is None:
+            continue
+        ids = _identities(r)
+        shared = ids & tds_ids_by_head.get(head, set())
+        if shared:
+            key = (head, "dup", min(shared))
+        elif ids:
+            key = (head, "new", min(ids))
+        else:
+            key = (head, "unknown", "")
+        if key not in sft_groups:
+            order.append(key)
+        sft_groups[key] = sft_groups.get(key, Decimal("0")) + amt
+
+    for head in sorted(tds):
+        notes.append(f"{head}: {tds[head]:,.2f} counted from the TDS section")
+    for key in order:
+        head, kind, ident = key
+        amt = sft_groups[key]
+        label = ident.split(":", 1)[-1].title() if ident else "(source not identified)"
+        if kind == "dup":
+            notes.append(f"{head}: {label} is in both sections; counted from the TDS section, the SFT "
+                         f"amount {amt:,.2f} is NOT added (counted once)")
+        elif kind == "unknown" and tds.get(head, Decimal("0")) != Decimal("0"):
+            notes.append(f"{head}: SFT amount {amt:,.2f} from a source that cannot be identified is NOT "
+                         f"counted, because the TDS section already reports {head} income and it may be "
+                         f"the same income (counted once)")
+        else:
+            sft[head] = sft.get(head, Decimal("0")) + amt
+            notes.append(f"{head}: {label} {amt:,.2f} counted from SFT (not in the TDS section)")
+    total = dict(tds)
+    for head, v in sft.items():
+        total[head] = total.get(head, Decimal("0")) + v
+    return total, tds, sft, notes
+
+
 def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
-                            year_key: str) -> AisBooksReport:
+                            year_key: str, normalized: Any = None) -> AisBooksReport:
     """Tie out AIS's per-category tdsTcs income (and total TDS credit)
     against the GnuCash books, with the books treated as primary. `book` is
     an already-parsed parse_gnucash.Book, `mapping` an already-loaded
@@ -199,7 +284,7 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
     books_cat = _books_by_category(by_tag)
     books_tds = _books_tds_credit(by_tag)
 
-    ais_cat = _ais_by_category(report)
+    ais_cat, ais_tds_part, ais_sft_part, source_notes = _ais_by_category(report, normalized)
     ais_tds = report.total_tds_credit
 
     categories: list[CategoryBooksTieOut] = []
@@ -213,6 +298,8 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
         categories.append(CategoryBooksTieOut(
             category=category, ais_income=a, books_income=b, delta=d,
             flagged=abs(d) > TOLERANCE,
+            from_tds_section=ais_tds_part.get(category, Decimal("0")),
+            from_sft_only=ais_sft_part.get(category, Decimal("0")),
         ))
         if b != Decimal("0") and a == Decimal("0"):
             books_income_not_in_ais.append(category)
@@ -231,4 +318,5 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
         books_income_not_in_ais=books_income_not_in_ais,
         ais_income_not_in_books=ais_income_not_in_books,
         untagged_income_account_count=untagged_income_count,
+        source_notes=source_notes,
     )

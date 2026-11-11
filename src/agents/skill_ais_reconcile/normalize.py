@@ -28,6 +28,7 @@ function over an already-decrypted dict (see decrypt.decrypt_ais).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -64,6 +65,34 @@ class NormalizedAis:
     summary: list[SectionSummary] = field(default_factory=list)
 
 
+# ITR-20: AIS amounts arrive as Indian comma-grouped strings ("9,99,999.99", "1,00,000") as well as plain
+# or western-grouped ones. Grouping commas are only accepted in a valid grouping pattern, so garbage such as
+# "1,2,3x" or "1,2,3" is still rejected rather than read as a different number.
+_INDIAN_GROUPED = re.compile(r"^-?\d{1,2}(,\d{2})*,\d{3}(\.\d+)?$")
+_WESTERN_GROUPED = re.compile(r"^-?\d{1,3}(,\d{3})+(\.\d+)?$")
+
+
+def parse_amount(raw_value: Any) -> Decimal | None:
+    """The one place an AIS amount becomes a Decimal. Returns None (never 0) for blank, None, bool or
+    anything that is not a finite number, including malformed comma grouping."""
+    if raw_value is None or isinstance(raw_value, bool):
+        return None
+    if isinstance(raw_value, Decimal):
+        return raw_value if raw_value.is_finite() else None
+    text = str(raw_value).strip()
+    if not text:
+        return None
+    if "," in text:
+        if not (_INDIAN_GROUPED.match(text) or _WESTERN_GROUPED.match(text)):
+            return None
+        text = text.replace(",", "")
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
+    return value if value.is_finite() else None
+
+
 def _coerce(raw_value: Any, decl_type: str | None) -> Any:
     """Coerce a single columnData value per its declared `type`. Defensive:
     blank/None/unparseable values degrade to None rather than raising, since
@@ -75,10 +104,7 @@ def _coerce(raw_value: Any, decl_type: str | None) -> Any:
 
     t = (decl_type or "").strip().lower()
     if t == "decimal":
-        try:
-            return Decimal(str(raw_value))
-        except (InvalidOperation, ValueError):
-            return None
+        return parse_amount(raw_value)
     if t == "date":
         # Dates are surfaced as the raw string (format varies by section); a
         # downstream phase that needs a real date object can parse this with

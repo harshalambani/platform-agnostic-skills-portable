@@ -327,15 +327,16 @@ def _write_26as_tieout_sheet(wb: Workbook, report: Ais26asReport) -> None:
     _autosize(ws, max(len(_TIEOUT_QUARTER_COLUMNS), len(_TIEOUT_CATEGORY_COLUMNS)), row - 1)
 
 
-_BOOKS_CATEGORY_COLUMNS = ["Category", "AIS income", "Books income", "Delta"]
-_BOOKS_CATEGORY_MONEY_COLS = (2, 3, 4)
+_BOOKS_CATEGORY_COLUMNS = ["Category", "AIS income", "Books income", "Delta",
+                           "AIS from TDS section", "AIS from SFT only"]
+_BOOKS_CATEGORY_MONEY_COLS = (2, 3, 4, 5, 6)
 
 
 def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
     ws = wb.create_sheet("Books Reconciliation")
     row = 1
     flagged_count = len(report.flagged_categories) + (1 if report.flag_tds_mismatch else 0)
-    row = _write_banner(ws, row, 4, flagged_count)
+    row = _write_banner(ws, row, 6, flagged_count)
 
     # -- TDS credit tie-out -------------------------------------------------
     _set(ws, row, 1, "TDS credit tie-out (AIS vs books)", bold=True, fill=_HEADER_FILL)
@@ -366,7 +367,8 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
     for c in report.categories:
         fill = _RED_FILL if c.flagged else None
         color = _RED_FONT_COLOR if c.flagged else None
-        values = [c.category, _num(c.ais_income), _num(c.books_income), _num(c.delta)]
+        values = [c.category, _num(c.ais_income), _num(c.books_income), _num(c.delta),
+                  _num(c.from_tds_section), _num(c.from_sft_only)]
         for col, value in enumerate(values, start=1):
             nf = INR_FORMAT if col in _BOOKS_CATEGORY_MONEY_COLS else None
             _set(ws, row, col, value, number_format=nf, fill=fill, color=color,
@@ -379,6 +381,19 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
             f"{delta_col_letter}{category_first_row}:{delta_col_letter}{category_last_row}",
             CellIsRule(operator="notEqual", formula=["0"], fill=_RED_FILL),
         )
+    row += 1
+
+    # -- LEG-02: which section each AIS amount came from ----------------------
+    _set(ws, row, 1, "AIS income sources (each source counted once; TDS section preferred)",
+         bold=True, fill=_HEADER_FILL)
+    row += 1
+    if report.source_notes:
+        for note in report.source_notes:
+            _set(ws, row, 1, note)
+            row += 1
+    else:
+        _set(ws, row, 1, "(none)")
+        row += 1
     row += 1
 
     # -- Completeness call-outs (books is primary) ---------------------------

@@ -2081,3 +2081,191 @@ def test_run_huf_entity_uses_doi_for_password(tmp_path):
 
     assert summary.startswith("ERROR:")
     assert "doi" in summary
+
+
+# ---------------------------------------------------------------------------
+# ITR-20: comma-grouped amounts must parse (they used to be lost as None)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("raw, expected", [
+    ("9,99,999.99", Decimal("999999.99")),     # Indian grouping
+    ("1,00,000", Decimal("100000")),
+    ("12,34,56,789.50", Decimal("123456789.50")),
+    ("1,234,567.89", Decimal("1234567.89")),   # western grouping
+    ("1,000", Decimal("1000")),
+    ("1000.50", Decimal("1000.50")),           # plain
+    ("  2500  ", Decimal("2500")),             # surrounding whitespace
+    ("-1,00,000.25", Decimal("-100000.25")),   # negative
+    ("-75", Decimal("-75")),
+    (500, Decimal("500")),                     # already numeric
+    (12.5, Decimal("12.5")),
+    (Decimal("7.25"), Decimal("7.25")),
+])
+def test_itr20_parse_amount_accepts_grouped_and_plain(raw, expected):
+    assert N.parse_amount(raw) == expected
+    assert N._coerce(raw, "decimal") == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "", "   ", "1,2,3x", "--5", "1,23,45", "12,34", ",100",
+                                 "100,", "1,,000", "NaN", "Infinity", None, True])
+def test_itr20_negative_garbage_never_becomes_a_number(raw):
+    """NEGATIVE: junk must stay None (never 0, never a guessed number)."""
+    assert N.parse_amount(raw) is None
+    assert N._coerce(raw, "decimal") is None
+
+
+def _ais_with(tds_elements=(), sft_elements=()):
+    """Synthetic AIS whose partB holds exactly the given tdsTcs / sft elements."""
+    ais = synthetic_ais()
+    ais["partB"]["sections"] = [
+        {"sectionKey": "tdsTcs", "title": "TDS/TCS Information", "heading": "B1",
+         "elements": list(tds_elements)},
+        {"sectionKey": "sft", "title": "SFT Information", "heading": "B2",
+         "elements": list(sft_elements)},
+    ]
+    return ais
+
+
+def _income_element(title, source, amt_paid, *, tds="0", l1src="TDS", info="X-1", tan=None):
+    cols = [_column_label("deductorName", "Name", "string"),
+            _column_label("amtPaid", "Amount paid", "decimal", display_feedback=True),
+            _column_label("taxDeducted", "TDS", "decimal")]
+    row = {"deductorName": source, "amtPaid": amt_paid, "taxDeducted": tds,
+           "status": "Active", "transFeedback": None}
+    if tan:
+        row["tan"] = tan
+    return {"title": title, "l1Src": l1src, "infoSrcId": info,
+            "l1": {"columnLabel": cols, "columnData": [row], "columnDataType": {}}, "l2": None}
+
+
+def _income_book(tag, guid, amount):
+    acct = _acct(guid, "Synthetic Income", "INCOME")
+    return (Book(accounts={guid: acct},
+                 transactions=[_txn_book("t-" + guid, posted=date(2025, 8, 1),
+                                         splits=[_split(guid, -amount)])]),
+            _mapping({guid: tag}))
+
+
+def _books_tieout(ais, book, mapping):
+    n = N.normalize(ais)
+    return RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY, n)
+
+
+def _cat(report, name):
+    return next(c for c in report.categories if c.category == name)
+
+
+def test_itr20_tds_row_with_comma_amounts_end_to_end():
+    n = N.normalize(_ais_with([_income_element("Interest from deposit", "SYNTHETIC BANK",
+                                               "9,99,999.99", tds="1,00,000")]))
+    l1 = next(r for r in n.rows if r.section_key == "tdsTcs" and r.level == "l1")
+    assert l1.fields["amtPaid"] == Decimal("999999.99")
+    assert l1.fields["taxDeducted"] == Decimal("100000")
+
+
+def test_itr20_comma_amounts_do_not_report_income_missing_from_ais():
+    """NEGATIVE: the head is present in the AIS, so it must never be called 'books income not in AIS',
+    and the AIS amount must not be lost (0) -- the old false-gap behaviour."""
+    ais = _ais_with([_income_element("Interest from deposit", "SYNTHETIC BANK", "9,99,999.99")])
+    book, mapping = _income_book("OS_INTEREST_BANK", "i1", 999999.99)
+    rep = _books_tieout(ais, book, mapping)
+    interest = _cat(rep, "interest")
+    assert interest.ais_income == Decimal("999999.99")
+    assert not interest.flagged
+    assert "interest" not in rep.books_income_not_in_ais
+
+
+# ---------------------------------------------------------------------------
+# LEG-02: SFT dividend/interest widening, each source counted once
+# ---------------------------------------------------------------------------
+
+def test_leg02_sft_only_dividend_is_counted():
+    ais = _ais_with(sft_elements=[_income_element("Dividend", "SYNTHETIC CO", "5000", l1src="SFT")])
+    book, mapping = _income_book("OS_DIVIDEND", "d1", 5000)
+    rep = _books_tieout(ais, book, mapping)
+    div = _cat(rep, "dividend")
+    assert div.ais_income == Decimal("5000")
+    assert div.from_sft_only == Decimal("5000") and div.from_tds_section == Decimal("0")
+    assert not div.flagged
+    assert any("counted from SFT" in note for note in rep.source_notes)
+
+
+def test_leg02_same_source_in_both_sections_counted_once():
+    ais = _ais_with(
+        [_income_element("Interest from deposit", "Synthetic Bank Ltd", "8000", tds="800")],
+        [_income_element("Interest from deposit", "SYNTHETIC BANK LTD.", "8000", l1src="SFT",
+                         info="S-1")])
+    book, mapping = _income_book("OS_INTEREST_BANK", "i1", 8000)
+    rep = _books_tieout(ais, book, mapping)
+    interest = _cat(rep, "interest")
+    assert interest.ais_income == Decimal("8000")
+    assert interest.ais_income != Decimal("16000")      # NEGATIVE: the double total must never appear
+    assert interest.from_tds_section == Decimal("8000") and interest.from_sft_only == Decimal("0")
+    assert not interest.flagged
+    assert any("both sections" in n and "NOT added" in n for n in rep.source_notes)
+
+
+def test_leg02_same_tan_different_name_counted_once():
+    ais = _ais_with(
+        [_income_element("Dividend", "Synthetic Co", "3000", tan="TANX00001A")],
+        [_income_element("Dividend", "Totally Different Spelling", "3000", l1src="SFT", tan="TANX00001A")])
+    rep = _books_tieout(ais, *_income_book("OS_DIVIDEND", "d1", 3000))
+    assert _cat(rep, "dividend").ais_income == Decimal("3000")
+
+
+def test_leg02_unidentifiable_sft_not_added_over_existing_tds_income():
+    """NEGATIVE: an SFT row with no source identity might be the TDS income again; never add it."""
+    sft = _income_element("Interest from deposit", "", "4000", l1src="SFT", info="S-2")
+    ais = _ais_with([_income_element("Interest from deposit", "Synthetic Bank", "4000")], [sft])
+    rep = _books_tieout(ais, *_income_book("OS_INTEREST_BANK", "i1", 4000))
+    assert _cat(rep, "interest").ais_income == Decimal("4000")
+    assert any("cannot be identified" in n for n in rep.source_notes)
+
+
+def test_leg02_different_source_in_sft_is_added():
+    ais = _ais_with(
+        [_income_element("Interest from deposit", "Synthetic Bank A", "1000")],
+        [_income_element("Interest from deposit", "Synthetic Bank B", "2000", l1src="SFT")])
+    rep = _books_tieout(ais, *_income_book("OS_INTEREST_BANK", "i1", 3000))
+    interest = _cat(rep, "interest")
+    assert interest.ais_income == Decimal("3000")
+    assert interest.from_tds_section == Decimal("1000") and interest.from_sft_only == Decimal("2000")
+
+
+def test_leg02_securities_sft_never_enters_income():
+    """NEGATIVE: purchase/sale of securities (and anything not interest/dividend) stays out."""
+    ais = _ais_with(sft_elements=[
+        _income_element("Sale of securities", "Synthetic Broker", "1000000", l1src="SFT", info="S-3"),
+        _income_element("Purchase of securities", "Synthetic Broker", "900000", l1src="SFT", info="S-4"),
+        _income_element("Purchase of mutual fund units", "Synthetic AMC", "50000", l1src="SFT", info="S-5"),
+    ])
+    n = N.normalize(ais)
+    total, tds_part, sft_part, _notes = RB._ais_by_category(R.reconcile_internal(n), n)
+    assert total == {} and sft_part == {}
+
+
+def test_leg02_nil_tds_row_is_counted():
+    ais = _ais_with([_income_element("Dividend", "Synthetic Co", "7000", tds="0")])
+    rep = _books_tieout(ais, *_income_book("OS_DIVIDEND", "d1", 7000))
+    div = _cat(rep, "dividend")
+    assert div.ais_income == Decimal("7000")
+    assert div.from_tds_section == Decimal("7000")
+    assert not div.flagged
+
+
+def test_leg02_without_normalized_behaviour_is_tds_only():
+    """NEGATIVE: callers that do not pass normalized get the old TDS-only total, no SFT leakage."""
+    ais = _ais_with([_income_element("Dividend", "Synthetic Co", "100")],
+                    [_income_element("Dividend", "Other Co", "900", l1src="SFT")])
+    n = N.normalize(ais)
+    book, mapping = _income_book("OS_DIVIDEND", "d1", 100)
+    rep = RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY)
+    assert _cat(rep, "dividend").ais_income == Decimal("100")
+
+
+def test_leg02_notes_say_which_section(tmp_path):
+    ais = _ais_with([_income_element("Interest from deposit", "Synthetic Bank A", "1000")],
+                    [_income_element("Interest from deposit", "Synthetic Bank B", "2000", l1src="SFT")])
+    rep = _books_tieout(ais, *_income_book("OS_INTEREST_BANK", "i1", 3000))
+    assert any("TDS section" in x for x in rep.source_notes)
+    assert any("counted from SFT" in x for x in rep.source_notes)

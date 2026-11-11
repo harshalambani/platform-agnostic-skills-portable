@@ -18,10 +18,9 @@ We load entities.yaml, mask each candidate's real PAN the same way
 possible) up front -- if no entity's masked PAN matches the prefix, the
 run fails loud with an ERROR string rather than guessing.
 
-v1 scope note (mirrors reconcile_books.py's own docstring): the AIS side
-of the books tie-out only looks at tdsTcs-reported income, to avoid
-double-counting against sft/other AIS sections that may describe the
-same underlying transaction from a different angle.
+Scope note (mirrors reconcile_books.py's own docstring): the AIS side of the
+books tie-out counts tdsTcs income (nil-TDS rows included) plus SFT dividend
+and interest, each source counted once; securities SFT never enters income.
 
 Feedback suggestions (Phase D) are ADVISORY ONLY -- see feedback.py's
 module docstring. Nothing in this skill submits anything to the AIS
@@ -252,7 +251,7 @@ def run(
                 except configs.MappingValidationError as e:
                     summary_lines.append(f"Books: mapping file invalid ({e}) -- tie-out skipped.")
                 else:
-                    books_report = RB.reconcile_ais_vs_books(report, book, mapping, year_key)
+                    books_report = RB.reconcile_ais_vs_books(report, book, mapping, year_key, normalized)
                     tds_flag = "DIFFERS" if books_report.flag_tds_mismatch else "matches"
                     summary_lines.append(
                         f"Books: {len(books_report.flagged_categories)} categor(y/ies) flagged, "
