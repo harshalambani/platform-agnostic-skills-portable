@@ -385,6 +385,8 @@ def test_a_run_of_the_browser_tests_leaves_nothing_in_the_temp_folder(tmp_path):
          "-k", "real_browser or detects_the_old", str(Path(__file__).resolve())],
         env=env, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
     assert cp.returncode == 0, cp.stdout[-2000:] + cp.stderr[-1000:]
+    if "passed" not in cp.stdout and "skipped" in cp.stdout:
+        pytest.skip("the browser did not start here, so there is no profile to check")
     assert "4 passed" in cp.stdout, cp.stdout[-1500:]
     left = []
     total = 0
