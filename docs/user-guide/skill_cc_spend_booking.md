@@ -35,6 +35,9 @@ After the bank statements are imported and the card statements are sorted, when 
 - **Corporate card prepayments -- codes of unmatched payments to book to the prepayment account (optional)** (optional) — accepts: Codes separated by spaces or commas. Needs ccp_split_from and prepayment_account on the Cards screen.
   - Codes printed beside unmatched payments in the report. Each code books that payment to the prepayment account (Drawings) instead of leaving it in the pool.
   - ⚠️ Only unmatched payments on or after the split date can be marked. Nothing is marked for you.
+- **Payment confirmation emails (optional)** (optional) — accepts: A folder. Only .msg files from the cred.club domain are read; other files are skipped and counted.
+  - Folder of CRED payment confirmation emails (.msg). They only confirm which card a bank payment was for; they never book anything.
+  - ⚠️ Leave blank to run exactly as before. An email naming a different card than the payment is routed to holds that payment and raises a RED FLAG. Needs the card list.
 
 ## How to run
 

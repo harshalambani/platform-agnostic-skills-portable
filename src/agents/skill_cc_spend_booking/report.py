@@ -2,6 +2,7 @@
 
 Block order in the text (decision: payments without a statement first;
   a stopped AI pass, with its Suspense count, comes before all of them):
+  0. RED FLAG (CC-40): a CRED payment email names a different card than the payment is routed to (held)
   1. RED FLAG: bank payments to Credit Card Payment that match no statement
   2. fees booked
   3. large spends (possible assets)
@@ -51,6 +52,8 @@ class RunReport:
     untied: list = field(default_factory=list)                  # CC-26: [(Statement, TieOut)] imported although the tie-out did not pass
     view_statements: list = field(default_factory=list)         # CC-23: PDF statements read in the range
     view_per_statement: dict = field(default_factory=dict)      # CC-23: id(statement) -> journals (read-only view input)
+    cred_email: object = None                           # CC-40: EmailResult, None when no folder was given
+    cred_email_held: list = field(default_factory=list) # CC-40: payments held (not booked) after a card clash
     view_pool: list = field(default_factory=list)               # CC-23: bank payments considered (BookPayment)
     view_range: tuple = ()                                      # CC-23: (start, end) of the run
     csv_pairings: list = field(default_factory=list)            # CC-27: Pairings of CSV payment rows with bank payments
@@ -100,7 +103,7 @@ class RunReport:
     def open_items(self) -> bool:
         """True while anything stops the run from being called a success."""
         return bool(self.ai_stop or self.pool_failure or self.split_refused or self.issues or self.unmatched_payments or self.lines_unmatched or self.ambiguous
-                    or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld or self.flagged
+                    or self.cred_email_held or (self.cred_email is not None and self.cred_email.open_count) or self.refused or self.untied or self.csv_refused or self.held or self.csv_lines_unmatched or self.unpaid or self.partly_booked or self.withheld or self.flagged
                     or (self.emi and self.emi.get("rows"))
                     or any(s.status not in CLOSED_STATUSES for s in self.settlements)
                     or abs(self.tie.get("other", 0.0)) > self.tie.get("tol", 0.5))
@@ -210,6 +213,48 @@ def payment_statement_block(rep: RunReport) -> str:
             by_month.setdefault(f"{d:%b %Y}", []).append((d, a))
         for m, pairs in by_month.items():
             out.append(f"    {m} | {_ds(pairs)}")
+    return "\n".join(out)
+
+
+def email_clash_block(rep: RunReport) -> str:
+    """CC-40: first thing the reader sees. The payment is held: nothing is booked for it."""
+    res = rep.cred_email
+    if res is None or not res.held:
+        return ""
+    out = []
+    for t in res.held:
+        p, em = t.payment, t.email
+        out.append(f"RED FLAG: the {p.date:%d %b %Y} bank payment of {money(p.amount)} was NOT booked (held). "
+                   f"The CRED payment email {em.name} names card {t.card}, but the payment is routed to "
+                   f"{', '.join(t.routed)}. Check which card was paid, then fix the card list or the narration.")
+    return "\n".join(out)
+
+
+def email_block(rep: RunReport) -> str:
+    """CC-40: evidence summary. Emails confirm a routing; they never create or change a booking."""
+    res = rep.cred_email
+    if res is None:
+        return ""
+    out = [f"CRED PAYMENT EMAILS (evidence only; nothing is booked from them): "
+           f"{len(res.confirmed)} of {res.n_debits} bank payments confirmed by email; "
+           f"{res.n_emails} readable email(s), {len(res.skipped)} file(s) skipped"]
+    for name, why in res.skipped:
+        out.append(f"  skipped: {name} ({why})")
+    for name, why in res.unreadable:
+        out.append(f"  UNREADABLE: {name} ({why})")
+    for em, why in res.unmatched_emails:
+        out.append(f"  email not matched: {em.name} | {money(em.amount)} paid {em.pay_date:%d %b %Y} | {why}")
+    for ems, pays in res.ambiguous:
+        out.append("  AMBIGUOUS, none tied: emails " + ", ".join(f"{e.name} ({money(e.amount)})" for e in ems)
+                   + " and debits " + ", ".join(f"{p.date:%d %b %Y} {money(p.amount)}" for p in pays))
+    for p in res.unmatched_debits:
+        out.append(f"  debit with no email: {p.date:%d %b %Y} | {money(p.amount)} | basis: {res.basis.get(p.guid, '')}")
+    for t in res.confirmed:
+        out.append(f"  confirmed: {t.payment.date:%d %b %Y} | {money(t.payment.amount)} | {t.card} | basis: email-confirmed")
+    for t in res.ties:
+        if t.status == "unrouted":
+            out.append(f"  email names {t.card} for the {t.payment.date:%d %b %Y} payment of {money(t.payment.amount)}, "
+                       f"which no statement line or narration routes to a card; nothing changed")
     return "\n".join(out)
 
 
@@ -461,8 +506,8 @@ def tie_block(rep: RunReport) -> str:
 
 def build_message(rep: RunReport) -> str:
     parts = []
-    for block in (pool_block(rep), held_block(rep), not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep),
-                  prepay_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
+    for block in (email_clash_block(rep), pool_block(rep), held_block(rep), not_tied_block(rep), ai_stop_block(rep), red_flag_block(rep),
+                  email_block(rep), prepay_block(rep), fee_block(rep), large_spend_block(rep), statement_block(rep),
                   emi_block(rep)):
         if block:
             parts.append(block)
@@ -473,6 +518,8 @@ def build_message(rep: RunReport) -> str:
         n = (1 if rep.ai_stop else 0) + len(rep.issues) + len(rep.unmatched_payments) + len(rep.refused) + len(rep.withheld) + len(rep.flagged) \
             + len(rep.lines_unmatched) + len(rep.ambiguous) + len(rep.unpaid) + len(rep.partly_booked)             + len(rep.csv_refused) + len(rep.untied) + len(rep.csv_lines_unmatched) \
             + len(rep.split_refused) + (1 if rep.pool_failure else 0)
+        if rep.cred_email is not None:
+            n += rep.cred_email.open_count
         n += sum(1 for s in rep.settlements if s.status not in CLOSED_STATUSES)
         head = f"Credit card spend booking NOT complete: {max(n, 1)} open item(s) above."
     else:
