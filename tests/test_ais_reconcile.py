@@ -2224,8 +2224,8 @@ def test_leg02_unidentifiable_sft_not_added_over_existing_tds_income():
 
 def test_leg02_different_source_in_sft_is_added():
     ais = _ais_with(
-        [_income_element("Interest from deposit", "Synthetic Bank A", "1000")],
-        [_income_element("Interest from deposit", "Synthetic Bank B", "2000", l1src="SFT")])
+        [_income_element("Interest from deposit", "Alpha Finance", "1000")],
+        [_income_element("Interest from deposit", "Beta Capital", "2000", l1src="SFT")])
     rep = _books_tieout(ais, *_income_book("OS_INTEREST_BANK", "i1", 3000))
     interest = _cat(rep, "interest")
     assert interest.ais_income == Decimal("3000")
@@ -2240,7 +2240,7 @@ def test_leg02_securities_sft_never_enters_income():
         _income_element("Purchase of mutual fund units", "Synthetic AMC", "50000", l1src="SFT", info="S-5"),
     ])
     n = N.normalize(ais)
-    total, tds_part, sft_part, _notes = RB._ais_by_category(R.reconcile_internal(n), n)
+    total, tds_part, sft_part, _notes, _possible = RB._ais_by_category(R.reconcile_internal(n), n)
     assert total == {} and sft_part == {}
 
 
@@ -2264,8 +2264,140 @@ def test_leg02_without_normalized_behaviour_is_tds_only():
 
 
 def test_leg02_notes_say_which_section(tmp_path):
-    ais = _ais_with([_income_element("Interest from deposit", "Synthetic Bank A", "1000")],
-                    [_income_element("Interest from deposit", "Synthetic Bank B", "2000", l1src="SFT")])
+    ais = _ais_with([_income_element("Interest from deposit", "Alpha Finance", "1000")],
+                    [_income_element("Interest from deposit", "Beta Capital", "2000", l1src="SFT")])
     rep = _books_tieout(ais, *_income_book("OS_INTEREST_BANK", "i1", 3000))
     assert any("TDS section" in x for x in rep.source_notes)
     assert any("counted from SFT" in x for x in rep.source_notes)
+
+
+# ---------------------------------------------------------------------------
+# LEG-02 identity: payer name comes from the element's l2 "Information Source"
+# (real shape: positional rows, no name on l1, TAN-shaped id in tdsTcs, PAN-shaped .SFT id in sft)
+# ---------------------------------------------------------------------------
+
+def _real_element(section, title, info_id, source, amount):
+    l1 = {
+        "columnLabel": [_column_label_seq("tsnId", "Txn", "string", 0),
+                        _column_label_seq("amtPaid", "Amount", "decimal", 1, display_feedback=True),
+                        _column_label_seq("quarter", "Quarter", "string", 2)],
+        "columnData": [["TSN-1", amount, "Q1"]],
+        "columnDataType": ["string", "decimal", "string"],
+    }
+    l2 = {
+        "columnLabel": ["Information Category", "Information Source", "Count", "Amount"],
+        "columnData": [[title, source, "1", amount]],
+        "columnDataType": ["string", "string", "numeric", "decimal"],
+    }
+    return {"title": title, "l1Src": "TDS" if section == "tdsTcs" else "SFT",
+            "infoSrcId": info_id, "l1": l1, "l2": l2}
+
+
+def _tds_el(title, source, amount, n=1):
+    return _real_element("tdsTcs", title, f"TANAA000{n}A", source, amount)
+
+
+def _sft_el(title, source, amount, n=1):
+    return _real_element("sft", title, f"ZZZZZ000{n}Z.SFT012", source, amount)
+
+
+def _tieout(tds, sft, tag="OS_DIVIDEND", book_amount=0):
+    ais = _ais_with(tds, sft)
+    n = N.normalize(ais)
+    book, mapping = _income_book(tag, "g1", book_amount)
+    return RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY, n), n
+
+
+def test_leg02_real_shape_sft_only_dividend_payer_is_added():
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "GAMMA FOODS LIMITED (ZZZZZ0001Z)", "400")])
+    div = _cat(rep, "dividend")
+    assert div.ais_income == Decimal("1400")
+    assert div.from_tds_section == Decimal("1000") and div.from_sft_only == Decimal("400")
+    assert not rep.possible_same_payers
+
+
+def test_leg02_real_shape_never_reaches_unknown_path_when_l2_name_present():
+    """Regression this fix exists for: real rows carry no name on l1; the l2 name must be used."""
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "GAMMA FOODS LIMITED (ZZZZZ0001Z)", "400")])
+    assert not any("cannot be identified" in x for x in rep.source_notes)
+    assert _cat(rep, "dividend").from_sft_only == Decimal("400")
+
+
+def test_leg02_two_sft_elements_same_new_payer_added_once_each_one_note():
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "GAMMA FOODS LTD (ZZZZZ0001Z)", "400", n=1),
+                      _sft_el("Dividend", "Gamma Foods Limited (ZZZZZ0001Z)", "100", n=2)])
+    assert _cat(rep, "dividend").from_sft_only == Decimal("500")
+    assert sum("counted from SFT" in x for x in rep.source_notes) == 1
+
+
+def test_leg02_exact_name_with_different_bracketed_ids_is_not_added():
+    """NEGATIVE: same payer, different ids -> total is the TDS amount only."""
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LTD (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "Alpha Finance Limited (ZZZZZ0009Z)", "1000")])
+    div = _cat(rep, "dividend")
+    assert div.ais_income == Decimal("1000") and div.ais_income != Decimal("2000")
+    assert div.from_sft_only == Decimal("0")
+    assert any("both sections" in x for x in rep.source_notes)
+
+
+def test_leg02_bracketed_id_is_never_part_of_the_name():
+    """NEGATIVE: ids must not decide the match."""
+    assert RB._norm_name("ALPHA FINANCE LTD (id1)") == RB._norm_name("Alpha Finance Limited (id2)")
+    assert "ID1" not in RB._norm_name("ALPHA FINANCE LTD (id1)")
+
+
+def test_leg02_near_match_not_added_and_listed_for_the_user():
+    """NEGATIVE: same first word, different rest -> NOT added, and visible in the possible-same list."""
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "ALPHA HOLDINGS LIMITED (ZZZZZ0001Z)", "700")])
+    div = _cat(rep, "dividend")
+    assert div.ais_income == Decimal("1000") and div.from_sft_only == Decimal("0")
+    assert len(rep.possible_same_payers) == 1
+    msg = rep.possible_same_payers[0]
+    assert "Alpha Holdings" in msg and "Alpha Finance" in msg and "NOT added" in msg
+
+
+def test_leg02_near_match_reaches_the_workbook(tmp_path):
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "ALPHA HOLDINGS LIMITED (ZZZZZ0001Z)", "700")])
+    ws_wb = X._write_books_sheet
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws_wb(wb, rep)
+    ws = wb["Books Reconciliation"]
+    text = " ".join(str(c.value) for r in ws.iter_rows() for c in r if c.value is not None)
+    assert "may be the same payer" in text and "please check" in text
+
+
+def test_leg02_unidentified_sft_not_added_when_tds_head_has_income():
+    """NEGATIVE: no l2 name and no l1 name field -> keep the conservative rule."""
+    sft = _sft_el("Dividend", "", "300")
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")], [sft])
+    assert _cat(rep, "dividend").ais_income == Decimal("1000")
+    assert any("cannot be identified" in x for x in rep.source_notes)
+
+
+def test_leg02_unidentified_sft_added_when_tds_head_has_none():
+    rep, n = _tieout([], [_sft_el("Dividend", "", "300")])
+    assert _cat(rep, "dividend").ais_income == Decimal("300")
+
+
+def test_leg02_real_shape_securities_sft_still_not_added():
+    """NEGATIVE: purchase and sale categories stay out even with a clean l2 name."""
+    rep, n = _tieout([_tds_el("Dividend", "ALPHA FINANCE LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Sale of securities", "GAMMA BROKING LIMITED (ZZZZZ0001Z)", "900000"),
+                      _sft_el("Purchase of securities", "GAMMA BROKING LIMITED (ZZZZZ0001Z)", "800000", n=2)])
+    assert _cat(rep, "dividend").ais_income == Decimal("1000")
+
+
+def test_leg02_filler_only_names_do_not_match_and_count_as_unidentified():
+    """NEGATIVE: 'THE COMPANY LIMITED' normalises to nothing; two such names must not match each other."""
+    assert RB._norm_name("THE COMPANY LIMITED") == ""
+    rep, n = _tieout([_tds_el("Dividend", "THE COMPANY LIMITED (TANAA0001A)", "1000")],
+                     [_sft_el("Dividend", "The Company Ltd (ZZZZZ0001Z)", "1000")])
+    assert _cat(rep, "dividend").ais_income == Decimal("1000")
+    assert not any("both sections" in x for x in rep.source_notes)
+    assert any("cannot be identified" in x for x in rep.source_notes)

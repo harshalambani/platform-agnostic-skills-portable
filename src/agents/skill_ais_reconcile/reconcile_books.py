@@ -23,9 +23,12 @@ AIS INCOME SOURCE (LEG-02): the AIS side counts the TDS-section (tdsTcs) income 
   income event under both sections, so each SOURCE is counted ONCE: when the same source (a TAN or a
   normalised payer name, whichever the rows carry) and the same head appear in both, the TDS-section
   amount is used and the SFT amount is not added; the report says which section each amount came from.
-  An SFT row whose source cannot be identified is never added on top of a head that already has
-  TDS-section income (it could be the same income); it is listed as not counted. Securities purchase
-  and sale SFT rows never enter income. Callers pass the NormalizedAis as `normalized` for the SFT
+  The source is the payer name in the element's l2 "Information Source" value (ids differ between the
+  sections: TAN in tdsTcs, PAN in sft), compared after dropping any bracketed id, punctuation and filler
+  words. A payer whose name only shares its first word with a TDS payer is NOT added and is listed as a
+  possible same payer for the user to check. An SFT row whose source cannot be identified is never added
+  on top of a head that already has TDS-section income (it could be the same income); it is listed as
+  not counted. Securities purchase and sale SFT rows never enter income. Callers pass the NormalizedAis as `normalized` for the SFT
   widening; without it only the TDS section is counted, as before.
 
 Category buckets mirror reconcile_26as.py's categories (interest / dividend
@@ -34,6 +37,7 @@ from reconcile_26as rather than redefined here.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -102,6 +106,8 @@ class AisBooksReport:
     # LEG-02: one line per source/head saying which section its AIS amount was counted from, and which
     # SFT amounts were NOT counted (same source already in the TDS section, or source unidentifiable).
     source_notes: list[str] = field(default_factory=list)
+    # LEG-02: SFT payers that share a first word with a TDS payer: not added, listed for the user to check.
+    possible_same_payers: list[str] = field(default_factory=list)
 
     @property
     def flagged_categories(self) -> list[str]:
@@ -184,14 +190,51 @@ _NAME_FIELDS = ("deductorName", "payerName", "nameOfPayer", "nameOfDeductor", "r
 _TAN_FIELDS = ("tan", "TAN", "deductorTan", "payerTan", "reportingEntityTan")
 _SFT_EXCLUDE = ("purchase", "sale", "redemption", "buyback", "buy back")
 
+# Words dropped from a payer name before comparing, so "Alpha Finance Ltd" and "ALPHA FINANCE LIMITED"
+# are the same payer. Keep this list small; it is the only place filler words are defined.
+_NAME_FILLER = frozenset({"LIMITED", "LTD", "PRIVATE", "PVT", "THE", "CO", "COMPANY", "AND",
+                          "INC", "CORP", "CORPORATION"})
+_SOURCE_LABEL = "informationsource"        # "Information Source" matched ignoring case, spaces, underscores
+
 
 def _norm_name(value: Any) -> str:
-    return " ".join("".join(ch if ch.isalnum() else " " for ch in str(value).upper()).split())
+    """Upper-case, strip a trailing bracketed id, punctuation to spaces, drop filler words.
+    Empty result = the name is unusable (counts as unidentified)."""
+    text = re.sub(r"\([^()]*\)\s*$", "", str(value).strip())
+    words = "".join(ch if ch.isalnum() else " " for ch in text.upper()).split()
+    return " ".join(w for w in words if w not in _NAME_FILLER)
 
 
-def _identities(row: Any) -> set:
-    """The source identities a row carries: a TAN and/or a normalised payer name. Empty = unidentifiable."""
+def _element_key(row: Any) -> tuple:
+    return (row.section_key, row.category, row.info_src_id)
+
+
+def _element_names(normalized: Any) -> dict:
+    """element -> normalised payer name, read from the element's l2 'Information Source' value."""
+    out: dict = {}
+    for r in normalized.rows:
+        if r.level != "l2":
+            continue
+        key = _element_key(r)
+        if out.get(key):
+            continue
+        for label, value in r.fields.items():
+            if re.sub(r"[\s_]+", "", str(label)).lower() == _SOURCE_LABEL and value is not None:
+                name = _norm_name(value)
+                if name:
+                    out[key] = name
+                break
+    return out
+
+
+def _identities(row: Any, element_names: dict | None = None) -> set:
+    """The source identities of a row. The element's l2 payer name wins; otherwise a TAN and/or a payer
+    name carried on the l1 row itself. Empty = unidentifiable."""
     out = set()
+    name = (element_names or {}).get(_element_key(row))
+    if name:
+        out.add("NAME:" + name)
+        return out
     for f in _TAN_FIELDS:
         v = row.fields.get(f)
         if v is not None and str(v).strip():
@@ -203,6 +246,10 @@ def _identities(row: Any) -> set:
     return out
 
 
+def _first_word(ident: str) -> str:
+    return ident.split(":", 1)[-1].split(" ", 1)[0] if ident.startswith("NAME:") else ""
+
+
 def _row_amount(row: Any) -> Decimal | None:
     if not row.feedback_editable_field:
         return None
@@ -210,7 +257,8 @@ def _row_amount(row: Any) -> Decimal | None:
 
 
 def _ais_by_category(report: AisRecoReport, normalized: Any = None):
-    """(total by category, TDS-section part, SFT-only part, notes). Each source is counted once."""
+    """(total by category, TDS-section part, SFT-only part, notes, possible-same-payer notes).
+    Each source is counted once; a possibly-same payer is neither added nor silently dropped."""
     tds: dict[str, Decimal] = {}
     for el in report.elements:
         if el.section_key != "tdsTcs" or el.detail_sum is None:
@@ -219,15 +267,19 @@ def _ais_by_category(report: AisRecoReport, normalized: Any = None):
         tds[category] = tds.get(category, Decimal("0")) + el.detail_sum
     sft: dict[str, Decimal] = {}
     notes: list[str] = []
+    possible: list[str] = []
     if normalized is None:
-        return dict(tds), tds, sft, notes
+        return dict(tds), tds, sft, notes, possible
 
+    names = _element_names(normalized)
     tds_ids_by_head: dict[str, set] = {}
     for r in normalized.rows:
         if r.section_key == "tdsTcs" and r.level == "l1":
-            tds_ids_by_head.setdefault(_classify_ais_category(r.category), set()).update(_identities(r))
+            tds_ids_by_head.setdefault(_classify_ais_category(r.category), set()).update(
+                _identities(r, names))
 
     sft_groups: dict[tuple, Decimal] = {}
+    near_with: dict[tuple, str] = {}
     order: list[tuple] = []
     for r in normalized.rows:
         if r.section_key != "sft" or r.level != "l1":
@@ -239,10 +291,16 @@ def _ais_by_category(report: AisRecoReport, normalized: Any = None):
         amt = _row_amount(r)
         if amt is None:
             continue
-        ids = _identities(r)
-        shared = ids & tds_ids_by_head.get(head, set())
+        ids = _identities(r, names)
+        tds_ids = tds_ids_by_head.get(head, set())
+        shared = ids & tds_ids
+        near = sorted(t for t in tds_ids for i in ids
+                      if _first_word(i) and _first_word(i) == _first_word(t) and t not in ids)
         if shared:
             key = (head, "dup", min(shared))
+        elif near:
+            key = (head, "near", min(ids))
+            near_with[key] = near[0]
         elif ids:
             key = (head, "new", min(ids))
         else:
@@ -260,6 +318,12 @@ def _ais_by_category(report: AisRecoReport, normalized: Any = None):
         if kind == "dup":
             notes.append(f"{head}: {label} is in both sections; counted from the TDS section, the SFT "
                          f"amount {amt:,.2f} is NOT added (counted once)")
+        elif kind == "near":
+            other = near_with[key].split(":", 1)[-1].title()
+            msg = (f"{head}: SFT payer {label} ({amt:,.2f}) may be the same payer as TDS-section payer "
+                   f"{other}; the SFT amount is NOT added until you check")
+            notes.append(msg)
+            possible.append(msg)
         elif kind == "unknown" and tds.get(head, Decimal("0")) != Decimal("0"):
             notes.append(f"{head}: SFT amount {amt:,.2f} from a source that cannot be identified is NOT "
                          f"counted, because the TDS section already reports {head} income and it may be "
@@ -270,7 +334,7 @@ def _ais_by_category(report: AisRecoReport, normalized: Any = None):
     total = dict(tds)
     for head, v in sft.items():
         total[head] = total.get(head, Decimal("0")) + v
-    return total, tds, sft, notes
+    return total, tds, sft, notes, possible
 
 
 def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
@@ -284,7 +348,7 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
     books_cat = _books_by_category(by_tag)
     books_tds = _books_tds_credit(by_tag)
 
-    ais_cat, ais_tds_part, ais_sft_part, source_notes = _ais_by_category(report, normalized)
+    ais_cat, ais_tds_part, ais_sft_part, source_notes, possible_same = _ais_by_category(report, normalized)
     ais_tds = report.total_tds_credit
 
     categories: list[CategoryBooksTieOut] = []
@@ -319,4 +383,5 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
         ais_income_not_in_books=ais_income_not_in_books,
         untagged_income_account_count=untagged_income_count,
         source_notes=source_notes,
+        possible_same_payers=possible_same,
     )

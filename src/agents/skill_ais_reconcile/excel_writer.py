@@ -396,6 +396,18 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
         row += 1
     row += 1
 
+    _set(ws, row, 1, "SFT payers that may be the same as a TDS payer (NOT added -- please check)",
+         bold=True, fill=_HEADER_FILL)
+    row += 1
+    if report.possible_same_payers:
+        for note in report.possible_same_payers:
+            _set(ws, row, 1, note, fill=_RED_FILL, color=_RED_FONT_COLOR, bold=True)
+            row += 1
+    else:
+        _set(ws, row, 1, "(none)")
+        row += 1
+    row += 1
+
     # -- Completeness call-outs (books is primary) ---------------------------
     _set(ws, row, 1, "AIS income not found in books (books is primary -- "
                       "check for missing postings)", bold=True, fill=_HEADER_FILL)
