@@ -286,9 +286,47 @@ def _write_import_csv(ready, path: Path) -> None:
         w.writerows(rows)
 
 
+def _cred_email_pass(folder, rep, all_lines, pool_pay, cred_max, cards, cards_problem, outcome):
+    """CC-40. Returns the outcome to use (re-matched without the held payments when a card clashes)."""
+    from agents.skill_cc_spend_booking import cred_email as CE
+    if not Path(folder).is_dir():
+        rep.issues.append("CRED payment confirmation emails: the folder does not exist; the emails were not used")
+        return outcome
+    if not cards:
+        rep.issues.append("CRED payment confirmation emails: the card list is not available, so no email can be "
+                          "tied to a card; the emails were not used" + (f" ({cards_problem})" if cards_problem else ""))
+        return outcome
+    res = CE.scan(folder)
+    held_ids: set = set()
+    clashes: dict = {}
+    for _ in range(len(pool_pay) + 1):
+        pool_now = [p for p in pool_pay if p.guid not in held_ids]
+        routing: dict = {}
+        for pr in outcome.pairings:
+            for p in pr.payments:
+                routing.setdefault(p.guid, set()).add(getattr(pr.line.stmt, "card", None))
+        named = M.narration_cards(pool_now, cards)
+        for g, cs in named.items():
+            routing.setdefault(g, set()).update(c.label for c in cs)
+        CE.tie(res, [p for p in pool_now if p.in_range], routing, cards, set(named))
+        for t in res.held:
+            clashes.setdefault(t.payment.guid, t)
+        new = {t.payment.guid for t in res.held} - held_ids
+        if not new:
+            break
+        held_ids |= new
+        outcome = M.match_payments(all_lines, [p for p in pool_pay if p.guid not in held_ids], cred_max, cards)
+    res.held = sorted(clashes.values(), key=lambda t: (t.payment.date, t.payment.guid))
+    res.n_debits += len(res.held)
+    rep.cred_email = res
+    rep.cred_email_held = [p for p in pool_pay if p.guid in held_ids]
+    return outcome
+
+
 def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, period: str = "",
         custom_start: str = "", custom_end: str = "", entities_path: str = "", settings_path: str = "",
-        config_path: str = None, model_override: str = None, prepayment_marks: str = ""):
+        config_path: str = None, model_override: str = None, prepayment_marks: str = "",
+        cred_email_dir: str = ""):
     from agents.period_picker import resolve_period
     from agents.outputs import ReplyWithOutputs, extra_output
 
@@ -463,6 +501,12 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         csv_lines = M.pay_lines(csv_sts)
         csv_ids = {id(s) for s in csv_sts}
         outcome = M.match_payments(lines + csv_lines, pool_pay, cred_max, cards)
+        # CC-40: CRED payment-confirmation emails are EVIDENCE only. They never create, change or double a
+        # booking. A card clash holds that payment: it leaves the match pool and is not booked. A blank folder
+        # skips all of this, so the run is exactly as before.
+        if (cred_email_dir or "").strip():
+            outcome = _cred_email_pass(cred_email_dir.strip(), rep, lines + csv_lines, pool_pay, cred_max, cards,
+                                       cards_problem, outcome)
         rep.pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) not in csv_ids]
         rep.csv_pairings = [pr for pr in outcome.pairings if id(pr.line.stmt) in csv_ids]
         rep.lines_unmatched = [ln for ln in outcome.lines_unmatched if id(ln.stmt) not in csv_ids]
@@ -486,7 +530,8 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _paired = {p.guid for pr in outcome.pairings for p in pr.payments}
         _paired |= {p.guid for s in settlements for p in s.payments}
         _unpaired = {p.guid for p in outcome.payments_unmatched if p.in_range and p.guid not in _paired}
-        _by_code = {J.prepay_code(p.guid): p for p in pool_pay if p.in_range}
+        _held_ids = {p.guid for p in rep.cred_email_held}      # CC-40: a held payment is never marked or booked
+        _by_code = {J.prepay_code(p.guid): p for p in pool_pay if p.in_range and p.guid not in _held_ids}
         prepay_js: dict = {}
         for tok in mark_tokens:
             p = _by_code.get(tok)

@@ -56,6 +56,10 @@ inputs:
     type: "text"
     label: "Corporate card prepayments -- codes of unmatched payments to book to the prepayment account (optional)"
     required: false
+  - name: "cred_emails"
+    type: "directory"
+    label: "Payment confirmation emails (optional)"
+    required: false
 
 run_args:
   pdf_dir: "{inputs.pdf_dir}"
@@ -66,6 +70,7 @@ run_args:
   custom_start: "{inputs.custom_start}"
   custom_end: "{inputs.custom_end}"
   prepayment_marks: "{inputs.prepayment_marks}"
+  cred_email_dir: "{inputs.cred_emails}"
   entities_path: "{data_root}/itr/entities.yaml"
   settings_path: "{data_root}/settings/config.yaml"
   config_path: "{config_path}"
@@ -132,6 +137,10 @@ help:
       tooltip: "Codes printed beside unmatched payments in the report. Each code books that payment to the prepayment account (Drawings) instead of leaving it in the pool."
       accepts: "Codes separated by spaces or commas. Needs ccp_split_from and prepayment_account on the Cards screen."
       gotchas: "Only unmatched payments on or after the split date can be marked. Nothing is marked for you."
+    - name: "cred_emails"
+      tooltip: "Folder of CRED payment confirmation emails (.msg). They only confirm which card a bank payment was for; they never book anything."
+      accepts: "A folder. Only .msg files from the cred.club domain are read; other files are skipped and counted."
+      gotchas: "Leave blank to run exactly as before. An email naming a different card than the payment is routed to holds that payment and raises a RED FLAG. Needs the card list."
   steps:
     - "Run Credit Card - Sort PDFs first, and import the bank statements into the book."
     - "Pick the entity and financial year, then the statements folder and the period."
