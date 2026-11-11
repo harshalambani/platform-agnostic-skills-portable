@@ -270,6 +270,32 @@ def test_e2e_card_clash_is_a_red_flag_at_the_top_and_the_payment_is_not_booked(t
     assert not any(r.get("Description", "").startswith("Moves card payment") for r in rows1)
 
 
+def test_e2e_card_clash_pool_tie_out_shows_the_held_payment_never_a_silent_tie(tmp_path, monkeypatch):    # CC-40 follow-up
+    """A held payment stays in the pool (the bank paid it) but books nothing, so the tie-out cannot tie to
+    zero. It must be reported as an open residual AND the held entry must be named, never a quiet 'ties'."""
+    put(tmp_path / "mail", "x.msg", issuer="ICICI Bank", last4="2222")
+    r, rows, _c, out = _run(tmp_path, monkeypatch, folder=tmp_path / "mail")
+    text = str(r)
+    assert text.startswith("RED FLAG") and "NOT booked (held)" in text
+    tie_part = text[text.index("tie-out for the range"):]
+    # the held 1,900.00 is in the pool, so the figure is open and flagged as a residual
+    assert "before (book, as it stands): 1,900.00" in tie_part
+    assert "these journals: 0.00" in tie_part
+    assert "after: 1,900.00  <- residual" in tie_part
+    # and the line that explains it says it was held, not just a bare 'other'
+    assert "HDFC CC PAYMENT [HELD: card clash, not booked]: 1,900.00" in tie_part
+    # the run is not complete and writes nothing
+    assert "NOT complete" in text and not rows
+    # negative: it never claims the pool is tied, and nothing is booked against the clashing payment
+    assert "tie-out ties" not in text.lower() and "residual: 0.00" not in tie_part
+    assert not out.exists() or not out.read_text(encoding="utf-8").strip()
+
+
+def test_e2e_no_clash_payment_line_is_not_labelled_held(tmp_path, monkeypatch):    # NEGATIVE
+    r, _rows, _c, _o = _run(tmp_path, monkeypatch)
+    assert "[HELD" not in str(r)
+
+
 def test_e2e_missing_card_list_is_reported_and_emails_unused(tmp_path, monkeypatch):
     put(tmp_path / "mail", "x.msg")
     (tmp_path / "cc_cards.yaml").unlink(missing_ok=True)

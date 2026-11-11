@@ -4,7 +4,8 @@ tests/skill_itr_workbook/test_parse_gnucash.py -- Batch 2 tests: the
 the book<->HTML cross-check (plan sections 1.2, 3.2, 6.1). Fully offline;
 synthetic fixtures only (see fixture_gen.py's build_syn_ind_gnucash /
 build_syn_huf_gnucash). Real-corpus tests are behind @pytest.mark.local_samples
-and skip when Data/GNUCashReports/ is absent, so CI never touches real data.
+and skip unless PASK_REAL_CORPUS_CONFIG names a local file (see real_corpus_config.py), so CI never
+touches real data.
 """
 from __future__ import annotations
 
@@ -18,7 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-REAL_SAMPLES_DIR = ROOT / "Data" / "GNUCashReports"
 
 for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
     if p not in sys.path:
@@ -30,6 +30,7 @@ import lots  # noqa: E402
 import quarters  # noqa: E402
 import verify as vfy  # noqa: E402
 import fixture_gen  # noqa: E402
+import real_corpus_config as rcc  # noqa: E402
 
 YEAR_KEY = "2024-25"
 
@@ -232,46 +233,41 @@ def test_b1_adversarial_tests_present():
 
 
 # ---------------------------------------------------------------------------
-# Real-corpus tests -- never run in CI (skipped when the folder is absent).
+# Real-corpus tests -- never run in CI (skipped unless PASK_REAL_CORPUS_CONFIG is set).
 # ---------------------------------------------------------------------------
 
-_REAL_PAIRS = [
-    ("DaveDoe2425.html", "DaveDoe2425.gnucash"),
-    ("CarolDoe2425.html", "CarolDoe2425.gnucash"),
-    ("AliceDoe2425.html", "AliceDoe2425.gnucash"),
-    ("BobDoe2425.html", "BobDoe2425.gnucash"),
-    ("BobDoeHUF2425.html", "BobDoeHUF2425.gnucash"),
-]
+def _real_pairs_or_skip():
+    pairs, why = rcc.need_pairs()
+    if pairs is None:
+        pytest.skip(why)
+    return pairs
 
 
 @pytest.mark.local_samples
-def test_real_corpus_cross_check_green_for_all_5_entities():
-    if not REAL_SAMPLES_DIR.is_dir():
-        pytest.skip("Data/GNUCashReports/ not present -- real-file smoke test skipped")
-    for html_name, book_name in _REAL_PAIRS:
-        tree = pe.parse_file(REAL_SAMPLES_DIR / html_name)
-        book = pg.parse_book(REAL_SAMPLES_DIR / book_name)
+def test_real_corpus_cross_check_green_for_all_listed_entities():
+    """Pairs come from the local file named by PASK_REAL_CORPUS_CONFIG (see real_corpus_config.py)."""
+    pairs = _real_pairs_or_skip()
+    assert pairs
+    for html_path, book_path in pairs:
+        tree = pe.parse_file(html_path)
+        book = pg.parse_book(book_path)
         results = vfy.cross_check(tree, book, YEAR_KEY)
         mismatches = [r for r in results if not r.ok]
-        assert results, f"{html_name}: no matching GUIDs compared"
-        assert mismatches == [], f"{html_name}: {mismatches}"
+        assert results, f"{html_path.name}: no matching GUIDs compared"
+        assert mismatches == [], f"{html_path.name}: {mismatches}"
 
 
 @pytest.mark.local_samples
-def test_real_corpus_dave_lots_reproduce_capgain_sheet():
-    """FY24-25 lot reconstruction for the richest real book must reproduce
-    the books' own gain lines: every sale reconciles, one scrip carries two
-    lots (one a loss, one a gain), and the gains summed per holding term equal
-    the booked gains for the sales of that term. Nothing here names a scrip or
-    states an amount: the control figures are read from the book at run time."""
-    if not REAL_SAMPLES_DIR.is_dir():
-        pytest.skip("Data/GNUCashReports/ not present -- real-file smoke test skipped")
-    _dave_books = sorted(
-        p for p in REAL_SAMPLES_DIR.glob("DaveDoe*.gnucash") if "HUF" not in p.stem
-    )
-    if not _dave_books:
-        pytest.skip("no DaveDoe*.gnucash sample found -- real-file smoke test skipped")
-    book = pg.parse_book(_dave_books[0])
+def test_real_corpus_richest_book_lots_reproduce_capgain_sheet():
+    """FY24-25 lot reconstruction for the richest real book (the `richest` line of the local config)
+    must reproduce the books' own gain lines: every sale reconciles, one scrip carries two
+    lots (one a loss, one a gain), and the gains summed per holding term equal the booked gains for
+    the sales of that term. Nothing here names a scrip or states an amount: the control figures are
+    read from the book at run time."""
+    richest, why = rcc.need_richest()
+    if richest is None:
+        pytest.skip(why)
+    book = pg.parse_book(richest)
     recs = lots.reconstruct_lots(book, YEAR_KEY)
     assert len(recs) == 3
     assert all(r.ok for r in recs)
@@ -303,11 +299,10 @@ def test_real_corpus_dave_lots_reproduce_capgain_sheet():
 
 @pytest.mark.local_samples
 def test_real_corpus_no_unattributed_or_fifo_flags():
-    if not REAL_SAMPLES_DIR.is_dir():
-        pytest.skip("Data/GNUCashReports/ not present -- real-file smoke test skipped")
-    for _, book_name in _REAL_PAIRS:
-        book = pg.parse_book(REAL_SAMPLES_DIR / book_name)
+    pairs = _real_pairs_or_skip()
+    for _, book_path in pairs:
+        book = pg.parse_book(book_path)
         recs = lots.reconstruct_lots(book, YEAR_KEY)
         for lot in lots.all_lots(recs):
-            assert lot.attribution == "matched", f"{book_name}: {lot.scrip} unattributed"
-            assert lot.fifo_flag is None, f"{book_name}: {lot.scrip} FIFO flag"
+            assert lot.attribution == "matched", f"{book_path.name}: {lot.scrip} unattributed"
+            assert lot.fifo_flag is None, f"{book_path.name}: {lot.scrip} FIFO flag"

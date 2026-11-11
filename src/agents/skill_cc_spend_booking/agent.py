@@ -854,8 +854,11 @@ def run(pdf_dir: str, entity_key: str, gnucash_path: str, output_path: str, peri
         _skip |= {p.guid for s in settlements if s.status == M.S_PARTLY for p in s.payments if p.in_range}
         _skip |= {t.guid for t in view.txns if t.num in _partly_ov and start <= t.date <= end}
         _csv_guids = {p.guid for pr in rep.csv_pairings for p in pr.payments}
+        _held_guids = {p.guid for p in rep.cred_email_held}
         other_lines = [(t.date, (t.description or "(no description)")
-                        + (" [matched to a CSV payment row]" if t.guid in _csv_guids else ""), SP.pool_amount(t, CCP_PATH))
+                        + (" [matched to a CSV payment row]" if t.guid in _csv_guids else "")
+                        + (" [HELD: card clash, not booked]" if t.guid in _held_guids else ""),
+                        SP.pool_amount(t, CCP_PATH))
                        for t in sorted(view.txns, key=lambda x: (x.date, x.guid))
                        if start <= t.date <= end and any(SP.in_pool(pth, CCP_PATH) for pth, _v in t.splits)
                        and t.guid not in _skip]
