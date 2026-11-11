@@ -9,18 +9,25 @@ UI-09 / UI-08 follow-ups (shared review engine).
    uses separate borders, the row separator lives on `td`.
 
 The static checks are string-level. The bleed is ALSO checked in a real browser
-(headless Edge/Chrome screenshot at DPR 1 / 1.25 / 1.5); skipped if no browser or
-Pillow is available.
+(headless Edge/Chrome driven over the DevTools protocol, as the UI-11 tests do,
+screenshot at DPR 1 / 1.25 / 1.5); skipped if no browser, aiohttp or Pillow is
+available. The browser profile lives in a folder made for the test run and is
+removed afterwards; a test proves nothing is left in the temp folder.
 """
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
 import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
-import tempfile
+import time
+import urllib.request
 from pathlib import Path
 
 import pytest
@@ -180,7 +187,47 @@ def _browser():
     return None
 
 
-def _bleed_pixels(html, dpr, browser, tmp):
+async def _bleed_report(page_url, port, dpr):
+    """Open the page in the running browser over the DevTools protocol, wait for
+    the page's own report element, and return (report dict, PNG bytes)."""
+    import aiohttp
+    targets = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % port))
+    ws_url = [t for t in targets if t.get("type") == "page"][0]["webSocketDebuggerUrl"]
+    async with aiohttp.ClientSession() as sess:
+        async with sess.ws_connect(ws_url, max_msg_size=0) as ws:
+            n = 0
+
+            async def call(method, **params):
+                nonlocal n
+                n += 1
+                await ws.send_json({"id": n, "method": method, "params": params})
+                while True:
+                    msg = await ws.receive_json()
+                    if msg.get("id") == n:
+                        if "error" in msg:
+                            raise RuntimeError(msg["error"])
+                        return msg.get("result", {})
+
+            await call("Page.enable")
+            await call("Emulation.setDeviceMetricsOverride", width=900, height=600,
+                       deviceScaleFactor=dpr, mobile=False)
+            await call("Page.navigate", url=page_url)
+            rep = None
+            for _ in range(100):
+                await asyncio.sleep(0.1)
+                r = await call("Runtime.evaluate", returnByValue=True,
+                               expression="(document.getElementById('rep')||{}).textContent||''")
+                val = r.get("result", {}).get("value")
+                if val:
+                    rep = json.loads(val)
+                    break
+            assert rep, "page did not render"
+            await asyncio.sleep(0.2)
+            shot = await call("Page.captureScreenshot", format="png")
+            return rep, base64.b64decode(shot["data"])
+
+
+def _bleed_pixels(html, dpr, port, tmp):
     from PIL import Image
     page = ("<!doctype html><meta charset=utf-8><body style='margin:0;background:#0f0f0f'>" + html +
             "<script>setTimeout(function(){var w=document.querySelector('.scroll-wrapper');"
@@ -190,20 +237,9 @@ def _bleed_pixels(html, dpr, browser, tmp):
             "document.body.appendChild(p);},500)</script>")
     f = Path(tmp) / "page.html"
     f.write_text(page, encoding="utf-8")
-    url = f.as_uri()
-    shot = Path(tmp) / f"s{dpr}.png"
-    common = ["--headless=new", "--disable-gpu", "--hide-scrollbars", "--disable-lcd-text",
-              "--font-render-hinting=none", f"--force-device-scale-factor={dpr}",
-              "--window-size=900,600", "--virtual-time-budget=4000",
-              f"--user-data-dir={Path(tmp) / 'profile'}"]
-    subprocess.run([browser, *common, f"--screenshot={shot}", url], capture_output=True, timeout=120)
-    dump = subprocess.run([browser, *common, "--dump-dom", url], capture_output=True,
-                          timeout=120).stdout.decode("utf-8", "replace")
-    m = re.search(r'id="rep">(.*?)</pre>', dump)
-    assert m, "page did not render"
-    rep = json.loads(m.group(1))
+    rep, png = asyncio.run(_bleed_report(f.as_uri(), port, dpr))
     assert rep["y"] > 200, "the table did not scroll"
-    im = Image.open(shot).convert("RGB")
+    im = Image.open(io.BytesIO(png)).convert("RGB")
     bad = 0
     for y in range(int((rep["top"] + 1) * dpr), int(rep["bottom"] * dpr) - 2):
         for x in range(int((rep["l"] + 2) * dpr), int((rep["r"] - 20) * dpr)):
@@ -227,27 +263,141 @@ def _page_html(collapsed=False):
 def _have_browser_stack():
     try:
         import PIL  # noqa: F401
+        import aiohttp  # noqa: F401
     except ImportError:
         return False
     return _browser() is not None
 
 
-needs_browser = pytest.mark.skipif(not _have_browser_stack(), reason="no headless Edge/Chrome or Pillow")
+needs_browser = pytest.mark.skipif(not _have_browser_stack(),
+                                   reason="no headless Edge/Chrome, aiohttp or Pillow")
+
+
+def _close_browser(port, timeout=15):
+    """Ask the browser itself to quit (CDP Browser.close) and wait until its
+    debugging port stops answering. On Windows the process Popen started can be
+    a launcher, so terminate() alone leaves the real browser, and the lock on
+    its profile folder, behind."""
+    import aiohttp
+
+    async def _go():
+        info = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=2))
+        async with aiohttp.ClientSession() as sess:
+            async with sess.ws_connect(info["webSocketDebuggerUrl"]) as ws:
+                await ws.send_str(json.dumps({"id": 1, "method": "Browser.close"}))
+                try:
+                    await asyncio.wait_for(ws.receive(), 5)
+                except Exception:
+                    pass
+    try:
+        asyncio.run(_go())
+    except Exception:
+        pass
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port, timeout=1)
+        except Exception:
+            return
+        time.sleep(0.2)
+
+
+def _remove_dir_with_retry(path, attempts=20, delay=0.25):
+    for _ in range(attempts):
+        shutil.rmtree(path, ignore_errors=True)
+        if not Path(path).exists():
+            return
+        time.sleep(delay)
+    shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def browser_port(tmp_path_factory):
+    """One headless browser for the module, its profile inside a pytest temp
+    folder, closed and removed when the module is done."""
+    if not _have_browser_stack():
+        pytest.skip("no headless Edge/Chrome, aiohttp or Pillow")
+    work = tmp_path_factory.mktemp("ui09-browser")
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()
+    proc = subprocess.Popen(
+        [_browser(), "--headless=new", "--disable-gpu", "--no-first-run",
+         "--hide-scrollbars", "--disable-lcd-text", "--font-render-hinting=none",
+         "--remote-debugging-port=%d" % port, "--remote-allow-origins=*",
+         "--window-size=900,600", "--user-data-dir=%s" % (work / "profile"), "about:blank"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            try:
+                urllib.request.urlopen("http://127.0.0.1:%d/json" % port, timeout=1)
+                break
+            except Exception:
+                time.sleep(0.2)
+        else:
+            pytest.skip("browser did not start")
+        yield port, work
+    finally:
+        _close_browser(port)
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        try:
+            proc.kill()
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        _remove_dir_with_retry(work / "profile")
 
 
 @needs_browser
 @pytest.mark.parametrize("dpr", [1, 1.25, 1.5])
-def test_no_accent_pixels_in_the_sticky_header_band_in_a_real_browser(dpr):
+def test_no_accent_pixels_in_the_sticky_header_band_in_a_real_browser(dpr, browser_port):
     """60 accent rows, scrolled ~230px: the header band (title + filter row) must
     contain only grey pixels. Up to 4 stray anti-aliased pixels are tolerated at
     the wrapper's rounded corner (the old stylesheet gives well over 1000)."""
-    with tempfile.TemporaryDirectory() as tmp:
-        assert _bleed_pixels(_page_html(), dpr, _browser(), tmp) <= 4
+    port, work = browser_port
+    assert _bleed_pixels(_page_html(), dpr, port, work) <= 4
 
 
 @needs_browser
-def test_the_browser_check_detects_the_old_collapsed_table():
+def test_the_browser_check_detects_the_old_collapsed_table(browser_port):
     """NEGATIVE control: the same page with the old collapsed-border CSS DOES bleed,
     so a clean result above is not a blind test."""
-    with tempfile.TemporaryDirectory() as tmp:
-        assert _bleed_pixels(_page_html(collapsed=True), 1, _browser(), tmp) > 200
+    port, work = browser_port
+    assert _bleed_pixels(_page_html(collapsed=True), 1, port, work) > 200
+
+
+@needs_browser
+def test_a_run_of_the_browser_tests_leaves_nothing_in_the_temp_folder(tmp_path):
+    """NEGATIVE: run the real-browser tests above in a child pytest whose temp
+    folder is a fresh empty one, then check that no browser profile, and no
+    leftover of any size worth the name, remains in it. (Before this was fixed
+    every run left about 7 MB of browser profile in the temp folder.)"""
+    sandbox = tmp_path / "sandbox-temp"
+    sandbox.mkdir()
+    env = dict(os.environ, TMP=str(sandbox), TEMP=str(sandbox), TMPDIR=str(sandbox))
+    cp = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:warnings", "-v", "-p", "no:cacheprovider",
+         "-k", "real_browser or detects_the_old", str(Path(__file__).resolve())],
+        env=env, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+    assert cp.returncode == 0, cp.stdout[-2000:] + cp.stderr[-1000:]
+    if "passed" not in cp.stdout and "skipped" in cp.stdout:
+        pytest.skip("the browser did not start here, so there is no profile to check")
+    assert "4 passed" in cp.stdout, cp.stdout[-1500:]
+    left = []
+    total = 0
+    for dp, dn, fn in os.walk(sandbox):
+        for d in dn:
+            if d.lower() == "profile":
+                left.append(str(Path(dp) / d))
+        for f in fn:
+            try:
+                total += (Path(dp) / f).stat().st_size
+            except OSError:
+                pass
+    assert not left, "browser profile left behind: %s" % left
+    assert total < 1_000_000, "%d bytes left in the temp folder" % total
