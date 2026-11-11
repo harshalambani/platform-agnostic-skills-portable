@@ -14,12 +14,14 @@ plus a thin @tool wrapper that the LangGraph agent calls.
 from __future__ import annotations
 
 import ast
+import base64
 import contextlib
 import json
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.parse
 from pathlib import Path
 
 from langchain_core.tools import tool
@@ -88,6 +90,8 @@ _TYPED_ARGS: set[str] = set()
 # prompt carries MASK in their place and run_tieout puts the real value back
 # just before the local tie-out run.
 _SECRETS: list[str] = []
+# The option / key name each value in _SECRETS was typed for, same order.
+_SLOTS: list[tuple[str, str]] = []
 
 MASK = "***"
 _SECRET_NAMES = frozenset({"password", "pwd", "pass", "passphrase"})
@@ -101,12 +105,11 @@ def _is_secret_name(name: str) -> bool:
     return bool(parts) and parts[-1] in _SECRET_NAMES
 
 
-def mask_secret_args(text: str) -> tuple[str, list[str]]:
-    """Return (masked text, secret values in order). The values of password-like
-    arguments become MASK. Handles '--opt value', '--opt=value' and 'key=value'.
-    A bare positional password cannot be recognised and is left as typed."""
+def _mask_pairs(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """Core of mask_secret_args: (masked text, [(slot, value), ...]) where the
+    slot is the lower-cased option / key name the value was typed for."""
     toks = (text or "").split()
-    secrets: list[str] = []
+    pairs: list[tuple[str, str]] = []
     out: list[str] = []
     i = 0
     while i < len(toks):
@@ -117,40 +120,94 @@ def mask_secret_args(text: str) -> tuple[str, list[str]]:
                 lead = t[: len(t) - len(t.lstrip("-"))]
                 if eq:
                     if val:
-                        secrets.append(val)
+                        pairs.append((name.lower(), val))
                         t = f"{lead}{name}={MASK}"
                 elif i + 1 < len(toks):
                     out.append(t)
-                    secrets.append(toks[i + 1])
+                    pairs.append((name.lower(), toks[i + 1]))
                     t = MASK
                     i += 1
         elif "=" in t:
             name, _, val = t.partition("=")
             if val and _is_secret_name(name):
-                secrets.append(val)
+                pairs.append((name.lower(), val))
                 t = f"{name}={MASK}"
         out.append(t)
         i += 1
-    return " ".join(out), secrets
+    return " ".join(out), pairs
+
+
+def mask_secret_args(text: str) -> tuple[str, list[str]]:
+    """Return (masked text, secret values in order). The values of password-like
+    arguments become MASK. Handles '--opt value', '--opt=value' and 'key=value'.
+    A bare positional password cannot be recognised and is left as typed."""
+    masked, pairs = _mask_pairs(text)
+    return masked, [v for _, v in pairs]
+
+
+def _secret_variants(secret: str) -> list[tuple[str, int]]:
+    """The typed value plus the common changed forms a model or a tool may
+    echo back: percent-encoded and base64 (standard and URL-safe, padded or
+    not). Each comes with the regex flags to match it with."""
+    raw = secret.encode("utf-8")
+    forms: list[tuple[str, int]] = [(secret, 0)]
+    enc = {
+        urllib.parse.quote(secret, safe=""),
+        urllib.parse.quote_plus(secret),
+        urllib.parse.quote(secret),
+    }
+    for e in enc:
+        if e != secret:
+            forms.append((e, re.IGNORECASE))
+    for fn in (base64.b64encode, base64.urlsafe_b64encode):
+        b = fn(raw).decode("ascii")
+        forms.append((b, 0))
+        if b.rstrip("="):
+            forms.append((b.rstrip("="), 0))
+    return forms
 
 
 def scrub_secrets(text: str, secrets: list[str]) -> str:
-    """Replace every occurrence of a secret value in `text` with MASK."""
-    for s in sorted(set(secrets), key=len, reverse=True):
+    """Replace every occurrence of a secret value in `text` with MASK. The
+    value is also found percent-encoded, base64-encoded, or split by
+    whitespace or line breaks between its characters."""
+    todo: list[tuple[str, int]] = []
+    for s in set(secrets):
         if s:
-            text = text.replace(s, MASK)
+            todo.extend(_secret_variants(s))
+    seen: set[tuple[str, int]] = set()
+    for form, flags in sorted(todo, key=lambda f: len(f[0]), reverse=True):
+        if (form, flags) in seen:
+            continue
+        seen.add((form, flags))
+        pattern = r"\s*".join(re.escape(c) for c in form)
+        text = re.sub(pattern, lambda _m: MASK, text, flags=flags)
     return text
 
 
 def _unmask_args(arglist: list[str]) -> list[str]:
-    """Put the typed secret values back where the model repeated MASK."""
-    secrets = list(_SECRETS)
+    """Put each typed secret value back only into the slot it was typed for:
+    '--name ***' / '--name=***' / 'name=***' with the same option name. A MASK
+    anywhere else (another option, a bare argument, a different name) is left
+    as MASK, so the real value is never handed to a slot the developer did not
+    type it for."""
+    free = list(_SLOTS)  # [(slot, value)], each used at most once
     out: list[str] = []
     for tok in arglist:
-        if tok == MASK and secrets:
-            tok = secrets.pop(0)
-        elif tok.endswith("=" + MASK) and secrets:
-            tok = tok[: -len(MASK)] + secrets.pop(0)
+        prev = out[-1] if out else ""
+        slot = None
+        if tok == MASK and prev.startswith("-") and "=" not in prev:
+            slot = prev.lstrip("-").lower()
+            fill = lambda v: v  # noqa: E731
+        elif tok.endswith("=" + MASK) and len(tok) > len(MASK) + 1:
+            slot = tok[: -len(MASK) - 1].lstrip("-").lower()
+            fill = lambda v, t=tok: t[: -len(MASK)] + v  # noqa: E731
+        if slot is not None:
+            for k, (sl, val) in enumerate(free):
+                if sl == slot:
+                    tok = fill(val)
+                    del free[k]
+                    break
         out.append(tok)
     return out
 
@@ -161,13 +218,16 @@ def typed_tieout_args(text: str):
     block runs. Cleared on exit, including after an exception."""
     _TYPED_ARGS.clear()
     _SECRETS.clear()
+    _SLOTS.clear()
     _TYPED_ARGS.update((text or "").split())
-    _SECRETS.extend(mask_secret_args(text)[1])
+    _SLOTS.extend(_mask_pairs(text)[1])
+    _SECRETS.extend(v for _, v in _SLOTS)
     try:
         yield
     finally:
         _TYPED_ARGS.clear()
         _SECRETS.clear()
+        _SLOTS.clear()
 
 
 def _check_tieout_args(arglist: list[str], parser: Path) -> str:
