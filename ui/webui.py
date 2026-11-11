@@ -232,9 +232,10 @@ _ZOOM_HEAD = """
     function loadZoom() {
         try {
             var raw = window.localStorage.getItem(STORAGE_KEY);
-            var val = raw !== null ? parseFloat(raw) : NaN;
-            if (!isNaN(val) && val >= MIN_ZOOM && val <= MAX_ZOOM) {
-                return val;
+            // Number(), not parseFloat(): "0.5abc" is a bad value, not 0.5.
+            var val = raw !== null ? Number(raw) : NaN;
+            if (isFinite(val) && val >= MIN_ZOOM && val <= MAX_ZOOM) {
+                return Math.round(val * 100) / 100;
             }
         } catch (e) { /* localStorage can throw (private mode, disabled, etc.) */ }
         return 1.0;
@@ -258,10 +259,49 @@ _ZOOM_HEAD = """
         } catch (e) { /* defensive: never let zoom apply crash the page */ }
     }
 
+    // The zoom badge: shown whenever the zoom is not 100%, emphasised for a
+    // moment after each change, and a click puts the zoom back to 100%.
+    var badge = null;
+    var badgeTimer = null;
+
+    function ensureBadge() {
+        if (badge || !document.body) return badge;
+        try {
+            badge = document.createElement("div");
+            badge.id = "pask-zoom-badge";
+            badge.title = "Click to reset zoom to 100%";
+            badge.style.cssText = "position:fixed;right:12px;bottom:12px;z-index:99999;" +
+                "padding:2px 8px;border-radius:10px;font:12px sans-serif;cursor:pointer;" +
+                "background:#333;color:#fff;opacity:0.6;transition:opacity .3s;display:none;";
+            badge.addEventListener("click", function () { setZoom(1.0); });
+            document.body.appendChild(badge);
+        } catch (e) { badge = null; }
+        return badge;
+    }
+
+    function showBadge(flash) {
+        var b = ensureBadge();
+        if (!b) return;
+        if (zoom === 1) {
+            b.style.display = "none";
+            b.textContent = "";
+            return;
+        }
+        b.textContent = Math.round(zoom * 100) + "%";
+        b.style.zoom = String(1 / zoom);   // keep the badge itself at a steady size
+        b.style.display = "block";
+        if (flash) {
+            b.style.opacity = "1";
+            if (badgeTimer) clearTimeout(badgeTimer);
+            badgeTimer = setTimeout(function () { b.style.opacity = "0.6"; }, 1800);
+        }
+    }
+
     function setZoom(val) {
         zoom = clamp(Math.round(val * 100) / 100);
         applyZoom();
         saveZoom(zoom);
+        showBadge(true);
     }
 
     function onWheel(evt) {
@@ -290,6 +330,7 @@ _ZOOM_HEAD = """
     function init() {
         zoom = loadZoom();
         applyZoom();
+        showBadge(false);
         document.addEventListener("wheel", onWheel, { capture: true, passive: false });
         document.addEventListener("keydown", onKeydown, { capture: true });
     }
