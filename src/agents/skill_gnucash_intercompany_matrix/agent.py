@@ -41,7 +41,7 @@ def run(
     path textbox holding one path per line, and run_args substitution makes every
     kwarg a string on the way in.
     """
-    from matrix_recon import run_matrix
+    from matrix_recon import run_matrix, unreadable_pairs, none_compared, pair_name
     from matrix_report import write_matrix_workbook
 
     if isinstance(books, str):
@@ -75,12 +75,18 @@ def run(
     out_of_balance = [p for p in ok if p["res"]["difference"] != 0]
     with_exc = [p for p in ok if p["res"]["a_exc"] or p["res"]["b_exc"]]
 
-    lines = [
+    unreadable = unreadable_pairs(m)
+    lines = []
+    if none_compared(m):
+        lines.append("ERROR: no pair could be compared -- this is NOT a clean run.")
+    lines += [
         f"Inter-entity matrix [{m['fy_label']}] -- {len(paths)} books, "
         f"{len(m['pairs'])} pairs.",
         f"  Reconciled: {len(ok)}   |   n/a (no mutual contra): {len(na)}",
         f"  Out of balance: {len(out_of_balance)}   |   With exceptions: {len(with_exc)}",
     ]
+    for p in unreadable:
+        lines.append(f"  UNREADABLE PAIR  {pair_name(p)} -- {p['err']}")
     for p in out_of_balance:
         r = p["res"]
         lines.append(f"  OUT OF BALANCE  {p['a_owner']} <-> {p['b_owner']} "

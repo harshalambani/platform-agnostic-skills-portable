@@ -281,12 +281,76 @@ def test_matrix_needs_two_books(tmp_path):
     assert mr.main([str(tmp_path / "o.xlsx"), alice(tmp_path, [A_LEND])]) == 1
 
 
-def test_matrix_turns_any_pair_error_into_na(tmp_path):
-    """Documents current behaviour: an unreadable book is shown as n/a for its
-    pair and the run exits 0 when nothing else is wrong."""
-    a = alice(tmp_path, [A_LEND])
-    bad = tmp_path / "BobRao2526.gnucash"
+def _bad_book(tmp_path, stem="BobRao2526"):
+    bad = tmp_path / f"{stem}.gnucash"
     bad.write_bytes(b"not a gnucash file")
-    m = mr.run_matrix([a, str(bad)])
+    return str(bad)
+
+
+def test_unreadable_pair_is_named_and_the_run_is_not_success(tmp_path, capsys):
+    """PIPE-17: a book that cannot be read is UNREADABLE (not n/a), named by
+    its pair in the printed report and in the workbook, and the run is not a
+    clean exit."""
+    a = alice(tmp_path, [A_LEND])
+    bad = _bad_book(tmp_path)
+    m = mr.run_matrix([a, bad])
     assert m["pairs"][0]["ok"] is False
-    assert mr.main([str(tmp_path / "o.xlsx"), a, str(bad)]) == 0
+    assert m["pairs"][0]["kind"] == "unreadable"
+    out = tmp_path / "o.xlsx"
+    assert mr.main([str(out), a, bad]) != 0
+    printed = capsys.readouterr().out
+    pair = f"{m['owners'][0]} <-> {m['owners'][1]}"
+    assert f"UNREADABLE PAIR: {pair}" in printed
+    wb = load_workbook(out)
+    assert "UNREADABLE" in _text(wb["Pairs"])
+    assert "UNREADABLE" in _text(wb["Matrix"])
+
+
+def test_all_pairs_na_is_not_success(tmp_path, capsys):
+    """PIPE-17: when no pair was actually compared the run must not exit 0."""
+    a = _bad_book(tmp_path, "AliceRao2526")
+    b = _bad_book(tmp_path, "BobRao2526")
+    c = _bad_book(tmp_path, "CarolRao2526")
+    rc = mr.main([str(tmp_path / "o.xlsx"), a, b, c])
+    assert rc == 1
+    assert "no pair could be compared" in capsys.readouterr().out
+
+
+def test_no_contra_everywhere_is_still_not_success(tmp_path, capsys):
+    """Readable books with no mutual contra: nothing was compared, so no
+    success either -- but it is n/a, not UNREADABLE."""
+    a = make_book(tmp_path, "AliceRao2526", {}, [])
+    b = make_book(tmp_path, "BobRao2526", {}, [])
+    m = mr.run_matrix([a, b])
+    assert m["pairs"][0]["kind"] == "no_contra"
+    assert mr.main([str(tmp_path / "o.xlsx"), a, b]) == 1
+    printed = capsys.readouterr().out
+    assert "UNREADABLE" not in printed
+    assert "no pair could be compared" in printed
+
+
+def test_one_unreadable_pair_among_good_ones_is_flagged_not_clean(tmp_path, capsys):
+    a, b, _ = _three_books(tmp_path)
+    bad = _bad_book(tmp_path, "DaveRao2526")
+    rc = mr.main([str(tmp_path / "o.xlsx"), a, b, bad])
+    printed = capsys.readouterr().out
+    assert rc != 0
+    assert printed.count("UNREADABLE PAIR:") == 2   # both pairs with the bad book
+    assert "1 reconciled" in printed                # the good pair still compared
+
+
+def test_clean_matching_run_is_still_success(tmp_path, capsys):
+    a = alice(tmp_path, [A_LEND])
+    b = bob(tmp_path, [B_LEND])
+    assert mr.main([str(tmp_path / "o.xlsx"), a, b]) == 0
+    printed = capsys.readouterr().out
+    assert "UNREADABLE" not in printed
+    assert "no pair could be compared" not in printed
+
+
+def test_no_contra_pair_beside_good_pairs_is_still_success(tmp_path, capsys):
+    """The expected n/a (two entities that never lend to each other) does not
+    spoil a run where the other pairs tie."""
+    paths = _three_books(tmp_path)
+    assert mr.main([str(tmp_path / "o.xlsx"), *paths]) == 0
+    assert "UNREADABLE" not in capsys.readouterr().out
