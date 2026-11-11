@@ -35,7 +35,8 @@ def _matrix_sheet(ws, m):
     ws["A1"] = "Inter-entity Matrix -- balance difference per pair"
     ws["A1"].font = TITLE_FONT
     ws["A2"] = (f"Period: {m['fy_label']}   |   date tolerance: +/-{m['tol_days']} days"
-                f"   |   0 = ties, blank = same book, n/a = no mutual contra")
+                f"   |   0 = ties, blank = same book, n/a = no mutual contra, "
+                f"UNREADABLE = pair could not be read")
     ws["A2"].font = SUB_FONT
 
     top = 4
@@ -75,8 +76,10 @@ def _matrix_sheet(ws, m):
                 continue
             p = grid.get((i, j))
             if not p or not p.get("ok"):
-                cell.value = "n/a"
-                cell.font = Font(color="808080")
+                unreadable = bool(p) and p.get("kind") != "no_contra"
+                cell.value = "UNREADABLE" if unreadable else "n/a"
+                cell.font = (Font(color="C00000", bold=True) if unreadable
+                             else Font(color="808080"))
                 continue
             diff = p["res"]["difference"]
             cell.value = diff
@@ -115,8 +118,12 @@ def _pairs_sheet(ws, m):
                 c.border = BORDER
                 c.alignment = Alignment(horizontal="center")
         else:
-            _txt(ws, row, 3, "n/a")
-            _txt(ws, row, 10, f"n/a: {p['err']}")
+            if p.get("kind") == "no_contra":
+                _txt(ws, row, 3, "n/a")
+                _txt(ws, row, 10, f"n/a: {p['err']}")
+            else:
+                _txt(ws, row, 3, "UNREADABLE")
+                _txt(ws, row, 10, f"UNREADABLE: {p['err']}")
         row += 1
 
 

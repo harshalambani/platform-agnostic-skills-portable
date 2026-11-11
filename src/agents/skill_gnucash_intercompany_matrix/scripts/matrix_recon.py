@@ -53,13 +53,31 @@ def run_matrix(paths: list[str], period: str = "", start: str = "",
             owners[ia], owners[ib] = entry["a_owner"], entry["b_owner"]
             fy_label = fy_label or res["fy_label"]
         except Exception as e:  # noqa: BLE001  -- no mutual contra, bad period, etc.
-            entry.update(ok=False, err=str(e))
+            # "No contra account" is the one expected reason a pair has nothing
+            # to compare (two entities that do not lend to each other). Anything
+            # else -- a file that cannot be read, no period -- is unreadable.
+            kind = "no_contra" if str(e).startswith("No contra account") else "unreadable"
+            entry.update(ok=False, err=str(e), kind=kind)
         pair_results.append(entry)
     return {
         "paths": paths, "owners": owners, "pairs": pair_results,
         "fy_label": fy_label or period or "(period undetermined)",
         "tol_days": tol_days,
     }
+
+
+def unreadable_pairs(m: dict) -> list[dict]:
+    """Pairs that failed for a reason other than having no mutual contra."""
+    return [p for p in m["pairs"] if not p.get("ok") and p.get("kind") != "no_contra"]
+
+
+def none_compared(m: dict) -> bool:
+    """True when not a single pair was actually reconciled."""
+    return not any(p.get("ok") for p in m["pairs"])
+
+
+def pair_name(p: dict) -> str:
+    return f"{p['a_owner']} <-> {p['b_owner']}"
 
 
 def main(argv=None) -> int:
@@ -93,12 +111,22 @@ def main(argv=None) -> int:
         tie = "TIES" if r["difference"] == 0 else f"OUT by {r['difference']:,.2f}"
         print(f"  {p['a_owner']:<22} <-> {p['b_owner']:<22} "
               f"matched={len(r['pairs']):>2} exc={len(r['a_exc'])}/{len(r['b_exc'])}  {tie}")
+    unreadable = unreadable_pairs(m)
     for p in na:
-        print(f"  {p['a_owner']:<22} <-> {p['b_owner']:<22} n/a ({p['err']})")
+        label = "UNREADABLE" if p in unreadable else "n/a"
+        print(f"  {p['a_owner']:<22} <-> {p['b_owner']:<22} {label} ({p['err']})")
     print(f"Summary: {len(ok)} reconciled, {len(na)} n/a, "
           f"{len(out_of_balance)} out of balance, {len(with_exc)} with exceptions")
+    for p in unreadable:
+        print(f"UNREADABLE PAIR: {pair_name(p)} -- {p['err']}")
+    if none_compared(m):
+        print("ERROR: no pair could be compared -- this is NOT a clean run.")
     print(f"Workbook: {args.out_xlsx}")
 
+    if none_compared(m):
+        return 1
+    if unreadable:
+        return 2
     return 0 if (not out_of_balance and not with_exc) else 2
 
 
