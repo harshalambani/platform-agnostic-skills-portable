@@ -1106,7 +1106,7 @@ def _txn(deductor_name, *, txn_date, tds_deposited, tan="TAN00001A", section="19
 
 
 def test_reconcile_26as_aggregate_matches_no_flag():
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[_txn("BANK A", txn_date=date(2025, 5, 10), tds_deposited=100.0)])
 
@@ -1118,7 +1118,7 @@ def test_reconcile_26as_aggregate_matches_no_flag():
 
 
 def test_reconcile_26as_aggregate_mismatch_flags():
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[_txn("BANK A", txn_date=date(2025, 5, 10), tds_deposited=60.0)])
 
@@ -1128,7 +1128,7 @@ def test_reconcile_26as_aggregate_mismatch_flags():
 
 
 def test_reconcile_26as_aggregate_within_tolerance_not_flagged():
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100.40"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100.40"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[_txn("BANK A", txn_date=date(2025, 5, 10), tds_deposited=100.0)])
     report = R26.reconcile_ais_vs_26as(n, as26)
@@ -1137,8 +1137,8 @@ def test_reconcile_26as_aggregate_within_tolerance_not_flagged():
 
 def test_reconcile_26as_per_quarter_split_correctness():
     rows = [
-        _tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100"), info_src_id="A"),
-        _tds_row("BANK B", quarter="Quarter 3", amount_deposited=Decimal("50"), info_src_id="B"),
+        _tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100"), info_src_id="A"),
+        _tds_row("Interest from deposit", quarter="Quarter 3", amount_deposited=Decimal("50"), info_src_id="B"),
     ]
     n = _normalized(rows)
     as26 = As26Data(transactions=[
@@ -1160,7 +1160,7 @@ def test_reconcile_26as_per_quarter_split_correctness():
 
 
 def test_reconcile_26as_per_quarter_mismatch_flags_only_that_quarter():
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[
         _txn("BANK A", txn_date=date(2025, 5, 1), tds_deposited=100.0),   # Q1: matches
@@ -1188,7 +1188,7 @@ def test_reconcile_26as_decimal_float_boundary():
     """as26 amounts are native floats (per As26Transaction); the tie-out must
     convert them to Decimal via str() at the boundary, never mixing float
     and Decimal arithmetic (which would raise TypeError)."""
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("33.33"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("33.33"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[
         _txn("BANK A", txn_date=date(2025, 5, 1), tds_deposited=33.33),
@@ -1201,7 +1201,7 @@ def test_reconcile_26as_decimal_float_boundary():
 
 
 def test_reconcile_26as_empty_as26_no_crash():
-    rows = [_tds_row("BANK A", quarter="Q1", amount_deposited=Decimal("100"))]
+    rows = [_tds_row("Interest from deposit", quarter="Q1", amount_deposited=Decimal("100"))]
     n = _normalized(rows)
     report = R26.reconcile_ais_vs_26as(n, As26Data())
     assert report.total_26as_tds_deposited == Decimal("0")
@@ -1272,8 +1272,8 @@ def test_reconcile_26as_category_tieout_deliberate_mismatch_flags():
     assert report.flagged_categories == ["interest"]
 
 
-def test_reconcile_26as_category_tieout_unknown_category_falls_to_other():
-    rows = [_tds_row("Winnings from lottery", quarter="Q1", amount_deposited=Decimal("20"))]
+def test_reconcile_26as_category_tieout_non_income_category_falls_to_other():
+    rows = [_tds_row("Receipt of amount by Partners from Partnership Firm", quarter="Q1", amount_deposited=Decimal("20"))]
     n = _normalized(rows)
     as26 = As26Data(transactions=[
         _txn("PAYER Z", txn_date=date(2025, 5, 1), tds_deposited=20.0, section="194B"),
@@ -2864,7 +2864,7 @@ def test_itr21_other_ais_categories_never_land_in_a_head_or_partner(tmp_path):
     cats = RR._ais_by_tan(N.normalize(_ais_with(tds, [])))
     assert cats[3] == {}                                  # nothing in the 194T bucket
     for tan in ("TANRR0004R", "TANFX0005F", "TANFT0006T"):
-        assert cats[2][tan] == {"other"}
+        assert tan not in cats[0] and tan not in cats[2]  # ITR-22: not a credit at all
 
 
 def test_itr21_partner_category_matched_whole_label_only(tmp_path):
@@ -2884,3 +2884,153 @@ def test_itr21_agent_itr4_fails_loud_no_sheet(tmp_path, monkeypatch):
 def test_itr21_agent_garbage_return_is_an_error_not_a_crash(tmp_path, monkeypatch):
     summary, wb = _run_agent(tmp_path, monkeypatch, raw="not json at all")
     assert "ERROR" in summary and "Return Tie-out" not in wb.sheetnames
+
+
+# ---- ITR-22: TCS / payer-side / unknown AIS categories are no TDS credit -----
+
+AC = __import__("agents.skill_ais_reconcile.ais_categories", fromlist=["x"])
+_TCS_FX = "Outward foreign remittance/purchase of foreign currency"
+_TAN_RENT, _TAN_FX, _TAN_TRV, _TAN_UNK = "TANRR0004R", "TANFX0005F", "TANFT0006T", "TANUK0007U"
+
+
+def _extras():
+    return [
+        _tds_credit_el("Rent payment", "LANDLORD", "50000", "5000", _TAN_RENT),
+        _tds_credit_el(_TCS_FX, "FX DEALER", "70000", "700", _TAN_FX),
+        _tds_credit_el("Foreign travel", "TRAVEL CO", "90000", "900", _TAN_TRV),
+    ]
+
+
+def _norm(tds):
+    return N.normalize(_ais_with(list(tds), []))
+
+
+def test_itr22_classifier_exact_labels():
+    for lab in ("Dividend", "Interest from deposit", "Interest from others", "Salary",
+                "Receipt of amount by Partners from Partnership Firm", "  INTEREST  from   deposit "):
+        assert AC.classify_label(lab) == AC.CREDIT
+    assert AC.classify_label("Foreign travel") == AC.TCS and AC.classify_label(_TCS_FX) == AC.TCS
+    assert AC.classify_label("Rent payment") == AC.PAYER_SIDE
+
+
+def test_itr22_label_match_is_whole_label_not_substring():
+    """NEGATIVE: a label merely containing interest/travel/rent is not misclassified."""
+    for lab in ("Interest from NBFC bonds", "Interest", "Dividend (Domestic)", "Salary received",
+                "Foreign travel insurance", "Domestic travel", "Rent payment by tenant",
+                "Rent", "Outward foreign remittance", "", None):
+        assert AC.classify_label(lab) == AC.UNKNOWN, lab
+
+
+def test_itr22_credit_only_ais_totals_unchanged_pinned():
+    """Credit-row totals are exactly the pre-ITR-22 numbers."""
+    tds = [_tds_credit_el("Interest from deposit", "ALPHA BANK", "2500", "200", TAN_A),
+           _tds_credit_el("Dividend", "GAMMA FOODS LIMITED", "1000", "30", TAN_B),
+           _tds_credit_el("Salary", "EMPLOYER LTD", "100000", "5000", TAN_C)]
+    n = _norm(tds)
+    rep = R.reconcile_internal(n)
+    assert rep.total_tds_credit == Decimal("5230") and rep.uncounted_tds == []
+    as26 = R26.reconcile_ais_vs_26as(n, As26Data(transactions=[]), None)
+    assert as26.total_ais_tds_credit == Decimal("5230") and as26.uncounted_tds == []
+    cr, _names, _cats, t194 = RR._ais_by_tan(n)
+    assert cr == {TAN_A: Decimal("200"), TAN_B: Decimal("30"), TAN_C: Decimal("5000")} and t194 == {}
+
+
+def test_itr22_tcs_and_rent_never_reach_any_tds_credit_total():
+    """NEGATIVE: all three checks leave TCS and payer-side rows out of the credit."""
+    n = _norm(list(_BASE_TDS) + _extras())
+    assert R.reconcile_internal(n).total_tds_credit == Decimal("200")
+    as26 = R26.reconcile_ais_vs_26as(n, As26Data(transactions=[]), None)
+    assert as26.total_ais_tds_credit == Decimal("200")
+    cr = RR._ais_by_tan(n)[0]
+    assert set(cr) == {TAN_A, TAN_B}
+    assert sum(cr.values()) == Decimal("200")
+
+
+def test_itr22_books_tds_credit_excludes_tcs_and_rent():
+    n = _norm(list(_BASE_TDS) + _extras())
+    book, mapping = _income_book("OS_DIVIDEND", "g1", 1000)
+    rb = RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY, n)
+    assert rb.ais_tds_credit == Decimal("200")
+
+
+def test_itr22_rent_row_gives_no_not_claimed_line(tmp_path):
+    """NEGATIVE: a Rent payment row is not 'TDS in the AIS, not claimed'."""
+    rep = _tie(_parse(tmp_path, _itr1_json()), list(_BASE_TDS) + _extras())
+    assert _ded(rep, _TAN_RENT) is None and _ded(rep, _TAN_FX) is None and _ded(rep, _TAN_TRV) is None
+    assert not any("not claimed" in d.note for d in rep.deductors)
+    assert any(lab.startswith("TDS you deducted as payer - not your credit") and _TAN_RENT in txt
+               for lab, txt in rep.informational)
+
+
+def test_itr22_unknown_category_listed_not_summed(tmp_path):
+    """NEGATIVE: an unrecognised label is reported by label and count, in no total."""
+    unk = [_tds_credit_el("Brand new AIS category", "SOMEONE", "1000", "999", _TAN_UNK),
+           _tds_credit_el("Brand new AIS category", "SOMEONE ELSE", "1000", "1", "TANUK0008U")]
+    n = _norm(list(_BASE_TDS) + unk)
+    rep = R.reconcile_internal(n)
+    assert rep.total_tds_credit == Decimal("200") and rep.uncounted_tds == [("Brand new AIS category", 2)]
+    assert R26.reconcile_ais_vs_26as(n, As26Data(transactions=[]), None).uncounted_tds == [("Brand new AIS category", 2)]
+    rr = _tie(_parse(tmp_path, _itr1_json()), list(_BASE_TDS) + unk)
+    assert rr.uncounted_tds == [("Brand new AIS category", 2)]
+    assert _ded(rr, _TAN_UNK) is None
+
+
+def test_itr22_uncounted_line_visible_on_all_four_sheets(tmp_path):
+    unk = [_tds_credit_el("Brand new AIS category", "SOMEONE", "1000", "999", _TAN_UNK)]
+    n = _norm(list(_BASE_TDS) + unk)
+    rep = R.reconcile_internal(n)
+    book, mapping = _income_book("OS_DIVIDEND", "g1", 1000)
+    rb = RB.reconcile_ais_vs_books(rep, book, mapping, YEAR_KEY, n)
+    r26 = R26.reconcile_ais_vs_26as(n, As26Data(transactions=[]), None)
+    rr = RR.reconcile_return(_parse(tmp_path, _itr1_json()), rep, n)
+    X.write_reco_workbook(rep, str(tmp_path / "w.xlsx"), report_26as=r26, report_books=rb, report_return=rr)
+    wbk = load_workbook(tmp_path / "w.xlsx")
+    hits = 0
+    for ws in wbk.worksheets:
+        texts = [str(c.value) for r in ws.iter_rows() for c in r if c.value]
+        if any(AC.NOT_COUNTED_TEXT in t for t in texts):
+            assert any("Brand new AIS category (1 row)" in t for t in texts)
+            hits += 1
+    assert hits >= 4        # internal, 26AS, books, return
+
+
+def test_itr22_tcs_equal_does_not_flag_unequal_does(tmp_path):
+    tcs_rows = [_tds_credit_el(_TCS_FX, "FX DEALER", "70000", "700", _TAN_FX),
+                _tds_credit_el("Foreign travel", "TRAVEL CO", "90000", "900", _TAN_TRV)]
+    base = _itr1_json()
+    base["ITR"]["ITR1"]["ScheduleTCS"] = {"TotalSchTCS": 1600}
+    rep = _tie(_parse(tmp_path, base), list(_BASE_TDS) + tcs_rows)
+    assert rep.tcs is not None and rep.tcs.ais == Decimal("1600") and rep.tcs.ret == Decimal("1600")
+    assert not rep.tcs.flagged and rep.flagged_count == 0
+    assert sorted(t for t, _n, _a in rep.tcs.by_tan) == sorted([_TAN_FX, _TAN_TRV])
+    base["ITR"]["ITR1"]["ScheduleTCS"] = {"TotalSchTCS": 700}
+    rep = _tie(_parse(tmp_path, base, "b.json"), list(_BASE_TDS) + tcs_rows)
+    assert rep.tcs.flagged and "differs" in rep.tcs.note and rep.flagged_count == 1
+
+
+def test_itr22_tcs_in_ais_return_without_schedule_is_flagged_plainly(tmp_path):
+    payload = _itr1_json()
+    del payload["ITR"]["ITR1"]["ScheduleTCS"]
+    rep = _tie(_parse(tmp_path, payload), list(_BASE_TDS) + _extras()[1:2])
+    assert rep.tcs.flagged and rep.tcs.ret is None and "no readable TCS schedule" in rep.tcs.note
+    # with no AIS TCS either, it says so plainly and does not flag
+    rep = _tie(_parse(tmp_path, payload, "c.json"), list(_BASE_TDS))
+    assert rep.tcs is None and rep.flagged_count == 0
+    assert any(lab == "TCS" and "no TCS schedule" in txt for lab, txt in rep.informational)
+
+
+def test_itr22_tcs_in_return_absent_from_ais_is_flagged(tmp_path):
+    payload = _itr1_json()
+    payload["ITR"]["ITR1"]["ScheduleTCS"] = {"TotalSchTCS": 500}
+    rep = _tie(_parse(tmp_path, payload), list(_BASE_TDS))
+    assert rep.tcs.flagged and "absent from the AIS" in rep.tcs.note
+
+
+def test_itr22_agent_summary_names_unrecognised_category(tmp_path, monkeypatch):
+    entities_path = _write_entities_yaml(tmp_path)
+    ais = _ais_with(list(_BASE_TDS) + [_tds_credit_el("Brand new AIS category", "SOMEONE", "1000", "999", _TAN_UNK)])
+    ais_path = tmp_path / AIS_FILENAME
+    ais_path.write_text(D._encrypt_for_test(ais, D.derive_password_from_iso_date(PAN, DOB_ISO)), encoding="utf-8")
+    summary = AG.run(str(ais_path), str(tmp_path / "o.xlsx"), entity_key=ENTITY_KEY, entities_path=str(entities_path))
+    assert AC.NOT_COUNTED_TEXT in summary and "Brand new AIS category (1 row)" in summary
+    assert "total TDS credit reported 200" in summary

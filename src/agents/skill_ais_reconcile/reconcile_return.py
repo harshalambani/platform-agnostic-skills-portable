@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from agents.skill_ais_reconcile import ais_categories as AC
 from agents.skill_ais_reconcile.reconcile import TDS_CREDIT_FIELD_CANDIDATES, TOLERANCE, _as_decimal
 from agents.skill_ais_reconcile import reconcile_books as RB
 from agents.skill_ais_reconcile.reconcile_26as import _classify_ais_category
@@ -69,8 +70,23 @@ class DeductorTieOut:
 
 
 @dataclass
+class TcsTieOut:
+    """ITR-22: AIS TCS (tax collected from the taxpayer) vs the return's TCS
+    schedule total. Total only: the return's per-collector rows carry no
+    verified 'claimed this year' column, so a per-TAN comparison is not made."""
+    ais: Decimal
+    ret: Decimal | None          # None = the return states no readable TCS total
+    by_tan: list = field(default_factory=list)    # (tan, name, amount) from the AIS
+    flagged: bool = False
+    note: str = ""
+
+
+@dataclass
 class ReturnTieOut:
     form: str = ""
+    tcs: TcsTieOut | None = None
+    # ITR-22: unrecognised AIS tdsTcs categories (label, rows): in no total
+    uncounted_tds: list = field(default_factory=list)
     heads: list = field(default_factory=list)
     deductors: list = field(default_factory=list)
     partner_rows: list = field(default_factory=list)
@@ -90,7 +106,7 @@ class ReturnTieOut:
 
     @property
     def flagged_count(self) -> int:
-        return len(self.flagged_heads) + len(self.flagged_deductors)
+        return len(self.flagged_heads) + len(self.flagged_deductors) + (1 if self.tcs is not None and self.tcs.flagged else 0)
 
 
 # --------------------------------------------------------------------------
@@ -195,9 +211,9 @@ def _ais_by_tan(normalized: Any):
     t194: dict[str, Decimal] = {}
     if normalized is None:
         return credit, names, cats, t194
-    for r in normalized.rows:
-        if r.section_key != "tdsTcs" or r.level != "l1":
-            continue
+    # ITR-22: only known TDS-credit categories; TCS / payer-side / unknown
+    # rows are handled by _ais_other_by_tan and never summed here.
+    for r in AC.credit_rows(AC.tdstcs_l1_rows(normalized)):
         tan = str(r.info_src_id or "").strip().upper()
         if not tan:
             continue
@@ -216,6 +232,47 @@ def _ais_by_tan(normalized: Any):
         if nm and not names.get(tan):
             names[tan] = nm.title()
     return credit, names, cats, t194
+
+
+def _row_amount(r: Any) -> Decimal:
+    for cand in TDS_CREDIT_FIELD_CANDIDATES:
+        amt = _as_decimal(r.fields.get(cand))
+        if amt is not None:
+            return amt
+    return ZERO
+
+
+def _ais_other_by_tan(normalized: Any):
+    """(tcs rows by TAN, payer-side rows by TAN) -> {tan: [name, amount]}."""
+    names_by_el = RB._element_names(normalized) if normalized is not None else {}
+    tcs: dict[str, list] = {}
+    payer: dict[str, list] = {}
+    rows = AC.tdstcs_l1_rows(normalized)
+    for kind, bucket in ((AC.TCS, tcs), (AC.PAYER_SIDE, payer)):
+        for r in AC.rows_of_kind(rows, kind):
+            tan = str(r.info_src_id or "").strip().upper() or "(no TAN)"
+            ent = bucket.setdefault(tan, ["", ZERO])
+            ent[0] = ent[0] or names_by_el.get(RB._element_key(r), "").title()
+            ent[1] += _row_amount(r)
+    return tcs, payer
+
+
+def _tcs_tieout(fr: Any, ais_tcs: dict) -> TcsTieOut | None:
+    a = sum((v[1] for v in ais_tcs.values()), ZERO)
+    by_tan = [(t, v[0], v[1]) for t, v in sorted(ais_tcs.items())]
+    ret = _num(getattr(fr, "tcs_total", None))
+    if ret is None:
+        if a == ZERO:
+            return None
+        return TcsTieOut(ais=a, ret=None, by_tan=by_tan, flagged=True,
+                         note="TCS in the AIS, but the return has no readable TCS schedule total")
+    t = TcsTieOut(ais=a, ret=ret, by_tan=by_tan)
+    if abs(ret - a) > TOLERANCE:
+        t.flagged = True
+        t.note = ("TCS in the AIS, not in the return's TCS schedule" if ret == ZERO
+                  else "TCS in the return, absent from the AIS" if a == ZERO
+                  else "TCS in the return differs from the AIS")
+    return t
 
 
 def _as26_by_tan(as26: Any):
@@ -376,8 +433,16 @@ def reconcile_return(fr: Any, report: Any, normalized: Any = None,
         v = (getattr(fr, "tds_totals", {}) or {}).get(k)
         if _num(v) is not None:
             out.informational.append((label, f"{_num(v):,.2f}"))
-    if _num(getattr(fr, "tcs_total", None)) is not None:
-        out.informational.append(("TCS total in the return", f"{_num(fr.tcs_total):,.2f} -- not compared"))
+    # ---- TCS (tax collected from the taxpayer): its own line, never a TDS credit ----
+    ais_tcs, ais_payer = _ais_other_by_tan(normalized)
+    out.tcs = _tcs_tieout(fr, ais_tcs)
+    if out.tcs is None and _num(getattr(fr, "tcs_total", None)) is None:
+        out.informational.append(("TCS", "the return has no TCS schedule and the AIS shows no TCS"))
+    for tan, (nm, amt) in sorted(ais_payer.items()):
+        out.informational.append((
+            "TDS you deducted as payer - not your credit",
+            f"{tan} {nm}".strip() + f": {amt:,.2f} -- not compared"))
+    out.uncounted_tds = AC.uncounted_categories(AC.tdstcs_l1_rows(normalized))
 
     out.not_extracted = ne
     return out

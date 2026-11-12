@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from agents.skill_ais_reconcile.ais_categories import credit_rows as _credit_rows
+from agents.skill_ais_reconcile.ais_categories import tdstcs_l1_rows as _tdstcs_l1, uncounted_categories
 from agents.skill_ais_reconcile.normalize import AisRow, NormalizedAis, parse_amount
 
 # Small absolute tolerance for detail-vs-reported comparisons -- AIS amounts
@@ -104,6 +106,8 @@ class AisRecoReport:
 
     total_reported_by_section: dict[str, Decimal] = field(default_factory=dict)
     total_tds_credit: Decimal = Decimal("0")
+    # ITR-22: unrecognised tdsTcs l1 categories (label, rows) -- not in any total
+    uncounted_tds: list = field(default_factory=list)
     flagged_element_count: int = 0
 
 
@@ -241,9 +245,10 @@ def reconcile_internal(normalized: NormalizedAis) -> AisRecoReport:
             )
 
     tds_credit_values = []
-    for row in normalized.rows:
-        if row.section_key != "tdsTcs" or row.level != "l1":
-            continue
+    # ITR-22: only rows whose category is a known TDS credit are summed.
+    # TCS, payer-side TDS and unrecognised categories are never in the total.
+    _l1 = _tdstcs_l1(normalized)
+    for row in _credit_rows(_l1):
         for candidate in TDS_CREDIT_FIELD_CANDIDATES:
             v = _as_decimal(row.fields.get(candidate))
             if v is not None:
@@ -261,5 +266,6 @@ def reconcile_internal(normalized: NormalizedAis) -> AisRecoReport:
         elements=elements,
         total_reported_by_section=total_reported_by_section,
         total_tds_credit=total_tds_credit,
+        uncounted_tds=uncounted_categories(_l1),
         flagged_element_count=flagged_element_count,
     )

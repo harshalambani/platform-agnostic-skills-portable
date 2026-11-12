@@ -27,6 +27,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from agents.skill_ais_reconcile import ais_categories as AC
 from agents.skill_ais_reconcile.reconcile import AisRecoReport, ElementReco
 from agents.skill_ais_reconcile.reconcile_26as import Ais26asReport, CategoryTieOut, QuarterTieOut
 from agents.skill_ais_reconcile.reconcile_books import AisBooksReport, CategoryBooksTieOut
@@ -159,7 +160,9 @@ def _write_summary_sheet(wb: Workbook, report: AisRecoReport) -> None:
         row += 1
     _set(ws, row, 1, "Total TDS credit (tdsTcs l1)", bold=True)
     _set(ws, row, 2, _num(report.total_tds_credit), number_format=INR_FORMAT)
-    row += 2
+    row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
+    row += 1
 
     _set(ws, row, 1, "Elements checked", bold=True)
     _set(ws, row, 2, len(report.elements))
@@ -266,6 +269,7 @@ def _write_26as_tieout_sheet(wb: Workbook, report: Ais26asReport) -> None:
         _set(ws, row, 2, _num(value), number_format=INR_FORMAT,
              fill=agg_fill, color=agg_color, bold=agg_flag)
         row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
     row += 1
 
     # -- Per-quarter tie-out -------------------------------------------------
@@ -354,6 +358,7 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
         _set(ws, row, 2, _num(value), number_format=INR_FORMAT,
              fill=tds_fill, color=tds_color, bold=tds_flag)
         row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
     row += 1
 
     # -- Per-category income tie-out ----------------------------------------
@@ -449,6 +454,15 @@ _RETURN_TAN_COLUMNS = ["TAN", "Name", "Section", "Claimed in return", "AIS", "26
 _RETURN_TAN_MONEY_COLS = (4, 5, 6)
 
 
+def _write_uncounted(ws: Worksheet, row: int, items: list) -> int:
+    """ITR-22: visible line for unrecognised AIS tdsTcs categories (in no total)."""
+    if not items:
+        return row
+    _set(ws, row, 1, AC.NOT_COUNTED_TEXT, bold=True, fill=_RED_FILL, color=_RED_FONT_COLOR)
+    _set(ws, row, 2, AC.uncounted_text(items), fill=_RED_FILL, color=_RED_FONT_COLOR, bold=True)
+    return row + 1
+
+
 def _write_return_sheet(wb: Workbook, report: ReturnTieOut) -> None:
     ws = wb.create_sheet("Return Tie-out")
     row = _write_banner(ws, 1, 7, report.flagged_count)
@@ -512,6 +526,27 @@ def _write_return_sheet(wb: Workbook, report: ReturnTieOut) -> None:
     _tan_block("TDS by deductor: claimed in return | AIS | 26AS", report.deductors)
     _tan_block("Partner rows (section 194T / head BP) -- compared to the AIS 194T rows only",
                report.partner_rows)
+
+    if report.tcs is not None:
+        t = report.tcs
+        _set(ws, row, 1, "TCS (tax collected from you): return | AIS", bold=True, fill=_HEADER_FILL)
+        row += 1
+        fill = _RED_FILL if t.flagged else None
+        color = _RED_FONT_COLOR if t.flagged else None
+        _set(ws, row, 1, "TCS schedule total", bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 2, NOT_EXTRACTED if t.ret is None else _num(t.ret), number_format=INR_FORMAT,
+             bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 3, _num(t.ais), number_format=INR_FORMAT, bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 4, t.note or "ok", bold=t.flagged, fill=fill, color=color)
+        row += 1
+        for tan, nm, amt in t.by_tan:
+            _set(ws, row, 1, f"  AIS collector {tan} {nm}".rstrip())
+            _set(ws, row, 3, _num(amt), number_format=INR_FORMAT)
+            row += 1
+        row += 1
+    row = _write_uncounted(ws, row, report.uncounted_tds)
+    if report.uncounted_tds:
+        row += 1
 
     if report.informational:
         _set(ws, row, 1, "For information", bold=True, fill=_HEADER_FILL)

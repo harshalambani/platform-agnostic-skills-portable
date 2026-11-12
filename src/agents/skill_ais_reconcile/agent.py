@@ -32,6 +32,7 @@ import sys
 from pathlib import Path
 
 from agents.entity_scope import check_26as_fy, check_26as_owner
+from agents.skill_ais_reconcile import ais_categories as AC
 from agents.skill_ais_reconcile import decrypt as D
 from agents.skill_ais_reconcile import normalize as N
 from agents.skill_ais_reconcile import reconcile as R
@@ -111,7 +112,10 @@ def _return_tieout(summary_lines, path, entity, year_key, report, normalized, bo
     summary_lines.append(
         f"Return: {fr.itr_form} tied out -- {len(result.flagged_heads)} head(s) and "
         f"{len(result.flagged_deductors)} deductor(s) flagged; "
-        f"{len(result.not_extracted)} item(s) NOT-EXTRACTED.")
+        f"{len(result.not_extracted)} item(s) NOT-EXTRACTED"
+        + (f"; TCS {'DIFFERS' if result.tcs.flagged else 'matches'} "
+           f"(AIS {result.tcs.ais} vs return {result.tcs.ret})" if result.tcs is not None else "")
+        + ".")
     return result
 
 
@@ -229,6 +233,9 @@ def run(
         f"AIS-internal: {report.flagged_element_count} element(s) flagged "
         f"(of {len(report.elements)}); total TDS credit reported {report.total_tds_credit}.",
     ]
+    if report.uncounted_tds:
+        summary_lines.append(
+            f"{AC.NOT_COUNTED_TEXT} (in no TDS total): {AC.uncounted_text(report.uncounted_tds)}.")
 
     as26_report = None
     if xlsx_path:

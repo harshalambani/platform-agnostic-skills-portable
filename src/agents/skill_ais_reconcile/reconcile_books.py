@@ -87,6 +87,7 @@ class AisBooksReport:
     categories: list[CategoryBooksTieOut] = field(default_factory=list)
 
     ais_tds_credit: Decimal = Decimal("0")
+    uncounted_tds: list = field(default_factory=list)  # ITR-22, from the AIS report
     books_tds_credit: Decimal = Decimal("0")
     delta_tds: Decimal = Decimal("0")
     flag_tds_mismatch: bool = False
@@ -376,6 +377,7 @@ def reconcile_ais_vs_books(report: AisRecoReport, book: Any, mapping: Any,
     return AisBooksReport(
         categories=categories,
         ais_tds_credit=ais_tds,
+        uncounted_tds=list(getattr(report, "uncounted_tds", []) or []),
         books_tds_credit=books_tds,
         delta_tds=delta_tds,
         flag_tds_mismatch=flag_tds_mismatch,
