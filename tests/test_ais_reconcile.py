@@ -2401,3 +2401,486 @@ def test_leg02_filler_only_names_do_not_match_and_count_as_unidentified():
     assert _cat(rep, "dividend").ais_income == Decimal("1000")
     assert not any("both sections" in x for x in rep.source_notes)
     assert any("cannot be identified" in x for x in rep.source_notes)
+
+
+# ---------------------------------------------------------------------------
+# ITR-21: the filed return against the AIS (and the books, and the 26AS)
+# All data below is synthetic: invented PAN/TANs/names/amounts.
+# ---------------------------------------------------------------------------
+
+from agents.skill_ais_reconcile import reconcile_return as RR  # noqa: E402
+
+_FR = AG.filed_return_engine
+TAN_A = "TANAA0001A"
+TAN_B = "TANBB0002B"
+TAN_C = "TANCC0003C"
+
+
+def _credit_el(section, title, info_id, source, amount, credit="0"):
+    """Like _real_element, plus an amountDeposited column (the TDS credit)."""
+    el = _real_element(section, title, info_id, source, amount)
+    el["l1"]["columnLabel"].append(_column_label_seq("amountDeposited", "TDS deposited", "decimal", 3))
+    el["l1"]["columnData"][0].append(credit)
+    el["l1"]["columnDataType"].append("decimal")
+    return el
+
+
+def _tds_credit_el(title, source, amount, credit, tan):
+    return _credit_el("tdsTcs", title, tan, f"{source} ({tan})", amount, credit)
+
+
+def _itr1_json(rows=None, tds=None, extra=None, pan=PAN, ay="2026"):
+    itr = {
+        "Form_ITR1": ({"AssessmentYear": ay} if ay is not None else {}),
+        "PersonalInfo": {"PAN": pan},
+        "ITR1_IncomeDeductions": {
+            "GrossSalary": 0, "Salary": 0, "NetSalary": 0,
+            "IncomeOthSrc": 3500, "GrossTotIncome": 3500, "TotalIncome": 3500,
+            "OthersInc": {"OthersIncDtlsOthSrc": rows if rows is not None else [
+                {"OthSrcNatureDesc": "SAV", "OthSrcOthAmount": 500},
+                {"OthSrcNatureDesc": "IFD", "OthSrcOthAmount": 2000},
+                {"OthSrcNatureDesc": "DIV", "OthSrcOthAmount": 1000,
+                 "DividendInc": {"DateRange": {"Upto15Of6": 1000}}},
+            ]},
+        },
+        "TDSonOthThanSals": {
+            "TDSonOthThanSal": tds if tds is not None else [{
+                "EmployerOrDeductorOrCollectDetl": {
+                    "TAN": TAN_A, "EmployerOrDeductorOrCollecterName": "ALPHA BANK"},
+                "TDSSection": "194A", "AmtForTaxDeduct": 2000,
+                "TotTDSOnAmtPaid": 200, "ClaimOutOfTotTDSOnAmtPaid": 200, "DeductedYr": 2026}],
+            "TotalTDSonOthThanSals": 200,
+        },
+        "ScheduleTDS3Dtls": {"TotalTDS3Details": 0},
+        "ScheduleTCS": {"TotalSchTCS": 0},
+        "TaxPaid": {"TaxesPaid": {"TDS": 200}, "BalTaxPayable": 0},
+    }
+    itr.update(extra or {})
+    return {"ITR": {"ITR1": itr}}
+
+
+def _itr23_json(form="ITR3", tds1=None, tds2=None, os_block=None, salary=0, pan=PAN, ay="2026"):
+    itr = {
+        "Form_" + form: ({"AssessmentYear": ay} if ay is not None else {}),
+        "PartA_GEN1": {"PersonalInfo": {"PAN": pan}},
+        "PartB-TI": {"Salaries": salary, "IncomeFromHP": 0, "GrossTotalIncome": 3500,
+                     "TotalIncome": 3500, "IncFromOS": {"TotIncFromOS": 3500},
+                     "CapGain": {"TotalCapGains": 0}, "DeductionsUnderScheduleVIA": 0},
+        "ScheduleOS": {"IncOthThanOwnRaceHorse": os_block if os_block is not None else {
+            "IntrstFrmSavingBank": 500, "IntrstFrmTermDeposit": 2000,
+            "IntrstFrmIncmTaxRefund": 0, "IntrstFrmOthers": 0, "DividendGross": 1000}},
+        "ScheduleTDS2": {"TDSOthThanSalaryDtls": tds2 if tds2 is not None else [],
+                         "TotalTDSonOthThanSals": 0},
+        "ScheduleTDS3": {"TotalTDS3OnOthThanSal": 0},
+        "ScheduleTCS": {"TCS": [], "TotalSchTCS": 0},
+    }
+    if tds1 is not None:
+        itr["ScheduleS"] = {"TotalGrossSalary": salary, "TotIncUnderHeadSalaries": salary}
+        itr["ScheduleTDS1"] = {"TDSonSalary": tds1, "TotalTDSonSalaries": 0}
+    return {"ITR": {form: itr}}
+
+
+def _tds2_row(tan, claimed, *, section="194A", head="OS", owner="S", gross=2000):
+    return {"TANOfDeductor": tan, "TDSSection": section, "HeadOfIncome": head,
+            "TDSCreditName": owner, "GrossAmount": gross, "BroughtFwdTDSAmt": 0, "AmtCarriedFwd": 0,
+            "TaxDeductCreditDtls": {"TaxDeductedOwnHands": claimed, "TaxClaimedOwnHands": claimed,
+                                    "TaxDeductedIncome": 0, "TaxClaimedIncome": 0,
+                                    "TaxDeductedTDS": 0, "TaxClaimedTDS": 0}}
+
+
+def _parse(tmp_path, payload, name="ret.json"):
+    p = tmp_path / name
+    p.write_text(json.dumps(payload), encoding="utf-8")
+    return _FR.parse_filed_return(p, ENTITY_KEY)
+
+
+def _tie(fr, tds=(), sft=(), **kw):
+    n = N.normalize(_ais_with(list(tds), list(sft)))
+    return RR.reconcile_return(fr, R.reconcile_internal(n), n, **kw)
+
+
+def _head(rep, name):
+    return next((h for h in rep.heads if h.head == name), None)
+
+
+def _ded(rep, tan):
+    return next((d for d in rep.deductors if d.tan == tan), None)
+
+
+_BASE_TDS = [
+    _tds_credit_el("Interest from deposit", "ALPHA BANK", "2500", "200", TAN_A),
+    _tds_credit_el("Dividend", "GAMMA FOODS LIMITED", "1000", "0", TAN_B),
+]
+
+
+# ---- parser -----------------------------------------------------------------
+
+def test_itr21_parse_itr1_pan_salary_os_and_tds(tmp_path):
+    fr = _parse(tmp_path, _itr1_json())
+    assert fr.itr_form == "ITR1" and fr.pan == PAN
+    assert fr.salary["gross_salary"] == 0
+    assert fr.schedule_os["interest_sb"] == 500 and fr.schedule_os["interest_td"] == 2000
+    assert fr.schedule_os["dividend_gross"] == 1000
+    assert fr.tds_rows_extracted and len(fr.tds_rows) == 1
+    row = fr.tds_rows[0]
+    assert row["tan"] == TAN_A and row["claimed"] == 200 and row["credit_owner"] == "S"
+    assert fr.tds_totals["other"] == 200 and fr.tcs_total == 0
+
+
+def test_itr21_parse_itr2_and_itr3_tds_rows(tmp_path):
+    for form in ("ITR2", "ITR3"):
+        payload = _itr23_json(form, tds1=[{
+            "EmployerOrDeductorOrCollectDetl": {"TAN": TAN_C, "EmployerOrDeductorOrCollecterName": "OMEGA LTD"},
+            "IncChrgSal": 100000, "TotalTDSSal": 5000}], tds2=[_tds2_row(TAN_A, 200)], salary=100000)
+        fr = _parse(tmp_path, payload, f"{form}.json")
+        assert fr.itr_form == form and fr.pan == PAN
+        assert fr.salary["gross_salary"] == 100000
+        kinds = {r["tan"]: (r["kind"], r["claimed"]) for r in fr.tds_rows}
+        assert kinds == {TAN_C: ("salary", 5000), TAN_A: ("other", 200)}
+
+
+def test_itr21_parse_itr23_dividend_split_keys_only_when_present(tmp_path):
+    fr = _parse(tmp_path, _itr23_json(os_block={"IntrstFrmSavingBank": 1, "DividendGross": 5}))
+    assert "dividend_22e" not in fr.schedule_os and "dividend_oth_than_22e" not in fr.schedule_os
+    fr = _parse(tmp_path, _itr23_json(os_block={"IntrstFrmSavingBank": 1, "DividendOthThan22e": 3,
+                                                "Dividend22e": 2}), "b.json")
+    assert fr.schedule_os["dividend_oth_than_22e"] == 3 and fr.schedule_os["dividend_22e"] == 2
+
+
+def test_itr21_old_filed_return_fixture_unchanged():
+    """NEGATIVE: the ITR-2 fixture's pre-ITR-21 outputs are exactly as before."""
+    fx = Path(__file__).resolve().parent / "skill_itr_workbook" / "fixtures" / "syn_ind_filed_return.json"
+    fr = _FR.parse_filed_return(fx, "SYN-IND")
+    assert fr.itr_form == "ITR2" and fr.not_extracted_fields == []
+    assert set(fr.schedule_os) == {"interest_sb", "interest_td", "interest_refund", "interest_other",
+                                   "dividend_gross"}
+    assert fr.schedule_os["interest_sb"] == 500 and fr.schedule_os["dividend_gross"] == 750
+    assert fr.heads["Salaries"] == 800000 and fr.taxes_paid["TDS"] == 50000
+
+
+def test_itr21_unsupported_form_fails_loud_no_partial_result(tmp_path):
+    """NEGATIVE: ITR-4 is not read at all -- no half-filled FiledReturn comes back."""
+    p = tmp_path / "itr4.json"
+    p.write_text(json.dumps({"ITR": {"ITR4": {"PersonalInfo": {"PAN": PAN}}}}), encoding="utf-8")
+    with pytest.raises(_FR.UnsupportedReturnForm):
+        _FR.parse_filed_return(p, ENTITY_KEY)
+
+
+def test_itr21_unknown_itr1_nature_code_is_not_extracted_not_mapped(tmp_path):
+    """NEGATIVE: an unknown code is neither interest nor other income."""
+    rows = [{"OthSrcNatureDesc": "SAV", "OthSrcOthAmount": 500},
+            {"OthSrcNatureDesc": "ZZZ", "OthSrcOthAmount": 7777}]
+    fr = _parse(tmp_path, _itr1_json(rows=rows))
+    assert any("'ZZZ'" in x for x in fr.return_not_extracted)
+    assert fr.schedule_os["interest_sb"] == 500
+    assert fr.schedule_os["interest_td"] == 0 and fr.schedule_os["other_income"] == 0
+    assert 7777 not in fr.schedule_os.values()
+
+
+def test_itr21_itr1_salary_tds_key_is_not_extracted(tmp_path):
+    """NEGATIVE: an ITR-1 salary-TDS block is flagged, never read into the TDS rows."""
+    fr = _parse(tmp_path, _itr1_json(extra={"TDSonSalaries": {"TDSonSalary": [{"TotalTDSSal": 9999}]}}))
+    assert any(x.startswith("ITR-1 salary TDS (TDSonSalaries)") for x in fr.return_not_extracted)
+    assert all(r["claimed"] != 9999 for r in fr.tds_rows)
+    assert all(r["kind"] != "salary" for r in fr.tds_rows)
+
+
+def test_itr21_unreadable_claimed_amount_is_not_extracted(tmp_path):
+    tds = [{"EmployerOrDeductorOrCollectDetl": {"TAN": TAN_A, "EmployerOrDeductorOrCollecterName": "A"},
+            "TDSSection": "194A", "ClaimOutOfTotTDSOnAmtPaid": "n/a"}]
+    fr = _parse(tmp_path, _itr1_json(tds=tds))
+    assert fr.tds_rows[0]["claimed"] == "NOT-EXTRACTED"
+    rep = _tie(fr, _BASE_TDS)
+    assert "claimed amount NOT-EXTRACTED" in _ded(rep, TAN_A).note and _ded(rep, TAN_A).flagged
+
+
+# ---- guard ------------------------------------------------------------------
+
+def _fake_fr(**kw):
+    base = dict(source_format="json", pan=PAN, assessment_year="2026", itr_form="ITR1")
+    base.update(kw)
+    return type("FR", (), base)()
+
+
+def test_itr21_guard_accepts_matching_pan_and_year():
+    assert RR.check_return_guard(_fake_fr(), PAN, YEAR_KEY) is None
+    assert RR.check_return_guard(_fake_fr(assessment_year="2026"), PAN, "2025-26") is None
+
+
+def test_itr21_guard_pan_mismatch_is_an_error():
+    """NEGATIVE: someone else's return is never tied out."""
+    msg = RR.check_return_guard(_fake_fr(pan="ZZZZZ9999Z"), PAN, YEAR_KEY)
+    assert msg.startswith("ERROR") and "different PAN" in msg
+    assert PAN not in msg and "ZZZZZ9999Z" not in msg     # masked in the line
+
+
+def test_itr21_guard_ay_mismatch_is_an_error():
+    """NEGATIVE: a return for another year is never tied out."""
+    msg = RR.check_return_guard(_fake_fr(assessment_year="2025"), PAN, "2025-26")
+    assert msg.startswith("ERROR") and "assessment year" in msg
+
+
+def test_itr21_guard_missing_pan_and_pdf_are_errors():
+    assert RR.check_return_guard(_fake_fr(pan="NOT-EXTRACTED"), PAN, YEAR_KEY).startswith("ERROR")
+    assert RR.check_return_guard(_fake_fr(source_format="pdf"), PAN, YEAR_KEY).startswith("ERROR")
+
+
+# ---- tie-out ----------------------------------------------------------------
+
+def test_itr21_tieout_clean_return_has_no_flags(tmp_path):
+    rep = _tie(_parse(tmp_path, _itr1_json()), _BASE_TDS)
+    assert _head(rep, "interest").ret == Decimal("2500") and _head(rep, "interest").ais == Decimal("2500")
+    assert _head(rep, "dividend").ret == Decimal("1000") and _head(rep, "dividend").ais == Decimal("1000")
+    assert rep.flagged_heads == []
+    assert _ded(rep, TAN_A).claimed == Decimal("200") and _ded(rep, TAN_A).ais == Decimal("200")
+    assert not _ded(rep, TAN_A).flagged
+
+
+def test_itr21_head_in_return_absent_from_ais_is_flagged(tmp_path):
+    """NEGATIVE: declared dividend with no AIS dividend must not tie silently."""
+    rep = _tie(_parse(tmp_path, _itr1_json()),
+               [_tds_credit_el("Interest from deposit", "ALPHA BANK", "2500", "200", TAN_A)])
+    h = _head(rep, "dividend")
+    assert h.flagged and h.ais == Decimal("0") and "absent from the AIS" in h.note
+    assert "dividend" in rep.flagged_heads and "interest" not in rep.flagged_heads
+
+
+def test_itr21_head_in_ais_not_in_return_is_flagged(tmp_path):
+    rows = [{"OthSrcNatureDesc": "SAV", "OthSrcOthAmount": 500},
+            {"OthSrcNatureDesc": "IFD", "OthSrcOthAmount": 2000}]
+    rep = _tie(_parse(tmp_path, _itr1_json(rows=rows)), _BASE_TDS)
+    h = _head(rep, "dividend")
+    assert h.flagged and h.ret == Decimal("0") and "not declared in the return" in h.note
+
+
+def test_itr21_tan_in_ais_not_claimed_is_flagged(tmp_path):
+    """NEGATIVE: TDS the AIS shows for a TAN, missing from the claim, must not pass."""
+    tds = _BASE_TDS + [_tds_credit_el("Interest from deposit", "BETA BANK", "100", "10", TAN_C)]
+    rep = _tie(_parse(tmp_path, _itr1_json()), tds)
+    d = _ded(rep, TAN_C)
+    assert d is not None and d.flagged and d.claimed == Decimal("0") and d.ais == Decimal("10")
+    assert "not claimed" in d.note
+    assert not _ded(rep, TAN_A).flagged
+
+
+def test_itr21_tan_claimed_but_absent_from_ais_is_flagged(tmp_path):
+    """NEGATIVE: a claim with no AIS support must not pass."""
+    tds = [{"EmployerOrDeductorOrCollectDetl": {"TAN": TAN_C, "EmployerOrDeductorOrCollecterName": "OMEGA"},
+            "TDSSection": "194A", "AmtForTaxDeduct": 500, "TotTDSOnAmtPaid": 50,
+            "ClaimOutOfTotTDSOnAmtPaid": 50}]
+    rep = _tie(_parse(tmp_path, _itr1_json(tds=tds)), _BASE_TDS)
+    d = _ded(rep, TAN_C)
+    assert d.flagged and d.ais == Decimal("0") and "absent from the AIS" in d.note
+
+
+def test_itr21_payer_in_tds_and_sft_counted_once_in_ais_column(tmp_path):
+    """NEGATIVE: the same dividend payer in both AIS sections is not double counted."""
+    tds = [_tds_credit_el("Dividend", "GAMMA FOODS LIMITED", "1000", "0", TAN_B)]
+    sft = [_sft_el("Dividend", "GAMMA FOODS LIMITED (ZZZZZ0001Z)", "1000")]
+    rep = _tie(_parse(tmp_path, _itr1_json()), tds, sft)
+    assert _head(rep, "dividend").ais == Decimal("1000")
+    assert _head(rep, "dividend").ais != Decimal("2000")
+
+
+def test_itr21_ais_and_books_figures_are_the_books_reconciliation_figures(tmp_path):
+    ais = _ais_with(list(_BASE_TDS), [])
+    n = N.normalize(ais)
+    book, mapping = _income_book("OS_DIVIDEND", "g1", 1000)
+    books_rep = RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY, n)
+    rep = RR.reconcile_return(_parse(tmp_path, _itr1_json()), R.reconcile_internal(n), n, books_report=books_rep)
+    h = _head(rep, "dividend")
+    assert h.ais == _cat(books_rep, "dividend").ais_income
+    assert h.books == _cat(books_rep, "dividend").books_income == Decimal("1000")
+    assert rep.books_given
+
+
+def test_itr21_return_differs_from_books_is_flagged(tmp_path):
+    n = N.normalize(_ais_with(list(_BASE_TDS), []))
+    book, mapping = _income_book("OS_DIVIDEND", "g1", 400)
+    books_rep = RB.reconcile_ais_vs_books(R.reconcile_internal(n), book, mapping, YEAR_KEY, n)
+    rep = RR.reconcile_return(_parse(tmp_path, _itr1_json()), R.reconcile_internal(n), n, books_report=books_rep)
+    h = _head(rep, "dividend")
+    assert h.flagged and "differs from the books" in h.note and h.delta_books == Decimal("600")
+
+
+def test_itr21_credit_in_another_persons_hands_not_added_to_claimed(tmp_path):
+    """NEGATIVE: a row whose credit sits with someone else is listed and flagged, never claimed."""
+    payload = _itr23_json(tds2=[_tds2_row(TAN_A, 200), _tds2_row(TAN_A, 80, owner="O")])
+    fr = _parse(tmp_path, payload)
+    rep = _tie(fr, _BASE_TDS)
+    d = _ded(rep, TAN_A)
+    assert d.claimed == Decimal("200") and d.claimed != Decimal("280")
+    assert d.flagged and "another person's hands" in d.note
+
+
+def test_itr21_only_other_hands_row_claims_nothing(tmp_path):
+    fr = _parse(tmp_path, _itr23_json(tds2=[_tds2_row(TAN_A, 80, owner="O")]))
+    d = _ded(_tie(fr, _BASE_TDS), TAN_A)
+    assert d.claimed == Decimal("0") and d.flagged
+
+
+def test_itr21_partner_rows_are_separate_from_other_sources(tmp_path):
+    payload = _itr23_json(tds2=[_tds2_row(TAN_A, 200), _tds2_row(TAN_C, 300, section="94T", head="BP")])
+    tds = _BASE_TDS + [_tds_credit_el("Receipt of amount by Partners from Partnership Firm", "OMEGA LLP", "3000", "300", TAN_C)]
+    rep = _tie(_parse(tmp_path, payload), tds)
+    assert [d.tan for d in rep.partner_rows] == [TAN_C]
+    assert rep.partner_rows[0].claimed == Decimal("300") and not rep.partner_rows[0].flagged
+    assert _ded(rep, TAN_C) is None                    # not folded into the other-sources block
+    assert _head(rep, "interest").ais == Decimal("2500")  # and not into a head
+
+
+def test_itr21_partner_claim_without_ais_194t_row_is_flagged(tmp_path):
+    payload = _itr23_json(tds2=[_tds2_row(TAN_C, 300, section="94T", head="BP")])
+    rep = _tie(_parse(tmp_path, payload), _BASE_TDS)
+    assert rep.partner_rows[0].flagged and "absent from the AIS 194T rows" in rep.partner_rows[0].note
+
+
+def test_itr21_26as_third_column(tmp_path):
+    t = As26Transaction(tan=TAN_A, deductor_name="ALPHA BANK", section="194A", txn_date=date(2025, 8, 1),
+                        amount=Decimal("2000"), tax_deducted=Decimal("150"), tds_deposited=Decimal("150"))
+    as26 = As26Data(transactions=[t])
+    rep = _tie(_parse(tmp_path, _itr1_json()), _BASE_TDS, as26=as26)
+    d = _ded(rep, TAN_A)
+    assert d.as26 == Decimal("150") and d.flagged and "claimed differs from the 26AS" in d.note
+    assert rep.as26_given
+
+
+def test_itr21_itr1_salary_only_tan_not_compared_but_noted(tmp_path):
+    tds = _BASE_TDS + [_tds_credit_el("Salary", "EMPLOYER LTD", "100000", "5000", TAN_C)]
+    rep = _tie(_parse(tmp_path, _itr1_json()), tds)
+    assert _ded(rep, TAN_C) is None
+    assert any(TAN_C in x and "not compared" in x for x in rep.notes)
+
+
+def test_itr21_unreadable_head_is_flagged_not_tied(tmp_path):
+    fr = _parse(tmp_path, _itr23_json(os_block={"IntrstFrmSavingBank": 500, "IntrstFrmTermDeposit": 2000,
+                                                "IntrstFrmIncmTaxRefund": 0}))
+    rep = _tie(fr, _BASE_TDS)
+    assert _head(rep, "dividend").ret is None and _head(rep, "dividend").flagged
+    assert any("dividend" in x for x in rep.not_extracted)
+
+
+# ---- workbook / feedback ----------------------------------------------------
+
+def test_itr21_sheet_lists_not_extracted_first_in_red(tmp_path):
+    from openpyxl import Workbook
+    fr = _parse(tmp_path, _itr1_json(rows=[{"OthSrcNatureDesc": "ZZZ", "OthSrcOthAmount": 1}]))
+    rep = _tie(fr, _BASE_TDS)
+    wb = Workbook()
+    X._write_return_sheet(wb, rep)
+    ws = wb["Return Tie-out"]
+    texts = [(c.value, c.font.color.rgb if c.font and c.font.color else None)
+             for r in ws.iter_rows() for c in r if c.value]
+    ne_idx = next(i for i, (v, _) in enumerate(texts) if str(v).startswith("NOT-EXTRACTED from the return"))
+    head_idx = next(i for i, (v, _) in enumerate(texts) if str(v).startswith("Heads:"))
+    assert ne_idx < head_idx
+    assert any("'ZZZ'" in str(v) for v, _ in texts[ne_idx:head_idx])
+
+
+def test_itr21_feedback_only_ever_suggests_review(tmp_path):
+    rep = _tie(_parse(tmp_path, _itr1_json()),
+               _BASE_TDS + [_tds_credit_el("Interest from deposit", "BETA BANK", "100", "10", TAN_C)])
+    sugg = F._return_suggestions(rep)
+    assert sugg and all(s.suggested_action == F.FEEDBACK_REVIEW for s in sugg)
+    assert F._return_suggestions(None) == []
+
+
+# ---- agent end to end -------------------------------------------------------
+
+def _run_agent(tmp_path, monkeypatch, payload=None, *, raw=None, out_name="out.xlsx", pass_return=True):
+    entities_path = _write_entities_yaml(tmp_path)
+    ais_path = _write_encrypted_ais(tmp_path)
+    out = tmp_path / out_name
+    kwargs = {}
+    if pass_return:
+        rp = tmp_path / "return.json"
+        rp.write_text(raw if raw is not None else json.dumps(payload), encoding="utf-8")
+        kwargs["filed_return_path"] = str(rp)
+    summary = AG.run(str(ais_path), str(out), entity_key=ENTITY_KEY, entities_path=str(entities_path), **kwargs)
+    return summary, load_workbook(out)
+
+
+def test_itr21_agent_valid_return_writes_the_sheet(tmp_path, monkeypatch):
+    summary, wb = _run_agent(tmp_path, monkeypatch, _itr1_json())
+    assert "Return: ITR1 tied out" in summary and "ERROR" not in summary
+    assert "Return Tie-out" in wb.sheetnames
+
+
+def test_itr21_agent_no_return_path_keeps_the_sheet_set(tmp_path, monkeypatch):
+    """NEGATIVE: without filed_return_path no ITR-21 sheet or line appears."""
+    summary, wb = _run_agent(tmp_path, monkeypatch, pass_return=False)
+    assert "Return Tie-out" not in wb.sheetnames and "Return:" not in summary
+    base = wb.sheetnames
+    _, wb2 = _run_agent(tmp_path, monkeypatch, _itr1_json(), out_name="out2.xlsx")
+    assert wb2.sheetnames == base + ["Return Tie-out"] or [s for s in wb2.sheetnames if s != "Return Tie-out"] == base
+
+
+def test_itr21_agent_pan_mismatch_skips_with_error_no_sheet(tmp_path, monkeypatch):
+    summary, wb = _run_agent(tmp_path, monkeypatch, _itr1_json(pan="ZZZZZ9999Z"))
+    assert "ERROR" in summary and "different PAN" in summary
+    assert "Return Tie-out" not in wb.sheetnames
+
+
+def test_itr21_agent_ay_mismatch_skips_with_error_no_sheet(tmp_path, monkeypatch):
+    """NEGATIVE: Form_ITR2.AssessmentYear "2025" against FY 2025-26 is never tied out."""
+    summary, wb = _run_agent(tmp_path, monkeypatch, _itr23_json("ITR2", ay="2025"))
+    assert "ERROR" in summary and "assessment year 2025" in summary
+    assert "Return Tie-out" not in wb.sheetnames
+
+
+def test_itr21_agent_missing_ay_skips_with_error_no_sheet(tmp_path, monkeypatch):
+    """NEGATIVE: a return whose year is unknown is never tied out."""
+    summary, wb = _run_agent(tmp_path, monkeypatch, _itr1_json(ay=None))
+    assert "ERROR" in summary and "does not state its assessment year" in summary
+    assert "Return Tie-out" not in wb.sheetnames
+
+
+def test_itr21_parse_assessment_year_all_three_forms(tmp_path):
+    assert _parse(tmp_path, _itr1_json(), "a.json").assessment_year == "2026"
+    for form in ("ITR2", "ITR3"):
+        assert _parse(tmp_path, _itr23_json(form, ay="2026"), form + ".json").assessment_year == "2026"
+
+
+def test_itr21_missing_ay_stays_not_extracted(tmp_path):
+    fr = _parse(tmp_path, _itr1_json(ay=None))
+    assert fr.assessment_year == "NOT-EXTRACTED" and "assessment year" in fr.return_not_extracted
+    assert RR.check_return_guard(fr, PAN, YEAR_KEY).startswith("ERROR")
+
+
+def test_itr21_guard_missing_ay_is_an_error():
+    assert RR.check_return_guard(_fake_fr(assessment_year="NOT-EXTRACTED"), PAN, YEAR_KEY).startswith("ERROR")
+
+
+def test_itr21_other_ais_categories_never_land_in_a_head_or_partner(tmp_path):
+    """NEGATIVE: rent, foreign remittance and foreign travel are not interest/dividend/salary/partner."""
+    tds = list(_BASE_TDS) + [
+        _tds_credit_el("Rent payment", "LANDLORD", "50000", "5000", "TANRR0004R"),
+        _tds_credit_el("Outward foreign remittance/purchase of foreign currency", "FX DEALER", "70000", "700", "TANFX0005F"),
+        _tds_credit_el("Foreign travel", "TRAVEL CO", "90000", "900", "TANFT0006T")]
+    rep = _tie(_parse(tmp_path, _itr1_json()), tds)
+    assert _head(rep, "interest").ais == Decimal("2500") and _head(rep, "dividend").ais == Decimal("1000")
+    assert _head(rep, "salary") is None or _head(rep, "salary").ais == Decimal("0")
+    assert rep.partner_rows == []
+    cats = RR._ais_by_tan(N.normalize(_ais_with(tds, [])))
+    assert cats[3] == {}                                  # nothing in the 194T bucket
+    for tan in ("TANRR0004R", "TANFX0005F", "TANFT0006T"):
+        assert cats[2][tan] == {"other"}
+
+
+def test_itr21_partner_category_matched_whole_label_only(tmp_path):
+    label = "  Receipt of amount by Partners  from Partnership Firm "
+    n = N.normalize(_ais_with([_tds_credit_el(label, "OMEGA LLP", "3000", "300", TAN_C)], []))
+    assert RR._ais_by_tan(n)[3] == {TAN_C: Decimal("300")}
+    n = N.normalize(_ais_with([_tds_credit_el("Partner rent 194T note", "X", "3000", "300", TAN_C)], []))
+    assert RR._ais_by_tan(n)[3] == {}
+
+
+def test_itr21_agent_itr4_fails_loud_no_sheet(tmp_path, monkeypatch):
+    summary, wb = _run_agent(tmp_path, monkeypatch, {"ITR": {"ITR4": {"PersonalInfo": {"PAN": PAN}}}})
+    assert "ERROR" in summary and "ITR4" in summary
+    assert "Return Tie-out" not in wb.sheetnames
+
+
+def test_itr21_agent_garbage_return_is_an_error_not_a_crash(tmp_path, monkeypatch):
+    summary, wb = _run_agent(tmp_path, monkeypatch, raw="not json at all")
+    assert "ERROR" in summary and "Return Tie-out" not in wb.sheetnames

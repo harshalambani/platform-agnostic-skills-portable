@@ -37,6 +37,7 @@ from agents.skill_ais_reconcile import normalize as N
 from agents.skill_ais_reconcile import reconcile as R
 from agents.skill_ais_reconcile import reconcile_26as as R26
 from agents.skill_ais_reconcile import reconcile_books as RB
+from agents.skill_ais_reconcile import reconcile_return as RR
 from agents.skill_ais_reconcile import feedback as F
 from agents.skill_ais_reconcile import excel_writer as XL
 
@@ -48,6 +49,7 @@ _ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "
 if str(_ITR_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_ITR_SCRIPTS))
 import configs  # noqa: E402
+import filed_return as filed_return_engine  # noqa: E402
 import parse_gnucash as pg  # noqa: E402
 import rules as rules_engine  # noqa: E402
 import as26 as as26_engine  # noqa: E402
@@ -88,6 +90,31 @@ def _resolve_entity_from_prefix(entities_path: str, prefix: str) -> "configs.Ent
     )
 
 
+def _return_tieout(summary_lines, path, entity, year_key, report, normalized, books_report, as26_data):
+    """ITR-21. Returns a ReturnTieOut, or None after adding an ERROR/skip line to the summary."""
+    try:
+        fr = filed_return_engine.parse_filed_return(path, entity.key)
+    except filed_return_engine.UnsupportedReturnForm as e:
+        summary_lines.append(f"ERROR: filed return not read: {e}. Return tie-out skipped.")
+        return None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        summary_lines.append(f"ERROR: filed return unreadable ({e}). Return tie-out skipped.")
+        return None
+    except Exception as e:  # noqa: BLE001 -- pdfplumber raises its own error types
+        summary_lines.append(f"ERROR: filed return unreadable ({e}). Return tie-out skipped.")
+        return None
+    problem = RR.check_return_guard(fr, getattr(entity, "pan", ""), year_key)
+    if problem:
+        summary_lines.append(problem)
+        return None
+    result = RR.reconcile_return(fr, report, normalized, books_report=books_report, as26=as26_data)
+    summary_lines.append(
+        f"Return: {fr.itr_form} tied out -- {len(result.flagged_heads)} head(s) and "
+        f"{len(result.flagged_deductors)} deductor(s) flagged; "
+        f"{len(result.not_extracted)} item(s) NOT-EXTRACTED.")
+    return result
+
+
 def run(
     ais_path: str,
     output_path: str,
@@ -98,6 +125,7 @@ def run(
     model_override: str = None,
     entities_path: str = "Data/itr/entities.yaml",
     rules_dir: str = "Data/itr/rules",
+    filed_return_path: str = None,
 ) -> str:
     """
     Decrypt and reconcile an encrypted AIS JSON export against itself
@@ -125,6 +153,10 @@ def run(
     is prefixed with a loud WARNING (Phase C's tie-out sheet still gets
     written, so the mismatch is visible in both places, but the numbers in
     it are almost certainly meaningless for a wrong-year book).
+
+    filed_return_path (ITR-21), when supplied, is the entity's filed return (JSON; ITR-1, ITR-2 or
+    ITR-3). Its PAN must be the entity's and its assessment year, when it states one, the FY end
+    year, otherwise an ERROR line is added and no Return Tie-out sheet is written.
 
     xlsx_path, when supplied, must be a 26AS skill output workbook (Part I
     sheet) for the same entity/year -- feeds the TDS-credit tie-out.
@@ -259,12 +291,20 @@ def run(
                         f"books {books_report.books_tds_credit})."
                     )
 
-    suggestions = F.suggest_feedback(report, books=books_report, as26=as26_report)
+    return_report = None
+    if filed_return_path:
+        return_report = _return_tieout(
+            summary_lines, filed_return_path, entity, year_key, report, normalized,
+            books_report, as26_data if as26_report is not None else None)
+
+    suggestions = F.suggest_feedback(report, books=books_report, as26=as26_report,
+                                     filed_return=return_report)
     summary_lines.append(f"Feedback: {len(suggestions)} advisory suggestion(s) -- review before acting.")
 
     XL.write_reco_workbook(
         report, output_path,
         report_26as=as26_report, report_books=books_report, suggestions=suggestions,
+        report_return=return_report,
     )
 
     if fy_warning:
