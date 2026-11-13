@@ -1,0 +1,121 @@
+# skill.yaml -- Year-End Close manifest.
+# One entity, one closing financial year, one step per run. Copies and
+# registers books, checks the close, and lists clean-up for the user to run.
+# Never deletes, moves, overwrites or edits a .gnucash file.
+
+name: "year_end_close"
+display_name: "Year-End Close"
+description: >
+  Carries one entity's books from a closing financial year into the next:
+  copies the final book to the Drive year folder, sets up the next year's
+  GnuCash folder, book, registry entry and Drive shortcut, checks that the
+  new book is closed for the old year, and lists what can be cleaned up with
+  a Recycle Bin script for you to run. Nothing is ever deleted by the skill.
+category: "gnucash"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "entity"
+    type: "select"
+    label: "Entity -- one entity per run; its registered book for the closing year is the one carried forward"
+    options_from: "itr_entities"
+    required: true
+  - name: "closing_fy"
+    type: "text"
+    label: "Closing financial year (YYYY-YY, e.g. 2025-26)"
+    required: true
+  - name: "step"
+    type: "select"
+    label: "Step to run (in order: 1, 2, then 3 in GnuCash, then 4, then 5)"
+    options:
+      - "0 - Show where this year-end run stands"
+      - "1 - Copy the final book to the Drive year folder"
+      - "2 - Carry the book into the next year"
+      - "3 - Close the books in GnuCash (you do this)"
+      - "4 - Check the new book is closed"
+      - "5 - List what can be cleaned up"
+    required: true
+
+run_args:
+  entity_key: "{inputs.entity}"
+  closing_fy: "{inputs.closing_fy}"
+  step: "{inputs.step}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+  entities_path: "{data_root}/itr/entities.yaml"
+  settings_path: "{data_root}/settings/config.yaml"
+  state_dir: "{data_root}/year_end"
+
+output:
+  extension: ".md"
+  suffix: "Year-End-Close"
+  download_label: "Download Year-End Report"
+  extra_outputs:
+    - key: "cleanup_script"
+      label: "Recycle Bin script"
+      download_label: "Download clean-up script (PowerShell)"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+  network: false
+
+help:
+  overview: >
+    Year-end for one entity, one step at a time. Folders come only from the
+    Entities screen (the entity's folder name and the two year-end folders),
+    and the closing year's book is the one the book registry holds for that
+    entity and year. An entity with no registered book for the year is not
+    part of year-end and nothing is created. Step 1 copies the final book to
+    the Drive year folder. Step 2 copies it into the next year's GnuCash
+    folder under the next year's name, registers it, and adds a Drive
+    shortcut. Step 3 is yours: close the books in the new year's book in
+    GnuCash. Step 4 opens the new book read-only and checks that every
+    Income and Expense account is zero at 31 March and that closing entries
+    dated 31 March exist; only then is the year marked done. Step 5 lists the
+    backups, logs and the old shortcut, and writes a Recycle Bin script for
+    you to run. The skill never deletes, moves, overwrites or edits a book,
+    and stops while any lock file is in the GnuCash folders.
+  when_to_use: >
+    At the end of a financial year, once the last entries are in the final
+    book and GnuCash is closed.
+  inputs:
+    - name: "entity"
+      tooltip: "The entity to close the year for."
+      accepts: "One entity from the Entities tab."
+      gotchas: "It needs a folder name on the Entities screen and a registered book for the closing year."
+    - name: "closing_fy"
+      tooltip: "The year being closed."
+      accepts: "Text like 2025-26."
+      gotchas: "This is the financial year, not the assessment year."
+    - name: "step"
+      tooltip: "Which step to run now."
+      accepts: "One of the listed steps."
+      gotchas: "Steps run in order. A step that stops changes nothing it was not asked to."
+  steps:
+    - "Pick the entity, type the closing year and choose step 1. Run."
+    - "Run step 2, then do step 3 in GnuCash (close the books in the NEW year's book)."
+    - "Run step 4. When it passes the year is marked done."
+    - "Run step 5, then run the script it writes if you agree with the list."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Year-End-Close.md"
+        tooltip: "What the step did or why it stopped."
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Year-End-Close-cleanup.ps1"
+        tooltip: "Step 5 only. Sends the listed files to the Recycle Bin when you run it."
+  tips: >
+    Step 0 shows which steps have passed. A stopped step can simply be run
+    again after the cause is fixed.
+  troubleshooting:
+    - problem: "It says a lock file is in the folder."
+      fix: "A book is open in GnuCash. Close GnuCash and run the step again."
+    - problem: "It says no books - not part of year-end."
+      fix: "The entity has no registered book for that year. Nothing was created."
+    - problem: "Step 4 does not pass."
+      fix: "Run the 31 March close in the new year's book, save, close GnuCash, and run step 4 again."

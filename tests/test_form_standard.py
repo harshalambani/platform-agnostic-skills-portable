@@ -28,6 +28,7 @@ ENTITY_SKILLS = {
     "skill_gnucash_intercompany",
     "skill_gnucash_intercompany_matrix",
     "skill_krc_gnucash",
+    "skill_year_end_close",
     "skill_26as_journal",
     "skill_itr_workbook",
     "skill_gnucash_pipeline",
