@@ -74,6 +74,7 @@ padding-top:14px}
 <a href="#skill_sbm">SBM</a>
 <a href="#skill_scaffold">Skill Scaffolder</a>
 <a href="#skill_translate">Text Translator</a>
+<a href="#skill_year_end_close">Year-End Close</a>
 </nav>
 <main>
 <h1>User Guide</h1>
@@ -942,7 +943,36 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 28 UI skills, 4 internal steps.</footer>
+<section id="skill_year_end_close" class="skill">
+<h2>Year-End Close <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">Year-end for one entity, one step at a time. Folders come only from the Entities screen (the entity&#x27;s folder name and the two year-end folders), and the closing year&#x27;s book is the one the book registry holds for that entity and year. An entity with no registered book for the year is not part of year-end and nothing is created. Step 1 copies the final book to the Drive year folder. Step 2 copies it into the next year&#x27;s GnuCash folder under the next year&#x27;s name, registers it, and adds a Drive shortcut. Step 3 is yours: close the books in the new year&#x27;s book in GnuCash. Step 4 opens the new book read-only and checks that every Income and Expense account is zero at 31 March and that closing entries dated 31 March exist; only then is the year marked done. Step 5 lists the backups, logs and the old shortcut, and writes a Recycle Bin script for you to run. The skill never deletes, moves, overwrites or edits a book, and stops while any lock file is in the GnuCash folders.</p>
+<p class="whenuse"><b>When to use it.</b> At the end of a financial year, once the last entries are in the final book and GnuCash is closed.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Entity -- one entity per run; its registered book for the closing year is the one carried forward</b> <em>(required)</em> <span class="pa-tip" data-tip="The entity to close the year for. ⚠️ It needs a folder name on the Entities screen and a registered book for the closing year.">ℹ️</span><br><span class="fmt">accepts: One entity from the Entities tab.</span></li>
+<li><b>Closing financial year (YYYY-YY, e.g. 2025-26)</b> <em>(required)</em> <span class="pa-tip" data-tip="The year being closed. ⚠️ This is the financial year, not the assessment year.">ℹ️</span><br><span class="fmt">accepts: Text like 2025-26.</span></li>
+<li><b>Step to run (in order: 1, 2, then 3 in GnuCash, then 4, then 5)</b> <em>(required)</em> <span class="pa-tip" data-tip="Which step to run now. ⚠️ Steps run in order. A step that stops changes nothing it was not asked to.">ℹ️</span><br><span class="fmt">accepts: One of the listed steps.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the entity, type the closing year and choose step 1. Run.</li>
+<li>Run step 2, then do step 3 in GnuCash (close the books in the NEW year&#x27;s book).</li>
+<li>Run step 4. When it passes the year is marked done.</li>
+<li>Run step 5, then run the script it writes if you agree with the list.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-Year-End-Close.md</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Year-End-Close.md</code><span class="pa-tip" data-tip="What the step did or why it stopped.">ℹ️</span> — What the step did or why it stopped.</li>
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Year-End-Close-cleanup.ps1</code><span class="pa-tip" data-tip="Step 5 only. Sends the listed files to the Recycle Bin when you run it.">ℹ️</span> — Step 5 only. Sends the listed files to the Recycle Bin when you run it.</li>
+</ul>
+<h3>Tips</h3><p>Step 0 shows which steps have passed. A stopped step can simply be run again after the cause is fixed.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>It says a lock file is in the folder.</td><td>A book is open in GnuCash. Close GnuCash and run the step again.</td></tr>
+<tr><td>It says no books - not part of year-end.</td><td>The entity has no registered book for that year. Nothing was created.</td></tr>
+<tr><td>Step 4 does not pass.</td><td>Run the 31 March close in the new year&#x27;s book, save, close GnuCash, and run step 4 again.</td></tr>
+</tbody></table>
+</section>
+<footer>Generated from skill manifests · 29 UI skills, 4 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];
