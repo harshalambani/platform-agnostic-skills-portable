@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 BACKUP_RE = re.compile(r"^.+\.gnucash\.\d{14}\.gnucash$", re.IGNORECASE)
 LOG_RE = re.compile(r"^.+\.log$", re.IGNORECASE)
@@ -58,7 +58,7 @@ def list_cleanup(gnucash_dir: Path, final_book: Path, drive_dir: Path) -> list[C
 def script_safe(item: CleanupItem) -> bool:
     """Only a plain absolute ASCII path with no wildcard goes into the script."""
     p = item.path
-    return (p.isascii() and Path(p).is_absolute()
+    return (p.isascii() and (PureWindowsPath(p).is_absolute() or PurePosixPath(p).is_absolute())
             and not any(c in p for c in "*?\r\n\t\"`$"))
 
 
