@@ -186,6 +186,9 @@ class EntityProfile:
     cc_cred_max_overage: object = None   # CC-31: the most (rupees) a CRED payment line may exceed the bank
                                          # amount and still match. Kept as read; checked by
                                          # parse_cred_max_overage. None == the code default (50).
+    folder_name: str = ""                # YE-01: this entity's folder name, the same in the Drive Accounts
+                                         # tree and the GnuCash profile tree (one path segment, see
+                                         # check_folder_name). Empty == not set; the year-end skill refuses.
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -219,6 +222,70 @@ def parse_cred_max_overage(value) -> float:
         raise ValueError(f"{value!r} is not a number")
     if out < 0 or out > CRED_MAX_OVERAGE_LIMIT:
         raise ValueError(f"{value!r} is outside 0 to {CRED_MAX_OVERAGE_LIMIT:g} rupees")
+    return out
+
+
+_FOLDER_NAME_BAD_CHARS = '<>:"/' + chr(92) + '|?*'
+
+
+def check_folder_name(value) -> str | None:
+    """YE-01: None when ``value`` is a usable folder name, else a plain message.
+
+    One path segment only: not blank, no separators, not "." or "..", none of the characters
+    Windows forbids in a name, no trailing dot or space. The same name is used under the Drive
+    Accounts root and under the GnuCash profile root, so it must be safe in both. An unset entity
+    (empty string / None) is NOT checked here: callers treat empty as "not set"."""
+    if not isinstance(value, str):
+        return f"{value!r} is not text"
+    if not value.strip():
+        return "is blank (leave it empty to leave the folder name unset)"
+    if value != value.strip():
+        return f"{value!r} starts or ends with a space"
+    if value in (".", "..") or ".." in value:
+        return f"{value!r} must not be '.' or contain '..'"
+    bad = sorted({c for c in value if c in _FOLDER_NAME_BAD_CHARS or ord(c) < 32})
+    if bad:
+        shown = " ".join(repr(c) if ord(c) < 32 else c for c in bad)
+        return f"{value!r} must be a single folder name -- it contains {shown}"
+    if value.endswith("."):
+        return f"{value!r} must not end with a dot"
+    return None
+
+
+YEAR_END_ROOT_KEYS = ("drive_accounts_root", "gnucash_profile_root")
+
+
+def check_root_folder(value) -> str | None:
+    """YE-01: None when ``value`` is an absolute path to an existing folder, else a plain message.
+    Empty/None is "not set" and is the caller's business."""
+    if not isinstance(value, str) or not value.strip():
+        return "is blank"
+    p = Path(value.strip())
+    if not p.is_absolute():
+        return f"{value!r} is not a full path (it must start at a drive letter)"
+    if not p.exists():
+        return f"{value!r} does not exist"
+    if not p.is_dir():
+        return f"{value!r} is not a folder"
+    return None
+
+
+def read_year_end_roots(settings_path: str | Path | None) -> dict[str, str]:
+    """YE-01: {'drive_accounts_root': ..., 'gnucash_profile_root': ...} from the portable config.yaml
+    (the same file as cc_large_spend_threshold). A key that is absent or blank is returned as "" -- not
+    set. Nothing is guessed, nothing defaults to a real path, and it never raises."""
+    out = {k: "" for k in YEAR_END_ROOT_KEYS}
+    if not settings_path:
+        return out
+    try:
+        p = Path(settings_path)
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) if p.is_file() else None
+    except Exception:
+        return out
+    if isinstance(data, dict):
+        for k in YEAR_END_ROOT_KEYS:
+            v = data.get(k)
+            out[k] = v.strip() if isinstance(v, str) else ""
     return out
 
 
@@ -265,6 +332,7 @@ def load_entities(path: str | Path) -> dict[str, EntityProfile]:
             partner_firm_pan=str(fields_.get("partner_firm_pan") or "").strip().upper(),
             cc_large_spend_threshold=_parse_positive_amount(fields_.get("cc_large_spend_threshold")),
             cc_cred_max_overage=fields_.get("cc_cred_max_overage"),
+            folder_name=str(fields_.get("folder_name") or "").strip(),
             foreign_dividend_cash_account=str(fields_.get("foreign_dividend_cash_account") or "").strip(),
             foreign_dividend_tax_account=str(fields_.get("foreign_dividend_tax_account") or "").strip(),
             foreign_dividend_income_account=str(fields_.get("foreign_dividend_income_account") or "").strip(),
@@ -367,6 +435,8 @@ def _entity_to_dict(e: EntityProfile) -> dict:
             d["cc_cred_max_overage"] = parse_cred_max_overage(e.cc_cred_max_overage)
         except ValueError:
             d["cc_cred_max_overage"] = e.cc_cred_max_overage   # never rewrite a bad value into a good-looking one
+    if e.folder_name:
+        d["folder_name"] = e.folder_name
     for _k in ("foreign_dividend_cash_account", "foreign_dividend_tax_account",
                "foreign_dividend_income_account"):
         if getattr(e, _k):

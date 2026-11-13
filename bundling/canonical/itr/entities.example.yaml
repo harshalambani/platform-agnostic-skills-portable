@@ -176,6 +176,10 @@ SYN-PARTNER:
   # CC-31: the most (rupees, 0 to 500) a CRED payment line on a statement may exceed the bank amount and
   # still be matched. Missing = 50. Anything else than a number from 0 to 500 stops the card-spend run.
   cc_cred_max_overage: 50
+  # YE-01: this entity's folder name, the same under the Drive Accounts root and the GnuCash profile root
+  # (both roots are set once, on the Entities screen, not in this file). One folder name: no slashes, no '..'.
+  # Missing = not set; the year-end skill will not run for the entity.
+  folder_name: "Syn Individual"
   # ITR-05: PAN of the firm/LLP/AOP this entity is a partner of (Schedule AL firm interest line).
   partner_firm_pan: "FFFFF1234F"
   # Partner of a firm (Partner Compensation skill). Date admitted drives the
