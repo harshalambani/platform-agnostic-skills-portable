@@ -23,6 +23,9 @@ Use once you've downloaded your AIS JSON export from the income-tax portal, to c
 - **26AS workbook (optional, from the 26AS skill -- enables the TDS-credit tie-out)** (optional) — accepts: Excel (.xlsx) with a Part I (TDS) sheet.
   - 26AS workbook produced by this repo's '26AS' skill, for the same entity/year.
   - ⚠️ A workbook for the wrong entity/year will tie out against the wrong TDS figures without a hard error -- double-check before relying on it.
+- **Filed return (optional, JSON of the entity's own ITR-1/2/3 for the SAME FY -- enables the Return Tie-out)** (optional) — accepts: Filed-return JSON (ITR-1, ITR-2 or ITR-3). A PDF is accepted but carries no per-head figures, so the tie-out is skipped.
+  - The entity's filed return, to tie out against the AIS (and the books and 26AS when given).
+  - ⚠️ The return's PAN must be the selected entity's, and a return that states its assessment year must be for this FY, otherwise the Return Tie-out is skipped with an ERROR line. Fields that cannot be read are listed in red as NOT-EXTRACTED, never guessed.
 
 ## How to run
 

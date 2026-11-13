@@ -27,10 +27,12 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
+from agents.skill_ais_reconcile import ais_categories as AC
 from agents.skill_ais_reconcile.reconcile import AisRecoReport, ElementReco
 from agents.skill_ais_reconcile.reconcile_26as import Ais26asReport, CategoryTieOut, QuarterTieOut
 from agents.skill_ais_reconcile.reconcile_books import AisBooksReport, CategoryBooksTieOut
 from agents.skill_ais_reconcile.feedback import FeedbackSuggestion
+from agents.skill_ais_reconcile.reconcile_return import NOT_EXTRACTED, ReturnTieOut
 
 FONT_NAME = "Arial"
 INR_FORMAT = "#,##,##0.00"
@@ -158,7 +160,9 @@ def _write_summary_sheet(wb: Workbook, report: AisRecoReport) -> None:
         row += 1
     _set(ws, row, 1, "Total TDS credit (tdsTcs l1)", bold=True)
     _set(ws, row, 2, _num(report.total_tds_credit), number_format=INR_FORMAT)
-    row += 2
+    row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
+    row += 1
 
     _set(ws, row, 1, "Elements checked", bold=True)
     _set(ws, row, 2, len(report.elements))
@@ -265,6 +269,7 @@ def _write_26as_tieout_sheet(wb: Workbook, report: Ais26asReport) -> None:
         _set(ws, row, 2, _num(value), number_format=INR_FORMAT,
              fill=agg_fill, color=agg_color, bold=agg_flag)
         row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
     row += 1
 
     # -- Per-quarter tie-out -------------------------------------------------
@@ -353,6 +358,7 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
         _set(ws, row, 2, _num(value), number_format=INR_FORMAT,
              fill=tds_fill, color=tds_color, bold=tds_flag)
         row += 1
+    row = _write_uncounted(ws, row, getattr(report, "uncounted_tds", []))
     row += 1
 
     # -- Per-category income tie-out ----------------------------------------
@@ -442,6 +448,126 @@ def _write_books_sheet(wb: Workbook, report: AisBooksReport) -> None:
     _autosize(ws, len(_BOOKS_CATEGORY_COLUMNS), row - 1)
 
 
+_RETURN_HEAD_COLUMNS = ["Head", "Books", "Return", "AIS", "Return - AIS", "Return - books", "Flag"]
+_RETURN_HEAD_MONEY_COLS = (2, 3, 4, 5, 6)
+_RETURN_TAN_COLUMNS = ["TAN", "Name", "Section", "Claimed in return", "AIS", "26AS", "Flag"]
+_RETURN_TAN_MONEY_COLS = (4, 5, 6)
+
+
+def _write_uncounted(ws: Worksheet, row: int, items: list) -> int:
+    """ITR-22: visible line for unrecognised AIS tdsTcs categories (in no total)."""
+    if not items:
+        return row
+    _set(ws, row, 1, AC.NOT_COUNTED_TEXT, bold=True, fill=_RED_FILL, color=_RED_FONT_COLOR)
+    _set(ws, row, 2, AC.uncounted_text(items), fill=_RED_FILL, color=_RED_FONT_COLOR, bold=True)
+    return row + 1
+
+
+def _write_return_sheet(wb: Workbook, report: ReturnTieOut) -> None:
+    ws = wb.create_sheet("Return Tie-out")
+    row = _write_banner(ws, 1, 7, report.flagged_count)
+    _set(ws, row, 1, f"Filed return ({report.form}) against the AIS"
+         + (", the books" if report.books_given else "")
+         + (" and the 26AS" if report.as26_given else ""), bold=True)
+    row += 2
+
+    # NOT-EXTRACTED fields first, in red: never guessed, never silently tied.
+    if report.not_extracted:
+        _set(ws, row, 1, "NOT-EXTRACTED from the return (not compared)", bold=True, fill=_RED_FILL,
+             color=_RED_FONT_COLOR)
+        row += 1
+        for item in report.not_extracted:
+            _set(ws, row, 1, item, fill=_RED_FILL, color=_RED_FONT_COLOR, bold=True)
+            row += 1
+        row += 1
+
+    _set(ws, row, 1, "Heads: books | return | AIS", bold=True, fill=_HEADER_FILL)
+    row += 1
+    for col, label in enumerate(_RETURN_HEAD_COLUMNS, start=1):
+        _set(ws, row, col, label, bold=True, fill=_HEADER_FILL)
+    header_row = row
+    row += 1
+    for h in report.heads:
+        fill = _RED_FILL if h.flagged else None
+        color = _RED_FONT_COLOR if h.flagged else None
+        ret = NOT_EXTRACTED if h.ret is None else _num(h.ret)
+        values = [h.label, None if h.books is None else _num(h.books), ret, _num(h.ais),
+                  None if h.delta_ais is None else _num(h.delta_ais),
+                  None if h.delta_books is None else _num(h.delta_books), h.note or "ok"]
+        for col, value in enumerate(values, start=1):
+            _set(ws, row, col, value, number_format=INR_FORMAT if col in _RETURN_HEAD_MONEY_COLS else None,
+                 fill=fill, color=color, bold=h.flagged)
+        row += 1
+    row += 1
+
+    def _tan_block(title: str, rows: list) -> int:
+        nonlocal row
+        _set(ws, row, 1, title, bold=True, fill=_HEADER_FILL)
+        row += 1
+        for col, label in enumerate(_RETURN_TAN_COLUMNS, start=1):
+            _set(ws, row, col, label, bold=True, fill=_HEADER_FILL)
+        row += 1
+        if not rows:
+            _set(ws, row, 1, "(none)")
+            row += 1
+        for d in rows:
+            fill = _RED_FILL if d.flagged else None
+            color = _RED_FONT_COLOR if d.flagged else None
+            values = [d.tan, d.name, d.section,
+                      NOT_EXTRACTED if d.claimed is None else _num(d.claimed), _num(d.ais),
+                      None if d.as26 is None else _num(d.as26), d.note or "ok"]
+            for col, value in enumerate(values, start=1):
+                _set(ws, row, col, value, number_format=INR_FORMAT if col in _RETURN_TAN_MONEY_COLS else None,
+                     fill=fill, color=color, bold=d.flagged)
+            row += 1
+        row += 1
+        return row
+
+    _tan_block("TDS by deductor: claimed in return | AIS | 26AS", report.deductors)
+    _tan_block("Partner rows (section 194T / head BP) -- compared to the AIS 194T rows only",
+               report.partner_rows)
+
+    if report.tcs is not None:
+        t = report.tcs
+        _set(ws, row, 1, "TCS (tax collected from you): return | AIS", bold=True, fill=_HEADER_FILL)
+        row += 1
+        fill = _RED_FILL if t.flagged else None
+        color = _RED_FONT_COLOR if t.flagged else None
+        _set(ws, row, 1, "TCS schedule total", bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 2, NOT_EXTRACTED if t.ret is None else _num(t.ret), number_format=INR_FORMAT,
+             bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 3, _num(t.ais), number_format=INR_FORMAT, bold=t.flagged, fill=fill, color=color)
+        _set(ws, row, 4, t.note or "ok", bold=t.flagged, fill=fill, color=color)
+        row += 1
+        for tan, nm, amt in t.by_tan:
+            _set(ws, row, 1, f"  AIS collector {tan} {nm}".rstrip())
+            _set(ws, row, 3, _num(amt), number_format=INR_FORMAT)
+            row += 1
+        row += 1
+    row = _write_uncounted(ws, row, report.uncounted_tds)
+    if report.uncounted_tds:
+        row += 1
+
+    if report.informational:
+        _set(ws, row, 1, "For information", bold=True, fill=_HEADER_FILL)
+        row += 1
+        for label, text in report.informational:
+            _set(ws, row, 1, label)
+            _set(ws, row, 2, text)
+            row += 1
+        row += 1
+    if report.notes:
+        _set(ws, row, 1, "AIS income sources (the same figures as Books Reconciliation)", bold=True,
+             fill=_HEADER_FILL)
+        row += 1
+        for note in report.notes:
+            _set(ws, row, 1, note)
+            row += 1
+
+    ws.freeze_panes = f"A{header_row}"
+    _autosize(ws, 7, row)
+
+
 _FEEDBACK_COLUMNS = ["Section", "Category", "Info source", "Discrepancy",
                      "Suggested action", "Confidence", "Rationale"]
 _FEEDBACK_RATIONALE_COL = 7
@@ -486,7 +612,8 @@ def _write_feedback_sheet(wb: Workbook, suggestions: list[FeedbackSuggestion]) -
 def write_reco_workbook(report: AisRecoReport, out_path: str,
                          report_26as: Ais26asReport | None = None,
                          report_books: AisBooksReport | None = None,
-                         suggestions: list[FeedbackSuggestion] | None = None) -> None:
+                         suggestions: list[FeedbackSuggestion] | None = None,
+                         report_return: ReturnTieOut | None = None) -> None:
     """Write ONE standalone .xlsx from an AisRecoReport:
       - "Summary": per-entity header block, section rollups, TDS credit
         total, and a prominent flagged-count banner (red "N DIFFERENCES
@@ -514,6 +641,9 @@ def write_reco_workbook(report: AisRecoReport, out_path: str,
         ADVISORY-ONLY portal-feedback suggestions for a human to review --
         never auto-submitted, never claimed as definitive. Neutral (non-red)
         styling, since these are suggestions, not errors.
+      - "Return Tie-out" (ITR-21, only when `report_return` is given): the
+        filed return against the AIS, the books and the 26AS -- heads, TDS by
+        deductor, partner (194T) rows, and the NOT-EXTRACTED fields in red.
     The tools/agent layer decides `out_path`; this function only writes it.
     The existing single-argument call (`write_reco_workbook(report, path)`)
     keeps working unchanged -- `report_26as`, `report_books`, and
@@ -526,6 +656,9 @@ def write_reco_workbook(report: AisRecoReport, out_path: str,
 
     if report_books is not None:
         _write_books_sheet(wb, report_books)
+
+    if report_return is not None:
+        _write_return_sheet(wb, report_return)
 
     by_section: dict[str, list[ElementReco]] = {}
     for el in report.elements:

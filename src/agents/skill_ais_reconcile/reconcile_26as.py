@@ -54,6 +54,7 @@ from decimal import Decimal
 from typing import Any
 
 from agents.skill_ais_reconcile.normalize import AisRow, NormalizedAis
+from agents.skill_ais_reconcile.ais_categories import credit_rows, tdstcs_l1_rows, uncounted_categories
 from agents.skill_ais_reconcile.reconcile import TDS_CREDIT_FIELD_CANDIDATES, TOLERANCE, _as_decimal
 from agents.skill_itr_workbook.scripts.as26 import classify_section
 
@@ -107,6 +108,8 @@ class Ais26asReport:
     # there's no section->category mapping to classify the 26AS side by, so
     # the tie-out is skipped rather than guessed at.
     categories: list[CategoryTieOut] = field(default_factory=list)
+    # ITR-22: unrecognised tdsTcs l1 categories (label, rows) -- in no total
+    uncounted_tds: list = field(default_factory=list)
 
     @property
     def flagged_quarters(self) -> list[int]:
@@ -159,7 +162,9 @@ def _tds_credit(row: AisRow) -> Decimal | None:
 
 
 def _ais_tdstcs_l1_rows(normalized: NormalizedAis) -> list[AisRow]:
-    return [r for r in normalized.rows if r.section_key == "tdsTcs" and r.level == "l1"]
+    """The tdsTcs l1 rows that are a TDS credit (ITR-22): TCS, payer-side TDS
+    and unrecognised categories are excluded; see ais_categories."""
+    return credit_rows(tdstcs_l1_rows(normalized))
 
 
 def _sum(values) -> Decimal:
@@ -278,4 +283,5 @@ def reconcile_ais_vs_26as(normalized: NormalizedAis, as26: Any,
         flag_aggregate_mismatch=flag_aggregate_mismatch,
         quarters=quarters,
         categories=categories,
+        uncounted_tds=uncounted_categories(tdstcs_l1_rows(normalized)),
     )

@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from agents.skill_ais_reconcile.reconcile import AisRecoReport, ElementReco
 from agents.skill_ais_reconcile.reconcile_26as import Ais26asReport
 from agents.skill_ais_reconcile.reconcile_books import AisBooksReport
+from agents.skill_ais_reconcile.reconcile_return import ReturnTieOut
 
 # The exact standard AIS portal feedback vocabulary. Any suggested_action
 # this module emits is either one of these six strings verbatim, or the
@@ -177,8 +178,47 @@ def _as26_suggestions(as26: Ais26asReport | None) -> list[FeedbackSuggestion]:
     return out
 
 
+def _return_suggestions(ret: ReturnTieOut | None) -> list[FeedbackSuggestion]:
+    """ITR-21: where the AIS differs from the filed return. Conservative: the
+    return may be right and the AIS wrong, or the other way round, so the only
+    action ever suggested is a review."""
+    if ret is None:
+        return []
+    out: list[FeedbackSuggestion] = []
+    for h in ret.heads:
+        if not h.flagged or h.delta_ais is None or abs(h.delta_ais) <= 0 or h.ais == 0:
+            continue
+        out.append(FeedbackSuggestion(
+            section_key="tdsTcs", category=h.head, info_src_id=None,
+            delta_context=f"AIS {h.head} differs from the filed return",
+            suggested_action=FEEDBACK_REVIEW,
+            rationale=(
+                f"The filed return declares {h.head} income that differs from the AIS "
+                f"({h.note}). Check the source documents; if the AIS is wrong it can be "
+                "corrected through the portal feedback, if the return is wrong consider "
+                "whether a revised return is needed."
+            ),
+            confidence="medium",
+        ))
+    for d in ret.deductors + ret.partner_rows:
+        if not d.flagged or d.tan.startswith("NOT-"):
+            continue
+        out.append(FeedbackSuggestion(
+            section_key="tdsTcs", category="TDS credit", info_src_id=d.tan,
+            delta_context=f"TDS credit for {d.tan} differs between the AIS and the filed return",
+            suggested_action=FEEDBACK_REVIEW,
+            rationale=(
+                f"TDS claimed in the return vs the AIS for this deductor: {d.note}. "
+                "Reconcile with the 26AS and the deductor's certificate before relying on either."
+            ),
+            confidence="medium",
+        ))
+    return out
+
+
 def suggest_feedback(internal: AisRecoReport, books: AisBooksReport | None = None,
-                      as26: Ais26asReport | None = None) -> list[FeedbackSuggestion]:
+                      as26: Ais26asReport | None = None,
+                      filed_return: ReturnTieOut | None = None) -> list[FeedbackSuggestion]:
     """Build advisory (never auto-submitted) portal-feedback suggestions from
     the internal AIS reconciliation, and optionally the books and/or 26AS
     tie-outs. Pure function -- no I/O, no portal interaction of any kind."""
@@ -186,6 +226,7 @@ def suggest_feedback(internal: AisRecoReport, books: AisBooksReport | None = Non
         _internal_suggestions(internal)
         + _books_suggestions(internal, books)
         + _as26_suggestions(as26)
+        + _return_suggestions(filed_return)
     )
 
     deduped: dict[tuple, FeedbackSuggestion] = {}

@@ -55,12 +55,18 @@ inputs:
     match: "*-26AS.xlsx"
     entity_from: "entity"
     required: false
+  - name: "filed_return_path"
+    type: "file"
+    label: "Filed return (optional, JSON of the entity's own ITR-1/2/3 for the SAME FY -- enables the Return Tie-out)"
+    file_types: [".json", ".pdf"]
+    required: false
 
 run_args:
   entity_key: "{inputs.entity}"
   ais_path: "{inputs.ais_path}"
   gnucash_path: "{inputs.gnucash_path}"
   xlsx_path: "{inputs.xlsx_path}"
+  filed_return_path: "{inputs.filed_return_path}"
   output_path: "{output_path}"
   config_path: "{config_path}"
   model_override: "{model_override}"
@@ -141,6 +147,10 @@ help:
       tooltip: "26AS workbook produced by this repo's '26AS' skill, for the same entity/year."
       accepts: "Excel (.xlsx) with a Part I (TDS) sheet."
       gotchas: "A workbook for the wrong entity/year will tie out against the wrong TDS figures without a hard error -- double-check before relying on it."
+    - name: "filed_return_path"
+      tooltip: "The entity's filed return, to tie out against the AIS (and the books and 26AS when given)."
+      accepts: "Filed-return JSON (ITR-1, ITR-2 or ITR-3). A PDF is accepted but carries no per-head figures, so the tie-out is skipped."
+      gotchas: "The return's PAN must be the selected entity's, and a return that states its assessment year must be for this FY, otherwise the Return Tie-out is skipped with an ERROR line. Fields that cannot be read are listed in red as NOT-EXTRACTED, never guessed."
   steps:
     - "Pick the AIS JSON export."
     - "Optionally supply the matching-FY GnuCash book and/or the entity's 26AS workbook."
