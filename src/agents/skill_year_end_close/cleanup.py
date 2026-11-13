@@ -45,9 +45,12 @@ def list_cleanup(gnucash_dir: Path, final_book: Path, drive_dir: Path) -> list[C
         for p in sorted(gnucash_dir.iterdir(), key=lambda q: q.name.lower()):
             if not p.is_file() or _norm(p) == final:
                 continue
-            if BACKUP_RE.match(p.name):
+            if not p.name.lower().startswith(final_book.name.lower() + "."):
+                continue          # only the final book's OWN backups and logs
+            rest = p.name[len(final_book.name) + 1:]
+            if BACKUP_RE.match(p.name) and re.fullmatch(r"\d{14}\.gnucash", rest, re.IGNORECASE):
                 items.append(_item(p, "backup"))
-            elif LOG_RE.match(p.name):
+            elif LOG_RE.match(p.name) and re.fullmatch(r"\d{14}\.log", rest, re.IGNORECASE):
                 items.append(_item(p, "log"))
     lnk = drive_dir / (final_book.name + ".lnk")
     if drive_dir.is_dir() and lnk.is_file() and _norm(lnk) != final:

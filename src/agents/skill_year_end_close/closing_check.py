@@ -80,7 +80,11 @@ def check_closed(book_path: str | Path, closing_end_year: int) -> CheckResult:
         splits = []
         for sp in trn.findall(f"{_TRN}splits/{_TRN}split"):
             acc = sp.find(f"{_SPLIT}account")
-            val = sp.find(f"{_SPLIT}value")
+            # Quantity is in the account's own commodity; value is in the
+            # transaction's currency. Balance uses quantity, value only as a fallback.
+            val = sp.find(f"{_SPLIT}quantity")
+            if val is None or not (val.text or "").strip():
+                val = sp.find(f"{_SPLIT}value")
             if acc is None or val is None or (acc.text or "") not in accounts:
                 continue
             splits.append((acc.text, _fraction(val.text or "0")))

@@ -352,7 +352,7 @@ def test_a_bad_closing_year_is_refused(env):                                    
 def _prepare_to_step4(env, new_content):
     go(env, 1)
     go(env, 2)
-    new = env.gnc / "20262027" / "Syn A" / NEXT_BOOK
+    new = env.gnc / "20262027" / env.gdir.name / NEXT_BOOK
     new.write_bytes(new_content)          # stands in for the user's GnuCash close
     return new
 
@@ -585,11 +585,57 @@ def test_a_differing_file_stop_names_the_file_and_says_to_recycle_and_rerun(env)
 
 
 def test_step5_lists_a_non_ascii_path_under_not_in_the_script_with_size_and_date(env):
+    odd_dir = env.gnc / "20252026" / "Syn é"
+    env.gdir.rename(odd_dir)
+    (env.drive / FY / "Syn A").rename(env.drive / FY / "Syn é")
+    book = odd_dir / BOOK
+    env.write_entities({"SYN-A": _entity("Entity A", "Syn é", {FY: str(book)}), "SYN-B": _entity("Entity B", "Syn B")})
+    env.gdir, env.ddir, env.book = odd_dir, env.drive / FY / "Syn é", book
     _done_year(env)
-    odd = env.gdir / ("café_" + BOOK + ".log")
+    odd = odd_dir / (BOOK + ".20260401120000.log")
     odd.write_bytes(b"123")
     r = go(env, 5)
     assert "Not in the script - recycle by hand" in r
     assert str(odd) in r and "| 3 |" in r
     text = Path(str(env.out)).with_name("report-cleanup.ps1").read_text(encoding="ascii")
-    assert "caf" not in text
+    assert "Syn" not in text
+
+
+
+def _fx_book(income_value, income_qty):
+    """Income account whose commodity differs from the transaction currency; the split carries both."""
+    sp = lambda a, v, q: (f'<trn:split><split:value>{v}</split:value><split:quantity>{q}</split:quantity>'
+                          f'<split:account type="guid">{a}</split:account></trn:split>')
+    t1 = (f'<gnc:transaction version="2.0.0"><trn:date-posted><ts:date>2025-06-01 00:00:00 +0000</ts:date></trn:date-posted>'
+          f'<trn:splits>{sp("i", income_value[0], income_qty[0])}{sp("e", "-" + income_value[0], "-" + income_value[0])}</trn:splits></gnc:transaction>')
+    t2 = (f'<gnc:transaction version="2.0.0"><trn:date-posted><ts:date>2026-03-31 00:00:00 +0000</ts:date></trn:date-posted>'
+          f'<trn:splits>{sp("i", income_value[1], income_qty[1])}{sp("e", "-" + income_value[1], "-" + income_value[1])}</trn:splits></gnc:transaction>')
+    body = "".join(_acct(*a) for a in _ACCTS) + t1 + t2
+    return (_HEAD + body + "</gnc:book></gnc-v2>").encode("utf-8")
+
+
+def test_balance_uses_quantity_so_a_foreign_commodity_account_with_zero_quantity_passes(tmp_path):
+    f = tmp_path / "b.gnucash"
+    f.write_bytes(_fx_book(("100/1", "-90/1"), ("-50/1", "50/1")))      # value sums to 10, quantity to 0
+    res = closing_check.check_closed(f, 2026)
+    assert not res.income_nonzero and res.ok
+
+
+def test_balance_uses_quantity_so_zero_value_but_nonzero_quantity_fails_and_names_the_account(tmp_path):    # NEGATIVE
+    f = tmp_path / "b.gnucash"
+    f.write_bytes(_fx_book(("100/1", "-100/1"), ("-50/1", "20/1")))     # value sums to 0, quantity to -30
+    res = closing_check.check_closed(f, 2026)
+    assert not res.ok and any("Salary" in x for x in res.income_nonzero)
+
+
+def test_another_books_backups_and_logs_and_stray_logs_are_never_listed(env):             # NEGATIVE
+    _done_year(env)
+    (env.gdir / (BOOK + ".20260401120000.gnucash")).write_bytes(b"mine")
+    (env.gdir / (BOOK + ".20260401120000.log")).write_bytes(b"mine")
+    for n in ("Other_2526.gnucash.20260401120000.gnucash", "Other_2526.gnucash.20260401120000.log", "stray.log"):
+        (env.gdir / n).write_bytes(b"x")
+    items = {Path(i.path).name for i in cleanup.list_cleanup(env.gdir, env.book, env.ddir)}
+    assert items == {BOOK + ".20260401120000.gnucash", BOOK + ".20260401120000.log"}
+    go(env, 5)
+    text = Path(str(env.out)).with_name("report-cleanup.ps1").read_text(encoding="ascii")
+    assert "Other_2526" not in text and "stray.log" not in text
