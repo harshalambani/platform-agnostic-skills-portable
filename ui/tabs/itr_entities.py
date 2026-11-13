@@ -358,7 +358,7 @@ _FORM_UI35_FIELDS = (
     "bank_service_charge_account", "card_emi_interest_account", "partner_comp_accounts",
     "foreign_dividends_in_book", "foreign_dividends_in_book_by_ay", "partner_firm_pan",
     "cc_large_spend_threshold", "foreign_dividend_cash_account", "foreign_dividend_tax_account",
-    "foreign_dividend_income_account", "cc_cred_max_overage",
+    "foreign_dividend_income_account", "cc_cred_max_overage", "folder_name",
 )
 
 #: UI-35: EntityProfile field -> a fragment of the label of the control that
@@ -383,6 +383,7 @@ _FIELD_CONTROLS = {
     "partner_firm_pan": "Firm PAN",
     "cc_large_spend_threshold": "Large-spend limit",
     "cc_cred_max_overage": "CRED tolerance",
+    "folder_name": "Folder name",
     "foreign_dividend_cash_account": "Foreign dividend cash account",
     "foreign_dividend_tax_account": "Foreign dividend tax account",
     "foreign_dividend_income_account": "Foreign dividend income account",
@@ -661,12 +662,46 @@ def _cred_text(raw) -> str:
         return str(raw)           # a bad hand-edited value is shown as it is, so it can be corrected
 
 
+def _save_year_end_roots(drive_root, profile_root, settings_path=None) -> str:
+    """YE-01: save the two year-end roots into the portable config.yaml. Each must be empty (= not set) or a
+    full path to an existing folder. Both are checked first: if either is refused, NOTHING is written.
+    Every other key in config.yaml (and all of entities.yaml) is left exactly as it was."""
+    configs = _configs_mod()
+    labels = {"drive_accounts_root": "Drive Accounts root", "gnucash_profile_root": "GnuCash profile root"}
+    given = {"drive_accounts_root": drive_root, "gnucash_profile_root": profile_root}
+    values, errors = {}, []
+    for k in configs.YEAR_END_ROOT_KEYS:
+        raw = given[k]
+        text = "" if raw is None else str(raw)
+        if text.strip() == "":
+            values[k] = ""
+            continue
+        err = configs.check_root_folder(text)
+        if err:
+            errors.append(f"{labels[k]} {err}.")
+        else:
+            values[k] = text.strip()
+    if errors:
+        return "**Not saved -- fix the following:**\n\n" + "\n".join(f"- {e}" for e in errors)
+    path = settings_path or _config_mod.PORTABLE_CONFIG_PATH
+    cfg = _config_mod.load_portable_config(path)
+    for k, v in values.items():
+        if v:
+            cfg[k] = v
+        else:
+            cfg.pop(k, None)
+    _config_mod.write_portable_config(cfg, path)
+    unset = [labels[k] for k, v in values.items() if not v]
+    tail = f" Not set: {', '.join(unset)}." if unset else ""
+    return "**Saved** the year-end roots." + tail
+
+
 def _entity_to_new_form(key: str, entities: dict) -> tuple:
     """UI-35 form values: foreign-dividend switches, drivers, the two card
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
     e = entities.get(key)
     if e is None:
-        return (False, "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "", "", "")
+        return (False, "", "", "", "", "", "", "", "", *([""] * len(_PARTNER_ACCOUNT_KEYS)), "", "", "", "", "")
     pa = e.partner_comp_accounts or {}
     return (
         bool(e.foreign_dividends_in_book), _format_kv_lines(e.foreign_dividends_in_book_by_ay),
@@ -675,6 +710,7 @@ def _entity_to_new_form(key: str, entities: dict) -> tuple:
         e.partner_firm_pan or "",
         ("" if e.cc_large_spend_threshold is None else f"{e.cc_large_spend_threshold:g}"),
         _cred_text(e.cc_cred_max_overage),
+        e.folder_name or "",
         *[str(pa.get(k) or "") for k in _PARTNER_ACCOUNT_KEYS],
         e.foreign_dividend_cash_account or "", e.foreign_dividend_tax_account or "",
         e.foreign_dividend_income_account or "",
@@ -707,6 +743,7 @@ def _save_entity(
     partner_firm_pan: str | None = None,
     cc_large_spend_threshold: str | None = None,
     cc_cred_max_overage: str | None = None,
+    folder_name: str | None = None,
     foreign_dividend_cash_account: str | None = None,
     foreign_dividend_tax_account: str | None = None,
     foreign_dividend_income_account: str | None = None,
@@ -796,6 +833,19 @@ def _save_entity(
                 )
         else:
             cred_max = ""
+    folder = None   # None == keep the stored value; "" == clear (not set)
+    if folder_name is not None:
+        if str(folder_name) == "":
+            folder = ""
+        else:
+            _fn_err = _configs_mod().check_folder_name(str(folder_name))
+            if _fn_err:
+                kv_errors.append(
+                    f"Folder name {_fn_err} -- it must be one folder name (no slashes, no '..'), "
+                    "or empty to leave it unset."
+                )
+            else:
+                folder = str(folder_name)
     acct_fields = {}
     if bank_service_charge_account is not None:
         acct_fields["Bank service charge account"] = bank_service_charge_account
@@ -964,6 +1014,8 @@ def _save_entity(
         new_profile.cc_large_spend_threshold = None if large_spend == "" else float(large_spend)
     if cred_max is not None:
         new_profile.cc_cred_max_overage = None if cred_max == "" else float(cred_max)
+    if folder is not None:
+        new_profile.folder_name = folder
     if foreign_dividend_cash_account is not None:
         new_profile.foreign_dividend_cash_account = foreign_dividend_cash_account.strip()
     if foreign_dividend_tax_account is not None:
@@ -1439,6 +1491,14 @@ def render(container_tab=None) -> None:
                          "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
                          "negative or above 500 is refused.",
                 )
+            with gr.Accordion("Year-end folders", open=False):
+                folder_name_box = gr.Textbox(
+                    label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(not set)",
+                    interactive=True,
+                    info="The one folder name this entity uses under both year-end roots below. A single "
+                         "name: no slashes, no '..'. Blank = not set, and the year-end skill will not run for "
+                         "this entity.",
+                )
             with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
                 firm_pan_box = gr.Textbox(
                     label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
@@ -1470,7 +1530,7 @@ def render(container_tab=None) -> None:
                     placeholder="2025-26 = 48", lines=2, interactive=True,
                     info="Months over which the capital is built up. Blank = the default, 48. A positive whole number.",
                 )
-            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, *partner_dds,
+            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, folder_name_box, *partner_dds,
                            fd_cash_dd, fd_tax_dd, fd_income_dd, capital_rate_box, capital_months_box]
 
             save_status = gr.Markdown("_Fill in the fields and click Save._")
@@ -1514,14 +1574,14 @@ def render(container_tab=None) -> None:
         """UI-35 values for the new controls; the account pick-lists are rebuilt
         from the entity's newest registered book."""
         entities = _load_entities()
-        fdb, fdb_ay, drv, bank, emi, fpan, lsp, crm, *partner = _entity_to_new_form(key or "", entities)
+        fdb, fdb_ay, drv, bank, emi, fpan, lsp, crm, fname, *partner = _entity_to_new_form(key or "", entities)
         cap_rate, cap_months = partner[-2:]
         partner = partner[:-2]
         books = dict(entities[key].books) if (key or "") in entities else {}
         choices, note = _account_choices(books)
         def dd(v):
             return gr.update(choices=choices, value=v)
-        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, crm, *[dd(v) for v in partner], cap_rate, cap_months, "_" + note + "_")
+        return (fdb, fdb_ay, drv, dd(bank), dd(emi), fpan, lsp, crm, fname, *[dd(v) for v in partner], cap_rate, cap_months, "_" + note + "_")
 
     _new_outputs = [*_new_inputs, accounts_note_md]
 
@@ -1564,7 +1624,7 @@ def render(container_tab=None) -> None:
         bf_losses_text, clubbing_notes_text,
         books_text, drawings_accounts_text, card_spend_default_account,
         reimbursement_markers_text, partner_admission_date,
-        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, large_spend, cred_max, *partner_values,
+        fdb, fdb_by_ay_text, drivers_text, bank_charge, emi_interest, firm_pan, large_spend, cred_max, folder_name, *partner_values,
     ):
         msg = _save_entity(
             orig_key, new_key, name, pan, status, residency, dob, doi, address,
@@ -1591,6 +1651,7 @@ def render(container_tab=None) -> None:
             partner_firm_pan=firm_pan or "",
             cc_large_spend_threshold=large_spend or "",
             cc_cred_max_overage=cred_max or "",
+            folder_name=folder_name or "",
         )
         new_choices = _entity_choices()
         new_orig = new_key.strip() if msg.startswith("**Saved**") else orig_key
@@ -1625,6 +1686,22 @@ def render(container_tab=None) -> None:
         outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs,
                  confirm_1_cb, confirm_2_cb, delete_btn],
     )
+
+    # --- Year-end roots (YE-01): two global folders, kept in the portable config.yaml ---
+    with gr.Accordion("Year-end roots (Drive Accounts and GnuCash profile)", open=False):
+        _roots0 = _configs_mod().read_year_end_roots(_config_mod.PORTABLE_CONFIG_PATH)
+        gr.Markdown(
+            "Two folders every entity's year-end folder sits under. Each must be a full path to a folder "
+            "that exists. Both start empty (not set); the year-end skill refuses to run while either is empty. "
+            "Saved in `config.yaml` (next to the other global settings), not in entities.yaml."
+        )
+        drive_root_box = gr.Textbox(label="Drive Accounts root", value=_roots0["drive_accounts_root"],
+                                    placeholder="(not set)", interactive=True)
+        profile_root_box = gr.Textbox(label="GnuCash profile root", value=_roots0["gnucash_profile_root"],
+                                      placeholder="(not set)", interactive=True)
+        roots_status = gr.Markdown("_Fill in both folders and click Save year-end roots._")
+        roots_btn = gr.Button("Save year-end roots", variant="primary")
+        roots_btn.click(fn=_save_year_end_roots, inputs=[drive_root_box, profile_root_box], outputs=[roots_status])
 
     # --- Credit cards (CC-28): settings/cc_cards.yaml, the one card list ----
     with gr.Accordion("Credit cards (the card list every CC skill reads)", open=False):
