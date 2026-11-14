@@ -696,6 +696,17 @@ def _save_year_end_roots(drive_root, profile_root, settings_path=None) -> str:
     return "**Saved** the year-end roots." + tail
 
 
+def _browse_year_end_root(which: str, current=None):
+    """UI-50: native folder picker for one year-end root box. A picked folder fills that box only;
+    cancel (or no native dialog) leaves the box exactly as it was. Never saves anything."""
+    label = {"drive_accounts_root": "Drive Accounts root", "gnucash_profile_root": "GnuCash profile root"}[which]
+    start = str(current).strip() if current else ""
+    picked = _filedialog.pick_folder(
+        f"year_end.{which}", title=f"Select folder - {label}",
+        fallback_dir=start if start and Path(start).is_dir() else None)
+    return gr.update(value=picked) if picked else gr.update()
+
+
 def _entity_to_new_form(key: str, entities: dict) -> tuple:
     """UI-35 form values: foreign-dividend switches, drivers, the two card
     accounts, then the nine partner accounts in _PARTNER_ACCOUNT_KEYS order."""
@@ -1692,13 +1703,21 @@ def render(container_tab=None) -> None:
         _roots0 = _configs_mod().read_year_end_roots(_config_mod.PORTABLE_CONFIG_PATH)
         gr.Markdown(
             "Two folders every entity's year-end folder sits under. Each must be a full path to a folder "
-            "that exists. Both start empty (not set); the year-end skill refuses to run while either is empty. "
+            "that exists. Use Browse… or paste a full path. Both start empty (not set); the year-end skill refuses to run while either is empty. "
             "Saved in `config.yaml` (next to the other global settings), not in entities.yaml."
         )
-        drive_root_box = gr.Textbox(label="Drive Accounts root", value=_roots0["drive_accounts_root"],
-                                    placeholder="(not set)", interactive=True)
-        profile_root_box = gr.Textbox(label="GnuCash profile root", value=_roots0["gnucash_profile_root"],
-                                      placeholder="(not set)", interactive=True)
+        with gr.Row():
+            drive_root_box = gr.Textbox(label="Drive Accounts root", value=_roots0["drive_accounts_root"],
+                                        placeholder="(not set)", interactive=True, scale=5)
+            drive_root_browse = gr.Button("Browse…", scale=0, min_width=110)
+        with gr.Row():
+            profile_root_box = gr.Textbox(label="GnuCash profile root", value=_roots0["gnucash_profile_root"],
+                                          placeholder="(not set)", interactive=True, scale=5)
+            profile_root_browse = gr.Button("Browse…", scale=0, min_width=110)
+        drive_root_browse.click(fn=lambda cur=None: _browse_year_end_root("drive_accounts_root", cur),
+                                inputs=[drive_root_box], outputs=[drive_root_box])
+        profile_root_browse.click(fn=lambda cur=None: _browse_year_end_root("gnucash_profile_root", cur),
+                                  inputs=[profile_root_box], outputs=[profile_root_box])
         roots_status = gr.Markdown("_Fill in both folders and click Save year-end roots._")
         roots_btn = gr.Button("Save year-end roots", variant="primary")
         roots_btn.click(fn=_save_year_end_roots, inputs=[drive_root_box, profile_root_box], outputs=[roots_status])
