@@ -703,7 +703,7 @@ def _browse_year_end_root(which: str, current=None):
     start = str(current).strip() if current else ""
     picked = _filedialog.pick_folder(
         f"year_end.{which}", title=f"Select folder - {label}",
-        fallback_dir=start if start and Path(start).is_dir() else None)
+        fallback_dir=start or None)   # pick_folder itself ignores a start that is not a folder
     return gr.update(value=picked) if picked else gr.update()
 
 

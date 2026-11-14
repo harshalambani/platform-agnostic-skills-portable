@@ -50,12 +50,20 @@ def test_cancel_leaves_the_box_as_it_was(monkeypatch, result):               # N
     assert _is_noop(ui_mod._browse_year_end_root("drive_accounts_root", "typed value"))
 
 
-def test_the_picker_starts_in_the_boxs_existing_folder_and_ignores_a_missing_one(tmp_path, monkeypatch):
+def test_the_picker_is_offered_the_boxs_value_as_its_start_folder(tmp_path, monkeypatch):
     calls = []
     _patch(monkeypatch, None, calls)
     ui_mod._browse_year_end_root("drive_accounts_root", str(tmp_path))
-    ui_mod._browse_year_end_root("drive_accounts_root", str(tmp_path / "nope"))
+    ui_mod._browse_year_end_root("drive_accounts_root", "")
     assert calls[0][1] == str(tmp_path) and calls[1][1] is None
+
+
+def test_a_start_that_is_not_a_folder_is_ignored_by_the_real_picker(tmp_path, monkeypatch):    # NEGATIVE
+    seen = {}
+    monkeypatch.setattr(_filedialog, "last_dir_for", lambda *a, **k: "")
+    monkeypatch.setattr(_filedialog, "_native_folder_dialog", lambda initialdir, title: seen.update(i=initialdir))
+    ui_mod._browse_year_end_root("drive_accounts_root", str(tmp_path / "nope"))
+    assert not seen["i"]
 
 
 def test_browse_writes_nothing_to_config_yaml(tmp_path, monkeypatch):           # NEGATIVE
