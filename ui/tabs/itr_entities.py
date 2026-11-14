@@ -151,6 +151,16 @@ def _entity_choices() -> list[tuple[str, str]]:
     )
 
 
+def _entity_header(key=None) -> str:
+    """Heading for the This entity tab. Read-only; names the selected entity (or a new one)."""
+    key = key or ""
+    if not key:
+        return "### New entity\n\n_Fill in the form and Save, or pick an entity above._"
+    ent = _load_entities().get(key)
+    name = getattr(ent, "name", "") if ent is not None else ""
+    return f"### {key}" + (f" - {name}" if name else "")
+
+
 # ---------------------------------------------------------------------------
 # Small key->value editors, encoded as "one 'key = value' per line" text --
 # simpler and more testable than a nested Dataframe widget for what is, in
@@ -1329,6 +1339,8 @@ def render(container_tab=None) -> None:
         "This is the single source for every **Entity** dropdown in the "
         "app, and the per-financial-year **books** registered below are "
         "what those dropdowns auto-fill the GnuCash book path from.\n\n"
+        "The **This entity** tab edits the selected entity and its cards; the **All entities** tab "
+        "holds the settings that apply to every entity.\n\n"
         "> **Rename note:** changing the entity key on an existing entity "
         "renames its `.mapping.yaml` file and any filed returns in "
         "`Data/ITRFiled/` to match. If a file already exists at any new "
@@ -1337,222 +1349,271 @@ def render(container_tab=None) -> None:
 
     initial_choices = _entity_choices()
 
-    with gr.Row():
-        entity_dropdown = gr.Dropdown(
-            label="Entity",
-            choices=initial_choices,
-            value="",
-            interactive=True,
-            scale=4,
-        )
-        refresh_btn = gr.Button("↻", scale=0, min_width=40)
-
-    if container_tab is not None:
-        def _rescan_entities():
-            return gr.update(choices=_entity_choices(), value="")
-        container_tab.select(fn=_rescan_entities, inputs=[], outputs=[entity_dropdown])
-
-    with gr.Row():
-        with gr.Column(scale=1):
-            orig_key_state = gr.State("")
-            key_box = gr.Textbox(label="Entity key", placeholder="e.g. SYN-IND", interactive=True)
-            name_box = gr.Textbox(label="Name", interactive=True)
-            pan_box = gr.Textbox(label="PAN", placeholder="AAAAA0000A", interactive=True)
-            status_dd = gr.Dropdown(label="Status", choices=list(_STATUS_CHOICES), value="Individual", interactive=True)
-            residency_box = gr.Textbox(
-                label="Residency", value="Resident", interactive=True,
-                info="R/OR, RNOR, or NR takes statutory effect; anything else (incl. free text) defaults to R/OR.",
-            )
-            dob_box = gr.Textbox(label="Date of birth (YYYY-MM-DD)", interactive=True)
-            doi_box = gr.Textbox(label="Date of incorporation (YYYY-MM-DD, HUF)", interactive=True)
-            address_box = gr.Textbox(label="Address", interactive=True)
-            father_name_box = gr.Textbox(label="Father's name (optional)", interactive=True)
-            aadhaar_box = gr.Textbox(label="Aadhaar (optional, digits only)", interactive=True)
-            business_subtree_box = gr.Textbox(
-                label="Business subtree (GnuCash account path prefix, optional)", interactive=True,
-            )
-            workbook_match_box = gr.Textbox(
-                label="Workbook match (optional) -- filename name w/o year, e.g. AliceDoe",
-                interactive=True,
-            )
-            books_box = gr.Textbox(
-                label=(
-                    "Financial-year books (one per line, 'FY = path', e.g. "
-                    "2025-26 = C:\\books\\AliceDoe2526.gnucash)"
-                ),
-                lines=3, interactive=True,
-            )
+    with gr.Tabs():
+        with gr.Tab("This entity"):
             with gr.Row():
-                fy_browse_box = gr.Textbox(label="FY for Browse", placeholder="2025-26", scale=1)
-                books_browse_btn = gr.Button("Browse for book...", scale=0, min_width=140)
-            derived_match_md = gr.Markdown(
-                "**Effective workbook match:** _(none yet -- register a book or set an override above)_"
-            )
-
-        with gr.Column(scale=1):
-            default_regime_dd = gr.Dropdown(
-                label="Default regime", choices=list(_REGIME_CHOICES), value="new", interactive=True,
-            )
-            regime_by_ay_box = gr.Textbox(
-                label="Regime by AY (one per line, 'AY = old|new')",
-                placeholder="2025-26 = old\n2026-27 = new",
-                lines=3, interactive=True,
-            )
-            audit_case_cb = gr.Checkbox(
-                label="Extended due date -- s.139(1) due date is 31 Oct, not 31 Jul",
-                value=False,
-            )
-            audit_case_by_ay_box = gr.Textbox(
-                label="Extended due date by AY (one per line, 'AY = true|false')",
-                placeholder="2025-26 = false",
-                lines=3, interactive=True,
-            )
-            audit_case_basis_dd = gr.Dropdown(
-                label="Why 31 Oct applies (optional -- wording only, never the date)",
-                choices=list(_AUDIT_BASIS_CHOICES),
-                value=_AUDIT_BASIS_BLANK,
-                interactive=True,
-                info="s.139(1) Expl. 2 gives 31 Oct by several routes. "
-                     "'partner_of_audited_firm' = working partner of a firm liable to "
-                     "audit, who is not an audit case himself. Blank reads as s.44AB.",
-            )
-            drawings_accounts_box = gr.Textbox(
-                label="Drawings accounts (GnuCash mapper; one account path per line)",
-                placeholder="Equity:Drawings",
-                lines=2, interactive=True,
-                info="Money IN lands here only via a History match or the employer "
-                     "reimbursement rule (and the rule only when exactly one is listed). "
-                     "A path that is not in the book, or is hidden/placeholder, is ignored. "
-                     "Blank = unconfigured.",
-            )
-            card_default_box = gr.Textbox(
-                label="Card-spend default account (GnuCash mapper; one account path)",
-                placeholder="Equity:Drawings",
-                lines=1, interactive=True,
-                info="Card spends nothing else matched go here at low confidence. Blank = Suspense.",
-            )
-            reimbursement_markers_box = gr.Textbox(
-                label="Reimbursement markers (GnuCash mapper; one per line or comma-separated)",
-                placeholder="ZZRB",
-                lines=2, interactive=True,
-                info="A NEFT FROM credit whose narration contains one of these whole words is "
-                     "routed to Drawings (needs exactly one Drawings account above). "
-                     "Blank = the rule never fires.",
-            )
-            partner_admission_box = gr.Textbox(
-                label="Date admitted as partner (YYYY-MM-DD, optional)", interactive=True,
-                info="Only for a partner of a firm. The Partner Compensation skill counts "
-                     "whole months from this date to 31 March of each year for the capital "
-                     "rule (40% of target compensation over 48 months). Blank = the "
-                     "capital check says the date is not set.",
-            )
-            bf_losses_box = gr.Textbox(
-                label="B/f losses (one per line)", lines=3, interactive=True,
-            )
-            clubbing_notes_box = gr.Textbox(
-                label="Clubbing notes (one per line)", lines=3, interactive=True,
-            )
-
-            with gr.Accordion("Foreign dividends", open=False):
-                fdb_cb = gr.Checkbox(
-                    label="Foreign dividends are already in the book",
-                    value=False,
-                    info="Off: the broker report's foreign dividends are ADDED to Other Sources. "
-                         "On: the book already records them, so they stay out of the total.",
-                )
-                fdb_by_ay_box = gr.Textbox(
-                    label="Foreign dividends already in the book by AY (one per line, 'AY = true|false')",
-                    placeholder="2026-27 = true", lines=2, interactive=True,
-                )
-                fd_cash_dd = gr.Dropdown(
-                    label="Foreign dividend cash account", choices=[], value="",
-                    allow_custom_value=True, interactive=True,
-                    info="Where the broker's net dividend cash sits. Needed for the foreign-dividend journal; blank = it stops and says so.",
-                )
-                fd_tax_dd = gr.Dropdown(
-                    label="Foreign dividend tax account", choices=[], value="",
-                    allow_custom_value=True, interactive=True,
-                    info="Receives the foreign tax withheld (debit).",
-                )
-                fd_income_dd = gr.Dropdown(
-                    label="Foreign dividend income account", choices=[], value="",
-                    allow_custom_value=True, interactive=True,
-                    info="Receives the gross foreign dividend (credit).",
-                )
-            with gr.Accordion("Card accounts (card-spend booking)", open=False):
-                accounts_note_md = gr.Markdown("_Select an entity to load account pick-lists from its book._")
-                bank_charge_dd = gr.Dropdown(
-                    label="Bank service charge account", choices=[], value="",
-                    allow_custom_value=True, interactive=True,
-                    info="Card fees, interest and GST on fees. Blank = the card-spend booking stops with a named error when a fee row needs it.",
-                )
-                emi_interest_dd = gr.Dropdown(
-                    label="Card EMI interest account", choices=[], value="",
-                    allow_custom_value=True, interactive=True,
-                    info="Card EMI interest only; never the Bank service charge account.",
-                )
-                large_spend_box = gr.Textbox(
-                    label="Large-spend limit (rupees)", placeholder="20000", interactive=True,
-                    info="A card spend of this amount or more is flagged as a possible asset for THIS entity. "
-                         "Blank = use the global setting. Zero, negative or text is refused.",
-                )
-                cred_max_box = gr.Textbox(
-                    label="CRED tolerance (rupees)", placeholder=f"{_cred_default_text()} (default)", interactive=True,
-                    info="The most a CRED payment line on a statement may exceed the bank amount and still be "
-                         "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
-                         "negative or above 500 is refused.",
-                )
-            with gr.Accordion("Year-end folders", open=False):
-                folder_name_box = gr.Textbox(
-                    label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(not set)",
+                entity_dropdown = gr.Dropdown(
+                    label="Entity",
+                    choices=initial_choices,
+                    value="",
                     interactive=True,
-                    info="The one folder name this entity uses under both year-end roots below. A single "
-                         "name: no slashes, no '..'. Blank = not set, and the year-end skill will not run for "
-                         "this entity.",
+                    scale=4,
                 )
-            with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
-                firm_pan_box = gr.Textbox(
-                    label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
-                    placeholder="AAAAA0000A", interactive=True,
-                    info="Used by the Schedule AL firm interest line. Blank = none; a malformed PAN is refused.",
-                )
-                partner_dds = [
-                    gr.Dropdown(
-                        label=f"Partner account: {k}", choices=[], value="",
-                        allow_custom_value=True, interactive=True,
+                refresh_btn = gr.Button("↻", scale=0, min_width=40)
+
+            if container_tab is not None:
+                def _rescan_entities():
+                    return gr.update(choices=_entity_choices(), value="")
+                container_tab.select(fn=_rescan_entities, inputs=[], outputs=[entity_dropdown])
+
+            entity_header_md = gr.Markdown(_entity_header(""))
+            entity_dropdown.change(fn=_entity_header, inputs=[entity_dropdown], outputs=[entity_header_md])
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    orig_key_state = gr.State("")
+                    key_box = gr.Textbox(label="Entity key", placeholder="e.g. SYN-IND", interactive=True)
+                    name_box = gr.Textbox(label="Name", interactive=True)
+                    pan_box = gr.Textbox(label="PAN", placeholder="AAAAA0000A", interactive=True)
+                    status_dd = gr.Dropdown(label="Status", choices=list(_STATUS_CHOICES), value="Individual", interactive=True)
+                    residency_box = gr.Textbox(
+                        label="Residency", value="Resident", interactive=True,
+                        info="R/OR, RNOR, or NR takes statutory effect; anything else (incl. free text) defaults to R/OR.",
                     )
-                    for k in _PARTNER_ACCOUNT_KEYS
-                ]
-                drivers_box = gr.Textbox(
-                    label="Partner compensation drivers (YAML, one block per FY)",
-                    placeholder="2025-26:\n  firms_tax_rate: 0.25\n  target_compensation: 1200000\n  remuneration_tds_section: 194T",
-                    lines=6, interactive=True,
-                    info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
-                         "is refused and nothing is saved. Blank removes all drivers.",
-                )
-                capital_rate_box = gr.Textbox(
-                    label="Capital rule rate by FY (percent, one per line 'FY = percent')",
-                    placeholder="2025-26 = 40", lines=2, interactive=True,
-                    info="Share of target compensation required as capital. Blank = the default, 40%. "
-                         "A percent above 0 and below 100. Informational only; no journal uses it.",
-                )
-                capital_months_box = gr.Textbox(
-                    label="Capital rule total months by FY (one per line 'FY = months')",
-                    placeholder="2025-26 = 48", lines=2, interactive=True,
-                    info="Months over which the capital is built up. Blank = the default, 48. A positive whole number.",
-                )
-            _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, folder_name_box, *partner_dds,
-                           fd_cash_dd, fd_tax_dd, fd_income_dd, capital_rate_box, capital_months_box]
+                    dob_box = gr.Textbox(label="Date of birth (YYYY-MM-DD)", interactive=True)
+                    doi_box = gr.Textbox(label="Date of incorporation (YYYY-MM-DD, HUF)", interactive=True)
+                    address_box = gr.Textbox(label="Address", interactive=True)
+                    father_name_box = gr.Textbox(label="Father's name (optional)", interactive=True)
+                    aadhaar_box = gr.Textbox(label="Aadhaar (optional, digits only)", interactive=True)
+                    business_subtree_box = gr.Textbox(
+                        label="Business subtree (GnuCash account path prefix, optional)", interactive=True,
+                    )
+                    workbook_match_box = gr.Textbox(
+                        label="Workbook match (optional) -- filename name w/o year, e.g. AliceDoe",
+                        interactive=True,
+                    )
+                    books_box = gr.Textbox(
+                        label=(
+                            "Financial-year books (one per line, 'FY = path', e.g. "
+                            "2025-26 = C:\\books\\AliceDoe2526.gnucash)"
+                        ),
+                        lines=3, interactive=True,
+                    )
+                    with gr.Row():
+                        fy_browse_box = gr.Textbox(label="FY for Browse", placeholder="2025-26", scale=1)
+                        books_browse_btn = gr.Button("Browse for book...", scale=0, min_width=140)
+                    derived_match_md = gr.Markdown(
+                        "**Effective workbook match:** _(none yet -- register a book or set an override above)_"
+                    )
 
-            save_status = gr.Markdown("_Fill in the fields and click Save._")
-            with gr.Row():
-                save_btn = gr.Button("Save Entity", variant="primary")
+                with gr.Column(scale=1):
+                    default_regime_dd = gr.Dropdown(
+                        label="Default regime", choices=list(_REGIME_CHOICES), value="new", interactive=True,
+                    )
+                    regime_by_ay_box = gr.Textbox(
+                        label="Regime by AY (one per line, 'AY = old|new')",
+                        placeholder="2025-26 = old\n2026-27 = new",
+                        lines=3, interactive=True,
+                    )
+                    audit_case_cb = gr.Checkbox(
+                        label="Extended due date -- s.139(1) due date is 31 Oct, not 31 Jul",
+                        value=False,
+                    )
+                    audit_case_by_ay_box = gr.Textbox(
+                        label="Extended due date by AY (one per line, 'AY = true|false')",
+                        placeholder="2025-26 = false",
+                        lines=3, interactive=True,
+                    )
+                    audit_case_basis_dd = gr.Dropdown(
+                        label="Why 31 Oct applies (optional -- wording only, never the date)",
+                        choices=list(_AUDIT_BASIS_CHOICES),
+                        value=_AUDIT_BASIS_BLANK,
+                        interactive=True,
+                        info="s.139(1) Expl. 2 gives 31 Oct by several routes. "
+                             "'partner_of_audited_firm' = working partner of a firm liable to "
+                             "audit, who is not an audit case himself. Blank reads as s.44AB.",
+                    )
+                    drawings_accounts_box = gr.Textbox(
+                        label="Drawings accounts (GnuCash mapper; one account path per line)",
+                        placeholder="Equity:Drawings",
+                        lines=2, interactive=True,
+                        info="Money IN lands here only via a History match or the employer "
+                             "reimbursement rule (and the rule only when exactly one is listed). "
+                             "A path that is not in the book, or is hidden/placeholder, is ignored. "
+                             "Blank = unconfigured.",
+                    )
+                    card_default_box = gr.Textbox(
+                        label="Card-spend default account (GnuCash mapper; one account path)",
+                        placeholder="Equity:Drawings",
+                        lines=1, interactive=True,
+                        info="Card spends nothing else matched go here at low confidence. Blank = Suspense.",
+                    )
+                    reimbursement_markers_box = gr.Textbox(
+                        label="Reimbursement markers (GnuCash mapper; one per line or comma-separated)",
+                        placeholder="ZZRB",
+                        lines=2, interactive=True,
+                        info="A NEFT FROM credit whose narration contains one of these whole words is "
+                             "routed to Drawings (needs exactly one Drawings account above). "
+                             "Blank = the rule never fires.",
+                    )
+                    partner_admission_box = gr.Textbox(
+                        label="Date admitted as partner (YYYY-MM-DD, optional)", interactive=True,
+                        info="Only for a partner of a firm. The Partner Compensation skill counts "
+                             "whole months from this date to 31 March of each year for the capital "
+                             "rule (40% of target compensation over 48 months). Blank = the "
+                             "capital check says the date is not set.",
+                    )
+                    bf_losses_box = gr.Textbox(
+                        label="B/f losses (one per line)", lines=3, interactive=True,
+                    )
+                    clubbing_notes_box = gr.Textbox(
+                        label="Clubbing notes (one per line)", lines=3, interactive=True,
+                    )
 
-            gr.Markdown("---\n**Delete** (double-confirm required):")
-            with gr.Row():
-                confirm_1_cb = gr.Checkbox(label="I understand this removes the entity from entities.yaml", value=False)
-                confirm_2_cb = gr.Checkbox(label="I confirm I want to delete this entity", value=False, interactive=False)
-            delete_btn = gr.Button("Delete Entity", variant="stop", interactive=False)
+                    with gr.Accordion("Foreign dividends", open=False):
+                        fdb_cb = gr.Checkbox(
+                            label="Foreign dividends are already in the book",
+                            value=False,
+                            info="Off: the broker report's foreign dividends are ADDED to Other Sources. "
+                                 "On: the book already records them, so they stay out of the total.",
+                        )
+                        fdb_by_ay_box = gr.Textbox(
+                            label="Foreign dividends already in the book by AY (one per line, 'AY = true|false')",
+                            placeholder="2026-27 = true", lines=2, interactive=True,
+                        )
+                        fd_cash_dd = gr.Dropdown(
+                            label="Foreign dividend cash account", choices=[], value="",
+                            allow_custom_value=True, interactive=True,
+                            info="Where the broker's net dividend cash sits. Needed for the foreign-dividend journal; blank = it stops and says so.",
+                        )
+                        fd_tax_dd = gr.Dropdown(
+                            label="Foreign dividend tax account", choices=[], value="",
+                            allow_custom_value=True, interactive=True,
+                            info="Receives the foreign tax withheld (debit).",
+                        )
+                        fd_income_dd = gr.Dropdown(
+                            label="Foreign dividend income account", choices=[], value="",
+                            allow_custom_value=True, interactive=True,
+                            info="Receives the gross foreign dividend (credit).",
+                        )
+                    with gr.Accordion("Card accounts (card-spend booking)", open=False):
+                        accounts_note_md = gr.Markdown("_Select an entity to load account pick-lists from its book._")
+                        bank_charge_dd = gr.Dropdown(
+                            label="Bank service charge account", choices=[], value="",
+                            allow_custom_value=True, interactive=True,
+                            info="Card fees, interest and GST on fees. Blank = the card-spend booking stops with a named error when a fee row needs it.",
+                        )
+                        emi_interest_dd = gr.Dropdown(
+                            label="Card EMI interest account", choices=[], value="",
+                            allow_custom_value=True, interactive=True,
+                            info="Card EMI interest only; never the Bank service charge account.",
+                        )
+                        large_spend_box = gr.Textbox(
+                            label="Large-spend limit (rupees)", placeholder="20000", interactive=True,
+                            info="A card spend of this amount or more is flagged as a possible asset for THIS entity. "
+                                 "Blank = use the global setting. Zero, negative or text is refused.",
+                        )
+                        cred_max_box = gr.Textbox(
+                            label="CRED tolerance (rupees)", placeholder=f"{_cred_default_text()} (default)", interactive=True,
+                            info="The most a CRED payment line on a statement may exceed the bank amount and still be "
+                                 "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
+                                 "negative or above 500 is refused.",
+                        )
+                    with gr.Accordion("Year-end folders", open=False):
+                        folder_name_box = gr.Textbox(
+                            label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(not set)",
+                            interactive=True,
+                            info="The one folder name this entity uses under both year-end roots below. A single "
+                                 "name: no slashes, no '..'. Blank = not set, and the year-end skill will not run for "
+                                 "this entity.",
+                        )
+                    with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
+                        firm_pan_box = gr.Textbox(
+                            label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
+                            placeholder="AAAAA0000A", interactive=True,
+                            info="Used by the Schedule AL firm interest line. Blank = none; a malformed PAN is refused.",
+                        )
+                        partner_dds = [
+                            gr.Dropdown(
+                                label=f"Partner account: {k}", choices=[], value="",
+                                allow_custom_value=True, interactive=True,
+                            )
+                            for k in _PARTNER_ACCOUNT_KEYS
+                        ]
+                        drivers_box = gr.Textbox(
+                            label="Partner compensation drivers (YAML, one block per FY)",
+                            placeholder="2025-26:\n  firms_tax_rate: 0.25\n  target_compensation: 1200000\n  remuneration_tds_section: 194T",
+                            lines=6, interactive=True,
+                            info="Known drivers: " + ", ".join(_DRIVER_KEYS) + ". Anything else, or a wrong type, "
+                                 "is refused and nothing is saved. Blank removes all drivers.",
+                        )
+                        capital_rate_box = gr.Textbox(
+                            label="Capital rule rate by FY (percent, one per line 'FY = percent')",
+                            placeholder="2025-26 = 40", lines=2, interactive=True,
+                            info="Share of target compensation required as capital. Blank = the default, 40%. "
+                                 "A percent above 0 and below 100. Informational only; no journal uses it.",
+                        )
+                        capital_months_box = gr.Textbox(
+                            label="Capital rule total months by FY (one per line 'FY = months')",
+                            placeholder="2025-26 = 48", lines=2, interactive=True,
+                            info="Months over which the capital is built up. Blank = the default, 48. A positive whole number.",
+                        )
+                    _new_inputs = [fdb_cb, fdb_by_ay_box, drivers_box, bank_charge_dd, emi_interest_dd, firm_pan_box, large_spend_box, cred_max_box, folder_name_box, *partner_dds,
+                                   fd_cash_dd, fd_tax_dd, fd_income_dd, capital_rate_box, capital_months_box]
+
+                    with gr.Accordion("Credit cards of this entity", open=False):
+                        from . import _entity_cards  # noqa: PLC0415
+                        _entity_cards.render_entity_cards(entity_dropdown, container_tab=container_tab)
+
+                    save_status = gr.Markdown("_Fill in the fields and click Save._")
+                    with gr.Row():
+                        save_btn = gr.Button("Save Entity", variant="primary")
+
+                    gr.Markdown("---\n**Delete** (double-confirm required):")
+                    with gr.Row():
+                        confirm_1_cb = gr.Checkbox(label="I understand this removes the entity from entities.yaml", value=False)
+                        confirm_2_cb = gr.Checkbox(label="I confirm I want to delete this entity", value=False, interactive=False)
+                    delete_btn = gr.Button("Delete Entity", variant="stop", interactive=False)
+        with gr.Tab("All entities") as all_tab:
+            # --- Year-end roots (YE-01): two global folders, kept in the portable config.yaml ---
+            with gr.Accordion("Year-end roots (Drive Accounts and GnuCash profile)", open=False):
+                _roots0 = _configs_mod().read_year_end_roots(_config_mod.PORTABLE_CONFIG_PATH)
+                gr.Markdown(
+                    "Two folders every entity's year-end folder sits under. Each must be a full path to a folder "
+                    "that exists. Use Browse… or paste a full path. Both start empty (not set); the year-end skill refuses to run while either is empty. "
+                    "Saved in `config.yaml` (next to the other global settings), not in entities.yaml."
+                )
+                with gr.Row():
+                    drive_root_box = gr.Textbox(label="Drive Accounts root", value=_roots0["drive_accounts_root"],
+                                                placeholder="(not set)", interactive=True, scale=5)
+                    drive_root_browse = gr.Button("Browse…", scale=0, min_width=110)
+                with gr.Row():
+                    profile_root_box = gr.Textbox(label="GnuCash profile root", value=_roots0["gnucash_profile_root"],
+                                                  placeholder="(not set)", interactive=True, scale=5)
+                    profile_root_browse = gr.Button("Browse…", scale=0, min_width=110)
+                drive_root_browse.click(fn=lambda cur=None: _browse_year_end_root("drive_accounts_root", cur),
+                                        inputs=[drive_root_box], outputs=[drive_root_box])
+                profile_root_browse.click(fn=lambda cur=None: _browse_year_end_root("gnucash_profile_root", cur),
+                                          inputs=[profile_root_box], outputs=[profile_root_box])
+                roots_status = gr.Markdown("_Fill in both folders and click Save year-end roots._")
+                roots_btn = gr.Button("Save year-end roots", variant="primary")
+                roots_btn.click(fn=_save_year_end_roots, inputs=[drive_root_box, profile_root_box], outputs=[roots_status])
+
+            # --- Credit card app-wide settings (CC-39 / CC-29): split date and prepayment account ---
+            with gr.Accordion("Credit card split settings (apply to every entity)", open=False):
+                from . import _entity_cards  # noqa: PLC0415
+                _entity_cards.render_global(container_tab=container_tab, inner_tab=all_tab)
+
+            # --- Other dropdown data (read-only) -----------------------------------
+            # Entities is the only dropdown source in the app that is hand-maintained
+            # data; the other three are DERIVED and have no file to edit. Rather than
+            # invent editors for them, surface where each one comes from and what it
+            # currently resolves to, so this tab answers "where is this dropdown
+            # managed?" for every dropdown, not just Entity.
+            with gr.Accordion("Other dropdown data (read-only)", open=False):
+                sources_md = gr.Markdown(_DROPDOWN_SOURCES_PLACEHOLDER)
+                sources_refresh_btn = gr.Button("Refresh", scale=0, min_width=100)
+                sources_refresh_btn.click(fn=_dropdown_sources_md, inputs=[], outputs=[sources_md])
 
     _form_outputs = [
         key_box, name_box, pan_box, status_dd, residency_box,
@@ -1698,45 +1759,6 @@ def render(container_tab=None) -> None:
                  confirm_1_cb, confirm_2_cb, delete_btn],
     )
 
-    # --- Year-end roots (YE-01): two global folders, kept in the portable config.yaml ---
-    with gr.Accordion("Year-end roots (Drive Accounts and GnuCash profile)", open=False):
-        _roots0 = _configs_mod().read_year_end_roots(_config_mod.PORTABLE_CONFIG_PATH)
-        gr.Markdown(
-            "Two folders every entity's year-end folder sits under. Each must be a full path to a folder "
-            "that exists. Use Browse… or paste a full path. Both start empty (not set); the year-end skill refuses to run while either is empty. "
-            "Saved in `config.yaml` (next to the other global settings), not in entities.yaml."
-        )
-        with gr.Row():
-            drive_root_box = gr.Textbox(label="Drive Accounts root", value=_roots0["drive_accounts_root"],
-                                        placeholder="(not set)", interactive=True, scale=5)
-            drive_root_browse = gr.Button("Browse…", scale=0, min_width=110)
-        with gr.Row():
-            profile_root_box = gr.Textbox(label="GnuCash profile root", value=_roots0["gnucash_profile_root"],
-                                          placeholder="(not set)", interactive=True, scale=5)
-            profile_root_browse = gr.Button("Browse…", scale=0, min_width=110)
-        drive_root_browse.click(fn=lambda cur=None: _browse_year_end_root("drive_accounts_root", cur),
-                                inputs=[drive_root_box], outputs=[drive_root_box])
-        profile_root_browse.click(fn=lambda cur=None: _browse_year_end_root("gnucash_profile_root", cur),
-                                  inputs=[profile_root_box], outputs=[profile_root_box])
-        roots_status = gr.Markdown("_Fill in both folders and click Save year-end roots._")
-        roots_btn = gr.Button("Save year-end roots", variant="primary")
-        roots_btn.click(fn=_save_year_end_roots, inputs=[drive_root_box, profile_root_box], outputs=[roots_status])
-
-    # --- Credit cards (CC-28): settings/cc_cards.yaml, the one card list ----
-    with gr.Accordion("Credit cards (the card list every CC skill reads)", open=False):
-        from . import _entity_cards  # noqa: PLC0415
-        _entity_cards.render(container_tab=container_tab)
-
-    # --- Other dropdown data (read-only) -----------------------------------
-    # Entities is the only dropdown source in the app that is hand-maintained
-    # data; the other three are DERIVED and have no file to edit. Rather than
-    # invent editors for them, surface where each one comes from and what it
-    # currently resolves to, so this tab answers "where is this dropdown
-    # managed?" for every dropdown, not just Entity.
-    with gr.Accordion("Other dropdown data (read-only)", open=False):
-        sources_md = gr.Markdown(_DROPDOWN_SOURCES_PLACEHOLDER)
-        sources_refresh_btn = gr.Button("Refresh", scale=0, min_width=100)
-        sources_refresh_btn.click(fn=_dropdown_sources_md, inputs=[], outputs=[sources_md])
 
     if container_tab is not None:
         # Populated on tab open rather than at build time: the model list can
