@@ -87,13 +87,13 @@ def test_number_vs_name_conflict_prefers_number_and_warns_on_fallback(tmp_path):
     accounts = [
         _account_xml("Root Account", "root", "ROOT", None),
         _account_xml("Assets", "asset", "ASSET", "root"),
-        _account_xml("BoB - Savings 100000000001", "bob1", "BANK", "asset"),
+        _account_xml("BoB - Savings", "bob1", "BANK", "asset"),
     ]
     book = _write_book(tmp_path, accounts)
 
     result = _get_gnucash_account_balance(book, "BoB", account_number="999999999999")
     assert result["found"] is True
-    assert result["account_name"].endswith("BoB - Savings 100000000001")
+    assert result["account_name"].endswith("BoB - Savings")
     assert result["match_warning"] is not None
     assert "999999999999" in result["match_warning"]
 

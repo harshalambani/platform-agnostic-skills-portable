@@ -635,10 +635,78 @@ def _balance_before(entries, start_date: str | None) -> float:
     return sum(v for d, v in entries if not start_date or (d and d < start_date))
 
 
+def _number_fits(number_digits: str, text: str | None) -> bool:
+    """The ONE account-number rule (IMP-08/IMP-09): ``text`` carries digits and
+    one digit string contains the other (so masked / last-digits forms fit)."""
+    d = _normalize_digits(text)
+    return bool(d) and (number_digits in d or d in number_digits)
+
+
+def _other_entity_holders(
+    gnucash_file: str, account_number: str | None, entities_path=None,
+) -> tuple[list[str], list[str]]:
+    """BNK-10: which OTHER entities' books (same financial year as this book)
+    hold a postable BANK account carrying ``account_number``?
+
+    Returns (holders, notes): holders are plain-words labels naming the
+    entity and its folder; notes are one-line skips for a missing or unreadable
+    book. Strictly read-only: the registry file is read, other books are only
+    parsed (never opened for writing, no lock file, no backup). Never raises.
+    """
+    holders: list[str] = []
+    notes: list[str] = []
+    want = _normalize_digits(account_number)
+    if not want:
+        return holders, notes
+    try:
+        scripts = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        from ui import _book_registry as reg  # noqa: PLC0415
+        from agents.gnucash_accounts import TargetGuard, load_accounts  # noqa: PLC0415
+
+        epath = Path(entities_path) if entities_path is not None else reg._default_entities_path()
+        entities = reg._load_entities_tolerant(epath)
+        here = reg._norm_path(gnucash_file)
+        cur_key = cur_fy = None
+        for key in entities:
+            for fy, raw in reg.list_books(key, epath).items():
+                if reg._norm_path(raw) == here:
+                    cur_key, cur_fy = key, fy
+        if cur_key is None:
+            return holders, notes  # this book is not registered: no year to compare
+        for key, profile in entities.items():
+            if key == cur_key:
+                continue
+            raw = reg.list_books(key, epath).get(cur_fy)
+            if not raw or reg._norm_path(raw) == here:
+                continue
+            label = f"{profile.name or key}"
+            other = Path(raw)
+            try:
+                if not other.is_file():
+                    notes.append(f"Other-book check: {label}'s book for {cur_fy} is missing; skipped.")
+                    continue
+                accs = load_accounts(other)
+            except Exception:  # noqa: BLE001
+                accs = []
+            if not accs:
+                notes.append(f"Other-book check: {label}'s book for {cur_fy} could not be read; skipped.")
+                continue
+            guard = TargetGuard(accs)
+            if any(a.type == "BANK" and not a.is_root and not guard.is_blocked(a.path)
+                   and _number_fits(want, a.path) for a in accs):
+                holders.append(f"{label} (folder '{other.parent.name}')")
+    except Exception as e:  # noqa: BLE001 - the check must never break an import
+        notes.append(f"Other-book check skipped: {type(e).__name__}.")
+    return holders, notes
+
+
 def _get_gnucash_account_balance(
     gnucash_file: str, bank_name: str, account_number: str | None = None,
     *, opening_balance: float | None = None, start_date: str | None = None,
     narrations: list[str] | None = None, chosen_account: str | None = None,
+    entities_path=None,
 ) -> dict:
     """
     Parse a .gnucash XML file and find the bank account's ledger balance.
@@ -766,7 +834,22 @@ def _get_gnucash_account_balance(
             "match_note": note,
             "ambiguous": ambiguous, "refused": refused,
             "candidates": cands if cands is not None else [],
+            "wrong_book": False, "double_booking": [], "other_book_notes": [],
         }
+
+    def _wrong_book(why: str) -> dict:
+        """BNK-10: stop -- this statement's account number belongs elsewhere.
+        Names the other entity's folder when one holds the number."""
+        holders, notes = _other_entity_holders(gnucash_file, account_number, entities_path)
+        msg = f"{why} Nothing was imported."
+        if holders:
+            msg += (" That number is a bank account in the book for the same year of: "
+                    + "; ".join(holders) + ". Import this statement there.")
+        if notes:
+            msg += " " + " ".join(notes)
+        res = _result(False, warn=msg, cands=postable_paths)
+        res.update(wrong_book=True, other_book_notes=notes)
+        return res
 
     postable_paths = [_strip_root(full) for _aid, full in candidates]
 
@@ -878,17 +961,37 @@ def _get_gnucash_account_balance(
                 f"'{bank_name}' ({', '.join(name for _, name in candidates)}); "
                 f"not resolving to any one of them automatically."
             )
+            _h, _n = _other_entity_holders(gnucash_file, account_number, entities_path)
+            if _h:
+                return _wrong_book(match_warning)
             return _result(False, warn=match_warning, cands=postable_paths)
+        elif not candidates:
+            # No account of this bank here at all. Stop only when another
+            # entity's book holds the number (BNK-10); otherwise as before.
+            _h, _n = _other_entity_holders(gnucash_file, account_number, entities_path)
+            if _h:
+                return _wrong_book(
+                    f"This book has no postable '{bank_name}' account for account "
+                    f"number '{account_number}'.")
         # else: zero or exactly one candidate -- handled below.
 
     if target_id is None and len(candidates) == 1:
         target_id, target_name = candidates[0]
         if norm_number and not chosen_account:
+            if _normalize_digits(target_name):
+                # BNK-10: the account carries a DIFFERENT number -- this
+                # statement is for another account. Stop, write nothing.
+                return _wrong_book(
+                    f"The statement's account number '{account_number}' does not "
+                    f"match this book: its only '{bank_name}' account, "
+                    f"'{_strip_root(target_name)}', carries a different account "
+                    f"number.")
             match_warning = (
                 f"Could not match account number '{account_number}' to any "
                 f"GnuCash account digits; fell back to name match on "
                 f"'{bank_name}' -> '{target_name}'. Verify this is the "
-                f"correct account."
+                f"correct account. Put the account number in the GnuCash "
+                f"account name so a statement for another account is caught."
             )
     elif target_id is None and len(candidates) > 1:
         picked = _decide(candidates)
@@ -907,9 +1010,16 @@ def _get_gnucash_account_balance(
     balance = sum(v for _d, v in entries)
     last_date = max((d for d, _v in entries if d), default=None)
 
-    return _result(True, target_name, round(balance, 2), last_date,
-                   match_warning, match_note, cands=postable_paths,
-                   opening=round(_balance_before(entries, start_date), 2))
+    res = _result(True, target_name, round(balance, 2), last_date,
+                  match_warning, match_note, cands=postable_paths,
+                  opening=round(_balance_before(entries, start_date), 2))
+    if norm_number and not chosen_account and _number_fits(norm_number, target_name):
+        # BNK-10: the same number is also a bank account in another entity's
+        # book for this year -- one account in two books is a double booking.
+        _h, _n = _other_entity_holders(gnucash_file, account_number, entities_path)
+        res["double_booking"] = _h
+        res["other_book_notes"] = _n
+    return res
 
 
 def postable_bank_accounts(gnucash_file: str, bank_name: str) -> list[str]:
@@ -930,7 +1040,7 @@ def _reconcile_opening_balance(
     gnucash_file: str,
     bank_name: str,
     account_number: str | None = None,
-    *, chosen_account: str | None = None,
+    *, chosen_account: str | None = None, entities_path=None,
 ) -> dict:
     """
     Reconcile the canonical CSV's opening balance against GnuCash ledger.
@@ -969,7 +1079,16 @@ def _reconcile_opening_balance(
         gnucash_file, bank_name, account_number,
         opening_balance=ev.get("opening_balance"), start_date=ev.get("start_date"),
         narrations=ev.get("narrations"), chosen_account=chosen_account,
+        entities_path=entities_path,
     )
+    if gc.get("wrong_book"):
+        return {
+            "ok": False, "stop": True, "wrong_book": True,
+            "message": gc.get("match_warning") or "This statement does not belong in this book.",
+            "rows_skipped": 0, "filtered_rows": canonical_rows,
+            "gnucash_balance": 0.0, "statement_opening": 0.0,
+            "account_found": False, "match_warning": None, "candidates": [],
+        }
     if gc.get("ambiguous") or gc.get("refused"):
         # IMP-08: stop and ask -- never continue on a guessed account.
         return {
@@ -1727,6 +1846,15 @@ def run(
         recon = _reconcile_opening_balance(
             canonical_rows, gnucash_file, bank, stmt_account_number,
             chosen_account=bank_account)
+        if recon.get("stop") and recon.get("wrong_book"):
+            # BNK-10: the statement's account number belongs to another account
+            # or another entity's book. No output file is written.
+            nl2 = chr(10) * 2
+            return (
+                f"**This {bank} statement does not belong in this book**{nl2}"
+                f"{recon['message']}{nl2}"
+                "Nothing was written. Open the right book and run again."
+            )
         if recon.get("stop"):
             # IMP-08: several postable accounts and no evidence (or a refused
             # choice). No output file is written; the user picks and re-runs.
@@ -1791,6 +1919,14 @@ def run(
             start_date=_ev2.get("start_date"),
             narrations=_ev2.get("narrations"), chosen_account=bank_account)
         account_filter_path = gc_info["account_name"] if gc_info["found"] else None
+        if gc_info.get("double_booking"):
+            # BNK-10: one account number in two books is a double booking.
+            log_lines.insert(0, (
+                f"RED FLAG: account number '{stmt_account_number}' is also a bank account "
+                f"in the book for the same year of: {'; '.join(gc_info['double_booking'])}. "
+                f"One account in two books is a double booking; check before importing."))
+        for _note in gc_info.get("other_book_notes") or []:
+            log_lines.append(_note)
 
         # ── Duplicate detection (Phase 4 Lite) ─────────────────────────────────
         # Compare canonical CSV against GnuCash book to flag duplicates
