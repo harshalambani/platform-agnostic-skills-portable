@@ -187,44 +187,89 @@ def _browser():
     return None
 
 
-async def _bleed_report(page_url, port, dpr):
+# How long any single wait for the browser's DevTools reply may take. A test can
+# pass a much shorter limit to _bleed_report to prove that a silent browser fails
+# fast instead of hanging.
+DEVTOOLS_TIMEOUT = 30.0
+
+
+class BrowserDidNotAnswer(AssertionError):
+    """The browser accepted a DevTools call and never answered it in time."""
+
+
+async def _bleed_report(page_url, port, dpr, timeout=None, retry=True):
     """Open the page in the running browser over the DevTools protocol, wait for
-    the page's own report element, and return (report dict, PNG bytes)."""
+    the page's own report element, and return (report dict, PNG bytes). Every
+    wait for the browser has a time limit; a silent browser raises
+    BrowserDidNotAnswer naming the call that was not answered."""
     import aiohttp
-    targets = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % port))
-    ws_url = [t for t in targets if t.get("type") == "page"][0]["webSocketDebuggerUrl"]
+    limit = float(DEVTOOLS_TIMEOUT if timeout is None else timeout)
+
+    async def _within(coro, what):
+        try:
+            return await asyncio.wait_for(coro, limit)
+        except asyncio.TimeoutError:
+            raise BrowserDidNotAnswer("browser did not answer %s within %g s" % (what, limit)) from None
+
     async with aiohttp.ClientSession() as sess:
-        async with sess.ws_connect(ws_url, max_msg_size=0) as ws:
-            n = 0
+        async def _targets():
+            async with sess.get("http://127.0.0.1:%d/json" % port) as r:
+                return await r.json(content_type=None)
 
-            async def call(method, **params):
-                nonlocal n
-                n += 1
-                await ws.send_json({"id": n, "method": method, "params": params})
-                while True:
-                    msg = await ws.receive_json()
-                    if msg.get("id") == n:
-                        if "error" in msg:
-                            raise RuntimeError(msg["error"])
-                        return msg.get("result", {})
+        async def _fresh_target():
+            async with sess.put("http://127.0.0.1:%d/json/new?about:blank" % port) as r:
+                return await r.json(content_type=None)
 
-            await call("Page.enable")
-            await call("Emulation.setDeviceMetricsOverride", width=900, height=600,
-                       deviceScaleFactor=dpr, mobile=False)
-            await call("Page.navigate", url=page_url)
-            rep = None
-            for _ in range(100):
-                await asyncio.sleep(0.1)
-                r = await call("Runtime.evaluate", returnByValue=True,
-                               expression="(document.getElementById('rep')||{}).textContent||''")
-                val = r.get("result", {}).get("value")
-                if val:
-                    rep = json.loads(val)
-                    break
-            assert rep, "page did not render"
-            await asyncio.sleep(0.2)
-            shot = await call("Page.captureScreenshot", format="png")
-            return rep, base64.b64decode(shot["data"])
+        async def _attempt(ws_url):
+            ws = await _within(sess.ws_connect(ws_url, max_msg_size=0), "the DevTools websocket connect")
+            try:
+                n = 0
+
+                async def call(method, **params):
+                    nonlocal n
+                    n += 1
+                    await ws.send_json({"id": n, "method": method, "params": params})
+
+                    async def _reply():
+                        while True:     # replies for other ids are skipped, but only until the limit
+                            msg = await ws.receive_json()
+                            if msg.get("id") == n:
+                                return msg
+                    msg = await _within(_reply(), method)
+                    if "error" in msg:
+                        raise RuntimeError(msg["error"])
+                    return msg.get("result", {})
+
+                await call("Page.enable")
+                await call("Emulation.setDeviceMetricsOverride", width=900, height=600,
+                           deviceScaleFactor=dpr, mobile=False)
+                await call("Page.navigate", url=page_url)
+                rep = None
+                for _ in range(100):
+                    await asyncio.sleep(0.1)
+                    r = await call("Runtime.evaluate", returnByValue=True,
+                                   expression="(document.getElementById('rep')||{}).textContent||''")
+                    val = r.get("result", {}).get("value")
+                    if val:
+                        rep = json.loads(val)
+                        break
+                assert rep, "page did not render"
+                await asyncio.sleep(0.2)
+                shot = await call("Page.captureScreenshot", format="png")
+                return rep, base64.b64decode(shot["data"])
+            finally:
+                await ws.close()
+
+        targets = await _within(_targets(), "the /json target list")
+        first = [t for t in targets if t.get("type") == "page"][0]
+        try:
+            return await _attempt(first["webSocketDebuggerUrl"])
+        except BrowserDidNotAnswer as e:
+            if not retry:
+                raise
+            print("RETRY: %s; trying once more in a fresh page" % e, flush=True)
+            fresh = await _within(_fresh_target(), "a fresh page target")
+            return await _attempt(fresh["webSocketDebuggerUrl"])
 
 
 def _bleed_pixels(html, dpr, port, tmp):
@@ -326,6 +371,9 @@ def browser_port(tmp_path_factory):
         [_browser(), "--headless=new", "--disable-gpu", "--no-first-run",
          "--hide-scrollbars", "--disable-lcd-text", "--font-render-hinting=none",
          "--remote-debugging-port=%d" % port, "--remote-allow-origins=*",
+         # the browser's own background downloads (component updates) land in the
+         # system temp folder, outside the profile; nothing here needs them
+         "--disable-background-networking", "--disable-component-update",
          "--window-size=900,600", "--user-data-dir=%s" % (work / "profile"), "about:blank"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -380,24 +428,135 @@ def test_a_run_of_the_browser_tests_leaves_nothing_in_the_temp_folder(tmp_path):
     sandbox = tmp_path / "sandbox-temp"
     sandbox.mkdir()
     env = dict(os.environ, TMP=str(sandbox), TEMP=str(sandbox), TMPDIR=str(sandbox))
-    cp = subprocess.run(
-        [sys.executable, "-m", "pytest", "-p", "no:warnings", "-v", "-p", "no:cacheprovider",
-         "-k", "real_browser or detects_the_old", str(Path(__file__).resolve())],
-        env=env, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
-    assert cp.returncode == 0, cp.stdout[-2000:] + cp.stderr[-1000:]
-    if "passed" not in cp.stdout and "skipped" in cp.stdout:
-        pytest.skip("the browser did not start here, so there is no profile to check")
-    assert "4 passed" in cp.stdout, cp.stdout[-1500:]
-    left = []
-    total = 0
-    for dp, dn, fn in os.walk(sandbox):
-        for d in dn:
-            if d.lower() == "profile":
-                left.append(str(Path(dp) / d))
-        for f in fn:
-            try:
-                total += (Path(dp) / f).stat().st_size
-            except OSError:
-                pass
-    assert not left, "browser profile left behind: %s" % left
-    assert total < 1_000_000, "%d bytes left in the temp folder" % total
+    try:
+        try:
+            cp = subprocess.run(
+                [sys.executable, "-m", "pytest", "-p", "no:warnings", "-v", "-p", "no:cacheprovider",
+                 "-k", "real_browser or detects_the_old", str(Path(__file__).resolve())],
+                env=env, capture_output=True, text=True, timeout=600, cwd=str(ROOT))
+        except subprocess.TimeoutExpired as e:
+            tail = e.stdout if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", "replace")
+            pytest.fail("the child run of the browser tests did not finish in 600 s:\n" + tail[-1500:])
+        assert cp.returncode == 0, cp.stdout[-2000:] + cp.stderr[-1000:]
+        if "passed" not in cp.stdout and "skipped" in cp.stdout:
+            pytest.skip("the browser did not start here, so there is no profile to check")
+        assert "4 passed" in cp.stdout, cp.stdout[-1500:]
+        left = []
+        total = 0
+        sizes = []
+        for dp, dn, fn in os.walk(sandbox):
+            for d in dn:
+                if d.lower() == "profile":
+                    left.append(str(Path(dp) / d))
+            for f in fn:
+                try:
+                    size = (Path(dp) / f).stat().st_size
+                except OSError:
+                    continue
+                total += size
+                sizes.append((size, str((Path(dp) / f).relative_to(sandbox))))
+        assert not left, "browser profile left behind: %s" % left
+        biggest = "; ".join("%s (%d)" % (name, size) for size, name in sorted(sizes, reverse=True)[:8])
+        assert total < 1_000_000, "%d bytes left in the temp folder, largest: %s" % (total, biggest)
+    finally:
+        # measured above; whatever the outcome, do not leave the sandbox (it can
+        # hold a whole browser profile) under pytest's kept temp folders
+        _remove_dir_with_retry(sandbox)
+
+
+# ---- a silent browser fails fast (no real browser needed) -----------------------------
+
+async def _until_closed(ws):
+    async for _ in ws:      # ends when the client closes the socket
+        pass
+
+
+def _run_against_a_fake_browser(behaviour, limit=1.0):
+    """Start a local fake DevTools endpoint, run _bleed_report against it with a
+    short limit, and return (exception raised or None, seconds taken)."""
+    pytest.importorskip("aiohttp")
+    from aiohttp import web
+
+    async def go():
+        bound = []
+
+        async def targets(request):
+            return web.json_response([{"type": "page",
+                                       "webSocketDebuggerUrl": "ws://127.0.0.1:%d/ws" % bound[0]}])
+
+        async def ws_handler(request):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await behaviour(ws)
+            return ws
+
+        app = web.Application()
+        app.add_routes([web.get("/json", targets), web.get("/ws", ws_handler)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        bound.append(port)
+        t0 = time.monotonic()
+        err = None
+        try:
+            await asyncio.wait_for(_bleed_report("file:///x.html", port, 1, timeout=limit, retry=False), limit * 10)
+        except BaseException as e:      # noqa: BLE001 - the test inspects it
+            err = e
+        took = time.monotonic() - t0
+        await runner.cleanup()
+        return err, took
+    return asyncio.run(go())
+
+
+def test_a_browser_that_never_answers_fails_fast_and_names_the_call():
+    async def silent(ws):
+        await ws.receive()          # take the first call, never reply
+        await _until_closed(ws)
+    err, took = _run_against_a_fake_browser(silent)
+    assert isinstance(err, BrowserDidNotAnswer), repr(err)
+    assert "Page.enable" in str(err) and "within 1 s" in str(err)
+    assert took < 5, "waited %.1f s past a 1 s limit" % took        # NEGATIVE: no hang
+
+
+def test_replies_for_other_ids_do_not_keep_the_wait_alive():
+    async def wrong_id_then_quiet(ws):
+        await ws.receive()
+        await ws.send_json({"id": 9999, "result": {}})
+        await _until_closed(ws)
+    err, took = _run_against_a_fake_browser(wrong_id_then_quiet)
+    assert isinstance(err, BrowserDidNotAnswer), repr(err)
+    assert "Page.enable" in str(err)
+    assert took < 5, "waited %.1f s past a 1 s limit" % took
+
+
+def test_a_stream_of_replies_for_other_ids_still_hits_the_limit():
+    async def chatty_wrong_ids(ws):
+        await ws.receive()
+        reader = asyncio.ensure_future(_until_closed(ws))
+        i = 0
+        while not reader.done():
+            i += 1
+            await ws.send_json({"id": 5000 + i, "result": {}})
+            await asyncio.sleep(0.02)
+    err, took = _run_against_a_fake_browser(chatty_wrong_ids)
+    assert isinstance(err, BrowserDidNotAnswer), repr(err)
+    assert took < 5, "the loop kept waiting %.1f s on replies for other ids" % took
+
+
+def test_a_later_call_that_goes_quiet_is_named_too():
+    async def answer_first_then_quiet(ws):
+        msg = await ws.receive_json()
+        await ws.send_json({"id": msg["id"], "result": {}})
+        await ws.receive()          # Emulation.setDeviceMetricsOverride: never answered
+        await _until_closed(ws)
+    err, took = _run_against_a_fake_browser(answer_first_then_quiet)
+    assert isinstance(err, BrowserDidNotAnswer), repr(err)
+    assert "Emulation.setDeviceMetricsOverride" in str(err)
+    assert "Page.enable" not in str(err)
+    assert took < 5
+
+
+def test_the_default_limit_is_about_thirty_seconds():
+    assert 20 <= DEVTOOLS_TIMEOUT <= 60
