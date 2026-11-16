@@ -188,7 +188,7 @@ class EntityProfile:
                                          # parse_cred_max_overage. None == the code default (50).
     folder_name: str = ""                # YE-01: this entity's folder name, the same in the Drive Accounts
                                          # tree and the GnuCash profile tree (one path segment, see
-                                         # check_folder_name). Empty == not set; the year-end skill refuses.
+                                         # check_folder_name). Empty == the year-end skill uses the entity key (YE-02).
 
 
 _REQUIRED_ENTITY_FIELDS = ("name", "pan", "status")
@@ -238,7 +238,7 @@ def check_folder_name(value) -> str | None:
     if not isinstance(value, str):
         return f"{value!r} is not text"
     if not value.strip():
-        return "is blank (leave it empty to leave the folder name unset)"
+        return "is blank (leave it empty to use the entity key)"
     if value != value.strip():
         return f"{value!r} starts or ends with a space"
     if value in (".", "..") or ".." in value:

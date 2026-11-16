@@ -863,7 +863,7 @@ def _save_entity(
             if _fn_err:
                 kv_errors.append(
                     f"Folder name {_fn_err} -- it must be one folder name (no slashes, no '..'), "
-                    "or empty to leave it unset."
+                    "or empty to use the entity key."
                 )
             else:
                 folder = str(folder_name)
@@ -1521,11 +1521,12 @@ def render(container_tab=None) -> None:
                         )
                     with gr.Accordion("Year-end folders", open=False):
                         folder_name_box = gr.Textbox(
-                            label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(not set)",
+                            label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(blank = the entity key)",
                             interactive=True,
-                            info="The one folder name this entity uses under both year-end roots below. A single "
-                                 "name: no slashes, no '..'. Blank = not set, and the year-end skill will not run for "
-                                 "this entity.",
+                            info="The one folder name this entity uses under both year-end roots. A single "
+                                 "name: no slashes, no '..'. Blank means the entity key is used as the folder "
+                                 "name when year-end runs (nothing is written here). A name you fill in is used "
+                                 "instead of the key.",
                         )
                     with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
                         firm_pan_box = gr.Textbox(

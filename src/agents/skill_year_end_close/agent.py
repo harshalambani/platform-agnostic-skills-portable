@@ -196,8 +196,18 @@ def build_ctx(entity_key: str, closing_fy: str, entities_path, settings_path) ->
 
     roots = configs.read_year_end_roots(settings_path)
     missing = []
-    if not (profile.folder_name or "").strip() or configs.check_folder_name(profile.folder_name):
-        missing.append("the entity's folder name (Entities screen)")
+    # YE-02: a filled Folder name wins; a blank one falls back to the entity key,
+    # as it is (worked out here at run time, never written to entities.yaml).
+    # The "registered book is inside the expected folder" check below is what
+    # makes a wrong fallback safe: nothing is copied or created before it.
+    set_name = (profile.folder_name or "").strip()
+    effective = set_name or str(entity_key)
+    if set_name:
+        if configs.check_folder_name(set_name):
+            missing.append("the entity's folder name (Entities screen)")
+    elif configs.check_folder_name(effective):
+        missing.append(f"the entity's folder name (blank, and the entity key {effective!r} "
+                       "could not be used as a folder name; set Folder name on the Entities screen)")
     for key, label in (("drive_accounts_root", "the Drive accounts root"),
                        ("gnucash_profile_root", "the GnuCash profile root")):
         if not roots.get(key) or configs.check_root_folder(roots[key]):
@@ -206,7 +216,7 @@ def build_ctx(entity_key: str, closing_fy: str, entities_path, settings_path) ->
         raise Stop("Year-end cannot start: " + "; ".join(missing)
                    + " is not set or not valid. Nothing was created.")
 
-    c.folder = profile.folder_name.strip()
+    c.folder = effective
     c.drive_root, c.gnc_root = Path(roots["drive_accounts_root"]), Path(roots["gnucash_profile_root"])
     c.gnc_dir = c.gnc_root / f"{start}{end}" / c.folder
     c.next_gnc_dir = c.gnc_root / f"{start + 1}{end + 1}" / c.folder
