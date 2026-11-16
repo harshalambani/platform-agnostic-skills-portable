@@ -65,6 +65,7 @@ help:
       gotchas: >
         Use the bank's original text PDF, not a photo/scan. Password-protected
         PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
   steps:
     - "Click the input and pick one or more Bank of Baroda statement PDFs."
     - "Click Run — it finishes in a few seconds."

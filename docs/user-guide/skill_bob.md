@@ -13,7 +13,7 @@ Use this when you have BoB account statements as PDFs and want them as a tidy CS
 
 - **Bank of Baroda statement PDF(s)** (required) — accepts: PDF (.pdf) — one or many, in any order.
   - Your BoB statement PDF(s). You can select several at once.
-  - ⚠️ Use the bank's original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.
+  - ⚠️ Use the bank's original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV. If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
 
 ## How to run
 

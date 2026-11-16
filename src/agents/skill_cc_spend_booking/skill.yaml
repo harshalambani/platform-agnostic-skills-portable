@@ -100,7 +100,7 @@ help:
     fees become two-split journals against Credit Card Payment. A statement whose tie-out is not PASS is
     still booked (on its settling payment's date, or its real dates when no payment settles it) and is
     reported first as NOT TIED, with every one of its journals marked in the workbook; only a statement
-    that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked. Card sub-accounts: a card with an account on the Cards screen, paid on or after ccp_split_from, has each bank payment moved onto its sub-account and its spends booked there; the pool (parent plus sub-accounts) must tie to the unsplit figure or no import file is written. Corporate card prepayments: paste the code printed beside an unmatched payment to book it to the prepayment account; nothing is marked for you. Uses the LLM to suggest an account for spends the rules cannot place; if that AI pass stops, the rows it did not reach go to suspense and the result says so.
+    that read 0 rows is refused. HSBC EMI: each instalment principal is booked as a spend (the converted purchase is withheld), the interest to the entity card_emi_interest_account, the processing fee and GST to Bank Service Charge; the credit legs and the conversion credit are never booked. Other banks' EMI wording is UNVALIDATED, and any unrecognised EMI, instalment or loan row is listed for a decision, never booked. Card sub-accounts: a card with an account under "Credit cards of this entity" (Entities tab, This entity sub-tab), paid on or after ccp_split_from, has each bank payment moved onto its sub-account and its spends booked there; the pool (parent plus sub-accounts) must tie to the unsplit figure or no import file is written. Corporate card prepayments: paste the code printed beside an unmatched payment to book it to the prepayment account; nothing is marked for you. Uses the LLM to suggest an account for spends the rules cannot place; if that AI pass stops, the rows it did not reach go to suspense and the result says so.
   when_to_use: >
     After the bank statements are imported and the card statements are sorted, when you want the
     card spends booked to their expense accounts.
@@ -135,7 +135,7 @@ help:
       gotchas: "Both start and end are required for a custom range."
     - name: "prepayment_marks"
       tooltip: "Codes printed beside unmatched payments in the report. Each code books that payment to the prepayment account (Drawings) instead of leaving it in the pool."
-      accepts: "Codes separated by spaces or commas. Needs ccp_split_from and prepayment_account on the Cards screen."
+      accepts: "Codes separated by spaces or commas. Needs ccp_split_from and prepayment_account, set under 'Credit card split settings (apply to every entity)' on the Entities tab, All entities sub-tab."
       gotchas: "Only unmatched payments on or after the split date can be marked. Nothing is marked for you."
     - name: "cred_emails"
       tooltip: "Folder of CRED payment confirmation emails (.msg). They only confirm which card a bank payment was for; they never book anything."
@@ -156,8 +156,16 @@ help:
   tips: >
     A spend at or above the large-spend threshold (Settings, default 20,000) is flagged as a possible asset.
     The flag never changes its account.
+
+    While it runs, the panel shows the newest step, in the form Reading statement 3 of 12 - about 4 min left
+    (no estimate is shown until the first statement is read). Press Stop to end the run: the panel says
+    "Stopping..." at once and then "Cancelled", and no output file is written. The skill stops at a safe point
+    (between statements and between its stages), so a statement already being read is finished first. If you
+    stop during the AI pass, none of its partial answers are written.
   troubleshooting:
     - problem: "RED FLAG: payments match no statement."
       fix: "Check the statements folder has the statement the payment settles, and that its dates make it the card's next statement."
+    - problem: "A payment in the Credit Card Payment tie-out is labelled HELD and the pool is not tied."
+      fix: "A CRED confirmation email named a different card than the payment, so the payment was held and not booked (the line reads 'HELD: card clash, not booked'). It stays in the tie-out as an open amount, so the tie-out does not read as tied. Check the email and the payment, then run again."
     - problem: "Nothing was written."
       fix: "No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows)."

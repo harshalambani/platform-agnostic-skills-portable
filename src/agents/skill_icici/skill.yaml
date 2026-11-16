@@ -57,6 +57,7 @@ help:
         become real Excel cells) parses the same as the original download,
         and an accidental .xlsx re-save is read automatically too. If it
         still fails to parse, export a fresh .xls from ICICI net-banking.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
   steps:
     - "Download your statement(s) as .xls from ICICI net-banking."
     - "Select the file(s)."

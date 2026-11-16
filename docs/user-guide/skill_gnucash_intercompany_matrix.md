@@ -16,7 +16,7 @@ Run at year-end to see, at a glance, which family members' books agree and which
   - ⚠️ Only entities with a registered book fill in; any that have none are named under the field, and you can Browse to those. 'X HUF' is a separate entity from 'X'.
 - **GnuCash books (.gnucash) -- pick 2 or more; all must be closed in GnuCash** (required) — accepts: Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse.
   - Two or more people's GnuCash books, one path per line.
-  - ⚠️ Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair.
+  - ⚠️ Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error; a pair whose book could not be read shows UNREADABLE and is named in the reply. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair.
 - **Reconciliation period (Indian FY = 1 Apr to 31 Mar)** (required) — accepts: A FY, a calendar year, Auto, or a custom date range.
   - Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar.
   - ⚠️ 'Auto' reads the FY from the file names; use a fixed FY if the names disagree.
@@ -57,5 +57,7 @@ Start from the Matrix grid: any red cell is a pair to open. The All Exceptions s
 
 | If… | Then… |
 |------|-------|
+| The reply says UNREADABLE PAIR, naming two people. | One of those two books could not be read (for example it is not a GnuCash file, or no period could be found). The pair is named (as two names joined by <->) with the reason, and shows UNREADABLE (not n/a) on the Matrix grid and the Pairs sheet. Fix or re-select that book and run again. The other pairs are still compared, but the run is not a clean one while any pair is unreadable. |
+| The reply starts with 'ERROR: no pair could be compared -- this is NOT a clean run.' | Not one pair was reconciled, so there is nothing to rely on. Either every pair is n/a (none of the books keep an account named for another) or the books could not be read. A run like this is never a success; check the books you selected. |
 | A pair shows 'n/a'. | Those two books do not each keep an account named for the other. That is normal for people who do not transact. |
 | A pair is red (out of balance) with a large difference. | Open it in the two-book Inter-entity Reconcile for full Matched / Exceptions detail, then fix the mis-postings it lists. |

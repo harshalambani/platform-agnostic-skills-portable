@@ -19,10 +19,10 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
   - ⚠️ Pick 'Other Bank (CSV)' for any bank without a dedicated extractor; columns are normalised with LLM help.
 - **Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak (HSBC also takes an already-enriched .xlsx); CSV or XLS/XLSX for HDFC / Other** (required) — accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill's own output) instead of PDFs.
   - The statement file(s), matching the bank you chose.
-  - ⚠️ File type must match the selected bank, or extraction will fail.
-- **Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password.
-  - Used for an HDFC PDF or an SBM xlsx that is itself password-protected.
-  - ⚠️ Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output.
+  - ⚠️ File type must match the selected bank, or extraction will fail. If two uploads share a file name (capital letters do not count as a difference) the run stops with 'two uploads are both named' and the file name, and nothing is run. Rename one of them and upload again.
+- **Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak it is the password the bank gave the PDF.
+  - Used for an HDFC PDF, an SBM xlsx or a Kotak PDF that is itself password-protected.
+  - ⚠️ Ignored for ICICI and for unprotected files. A password-protected Kotak PDF with no password (or a wrong one) stops with a password message. A wrong or missing SBM password stops the run. Never logged or included in output.
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used to learn your accounts and map transactions.
   - ⚠️ Must be closed in GnuCash so the file is not locked. It is read only, never modified.
@@ -108,4 +108,6 @@ only the rows absent from this bank's account. It never writes to the book.
 |------|-------|
 | Run errors mentioning the endpoint / model. | Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings. |
 | Extraction fails immediately. | The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both. |
+| The reply says this statement "does not belong in this book". | The statement's account number belongs to another account or another book, so nothing was written. The reply says why (for example that the book's only account at that bank carries a different account number) and, when another entity's book for the same year holds that number, names that entity and its folder. Open the right book and run again. The message ends with "Nothing was written. Open the right book and run again." |
+| The reply says 'more than one statement' and 'can only convert one statement per run'. | The upload holds several statements of one bank (ICICI, HDFC, SBM or Other Bank (CSV)) and only one can be converted per run, so nothing was imported. The reply lists the files. Upload a single file, run, then repeat for the next one. |
 | Some rows mapped to the wrong account. | Fix them in GnuCash after import; future runs learn from the correction. |

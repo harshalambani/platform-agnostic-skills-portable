@@ -16,7 +16,7 @@ Run this second, after "Convert" (Part I). Its Bills workbook is the input to "C
   - ⚠️ Run Part I first; the picker only lists Ledger workbooks from earlier runs.
 - **Contract Notes (SLBM memos + trade notes)** (required) — accepts: PDF (.pdf) — one or many contract notes.
   - The contract-note PDFs — SLBM memos plus trade notes.
-  - ⚠️ Include every contract note for the period so the reconciliation is complete.
+  - ⚠️ Include every contract note for the period so the reconciliation is complete. If two uploads share a file name (capital letters do not count as a difference) the run stops with 'two uploads are both named' and the file name, and nothing is run. Rename one of them and upload again.
 - **PDF password (account holder's PAN)** (required) — accepts: Text — the account holder's PAN.
   - The PDF password — the account holder's PAN.
   - ⚠️ Decryption uses qpdf (bundled in the frozen build).

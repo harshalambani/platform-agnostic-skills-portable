@@ -98,7 +98,7 @@ help:
     - name: "books"
       tooltip: "Two or more people's GnuCash books, one path per line."
       accepts: "Paths to GnuCash files (.gnucash) -- filled from the entity picker above, or added with Browse."
-      gotchas: "Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair."
+      gotchas: "Close them in GnuCash first. Browse ADDS to the list rather than replacing it, so books can be gathered a few at a time. Pairs with no mutual contra account show as 'n/a', not an error; a pair whose book could not be read shows UNREADABLE and is named in the reply. 'X HUF' is a separate entity from 'X', so Bob vs Bob-HUF is its own pair."
     - name: "period"
       tooltip: "Which period to reconcile across all pairs. Indian FY runs 1 Apr to 31 Mar."
       accepts: "A FY, a calendar year, Auto, or a custom date range."
@@ -133,6 +133,10 @@ help:
     Start from the Matrix grid: any red cell is a pair to open. The All
     Exceptions sheet is the single actionable to-do list across the whole family.
   troubleshooting:
+    - problem: "The reply says UNREADABLE PAIR, naming two people."
+      fix: "One of those two books could not be read (for example it is not a GnuCash file, or no period could be found). The pair is named (as two names joined by <->) with the reason, and shows UNREADABLE (not n/a) on the Matrix grid and the Pairs sheet. Fix or re-select that book and run again. The other pairs are still compared, but the run is not a clean one while any pair is unreadable."
+    - problem: "The reply starts with 'ERROR: no pair could be compared -- this is NOT a clean run.'"
+      fix: "Not one pair was reconciled, so there is nothing to rely on. Either every pair is n/a (none of the books keep an account named for another) or the books could not be read. A run like this is never a success; check the books you selected."
     - problem: "A pair shows 'n/a'."
       fix: "Those two books do not each keep an account named for the other. That is normal for people who do not transact."
     - problem: "A pair is red (out of balance) with a large difference."
