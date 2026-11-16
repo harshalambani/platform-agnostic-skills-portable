@@ -1036,10 +1036,22 @@ def _make_run_handler(skill: SkillInfo):
                     stage_dir = Path(tempfile.mkdtemp(
                         prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-",
                     ))
+                    staged_names: set[str] = set()
                     for fp in file_list:
                         src = Path(fp.name if hasattr(fp, "name") else fp)
                         if not src.is_file():
                             continue
+
+                        # UI-52: two uploads with one name would overwrite each
+                        # other in the staging folder. File names are
+                        # case-insensitive on Windows, so compare folded.
+                        if src.name.casefold() in staged_names:
+                            yield add(
+                                f"Error: two uploads are both named **{src.name}** for: "
+                                f"{inp_def.label}. Nothing was run. Rename one of them "
+                                f"and upload again."
+                            ), gr.update(interactive=False, value=None), gr.update()
+                            return
 
                         # -- Per-file size cap (security: finding #7) --
                         try:
@@ -1055,6 +1067,7 @@ def _make_run_handler(skill: SkillInfo):
                             return
 
                         shutil.copy2(src, stage_dir / src.name)
+                        staged_names.add(src.name.casefold())
                     staged_count = len(list(stage_dir.iterdir()))
                     if staged_count == 0:
                         yield add(f"Warning: no valid files found for: {inp_def.label}"), gr.update(interactive=False, value=None), gr.update()
