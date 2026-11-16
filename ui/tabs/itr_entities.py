@@ -390,7 +390,7 @@ _FIELD_CONTROLS = {
     "card_spend_default_account": "Card-spend default account",
     "bank_service_charge_account": "Bank service charge account",
     "card_emi_interest_account": "Card EMI interest account",
-    "partner_firm_pan": "Firm PAN",
+    "partner_firm_pan": "PAN of the firm or AOP",
     "cc_large_spend_threshold": "Large-spend limit",
     "cc_cred_max_overage": "CRED tolerance",
     "folder_name": "Folder name",
@@ -408,6 +408,102 @@ _PARTNER_ACCOUNT_KEYS = (
     "capital_contribution", "medical_expense", "remuneration_income",
     "share_of_profit_income", "salary_clearing",
 )
+
+
+# ---------------------------------------------------------------------------
+# UI-53: fields shown by switch. Hiding NEVER deletes: a hidden control keeps its
+# value, is still sent with the save, and a field that holds a value stays visible.
+# ---------------------------------------------------------------------------
+
+HELD_NOTE = "Shown because it holds a value."
+_HUF = "HUF"
+_PARTNER_ONLY_CHOICE = "partner_of_audited_firm"
+
+#: gated control -> the switch that shows it: "not_huf" (Status is not HUF), "huf",
+#: "partner" (Individual with "Partner of a firm or LLP" ticked), "books" (one or more
+#: financial-year books), "ext_due" (an extended due date is set).
+_GATE_RULES = {
+    "dob": "not_huf", "father_name": "not_huf", "aadhaar": "not_huf",
+    "doi": "huf",
+    "partner_admission": "partner", "drivers": "partner", "capital_rate": "partner",
+    "capital_months": "partner",
+    **{f"partner_acct_{k}": "partner" for k in _PARTNER_ACCOUNT_KEYS},
+    "business_subtree": "books", "drawings": "books", "card_default": "books",
+    "reimbursement": "books", "fdb": "books", "fdb_by_ay": "books", "fd_cash": "books",
+    "fd_tax": "books", "fd_income": "books", "bank_charge": "books", "emi_interest": "books",
+    "large_spend": "books", "cred_max": "books", "folder_name": "books",
+    "audit_basis": "ext_due",
+}
+#: accordion -> the controls inside it (it shows when any of them does).
+_GATE_ACCORDIONS = {
+    "partner_acc": ("drivers", "capital_rate", "capital_months",
+                    *[f"partner_acct_{k}" for k in _PARTNER_ACCOUNT_KEYS]),
+    "fdb_acc": ("fdb", "fdb_by_ay", "fd_cash", "fd_tax", "fd_income"),
+    "card_acc": ("bank_charge", "emi_interest", "large_spend", "cred_max"),
+    "ye_acc": ("folder_name",),
+}
+_PARTNER_VALUE_NAMES = tuple(n for n, r in _GATE_RULES.items() if r == "partner")
+
+
+def _holds_value(v) -> bool:
+    """True when a control carries a value (a blank, the blank sentinel and False do not)."""
+    if v is None or v is False:
+        return False
+    if isinstance(v, str):
+        return bool(v.strip()) and v.strip() != _AUDIT_BASIS_BLANK
+    return bool(v)
+
+
+def _books_registered(books_text: str) -> bool:
+    return bool(_parse_kv_lines(books_text or "")[0])
+
+
+def _extended_due(audit_case, audit_case_by_ay_text: str) -> bool:
+    return bool(audit_case) or any(_parse_kv_lines(audit_case_by_ay_text or "", as_bool=True)[0].values())
+
+
+def _entity_holds_partner(e) -> bool:
+    """On load the "Partner of a firm or LLP" tick is on when the entity holds any partner value."""
+    if e is None:
+        return False
+    drivers = (e.extra_items or {}).get("partner_comp_drivers")
+    return bool(getattr(e, "partner_admission_date", None)
+                or any((e.partner_comp_accounts or {}).values()) or drivers)
+
+
+def _compute_gates(status, partner_tick, books_text, audit_case, audit_case_by_ay_text, values: dict) -> dict:
+    """Pure: {control or accordion name: (visible, held_note)}. `values` maps a gated control
+    name to its current value. A control whose switch is off but which holds a value stays
+    visible with held_note True; every other control of that switch is hidden."""
+    huf = (status or "") == _HUF
+    on = {
+        "not_huf": not huf, "huf": huf,
+        "partner": (not huf) and bool(partner_tick),
+        "books": _books_registered(books_text),
+        "ext_due": _extended_due(audit_case, audit_case_by_ay_text),
+    }
+    out = {}
+    for name, rule in _GATE_RULES.items():
+        held = _holds_value(values.get(name))
+        if on[rule]:
+            out[name] = (True, False)
+        elif held:
+            out[name] = (True, True)
+        else:
+            out[name] = (False, False)
+    for acc, kids in _GATE_ACCORDIONS.items():
+        out[acc] = (any(out[k][0] for k in kids), False)
+    out["partner_tick"] = (not huf, False)
+    return out
+
+
+def _basis_choices(status, current_basis) -> list:
+    """The 31 Oct reason list. An HUF is not offered the audited-firm partner reason unless it
+    already holds it."""
+    choices = list(_AUDIT_BASIS_CHOICES)
+    if (status or "") == _HUF and (current_basis or "") != _PARTNER_ONLY_CHOICE:
+        choices.remove(_PARTNER_ONLY_CHOICE)
+    return choices
 
 #: extra_items["partner_comp_drivers"][<FY>] -- the keys the Partner
 #: Compensation skill reads, and the type each must have.
@@ -1320,6 +1416,20 @@ def _dropdown_sources_md() -> str:
 # Gradio tab renderer.
 # ---------------------------------------------------------------------------
 
+#: UI-53: the help paragraph on the tab. Every quoted name is checked against the controls
+#: by tests/test_ui53_entities_switches.py.
+_SWITCH_HELP = (
+    "**Fields appear as they apply.** Status HUF hides \"Date of birth\", \"Father's name\", "
+    "\"Aadhaar\" and the partner fields, and shows \"Date of incorporation\"; an Individual does not "
+    "see the date of incorporation. Individuals tick \"Partner of a firm or LLP\" to show the partner "
+    "fields. The mapper accounts, business subtree, foreign dividends, card accounts and year-end folder "
+    "appear once the entity has a financial-year book registered. \"Why 31 Oct applies\" appears when an "
+    "extended due date is set. The PAN of the firm or AOP the entity holds an interest in is always "
+    "shown. Hiding never deletes: a save keeps every stored value, and a hidden field that holds a "
+    "value stays visible with the note \"" + HELD_NOTE + "\"."
+)
+
+
 def render(container_tab=None) -> None:
     """Render the Entities tab. Must be called inside gr.Tab().
 
@@ -1344,7 +1454,8 @@ def render(container_tab=None) -> None:
         "> **Rename note:** changing the entity key on an existing entity "
         "renames its `.mapping.yaml` file and any filed returns in "
         "`Data/ITRFiled/` to match. If a file already exists at any new "
-        "name, the rename is blocked rather than half-applied."
+        "name, the rename is blocked rather than half-applied.\n\n"
+        + _SWITCH_HELP
     )
 
     initial_choices = _entity_choices()
@@ -1375,6 +1486,12 @@ def render(container_tab=None) -> None:
                     key_box = gr.Textbox(label="Entity key", placeholder="e.g. SYN-IND", interactive=True)
                     name_box = gr.Textbox(label="Name", interactive=True)
                     pan_box = gr.Textbox(label="PAN", placeholder="AAAAA0000A", interactive=True)
+                    firm_pan_box = gr.Textbox(
+                        label="PAN of the firm or AOP this entity holds an interest in",
+                        placeholder="AAAAA0000A", interactive=True,
+                        info="The firm's or AOP's PAN, not this entity's own PAN above. Used by the Schedule AL "
+                             "firm / AOP interest line. Blank = none; a malformed PAN is refused.",
+                    )
                     status_dd = gr.Dropdown(label="Status", choices=list(_STATUS_CHOICES), value="Individual", interactive=True)
                     residency_box = gr.Textbox(
                         label="Residency", value="Resident", interactive=True,
@@ -1456,6 +1573,11 @@ def render(container_tab=None) -> None:
                              "routed to Drawings (needs exactly one Drawings account above). "
                              "Blank = the rule never fires.",
                     )
+                    partner_tick_cb = gr.Checkbox(
+                        label="Partner of a firm or LLP", value=False,
+                        info="Individuals only. Shows the partner fields. Not saved; unticking only hides them, "
+                             "it never clears a value.",
+                    )
                     partner_admission_box = gr.Textbox(
                         label="Date admitted as partner (YYYY-MM-DD, optional)", interactive=True,
                         info="Only for a partner of a firm. The Partner Compensation skill counts "
@@ -1470,7 +1592,7 @@ def render(container_tab=None) -> None:
                         label="Clubbing notes (one per line)", lines=3, interactive=True,
                     )
 
-                    with gr.Accordion("Foreign dividends", open=False):
+                    with gr.Accordion("Foreign dividends", open=False) as fdb_acc:
                         fdb_cb = gr.Checkbox(
                             label="Foreign dividends are already in the book",
                             value=False,
@@ -1496,7 +1618,7 @@ def render(container_tab=None) -> None:
                             allow_custom_value=True, interactive=True,
                             info="Receives the gross foreign dividend (credit).",
                         )
-                    with gr.Accordion("Card accounts (card-spend booking)", open=False):
+                    with gr.Accordion("Card accounts (card-spend booking)", open=False) as card_acc:
                         accounts_note_md = gr.Markdown("_Select an entity to load account pick-lists from its book._")
                         bank_charge_dd = gr.Dropdown(
                             label="Bank service charge account", choices=[], value="",
@@ -1519,7 +1641,7 @@ def render(container_tab=None) -> None:
                                  "matched, for THIS entity. Blank = the default (50). A number from 0 to 500; text, "
                                  "negative or above 500 is refused.",
                         )
-                    with gr.Accordion("Year-end folders", open=False):
+                    with gr.Accordion("Year-end folders", open=False) as ye_acc:
                         folder_name_box = gr.Textbox(
                             label="Folder name (Drive Accounts and GnuCash profile folders)", placeholder="(blank = the entity key)",
                             interactive=True,
@@ -1528,12 +1650,7 @@ def render(container_tab=None) -> None:
                                  "name when year-end runs (nothing is written here). A name you fill in is used "
                                  "instead of the key.",
                         )
-                    with gr.Accordion("Partner of a firm (Partner Compensation)", open=False):
-                        firm_pan_box = gr.Textbox(
-                            label="Firm PAN (the firm/LLP/AOP this entity is a partner of)",
-                            placeholder="AAAAA0000A", interactive=True,
-                            info="Used by the Schedule AL firm interest line. Blank = none; a malformed PAN is refused.",
-                        )
+                    with gr.Accordion("Partner of a firm (Partner Compensation)", open=False) as partner_acc:
                         partner_dds = [
                             gr.Dropdown(
                                 label=f"Partner account: {k}", choices=[], value="",
@@ -1627,6 +1744,55 @@ def render(container_tab=None) -> None:
         drawings_accounts_box, card_default_box, reimbursement_markers_box,
     ]
 
+    # UI-53: which fields show. Every gated control stays in the page (visible="hidden", not
+    # removed), so its value is still sent with a save and a hide never clears anything.
+    _gate_comps = {
+        "dob": dob_box, "father_name": father_name_box, "aadhaar": aadhaar_box, "doi": doi_box,
+        "partner_admission": partner_admission_box, "drivers": drivers_box,
+        "capital_rate": capital_rate_box, "capital_months": capital_months_box,
+        **{f"partner_acct_{k}": dd for k, dd in zip(_PARTNER_ACCOUNT_KEYS, partner_dds)},
+        "business_subtree": business_subtree_box, "drawings": drawings_accounts_box,
+        "card_default": card_default_box, "reimbursement": reimbursement_markers_box,
+        "fdb": fdb_cb, "fdb_by_ay": fdb_by_ay_box, "fd_cash": fd_cash_dd, "fd_tax": fd_tax_dd,
+        "fd_income": fd_income_dd, "bank_charge": bank_charge_dd, "emi_interest": emi_interest_dd,
+        "large_spend": large_spend_box, "cred_max": cred_max_box, "folder_name": folder_name_box,
+        "audit_basis": audit_case_basis_dd,
+    }
+    _gate_all = {**_gate_comps, "partner_acc": partner_acc, "fdb_acc": fdb_acc, "card_acc": card_acc,
+                 "ye_acc": ye_acc, "partner_tick": partner_tick_cb}
+    _gate_names = list(_gate_all)
+    _gate_value_names = list(_gate_comps)
+    _base_info = {n: (getattr(c, "info", None) or "") for n, c in _gate_comps.items()}
+    for _n, (_vis, _held) in _compute_gates("Individual", False, "", False, "", {}).items():
+        _gate_all[_n].visible = True if _vis else "hidden"
+
+    def _vis_update(vis):
+        return gr.update(visible=True if vis else "hidden")
+
+    def _apply_gates(status, tick, books_text, audit_case, audit_by_ay_text, *vals):
+        values = dict(zip(_gate_value_names, vals))
+        gates = _compute_gates(status, tick, books_text, audit_case, audit_by_ay_text, values)
+        outs = []
+        for n in _gate_names:
+            vis, held = gates[n]
+            if n in _gate_comps:
+                base = _base_info[n]
+                info = (base + " " + HELD_NOTE).strip() if held else base
+                upd = {"visible": True if vis else "hidden", "info": info}
+                if n == "audit_basis":
+                    upd["choices"] = _basis_choices(status, values.get("audit_basis"))
+                outs.append(gr.update(**upd))
+            else:
+                outs.append(_vis_update(vis))
+        outs.append(_vis_update(gates["card_acc"][0]))      # the card-accounts pick-list note
+        return tuple(outs)
+
+    _gate_inputs = [status_dd, partner_tick_cb, books_box, audit_case_cb, audit_case_by_ay_box,
+                    *[_gate_comps[n] for n in _gate_value_names]]
+    _gate_outputs = [*[_gate_all[n] for n in _gate_names], accounts_note_md]
+    for _sw in (status_dd, partner_tick_cb, books_box, audit_case_cb, audit_case_by_ay_box):
+        _sw.change(fn=_apply_gates, inputs=_gate_inputs, outputs=_gate_outputs)
+
     books_browse_btn.click(
         fn=_browse_append_book,
         inputs=[books_box, fy_browse_box],
@@ -1662,7 +1828,8 @@ def render(container_tab=None) -> None:
         entities = _load_entities()
         values = _entity_to_form(key or "", entities)
         status_msg = f"_Loaded `{key}`. Edit and Save, or Delete._" if key else "_New entity -- fill in the fields and Save._"
-        return (*values, *_new_form_updates(key), key or "", status_msg, *_reset_confirm_updates())
+        return (*values, *_new_form_updates(key), _entity_holds_partner(entities.get(key or "")),
+                key or "", status_msg, *_reset_confirm_updates())
 
     def _reset_confirm_updates():
         return (
@@ -1674,9 +1841,9 @@ def render(container_tab=None) -> None:
     entity_dropdown.change(
         fn=_on_select,
         inputs=[entity_dropdown],
-        outputs=[*_form_outputs, *_new_outputs, orig_key_state, save_status,
+        outputs=[*_form_outputs, *_new_outputs, partner_tick_cb, orig_key_state, save_status,
                  confirm_1_cb, confirm_2_cb, delete_btn],
-    )
+    ).then(fn=_apply_gates, inputs=_gate_inputs, outputs=_gate_outputs)
 
     def _on_confirm_1(c1, c2):
         v2, i2, d = _confirm_gate(c1, c2)
@@ -1750,15 +1917,16 @@ def render(container_tab=None) -> None:
         blanks = _entity_to_form(new_value, _load_entities())
         return (
             msg, gr.update(choices=new_choices, value=new_value), new_value,
-            *blanks, *_new_form_updates(new_value), *_reset_confirm_updates(),
+            *blanks, *_new_form_updates(new_value), _entity_holds_partner(_load_entities().get(new_value)),
+            *_reset_confirm_updates(),
         )
 
     delete_btn.click(
         fn=_on_delete,
         inputs=[entity_dropdown, confirm_1_cb, confirm_2_cb],
-        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs,
+        outputs=[save_status, entity_dropdown, orig_key_state, *_form_outputs, *_new_outputs, partner_tick_cb,
                  confirm_1_cb, confirm_2_cb, delete_btn],
-    )
+    ).then(fn=_apply_gates, inputs=_gate_inputs, outputs=_gate_outputs)
 
 
     if container_tab is not None:

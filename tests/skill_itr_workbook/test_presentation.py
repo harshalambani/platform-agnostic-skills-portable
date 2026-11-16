@@ -1276,3 +1276,68 @@ def test_detail_schedules_do_not_change_total_income_or_tax_computation(wb):
     for formula in (gti_formula, ti_formula, tax_formula):
         for name in ("Interest Schedule", "Dividend Schedule", "TDS Schedule"):
             assert name not in formula
+
+
+# ---------------------------------------------------------------------------
+# UI-53 -- an HUF's cover leaves out Father's Name, Aadhaar No. and Date of Birth
+# ---------------------------------------------------------------------------
+
+_COVER_LABELS = ("Father's Name", "Aadhaar No.", "Date of Birth")
+
+
+def _label_row(ws, needle):
+    for row in ws.iter_rows():
+        for c in row:
+            if isinstance(c.value, str) and c.value.startswith(needle):
+                return c.row
+    return None
+
+
+def _cells(ws):
+    return {c.coordinate: (c.value, c.fill.start_color.rgb, getattr(c.border.bottom, "style", None))
+            for row in ws.iter_rows() for c in row}
+
+
+def test_an_individuals_cover_still_has_the_three_rows(wb):
+    ws = wb["Statement of Income"]
+    for label in _COVER_LABELS:
+        assert _find_label(ws, label) is not None, label
+    dob = _find_label(ws, "Date of Birth")
+    assert str(ws.cell(row=dob.row, column=5).value).startswith("='Entity'!")
+
+
+def test_an_huf_cover_has_none_of_the_three_rows_and_every_other_cell_is_unchanged(tmp_path, monkeypatch):
+    huf = {"status": "HUF", "doi": "2001-04-01", "dob": None}
+    (tmp_path / "new").mkdir()
+    new = _build(tmp_path / "new", entity_overrides=huf)
+    # the same HUF workbook as the old code wrote it (rows forced back on)
+    orig = presentation.write_statement_of_income
+    monkeypatch.setattr(presentation, "write_statement_of_income",
+                        lambda *a, **k: orig(*a, **{**k, "is_huf": False}))
+    (tmp_path / "old").mkdir()
+    old = _build(tmp_path / "old", entity_overrides=huf)
+    new_ws, old_ws = new["Statement of Income"], old["Statement of Income"]
+    for label in _COVER_LABELS:
+        assert _label_row(new_ws, label) is None, label
+        assert _label_row(old_ws, label) is not None
+    a, b = _cells(new_ws), _cells(old_ws)
+    assert set(a) == set(b)                                  # no row moved, no cell added or removed
+    changed = {k for k in a if a[k] != b[k]}
+    rows = {_label_row(old_ws, label) for label in _COVER_LABELS}
+    assert changed and {int("".join(ch for ch in k if ch.isdigit())) for k in changed} <= rows
+    cols = {"".join(ch for ch in k if ch.isalpha()) for k in changed}
+    assert cols <= {"A", "B", "D", "E"}
+    for k in changed:                                        # a changed cell is now empty and unlabelled
+        assert a[k][0] in (None, "")
+    # every formula elsewhere (all other sheets included) is identical
+    for name in old.sheetnames:
+        if name == "Statement of Income":
+            continue
+        assert _cells(new[name]) == _cells(old[name]), name
+
+
+def test_an_huf_cover_keeps_its_name_pan_address_status_and_regime_cells(tmp_path):
+    built = _build(tmp_path, entity_overrides={"status": "HUF", "doi": "2001-04-01", "dob": None})
+    ws = built["Statement of Income"]
+    for label in ("Name", "PAN", "Address", "Status", "Residential Status", "Regime"):
+        assert any(str(c.value or "").strip() == label for row in ws.iter_rows(max_row=20) for c in row), label

@@ -998,7 +998,7 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
                               computation_tail_fn, *,
                               father_name: str | None = None, aadhaar: str | None = None,
                               residency_value: str = "R/OR", residency_declared: bool = False,
-                              ei_layout: dict | None = None):
+                              ei_layout: dict | None = None, is_huf: bool = False):
     """Mirrors the CA reference's `ITWorking`: a letterhead header block, then
     three money columns (line items / sub-totals / running total) showing ONLY
     the selected regime.
@@ -1092,19 +1092,26 @@ def write_statement_of_income(wb, model, entity_layout: dict, comp_layout: dict,
     # prompt, section 1 -- previously PARKED, owner 2026-07-19). Per field:
     # present -> a real formula + label with "(to be filled)" dropped; absent
     # -> label keeps "(to be filled)" and the cell stays empty-but-styled.
-    if father_name:
+    if is_huf:
+        pass   # UI-53: an HUF has no father; the cell stays empty and unlabelled (the row is kept)
+    elif father_name:
         left("Father's Name", ent("father_name"))
     else:
         left(f"Father's Name {_PARKED_NOTE}", None)
     right("PAN", ent("pan"))
     row += 1
     left("Address", ent("address"))
-    if aadhaar:
+    if is_huf:
+        pass   # UI-53: no Aadhaar for an HUF; empty and unlabelled, row kept
+    elif aadhaar:
         right("Aadhaar No.", _aadhaar_formula(f"'Entity'!{entity_layout['aadhaar'].coordinate}"))
     else:
         right(f"Aadhaar No. {_PARKED_NOTE}", None, parked=True)
     row += 1
-    left("", "");                             right("Date of Birth", ent("dob"));          row += 1
+    left("", "")
+    if not is_huf:   # UI-53: an HUF has no date of birth; empty and unlabelled, row kept
+        right("Date of Birth", ent("dob"))
+    row += 1
     ws.cell(row=row, column=4, value="Status").font = _font(bold=True)
     ws.cell(row=row, column=5, value=ent("status")).font = _font()
     row += 1
@@ -2486,7 +2493,7 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
                              aadhaar: str | None = None, residency_value: str = "R/OR",
                              residency_declared: bool = False,
                              business_subtree: str | None = None,
-                             ei_layout: dict | None = None) -> None:
+                             ei_layout: dict | None = None, is_huf: bool = False) -> None:
     """Add the deliverable sheets in front of the calculation sheets and
     hide the raw working sheets. Adds only -- restyles and overwrites nothing.
 
@@ -2521,7 +2528,7 @@ def build_presentation_layer(wb, model, entity_layout: dict, comp_layout: dict,
         rules_layout, cg_layout, age_class, period_text, print_title, computation_tail_fn,
         father_name=father_name, aadhaar=aadhaar,
         residency_value=residency_value, residency_declared=residency_declared,
-        ei_layout=sch_ei_layout,
+        ei_layout=sch_ei_layout, is_huf=is_huf,
     )
     # BS brings the IS bottom line over under Equity and proves the tally --
     # a GnuCash balance sheet is short by exactly the year's net income until
