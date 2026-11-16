@@ -28,11 +28,19 @@ BANK_KEY = "kotak"
 _KOTAK_MARKERS = ("KOTAK MAHINDRA BANK",)
 _KOTAK_COLUMN_MARKERS = ("WITHDRAWAL", "DEPOSIT", "BALANCE")
 
-_ACCOUNT_RE = re.compile(r'Account\s*No\s*:\s*(\d+)', re.IGNORECASE)
+# Old fixture layout: "Account No : 123". Real layout: "<holder> Account No. 123"
+# (full stop, no colon). \b stops "Account Number"/"Account Statement" matching.
+_ACCOUNT_RE = re.compile(r'Account\s*No\b\.?\s*:?\s*(\d+)', re.IGNORECASE)
 _PERIOD_RE = re.compile(
     r'Statement Period\s*:\s*(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s+to\s+(\d{2}\s+[A-Za-z]{3}\s+\d{4})',
     re.IGNORECASE,
 )
+# Real layout: an unlabelled line that is ONLY "DD Mon YYYY - DD Mon YYYY".
+_REAL_PERIOD_LINE_RE = re.compile(
+    r'(\d{2}\s+[A-Za-z]{3}\s+\d{4})\s*-\s*(\d{2}\s+[A-Za-z]{3}\s+\d{4})'
+)
+_REAL_PERIOD_SCAN_LINES = 5
+_KOTAK_IFSC_RE = re.compile(r'IFSC\s*Code\s*:?\s*KKBK', re.IGNORECASE)
 
 
 def _extract_meta_fields(
@@ -58,6 +66,15 @@ def _extract_meta_fields(
     if m:
         period_from = _normalize.parse_space_month_date(m.group(1))
         period_to = _normalize.parse_space_month_date(m.group(2))
+    else:
+        # Unlabelled real form, first few lines only (never the footer or a
+        # transaction row). Not found -> stays None, never guessed.
+        for line in text.splitlines()[:_REAL_PERIOD_SCAN_LINES]:
+            m = _REAL_PERIOD_LINE_RE.fullmatch(line.strip())
+            if m:
+                period_from = _normalize.parse_space_month_date(m.group(1))
+                period_to = _normalize.parse_space_month_date(m.group(2))
+                break
 
     return account_number, period_from, period_to
 
@@ -143,13 +160,20 @@ class KotakSkill:
         if p.suffix.lower() != ".pdf":
             return 0.0
         try:
+            if not p.is_file():
+                return 0.0
             import pdfplumber  # noqa: PLC0415
 
             with pdfplumber.open(str(p)) as pdf:
-                text = (pdf.pages[0].extract_text() or "").upper()
+                raw = pdf.pages[0].extract_text() or ""
         except Exception:  # noqa: BLE001 -- detection must never raise
-            return 0.0
-        if any(m in text for m in _KOTAK_MARKERS) and all(m in text for m in _KOTAK_COLUMN_MARKERS):
+            # detect() has no password: an encrypted (or unreadable) .pdf
+            # scores low-but-nonzero, as the HDFC skill does.
+            return 0.3
+        text = raw.upper()
+        if all(m in text for m in _KOTAK_COLUMN_MARKERS) and (
+            any(m in text for m in _KOTAK_MARKERS) or _KOTAK_IFSC_RE.search(raw)
+        ):
             return 0.95
         return 0.0
 

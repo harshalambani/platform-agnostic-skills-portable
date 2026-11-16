@@ -37,6 +37,11 @@ SYN_PERIOD_TO = "2026-06-30"
 SYN_PERIOD_FROM_DISPLAY = "01 Jun 2026"
 SYN_PERIOD_TO_DISPLAY = "30 Jun 2026"
 
+# Made-up values for the REAL page-1 layout (labels as the bank prints them).
+SYN_REAL_HOLDER = "A SAMPLE HOLDER"
+SYN_REAL_ACCOUNT_NUMBER = "9988776655"
+SYN_REAL_FOOTER = "Statement Generated on 01 Jul 2026, 10:15 Page 1 of 4"
+
 SYN_OPENING_BALANCE = 200000.00
 SYN_CLOSING_BALANCE = 239000.00
 
@@ -105,7 +110,18 @@ def _indian_group(amount_str: str) -> str:
 # optional).
 # ---------------------------------------------------------------------------
 
-def build_pdf(password: str | None = None) -> bytes:
+def build_pdf(
+    password: str | None = None,
+    layout: str = "old",
+    include_period: bool = True,
+    include_account: bool = True,
+    kotak_marker: bool = True,
+    ifsc: bool = True,
+) -> bytes:
+    """layout "old" = the original guessed header; "real" = the real page-1
+    layout (labels only, invented values). The flags only affect "real"
+    (kotak_marker is the old-layout page-1 bank name and is ignored there:
+    real page 1 never carries it)."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.pdfencrypt import StandardEncryption
@@ -136,13 +152,32 @@ def build_pdf(password: str | None = None) -> bytes:
     ])
 
     story = []
-    story.append(Paragraph("KOTAK MAHINDRA BANK", styles["Title"]))
-    story.append(Paragraph("Savings Account Statement", styles["Normal"]))
-    story.append(Paragraph(f"Account No : {SYN_ACCOUNT_NUMBER}", styles["Normal"]))
-    story.append(Paragraph(
-        f"Statement Period : {SYN_PERIOD_FROM_DISPLAY} to {SYN_PERIOD_TO_DISPLAY}",
-        styles["Normal"],
-    ))
+    if layout == "real":
+        N = styles["Normal"]
+        story.append(Paragraph("Account Statement", N))
+        if include_period:
+            story.append(Paragraph(
+                f"{SYN_PERIOD_FROM_DISPLAY} - {SYN_PERIOD_TO_DISPLAY}", N))
+        acct = f" Account No. {SYN_REAL_ACCOUNT_NUMBER}" if include_account else ""
+        story.append(Paragraph(f"{SYN_REAL_HOLDER}{acct}", N))
+        story.append(Paragraph("Account Type Savings", N))
+        story.append(Paragraph("CRN xxxxx123", N))
+        story.append(Paragraph("Branch SYNTHETIC BRANCH, 1 Test Road, Testville", N))
+        story.append(Paragraph("Account Status Active", N))
+        story.append(Paragraph("Nominee Registered Yes", N))
+        story.append(Paragraph("Currency INDIAN RUPEE", N))
+        ifsc_txt = " IFSC Code KKBK0000123" if ifsc else ""
+        story.append(Paragraph(f"MICR 400000000{ifsc_txt}", N))
+        story.append(Paragraph("Savings Account Transactions", N))
+    else:
+        if kotak_marker:
+            story.append(Paragraph("KOTAK MAHINDRA BANK", styles["Title"]))
+        story.append(Paragraph("Savings Account Statement", styles["Normal"]))
+        story.append(Paragraph(f"Account No : {SYN_ACCOUNT_NUMBER}", styles["Normal"]))
+        story.append(Paragraph(
+            f"Statement Period : {SYN_PERIOD_FROM_DISPLAY} to {SYN_PERIOD_TO_DISPLAY}",
+            styles["Normal"],
+        ))
     story.append(Spacer(1, 14))
 
     # Page 1: header row + Opening Balance pseudo-row + first N transactions.
@@ -153,6 +188,9 @@ def build_pdf(password: str | None = None) -> bytes:
     t1 = Table(page1_rows, repeatRows=0)
     t1.setStyle(grid_style)
     story.append(t1)
+    if layout == "real":
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(SYN_REAL_FOOTER, styles["Normal"]))
     story.append(PageBreak())
 
     # Page 2: remaining transactions, NO header row repeated.
@@ -164,6 +202,9 @@ def build_pdf(password: str | None = None) -> bytes:
     t2 = Table(page2_rows, repeatRows=0)
     t2.setStyle(grid_style)
     story.append(t2)
+    if layout == "real":
+        story.append(Spacer(1, 10))
+        story.append(Paragraph("Kotak Mahindra Bank Ltd. | CIN: SYNTHETIC", styles["Normal"]))
     story.append(PageBreak())
 
     # Page 3: trailing abbreviation legend -- 2-column table, NOT transaction
@@ -176,6 +217,25 @@ def build_pdf(password: str | None = None) -> bytes:
     story.append(t3)
 
     doc.build(story)
+    return buf.getvalue()
+
+
+def build_plain_pdf(lines, table_rows=None) -> bytes:
+    """Unrelated readable PDF (text, optional ruled table) for detect()
+    negative tests."""
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Table, TableStyle
+
+    buf = io.BytesIO()
+    styles = getSampleStyleSheet()
+    story = [Paragraph(s, styles["Normal"]) for s in lines]
+    if table_rows:
+        t = Table(table_rows)
+        t.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+        story.append(t)
+    SimpleDocTemplate(buf, pagesize=A4).build(story)
     return buf.getvalue()
 
 
