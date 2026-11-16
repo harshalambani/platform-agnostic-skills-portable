@@ -63,9 +63,12 @@ help:
       tooltip: "Your Kotak statement PDF."
       accepts: "PDF (.pdf) — one statement per run."
       gotchas: >
-        Use the bank's original text PDF, not a photo/scan. Password-protected
-        PDFs must be unlocked first, or the run will report the file could not
-        be opened.
+        Use the bank's original text PDF, not a photo/scan. This skill has no
+        password box, so a password-protected statement stops it with a
+        password message. To convert a protected statement, use "Bank -
+        Convert to GnuCash", choose Kotak, and type the password in the
+        "Statement password" box there.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
   steps:
     - "Click the input and pick a Kotak statement PDF."
     - "Click Run — it finishes in a few seconds."
@@ -80,6 +83,10 @@ help:
           order; the "Opening Balance" front-matter row and the trailing
           abbreviation-legend page are both excluded from the CSV.
   tips: >
+    The account number and the statement period come from the statement header
+    and are carried with the statement when it goes through "Bank - Convert to
+    GnuCash". A period that is not printed stays empty.
+
     The running balance carries straight from the statement — if the final
     Balance matches your passbook, the extraction tied out. Sweep-in/sweep-out
     transfers to a linked Fixed Deposit are kept as real transactions, not
@@ -91,10 +98,20 @@ help:
         The PDF is probably a scanned image, not a text PDF. Re-download the
         original statement from Kotak net-banking, or run it through an OCR
         step first. This skill does not OCR.
-    - problem: "Run fails saying the PDF could not be opened."
+    - problem: "The run says the PDF is password-protected."
       fix: >
-        The PDF is password-protected. Unlock it (open in a viewer, print/save
-        as a new unprotected PDF) and try again.
+        The reply says the PDF "is password-protected - supply the statement
+        password". This skill has no password box. Either use "Bank - Convert
+        to GnuCash" with Kotak selected and type the password in the
+        "Statement password" box, or unlock the PDF first (open it in a
+        viewer, print/save as a new unprotected PDF) and run it here.
+    - problem: "The account number or the statement period is empty."
+      fix: >
+        The account number and the statement period are read from the
+        statement's own header (the account number printed after "Account No."
+        and the "DD Mon YYYY - DD Mon YYYY" period line near the top of page 1).
+        If a statement prints no period, it stays empty: it is never worked out
+        from the transaction dates or the date the statement was generated.
     - problem: "Closing balance in the CSV does not match my passbook."
       fix: >
         Check the statement's last page — the abbreviation legend on that page

@@ -255,6 +255,7 @@ help:
         pick one by hand. A file picked by hand in a picker below always
         wins over the drop zone. The Document password applies to the dropped
         files too.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
     - name: "advices_dir"
       heading: "Monthly payout documents"
       tooltip: "All of this financial year's monthly payout certificates (each titled \"payout details for the month of ...\"), one per month."
@@ -264,6 +265,7 @@ help:
         filename, to the monthly payout-advice parser -- a PDF that fails
         to open/parse, or whose content doesn't match that layout, fails
         the whole run loud, naming the file and the reason.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>
@@ -325,6 +327,7 @@ help:
         names why. A "Target compensation advice" letter is accepted but
         carries no instalment schedule, so it is not used. Recon only: the
         journal is the same with or without these documents.
+        If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
       sample_html: |
         <div style="border:1px solid #888;border-radius:6px;padding:10px 14px;max-width:560px;font-family:Georgia,serif;font-size:0.9em;background:#fafafa;color:#222;">
         <div style="font-size:0.75em;color:#a00;">SAMPLE -- drawn with made-up names and figures, not a real document</div>

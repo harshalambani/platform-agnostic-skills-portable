@@ -3,7 +3,7 @@
 
 *Mode: direct · Works offline*
 
-Year-end for one entity, one step at a time. Folders come only from the Entities screen (the entity's folder name and the two year-end folders), and the closing year's book is the one the book registry holds for that entity and year. An entity with no registered book for the year is not part of year-end and nothing is created. Step 1 copies the final book to the Drive year folder. Step 2 copies it into the next year's GnuCash folder under the next year's name, registers it, and adds a Drive shortcut. Step 3 is yours: close the books in the new year's book in GnuCash. Step 4 opens the new book read-only and checks that every Income and Expense account is zero at 31 March and that closing entries dated 31 March exist; only then is the year marked done. Step 5 lists the backups, logs and the old shortcut, and writes a Recycle Bin script for you to run. The skill never deletes, moves, overwrites or edits a book, and stops while any lock file is in the GnuCash folders.
+Year-end for one entity, one step at a time. Folders come only from the Entities tab, and the closing year's book is the one the book registry holds for that entity and year. Set the two roots once on the "All entities" sub-tab (Year-end roots: "Drive Accounts root" and "GnuCash profile root", each chosen with Browse and kept in config.yaml with Save year-end roots; every entity shares them). Then, on the "This entity" sub-tab, open "Year-end folders" and fill in "Folder name" for each entity that keeps books. The skill builds its paths like this. GnuCash: the GnuCash profile root, then the year folder (20252026 for 2025-26, and 20262027 for the new book), then the folder name. Drive: the Drive Accounts root, then the year (2025-26, and 2026-27 for the new shortcut), then the folder name. For example, with the folder name Acme Traders, closing 2025-26 reads <GnuCash profile root>/20252026/Acme Traders and <Drive Accounts root>/2025-26/Acme Traders. An entity with no registered book for the year is not part of year-end and nothing is created. Step 1 copies the final book to the Drive year folder. Step 2 copies it into the next year's GnuCash folder under the next year's name, registers it, and adds a Drive shortcut. Step 3 is yours: close the books in the new year's book in GnuCash. Step 4 opens the new book read-only and checks that every Income and Expense account is zero at 31 March and that closing entries dated 31 March exist; only then is the year marked done. Step 5 lists the backups, logs and the old shortcut, and writes a Recycle Bin script for you to run. The skill never deletes, moves, overwrites or edits a book, and stops while any lock file is in the GnuCash folders.
 
 ## When to use it
 
@@ -13,7 +13,7 @@ At the end of a financial year, once the last entries are in the final book and 
 
 - **Entity -- one entity per run; its registered book for the closing year is the one carried forward** (required) — accepts: One entity from the Entities tab.
   - The entity to close the year for.
-  - ⚠️ It needs a folder name on the Entities screen and a registered book for the closing year.
+  - ⚠️ It needs a Folder name (Entities tab, This entity, Year-end folders) and a registered book for the closing year. An entity that keeps no books has no registered book and is skipped.
 - **Closing financial year (YYYY-YY, e.g. 2025-26)** (required) — accepts: Text like 2025-26.
   - The year being closed.
   - ⚠️ This is the financial year, not the assessment year.
@@ -49,6 +49,8 @@ Step 0 shows which steps have passed. A stopped step can simply be run again aft
 
 | If… | Then… |
 |------|-------|
+| It says Year-end cannot start and names the folder name or a root. | The entity's Folder name is empty or not a single folder name, or a root is empty or not a folder that exists. Fill in the Folder name on the This entity sub-tab and the two roots on the All entities sub-tab, then save and run again. Nothing was created. |
+| Step 1 says the Drive year folder is not there. | The closing year's folder (for example 2025-26) does not exist under the Drive Accounts root and step 1 does not create it. Create it with the entity's folder name inside, or check the Drive Accounts root, then run step 1 again. Nothing was copied. |
 | It says a lock file is in the folder. | A book is open in GnuCash. Close GnuCash and run the step again. |
 | It says no books - not part of year-end. | The entity has no registered book for that year. Nothing was created. |
 | Step 4 does not pass. | Run the 31 March close in the new year's book, save, close GnuCash, and run step 4 again. |

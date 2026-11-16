@@ -42,7 +42,7 @@ inputs:
 
   - name: "pdf_password"
     type: "password"
-    label: "Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)"
+    label: "Statement password (HDFC, Kotak, Bank of Baroda or HSBC PDF, or SBM xlsx, if protected — for HDFC often the Cust ID)"
     required: false
 
   - name: "gnucash_file"
@@ -104,7 +104,7 @@ help:
     - name: "statement_files"
       tooltip: "The statement file(s), matching the bank you chose."
       accepts: "XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill's own output) instead of PDFs."
-      gotchas: "File type must match the selected bank, or extraction will fail."
+      gotchas: "File type must match the selected bank, or extraction will fail. If two uploads share a file name (capital letters do not count as a difference) the run stops with 'two uploads are both named' and the file name, and nothing is run. Rename one of them and upload again."
     - name: "gnucash_file"
       tooltip: "Your GnuCash book — used to learn your accounts and map transactions."
       accepts: "GnuCash file (.gnucash)."
@@ -118,9 +118,9 @@ help:
       accepts: "One of the postable accounts at the chosen bank, listed from your book."
       gotchas: "Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing."
     - name: "pdf_password"
-      tooltip: "Used for an HDFC PDF or an SBM xlsx that is itself password-protected."
-      accepts: "The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password."
-      gotchas: "Ignored for all other banks and for unprotected HDFC inputs. A wrong or missing SBM password stops the run. Never logged or included in output."
+      tooltip: "Used for an HDFC, Kotak, Bank of Baroda or HSBC PDF, or an SBM xlsx, that is itself password-protected."
+      accepts: "The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak, Bank of Baroda and HSBC it is the password the bank gave the PDF."
+      gotchas: "Ignored for ICICI and for unprotected files. A password-protected Kotak PDF with no password (or a wrong one) stops with a password message. A wrong or missing SBM password stops the run. Never logged or included in output."
   steps:
     - "Pick the entity (optional) — this fills in the GnuCash book for you."
     - "Choose the bank."
@@ -191,5 +191,9 @@ help:
       fix: "Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings."
     - problem: "Extraction fails immediately."
       fix: "The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both."
+    - problem: "The reply says this statement \"does not belong in this book\"."
+      fix: "The statement's account number belongs to another account or another book, so nothing was written. The reply says why (for example that the book's only account at that bank carries a different account number) and, when another entity's book for the same year holds that number, names that entity and its folder. Open the right book and run again. The message ends with \"Nothing was written. Open the right book and run again.\""
+    - problem: "The reply says 'more than one statement' and 'can only convert one statement per run'."
+      fix: "The upload holds several statements of one bank (ICICI, HDFC, SBM or Other Bank (CSV)) and only one can be converted per run, so nothing was imported. The reply lists the files. Upload a single file, run, then repeat for the next one."
     - problem: "Some rows mapped to the wrong account."
       fix: "Fix them in GnuCash after import; future runs learn from the correction."
