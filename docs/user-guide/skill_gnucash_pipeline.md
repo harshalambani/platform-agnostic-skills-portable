@@ -20,8 +20,8 @@ Use this when your goal is to get transactions into GnuCash. Use the individual 
 - **Statement file(s) — XLS for ICICI; PDF(s) for BoB / HSBC / Kotak (HSBC also takes an already-enriched .xlsx); CSV or XLS/XLSX for HDFC / Other** (required) — accepts: XLS for ICICI; PDF(s) for BoB / HSBC / Kotak; CSV or XLS/XLSX for HDFC / Other. HSBC also accepts a single already-enriched .xlsx/.xlsm workbook (this skill's own output) instead of PDFs.
   - The statement file(s), matching the bank you chose.
   - ⚠️ File type must match the selected bank, or extraction will fail. If two uploads share a file name (capital letters do not count as a difference) the run stops with 'two uploads are both named' and the file name, and nothing is run. Rename one of them and upload again.
-- **Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak it is the password the bank gave the PDF.
-  - Used for an HDFC PDF, an SBM xlsx or a Kotak PDF that is itself password-protected.
+- **Statement password (HDFC, Kotak, Bank of Baroda or HSBC PDF, or SBM xlsx, if protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak, Bank of Baroda and HSBC it is the password the bank gave the PDF.
+  - Used for an HDFC, Kotak, Bank of Baroda or HSBC PDF, or an SBM xlsx, that is itself password-protected.
   - ⚠️ Ignored for ICICI and for unprotected files. A password-protected Kotak PDF with no password (or a wrong one) stops with a password message. A wrong or missing SBM password stops the run. Never logged or included in output.
 - **GnuCash book (.gnucash) — must be closed in GnuCash** (required) — accepts: GnuCash file (.gnucash).
   - Your GnuCash book — used to learn your accounts and map transactions.

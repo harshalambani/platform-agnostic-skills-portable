@@ -42,7 +42,7 @@ inputs:
 
   - name: "pdf_password"
     type: "password"
-    label: "Statement password (HDFC PDF or SBM xlsx, if protected — for HDFC often the Cust ID)"
+    label: "Statement password (HDFC, Kotak, Bank of Baroda or HSBC PDF, or SBM xlsx, if protected — for HDFC often the Cust ID)"
     required: false
 
   - name: "gnucash_file"
@@ -118,8 +118,8 @@ help:
       accepts: "One of the postable accounts at the chosen bank, listed from your book."
       gotchas: "Hidden and placeholder accounts are never offered and are refused if typed in. If several accounts match and nothing on the statement tells them apart, the run stops and lists them rather than guessing."
     - name: "pdf_password"
-      tooltip: "Used for an HDFC PDF, an SBM xlsx or a Kotak PDF that is itself password-protected."
-      accepts: "The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak it is the password the bank gave the PDF."
+      tooltip: "Used for an HDFC, Kotak, Bank of Baroda or HSBC PDF, or an SBM xlsx, that is itself password-protected."
+      accepts: "The statement's open password — for HDFC this is often the Cust ID; for SBM it is the workbook's open password; for Kotak, Bank of Baroda and HSBC it is the password the bank gave the PDF."
       gotchas: "Ignored for ICICI and for unprotected files. A password-protected Kotak PDF with no password (or a wrong one) stops with a password message. A wrong or missing SBM password stops the run. Never logged or included in output."
   steps:
     - "Pick the entity (optional) — this fills in the GnuCash book for you."
