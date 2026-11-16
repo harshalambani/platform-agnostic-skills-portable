@@ -81,6 +81,58 @@ _NS = {
     'cmdty': '{http://www.gnucash.org/XML/cmdty}',
 }
 
+# BNK-11: banks whose staged upload is reduced to ONE file by
+# _resolve_single_file(), with the extensions each one reads. More than one
+# candidate file for such a bank used to be dropped silently (first by name
+# won); it is now a hard stop.
+_ONE_FILE_BANKS: dict[str, tuple[str, ...]] = {
+    "ICICI": (".xls", ".xlsx"),
+    "HDFC": (".csv", ".xls", ".xlsx", ".pdf"),
+    "SBM": (".xlsx",),
+    "Other Bank (CSV)": (".csv", ".xls", ".xlsx"),
+}
+
+
+def _multi_file_stop(bank: str, statement_files) -> str | None:
+    """Return a stop message when the upload holds more than one statement
+    that this pipeline would read only one of; ``None`` when it is safe.
+
+    Reads only names and directory listings -- nothing is parsed or written.
+    Joining several statements into one run is a separate item (BNK-01), so
+    this refuses rather than picking one.
+    """
+    if isinstance(statement_files, (list, tuple)):
+        entries = [str(x).strip() for x in statement_files if str(x).strip()]
+    else:
+        entries = [x.strip() for x in str(statement_files or "").split(",") if x.strip()]
+
+    def _stop(names: list[str]) -> str:
+        listed = ", ".join(f"`{n}`" for n in names)
+        return (
+            f"## {bank} \u2192 more than one statement\n\n"
+            f"\u274c This upload holds {len(names)} statements ({listed}), and "
+            f"{bank} can only convert one statement per run. Nothing was "
+            f"imported.\n\nRun one statement at a time: upload a single file "
+            f"and run again, then repeat for the next one."
+        )
+
+    if len(entries) > 1:
+        return _stop([Path(e).name or e for e in entries])
+
+    exts = _ONE_FILE_BANKS.get(bank)
+    if exts and entries:
+        p = Path(entries[0])
+        if p.is_dir():
+            files = sorted(c for c in p.iterdir() if c.is_file())
+            candidates = [c for c in files if c.suffix.lower() in exts]
+            # No file with a known extension: the old code took the first
+            # file of any type. Several of those is just as ambiguous.
+            if not candidates:
+                candidates = files
+            if len(candidates) > 1:
+                return _stop([c.name for c in candidates])
+    return None
+
 def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
     """If *path_or_dir* is a directory (staged uploads), return the first
     matching file inside it; otherwise return the path unchanged."""
@@ -1647,6 +1699,11 @@ def run(
     agents_root = Path(__file__).resolve().parent.parent
     if str(agents_root) not in sys.path:
         sys.path.insert(0, str(agents_root))
+
+    # BNK-11: refuse a multi-statement upload before anything is written.
+    _multi_stop = _multi_file_stop((bank or "").strip(), statement_files)
+    if _multi_stop:
+        return _multi_stop
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
