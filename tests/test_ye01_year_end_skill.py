@@ -314,16 +314,14 @@ def test_an_entity_with_a_book_only_for_another_year_is_refused(env):           
     assert "no books - not part of year-end" in go(env, 1).lower()
 
 
-@pytest.mark.parametrize("what", ["folder_name", "drive_accounts_root", "gnucash_profile_root"])
-def test_an_unset_folder_name_or_root_is_refused_naming_it_and_nothing_is_created(env, what):   # NEGATIVE
-    if what == "folder_name":
-        env.write_entities({"SYN-A": _entity("Entity A", "", {FY: str(env.book)}), "SYN-B": _entity("Entity B", "Syn B")})
-        word = "folder name"
-    else:
-        kw = {"drive_accounts_root": str(env.drive), "gnucash_profile_root": str(env.gnc)}
-        kw[what] = ""
-        env.write_settings(**kw)
-        word = "Drive accounts root" if what.startswith("drive") else "GnuCash profile root"
+@pytest.mark.parametrize("what", ["drive_accounts_root", "gnucash_profile_root"])
+def test_an_unset_root_is_refused_naming_it_and_nothing_is_created(env, what):   # NEGATIVE
+    # YE-02: a blank folder name no longer refuses (it falls back to the entity key), so only the
+    # two roots are refused here; the blank-folder cases are in test_ye02_folder_name_fallback.py.
+    kw = {"drive_accounts_root": str(env.drive), "gnucash_profile_root": str(env.gnc)}
+    kw[what] = ""
+    env.write_settings(**kw)
+    word = "Drive accounts root" if what.startswith("drive") else "GnuCash profile root"
     before = snapshot(env)
     dirs = _dirs(env.tmp)
     r = go(env, 1)
