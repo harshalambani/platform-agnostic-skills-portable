@@ -30,6 +30,10 @@ clean CSV with columns: #, Date, Description, Chq/Ref. No., Withdrawal, Deposit,
 8. **Sweep transfers are real transactions** - "Sweep transfer to/from FD..." rows
    (Kotak's auto-sweep to/from a linked Fixed Deposit) must be kept, not filtered.
 
+## Header layouts read
+- Real statements: unlabelled period line ("DD Mon YYYY - DD Mon YYYY", first 5 lines of page 1) and "<holder> Account No. <digits>". Detected by the column words plus an IFSC starting KKBK (page 1 has no bank name).
+- Older/synthetic form: "Account No : <digits>" and "Statement Period : ... to ...". If no period is printed, it stays empty (never guessed).
+
 ## Output schema
 - Date: ISO YYYY-MM-DD string
 - Description: free text, trimmed, single-spaced
