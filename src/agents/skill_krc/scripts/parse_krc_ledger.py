@@ -7,8 +7,13 @@ transfer entries (NSE_CASH / BSE_CASH / NSE_SLBM journal hops), and produce a
 single-sheet "Simplified Ledger" Excel workbook whose running balance ties out
 to the statement's own printed closing balance.
 
-Usage (called by tools.py via subprocess, or directly for testing):
-    python parse_krc_ledger.py <pdf_path> <password> <output_xlsx_path>
+Usage (called by agent.py via subprocess, or directly for testing):
+    python parse_krc_ledger.py <pdf_path> <output_xlsx_path> [--password-stdin]
+
+With --password-stdin the PDF password is read from the first line of stdin
+(only the trailing newline is stripped). It is never taken from the command
+line, where any local process could read it. Without the flag the password is
+empty, as before for an empty password.
 
 Exit codes:
     0  success (closing balance reconciles)
@@ -76,6 +81,7 @@ from pathlib import Path
 # skill_hsbc/scripts/parse_tsv.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from agents._native_resolve import resolve_qpdf  # noqa: E402
+from agents.secret_redact import redact_text  # noqa: E402
 
 DATE_RE = re.compile(r"^\d{2}/\d{2}/\d{4}$")
 SEGMENT_TOKEN_RE = re.compile(r"^(NSE_CASH|BSE_CASH|NSE_SLBM|NSECASH|BSECASH|NSESLBM)$")
@@ -560,11 +566,18 @@ def write_xlsx(simplified_rows: list[dict], references: list[dict], output_path:
 
 
 def main() -> int:
-    if len(sys.argv) < 4:
-        print("Usage: parse_krc_ledger.py <pdf_path> <password> <output_xlsx_path>", file=sys.stderr)
+    args = [a for a in sys.argv[1:] if a != "--password-stdin"]
+    if len(args) != 2:
+        # Fixed text only: an extra argument (for example a password typed the
+        # old way) is never taken as a password and never echoed.
+        print("Usage: parse_krc_ledger.py <pdf_path> <output_xlsx_path> [--password-stdin]",
+              file=sys.stderr)
         return 1
 
-    pdf_path, password, output_path = sys.argv[1], sys.argv[2], sys.argv[3]
+    pdf_path, output_path = args
+    password = ""
+    if "--password-stdin" in sys.argv[1:]:
+        password = sys.stdin.readline().rstrip("\r\n")
 
     if not Path(pdf_path).is_file():
         print(f"ERROR: PDF not found: {pdf_path}", file=sys.stderr)
@@ -574,7 +587,7 @@ def main() -> int:
     try:
         decrypt_pdf(pdf_path, password, scratch)
     except RuntimeError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
+        print(f"ERROR: {redact_text(str(e), [password])}", file=sys.stderr)
         return 1
 
     try:

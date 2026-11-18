@@ -26,6 +26,8 @@ from pathlib import Path
 
 from langchain_core.tools import tool
 
+from agents.secret_redact import redact_text
+
 TEMPLATE_PATH = Path(__file__).parent / "templates" / "parser_template.py"
 
 # Decision #1: generated/edited parsers live here and nowhere else.
@@ -495,6 +497,46 @@ def apply_template_edit_impl(parser_path: str, blanks: dict | str) -> str:
     )
 
 
+def _supports_password_stdin(parser: Path) -> bool:
+    """AUD-08 detection rule: the parser takes its password on stdin when the
+    literal text --password-stdin appears in its source."""
+    try:
+        return "--password-stdin" in parser.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def _pull_stdin_secrets(arglist: list[str]) -> tuple[list[str], list[str]]:
+    """Take password-like options (and their real values) out of an argument
+    list. Returns (remaining args, secret values). Recognises `--opt value`,
+    `--opt=value` and `key=value`; a MASK value is left alone."""
+    rest: list[str] = []
+    secrets: list[str] = []
+    i = 0
+    while i < len(arglist):
+        t = arglist[i]
+        if t.startswith("-") and t.lstrip("-"):
+            name, eq, val = t.lstrip("-").partition("=")
+            if _is_secret_name(name):
+                if eq and val and val != MASK:
+                    secrets.append(val)
+                    i += 1
+                    continue
+                if not eq and i + 1 < len(arglist) and arglist[i + 1] != MASK:
+                    secrets.append(arglist[i + 1])
+                    i += 2
+                    continue
+        elif "=" in t:
+            name, _, val = t.partition("=")
+            if val and val != MASK and _is_secret_name(name):
+                secrets.append(val)
+                i += 1
+                continue
+        rest.append(t)
+        i += 1
+    return rest, secrets
+
+
 def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180,
                     check_args: bool = False) -> str:
     """Run the parser and report its exit code (0 pass / 1 error / 2 mismatch).
@@ -513,10 +555,18 @@ def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180,
         err = _check_tieout_args(arglist, p)
         if err:
             return err
+    stdin_secrets: list[str] = []
+    stdin_text = None
+    if _supports_password_stdin(p):
+        # AUD-08: a stdin-capable parser gets the password on stdin, never argv.
+        arglist, stdin_secrets = _pull_stdin_secrets(arglist)
+        if stdin_secrets:
+            arglist.append("--password-stdin")
+            stdin_text = stdin_secrets[0] + chr(10)
     try:
         res = subprocess.run(
             [sys.executable, str(p), *arglist],
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, text=True, timeout=timeout, input=stdin_text,
         )
     except subprocess.TimeoutExpired:
         return f"TIMEOUT after {timeout}s running {p.name}."
@@ -528,6 +578,9 @@ def run_tieout_impl(parser_path: str, args: list | str, timeout: int = 180,
     }.get(code, f"exit {code}")
     out = (res.stdout or "").strip()
     err = (res.stderr or "").strip()
+    if stdin_secrets:
+        out = redact_text(out, stdin_secrets)
+        err = redact_text(err, stdin_secrets)
     balance_lines = "\n".join(ln for ln in out.splitlines() if "balance" in ln.lower())
     body = balance_lines or out or "(no stdout)"
     tail = f"\nstderr: {err}" if err else ""
