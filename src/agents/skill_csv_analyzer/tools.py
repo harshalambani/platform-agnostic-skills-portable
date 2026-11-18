@@ -22,6 +22,7 @@ emit — can execute arbitrary code or touch the filesystem.
 """
 from __future__ import annotations
 
+import os
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -195,220 +196,225 @@ def _format_frame(result: pd.DataFrame | pd.Series, *, noun: str = "rows") -> st
 # Tools
 # ---------------------------------------------------------------------------
 
-@tool
-def describe_csv(csv_path: str) -> str:
+def _make_tools(csv_path: str) -> list:
+    """Build the five CSV tools bound to ONE file.
+
+    The path is fixed here, once, so the model never supplies or sees a path:
+    no tool has a path argument, and none can be pointed at another file.
+    The operations themselves are unchanged.
     """
-    Describe the structure and first rows of a CSV file.
-    Returns: shape, column names with dtypes, and the first 5 rows.
-    Call this first to understand the data before querying it.
-    """
-    try:
-        df = _load_csv(csv_path)
-    except Exception as e:
-        return f"ERROR loading CSV: {e}"
+    csv_path = os.path.abspath(os.fspath(csv_path))
 
-    parts: list[str] = []
-    parts.append(f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n")
+    @tool
+    def describe_csv() -> str:
+        """
+        Describe the structure and first rows of a CSV file.
+        Returns: shape, column names with dtypes, and the first 5 rows.
+        Call this first to understand the data before querying it.
+        """
+        try:
+            df = _load_csv(csv_path)
+        except Exception as e:
+            return f"ERROR loading CSV: {e}"
 
-    # Column info.
-    buf = StringIO()
-    buf.write("Columns:\n")
-    for col in df.columns:
-        non_null = df[col].notna().sum()
-        buf.write(f"  - {col} ({df[col].dtype}, {non_null}/{len(df)} non-null)\n")
-    parts.append(buf.getvalue())
+        parts: list[str] = []
+        parts.append(f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n")
 
-    # First 5 rows.
-    parts.append("First 5 rows:\n" + df.head(5).to_string(index=True))
+        # Column info.
+        buf = StringIO()
+        buf.write("Columns:\n")
+        for col in df.columns:
+            non_null = df[col].notna().sum()
+            buf.write(f"  - {col} ({df[col].dtype}, {non_null}/{len(df)} non-null)\n")
+        parts.append(buf.getvalue())
 
-    # Basic stats for numeric columns.
-    numeric = df.select_dtypes(include="number")
-    if not numeric.empty:
-        parts.append("\nNumeric summary:\n" + numeric.describe().to_string())
+        # First 5 rows.
+        parts.append("First 5 rows:\n" + df.head(5).to_string(index=True))
 
-    return "\n".join(parts)
+        # Basic stats for numeric columns.
+        numeric = df.select_dtypes(include="number")
+        if not numeric.empty:
+            parts.append("\nNumeric summary:\n" + numeric.describe().to_string())
 
-
-@tool
-def aggregate_csv(
-    csv_path: str,
-    metric: str,
-    agg: str,
-    group_by: list[str] | None = None,
-    filters: list[dict] | None = None,
-) -> str:
-    """
-    Aggregate a numeric column, optionally grouped and filtered.
-
-    Args:
-        csv_path: Path to the CSV file.
-        metric: Column to aggregate (must be a real column).
-        agg: One of: sum, mean, median, min, max, count, nunique, std, var.
-        group_by: Optional list of column names to group by. Omit (or pass an
-            empty list) to aggregate over the whole (filtered) dataset.
-        filters: Optional list of filter objects, each like
-            {"column": "region", "op": "==", "value": "EMEA"}.
-            Supported ops: ==, !=, >, >=, <, <=, in, notin, contains.
-            For "in"/"notin", "value" should be a list.
-
-    Examples:
-        - Total revenue by region:
-          aggregate_csv(csv_path, metric="revenue", agg="sum", group_by=["region"])
-        - Average age of active customers:
-          aggregate_csv(csv_path, metric="age", agg="mean",
-                        filters=[{"column": "status", "op": "==", "value": "active"}])
-
-    Only the aggregations listed above are permitted; anything else is rejected
-    with a clean error. No code is ever executed — every argument is validated
-    against the file's real columns and a closed enum before pandas runs it.
-    """
-    try:
-        df = _load_csv(csv_path)
-    except Exception as e:
-        return f"ERROR loading CSV: {e}"
-
-    columns_to_check = [metric] + list(group_by or [])
-    err = _check_columns(df, columns_to_check)
-    if err:
-        return err
-
-    if agg not in _ALLOWED_AGGS:
-        return f"ERROR: unsupported agg {agg!r}. Allowed: {sorted(_ALLOWED_AGGS)}"
-
-    filtered, err = _apply_filters(df, filters)
-    if err:
-        return err
-
-    try:
-        if group_by:
-            result = filtered.groupby(list(group_by))[metric].agg(agg)
-        else:
-            result = getattr(filtered[metric], agg)()
-    except Exception as e:
-        return f"ERROR computing aggregate: {e}"
-
-    if isinstance(result, (pd.Series, pd.DataFrame)):
-        return _format_frame(result, noun="groups")
-    return str(result)
+        return "\n".join(parts)
 
 
-@tool
-def value_counts_csv(csv_path: str, column: str, top_n: int = 20) -> str:
-    """
-    Count how often each distinct value appears in a column, most frequent first.
+    @tool
+    def aggregate_csv(
+        metric: str,
+        agg: str,
+        group_by: list[str] | None = None,
+        filters: list[dict] | None = None,
+    ) -> str:
+        """
+        Aggregate a numeric column, optionally grouped and filtered.
 
-    Args:
-        csv_path: Path to the CSV file.
-        column: Column to count values of (must be a real column).
-        top_n: Maximum number of distinct values to return (default 20, capped at 50).
+        Args:
+            metric: Column to aggregate (must be a real column).
+            agg: One of: sum, mean, median, min, max, count, nunique, std, var.
+            group_by: Optional list of column names to group by. Omit (or pass an
+                empty list) to aggregate over the whole (filtered) dataset.
+            filters: Optional list of filter objects, each like
+                {"column": "region", "op": "==", "value": "EMEA"}.
+                Supported ops: ==, !=, >, >=, <, <=, in, notin, contains.
+                For "in"/"notin", "value" should be a list.
 
-    Example: "What are the top 5 product categories by frequency?" ->
-        value_counts_csv(csv_path, column="category", top_n=5)
-    """
-    try:
-        df = _load_csv(csv_path)
-    except Exception as e:
-        return f"ERROR loading CSV: {e}"
+        Examples:
+            - Total revenue by region:
+              aggregate_csv(metric="revenue", agg="sum", group_by=["region"])
+            - Average age of active customers:
+              aggregate_csv(metric="age", agg="mean",
+                            filters=[{"column": "status", "op": "==", "value": "active"}])
 
-    err = _check_columns(df, [column])
-    if err:
-        return err
+        Only the aggregations listed above are permitted; anything else is rejected
+        with a clean error. No code is ever executed — every argument is validated
+        against the file's real columns and a closed enum before pandas runs it.
+        """
+        try:
+            df = _load_csv(csv_path)
+        except Exception as e:
+            return f"ERROR loading CSV: {e}"
 
-    if not isinstance(top_n, int) or top_n <= 0:
-        return "ERROR: top_n must be a positive integer."
-    n = min(top_n, _MAX_ROWS)
+        columns_to_check = [metric] + list(group_by or [])
+        err = _check_columns(df, columns_to_check)
+        if err:
+            return err
 
-    counts = df[column].value_counts()
-    total = len(counts)
-    shown = counts.head(n)
-    header = f"{total} distinct value(s) in '{column}'. Showing top {len(shown)}:\n\n"
-    return header + shown.to_string()
+        if agg not in _ALLOWED_AGGS:
+            return f"ERROR: unsupported agg {agg!r}. Allowed: {sorted(_ALLOWED_AGGS)}"
 
+        filtered, err = _apply_filters(df, filters)
+        if err:
+            return err
 
-@tool
-def filter_count_csv(csv_path: str, filters: list[dict]) -> str:
-    """
-    Count how many rows match a set of filter conditions.
+        try:
+            if group_by:
+                result = filtered.groupby(list(group_by))[metric].agg(agg)
+            else:
+                result = getattr(filtered[metric], agg)()
+        except Exception as e:
+            return f"ERROR computing aggregate: {e}"
 
-    Args:
-        csv_path: Path to the CSV file.
-        filters: List of filter objects, each like
-            {"column": "age", "op": ">", "value": 30}.
-            Supported ops: ==, !=, >, >=, <, <=, in, notin, contains.
-            For "in"/"notin", "value" should be a list. Multiple filters are
-            combined with AND.
-
-    Example: "How many customers are over 30 in the EU?" ->
-        filter_count_csv(csv_path, filters=[
-            {"column": "age", "op": ">", "value": 30},
-            {"column": "region", "op": "==", "value": "EU"},
-        ])
-    """
-    try:
-        df = _load_csv(csv_path)
-    except Exception as e:
-        return f"ERROR loading CSV: {e}"
-
-    if not filters:
-        return "ERROR: filters must be a non-empty list of {column, op, value} objects."
-
-    filtered, err = _apply_filters(df, filters)
-    if err:
-        return err
-
-    return f"{len(filtered)} of {len(df)} rows match the given filter(s)."
+        if isinstance(result, (pd.Series, pd.DataFrame)):
+            return _format_frame(result, noun="groups")
+        return str(result)
 
 
-@tool
-def sort_head_csv(
-    csv_path: str,
-    sort_by: list[str],
-    n: int = 10,
-    ascending: bool = True,
-    columns: list[str] | None = None,
-    filters: list[dict] | None = None,
-) -> str:
-    """
-    Sort rows by one or more columns and return the first N.
+    @tool
+    def value_counts_csv(column: str, top_n: int = 20) -> str:
+        """
+        Count how often each distinct value appears in a column, most frequent first.
 
-    Args:
-        csv_path: Path to the CSV file.
-        sort_by: Column name(s) to sort by (must be real columns).
-        n: Number of rows to return (default 10, capped at 50).
-        ascending: Sort ascending if True (default), descending if False.
-        columns: Optional subset of columns to include in the output.
-            Omit to include all columns.
-        filters: Optional list of filter objects (see filter_count_csv) applied
-            before sorting.
+        Args:
+            column: Column to count values of (must be a real column).
+            top_n: Maximum number of distinct values to return (default 20, capped at 50).
 
-    Example: "Show the 5 highest-revenue deals in EMEA" ->
-        sort_head_csv(csv_path, sort_by=["revenue"], n=5, ascending=False,
-                      filters=[{"column": "region", "op": "==", "value": "EMEA"}])
-    """
-    try:
-        df = _load_csv(csv_path)
-    except Exception as e:
-        return f"ERROR loading CSV: {e}"
+        Example: "What are the top 5 product categories by frequency?" ->
+            value_counts_csv(column="category", top_n=5)
+        """
+        try:
+            df = _load_csv(csv_path)
+        except Exception as e:
+            return f"ERROR loading CSV: {e}"
 
-    columns_to_check = list(sort_by) + list(columns or [])
-    err = _check_columns(df, columns_to_check)
-    if err:
-        return err
+        err = _check_columns(df, [column])
+        if err:
+            return err
 
-    if not isinstance(n, int) or n <= 0:
-        return "ERROR: n must be a positive integer."
-    n = min(n, _MAX_ROWS)
+        if not isinstance(top_n, int) or top_n <= 0:
+            return "ERROR: top_n must be a positive integer."
+        n = min(top_n, _MAX_ROWS)
 
-    filtered, err = _apply_filters(df, filters)
-    if err:
-        return err
+        counts = df[column].value_counts()
+        total = len(counts)
+        shown = counts.head(n)
+        header = f"{total} distinct value(s) in '{column}'. Showing top {len(shown)}:\n\n"
+        return header + shown.to_string()
 
-    try:
-        result = filtered.sort_values(by=list(sort_by), ascending=ascending)
-    except Exception as e:
-        return f"ERROR sorting: {e}"
 
-    if columns:
-        result = result[list(columns)]
+    @tool
+    def filter_count_csv(filters: list[dict]) -> str:
+        """
+        Count how many rows match a set of filter conditions.
 
-    return _format_frame(result.head(n), noun="rows")
+        Args:
+            filters: List of filter objects, each like
+                {"column": "age", "op": ">", "value": 30}.
+                Supported ops: ==, !=, >, >=, <, <=, in, notin, contains.
+                For "in"/"notin", "value" should be a list. Multiple filters are
+                combined with AND.
+
+        Example: "How many customers are over 30 in the EU?" ->
+            filter_count_csv(filters=[
+                {"column": "age", "op": ">", "value": 30},
+                {"column": "region", "op": "==", "value": "EU"},
+            ])
+        """
+        try:
+            df = _load_csv(csv_path)
+        except Exception as e:
+            return f"ERROR loading CSV: {e}"
+
+        if not filters:
+            return "ERROR: filters must be a non-empty list of {column, op, value} objects."
+
+        filtered, err = _apply_filters(df, filters)
+        if err:
+            return err
+
+        return f"{len(filtered)} of {len(df)} rows match the given filter(s)."
+
+
+    @tool
+    def sort_head_csv(
+        sort_by: list[str],
+        n: int = 10,
+        ascending: bool = True,
+        columns: list[str] | None = None,
+        filters: list[dict] | None = None,
+    ) -> str:
+        """
+        Sort rows by one or more columns and return the first N.
+
+        Args:
+            sort_by: Column name(s) to sort by (must be real columns).
+            n: Number of rows to return (default 10, capped at 50).
+            ascending: Sort ascending if True (default), descending if False.
+            columns: Optional subset of columns to include in the output.
+                Omit to include all columns.
+            filters: Optional list of filter objects (see filter_count_csv) applied
+                before sorting.
+
+        Example: "Show the 5 highest-revenue deals in EMEA" ->
+            sort_head_csv(sort_by=["revenue"], n=5, ascending=False,
+                          filters=[{"column": "region", "op": "==", "value": "EMEA"}])
+        """
+        try:
+            df = _load_csv(csv_path)
+        except Exception as e:
+            return f"ERROR loading CSV: {e}"
+
+        columns_to_check = list(sort_by) + list(columns or [])
+        err = _check_columns(df, columns_to_check)
+        if err:
+            return err
+
+        if not isinstance(n, int) or n <= 0:
+            return "ERROR: n must be a positive integer."
+        n = min(n, _MAX_ROWS)
+
+        filtered, err = _apply_filters(df, filters)
+        if err:
+            return err
+
+        try:
+            result = filtered.sort_values(by=list(sort_by), ascending=ascending)
+        except Exception as e:
+            return f"ERROR sorting: {e}"
+
+        if columns:
+            result = result[list(columns)]
+
+        return _format_frame(result.head(n), noun="rows")
+
+    return [describe_csv, aggregate_csv, value_counts_csv, filter_count_csv, sort_head_csv]
