@@ -22,12 +22,6 @@ endpoints:
     temperature: 0.0
     # inherits default_model: gemma4:e2b
 
-  lan_ollama:
-    provider: ollama
-    base_url: http://192.168.1.50:11434
-    temperature: 0.0
-    # inherits default_model: gemma4:e2b
-
   openai_compatible:
     provider: openai_compatible
     base_url: http://localhost:8000/v1
