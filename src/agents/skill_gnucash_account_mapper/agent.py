@@ -2611,6 +2611,18 @@ def _openai_compatible_chat(
 
     headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
     if api_key:
+        # AUD-03: a key never goes over plain http. Nothing is sent; the pass stops.
+        try:
+            try:
+                from agents.endpoint_policy import check_send  # noqa: PLC0415
+            except ImportError:
+                from endpoint_policy import check_send  # noqa: PLC0415
+            check_send(base_url, api_key)
+        except ValueError as e:
+            _LLM_LAST_ERROR.clear()
+            _LLM_LAST_ERROR.update({"reason": str(e), "fatal": True, "credits": False})
+            _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
+            return None
         headers["Authorization"] = f"Bearer {api_key}"
 
     req = _req.Request(

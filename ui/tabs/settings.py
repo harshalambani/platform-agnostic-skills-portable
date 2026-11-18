@@ -72,6 +72,15 @@ def _save_endpoint(
     if provider not in ("ollama", "openai_compatible"):
         return "Error: provider must be 'ollama' or 'openai_compatible'."
 
+    # AUD-03: http only for this computer / private network; no key over http.
+    # The key in use is the typed one, else the one already stored (never echoed).
+    from agents.endpoint_policy import check_save
+    _stored = ((_config.load_portable_config().get("endpoints") or {}).get(name) or {}).get("api_key")
+    _key_in_use = api_key.strip() or (_stored if provider == "openai_compatible" else "")
+    _bad = check_save(base_url, _key_in_use if provider == "openai_compatible" else "", name)
+    if _bad:
+        return f"Error: {_bad}"
+
     cfg = _config.load_portable_config()
     if "endpoints" not in cfg or cfg["endpoints"] is None:
         cfg["endpoints"] = {}
@@ -276,6 +285,8 @@ def render() -> None:
             )
             ep_base_url = gr.Textbox(
                 label="Base URL",
+                info=("http:// works only for this computer and private-network "
+                      "addresses, and never with an API key. Anything else needs https://."),
                 placeholder="http://localhost:11434",
                 interactive=True,
             )

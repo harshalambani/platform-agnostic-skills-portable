@@ -286,8 +286,8 @@ def test_settings_save_persists_pacing(tmp_path, monkeypatch):
     store = {}
     monkeypatch.setattr(_config, "load_portable_config", lambda: store)
     monkeypatch.setattr(_config, "write_portable_config", lambda c: store.update(c))
-    settings._save_endpoint("e1", "ollama", "http://h", "m", "", 0.0, False, 600, 50)
+    settings._save_endpoint("e1", "ollama", "http://localhost", "m", "", 0.0, False, 600, 50)
     ep = store["endpoints"]["e1"]
     assert ep["min_gap_seconds"] == 600 and ep["daily_cap"] == 50
-    settings._save_endpoint("e2", "ollama", "http://h", "m", "", 0.0, False)
+    settings._save_endpoint("e2", "ollama", "http://localhost", "m", "", 0.0, False)
     assert "min_gap_seconds" not in store["endpoints"]["e2"]   # default OFF, not stored

@@ -165,8 +165,17 @@ def prime_async(endpoints: list[dict[str, Any]]) -> threading.Thread:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
+def _policy():
+    try:
+        from agents import endpoint_policy
+    except ImportError:
+        import endpoint_policy  # type: ignore[no-redef]
+    return endpoint_policy
+
+
 def _get_json(url: str, timeout: float = 2.0, api_key: str | None = None) -> dict[str, Any]:
     headers = {"User-Agent": "PA-Skills-Portable/health"}
+    _policy().check_send(url, api_key)   # AUD-03: a key never goes over plain http
     # Authenticated OpenAI-compatible hosts (OpenAI, Groq, Together, ...) require
     # a Bearer token on GET /models. Without it they answer 401, which the
     # Settings tab would otherwise surface as "unreachable" even for a valid key.
@@ -387,6 +396,10 @@ def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = No
     headers = {"User-Agent": "PA-Skills-Portable/health", "Content-Type": "application/json"}
     if provider == "ollama":
         url = f"{base}/api/chat"
+        try:
+            _policy().check_send(url, None)
+        except ValueError as e:
+            return HealthResult(False, "unreachable", str(e))
         payload = {"model": model, "stream": False,
                    "messages": [{"role": "user", "content": "ping"}],
                    "options": {"num_predict": 1}}
@@ -395,9 +408,13 @@ def probe_model(endpoint: dict[str, Any], model: str, timeout: float | None = No
         from . import _config
         raw_key = endpoint.get("api_key", "")
         key = _config.decrypt_api_key(raw_key) if raw_key else ""
+        url = f"{base}/chat/completions"
+        try:
+            _policy().check_send(url, key)   # AUD-03: nothing is sent
+        except ValueError as e:
+            return HealthResult(False, "unreachable", str(e))
         if key and key not in ("", "not-needed"):
             headers["Authorization"] = f"Bearer {key}"
-        url = f"{base}/chat/completions"
         # the same settings the real run uses for this model (a thinking model
         # can answer HTTP 400 to a 1-token cap)
         try:

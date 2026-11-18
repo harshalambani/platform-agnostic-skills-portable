@@ -55,6 +55,14 @@ def get_progress_queue() -> Optional[_queue_module.Queue]:
 # Model loading
 # ---------------------------------------------------------------------------
 
+def _endpoint_policy():
+    try:
+        from agents import endpoint_policy
+    except ImportError:  # run from inside src/agents
+        import endpoint_policy  # type: ignore[no-redef]
+    return endpoint_policy
+
+
 def load_model(config_path: str, model_override: str | None = None):
     """
     Load a LangChain chat model from a legacy-format config.yaml.
@@ -88,6 +96,7 @@ def load_model(config_path: str, model_override: str | None = None):
         model = model_override or ep.get("default_model") or "gemma4:12b"
         base_url = ep.get("base_url", "http://localhost:11434")
         temperature = float(ep.get("temperature", 0.0))
+        _endpoint_policy().check_send(base_url, None)   # AUD-03
         log.info("Loading ChatOllama: base_url=%s model=%s", base_url, model)
         from langchain_ollama import ChatOllama
         return ChatOllama(
@@ -103,6 +112,7 @@ def load_model(config_path: str, model_override: str | None = None):
         base_url = ep.get("base_url", "")
         api_key = ep.get("api_key", "not-needed") or "not-needed"
         temperature = float(ep.get("temperature", 0.0))
+        _endpoint_policy().check_send(base_url, api_key)   # AUD-03: no key over http
         log.info("Loading ChatOpenAI: base_url=%s model=%s", base_url, model)
         from langchain_openai import ChatOpenAI
         return ChatOpenAI(
