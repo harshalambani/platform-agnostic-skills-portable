@@ -195,6 +195,16 @@ jobs:
           # are not in the lock.
           pip install pytest reportlab xlwt
 
+      # PIPE-19: the real PDF-decryption tests need a working qpdf. The bundled
+      # one is a Windows binary in LFS (not fetched here, to protect the LFS
+      # quota), so use the system package. PASK_REQUIRE_QPDF=1 on the test step
+      # makes those tests fail, not skip, if it is ever missing.
+      - name: Install qpdf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qpdf
+          qpdf --version
+
       # Nothing here is advisory any more. A failing TEST fails the job, and so
       # does a suite that could not RUN -- but they are still reported as
       # different things, because the old `continue-on-error: true` flattened
@@ -218,6 +228,8 @@ jobs:
       # `-x` is gone deliberately: stopping at the first failure hides how much
       # of the suite is broken, which is the thing this step exists to report.
       - name: Run tests (non-build-time-only)
+        env:
+          PASK_REQUIRE_QPDF: "1"
         run: |
           cd src
           set +e

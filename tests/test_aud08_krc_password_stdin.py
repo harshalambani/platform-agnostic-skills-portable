@@ -137,18 +137,9 @@ def test_no_krc_subprocess_call_passes_a_password_variable_in_its_argv():       
 
 # ---- end to end on a synthetic encrypted PDF -------------------------------
 
-def _qpdf():
-    """A working qpdf, or None (the vendored copy can be an unfetched LFS pointer)."""
-    try:
-        from agents._native_resolve import resolve_qpdf
-        path = resolve_qpdf()
-        subprocess.run([path, "--version"], capture_output=True, timeout=30, check=True)
-        return path
-    except Exception:
-        return None
-
-
-needs_qpdf = pytest.mark.skipif(_qpdf() is None, reason="qpdf is not available here")
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+from qpdf_helper import needs_qpdf  # noqa: E402  (PIPE-19: skip locally, fail on CI)
 
 
 def _encrypted_pdf(path: Path, password: str) -> Path:

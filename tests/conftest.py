@@ -79,6 +79,13 @@ def _pin_rules_path_out_of_the_repo(tmp_path_factory, monkeypatch):
 # Prefixes the app's own code uses for scratch folders it never removes (or
 # removes only on a clean path). Under test they are all routed into pytest's
 # base temp, which pytest prunes, so none are left in the system temp folder.
+@pytest.fixture
+def require_qpdf():
+    """PIPE-19: skip without a working qpdf, or fail when PASK_REQUIRE_QPDF=1."""
+    from qpdf_helper import qpdf_or_skip_or_fail
+    return qpdf_or_skip_or_fail()
+
+
 APP_TEMP_PREFIXES = ("pa-skills-", "hsbc_bankskill_", "hsbc_run_", "pask-eml-", "pask-intake-")
 
 
