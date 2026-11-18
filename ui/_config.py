@@ -47,6 +47,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -254,6 +255,31 @@ def _cleanup_legacy_temp_dirs() -> None:
 
 
 register_exit_cleanup(_cleanup_legacy_temp_dirs)
+
+
+def discard_legacy_config(path) -> None:
+    """AUD-02: delete a per-run legacy config and its folder as soon as the run
+    ends. Only a folder this module made (registered in _LEGACY_TEMP_DIRS) is
+    touched. Safe to call twice, with None, or with a path that is already
+    gone; never raises. The exit-time cleanup stays as a backstop."""
+    try:
+        if not path:
+            return
+        folder = Path(path).parent
+        if folder not in _LEGACY_TEMP_DIRS:
+            return
+        for _ in range(5):
+            shutil.rmtree(folder, ignore_errors=True)
+            if not folder.exists():
+                break
+            time.sleep(0.05)  # a brief hold on the folder (scanner, indexer)
+        if not folder.exists():
+            try:
+                _LEGACY_TEMP_DIRS.remove(folder)
+            except ValueError:
+                pass
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------

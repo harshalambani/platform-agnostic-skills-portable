@@ -40,6 +40,16 @@ def _refresh_models() -> list[tuple[str, str]]:
 
 
 def _run_bob(pdf_file, model_choice):
+    cfg_holder: list = []
+    try:
+        yield from _run_bob_body(pdf_file, model_choice, cfg_holder)
+    finally:
+        # AUD-02: success, error, cancel and GeneratorExit all end here.
+        for _p in cfg_holder:
+            _config.discard_legacy_config(_p)
+
+
+def _run_bob_body(pdf_file, model_choice, cfg_holder):
     log: list[str] = []
 
     def add(line: str) -> str:
@@ -94,6 +104,7 @@ def _run_bob(pdf_file, model_choice):
 
     try:
         legacy_cfg = _config.materialize_legacy_config(active)
+        cfg_holder.append(legacy_cfg)
     except Exception as e:
         yield add(f"Error: config error: {e}"), gr.update(visible=False)
         return
