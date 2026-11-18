@@ -248,3 +248,111 @@ def test_shipped_default_has_no_lan_entry_and_every_endpoint_passes_the_rule():
     assert cfg["active_endpoint"] in cfg["endpoints"]
     for name, e in cfg["endpoints"].items():
         assert ep.check_save(e["base_url"], e.get("api_key", ""), name) == "", name
+
+
+# ---- AUD-03 follow-up: the send guard applies the full address rule ----------
+
+BAD_KEYLESS = ["http://8.8.8.8:11434", "http://myserver:11434", "http://172.15.0.1:11434",
+               "http://172.32.0.1:11434", "ftp://localhost"]
+GOOD_KEYLESS = ["http://localhost:11434", "http://127.0.0.1:11434", "http://[::1]:11434", "http://10.1.1.1:11434",
+                "http://172.16.0.9:11434", "http://172.31.0.9:11434", "http://192.168.1.2:11434",
+                "https://api.example.com"]
+
+
+def test_save_and_send_share_one_rule():
+    urls = BAD_KEYLESS + GOOD_KEYLESS + ["http://127.0.0.1/v1", "https://x.example/v1"]
+    for u in urls:
+        for k in ("", KEY):
+            saved = ep.check_save(u, k) != ""
+            try:
+                ep.check_send(u, k)
+                sent = False
+            except ep.EndpointPolicyError:
+                sent = True
+            assert saved == sent, (u, bool(k))
+
+
+@pytest.mark.parametrize("url", BAD_KEYLESS)
+def test_check_send_refuses_keyless_bad_addresses(url):                          # NEGATIVE
+    with pytest.raises(ep.EndpointPolicyError) as ei:
+        ep.check_send(url, None, "e1")
+    m = str(ei.value)
+    assert "Settings" in m and "Nothing was sent" in m and "e1" in m
+
+
+class _Resp:
+    def __init__(self, body=b'{"models": [], "choices": [{"message": {"content": "ok"}}]}'):
+        self._b = body
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def read(self): return self._b
+
+
+def _wire(monkeypatch):
+    """Record every request; a stand-in answer."""
+    from urllib import request
+    sent = []
+
+    def fake(req, timeout=None):
+        sent.append(req.full_url)
+        return _Resp()
+    monkeypatch.setattr(request, "urlopen", fake)
+    return sent
+
+
+@pytest.mark.parametrize("url", BAD_KEYLESS)
+def test_health_refuses_keyless_bad_http_and_sends_nothing(monkeypatch, url):    # NEGATIVE
+    from ui import _health
+    sent = _wire(monkeypatch)
+    for fn in (lambda: _health._get_json(url + "/api/tags"),
+               lambda: _health._post_json(url + "/api/show", {})):
+        with pytest.raises(ep.EndpointPolicyError):
+            fn()
+    for prov in ("ollama", "openai_compatible"):
+        res = _health.probe_model({"provider": prov, "base_url": url}, "m")
+        assert not res.ok and "Settings" in res.detail
+    res = _health._check_uncached({"provider": "ollama", "base_url": url})
+    assert not res.ok
+    assert sent == []
+
+
+@pytest.mark.parametrize("url", BAD_KEYLESS)
+def test_mapper_refuses_keyless_bad_http_both_providers_and_sends_nothing(monkeypatch, url):   # NEGATIVE
+    from agents.skill_gnucash_account_mapper import agent as ma
+    sent = _wire(monkeypatch)
+    assert ma._ollama_chat(url, "m", "s", "u", timeout=1) is None
+    assert ma._take_llm_error().get("fatal") is True
+    assert ma._openai_compatible_chat(url + "/v1", "m", "s", "u", api_key=None, timeout=1) is None
+    err = ma._take_llm_error()
+    assert err.get("fatal") is True and "Settings" in err["reason"]
+    assert sent == []
+
+
+@pytest.mark.parametrize("prov,url", [(p, u) for p in ("ollama", "openai_compatible") for u in BAD_KEYLESS])
+def test_load_model_refuses_keyless_bad_http(tmp_path, prov, url):               # NEGATIVE
+    from agents import base_agent
+    p = tmp_path / "c.yaml"
+    p.write_text(yaml.safe_dump({"provider": prov, prov: {"base_url": url, "default_model": "m"}}),
+                 encoding="utf-8")
+    with pytest.raises(ep.EndpointPolicyError):
+        base_agent.load_model(str(p))
+
+
+@pytest.mark.parametrize("url", GOOD_KEYLESS)
+def test_allowed_keyless_addresses_still_send(monkeypatch, url):
+    from ui import _health
+    from agents.skill_gnucash_account_mapper import agent as ma
+    sent = _wire(monkeypatch)
+    assert _health._get_json(url + "/api/tags") is not None
+    assert ma._ollama_chat(url, "m", "s", "u", timeout=1) is not None
+    assert ma._openai_compatible_chat(url + "/v1", "m", "s", "u", api_key=None, timeout=1) is not None
+    assert len(sent) == 3 and all(s.startswith(url) for s in sent)
+
+
+def test_https_with_a_key_still_sends_and_the_error_texts_never_hold_it(monkeypatch):
+    from agents.skill_gnucash_account_mapper import agent as ma
+    sent = _wire(monkeypatch)
+    assert ma._openai_compatible_chat("https://api.example.com/v1", "m", "s", "u", api_key=KEY, timeout=1)
+    assert sent == ["https://api.example.com/v1/chat/completions"]
+    ma._openai_compatible_chat("http://8.8.8.8/v1", "m", "s", "u", api_key=KEY, timeout=1)
+    assert KEY not in ma._take_llm_error().get("reason", "")

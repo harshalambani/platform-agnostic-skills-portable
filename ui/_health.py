@@ -189,6 +189,7 @@ def _get_json(url: str, timeout: float = 2.0, api_key: str | None = None) -> dic
 
 def _post_json(url: str, payload: dict, timeout: float = 3.0) -> dict[str, Any]:
     """POST JSON and return parsed response."""
+    _policy().check_send(url, None)   # AUD-03
     data = json.dumps(payload).encode("utf-8")
     req = request.Request(
         url, data=data, method="POST",
