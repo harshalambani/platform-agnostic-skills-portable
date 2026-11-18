@@ -64,7 +64,7 @@ def test_pacing_off_never_waits_or_writes(tmp_path):
 
 
 def test_pacing_off_is_the_default_config():
-    p = lp.configure_from_legacy({"provider": "ollama", "ollama": {"base_url": "http://h"}})
+    p = lp.configure_from_legacy({"provider": "ollama", "ollama": {"base_url": "http://localhost"}})
     assert p.enabled is False
     assert lp.langchain_rate_limiter(p) is None     # load_model builds as before
 
@@ -160,7 +160,7 @@ def test_long_wait_is_announced(tmp_path):
 # -- mapper wiring (route ii) -------------------------------------------------
 
 def _cfg(tmp_path, gap=0, cap=0):
-    ep = {"base_url": "http://h:1", "default_model": "mdl", "temperature": 0.0}
+    ep = {"base_url": "http://localhost:1", "default_model": "mdl", "temperature": 0.0}
     if gap:
         ep["min_gap_seconds"] = gap
     if cap:
@@ -173,17 +173,17 @@ def _cfg(tmp_path, gap=0, cap=0):
 def test_llm_chat_waits_on_shared_pacer_and_cap_stops_pass(tmp_path, monkeypatch):
     m._resolve_llm_endpoint_config(_cfg(tmp_path, gap=30, cap=2))
     clock = FakeClock()
-    pacer = lp.pacer_for("ollama", "http://h:1")
+    pacer = lp.pacer_for("ollama", "http://localhost:1")
     pacer._clock, pacer._sleep, pacer._state_path = clock.now, clock.sleep, tmp_path / "st.json"
     pacer._emit = lambda s: None
     pacer._cancel = lambda: False
     calls = []
     monkeypatch.setattr(m, "_ollama_chat", lambda *a, **k: calls.append(clock.now()) or "ok")
     guard = m._LLMGuard("mdl")
-    assert guard.ask("ollama", "http://h:1", "mdl", "s", "u") == "ok"
-    assert guard.ask("ollama", "http://h:1", "mdl", "s", "u") == "ok"
+    assert guard.ask("ollama", "http://localhost:1", "mdl", "s", "u") == "ok"
+    assert guard.ask("ollama", "http://localhost:1", "mdl", "s", "u") == "ok"
     assert calls[1] - calls[0] >= 30 - 1e-6
-    assert guard.ask("ollama", "http://h:1", "mdl", "s", "u") is None   # cap of 2
+    assert guard.ask("ollama", "http://localhost:1", "mdl", "s", "u") is None   # cap of 2
     assert guard.stopped and "Daily AI call cap reached" in guard.reason
     assert len(calls) == 2                            # negative: no third call was made
 
@@ -202,7 +202,7 @@ def _pass(cfg):
 def test_mapper_pass_stopped_by_cap_keeps_rows_unattempted(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, cap=1)
     m._resolve_llm_endpoint_config(cfg)
-    pacer = lp.pacer_for("ollama", "http://h:1")
+    pacer = lp.pacer_for("ollama", "http://localhost:1")
     pacer._state_path, pacer._emit, pacer._cancel = tmp_path / "st.json", (lambda s: None), (lambda: False)
     calls = []
     monkeypatch.setattr(m, "_ollama_chat", lambda *a, **k: calls.append(a) or "OK")
@@ -219,7 +219,7 @@ def test_stop_during_wait_keeps_mapped_rows(tmp_path, monkeypatch):
     cfg = _cfg(tmp_path, gap=600)
     m._resolve_llm_endpoint_config(cfg)
     clock = FakeClock()
-    pacer = lp.pacer_for("ollama", "http://h:1")
+    pacer = lp.pacer_for("ollama", "http://localhost:1")
     stop = {"on": False}
     pacer._clock, pacer._state_path, pacer._emit = clock.now, tmp_path / "st.json", (lambda s: None)
     pacer._cancel = lambda: stop["on"]
@@ -244,7 +244,7 @@ def test_no_pacing_registered_means_llm_chat_does_not_wait(tmp_path, monkeypatch
     monkeypatch.setattr(m, "_ollama_chat", lambda *a, **k: "ok")
     t0 = time.perf_counter()
     for _ in range(50):
-        assert m._llm_chat("ollama", "http://h:1", "mdl", "s", "u") == "ok"
+        assert m._llm_chat("ollama", "http://localhost:1", "mdl", "s", "u") == "ok"
     assert time.perf_counter() - t0 < 0.5
 
 
@@ -257,7 +257,7 @@ def test_load_model_attaches_shared_limiter_only_when_on(tmp_path):
     on = load_model(_cfg(tmp_path, gap=45))
     assert on.rate_limiter is not None
     # and it is the same pacer the mapper route waits on
-    assert lp.pacer_for("ollama", "http://h:1").min_gap == 45
+    assert lp.pacer_for("ollama", "http://localhost:1").min_gap == 45
 
 
 def test_langchain_limiter_blocks_via_pacer(tmp_path):
@@ -273,7 +273,7 @@ def test_langchain_limiter_blocks_via_pacer(tmp_path):
 
 def test_legacy_config_carries_pacing_only_when_on():
     from ui._config import _legacy_from_endpoint
-    base = {"provider": "ollama", "base_url": "http://h", "default_model": "x"}
+    base = {"provider": "ollama", "base_url": "http://localhost", "default_model": "x"}
     off = _legacy_from_endpoint(base)["ollama"]
     assert "min_gap_seconds" not in off and "daily_cap" not in off
     on = _legacy_from_endpoint({**base, "min_gap_seconds": 60, "daily_cap": 100})["ollama"]

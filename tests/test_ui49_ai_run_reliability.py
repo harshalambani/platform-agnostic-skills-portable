@@ -22,7 +22,7 @@ from ui.tabs import _generic, settings  # noqa: E402
 
 def _http_error(code, body, headers=None):
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-    return urllib.error.HTTPError("http://x/chat/completions", code, "err",
+    return urllib.error.HTTPError("http://localhost/chat/completions", code, "err",
                                   headers or {}, io.BytesIO(raw))
 
 
@@ -71,7 +71,7 @@ def test_a_occasional_refusals_do_not_stop_a_mostly_answered_run(monkeypatch):
     pattern = ([False] * 4 + [True] * 2) * 4
     g = _guard_with(monkeypatch, pattern)
     for _ in pattern:
-        g.ask("openai_compatible", "http://x", "mdl", "s", "u")
+        g.ask("openai_compatible", "http://localhost", "mdl", "s", "u")
         assert not g.stopped
     # negative: the wrong behaviour (stopping) did not occur
     assert g.reason == ""
@@ -83,7 +83,7 @@ def test_a_run_that_mostly_fails_stops_even_with_rare_successes(monkeypatch):
     pattern = ([False] * 4 + [True]) * 3 + [False] * 5   # 17 failures in last 20
     g = _guard_with(monkeypatch, pattern)
     for _ in pattern:
-        g.ask("openai_compatible", "http://x", "mdl", "s", "u")
+        g.ask("openai_compatible", "http://localhost", "mdl", "s", "u")
         if g.stopped:
             break
     assert g.stopped
@@ -93,7 +93,7 @@ def test_a_run_that_mostly_fails_stops_even_with_rare_successes(monkeypatch):
 def test_a_five_in_a_row_still_stops(monkeypatch):
     g = _guard_with(monkeypatch, [False] * 5)
     for _ in range(5):
-        g.ask("openai_compatible", "http://x", "mdl", "s", "u")
+        g.ask("openai_compatible", "http://localhost", "mdl", "s", "u")
     assert g.stopped and "5 calls in a row" in g.reason
 
 
@@ -102,7 +102,7 @@ def test_a_real_out_of_credits_stops_at_the_first_call(monkeypatch):
         raise _http_error(429, {"error": {"message": "Your credit balance is too low"}})
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     g = m._LLMGuard("mdl")
-    assert g.ask("openai_compatible", "http://x", "mdl", "s", "u") is None
+    assert g.ask("openai_compatible", "http://localhost", "mdl", "s", "u") is None
     assert g.stopped and g.out_of_credits
 
 
@@ -131,9 +131,9 @@ def test_b_gemini_429_backs_off_as_rate_limit(monkeypatch):
         raise _http_error(429, GEMINI_RATE)
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     with pytest.raises(m._LLMRateLimited):
-        m._openai_compatible_chat("http://x", "gemini-2.5-flash", "s", "u")
+        m._openai_compatible_chat("http://localhost", "gemini-2.5-flash", "s", "u")
     g = m._LLMGuard("mdl")
-    g.ask("openai_compatible", "http://x", "gemini-2.5-flash", "s", "u")
+    g.ask("openai_compatible", "http://localhost", "gemini-2.5-flash", "s", "u")
     assert g.stopped and g.rate_limited and not g.out_of_credits
 
 
@@ -146,7 +146,7 @@ def _capture_payload(monkeypatch, model):
         seen.update(json.loads(req.data))
         return _Resp({"choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}]})
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-    m._openai_compatible_chat("http://x", model, "s", "u")
+    m._openai_compatible_chat("http://localhost", model, "s", "u")
     return seen
 
 
@@ -181,7 +181,7 @@ def test_e_chat_call_drops_the_models_prefix_and_leaves_others(monkeypatch):
 
 # ------------------------------------------------------------ (d) pre-check
 
-OPENAI_EP = {"provider": "openai_compatible", "base_url": "http://host/v1", "default_model": "good"}
+OPENAI_EP = {"provider": "openai_compatible", "base_url": "http://localhost/v1", "default_model": "good"}
 
 
 def _router(chat, models=("good", "other")):
@@ -260,7 +260,7 @@ def test_d_optional_ai_step_still_only_warns():
 def test_e_gemini_listed_names_are_bare_and_default_stays_selected(monkeypatch):
     fake, _ = _router(lambda r: _Resp({}), models=("models/gemini-2.5-flash", "models/gemini-2.5-pro"))
     monkeypatch.setattr("urllib.request.urlopen", fake)
-    ep = {"provider": "openai_compatible", "base_url": "http://g/v1beta/openai",
+    ep = {"provider": "openai_compatible", "base_url": "http://localhost/v1beta/openai",
           "default_model": "gemini-2.5-pro"}
     res = _health.check(ep)
     assert res.models == ("gemini-2.5-flash", "gemini-2.5-pro")
@@ -278,7 +278,7 @@ def test_e_gemini_listed_names_are_bare_and_default_stays_selected(monkeypatch):
 def test_e_ollama_and_groq_names_unchanged(monkeypatch):
     fake, _ = _router(lambda r: _Resp({}), models=("llama-3.3-70b-versatile", "openai/gpt-oss-20b"))
     monkeypatch.setattr("urllib.request.urlopen", fake)
-    res = _health.check({"provider": "openai_compatible", "base_url": "http://groq/openai/v1"})
+    res = _health.check({"provider": "openai_compatible", "base_url": "http://localhost/openai/v1"})
     assert res.models == ("llama-3.3-70b-versatile", "openai/gpt-oss-20b")
     assert _health.bare_model_name("qwen2.5:7b") == "qwen2.5:7b"
     assert _health.bare_model_name("library/model:latest") == "library/model:latest"
@@ -373,7 +373,7 @@ def test_g_empty_list_or_non_json_does_not_crash_and_falls_back_to_status():
         raise _http_error(500, [])
     import unittest.mock as um
     with um.patch("urllib.request.urlopen", fake_urlopen):
-        assert m._openai_compatible_chat("http://x", "mdl", "s", "u") is None
+        assert m._openai_compatible_chat("http://localhost", "mdl", "s", "u") is None
     assert m._LLM_LAST_ERROR.get("reason", "").endswith("HTTP 500") or "HTTP 500" in m._LLM_LAST_ERROR.get("reason", "")
 
 

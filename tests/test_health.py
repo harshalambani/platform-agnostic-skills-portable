@@ -185,5 +185,5 @@ class TestGetJson:
     def test_parses_json(self):
         body = {"hello": "world"}
         with patch("ui._health.request.urlopen", return_value=_mock_urlopen(body)):
-            result = _get_json("http://example.com/test")
+            result = _get_json("http://localhost/test")
         assert result == {"hello": "world"}
