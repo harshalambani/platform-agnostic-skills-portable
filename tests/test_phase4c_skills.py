@@ -244,14 +244,21 @@ class TestCSVAnalyzerSafety:
         # Remove langchain import
         source = source.replace("from langchain_core.tools import tool", "")
         # Remove @tool decorators
-        source = re.sub(r"^@tool\s*$", "", source, flags=re.MULTILINE)
+        source = re.sub(r"^\s*@tool\s*$", "", source, flags=re.MULTILINE)
         ns = {}
         exec(compile(source, "tools.py", "exec"), ns)
-        self.describe_csv = ns["describe_csv"]
-        self.aggregate_csv = ns["aggregate_csv"]
-        self.value_counts_csv = ns["value_counts_csv"]
-        self.filter_count_csv = ns["filter_count_csv"]
-        self.sort_head_csv = ns["sort_head_csv"]
+
+        def _bound(name):
+            # AUD-05: tools are built per file and take no path argument;
+            # keep the old call shape (path first) by binding a closure per call.
+            return lambda path, *a, **k: {
+                f.__name__: f for f in ns["_make_tools"](path)}[name](*a, **k)
+
+        self.describe_csv = _bound("describe_csv")
+        self.aggregate_csv = _bound("aggregate_csv")
+        self.value_counts_csv = _bound("value_counts_csv")
+        self.filter_count_csv = _bound("filter_count_csv")
+        self.sort_head_csv = _bound("sort_head_csv")
         self.load_csv = ns["_load_csv"]
         self.ns = ns
 

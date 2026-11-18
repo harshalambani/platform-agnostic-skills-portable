@@ -47,9 +47,15 @@ SALES_CSV = str(FIXTURES / "sales.csv")
 def tools():
     source = TOOLS_PATH.read_text()
     source = source.replace("from langchain_core.tools import tool", "")
-    source = re.sub(r"^@tool\s*$", "", source, flags=re.MULTILINE)
+    source = re.sub(r"^\s*@tool\s*$", "", source, flags=re.MULTILINE)
     ns: dict = {}
     exec(compile(source, "tools.py", "exec"), ns)
+    # AUD-05: the tools are built per file (no path argument). Keep the old
+    # call shape (path first) by binding a fresh closure for each call.
+    for name in ("describe_csv", "aggregate_csv", "value_counts_csv",
+                 "filter_count_csv", "sort_head_csv"):
+        ns[name] = (lambda n: lambda path, *a, **k: {
+            f.__name__: f for f in ns["_make_tools"](path)}[n](*a, **k))(name)
     return ns
 
 

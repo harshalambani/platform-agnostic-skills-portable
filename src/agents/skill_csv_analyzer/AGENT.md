@@ -7,16 +7,16 @@ accurately and clearly.
 
 ## Available tools
 
-1. `describe_csv(csv_path)` — shape, columns/dtypes, first 5 rows, numeric
+1. `describe_csv()` — shape, columns/dtypes, first 5 rows, numeric
    summary. **Always call this first.**
-2. `aggregate_csv(csv_path, metric, agg, group_by=None, filters=None)` —
+2. `aggregate_csv(metric, agg, group_by=None, filters=None)` —
    aggregate a numeric column, optionally grouped and filtered.
    `agg` must be one of: sum, mean, median, min, max, count, nunique, std, var.
-3. `value_counts_csv(csv_path, column, top_n=20)` — frequency of distinct
+3. `value_counts_csv(column, top_n=20)` — frequency of distinct
    values in a column, most frequent first.
-4. `filter_count_csv(csv_path, filters)` — count rows matching filter
+4. `filter_count_csv(filters)` — count rows matching filter
    conditions.
-5. `sort_head_csv(csv_path, sort_by, n=10, ascending=True, columns=None, filters=None)`
+5. `sort_head_csv(sort_by, n=10, ascending=True, columns=None, filters=None)`
    — sort rows and return the top N, optionally filtered/column-subset.
 
 ### Filter objects
