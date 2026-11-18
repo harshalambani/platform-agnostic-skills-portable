@@ -126,24 +126,24 @@ def test_http_429_from_the_wire_carries_retry_after(monkeypatch):
     hdrs["Retry-After"] = "7"
 
     def boom(*a, **k):
-        raise HTTPError("http://x.invalid", 429, "Too Many", hdrs, io.BytesIO(b""))
+        raise HTTPError("http://localhost", 429, "Too Many", hdrs, io.BytesIO(b""))
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     monkeypatch.setattr(m, "_emit_mapper_progress", lambda msg: None)
     for chat in (m._ollama_chat, m._openai_compatible_chat):
         with pytest.raises(m._LLMRateLimited) as ei:
-            chat("http://x.invalid", "mm", "s", "u")
+            chat("http://localhost", "mm", "s", "u")
         assert ei.value.retry_after == 7.0
 
 
 def test_other_http_errors_are_not_rate_limits(monkeypatch):
     """NEGATIVE: a 500 stays a plain failure (None), not a 429 wait."""
     def boom(*a, **k):
-        raise HTTPError("http://x.invalid", 500, "Server", Message(), io.BytesIO(b""))
+        raise HTTPError("http://localhost", 500, "Server", Message(), io.BytesIO(b""))
     import urllib.request
     monkeypatch.setattr(urllib.request, "urlopen", boom)
     monkeypatch.setattr(m, "_emit_mapper_progress", lambda msg: None)
-    assert m._ollama_chat("http://x.invalid", "mm", "s", "u") is None
+    assert m._ollama_chat("http://localhost", "mm", "s", "u") is None
 
 
 # ---- (b) consecutive failures ----------------------------------------------

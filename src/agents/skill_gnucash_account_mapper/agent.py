@@ -2540,9 +2540,29 @@ def _wants_reasoning_effort(model: str) -> bool:
     return _reasoning_effort_for(model) is not None
 
 
+def _address_refused(base_url, api_key=None) -> bool:
+    """AUD-03: the endpoint address rule at send time. When it is broken,
+    record a fatal plain-words reason (the pass stops), send nothing, say True."""
+    try:
+        from agents.endpoint_policy import check_send  # noqa: PLC0415
+    except ImportError:
+        from endpoint_policy import check_send  # noqa: PLC0415
+    try:
+        check_send(base_url, api_key)
+    except ValueError as e:
+        _LLM_LAST_ERROR.clear()
+        _LLM_LAST_ERROR.update({"reason": str(e), "fatal": True, "credits": False})
+        _emit_mapper_progress(f"  AI endpoint refused: {e}")
+        return True
+    return False
+
+
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
     """Call Ollama's /api/chat directly. Returns the assistant reply or None."""
     from urllib import request as _req
+
+    if _address_refused(base_url):
+        return None
 
     payload = json.dumps({
         "model": model,
@@ -2610,19 +2630,9 @@ def _openai_compatible_chat(
     payload = json.dumps(body_out).encode("utf-8")
 
     headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
+    if _address_refused(base_url, api_key):
+        return None
     if api_key:
-        # AUD-03: a key never goes over plain http. Nothing is sent; the pass stops.
-        try:
-            try:
-                from agents.endpoint_policy import check_send  # noqa: PLC0415
-            except ImportError:
-                from endpoint_policy import check_send  # noqa: PLC0415
-            check_send(base_url, api_key)
-        except ValueError as e:
-            _LLM_LAST_ERROR.clear()
-            _LLM_LAST_ERROR.update({"reason": str(e), "fatal": True, "credits": False})
-            _emit_mapper_progress(f"  OpenAI-compatible error: {e}")
-            return None
         headers["Authorization"] = f"Bearer {api_key}"
 
     req = _req.Request(

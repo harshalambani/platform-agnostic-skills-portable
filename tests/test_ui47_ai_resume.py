@@ -27,7 +27,7 @@ import gnc_book_fixture as fx  # noqa: E402
 
 MODEL = "stub-model-zz"
 HIST = [{"account": "Expenses:Food", "description": "CAFE ALPHA", "frequency": 5}]
-URL = "http://x.invalid"
+URL = "http://localhost"
 
 
 def _rows(n, tag="MISC PAYMENT"):
