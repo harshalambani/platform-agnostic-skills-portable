@@ -29,7 +29,11 @@ true bill->settlement link lives only in the dropped BILL-ENTRY anchor rows,
 now preserved on the Part I References sheet.
 
 Usage:
-    python parse_krc_bills.py <cn_dir> <ledger_xlsx> <password> <out_xlsx>
+    python parse_krc_bills.py <cn_dir> <ledger_xlsx> <out_xlsx> [--password-stdin]
+
+With --password-stdin the contract-note password is read from the first line
+of stdin (only the trailing newline is stripped). It is never taken from the
+command line, where any local process could read it.
 
 Exit codes:
     0  success — all bills matched, no review rows
@@ -48,6 +52,7 @@ from pathlib import Path
 # skill_hsbc/scripts/parse_tsv.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from agents._native_resolve import resolve_qpdf  # noqa: E402
+from agents.secret_redact import redact_text  # noqa: E402
 
 
 # ---------- helpers ----------
@@ -574,11 +579,17 @@ def write_workbook(out_path, bills, trade_lines, recon, unmatched, diag):
 
 # ---------- main ----------
 def main() -> int:
-    if len(sys.argv) < 5:
-        print("Usage: parse_krc_bills.py <cn_dir> <ledger_xlsx> <password> <out_xlsx>",
+    args = [a for a in sys.argv[1:] if a != "--password-stdin"]
+    if len(args) != 3:
+        # Fixed text only: an extra argument (for example a password typed the
+        # old way) is never taken as a password and never echoed.
+        print("Usage: parse_krc_bills.py <cn_dir> <ledger_xlsx> <out_xlsx> [--password-stdin]",
               file=sys.stderr)
         return 1
-    cn_dir, ledger_xlsx, pw, out_xlsx = sys.argv[1:5]
+    cn_dir, ledger_xlsx, out_xlsx = args
+    pw = ""
+    if "--password-stdin" in sys.argv[1:]:
+        pw = sys.stdin.readline().rstrip("\r\n")
 
     if not Path(cn_dir).is_dir():
         print(f"ERROR: contract-note folder not found: {cn_dir}", file=sys.stderr)
@@ -601,8 +612,9 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001 — one bad note must not sink the batch
             # Decryption or parse failure on a single note: record it and carry
             # on so the workbook is still produced for every note that did parse.
-            skipped.append((name, str(e)))
-            print(f"WARNING: could not parse {name}: {e}", file=sys.stderr)
+            why = redact_text(str(e), [pw])
+            skipped.append((name, why))
+            print(f"WARNING: could not parse {name}: {why}", file=sys.stderr)
             continue
         if rec.get("net_amount") is None:
             skipped.append((name, "no bill amount found"))

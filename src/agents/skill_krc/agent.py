@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from agents.secret_redact import redact_text
+
 SCRIPT = Path(__file__).parent / "scripts" / "parse_krc_ledger.py"
 
 
@@ -27,12 +29,16 @@ def run(
     output_path. Direct mode — no LLM. config_path / model_override are accepted
     for interface compatibility and ignored.
     """
+    # The password goes to the script on stdin, never in its argv.
+    args = [sys.executable, str(SCRIPT), pdf_path, output_path]
+    if password:
+        args.append("--password-stdin")
     result = subprocess.run(
-        [sys.executable, str(SCRIPT), pdf_path, password, output_path],
+        args, input=(password + "\n") if password else None,
         capture_output=True, text=True,
     )
-    out = (result.stdout or "").strip()
-    err = (result.stderr or "").strip()
+    out = redact_text((result.stdout or "").strip(), [password])
+    err = redact_text((result.stderr or "").strip(), [password])
     if result.returncode == 1:
         return f"ERROR: {err or out}"
     if result.returncode == 2:
