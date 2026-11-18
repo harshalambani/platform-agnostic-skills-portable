@@ -1195,6 +1195,7 @@ def _make_run_handler(skill: SkillInfo):
         # -- Materialise legacy config --
         try:
             legacy_cfg = _config.materialize_legacy_config(active)
+            state["legacy_cfg"] = legacy_cfg  # AUD-02: removed by the wrappers below
         except Exception as e:
             yield add(f"Error: config error: {e}"), gr.update(interactive=False, value=None), gr.update()
             return
@@ -1404,25 +1405,33 @@ def _make_run_handler(skill: SkillInfo):
     declared = tuple(getattr(skill.output, "extra_outputs", ()) or ())
     if not declared:
         def _run(*args):
-            yield from _run_core({}, *args)
+            state: dict = {}
+            try:
+                yield from _run_core(state, *args)
+            finally:
+                # AUD-02: success, error, cancel and GeneratorExit all end here.
+                _config.discard_legacy_config(state.get("legacy_cfg"))
         return _run
 
     def _run_with_extras(*args):
         state: dict = {}
         first = True
-        for t in _run_core(state, *args):
-            if first:
-                # A new run starts with every extra output disabled and empty.
-                ext = [gr.update(interactive=False, value=None) for _ in declared]
-                ext.append(gr.update(value=""))
-                first = False
-            elif state.get("extras") and not state.get("extras_sent"):
-                ext = list(state["extras"]["updates"])
-                ext.append(gr.update(value="\n".join(state["extras"]["paths"])))
-                state["extras_sent"] = True
-            else:
-                ext = [gr.update() for _ in range(len(declared) + 1)]
-            yield (*t, *ext)
+        try:
+            for t in _run_core(state, *args):
+                if first:
+                    # A new run starts with every extra output disabled and empty.
+                    ext = [gr.update(interactive=False, value=None) for _ in declared]
+                    ext.append(gr.update(value=""))
+                    first = False
+                elif state.get("extras") and not state.get("extras_sent"):
+                    ext = list(state["extras"]["updates"])
+                    ext.append(gr.update(value="\n".join(state["extras"]["paths"])))
+                    state["extras_sent"] = True
+                else:
+                    ext = [gr.update() for _ in range(len(declared) + 1)]
+                yield (*t, *ext)
+        finally:
+            _config.discard_legacy_config(state.get("legacy_cfg"))
     return _run_with_extras
 
 
