@@ -135,24 +135,29 @@ def build_agent(
 
     Args:
         tools:          List of LangChain @tool-decorated functions.
-        system_prompt:  System prompt string (baked into tool instructions).
+        system_prompt:  System prompt sent to the model as the first message
+                        of every step. Must not be empty.
         config_path:    Path to legacy config.yaml for load_model().
         model_override: Optional model name override.
 
     Returns:
         A compiled LangGraph CompiledGraph (callable with .invoke()).
+
+    Raises:
+        ValueError: if system_prompt is empty or None. Checked before any
+            model is loaded.
     """
+    if not isinstance(system_prompt, str) or not system_prompt.strip():
+        raise ValueError(
+            "build_agent needs a non-empty system prompt; the agent's "
+            "instructions would otherwise never reach the model."
+        )
+
     from langgraph.prebuilt import create_react_agent
 
     llm = load_model(config_path, model_override)
 
-    # Create agent with tools; system prompt will be in the user message
-    agent = create_react_agent(llm, tools)
-
-    # Store system prompt as an attribute so skill runners can use it
-    agent._system_prompt = system_prompt
-
-    return agent
+    return create_react_agent(llm, tools, prompt=system_prompt)
 
 
 # ---------------------------------------------------------------------------
