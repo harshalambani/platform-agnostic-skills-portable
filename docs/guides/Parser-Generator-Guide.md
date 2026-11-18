@@ -80,7 +80,7 @@ Open the **Parser Generator** tab. Fields:
 |-------|---------------|
 | **Task** | `Fix a failing parser` or `Create a new parser`. |
 | **Parser** | A dropdown of the project's known parsers (with a ↻ refresh). Fix: pick the failing `parse_<format>.py`. Create: type a brand-new path (must be `src/agents/skill_<X>/scripts/parse_<format>.py`) - the field accepts custom values. |
-| **Tie-out args** | *(Fix only)* the parser's own CLI arguments, used to re-run the tie-out - e.g. `statement.pdf out.xlsx`. Do not type a password here; use a sample statement that has none. Arguments you type here are used exactly as typed. |
+| **Tie-out args** | *(Fix only)* the parser's own CLI arguments, used to re-run the tie-out - e.g. `statement.pdf out.xlsx`. Do not type a password here; use a sample statement that has none. If you do, a parser that takes `--password-stdin` is given it on stdin (type it as `--password <value>`), never on its command line. Arguments you type here are used exactly as typed. |
 | **Notes** | Fix: the symptom or the expected closing balance. Create: the format / `FORMAT_NAME`. |
 | **Model** | Your configured LLM (Ollama or OpenAI-compatible). Required - this tab uses the agent. |
 
@@ -142,12 +142,12 @@ this table to fill the tab fields correctly when you Fix one.
 
 | Parser (dropdown entry) | What it does | Tie-out args (its CLI signature) | Tie-out exit 2? | Tunable blanks |
 |---|---|---|:--:|---|
-| `skill_krc / parse_krc_ledger.py` | KR Choksey broker ledger -> Simplified Ledger xlsx | `<pdf> <password> <out.xlsx>` | **Yes** | 19 - column x0 ranges (`VNO_X0`..`DRCR_X0`), row/segment regexes, boilerplate + transfer markers |
+| `skill_krc / parse_krc_ledger.py` | KR Choksey broker ledger -> Simplified Ledger xlsx | `<pdf> <out.xlsx> [--password-stdin]` | **Yes** | 19 - column x0 ranges (`VNO_X0`..`DRCR_X0`), row/segment regexes, boilerplate + transfer markers |
 | `skill_hsbc / parse_tsv.py` | HSBC statement TSV -> cleaned JSON | `--work-dir <dir> [--out cleaned.json]` | No | 9 - column-right positions (`DEFAULT_*_RIGHT`, `NUM_FRAGMENT_*`), money/date regexes |
 | `skill_bob / extract_bob_statement.py` | Bank of Baroda PDF -> CSV | `<input.pdf> <out.csv>` | No | 5 - `DATE_RE`, `AMOUNT_RE`, `FOOTER_MARKERS`, `INCLUDE_OPENING_BALANCE`, `BASELINE_TOL` |
 | `skill_26as / extract_26as_to_xlsx.py` | Form 26AS PDF -> multi-sheet xlsx | `<input.pdf> <output.xlsx>` | No | field/section regexes (`DEDUCTOR_RX`, `TXN_RX`, `PART_DEFS`, `*_RE`) - **plus many openpyxl styling constants to leave alone** |
-| `skill_cc_sort / extract_sort_cc_pdfs.py` | Sort / route credit-card PDFs | `<in_folder> [out_folder] [password] [flags]` | No | none (a sorter, not a coordinate parser) |
-| `skill_krc_recon / parse_krc_bills.py` | KR Choksey contract-note reconcile | `<cn_dir> <ledger_xlsx> <password> <out_xlsx>` | No | none externalised |
+| `skill_cc_sort / extract_sort_cc_pdfs.py` | Sort / route credit-card PDFs | `<in_folder> [out_folder] [flags]` (password: `--password-stdin`, or the old third argument) | No | none (a sorter, not a coordinate parser) |
+| `skill_krc_recon / parse_krc_bills.py` | KR Choksey contract-note reconcile | `<cn_dir> <ledger_xlsx> <out_xlsx> [--password-stdin]` | No | none externalised |
 
 ### What this means in practice
 
