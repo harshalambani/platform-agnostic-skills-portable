@@ -47,5 +47,5 @@ Translation quality depends on the model you have connected — a larger model g
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or set an endpoint in Settings. |
+| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
 | Output mixes languages or is off. | Set the source language explicitly instead of 'auto', or try a larger model. |

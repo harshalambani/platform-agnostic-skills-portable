@@ -51,5 +51,5 @@ The runtime stays deterministic — this tool only edits the format-specific bla
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | This dev tool uses the LLM. Start Ollama or set an endpoint in Settings. |
+| Run errors mentioning the endpoint / model. | This dev tool uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
 | Tie-out still exits non-zero. | Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak. |

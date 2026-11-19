@@ -188,7 +188,7 @@ help:
 
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings."
+      fix: "Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings."
     - problem: "Extraction fails immediately."
       fix: "The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both."
     - problem: "The reply says this statement \"does not belong in this book\"."
