@@ -104,14 +104,27 @@ def message_from_body(body: object) -> str:
     return str(body.get("message") or "")
 
 
-def redact(text: object, secrets: tuple = ()) -> str:
+def redact(text: object, secrets: tuple = (), marker: str = "[redacted]") -> str:
     """Return ``text`` with key-like tokens (and any explicit ``secrets``)
-    replaced by ``[redacted]``."""
+    replaced by ``marker``."""
     out = "" if text is None else str(text)
     for s in secrets:
         if s:       # any length: the mapper's own redaction hid a short key too
-            out = out.replace(str(s), "[redacted]")
-    return _KEY_LIKE.sub("[redacted]", out)
+            out = out.replace(str(s), marker)
+    return _KEY_LIKE.sub(marker, out)
+
+
+def provider_message(raw: object, secrets: tuple = (), marker: str = "[redacted]") -> str:
+    """The provider's own error text from a raw HTTP error body (OpenAI style
+    {"error": {"message": ...}}, or a list wrapping it), redacted and capped.
+    A body that is not JSON is used as it is when it is short. "" when none."""
+    import json  # noqa: PLC0415
+    raw = "" if raw is None else str(raw)
+    try:
+        msg = message_from_body(json.loads(raw))
+    except Exception:  # noqa: BLE001
+        msg = raw if len(raw) < 200 else ""
+    return redact(str(msg).strip(), secrets, marker)[:_MAX_MESSAGE]
 
 
 @dataclass

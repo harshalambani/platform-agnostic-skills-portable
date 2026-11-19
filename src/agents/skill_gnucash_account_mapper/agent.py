@@ -24,6 +24,8 @@ from urllib.error import HTTPError as _HTTPError
 import yaml
 
 from agents.balance_utils import _safe_float
+from agents import llm_client as _llm_client
+from agents import llm_errors as _llm_errors
 
 
 # ---------------------------------------------------------------------------
@@ -2089,14 +2091,8 @@ _LLM_STOPPED_MARKER = "AI pass stopped"   # in MatchReason of rows the stopped p
 # the Authorization header are never put in here.
 _LLM_LAST_ERROR: Dict = {}
 
-_SECRET_LIKE_RX = re.compile(r"(?i)\bBearer\s+\S+|\b(?:sk|key|tok)[-_][A-Za-z0-9_\-]{8,}")
-
-
 def _redact_llm_text(text, api_key=None) -> str:
-    s = str(text or "")
-    if api_key:
-        s = s.replace(str(api_key), "***")
-    return _SECRET_LIKE_RX.sub("***", s)
+    return _llm_errors.redact(text, (api_key,) if api_key else (), "***")
 
 
 def _message_from_body(body) -> str:
@@ -2117,14 +2113,7 @@ def _provider_message(err, api_key=None) -> str:
         raw = err.read().decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         return ""
-    msg = ""
-    try:
-        body = json.loads(raw)
-        # UI-49: an object body, or a LIST wrapping it (Gemini's compatible address)
-        msg = _message_from_body(body)
-    except Exception:  # noqa: BLE001
-        msg = raw if len(raw) < 200 else ""
-    out = _redact_llm_text(str(msg).strip(), api_key)[:200]
+    out = _llm_errors.provider_message(raw, (api_key,) if api_key else (), "***")
     try:
         err._pa_provider_msg = out
     except Exception:  # noqa: BLE001
@@ -2183,34 +2172,8 @@ def _take_llm_error() -> Dict:
     return err
 
 
-class _LLMRateLimited(Exception):
-    """The provider answered HTTP 429. `retry_after` is the seconds the server
-    asked for (None if it sent no usable Retry-After)."""
-
-    def __init__(self, retry_after: Optional[float] = None):
-        super().__init__("HTTP 429 rate limited")
-        self.retry_after = retry_after
-
-
-def _parse_retry_after(value) -> Optional[float]:
-    """Retry-After is either delta-seconds or an HTTP date. None if unusable."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    try:
-        secs = float(text)
-        return secs if secs >= 0 else None
-    except ValueError:
-        pass
-    try:
-        from email.utils import parsedate_to_datetime  # noqa: PLC0415
-        from datetime import datetime, timezone  # noqa: PLC0415
-        when = parsedate_to_datetime(text)
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
-    except (TypeError, ValueError):
-        return None
+_LLMRateLimited = _llm_client.RateLimited
+_parse_retry_after = _llm_client.parse_retry_after
 
 
 def _llm_sleep(seconds: float) -> None:
@@ -2480,24 +2443,8 @@ def _resolve_llm_endpoint_config(
     or model is a hard ValueError. Callers must surface it through
     ``_emit_mapper_progress`` rather than guess an endpoint.
     """
-    cfg = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
-    provider = cfg.get("provider")
-    if provider not in ("ollama", "openai_compatible"):
-        raise ValueError(
-            f"Unknown or missing LLM provider {provider!r} in {config_path} "
-            "-- refusing to guess an endpoint."
-        )
-    ep = cfg.get(provider) or {}
-    base_url = (ep.get("base_url") or "").rstrip("/")
-    if not base_url:
-        raise ValueError(f"No base_url configured for provider '{provider}' in {config_path}.")
-    _register_pacing(cfg)
-    model = model_override or ep.get("default_model")
-    if not model:
-        raise ValueError(f"No model configured for provider '{provider}' in {config_path}.")
-    api_key = ep.get("api_key") if provider == "openai_compatible" else None
-    temperature = float(ep.get("temperature", 0.0))
-    return provider, base_url, model, api_key, temperature
+    ep = _llm_client.resolve_endpoint(config_path, model_override)
+    return ep.provider, ep.base_url, ep.model, ep.api_key, ep.temperature
 
 
 # MAP-24: the reply cap. 120 tokens was too small for a model that reasons
@@ -2523,17 +2470,7 @@ except ImportError:  # CLI / bare-import usage
         reply_cap_for as _reply_cap_for)
 
 
-class _Reply(str):
-    """The message CONTENT of an AI reply (never a reasoning field), plus why
-    the model stopped (`finish_reason`: "stop", "length", ... or None when the
-    server did not say). A str subclass so every existing caller, and the
-    None-on-failure contract, is unchanged."""
-    finish_reason: Optional[str] = None
-
-    def __new__(cls, text: str, finish_reason: Optional[str] = None):
-        obj = super().__new__(cls, text)
-        obj.finish_reason = finish_reason
-        return obj
+_Reply = _llm_client.Reply
 
 
 def _wants_reasoning_effort(model: str) -> bool:
@@ -2557,45 +2494,28 @@ def _address_refused(base_url, api_key=None) -> bool:
     return False
 
 
+def _forward_chat(ep, system: str, user: str, timeout: float, label: str):
+    """Send one call through the single AI client (pacing is done by _llm_chat,
+    so the client is told not to pace again). A reply, or None with the reason
+    noted in _LLM_LAST_ERROR; a 429 is raised (_LLMRateLimited)."""
+    try:
+        return _llm_client.chat(ep, system, user, timeout=timeout, paced=False)
+    except _llm_client.LlmError as e:
+        orig = e.original if e.original is not None else e
+        if isinstance(orig, _HTTPError):
+            orig._pa_provider_msg = _llm_errors.provider_message(
+                e.raw_body, (ep.api_key,) if ep.api_key else (), "***")
+        _note_llm_error(orig, ep.base_url, ep.model, timeout, ep.api_key)
+        _emit_mapper_progress(f"  {label} error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
+        return None
+
+
 def _ollama_chat(base_url: str, model: str, system: str, user: str, timeout: float = 60.0) -> Optional[str]:
     """Call Ollama's /api/chat directly. Returns the assistant reply or None."""
-    from urllib import request as _req
-
     if _address_refused(base_url):
         return None
-
-    payload = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "stream": False,
-        "options": {"temperature": 0.0, "num_predict": LLM_REPLY_MAX_TOKENS},
-    }).encode("utf-8")
-
-    req = _req.Request(
-        f"{base_url}/api/chat",
-        data=payload,
-        method="POST",
-        headers={"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"},
-    )
-    try:
-        with _req.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8", errors="replace"))
-            # Only message CONTENT counts; a "thinking" field is never the answer.
-            return _Reply((body.get("message") or {}).get("content") or "",
-                          body.get("done_reason"))
-    except _HTTPError as e:
-        if e.code == 429 and not _llm_errors_out_of_credits(429, _provider_message(e)):
-            raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _note_llm_error(e, base_url, model, timeout)
-        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
-        return None
-    except Exception as e:  # noqa: BLE001
-        _note_llm_error(e, base_url, model, timeout)
-        _emit_mapper_progress(f"  Ollama error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
-        return None
+    ep = _llm_client.Endpoint("ollama", base_url, model, None, max_tokens=LLM_REPLY_MAX_TOKENS)
+    return _forward_chat(ep, system, user, timeout, "Ollama")
 
 
 def _openai_compatible_chat(
@@ -2612,54 +2532,10 @@ def _openai_compatible_chat(
     OpenAI request/response schema and a Bearer Authorization header when
     an api_key is configured.
     """
-    from urllib import request as _req
-
-    body_out = {
-        "model": _chat_model_name(model),
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": 0.0,
-        "max_tokens": _reply_cap_for(model),
-        "stream": False,
-    }
-    effort = _reasoning_effort_for(model)
-    if effort:
-        body_out["reasoning_effort"] = effort
-    payload = json.dumps(body_out).encode("utf-8")
-
-    headers = {"Content-Type": "application/json", "User-Agent": "PA-Skills/mapper"}
     if _address_refused(base_url, api_key):
         return None
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    req = _req.Request(
-        f"{base_url}/chat/completions",
-        data=payload,
-        method="POST",
-        headers=headers,
-    )
-    try:
-        with _req.urlopen(req, timeout=timeout) as resp:
-            body = json.loads(resp.read().decode("utf-8", errors="replace"))
-            choices = body.get("choices") or []
-            if not choices:
-                return _Reply("")
-            # Only message CONTENT counts; a "reasoning" field is never the answer.
-            return _Reply((choices[0].get("message") or {}).get("content") or "",
-                          choices[0].get("finish_reason"))
-    except _HTTPError as e:
-        if e.code == 429 and not _llm_errors_out_of_credits(429, _provider_message(e, api_key)):
-            raise _LLMRateLimited(_parse_retry_after(e.headers.get("Retry-After") if e.headers else None))
-        _note_llm_error(e, base_url, model, timeout, api_key)
-        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
-        return None
-    except Exception as e:  # noqa: BLE001
-        _note_llm_error(e, base_url, model, timeout, api_key)
-        _emit_mapper_progress(f"  OpenAI-compatible error: {_LLM_LAST_ERROR.get('reason', 'failed')}")
-        return None
+    ep = _llm_client.Endpoint("openai_compatible", base_url, model, api_key or None)
+    return _forward_chat(ep, system, user, timeout, "OpenAI-compatible")
 
 
 def _llm_chat(

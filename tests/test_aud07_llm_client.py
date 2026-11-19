@@ -427,10 +427,8 @@ def test_https_with_a_key_is_allowed_by_the_address_rule(monkeypatch):
 # ---------------------------------------------------------------- redact widened
 
 def _mapper_rx():
-    src = (ROOT / "src/agents/skill_gnucash_account_mapper/agent.py").read_text(encoding="utf-8")
-    m = re.search(r'^_SECRET_LIKE_RX = re\.compile\((r".*?")\)$', src, re.M)
-    assert m, "mapper pattern moved"
-    return re.compile(eval(m.group(1)))  # noqa: S307 - a literal from our own source
+    # the pattern the mapper used before AUD-07 P3 (kept here as the floor redact must cover)
+    return re.compile(r"(?i)\bBearer\s+\S+|\b(?:sk|key|tok)[-_][A-Za-z0-9_\-]{8,}")
 
 
 @pytest.mark.parametrize("text", [
@@ -453,7 +451,7 @@ def test_redact_hides_an_explicit_secret_of_any_length():
 
 # ---------------------------------------------------------------- nothing calls it yet
 
-ALLOWED_IMPORTERS = ["ui/_health.py"]       # AUD-07 P2: the health check; P3 adds the mapper
+ALLOWED_IMPORTERS = ["src/agents/skill_gnucash_account_mapper/agent.py", "ui/_health.py"]
 
 
 def test_only_the_expected_modules_import_llm_client():

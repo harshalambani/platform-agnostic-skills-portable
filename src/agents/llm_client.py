@@ -94,8 +94,9 @@ class RateLimited(Exception):
     ``retry_after`` is the seconds the server asked for, or None."""
 
     def __init__(self, retry_after: Optional[float] = None, original: Optional[BaseException] = None,
-                 detail: str = ""):
+                 detail: str = "", raw_body: str = ""):
         super().__init__("HTTP 429 rate limited")
+        self.raw_body = raw_body
         self.retry_after = retry_after
         self.original = original      # the urllib exception, for callers that word it themselves
         self.detail = detail          # the service's own message (key removed)
@@ -110,8 +111,9 @@ class LlmError(Exception):
     health check)."""
 
     def __init__(self, failure: "llm_errors.LlmFailure", original: Optional[BaseException] = None,
-                 detail: str = ""):
+                 detail: str = "", raw_body: str = ""):
         super().__init__(failure.reason)
+        self.raw_body = raw_body      # the HTTP error body as sent: pass it through llm_errors.provider_message before showing it
         self.failure = failure
         self.original = original
         self.detail = detail
@@ -271,9 +273,10 @@ def _secrets(ep: Endpoint) -> tuple:
 
 
 def _fail(ep: Endpoint, exc: BaseException, original: Optional[BaseException] = None,
-          detail: str = "") -> LlmError:
+          detail: str = "", raw_body: str = "") -> LlmError:
     return LlmError(llm_errors.classify(exc, ep.model, _secrets(ep)),
-                    original=original if original is not None else exc, detail=detail)
+                    original=original if original is not None else exc, detail=detail,
+                    raw_body=raw_body)
 
 
 def _spec(ep: Endpoint) -> dict:
@@ -320,7 +323,9 @@ def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = T
             out = json.loads(raw)
         except ValueError as e:
             raise _fail(ep, ValueError(f"the reply was not JSON ({type(e).__name__})"), original=e) from None
-        return out if isinstance(out, dict) else {}
+        if not isinstance(out, dict):
+            raise _fail(ep, TypeError("the reply was not a JSON object"))
+        return out
     except _uerror.HTTPError as e:
         try:
             raw = e.read().decode("utf-8", errors="replace")
@@ -337,8 +342,9 @@ def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = T
         detail = llm_errors.redact(detail, _secrets(ep)) if detail else ""
         if e.code == 429 and not llm_errors.is_out_of_credits(429, text):
             raise RateLimited(parse_retry_after(e.headers.get("Retry-After") if e.headers else None),
-                              original=e, detail=detail) from None
-        raise _fail(ep, _HttpFailure(e.code, body, text), original=e, detail=detail) from None
+                              original=e, detail=detail, raw_body=raw) from None
+        raise _fail(ep, _HttpFailure(e.code, body, text), original=e, detail=detail,
+                    raw_body=raw) from None
     except LlmError:
         raise
     except _uerror.URLError as e:
@@ -349,18 +355,20 @@ def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = T
         raise _fail(ep, e) from None
 
 
-def chat(ep: Endpoint, system: str, user: str, *, timeout: Optional[float] = None) -> Reply:
+def chat(ep: Endpoint, system: str, user: str, *, timeout: Optional[float] = None,
+         paced: bool = True) -> Reply:
     """One system+user message in, the reply text out.
 
     Raises LlmError (a failure, already in plain redacted words), RateLimited
     (HTTP 429; not retried here) or llm_pacing.PacingStopped (Stop, or the daily
-    cap). Waits for this endpoint's slot on the shared pacer first.
+    cap). Waits for this endpoint's slot on the shared pacer first, unless the
+    caller already did (``paced=False``): a call is paced exactly once.
     """
     spec = _spec(ep)
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     url, body = spec["request"](ep, messages, _cap(ep))
     _guard_address(ep, url)
-    pacer = llm_pacing.pacer_for(ep.provider, ep.base_url)
+    pacer = llm_pacing.pacer_for(ep.provider, ep.base_url) if paced else None
     if pacer is not None:
         pacer.acquire()
     request = _req.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
