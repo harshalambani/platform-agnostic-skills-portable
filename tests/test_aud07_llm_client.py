@@ -453,7 +453,10 @@ def test_redact_hides_an_explicit_secret_of_any_length():
 
 # ---------------------------------------------------------------- nothing calls it yet
 
-def test_no_module_imports_llm_client_yet():
+ALLOWED_IMPORTERS = ["ui/_health.py"]       # AUD-07 P2: the health check; P3 adds the mapper
+
+
+def test_only_the_expected_modules_import_llm_client():
     pat = re.compile(r"\bllm_client\b")
     offenders = []
     for base in ("src", "ui", "scripts"):
@@ -465,7 +468,7 @@ def test_no_module_imports_llm_client_yet():
     for p in ROOT.glob("*.py"):
         if pat.search(p.read_text(encoding="utf-8", errors="replace")):
             offenders.append(p.name)
-    assert offenders == []
+    assert sorted(o.replace("\\", "/") for o in offenders) == ALLOWED_IMPORTERS
 
 
 def test_client_imports_nothing_from_ui_or_langchain():

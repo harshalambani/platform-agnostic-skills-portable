@@ -93,18 +93,28 @@ class RateLimited(Exception):
     """The provider answered HTTP 429 (and it is not an out-of-credits refusal).
     ``retry_after`` is the seconds the server asked for, or None."""
 
-    def __init__(self, retry_after: Optional[float] = None):
+    def __init__(self, retry_after: Optional[float] = None, original: Optional[BaseException] = None,
+                 detail: str = ""):
         super().__init__("HTTP 429 rate limited")
         self.retry_after = retry_after
+        self.original = original      # the urllib exception, for callers that word it themselves
+        self.detail = detail          # the service's own message (key removed)
 
 
 class LlmError(Exception):
     """A failed AI call. ``failure`` is the classified, redacted reason;
-    ``str(error)`` is ``failure.reason``."""
+    ``str(error)`` is ``failure.reason``. ``original`` is the exception that was
+    caught (urllib's HTTPError / URLError, a timeout, ...) and ``detail`` the
+    service's own message from a JSON error body, uncapped, with the key
+    removed; both exist for callers that word the failure themselves (the
+    health check)."""
 
-    def __init__(self, failure: "llm_errors.LlmFailure"):
+    def __init__(self, failure: "llm_errors.LlmFailure", original: Optional[BaseException] = None,
+                 detail: str = ""):
         super().__init__(failure.reason)
         self.failure = failure
+        self.original = original
+        self.detail = detail
 
 
 class _HttpFailure(Exception):
@@ -260,8 +270,10 @@ def _secrets(ep: Endpoint) -> tuple:
     return (ep.api_key,) if ep.api_key else ()
 
 
-def _fail(ep: Endpoint, exc: BaseException) -> LlmError:
-    return LlmError(llm_errors.classify(exc, ep.model, _secrets(ep)))
+def _fail(ep: Endpoint, exc: BaseException, original: Optional[BaseException] = None,
+          detail: str = "") -> LlmError:
+    return LlmError(llm_errors.classify(exc, ep.model, _secrets(ep)),
+                    original=original if original is not None else exc, detail=detail)
 
 
 def _spec(ep: Endpoint) -> dict:
@@ -295,17 +307,19 @@ def _headers(ep: Endpoint, json_body: bool) -> dict:
     return headers
 
 
-def _send(ep: Endpoint, request: "_req.Request", timeout: float) -> dict:
+def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = True) -> dict:
     """Send one request and return the parsed JSON body. 429 -> RateLimited
     (unless the text says the account is out of credits); anything else ->
-    LlmError. Never retries."""
+    LlmError. Never retries. ``parse=False`` accepts any 2xx answer unread."""
     try:
         with _req.urlopen(request, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
+        if not parse:
+            return {}
         try:
-            out = json.loads(raw) if raw.strip() else {}
+            out = json.loads(raw)
         except ValueError as e:
-            raise _fail(ep, ValueError(f"the reply was not JSON ({type(e).__name__})")) from None
+            raise _fail(ep, ValueError(f"the reply was not JSON ({type(e).__name__})"), original=e) from None
         return out if isinstance(out, dict) else {}
     except _uerror.HTTPError as e:
         try:
@@ -314,20 +328,23 @@ def _send(ep: Endpoint, request: "_req.Request", timeout: float) -> dict:
             raw = ""
         body: Any = None
         text = ""
+        detail = ""
         try:
             body = json.loads(raw)
-            text = llm_errors.message_from_body(body)
+            text = detail = llm_errors.message_from_body(body)
         except Exception:  # noqa: BLE001
             text = raw if len(raw) < 200 else ""
+        detail = llm_errors.redact(detail, _secrets(ep)) if detail else ""
         if e.code == 429 and not llm_errors.is_out_of_credits(429, text):
-            raise RateLimited(parse_retry_after(e.headers.get("Retry-After") if e.headers else None)) from None
-        raise _fail(ep, _HttpFailure(e.code, body, text)) from None
+            raise RateLimited(parse_retry_after(e.headers.get("Retry-After") if e.headers else None),
+                              original=e, detail=detail) from None
+        raise _fail(ep, _HttpFailure(e.code, body, text), original=e, detail=detail) from None
     except LlmError:
         raise
     except _uerror.URLError as e:
-        raise _fail(ep, e.reason if isinstance(e.reason, BaseException) else e) from None
-    except (socket.timeout, TimeoutError):
-        raise _fail(ep, TimeoutError("timed out")) from None
+        raise _fail(ep, e.reason if isinstance(e.reason, BaseException) else e, original=e) from None
+    except (socket.timeout, TimeoutError) as e:
+        raise _fail(ep, TimeoutError("timed out"), original=e) from None
     except Exception as e:  # noqa: BLE001
         raise _fail(ep, e) from None
 
@@ -363,14 +380,23 @@ def probe(ep: Endpoint, *, timeout: Optional[float] = None) -> None:
     _guard_address(ep, url)
     request = _req.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
                            headers=_headers(ep, True))
-    _send(ep, request, timeout or spec["probe_timeout"])
+    _send(ep, request, timeout or spec["probe_timeout"], parse=False)
 
 
 def list_models(ep: Endpoint, *, timeout: float = 2.0) -> list:
     """The models the endpoint says it serves: Ollama's /api/tags "models" or an
     OpenAI-style /models "data", as the raw dicts the service sent."""
     spec = _spec(ep)
-    url = spec["list_url"](ep)
+    return spec["list_parse"](_get(ep, spec["list_url"](ep), timeout))
+
+
+def _get(ep: Endpoint, url: str, timeout: float) -> dict:
     _guard_address(ep, url)
-    request = _req.Request(url, headers=_headers(ep, False))
-    return spec["list_parse"](_send(ep, request, timeout))
+    return _send(ep, _req.Request(url, headers=_headers(ep, False)), timeout)
+
+
+def get_json(url: str, *, api_key: Optional[str] = None, timeout: float = 2.0) -> dict:
+    """GET one URL and return its JSON body, with the same key rule and error
+    handling as the rest of the client. The key, when real, is sent as a Bearer
+    token whatever the provider (the health check's request)."""
+    return _get(Endpoint("openai_compatible", "", "", api_key or None), url, timeout)
