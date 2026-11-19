@@ -415,6 +415,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <tr><td>RED FLAG: payments match no statement.</td><td>Check the statements folder has the statement the payment settles, and that its dates make it the card&#x27;s next statement.</td></tr>
 <tr><td>A payment in the Credit Card Payment tie-out is labelled HELD and the pool is not tied.</td><td>A CRED confirmation email named a different card than the payment, so the payment was held and not booked (the line reads &#x27;HELD: card clash, not booked&#x27;). It stays in the tie-out as an open amount, so the tie-out does not read as tied. Check the email and the payment, then run again.</td></tr>
 <tr><td>Nothing was written.</td><td>No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows).</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>The account for a spend or refund is chosen by rules and history first, then by the LLM for what is left. If the LLM cannot be reached, its pass stops, the remaining rows go to Suspense and the result says it is not complete. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
@@ -606,6 +607,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>&quot;file truncated -- re-export&quot; error.</td><td>The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash.</td></tr>
 <tr><td>&quot;ERROR: selected Assessment Year does not match&quot; and only a stub workbook is produced.</td><td>Pick the Assessment Year that matches the uploaded HTML&#x27;s as-of date, or upload the HTML for the selected year, then run again.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>The LLM is used only to suggest a tag for each unmapped account. If it cannot be reached, those suggestions stop after the first failure, the run warns how many accounts got none, and the workbook is still built. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_gnucash_intercompany_matrix" class="skill">

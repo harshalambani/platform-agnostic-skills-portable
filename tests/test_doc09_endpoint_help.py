@@ -9,8 +9,6 @@ RULE = ("http:// works only for this computer and private-network addresses, "
         "and never with an API key. Anything else needs https://. "
         "Change the Base URL in Settings.")
 ROW = "Run errors mentioning the endpoint / model."
-# LLM skills whose help has no endpoint row yet (own row is a separate call).
-NO_ROW_YET = {"skill_cc_spend_booking", "skill_itr_workbook"}
 
 
 def _skills():
@@ -32,22 +30,15 @@ OTHER = {n: d for n, d in _skills().items() if n not in LLM}
 
 
 def test_there_are_llm_skills():
-    assert len(LLM) >= 8
+    assert len(LLM) == 8
 
 
-@pytest.mark.parametrize("name", sorted(set(LLM) - NO_ROW_YET))
+@pytest.mark.parametrize("name", sorted(LLM))
 def test_llm_skill_endpoint_row_carries_the_address_rule(name):
     rows = [r for r in _rows(LLM[name]) if r.get("problem") == ROW]
     assert len(rows) == 1, name
     assert RULE in rows[0]["fix"]
     assert "Settings" in rows[0]["fix"]
-
-
-@pytest.mark.parametrize("name", sorted(NO_ROW_YET))
-def test_known_gap_stays_listed_honestly(name):
-    # If a row is added, drop the name from NO_ROW_YET so it is guarded.
-    assert name in LLM
-    assert not [r for r in _rows(LLM[name]) if r.get("problem") == ROW]
 
 
 @pytest.mark.parametrize("name", sorted(OTHER))

@@ -169,3 +169,5 @@ help:
       fix: "A CRED confirmation email named a different card than the payment, so the payment was held and not booked (the line reads 'HELD: card clash, not booked'). It stays in the tie-out as an open amount, so the tie-out does not read as tied. Check the email and the payment, then run again."
     - problem: "Nothing was written."
       fix: "No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows)."
+    - problem: "Run errors mentioning the endpoint / model."
+      fix: "The account for a spend or refund is chosen by rules and history first, then by the LLM for what is left. If the LLM cannot be reached, its pass stops, the remaining rows go to Suspense and the result says it is not complete. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings."

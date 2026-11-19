@@ -64,3 +64,4 @@ book_file runs the book<->HTML cross-check. mapping_file runs the account-tag re
 |------|-------|
 | "file truncated -- re-export" error. | The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash. |
 | "ERROR: selected Assessment Year does not match" and only a stub workbook is produced. | Pick the Assessment Year that matches the uploaded HTML's as-of date, or upload the HTML for the selected year, then run again. |
+| Run errors mentioning the endpoint / model. | The LLM is used only to suggest a tag for each unmapped account. If it cannot be reached, those suggestions stop after the first failure, the run warns how many accounts got none, and the workbook is still built. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
