@@ -189,6 +189,8 @@ help:
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
       fix: "Mapping (and 'Other Bank' normalisation) uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings."
+    - problem: "The run stops with a message about a time limit or a step limit."
+      fix: "The model did not answer in time (10 minutes for a model on this computer or a private network, 2 minutes for any other, including Ollama cloud models), or the run used 15 steps without finishing. Use a smaller or faster model, or try a simpler request. A reply longer than 4,096 tokens is cut off and ends with a note saying so."
     - problem: "Extraction fails immediately."
       fix: "The file type probably doesn't match the chosen bank (e.g. a PDF selected for ICICI). Re-check both."
     - problem: "The reply says this statement \"does not belong in this book\"."

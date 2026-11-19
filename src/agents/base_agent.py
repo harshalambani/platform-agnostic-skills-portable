@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 import queue as _queue_module
@@ -63,6 +64,124 @@ def _endpoint_policy():
     return endpoint_policy
 
 
+def _params():
+    try:
+        from agents import llm_model_params
+    except ImportError:  # run from inside src/agents
+        import llm_model_params  # type: ignore[no-redef]
+    return llm_model_params
+
+
+def _is_length_stop(message) -> bool:
+    """True when the model stopped because it hit the reply cap."""
+    meta = getattr(message, "response_metadata", None) or {}
+    return str(meta.get("done_reason") or meta.get("finish_reason") or "").lower() == "length"
+
+
+def _with_cap_note(text: str, message) -> str:
+    if _is_length_stop(message):
+        note = _params().reply_cap_note()
+        log.warning("model reply was cut at the reply cap")
+        return text + chr(10) + chr(10) + note
+    return text
+
+
+def _retry_pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+_LIMITED_CLASSES: dict = {}
+
+
+def _limited_ollama_class():
+    """ChatOllama with a total time limit and connection retries (the
+    langchain class has neither). Built once; langchain_ollama is imported late."""
+    if "ollama" in _LIMITED_CLASSES:
+        return _LIMITED_CLASSES["ollama"]
+    import httpx
+    from langchain_ollama import ChatOllama
+
+    class LimitedChatOllama(ChatOllama):
+        limit_seconds: float = 120
+        connect_retries: int = 2
+
+        def _create_chat_stream(self, messages, stop=None, **kwargs):
+            p = _params()
+            deadline = time.monotonic() + self.limit_seconds
+            attempt = 0
+            while True:
+                started = False
+                try:
+                    for item in super()._create_chat_stream(messages, stop, **kwargs):
+                        started = True
+                        if time.monotonic() > deadline:
+                            raise p.LlmLimitError(p.timeout_message(self.limit_seconds))
+                        yield item
+                    return
+                except httpx.TimeoutException as e:      # never retried
+                    raise p.LlmLimitError(p.timeout_message(self.limit_seconds)) from e
+                except (ConnectionError, httpx.ConnectError):
+                    if started or attempt >= self.connect_retries:
+                        raise
+                    attempt += 1
+                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
+                    _retry_pause(1)
+
+    _LIMITED_CLASSES["ollama"] = LimitedChatOllama
+    return LimitedChatOllama
+
+
+def _limited_openai_class():
+    """ChatOpenAI that turns a timed-out call into the plain limit message."""
+    if "openai" in _LIMITED_CLASSES:
+        return _LIMITED_CLASSES["openai"]
+    import openai
+    from langchain_openai import ChatOpenAI
+
+    class LimitedChatOpenAI(ChatOpenAI):
+        def _generate(self, *args, **kwargs):
+            try:
+                return super()._generate(*args, **kwargs)
+            except openai.APITimeoutError as e:
+                p = _params()
+                raise p.LlmLimitError(p.timeout_message(self.request_timeout or 0)) from e
+
+    _LIMITED_CLASSES["openai"] = LimitedChatOpenAI
+    return LimitedChatOpenAI
+
+
+class _LimitedAgent:
+    """A compiled agent run with the step limit; a runaway loop stops with a
+    plain message, and a reply cut at the reply cap says so."""
+
+    def __init__(self, graph, steps: int | None = None):
+        self._graph = graph
+        self._steps = steps or _params().AGENT_STEP_LIMIT
+
+    def __getattr__(self, name):
+        return getattr(self._graph, name)
+
+    def invoke(self, input, config=None, **kwargs):
+        p = _params()
+        cfg = dict(config or {})
+        cfg["recursion_limit"] = min(int(cfg.get("recursion_limit") or self._steps), self._steps)
+        try:
+            from langgraph.errors import GraphRecursionError
+        except ImportError:  # pragma: no cover
+            GraphRecursionError = ()                                  # type: ignore[assignment]
+        try:
+            result = self._graph.invoke(input, cfg, **kwargs)
+        except GraphRecursionError as e:
+            raise p.LlmLimitError(p.step_limit_message(self._steps)) from e
+        try:
+            last = result["messages"][-1]
+            if _is_length_stop(last) and isinstance(last.content, str):
+                last.content = _with_cap_note(last.content, last)
+        except (KeyError, IndexError, TypeError, AttributeError):
+            pass
+        return result
+
+
 def load_model(config_path: str, model_override: str | None = None):
     """
     Load a LangChain chat model from a legacy-format config.yaml.
@@ -99,10 +218,16 @@ def load_model(config_path: str, model_override: str | None = None):
         _endpoint_policy().check_send(base_url, None)   # AUD-03
         log.info("Loading ChatOllama: base_url=%s model=%s", base_url, model)
         from langchain_ollama import ChatOllama
-        return ChatOllama(
+        p = _params()
+        seconds = p.langchain_timeout_seconds(base_url, model)
+        return _limited_ollama_class()(
             base_url=base_url,
             model=model,
             temperature=temperature,
+            num_predict=p.LANGCHAIN_REPLY_MAX_TOKENS,
+            client_kwargs={"timeout": seconds},
+            limit_seconds=seconds,
+            connect_retries=p.LANGCHAIN_MAX_RETRIES,
             **_pace_kw,
         )
 
@@ -115,11 +240,15 @@ def load_model(config_path: str, model_override: str | None = None):
         _endpoint_policy().check_send(base_url, api_key)   # AUD-03: no key over http
         log.info("Loading ChatOpenAI: base_url=%s model=%s", base_url, model)
         from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
+        p = _params()
+        return _limited_openai_class()(
             base_url=base_url or None,
             api_key=api_key,
             model=model,
             temperature=temperature,
+            request_timeout=p.langchain_timeout_seconds(base_url, model),
+            max_retries=p.LANGCHAIN_MAX_RETRIES,
+            max_tokens=p.LANGCHAIN_REPLY_MAX_TOKENS,
             **_pace_kw,
         )
 
@@ -167,7 +296,7 @@ def build_agent(
 
     llm = load_model(config_path, model_override)
 
-    return create_react_agent(llm, tools, prompt=system_prompt)
+    return _LimitedAgent(create_react_agent(llm, tools, prompt=system_prompt))
 
 
 # ---------------------------------------------------------------------------
@@ -201,4 +330,4 @@ def run_direct(
     ]
     log.info("run_direct: invoking LLM (%d chars user message)", len(user_message))
     response = llm.invoke(messages)
-    return response.content
+    return _with_cap_note(response.content, response)

@@ -42,4 +42,5 @@ Very long documents may be condensed heavily — for a specific section, point t
 | If… | Then… |
 |------|-------|
 | Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
+| The run stops with a message about a time limit or a step limit. | The model did not answer in time (10 minutes for a model on this computer or a private network, 2 minutes for any other, including Ollama cloud models), or the run used 15 steps without finishing. Use a smaller or faster model, or try a simpler request. A reply longer than 4,096 tokens is cut off and ends with a note saying so. |
 | Summary is thin or generic. | The PDF may be a scan with no text layer. Use a text-based document. |
