@@ -109,7 +109,7 @@ def redact(text: object, secrets: tuple = ()) -> str:
     replaced by ``[redacted]``."""
     out = "" if text is None else str(text)
     for s in secrets:
-        if s and len(str(s)) >= 4:
+        if s:       # any length: the mapper's own redaction hid a short key too
             out = out.replace(str(s), "[redacted]")
     return _KEY_LIKE.sub("[redacted]", out)
 
