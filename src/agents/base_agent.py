@@ -132,19 +132,52 @@ def _limited_ollama_class():
 
 
 def _limited_openai_class():
-    """ChatOpenAI that turns a timed-out call into the plain limit message."""
+    """ChatOpenAI with the plain timeout message and our own retries: the SDK is
+    built with max_retries=0 (it would retry a timeout), and a connection failure
+    is retried here, a timeout never."""
     if "openai" in _LIMITED_CLASSES:
         return _LIMITED_CLASSES["openai"]
     import openai
     from langchain_openai import ChatOpenAI
 
     class LimitedChatOpenAI(ChatOpenAI):
+        connect_retries: int = 2
+
+        def _timeout_error(self):
+            p = _params()
+            return p.LlmLimitError(p.timeout_message(self.request_timeout or 0))
+
         def _generate(self, *args, **kwargs):
-            try:
-                return super()._generate(*args, **kwargs)
-            except openai.APITimeoutError as e:
-                p = _params()
-                raise p.LlmLimitError(p.timeout_message(self.request_timeout or 0)) from e
+            attempt = 0
+            while True:
+                try:
+                    return super()._generate(*args, **kwargs)
+                except openai.APITimeoutError as e:            # a subclass of the next one: first
+                    raise self._timeout_error() from e
+                except openai.APIConnectionError:
+                    if attempt >= self.connect_retries:
+                        raise
+                    attempt += 1
+                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
+                    _retry_pause(1)
+
+        def _stream(self, *args, **kwargs):
+            attempt = 0
+            while True:
+                started = False
+                try:
+                    for chunk in super()._stream(*args, **kwargs):
+                        started = True
+                        yield chunk
+                    return
+                except openai.APITimeoutError as e:
+                    raise self._timeout_error() from e
+                except openai.APIConnectionError:
+                    if started or attempt >= self.connect_retries:
+                        raise
+                    attempt += 1
+                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
+                    _retry_pause(1)
 
     _LIMITED_CLASSES["openai"] = LimitedChatOpenAI
     return LimitedChatOpenAI
@@ -247,7 +280,8 @@ def load_model(config_path: str, model_override: str | None = None):
             model=model,
             temperature=temperature,
             request_timeout=p.langchain_timeout_seconds(base_url, model),
-            max_retries=p.LANGCHAIN_MAX_RETRIES,
+            max_retries=0,                            # the SDK would retry a timeout; see LimitedChatOpenAI
+            connect_retries=p.LANGCHAIN_MAX_RETRIES,
             max_tokens=p.LANGCHAIN_REPLY_MAX_TOKENS,
             **_pace_kw,
         )

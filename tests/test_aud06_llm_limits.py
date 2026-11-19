@@ -96,7 +96,9 @@ def test_ollama_model_carries_all_three_limits(tmp_path, url, model, secs):
 def test_openai_model_carries_all_three_limits(tmp_path, url, model, secs):
     m = ba.load_model(_cfg(tmp_path, "openai_compatible", url, model))
     assert m.max_tokens == 4096
-    assert m.max_retries == 2
+    assert m.connect_retries == 2                    # our own retries, connection failures only
+    assert m.max_retries == 0                        # the SDK would retry a timeout
+    assert m.root_client.max_retries == 0
     assert m.request_timeout == secs
 
 
@@ -322,3 +324,92 @@ def test_every_llm_skill_help_explains_the_limit_messages():
         assert bool(has) == llm, p.parent.name        # present on LLM skills only
         n += llm
     assert n == 8
+
+
+# ---- the OpenAI-compatible path: a timeout is never retried ------------------------------------
+
+def _oa_model(tmp_path, url, seconds, monkeypatch):
+    monkeypatch.setattr(P, "LANGCHAIN_TIMEOUT_ONPREM_SECONDS", seconds)
+    return ba.load_model(_cfg(tmp_path, "openai_compatible", url + "/v1", "local-model"))
+
+
+class _OAFake:
+    def __init__(self, mode):
+        self.mode, self.hits = mode, 0
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                outer.hits += 1
+                n = int(self.headers.get("Content-Length") or 0)
+                self.rfile.read(n)
+                if outer.mode == "silent":
+                    time.sleep(8)
+                    return
+                body = json.dumps({"id": "x", "object": "chat.completion", "created": 1, "model": "m",
+                                   "choices": [{"index": 0, "finish_reason": "length",
+                                                "message": {"role": "assistant", "content": "partial"}}],
+                                   "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+@pytest.fixture
+def oafake():
+    made = []
+
+    def make(mode):
+        f = _OAFake(mode)
+        made.append(f)
+        return f
+    yield make
+    for f in made:
+        f.close()
+
+
+def test_openai_server_that_never_answers_gets_exactly_one_request(tmp_path, oafake, monkeypatch):        # NEGATIVE
+    f = oafake("silent")
+    m = _oa_model(tmp_path, f.url, 1, monkeypatch)
+    sleeps = []
+    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
+    t0 = time.time()
+    with pytest.raises(P.LlmLimitError) as ei:
+        m.invoke("hello")
+    assert time.time() - t0 < 6
+    assert str(ei.value).startswith("The model did not answer within 1 s")
+    assert f.hits == 1
+    assert sleeps == []
+
+
+def test_openai_refused_connection_is_retried_twice_then_raised(tmp_path, monkeypatch):
+    import openai
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    m = _oa_model(tmp_path, f"http://127.0.0.1:{port}", 30, monkeypatch)
+    sleeps = []
+    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
+    with pytest.raises(openai.APIConnectionError):
+        m.invoke("hello")
+    assert sleeps == [1, 1]
+
+
+def test_openai_capped_reply_is_flagged_by_run_direct(tmp_path, oafake):
+    f = oafake("ok")
+    out = ba.run_direct("hi", "be brief", _cfg(tmp_path, "openai_compatible", f.url + "/v1", "local-model"))
+    assert out.startswith("partial") and P.reply_cap_note() in out
