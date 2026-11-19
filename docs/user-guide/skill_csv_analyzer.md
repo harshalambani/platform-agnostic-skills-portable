@@ -44,5 +44,5 @@ Treat the answer as a first pass — spot-check any number that drives a decisio
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or configure an endpoint in Settings. |
+| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or configure an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
 | Answer seems to ignore part of the data. | Large CSVs may be sampled; narrow the file or the question and re-run. |

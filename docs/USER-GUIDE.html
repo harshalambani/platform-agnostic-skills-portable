@@ -185,7 +185,7 @@ daily book balance with the statement&#x27;s running balance, names the first da
 they drift apart and the closing difference, and writes a `_missing_rows` CSV of
 only the rows absent from this bank&#x27;s account. It never writes to the book.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>Mapping (and &#x27;Other Bank&#x27; normalisation) uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>Extraction fails immediately.</td><td>The file type probably doesn&#x27;t match the chosen bank (e.g. a PDF selected for ICICI). Re-check both.</td></tr>
 <tr><td>The reply says this statement &quot;does not belong in this book&quot;.</td><td>The statement&#x27;s account number belongs to another account or another book, so nothing was written. The reply says why (for example that the book&#x27;s only account at that bank carries a different account number) and, when another entity&#x27;s book for the same year holds that number, names that entity and its folder. Open the right book and run again. The message ends with &quot;Nothing was written. Open the right book and run again.&quot;</td></tr>
 <tr><td>The reply says &#x27;more than one statement&#x27; and &#x27;can only convert one statement per run&#x27;.</td><td>The upload holds several statements of one bank (ICICI, HDFC, SBM or Other Bank (CSV)) and only one can be converted per run, so nothing was imported. The reply lists the files. Upload a single file, run, then repeat for the next one.</td></tr>
@@ -238,7 +238,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Treat the answer as a first pass — spot-check any number that drives a decision, since the model reasons over the data rather than running fixed formulas.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or configure an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or configure an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>Answer seems to ignore part of the data.</td><td>Large CSVs may be sampled; narrow the file or the question and re-run.</td></tr>
 </tbody></table>
 </section>
@@ -315,7 +315,7 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 </ul>
 <h3>Tips</h3><p>Entries whose deductor could not be matched to an account are flagged so you can fix the account name in your book (or add the missing account) and re-run. Confirming a credit account on the Review screen is remembered for that deductor (by its TAN) for next time — a later run applies it automatically, without a fresh guess and without asking you to confirm it again. If the s.194T reconciliation reports OPEN, run &quot;Partner Compensation Reconciliation&quot; (GnuCash &gt; Partner) first, then re-run this skill — the expected order is bank, then Partner Compensation Reconciliation, then this skill.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings).</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings). If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>A deductor was assigned the wrong account.</td><td>Rename/add the account in GnuCash so its name is closer to the deductor, then re-run.</td></tr>
 <tr><td>s.194T reconciliation shows OPEN or VARIANCE.</td><td>OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal&#x27;s postings for those months before importing.</td></tr>
 </tbody></table>
@@ -415,6 +415,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <tr><td>RED FLAG: payments match no statement.</td><td>Check the statements folder has the statement the payment settles, and that its dates make it the card&#x27;s next statement.</td></tr>
 <tr><td>A payment in the Credit Card Payment tie-out is labelled HELD and the pool is not tied.</td><td>A CRED confirmation email named a different card than the payment, so the payment was held and not booked (the line reads &#x27;HELD: card clash, not booked&#x27;). It stays in the tie-out as an open amount, so the tie-out does not read as tied. Check the email and the payment, then run again.</td></tr>
 <tr><td>Nothing was written.</td><td>No journal was ready to import; the result lists why (statements that read 0 rows, part payments, EMI rows).</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>The account for a spend or refund is chosen by rules and history first, then by the LLM for what is left. If the LLM cannot be reached, its pass stops, the remaining rows go to Suspense and the result says it is not complete. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_cc_sort" class="skill">
@@ -496,7 +497,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 </ul>
 <h3>Tips</h3><p>Very long documents may be condensed heavily — for a specific section, point the skill at just that text.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>Summary is thin or generic.</td><td>The PDF may be a scan with no text layer. Use a text-based document.</td></tr>
 </tbody></table>
 </section>
@@ -606,6 +607,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
 <tr><td>&quot;file truncated -- re-export&quot; error.</td><td>The HTML export is missing its trailing Imbalance Amount row. Re-export from GnuCash.</td></tr>
 <tr><td>&quot;ERROR: selected Assessment Year does not match&quot; and only a stub workbook is produced.</td><td>Pick the Assessment Year that matches the uploaded HTML&#x27;s as-of date, or upload the HTML for the selected year, then run again.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>The LLM is used only to suggest a tag for each unmapped account. If it cannot be reached, those suggestions stop after the first failure, the run warns how many accounts got none, and the workbook is still built. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 </tbody></table>
 </section>
 <section id="skill_gnucash_intercompany_matrix" class="skill">
@@ -778,7 +780,7 @@ The running balance carries straight from the statement — if the final Balance
 </ul>
 <h3>Tips</h3><p>The runtime stays deterministic — this tool only edits the format-specific blanks of a parser; the balance oracle and exit contract are never touched.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This dev tool uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This dev tool uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>Tie-out still exits non-zero.</td><td>Add the expected closing balance to Notes and re-run; if it persists, the format may need a manual template tweak.</td></tr>
 </tbody></table>
 </section>
@@ -947,7 +949,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 </ul>
 <h3>Tips</h3><p>Translation quality depends on the model you have connected — a larger model generally handles nuance and less-common languages better.</p>
 <h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
-<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings.</td></tr>
+<tr><td>Run errors mentioning the endpoint / model.</td><td>This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings.</td></tr>
 <tr><td>Output mixes languages or is off.</td><td>Set the source language explicitly instead of &#x27;auto&#x27;, or try a larger model.</td></tr>
 </tbody></table>
 </section>

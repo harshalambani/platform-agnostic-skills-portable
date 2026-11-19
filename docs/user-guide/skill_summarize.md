@@ -41,5 +41,5 @@ Very long documents may be condensed heavily — for a specific section, point t
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or set an endpoint in Settings. |
+| Run errors mentioning the endpoint / model. | This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
 | Summary is thin or generic. | The PDF may be a scan with no text layer. Use a text-based document. |

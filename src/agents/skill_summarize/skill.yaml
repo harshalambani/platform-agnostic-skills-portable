@@ -70,6 +70,6 @@ help:
     the skill at just that text.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings."
+      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings."
     - problem: "Summary is thin or generic."
       fix: "The PDF may be a scan with no text layer. Use a text-based document."

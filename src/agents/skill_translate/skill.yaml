@@ -111,6 +111,6 @@ help:
     generally handles nuance and less-common languages better.
   troubleshooting:
     - problem: "Run errors mentioning the endpoint / model."
-      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings."
+      fix: "This skill uses the LLM. Start Ollama or set an endpoint in Settings. If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings."
     - problem: "Output mixes languages or is off."
       fix: "Set the source language explicitly instead of 'auto', or try a larger model."

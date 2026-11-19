@@ -49,6 +49,6 @@ Entries whose deductor could not be matched to an account are flagged so you can
 
 | If… | Then… |
 |------|-------|
-| Run errors mentioning the endpoint / model. | This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings). |
+| Run errors mentioning the endpoint / model. | This skill uses the LLM for fallback matching. Start Ollama (or set an endpoint in Settings). If the run stops because the endpoint address is not allowed: http:// works only for this computer and private-network addresses, and never with an API key. Anything else needs https://. Change the Base URL in Settings. |
 | A deductor was assigned the wrong account. | Rename/add the account in GnuCash so its name is closer to the deductor, then re-run. |
 | s.194T reconciliation shows OPEN or VARIANCE. | OPEN means the Partner Compensation Reconciliation journal has not been run/posted yet for this FY -- run it first, then re-run this skill. VARIANCE or PARTIAL names the month(s) where 26AS and the posted journal disagree (or a month is missing) -- check that journal's postings for those months before importing. |
