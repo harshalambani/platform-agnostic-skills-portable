@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from pathlib import Path
 from typing import Any, Optional, Sequence
 import queue as _queue_module
@@ -86,103 +85,6 @@ def _with_cap_note(text: str, message) -> str:
     return text
 
 
-def _retry_pause(seconds: float) -> None:
-    time.sleep(seconds)
-
-
-_LIMITED_CLASSES: dict = {}
-
-
-def _limited_ollama_class():
-    """ChatOllama with a total time limit and connection retries (the
-    langchain class has neither). Built once; langchain_ollama is imported late."""
-    if "ollama" in _LIMITED_CLASSES:
-        return _LIMITED_CLASSES["ollama"]
-    import httpx
-    from langchain_ollama import ChatOllama
-
-    class LimitedChatOllama(ChatOllama):
-        limit_seconds: float = 120
-        connect_retries: int = 2
-
-        def _create_chat_stream(self, messages, stop=None, **kwargs):
-            p = _params()
-            deadline = time.monotonic() + self.limit_seconds
-            attempt = 0
-            while True:
-                started = False
-                try:
-                    for item in super()._create_chat_stream(messages, stop, **kwargs):
-                        started = True
-                        if time.monotonic() > deadline:
-                            raise p.LlmLimitError(p.timeout_message(self.limit_seconds))
-                        yield item
-                    return
-                except httpx.TimeoutException as e:      # never retried
-                    raise p.LlmLimitError(p.timeout_message(self.limit_seconds)) from e
-                except (ConnectionError, httpx.ConnectError):
-                    if started or attempt >= self.connect_retries:
-                        raise
-                    attempt += 1
-                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
-                    _retry_pause(1)
-
-    _LIMITED_CLASSES["ollama"] = LimitedChatOllama
-    return LimitedChatOllama
-
-
-def _limited_openai_class():
-    """ChatOpenAI with the plain timeout message and our own retries: the SDK is
-    built with max_retries=0 (it would retry a timeout), and a connection failure
-    is retried here, a timeout never."""
-    if "openai" in _LIMITED_CLASSES:
-        return _LIMITED_CLASSES["openai"]
-    import openai
-    from langchain_openai import ChatOpenAI
-
-    class LimitedChatOpenAI(ChatOpenAI):
-        connect_retries: int = 2
-
-        def _timeout_error(self):
-            p = _params()
-            return p.LlmLimitError(p.timeout_message(self.request_timeout or 0))
-
-        def _generate(self, *args, **kwargs):
-            attempt = 0
-            while True:
-                try:
-                    return super()._generate(*args, **kwargs)
-                except openai.APITimeoutError as e:            # a subclass of the next one: first
-                    raise self._timeout_error() from e
-                except openai.APIConnectionError:
-                    if attempt >= self.connect_retries:
-                        raise
-                    attempt += 1
-                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
-                    _retry_pause(1)
-
-        def _stream(self, *args, **kwargs):
-            attempt = 0
-            while True:
-                started = False
-                try:
-                    for chunk in super()._stream(*args, **kwargs):
-                        started = True
-                        yield chunk
-                    return
-                except openai.APITimeoutError as e:
-                    raise self._timeout_error() from e
-                except openai.APIConnectionError:
-                    if started or attempt >= self.connect_retries:
-                        raise
-                    attempt += 1
-                    log.warning("connection to the model failed; retry %d of %d", attempt, self.connect_retries)
-                    _retry_pause(1)
-
-    _LIMITED_CLASSES["openai"] = LimitedChatOpenAI
-    return LimitedChatOpenAI
-
-
 class _LimitedAgent:
     """A compiled agent run with the step limit; a runaway loop stops with a
     plain message, and a reply cut at the reply cap says so."""
@@ -219,13 +121,18 @@ def load_model(config_path: str, model_override: str | None = None):
     """
     Load a LangChain chat model from a legacy-format config.yaml.
 
+    The model sends every request through the single AI client
+    (agents.llm_client), so the key rule, pacing, error words and redaction are
+    the same as everywhere else. A missing provider, address or model is an
+    error in plain words; nothing is guessed.
+
     Args:
         config_path:    Path to a config.yaml produced by
                         ui._config.materialize_legacy_config().
         model_override: If provided, overrides the config's default_model.
 
     Returns:
-        A LangChain BaseChatModel (ChatOllama or ChatOpenAI).
+        A LangChain BaseChatModel (agents.llm_chat_model.ClientChatModel).
     """
     cfg_path = Path(config_path)
     if not cfg_path.is_file():
@@ -234,63 +141,18 @@ def load_model(config_path: str, model_override: str | None = None):
             "Make sure an endpoint is configured in the Settings tab."
         )
 
-    cfg: dict[str, Any] = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    provider = cfg.get("provider", "ollama")
-
-    # MAP-20: one shared pacer per endpoint (None when pacing is off, so an
-    # unpaced endpoint is built exactly as before).
-    from agents import llm_pacing  # noqa: PLC0415
-    _limiter = llm_pacing.langchain_rate_limiter(llm_pacing.configure_from_legacy(cfg))
-    _pace_kw: dict[str, Any] = {"rate_limiter": _limiter} if _limiter is not None else {}
-
-    if provider == "ollama":
-        ep: dict[str, Any] = cfg.get("ollama") or {}
-        model = model_override or ep.get("default_model") or "gemma4:12b"
-        base_url = ep.get("base_url", "http://localhost:11434")
-        temperature = float(ep.get("temperature", 0.0))
-        _endpoint_policy().check_send(base_url, None)   # AUD-03
-        log.info("Loading ChatOllama: base_url=%s model=%s", base_url, model)
-        from langchain_ollama import ChatOllama
-        p = _params()
-        seconds = p.langchain_timeout_seconds(base_url, model)
-        return _limited_ollama_class()(
-            base_url=base_url,
-            model=model,
-            temperature=temperature,
-            num_predict=p.LANGCHAIN_REPLY_MAX_TOKENS,
-            client_kwargs={"timeout": seconds},
-            limit_seconds=seconds,
-            connect_retries=p.LANGCHAIN_MAX_RETRIES,
-            **_pace_kw,
-        )
-
-    elif provider == "openai_compatible":
-        ep = cfg.get("openai_compatible") or {}
-        model = model_override or ep.get("default_model") or "gpt-4o"
-        base_url = ep.get("base_url", "")
-        api_key = ep.get("api_key", "not-needed") or "not-needed"
-        temperature = float(ep.get("temperature", 0.0))
-        _endpoint_policy().check_send(base_url, api_key)   # AUD-03: no key over http
-        log.info("Loading ChatOpenAI: base_url=%s model=%s", base_url, model)
-        from langchain_openai import ChatOpenAI
-        p = _params()
-        return _limited_openai_class()(
-            base_url=base_url or None,
-            api_key=api_key,
-            model=model,
-            temperature=temperature,
-            request_timeout=p.langchain_timeout_seconds(base_url, model),
-            max_retries=0,                            # the SDK would retry a timeout; see LimitedChatOpenAI
-            connect_retries=p.LANGCHAIN_MAX_RETRIES,
-            max_tokens=p.LANGCHAIN_REPLY_MAX_TOKENS,
-            **_pace_kw,
-        )
-
-    else:
-        raise ValueError(
-            f"Unknown provider {provider!r} in config. "
-            "Expected 'ollama' or 'openai_compatible'."
-        )
+    import dataclasses  # noqa: PLC0415
+    from agents import llm_chat_model, llm_client  # noqa: PLC0415
+    p = _params()
+    ep = llm_client.resolve_endpoint(config_path, model_override)   # also registers the pacing
+    _endpoint_policy().check_send(ep.base_url, ep.api_key if ep.provider == "openai_compatible" else None)  # AUD-03
+    ep = dataclasses.replace(
+        ep,
+        timeout=p.langchain_timeout_seconds(ep.base_url, ep.model),
+        max_tokens=p.LANGCHAIN_REPLY_MAX_TOKENS,
+    )
+    log.info("Loading model: provider=%s base_url=%s model=%s", ep.provider, ep.base_url, ep.model)
+    return llm_chat_model.ClientChatModel(endpoint=ep, connect_retries=p.LANGCHAIN_MAX_RETRIES)
 
 
 # ---------------------------------------------------------------------------
@@ -326,11 +188,11 @@ def build_agent(
             "instructions would otherwise never reach the model."
         )
 
-    from langgraph.prebuilt import create_react_agent
+    from langchain.agents import create_agent
 
     llm = load_model(config_path, model_override)
 
-    return _LimitedAgent(create_react_agent(llm, tools, prompt=system_prompt))
+    return _LimitedAgent(create_agent(llm, tools, system_prompt=system_prompt))
 
 
 # ---------------------------------------------------------------------------

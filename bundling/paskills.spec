@@ -34,6 +34,8 @@ hiddenimports = [
     "langchain_ollama",
     "langchain_openai",
     "langgraph.prebuilt",
+    "langchain.agents",
+    "langchain_core.utils.function_calling",
     "langgraph.graph",
     # PDF / OCR.
     "pdfplumber",
