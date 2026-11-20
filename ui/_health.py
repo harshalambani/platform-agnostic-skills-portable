@@ -192,18 +192,13 @@ def _get_json(url: str, timeout: float = 2.0, api_key: str | None = None) -> dic
 
 
 def _post_json(url: str, payload: dict, timeout: float = 3.0) -> dict[str, Any]:
-    """POST JSON and return parsed response."""
-    _policy().check_send(url, None)   # AUD-03
-    data = json.dumps(payload).encode("utf-8")
-    req = request.Request(
-        url, data=data, method="POST",
-        headers={
-            "User-Agent": "PA-Skills-Portable/health",
-            "Content-Type": "application/json",
-        },
-    )
-    with request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+    """POST JSON and return parsed response (sent by the AI client; the caller
+    sees the original exception, as with _get_json)."""
+    client = _llm_client()
+    try:
+        return client.post_json(url, payload, timeout=timeout)
+    except (client.LlmError, client.RateLimited) as e:
+        raise (e.original or e) from None
 
 
 # ---------------------------------------------------------------------------

@@ -249,12 +249,28 @@ def _cleanup_legacy_temp_dirs() -> None:
     """Exit handler — silently removes all legacy config temp dirs."""
     for d in _LEGACY_TEMP_DIRS:
         try:
+            _forget_run_key(d / "config.yaml")
             shutil.rmtree(d, ignore_errors=True)
         except Exception:
             pass
 
 
 register_exit_cleanup(_cleanup_legacy_temp_dirs)
+
+
+def _llm_client():
+    try:
+        from agents import llm_client
+    except ImportError:
+        import llm_client  # type: ignore[no-redef]
+    return llm_client
+
+
+def _forget_run_key(path) -> None:
+    try:
+        _llm_client().forget_key(path)
+    except Exception:
+        pass
 
 
 def discard_legacy_config(path) -> None:
@@ -268,6 +284,7 @@ def discard_legacy_config(path) -> None:
         folder = Path(path).parent
         if folder not in _LEGACY_TEMP_DIRS:
             return
+        _forget_run_key(path)
         for _ in range(5):
             shutil.rmtree(folder, ignore_errors=True)
             if not folder.exists():
@@ -457,6 +474,9 @@ def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
         raise KeyError(f"Endpoint '{name}' not found in portable config.")
 
     legacy = _legacy_from_endpoint(endpoints[name], cfg.get("default_model", ""))
+    # AUD-07 P5: the key stays in memory. The file carries everything else; the
+    # client takes the key from here, by this file's path (see llm_client).
+    run_key = (legacy.get(legacy["provider"]) or {}).pop("api_key", None)
 
     # Write into a per-process temp dir so concurrent skill runs don't collide.
     # The dir is registered for deletion on process exit so the API key does
@@ -465,6 +485,7 @@ def materialize_legacy_config(endpoint_name: str | None = None) -> Path:
     _LEGACY_TEMP_DIRS.append(tmp_dir)
     legacy_path = tmp_dir / "config.yaml"
     legacy_path.write_text(yaml.safe_dump(legacy, sort_keys=False), encoding="utf-8")
+    _llm_client().register_key(legacy_path, run_key)
     return legacy_path
 
 

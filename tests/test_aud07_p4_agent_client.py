@@ -456,7 +456,6 @@ ALLOWED_WIRE = {
     "src/agents/llm_client.py",     # the one AI client
     "src/run_4c_e2e.py",            # readiness poll of the app's own page
     "ui/webui.py",                  # readiness poll of the app's own page
-    "ui/_health.py",                # the health check's own plain GET
     "ui/_update.py",                # the update check
 }
 

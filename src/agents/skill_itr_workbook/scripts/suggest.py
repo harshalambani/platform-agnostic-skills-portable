@@ -66,6 +66,15 @@ def _config_secrets(config_path: str) -> tuple:
     for v in cfg.values():
         if isinstance(v, dict) and v.get("api_key"):
             found.append(str(v["api_key"]))
+    try:                                  # the per-run key is held in memory, not in the file
+        if str(_SRC_ROOT) not in sys.path:
+            sys.path.insert(0, str(_SRC_ROOT))
+        from agents import llm_client
+        held = llm_client.key_for(config_path)
+        if held:
+            found.append(held)
+    except Exception:  # noqa: BLE001
+        pass
     return tuple(found)
 
 
