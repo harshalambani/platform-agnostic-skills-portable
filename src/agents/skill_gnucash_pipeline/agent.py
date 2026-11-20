@@ -1508,6 +1508,7 @@ def _normalise_to_canonical(
     if str(agents_root) not in sys.path:
         sys.path.insert(0, str(agents_root))
     from agents.base_agent import run_direct  # noqa: E402
+    from agents import llm_client  # noqa: E402
 
     rows = _read_tabular_rows(input_file)
     if not rows:
@@ -1526,8 +1527,9 @@ def _normalise_to_canonical(
         for row in sample
     )
 
-    prompt = _NORMALISE_PROMPT.format(headers=headers_str, sample=sample_str)
-    system = (
+    prompt = _NORMALISE_PROMPT.format(headers=llm_client.wrap_data(headers_str),
+                                      sample=llm_client.wrap_data(sample_str))
+    system = llm_client.with_data_rule(
         f"You are normalising a {bank_name} bank statement CSV to canonical format. "
         "Output ONLY raw JSON — no markdown, no explanation."
     )

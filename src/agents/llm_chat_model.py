@@ -98,7 +98,7 @@ class ClientChatModel(BaseChatModel):
     def _generate(self, messages: List[BaseMessage], stop: Optional[List[str]] = None,
                   run_manager: Any = None, **kwargs: Any) -> ChatResult:
         ep = self.endpoint
-        neutral = [to_neutral(m) for m in messages]
+        neutral = llm_client.wrap_messages([to_neutral(m) for m in messages])   # AUD-16
         tools = kwargs.get("tools") or None
         attempt = 0
         while True:

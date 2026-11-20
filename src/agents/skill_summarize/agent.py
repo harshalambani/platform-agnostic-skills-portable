@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents import llm_client
 from agents.base_agent import run_direct
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
@@ -112,7 +113,7 @@ def run(
         f"Please summarise the following document.\n\n"
         f"**File name:** {src.name}\n\n"
         f"---\n\n"
-        f"{content}"
+        f"{llm_client.wrap_data(content)}"
     )
     if was_truncated:
         user_message += (
@@ -126,7 +127,7 @@ def run(
     print("[summarize] Sending to LLM …")
     summary = run_direct(
         user_message=user_message,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=llm_client.with_data_rule(SYSTEM_PROMPT),
         config_path=config_path,
         model_override=model_override,
     )
