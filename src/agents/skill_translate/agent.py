@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agents import llm_client
 from agents.base_agent import run_direct
 
 SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
@@ -50,14 +51,14 @@ def run(
         f"Translate the following text from **{src}** to "
         f"**{target_lang.strip()}**.\n\n"
         f"---\n\n"
-        f"{text}"
+        f"{llm_client.wrap_data(text)}"
     )
 
     # Call the LLM.
     print("[translate] Sending to LLM …")
     translation = run_direct(
         user_message=user_message,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt=llm_client.with_data_rule(SYSTEM_PROMPT),
         config_path=config_path,
         model_override=model_override,
     )

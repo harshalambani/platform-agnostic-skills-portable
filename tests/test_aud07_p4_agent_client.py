@@ -155,7 +155,7 @@ def test_a_tool_call_then_tool_result_then_final_answer(fake, tmp_path, provider
     assert sent_tools[0]["function"]["parameters"]["properties"]["text"]["type"] == "string"
     asst = [m for m in second["messages"] if m["role"] == "assistant"][0]
     tool_msg = [m for m in second["messages"] if m["role"] == "tool"][0]
-    assert tool_msg["content"] == "echo:x"
+    assert tool_msg["content"] == llm_client.wrap_data("echo:x")   # AUD-16: a tool result is marked as data
     if provider == "ollama":
         assert asst["tool_calls"][0]["function"] == {"name": "echo", "arguments": {"text": "x"}}
         assert tool_msg["tool_name"] == "echo"
@@ -174,7 +174,7 @@ def test_two_tool_calls_in_one_reply_both_run_and_both_results_go_back(fake, tmp
     assert res["messages"][-1].content == "both done"
     assert len(fake.requests) == 2
     second = fake.requests[1]["body"]["messages"]
-    assert [m["content"] for m in second if m["role"] == "tool"] == ["echo:a", "B"]
+    assert [m["content"] for m in second if m["role"] == "tool"] == [llm_client.wrap_data("echo:a"), llm_client.wrap_data("B")]
     asst = [m for m in second if m["role"] == "assistant"][0]
     assert len(asst["tool_calls"]) == 2
     if provider == "openai_compatible":

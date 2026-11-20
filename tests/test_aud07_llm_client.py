@@ -453,7 +453,10 @@ def test_redact_hides_an_explicit_secret_of_any_length():
 
 ALLOWED_IMPORTERS = ["src/agents/base_agent.py", "src/agents/llm_chat_model.py",
                      "src/agents/skill_gnucash_account_mapper/agent.py",
-                     "src/agents/skill_itr_workbook/scripts/suggest.py", "ui/_config.py",
+                     "src/agents/skill_gnucash_pipeline/agent.py",
+                     "src/agents/skill_itr_workbook/scripts/suggest.py",
+                     "src/agents/skill_summarize/agent.py", "src/agents/skill_translate/agent.py",
+                     "ui/_config.py",
                      "ui/_health.py"]
 
 
