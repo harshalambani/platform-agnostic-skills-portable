@@ -18,6 +18,10 @@ Public surface:
     chat(ep, system, user, *, timeout=None) -> Reply
     probe(ep, *, timeout=None) -> None
     list_models(ep, *, timeout=2.0) -> list[dict]
+    register_key(config_path, key) / forget_key(config_path) / key_for(config_path)
+        the decrypted key of a per-run config file, held in memory only
+    post_json(url, payload, *, timeout=3.0) -> dict
+        one plain JSON POST (the health check's capability query), no key
     chat_messages(ep, messages, tools=None, ...) -> Completion
         a whole conversation (with tool calls and tool results) in, the reply
         text and any tool calls out; used by the LangChain chat model
@@ -30,6 +34,7 @@ from __future__ import annotations
 
 import json
 import socket
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -167,6 +172,49 @@ def parse_retry_after(value) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Keys held in memory (AUD-07 P5)
+#
+# The UI writes a per-run config file WITHOUT the key and registers the key
+# here against that file's path. resolve_endpoint() reads the file, and takes
+# the key from here when the file has none. Each file has its own entry, so two
+# runs on different endpoints never see each other's key. Nothing is put in the
+# process environment. A hand-written config.yaml that still carries api_key
+# keeps working: the file's own key wins.
+# ---------------------------------------------------------------------------
+
+_KEYS: Dict[str, str] = {}
+_KEYS_LOCK = threading.Lock()
+
+
+def _key_id(config_path) -> str:
+    try:
+        return str(Path(config_path).resolve())
+    except (OSError, ValueError):
+        return str(config_path)
+
+
+def register_key(config_path, key: Optional[str]) -> None:
+    """Hold ``key`` in memory for the config file at ``config_path``. A blank
+    key, or "not-needed", is not held (nothing would be sent anyway)."""
+    if not endpoint_policy.has_key(key):
+        return
+    with _KEYS_LOCK:
+        _KEYS[_key_id(config_path)] = str(key)
+
+
+def forget_key(config_path) -> None:
+    with _KEYS_LOCK:
+        _KEYS.pop(_key_id(config_path), None)
+
+
+def key_for(config_path) -> Optional[str]:
+    """The key held for this config file, or None. For callers that must scrub
+    it from text; it is never logged or written."""
+    with _KEYS_LOCK:
+        return _KEYS.get(_key_id(config_path))
+
+
+# ---------------------------------------------------------------------------
 # Endpoint lookup (the mapper's strict version: nothing is guessed)
 # ---------------------------------------------------------------------------
 
@@ -192,7 +240,7 @@ def resolve_endpoint(config_path, model_override: Optional[str] = None) -> Endpo
     model = model_override or ep.get("default_model")
     if not model:
         raise ValueError(f"No model configured for provider '{provider}' in {config_path}.")
-    api_key = ep.get("api_key") if provider == "openai_compatible" else None
+    api_key = (ep.get("api_key") or key_for(config_path)) if provider == "openai_compatible" else None
     return Endpoint(
         provider=provider,
         base_url=base_url,
@@ -571,6 +619,17 @@ def list_models(ep: Endpoint, *, timeout: float = 2.0) -> list:
 def _get(ep: Endpoint, url: str, timeout: float) -> dict:
     _guard_address(ep, url)
     return _send(ep, _req.Request(url, headers=_headers(ep, False)), timeout)
+
+
+def post_json(url: str, payload: dict, *, timeout: float = 3.0) -> dict:
+    """POST one JSON body and return the JSON answer, with the same address
+    rule and error handling as the rest of the client. No key is sent (the health
+    check's capability query goes to a local model server)."""
+    ep = Endpoint("ollama", "", "", None)
+    _guard_address(ep, url)
+    request = _req.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST",
+                           headers=_headers(ep, True))
+    return _send(ep, request, timeout)
 
 
 def get_json(url: str, *, api_key: Optional[str] = None, timeout: float = 2.0) -> dict:
