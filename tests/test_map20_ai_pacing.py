@@ -250,13 +250,13 @@ def test_no_pacing_registered_means_llm_chat_does_not_wait(tmp_path, monkeypatch
 
 # -- LangChain route (i) ------------------------------------------------------
 
-def test_load_model_attaches_shared_limiter_only_when_on(tmp_path):
+def test_load_model_registers_the_shared_pacer_only_when_on(tmp_path):
     from agents.base_agent import load_model
-    off = load_model(_cfg(tmp_path))
-    assert getattr(off, "rate_limiter", None) is None      # negative: default unchanged
-    on = load_model(_cfg(tmp_path, gap=45))
-    assert on.rate_limiter is not None
-    # and it is the same pacer the mapper route waits on
+    lp.reset_registry()
+    load_model(_cfg(tmp_path))
+    assert not lp.pacer_for("ollama", "http://localhost:1").enabled      # negative: default unchanged
+    load_model(_cfg(tmp_path, gap=45))
+    # the model's calls wait on the same pacer the mapper route waits on (the client does it, once per call)
     assert lp.pacer_for("ollama", "http://localhost:1").min_gap == 45
 
 

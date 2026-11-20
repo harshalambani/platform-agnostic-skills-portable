@@ -18,6 +18,10 @@ Public surface:
     chat(ep, system, user, *, timeout=None) -> Reply
     probe(ep, *, timeout=None) -> None
     list_models(ep, *, timeout=2.0) -> list[dict]
+    chat_messages(ep, messages, tools=None, ...) -> Completion
+        a whole conversation (with tool calls and tool results) in, the reply
+        text and any tool calls out; used by the LangChain chat model
+        (agents/llm_chat_model.py)
 
 chat() and probe() never retry on their own. A 429 is raised as RateLimited and
 the CALLER decides whether to wait.
@@ -26,6 +30,8 @@ from __future__ import annotations
 
 import json
 import socket
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -87,6 +93,15 @@ class Reply(str):
         obj = super().__new__(cls, text)
         obj.finish_reason = finish_reason
         return obj
+
+
+@dataclass(frozen=True)
+class Completion:
+    """One model answer: the text (a Reply), the tool calls it asked for
+    (``[{"id", "name", "args"}]``, args a dict) and why it stopped."""
+    text: Reply
+    tool_calls: tuple = ()
+    finish_reason: Optional[str] = None
 
 
 class RateLimited(Exception):
@@ -233,6 +248,111 @@ def _openai_parse(body: dict) -> Reply:
                  choices[0].get("finish_reason"))
 
 
+# ---------------------------------------------------------------------------
+# Conversations with tool calls (the LangChain chat model sends these)
+#
+# A neutral message is a dict: {"role": "system"|"user"|"assistant"|"tool",
+# "content": str, "tool_calls": [{"id", "name", "args"}] (assistant only),
+# "tool_call_id" and "name" (tool only)}.
+# ---------------------------------------------------------------------------
+
+def _ollama_messages(messages: list) -> list:
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or "",
+                        "tool_calls": [{"function": {"name": c["name"], "arguments": c.get("args") or {}}}
+                                       for c in m["tool_calls"]]})
+        elif role == "tool":
+            msg = {"role": "tool", "content": m.get("content") or ""}
+            if m.get("name"):
+                msg["tool_name"] = m["name"]
+            out.append(msg)
+        else:
+            out.append({"role": role, "content": m.get("content") or ""})
+    return out
+
+
+def _openai_messages(messages: list) -> list:
+    out = []
+    for m in messages:
+        role = m.get("role")
+        if role == "assistant" and m.get("tool_calls"):
+            out.append({"role": "assistant", "content": m.get("content") or "",
+                        "tool_calls": [{"id": c["id"], "type": "function",
+                                        "function": {"name": c["name"],
+                                                     "arguments": json.dumps(c.get("args") or {})}}
+                                       for c in m["tool_calls"]]})
+        elif role == "tool":
+            out.append({"role": "tool", "tool_call_id": m.get("tool_call_id") or "",
+                        "content": m.get("content") or ""})
+        else:
+            out.append({"role": role, "content": m.get("content") or ""})
+    return out
+
+
+def _tool_args(raw: Any) -> dict:
+    """The arguments of one tool call: a JSON object, either already decoded
+    (Ollama) or as text (OpenAI style). Anything else is a ValueError."""
+    if raw is None or raw == "":
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            raise ValueError("the arguments were not valid JSON") from None
+    if not isinstance(raw, dict):
+        raise ValueError("the arguments were not a JSON object")
+    return raw
+
+
+def _read_tool_calls(ep: Endpoint, raw_calls: Any) -> tuple:
+    """Turn the service's tool_calls into [{"id", "name", "args"}]. A call that
+    cannot be read raises LlmError in plain words; nothing is skipped silently."""
+    if raw_calls is None:
+        return ()
+    try:
+        if not isinstance(raw_calls, list):
+            raise ValueError("the tool calls were not a list")
+        calls = []
+        for i, raw in enumerate(raw_calls):
+            fn = raw.get("function") if isinstance(raw, dict) else None
+            if not isinstance(fn, dict):
+                raise ValueError(f"tool call {i + 1} had no function")
+            name = fn.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"tool call {i + 1} had no tool name")
+            try:
+                args = _tool_args(fn.get("arguments"))
+            except ValueError as e:
+                raise ValueError(f"tool call {i + 1} ({name}): {e}") from None
+            call_id = raw.get("id")
+            calls.append({"id": call_id if isinstance(call_id, str) and call_id else f"call_{uuid.uuid4().hex[:12]}",
+                          "name": name, "args": args})
+        return tuple(calls)
+    except ValueError as e:
+        raise _fail(ep, ValueError(f"the AI service sent a tool call that could not be read ({e})")) from None
+
+
+def _ollama_completion(ep: Endpoint, body: dict) -> Completion:
+    msg = body.get("message")
+    if not isinstance(msg, dict):
+        raise _fail(ep, ValueError("the AI service reply had no message"))
+    reason = body.get("done_reason")
+    return Completion(Reply(msg.get("content") or "", reason), _read_tool_calls(ep, msg.get("tool_calls")), reason)
+
+
+def _openai_completion(ep: Endpoint, body: dict) -> Completion:
+    choices = body.get("choices")
+    if (not isinstance(choices, list) or not choices or not isinstance(choices[0], dict)
+            or not isinstance(choices[0].get("message"), dict)):
+        raise _fail(ep, ValueError("the AI service reply had no message"))
+    msg = choices[0]["message"]
+    reason = choices[0].get("finish_reason")
+    return Completion(Reply(msg.get("content") or "", reason), _read_tool_calls(ep, msg.get("tool_calls")), reason)
+
+
 def _ollama_list_url(ep: Endpoint) -> str:
     return f"{ep.base_url}/api/tags"
 
@@ -249,15 +369,17 @@ def _openai_list_parse(body: dict) -> list:
     return [m for m in (body.get("data") or []) if isinstance(m, dict)]
 
 
-# provider -> (build request, parse reply, list url, parse list, probe timeout)
+# provider -> build request, parse reply, messages in, completion out, list url, parse list, probe timeout
 _PROVIDERS: Dict[str, dict] = {
     "ollama": {
         "request": _ollama_chat_request, "parse": _ollama_parse,
+        "messages": _ollama_messages, "completion": _ollama_completion,
         "list_url": _ollama_list_url, "list_parse": _ollama_list_parse,
         "probe_timeout": PROBE_TIMEOUT_OLLAMA,
     },
     "openai_compatible": {
         "request": _openai_chat_request, "parse": _openai_parse,
+        "messages": _openai_messages, "completion": _openai_completion,
         "list_url": _openai_list_url, "list_parse": _openai_list_parse,
         "probe_timeout": PROBE_TIMEOUT_HOSTED,
     },
@@ -310,13 +432,28 @@ def _headers(ep: Endpoint, json_body: bool) -> dict:
     return headers
 
 
-def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = True) -> dict:
+def _send(ep: Endpoint, request: "_req.Request", timeout: float, parse: bool = True,
+          total: Optional[float] = None) -> dict:
     """Send one request and return the parsed JSON body. 429 -> RateLimited
     (unless the text says the account is out of credits); anything else ->
-    LlmError. Never retries. ``parse=False`` accepts any 2xx answer unread."""
+    LlmError. Never retries. ``parse=False`` accepts any 2xx answer unread.
+    ``total`` is a limit on the whole exchange, so a reply that trickles in
+    cannot run past it (``timeout`` only limits each wait)."""
     try:
+        deadline = None if total is None else time.monotonic() + total
         with _req.urlopen(request, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
+            if deadline is None:
+                raw = resp.read().decode("utf-8", errors="replace")
+            else:
+                chunks = []
+                while True:
+                    if time.monotonic() > deadline:
+                        raise TimeoutError("timed out")
+                    piece = resp.read1(65536)
+                    if not piece:
+                        break
+                    chunks.append(piece)
+                raw = b"".join(chunks).decode("utf-8", errors="replace")
         if not parse:
             return {}
         try:
@@ -374,6 +511,39 @@ def chat(ep: Endpoint, system: str, user: str, *, timeout: Optional[float] = Non
     request = _req.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
                            headers=_headers(ep, True))
     return spec["parse"](_send(ep, request, timeout or ep.timeout))
+
+
+def chat_messages(ep: Endpoint, messages: list, tools: Optional[list] = None, *,
+                  stop: Optional[list] = None, timeout: Optional[float] = None,
+                  total_limit: Optional[float] = None, paced: bool = True) -> Completion:
+    """A whole conversation in, one Completion out. ``messages`` are the neutral
+    dicts described above; ``tools`` is a list of OpenAI-style tool schemas
+    (``{"type": "function", "function": {name, description, parameters}}``),
+    which both providers accept. Same request builder, key rule, pacing, error
+    words and redaction as chat(); never retries. Raises LlmError, RateLimited
+    or llm_pacing.PacingStopped."""
+    spec = _spec(ep)
+    url, body = spec["request"](ep, spec["messages"](messages), _cap(ep))
+    if tools:
+        body["tools"] = tools
+    if stop:
+        if ep.provider == "ollama":
+            body["options"]["stop"] = list(stop)
+        else:
+            body["stop"] = list(stop)
+    _guard_address(ep, url)
+    pacer = llm_pacing.pacer_for(ep.provider, ep.base_url) if paced else None
+    if pacer is not None:
+        pacer.acquire()
+    request = _req.Request(url, data=json.dumps(body).encode("utf-8"), method="POST",
+                           headers=_headers(ep, True))
+    return spec["completion"](ep, _send(ep, request, timeout or ep.timeout, total=total_limit))
+
+
+def rate_limit_error(ep: Endpoint, limited: "RateLimited") -> LlmError:
+    """The same 429 as a plain LlmError, for callers that do not wait it out."""
+    return _fail(ep, _HttpFailure(429, None, limited.detail), original=limited.original,
+                 detail=limited.detail, raw_body=limited.raw_body)
 
 
 def probe(ep: Endpoint, *, timeout: Optional[float] = None) -> None:

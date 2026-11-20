@@ -11,7 +11,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import TypedDict
 
-import httpx
 import pytest
 import yaml
 
@@ -21,6 +20,7 @@ for _p in (str(ROOT), str(ROOT / "src")):
         sys.path.insert(0, _p)
 
 from agents import base_agent as ba  # noqa: E402
+from agents import llm_chat_model, llm_client  # noqa: E402
 from agents import llm_model_params as P  # noqa: E402
 
 
@@ -83,9 +83,8 @@ def _cfg(tmp_path, provider, base_url, model):
 ])
 def test_ollama_model_carries_all_three_limits(tmp_path, url, model, secs):
     m = ba.load_model(_cfg(tmp_path, "ollama", url, model))
-    assert m.num_predict == 4096
-    assert m.limit_seconds == secs
-    assert m.client_kwargs["timeout"] == secs
+    assert m.endpoint.max_tokens == 4096
+    assert m.endpoint.timeout == secs
     assert m.connect_retries == 2
 
 
@@ -95,18 +94,16 @@ def test_ollama_model_carries_all_three_limits(tmp_path, url, model, secs):
 ])
 def test_openai_model_carries_all_three_limits(tmp_path, url, model, secs):
     m = ba.load_model(_cfg(tmp_path, "openai_compatible", url, model))
-    assert m.max_tokens == 4096
-    assert m.connect_retries == 2                    # our own retries, connection failures only
-    assert m.max_retries == 0                        # the SDK would retry a timeout
-    assert m.root_client.max_retries == 0
-    assert m.request_timeout == secs
+    assert m.endpoint.max_tokens == 4096
+    assert m.connect_retries == 2                    # connection failures only; the client itself never retries
+    assert m.endpoint.timeout == secs
 
 
 def test_no_langchain_model_is_built_without_the_limits(tmp_path):    # NEGATIVE
-    from langchain_ollama import ChatOllama
+    from agents.llm_chat_model import ClientChatModel
     m = ba.load_model(_cfg(tmp_path, "ollama", "http://localhost:11434", "gemma4:12b"))
-    assert type(m) is not ChatOllama           # the limited subclass, never the plain class
-    assert m.num_predict is not None and m.limit_seconds > 0
+    assert type(m) is ClientChatModel          # the model that sends through the client, never a bare LangChain class
+    assert m.endpoint.max_tokens is not None and m.endpoint.timeout > 0
 
 
 # ---- a fake Ollama server ---------------------------------------------------------------
@@ -209,9 +206,10 @@ def test_connection_failures_are_retried_twice_then_raised(tmp_path, monkeypatch
     s.close()                                                     # nothing listens now
     m = _model(tmp_path, f"http://127.0.0.1:{port}", 30, monkeypatch)
     sleeps = []
-    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
-    with pytest.raises((ConnectionError, httpx.ConnectError)):
+    monkeypatch.setattr(llm_chat_model, "_retry_pause", lambda x: sleeps.append(x))
+    with pytest.raises(llm_client.LlmError) as ei:
         m.invoke("hello")
+    assert "could not be reached" in str(ei.value)
     assert len(sleeps) == 2
 
 
@@ -219,7 +217,7 @@ def test_a_timeout_is_not_a_connection_failure(tmp_path, fake, monkeypatch):    
     f = fake("silent")
     m = _model(tmp_path, f.url, 1, monkeypatch)
     sleeps = []
-    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
+    monkeypatch.setattr(llm_chat_model, "_retry_pause", lambda x: sleeps.append(x))
     with pytest.raises(P.LlmLimitError):
         m.invoke("hello")
     assert sleeps == []
@@ -303,12 +301,12 @@ def test_messages_name_the_limit_in_words():
     assert "4,096 tokens" in P.reply_cap_note()
 
 
-def test_the_langchain_ollama_call_streams_so_the_total_cap_is_ours(tmp_path, fake, monkeypatch):
-    """The client asks for a streamed reply, so the httpx timeout only limits the wait for the next
-    piece; the total limit comes from LimitedChatOllama (see the trickle test above)."""
+def test_the_model_asks_for_one_whole_reply_so_the_total_cap_is_the_clients(tmp_path, fake, monkeypatch):
+    """The model asks for one whole (not streamed) reply; the client reads it against a total
+    deadline, so a slow trickle is cut at the limit (see the trickle test above)."""
     f = fake("ok")
     _model(tmp_path, f.url, 30, monkeypatch).invoke("hello")
-    assert f.last_body.get("stream") is True
+    assert f.last_body.get("stream") is False
 
 
 def test_every_llm_skill_help_explains_the_limit_messages():
@@ -385,7 +383,7 @@ def test_openai_server_that_never_answers_gets_exactly_one_request(tmp_path, oaf
     f = oafake("silent")
     m = _oa_model(tmp_path, f.url, 1, monkeypatch)
     sleeps = []
-    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
+    monkeypatch.setattr(llm_chat_model, "_retry_pause", lambda x: sleeps.append(x))
     t0 = time.time()
     with pytest.raises(P.LlmLimitError) as ei:
         m.invoke("hello")
@@ -396,16 +394,16 @@ def test_openai_server_that_never_answers_gets_exactly_one_request(tmp_path, oaf
 
 
 def test_openai_refused_connection_is_retried_twice_then_raised(tmp_path, monkeypatch):
-    import openai
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
     m = _oa_model(tmp_path, f"http://127.0.0.1:{port}", 30, monkeypatch)
     sleeps = []
-    monkeypatch.setattr(ba, "_retry_pause", lambda x: sleeps.append(x))
-    with pytest.raises(openai.APIConnectionError):
+    monkeypatch.setattr(llm_chat_model, "_retry_pause", lambda x: sleeps.append(x))
+    with pytest.raises(llm_client.LlmError) as ei:
         m.invoke("hello")
+    assert "could not be reached" in str(ei.value)
     assert sleeps == [1, 1]
 
 
