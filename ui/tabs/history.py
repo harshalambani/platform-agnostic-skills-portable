@@ -32,6 +32,7 @@ from .. import _config
 # the rest are the non-bank skills.
 _NON_BANK_SUFFIX_TO_SKILL: dict[str, str] = {
     "26AS":             "Form 26AS Extractor",
+    "Bank-Skills":      "Bank Skills",
     "CC-Sort":          "CC Sort",
     "CC-Transactions":  "CC Transactions",
     "analysis":         "CSV Analyzer",

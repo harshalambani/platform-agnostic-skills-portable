@@ -39,13 +39,14 @@ def _missing(phrases, text):
 
 
 def _help_text(skill_name: str) -> str:
-    for s in registry.discover(refresh=True):
-        if s.name == skill_name:
-            h = s.help
-            parts = [h.overview, h.tips, h.when_to_use]
-            parts += [i.gotchas for i in h.inputs]
-            parts += [f"{t.problem} {t.fix}" for t in h.troubleshooting]
-            return " ".join(p for p in parts if p)
+    registry.discover(refresh=True)
+    s = registry.get(skill_name)          # resolves old names via aliases
+    if s is not None:
+        h = s.help
+        parts = [h.overview, h.tips, h.when_to_use]
+        parts += [i.gotchas for i in h.inputs]
+        parts += [f"{t.problem} {t.fix}" for t in h.troubleshooting]
+        return " ".join(p for p in parts if p)
     raise AssertionError(f"skill {skill_name} not found")
 
 

@@ -11,7 +11,7 @@ Use this when you have a Kotak savings-account statement as a PDF and want it as
 
 ## Inputs
 
-- **Kotak statement PDF** (required) — accepts: PDF (.pdf) — one statement per run.
+- **Kotak statement PDF** (required) — accepts: PDF (.pdf). One account per run: upload that account's statement file(s); a statement of a different account stops the run.
   - Your Kotak statement PDF.
   - ⚠️ Use the bank's original text PDF, not a photo/scan. This skill has no password box, so a password-protected statement stops it with a password message. To convert a protected statement, use "Bank - Convert to GnuCash", choose Kotak, and type the password in the "Statement password" box there. If two uploads share a file name (capital letters do not count as a difference) the run stops with "two uploads are both named" and the file name, and nothing is run. Rename one of them and upload again.
 

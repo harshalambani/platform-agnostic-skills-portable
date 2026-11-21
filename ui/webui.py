@@ -538,7 +538,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
     from ui import _native as _native_mod
     _native_mod.ensure_native_path()
 
-    skills = _discover_skills()
+    skills_all = _discover_skills()
+    # BNK-01: a hidden skill (the six per-bank readers) is not drawn as a tab;
+    # its help page still is, and the Bank Skills tab runs it.
+    skills = [s for s in skills_all if not s.hidden]
 
     # Probe the LLM endpoints on a background thread rather than here.
     #
@@ -770,7 +773,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                         tab_generic.render(_skill, container_tab=_t)
 
             with gr.Tab("Help"):
-                tab_help.render(skills=skills)
+                tab_help.render(skills=skills_all)
             with gr.Tab("History"):
                 tab_history.render()
             with gr.Tab("Settings"):

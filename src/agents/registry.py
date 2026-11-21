@@ -93,6 +93,17 @@ class SkillInput:
                               # "cc_sort_runs" = each Credit Card - Sort PDFs run's
                               # Decrypted_PDFs_Correct folder, newest run first.
                               # Empty = a plain path box.
+    visible_when: str = ""  # (BNK-01, optional) "<input>=<value>": the input is
+                              # drawn only while the named select holds that value,
+                              # and is ignored (never validated, passed empty) while
+                              # it does not. Empty = always drawn.
+    hint_from: str = ""     # (BNK-01, file/files/directory inputs, optional) name of
+                              # a `select` whose chosen bank (options_from:
+                              # "bank_parsers") decides the hint under this input:
+                              # that bank's own `help.accepts` for its statement
+                              # input. Empty = the input's own hint.
+    reset_after_run: bool = False  # (checkbox inputs only) goes back to off when a
+                              # run ends, so a one-run override cannot carry over.
 
 
 @dataclass(frozen=True)
@@ -219,6 +230,11 @@ class SkillInfo:
     help: SkillHelp | None = None
     check: SkillCheck | None = None
     input_groups: tuple[SkillInputGroup, ...] = ()
+    # BNK-01: a hidden skill is not drawn as a tab (its manifest still serves
+    # the bank registry, the help pages and the generated docs). `aliases` are
+    # the skill's earlier names; registry.get() resolves them to this skill.
+    hidden: bool = False
+    aliases: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +247,19 @@ def _validate_form_layout(skill_name: str, inputs, groups) -> None:
     typo can never silently drop an input from the form."""
     known_groups = {g.name for g in groups}
     names = {i.name for i in inputs}
+    by_name = {i.name: i for i in inputs}
     for i in inputs:
+        for label, ref in (("visible_when", i.visible_when.partition("=")[0].strip()
+                            if i.visible_when else ""),
+                           ("hint_from", i.hint_from)):
+            if ref and ref not in by_name:
+                raise ValueError(
+                    f"skill.yaml error in '{skill_name}': input '{i.name}' declares "
+                    f"{label} naming '{ref}', but no input has that name.")
+        if i.visible_when and "=" not in i.visible_when:
+            raise ValueError(
+                f"skill.yaml error in '{skill_name}': input '{i.name}' visible_when "
+                f"must read '<input>=<value>', got {i.visible_when!r}.")
         if i.group and i.group not in known_groups:
             raise ValueError(
                 f"skill.yaml error in '{skill_name}': input '{i.name}' declares "
@@ -344,6 +372,9 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
             gather_samples=tuple(str(x) for x in (inp.get("gather_samples") or ())),
             gather_samples_title=str(inp.get("gather_samples_title") or "").strip(),
             folders_from=str(inp.get("folders_from") or "").strip(),
+            visible_when=str(inp.get("visible_when") or "").strip(),
+            hint_from=str(inp.get("hint_from") or "").strip(),
+            reset_after_run=bool(inp.get("reset_after_run", False)),
         ))
 
     groups = tuple(
@@ -405,6 +436,8 @@ def _parse_manifest(path: Path) -> SkillInfo | None:
         help=help_block,
         check=_parse_check(raw.get("check")),
         input_groups=groups,
+        hidden=bool(raw.get("hidden", False)),
+        aliases=tuple(str(a).strip() for a in (raw.get("aliases") or ()) if str(a).strip()),
     )
 
 
@@ -455,8 +488,13 @@ def discover_parser_scripts() -> list[Path]:
 def get(name: str) -> SkillInfo | None:
     """Look up a skill by name (case-insensitive)."""
     name_lower = name.lower()
-    for skill in discover():
+    skills = discover()
+    for skill in skills:
         if skill.name.lower() == name_lower:
+            return skill
+    # BNK-01: an earlier name still resolves to the same skill.
+    for skill in skills:
+        if name_lower in (a.lower() for a in skill.aliases):
             return skill
     return None
 

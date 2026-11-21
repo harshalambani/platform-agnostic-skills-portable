@@ -1,6 +1,8 @@
 # skill.yaml — BoB skill manifest
 
-name: "BoB"
+name: "skill_bob"
+aliases: ["BoB"]
+hidden: true
 display_name: "Bank of Baroda"
 description: >
   Parse a Bank of Baroda transaction-statement PDF into a flat CSV of rows.
@@ -64,7 +66,7 @@ help:
   inputs:
     - name: "pdf_path"
       tooltip: "Your BoB statement PDF(s). You can select several at once."
-      accepts: "PDF (.pdf) — one or many, in any order."
+      accepts: "PDF (.pdf) — one or many, in any order. One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         Use the bank's original text PDF, not a photo/scan. Password-protected
         PDFs must be unlocked first. Mixed accounts are fine but land in one CSV.

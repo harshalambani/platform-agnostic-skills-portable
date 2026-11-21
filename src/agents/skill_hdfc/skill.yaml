@@ -1,4 +1,5 @@
 name: "skill_hdfc"
+hidden: true
 display_name: "HDFC"
 description: >
   Convert HDFC Bank statements to GnuCash-importable CSV. Supports digital PDF
@@ -60,7 +61,7 @@ help:
   inputs:
     - name: "pdf_path"
       tooltip: "Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export."
-      accepts: "PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file."
+      accepts: "PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv). One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         XLS/XLSX downloads are the most reliable and exact. Digital PDFs work
         directly; scanned or font-garbled PDFs are OCR'd automatically and OCR

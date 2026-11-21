@@ -1,6 +1,8 @@
 # skill.yaml — HSBC skill manifest
 
-name: "HSBC"
+name: "skill_hsbc"
+aliases: ["HSBC"]
+hidden: true
 display_name: "HSBC"
 description: >
   Consolidate one or more HSBC bank-statement PDFs into a clean Excel workbook
@@ -56,7 +58,7 @@ help:
   inputs:
     - name: "pdf_dir"
       tooltip: "A folder containing one or more HSBC statement PDFs, or a single PDF."
-      accepts: "A folder of HSBC PDF statements, or a single HSBC statement PDF."
+      accepts: "A folder of HSBC PDF statements, or a single HSBC statement PDF. One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         Scanned PDFs are OCR'd, so the run takes longer and needs Tesseract +
         Poppler (bundled in the frozen build). This tab only OCRs PDFs — if

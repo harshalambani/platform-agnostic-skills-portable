@@ -1,6 +1,8 @@
 # skill.yaml — Kotak skill manifest
 
-name: "Kotak"
+name: "skill_kotak"
+aliases: ["Kotak"]
+hidden: true
 display_name: "Kotak"
 description: >
   Parse a Kotak Mahindra Bank savings-account transaction-statement PDF into
@@ -63,7 +65,7 @@ help:
   inputs:
     - name: "pdf_path"
       tooltip: "Your Kotak statement PDF."
-      accepts: "PDF (.pdf) — one statement per run."
+      accepts: "PDF (.pdf). One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         Use the bank's original text PDF, not a photo/scan. This skill has no
         password box, so a password-protected statement stops it with a
