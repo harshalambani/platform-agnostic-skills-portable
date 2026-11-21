@@ -431,3 +431,28 @@ def test_resolution_a_single_candidate_is_unchanged(tmp_path):
     res = pipe._get_gnucash_account_balance(book, "HDFC", HDFC_NO)
     assert res["found"] is True and res["account_name"].endswith("HDFC Bank Savings")
     assert "fell back to name match" in res["match_warning"]
+
+
+# ===========================================================================
+# The labelled finder never joins a separate digit group to the number
+# ===========================================================================
+
+@pytest.mark.parametrize("line", [
+    f"Account No : {HDFC_NO} 01/04/2025",          # a date
+    f"AccountNo : {HDFC_NO} 123456 cheque",         # a cheque number
+    f"Account No :{HDFC_NO} 444-555555-666",        # a 3-6-3 narration number
+    f"Account No :{HDFC_NO} 12 04 2025",            # a date written with spaces
+])
+def test_finder_a_separate_digit_group_is_never_joined_to_the_number(line):
+    assert find_account_number([line]) == HDFC_NO
+
+
+@pytest.mark.parametrize("line,want", [
+    ("Account No : 013 065 123 456", "013065123456"),
+    ("A/C No. 0130 6512 3456", "013065123456"),
+    ("Account Number 0130-6512-3456", "013065123456"),
+    ("Account No : 013 065 123 456 01/04/2025", "013065123456"),
+    ("Account No : 0130 6512 3456 14:30", "013065123456"),
+])
+def test_finder_a_labelled_number_with_spaces_or_dashes_inside_is_still_read(line, want):
+    assert find_account_number([line]) == want

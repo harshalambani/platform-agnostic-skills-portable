@@ -10,6 +10,9 @@ version: "1.4.0"
 
 bank: true
 bank_key: "hdfc"
+rules_key: "HDFC"
+rules_order: 20
+hint_match: "substring"
 
 mode: "direct"
 entry_point: "agent:run"

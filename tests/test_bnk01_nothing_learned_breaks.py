@@ -105,11 +105,12 @@ def test_the_join_code_only_reads_the_description():
 # ---- (2) bank_key ---------------------------------------------------------
 
 OLD_BANK_KEYS = {"Bank of Baroda": "BoB", "HDFC": "HDFC", "HSBC": "HSBC", "ICICI": "ICICI"}
+NEW_BANK_KEYS = {"SBM": "SBM", "Kotak": "Kotak"}
 
 
-def test_the_mapper_bank_key_map_is_exactly_the_old_one():
+def test_the_mapper_bank_key_map_is_the_old_one_plus_sbm_and_kotak():
     from agents.skill_gnucash_account_mapper.agent import _BANK_KEY_MAP
-    assert _BANK_KEY_MAP == OLD_BANK_KEYS
+    assert _BANK_KEY_MAP == {**OLD_BANK_KEYS, **NEW_BANK_KEYS}
 
 
 @pytest.mark.parametrize("name,key", sorted(OLD_BANK_KEYS.items()))
@@ -118,16 +119,16 @@ def test_bank_key_resolves_to_the_old_string(name, key):
     assert _BANK_KEY_MAP.get(name) == key
 
 
-@pytest.mark.parametrize("name", ["SBM", "Kotak Mahindra Bank", "Other Bank (CSV)"])
-def test_sbm_kotak_and_other_bank_have_no_key_today(name):
-    """A known, listed change when commit 2 gives SBM and Kotak a key."""
+@pytest.mark.parametrize("name", ["Other Bank (CSV)"])
+def test_other_bank_has_no_key(name):
+    """Other Bank (CSV) is not a bank skill: no key."""
     from agents.skill_gnucash_account_mapper.agent import _BANK_KEY_MAP
     assert _BANK_KEY_MAP.get(name) is None
 
 
 def test_the_extractor_still_files_history_under_the_old_names():
     from agents.skill_gnucash_xml_extractor import agent as ex
-    assert {k for k in ex.BANK_PATTERNS} == {"ICICI", "HDFC", "HSBC", "BoB"}
+    assert {k for k in ex.BANK_PATTERNS} == {"ICICI", "HDFC", "HSBC", "BoB", "SBM", "Kotak"}
 
 
 # ---- (3) rules path and overrides ----------------------------------------

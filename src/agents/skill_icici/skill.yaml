@@ -12,6 +12,9 @@ category: "banks"
 version: "1.1.0"
 bank: true
 bank_key: "icici"
+rules_key: "ICICI"
+rules_order: 10
+hint_match: "substring"
 
 mode: "agent"
 entry_point: "agent:run"

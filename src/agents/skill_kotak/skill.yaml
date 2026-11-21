@@ -11,6 +11,8 @@ version: "1.0.0"
 
 bank: true
 bank_key: "kotak"
+rules_key: "Kotak"
+rules_order: 60
 
 mode: "direct"
 entry_point: "agent:run"
