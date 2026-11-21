@@ -136,3 +136,43 @@ def test_a_single_candidate_is_unchanged(tmp_path, typ):
     assert res["found"] is True and res["account_name"].endswith("Kotak Savings")
     if typ == "ASSET":
         assert "ASSET-type" in (res["match_warning"] or "")      # the IMP-10 warning stays
+
+
+# ---- commit 4: a single ASSET-type account + a number that fits nothing -------
+
+def test_a_single_asset_account_and_a_number_that_fits_none_asks(tmp_path):
+    book = _book(tmp_path, [("a", "Kotak Savings", "ASSET")])
+    res = _res(book, number=NO)
+    assert res["found"] is False and res["ambiguous"] is True
+    assert res["account_name"] == ""
+
+
+def test_a_single_asset_account_asks_whatever_the_opening_balance(tmp_path):
+    book = _book(tmp_path, [("a", "Kotak Savings", "ASSET")], [_bal("a", 100000)])
+    res = _res(book, number=NO, opening=1000.00)
+    assert res["found"] is False and res["ambiguous"] is True
+
+
+def test_a_single_asset_account_with_no_number_still_picks_with_the_imp10_warning(tmp_path):
+    book = _book(tmp_path, [("a", "Kotak Savings", "ASSET")])
+    res = _res(book, number=None)
+    assert res["found"] is True and "ASSET-type" in (res["match_warning"] or "")
+
+
+def test_a_single_asset_account_whose_name_carries_the_number_still_picks(tmp_path):
+    book = _book(tmp_path, [("a", f"Kotak Savings {NO}", "ASSET")])
+    res = _res(book, number=NO)
+    assert res["found"] is True and res["account_name"].endswith(NO)
+
+
+def test_a_single_asset_account_carrying_a_different_number_still_stops_as_wrong_book(tmp_path):
+    book = _book(tmp_path, [("a", "Kotak Savings 999900001111", "ASSET")])
+    res = _res(book, number=NO)
+    assert res["found"] is False and res.get("wrong_book") is True
+
+
+def test_a_single_bank_type_account_and_a_number_that_fits_none_still_picks_with_its_warning(tmp_path):
+    book = _book(tmp_path, [("b", "Kotak Savings", "BANK")])
+    res = _res(book, number=NO)
+    assert res["found"] is True
+    assert "fell back to name match" in (res["match_warning"] or "")

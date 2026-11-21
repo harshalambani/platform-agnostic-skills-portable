@@ -1024,6 +1024,14 @@ def _get_gnucash_account_balance(
                     f"match this book: its only '{bank_name}' account, "
                     f"'{_strip_root(target_name)}', carries a different account "
                     f"number.")
+            if fallback_warning:
+                # BNK-01: the one account at this bank is an IMP-10 ASSET
+                # fallback (not BANK-type) and the statement's number fits
+                # nothing in its name: never pick it on the name alone. Ask.
+                return _ask(
+                    f"The account number '{account_number}' is not in the name of "
+                    f"your only account at '{bank_name}', and that account is not "
+                    f"a BANK-type account.")
             match_warning = (
                 f"Could not match account number '{account_number}' to any "
                 f"GnuCash account digits; fell back to name match on "
