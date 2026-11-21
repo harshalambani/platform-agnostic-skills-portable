@@ -22,6 +22,7 @@ from typing import Any, Optional
 
 from agents.bank_common import normalize as _normalize
 from agents.bank_common import password as _password
+from agents.bank_common.statements import StatementStop, read_statements
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check
 from agents.skill_hsbc.acct_number import digits_only, find_account_number
@@ -322,6 +323,59 @@ def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Pat
     return out_xlsx
 
 
+def _resolve_upload(path_or_dir: str, hsbc_skill) -> str:
+    """Resolve one staged HSBC upload entry for ``HSBCSkill.parse()``.
+
+    HSBC reads either PDF statements (OCR path) or a single already-enriched
+    ``.xlsx``/``.xlsm`` workbook (fast path, HSB-03). A single file is passed
+    through as-is (never swapped for its parent folder, which would sweep every
+    sibling PDF into OCR). A folder is inspected: PDFs only -> the folder;
+    exactly one HSBC-shaped workbook -> that workbook. Anything else raises
+    :class:`StatementStop` with the reason.
+    """
+    src = Path(path_or_dir)
+    if not src.is_dir():
+        return str(src)
+
+    entries = sorted(src.iterdir())
+    pdfs = [p for p in entries if p.is_file() and p.suffix.lower() == ".pdf"]
+    workbooks = [p for p in entries if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm")]
+
+    if pdfs and workbooks:
+        raise StatementStop(
+            f"The staged upload directory contains both PDF statement(s) "
+            f"and enriched workbook(s): `{path_or_dir}`. "
+            "Upload either PDF statements (for OCR) or a single "
+            "already-enriched .xlsx/.xlsm workbook, not both.",
+            title="mixed upload")
+    if workbooks:
+        if len(workbooks) > 1:
+            raise StatementStop(
+                f"The staged upload directory contains more than one "
+                f"enriched workbook: `{path_or_dir}`. "
+                "Upload just one already-enriched HSBC .xlsx/.xlsm workbook.",
+                title="multiple workbooks")
+        wb = workbooks[0]
+        try:
+            confidence = hsbc_skill.detect(wb)
+        except Exception:  # noqa: BLE001
+            confidence = 0.0
+        if confidence <= 0:
+            raise StatementStop(
+                f"`{wb.name}` doesn't look like an already-enriched HSBC "
+                "workbook. Expected first-sheet headers: `Date, Transaction "
+                "Details, Transaction Date, Transaction Number, Extra "
+                "Information, Deposit, Withdrawals, Balance`.",
+                title="unrecognised workbook")
+        return str(wb)
+    if pdfs:
+        return str(src)
+    raise StatementStop(
+        f"The staged upload directory contains no .pdf or .xlsx/.xlsm "
+        f"files: `{path_or_dir}`",
+        title="no statements found")
+
+
 class HSBCSkill:
     """HSBC parser implementing the ``BankSkill`` protocol.
 
@@ -368,16 +422,39 @@ class HSBCSkill:
         except Exception:  # noqa: BLE001 — scanned/encrypted PDFs have no text layer; that's the norm for HSBC
             return 0.5
 
+    # An already-enriched workbook is read as well (HSB-03 fast path).
+    read_suffixes = (".pdf", ".xlsx", ".xlsm")
+
+    @staticmethod
+    def is_carry_forward_row(row: dict) -> bool:
+        """The "BALANCE BROUGHT FORWARD" opener of a statement: kept for the
+        first statement only when several are joined."""
+        return str(row.get("Description", "")).strip().upper() == "BALANCE BROUGHT FORWARD"
+
     def parse(
         self,
-        path: str | Path,
+        path,
         password: str | None = None,
+        *,
+        allow_balance_break: bool = False,
+        selected_account: str | None = None,
+        account_resolver=None,
     ) -> BankResult:
-        """Parse HSBC statement(s) into a canonical BankResult.
+        """Parse HSBC statement(s): a PDF, a list of PDFs, a folder of PDFs,
+        or one already-enriched ``.xlsx``/``.xlsm`` workbook.
 
-        ``path`` may be a single PDF, a folder of PDFs, or an already-enriched
-        ``.xlsx``/``.xlsm`` workbook (see class docstring). Returns canonical
-        rows only — writing the CSV/sidecar is the caller's job via
+        The shared reading rule (``bank_common.statements``) joins several
+        statements; one statement comes back as ``parse_one`` made it.
+        """
+        entries = path if isinstance(path, (list, tuple)) else [path]
+        resolved = [_resolve_upload(str(e), self) for e in entries if str(e).strip()]
+        return read_statements(
+            self, resolved, password, allow_balance_break=allow_balance_break,
+            selected_account=selected_account, account_resolver=account_resolver)
+
+    def parse_one(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse ONE HSBC statement (a PDF, or an enriched workbook) into a
+        canonical BankResult. Writing the CSV/sidecar is the caller's job via
         ``canonical_io`` (the shared tail), per the ``BankSkill`` protocol.
         """
         p = Path(path)
@@ -385,11 +462,6 @@ class HSBCSkill:
 
         if suffix in (".xlsx", ".xlsm"):
             enriched_xlsx = p
-        elif p.is_dir():
-            pdfs = sorted(p.glob("*.pdf"))
-            if not pdfs:
-                raise ValueError(f"No PDFs found in {path}")
-            enriched_xlsx = _run_ocr_pipeline(pdfs, password)
         elif suffix == ".pdf":
             enriched_xlsx = _run_ocr_pipeline([p], password)
         else:

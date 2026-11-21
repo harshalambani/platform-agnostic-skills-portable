@@ -22,6 +22,7 @@ from typing import Optional
 
 from agents.bank_common import normalize as _normalize
 from agents.bank_common.consolidate import StatementGroup, consolidate as _consolidate
+from agents.bank_common.statements import read_statements
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check
 
@@ -225,13 +226,6 @@ def _native_csv_to_canonical(input_csv: str) -> tuple[list[dict], list[str]]:
     return rows, warnings
 
 
-def _collect_pdfs(path: Path) -> list[Path]:
-    """Return the PDF(s) at ``path`` (single file or directory of PDFs)."""
-    if path.is_dir():
-        return sorted(path.glob("*.pdf"))
-    return [path]
-
-
 class BoBSkill:
     """Bank of Baroda parser implementing the ``BankSkill`` protocol.
 
@@ -267,12 +261,26 @@ class BoBSkill:
 
     def parse(
         self,
-        path: str | Path,
+        path,
         password: str | None = None,
+        *,
+        allow_balance_break: bool = False,
+        selected_account: str | None = None,
+        account_resolver=None,
     ) -> BankResult:
-        """Parse a BoB statement PDF (or directory of PDFs) to a BankResult.
+        """Parse a BoB statement PDF, a list of PDFs or a folder of PDFs.
 
-        Returns canonical rows only — writing the CSV/sidecar is the caller's
+        The shared reading rule (``bank_common.statements``) joins several
+        statements; a single PDF comes back exactly as ``parse_one`` made it.
+        """
+        return read_statements(
+            self, path, password, allow_balance_break=allow_balance_break,
+            selected_account=selected_account, account_resolver=account_resolver)
+
+    def parse_one(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse ONE BoB statement PDF to a BankResult.
+
+        Returns canonical rows only -- writing the CSV/sidecar is the caller's
         job via ``canonical_io`` (the shared tail), per the ``BankSkill``
         protocol.
         """
@@ -281,26 +289,10 @@ class BoBSkill:
             write_csv as _write_native_csv,
         )
 
-        pdfs = _collect_pdfs(Path(path))
-        if not pdfs:
-            raise FileNotFoundError(f"No BoB PDF(s) found at: {path}")
-
-        # Order multi-file batches by actual transaction date (not filename)
-        # and flag gaps/overlaps, via the shared bank_common helper. A single
-        # PDF is just a one-group "batch" -- consolidate() is a no-op for it,
-        # so the single-statement (e.g. full-year) path stays byte-identical.
-        groups = []
-        for pdf in pdfs:
-            pdf_rows = extract(pdf, password=password)
-            dates = sorted(d for d in (_parse_date_bob(r.date) for r in pdf_rows) if d)
-            groups.append(StatementGroup(
-                name=pdf.name,
-                rows=pdf_rows,
-                period_start=dates[0] if dates else None,
-                period_end=dates[-1] if dates else None,
-            ))
-        consolidated = _consolidate(groups)
-        native_rows = consolidated.rows
+        pdf = Path(path)
+        if not pdf.is_file():
+            raise FileNotFoundError(f"No BoB PDF found at: {path}")
+        native_rows = extract(pdf, password=password)
 
         # Round-trip through the native CSV so the canonical mapping sees the
         # exact same representation adapter_bob consumed (keeps tie-out exact).
@@ -308,13 +300,12 @@ class BoBSkill:
             native_csv = Path(tmp) / "bob_raw.csv"
             _write_native_csv(native_rows, native_csv)
             rows, warnings = _native_csv_to_canonical(str(native_csv))
-        warnings.extend(consolidated.warnings)
 
         balance_check = run_balance_check(rows)
         if not balance_check.ok:
             warnings.extend(f"Balance: {d}" for d in balance_check.details)
 
-        account_number, period_from, period_to = _extract_meta_fields(pdfs[0], password)
+        account_number, period_from, period_to = _extract_meta_fields(pdf, password)
         meta = BankStatementMeta(
             bank_key=BANK_KEY,
             account_number=account_number,

@@ -1,5 +1,9 @@
-"""BNK-11: Convert to GnuCash must stop when it would read only one of several
-uploaded statements, and must write nothing when it does."""
+"""BNK-11 (kept by BNK-01): Convert to GnuCash must stop when it would read only
+one of several uploaded statements, and must write nothing when it does.
+
+Since BNK-01 every dedicated bank reads the whole upload through its own reader
+(see test_bnk01_statements.py), so this guard is the second line of defence and
+only fires on the route that reads a single file: Other Bank (CSV)."""
 from __future__ import annotations
 
 import pytest
@@ -7,11 +11,14 @@ import pytest
 import agents.skill_gnucash_pipeline.agent as pipeline_agent
 from agents.banks import BankInfo
 
-ONE_FILE_BANKS = {
+CROSS = chr(0x274C)
+
+DEDICATED = {
     "ICICI": ("a.xls", "b.xls"),
     "HDFC": ("a.csv", "b.csv"),
     "SBM": ("a.xlsx", "b.xlsx"),
-    "Other Bank (CSV)": ("a.csv", "b.csv"),
+    "Bank of Baroda": ("a.pdf", "b.pdf"),
+    "HSBC": ("a.pdf", "b.pdf"),
 }
 
 
@@ -19,8 +26,8 @@ class _Spy:
     def __init__(self):
         self.calls = []
 
-    def parse(self, path, password=None):
-        self.calls.append(str(path))
+    def parse(self, path, password=None, **kw):
+        self.calls.append(path)
         raise RuntimeError("test-sentinel-stop")
 
 
@@ -47,10 +54,6 @@ def _run(monkeypatch, tmp_path, bank, statement_files):
     return spy, normalised, result, out_dir
 
 
-def _calls(spy, normalised):
-    return spy.calls + normalised
-
-
 def _folder(tmp_path, names):
     d = tmp_path / "upload"
     d.mkdir()
@@ -59,63 +62,55 @@ def _folder(tmp_path, names):
     return d
 
 
-@pytest.mark.parametrize("bank", list(ONE_FILE_BANKS))
-def test_two_files_in_a_folder_stop_naming_both(monkeypatch, tmp_path, bank):
-    a, b = ONE_FILE_BANKS[bank]
-    d = _folder(tmp_path, [a, b])
-    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, bank, str(d))
-    assert "\u274c" in result and a in result and b in result
+def test_other_bank_two_files_in_a_folder_stop_naming_both(monkeypatch, tmp_path):
+    d = _folder(tmp_path, ["a.csv", "b.csv"])
+    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, "Other Bank (CSV)", str(d))
+    assert CROSS in result and "a.csv" in result and "b.csv" in result
     assert "one statement at a time" in result
-    assert _calls(spy, norm) == []
+    assert spy.calls == [] and norm == []
     assert not out_dir.exists()
 
 
-def test_icici_mixed_extensions_stop(monkeypatch, tmp_path):
-    d = _folder(tmp_path, ["a.xls", "b.xlsx"])
-    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, "ICICI", str(d))
-    assert "a.xls" in result and "b.xlsx" in result
-    assert _calls(spy, norm) == [] and not out_dir.exists()
-
-
-def test_two_unknown_extension_files_stop_instead_of_first_file_wins(monkeypatch, tmp_path):
-    d = _folder(tmp_path, ["a.dat", "b.dat"])
-    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, "ICICI", str(d))
-    assert "a.dat" in result and "b.dat" in result
-    assert _calls(spy, norm) == [] and not out_dir.exists()
-
-
-@pytest.mark.parametrize("bank", ["ICICI", "HDFC", "SBM", "Other Bank (CSV)",
-                                  "Bank of Baroda", "HSBC"])
 @pytest.mark.parametrize("shape", ["list", "comma"])
-def test_two_entries_stop_for_every_bank(monkeypatch, tmp_path, bank, shape):
-    p1, p2 = tmp_path / "one.pdf", tmp_path / "two.pdf"
+def test_other_bank_two_entries_stop(monkeypatch, tmp_path, shape):
+    p1, p2 = tmp_path / "one.csv", tmp_path / "two.csv"
     p1.write_bytes(b"x"); p2.write_bytes(b"x")
     given = [str(p1), str(p2)] if shape == "list" else f"{p1}, {p2}"
-    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, bank, given)
-    assert "one.pdf" in result and "two.pdf" in result and "\u274c" in result
-    assert _calls(spy, norm) == [] and not out_dir.exists()
+    spy, norm, result, out_dir = _run(monkeypatch, tmp_path, "Other Bank (CSV)", given)
+    assert "one.csv" in result and "two.csv" in result and CROSS in result
+    assert spy.calls == [] and norm == [] and not out_dir.exists()
 
 
-@pytest.mark.parametrize("bank,name", [("ICICI", "s.xls"), ("HDFC", "s.csv"),
-                                       ("SBM", "s.xlsx"), ("Other Bank (CSV)", "s.csv")])
-@pytest.mark.parametrize("as_folder", [False, True])
-def test_one_file_still_reaches_the_parser_once(monkeypatch, tmp_path, bank, name, as_folder):
-    d = _folder(tmp_path, [name])
-    target = d if as_folder else d / name
-    spy, norm, result, _ = _run(monkeypatch, tmp_path, bank, str(target))
-    assert _calls(spy, norm) == [str(d / name)]
+def test_other_bank_one_file_still_reaches_the_normaliser_once(monkeypatch, tmp_path):
+    d = _folder(tmp_path, ["s.csv"])
+    spy, norm, result, _ = _run(monkeypatch, tmp_path, "Other Bank (CSV)", str(d))
+    assert norm == [str(d / "s.csv")]
     assert "more than one statement" not in result
 
 
-def test_one_statement_beside_a_stray_file_still_runs(monkeypatch, tmp_path):
-    d = _folder(tmp_path, ["s.xls", "notes.txt"])
-    spy, norm, result, _ = _run(monkeypatch, tmp_path, "ICICI", str(d))
-    assert spy.calls == [str(d / "s.xls")]
-
-
-@pytest.mark.parametrize("bank", ["Bank of Baroda", "HSBC"])
-def test_pdf_folders_for_bob_and_hsbc_pass_through(monkeypatch, tmp_path, bank):
-    d = _folder(tmp_path, ["a.pdf", "b.pdf", "c.pdf"])
+@pytest.mark.parametrize("bank", list(DEDICATED))
+def test_dedicated_bank_gets_the_whole_upload_and_is_not_stopped_here(monkeypatch, tmp_path, bank):
+    """BNK-01: no 'one statement at a time' stop for a dedicated bank; the
+    bank's reader receives every entry of the upload, unchanged."""
+    a, b = DEDICATED[bank]
+    d = _folder(tmp_path, [a, b])
     spy, norm, result, _ = _run(monkeypatch, tmp_path, bank, str(d))
-    assert len(spy.calls) == 1
+    assert spy.calls == [[str(d)]]
     assert "more than one statement" not in result
+
+
+@pytest.mark.parametrize("bank", list(DEDICATED))
+def test_dedicated_bank_gets_a_list_of_files_as_given(monkeypatch, tmp_path, bank):
+    p1, p2 = tmp_path / "one.pdf", tmp_path / "two.pdf"
+    p1.write_bytes(b"x"); p2.write_bytes(b"x")
+    spy, norm, result, _ = _run(monkeypatch, tmp_path, bank, [str(p1), str(p2)])
+    assert spy.calls == [[str(p1), str(p2)]]
+
+
+def test_guard_function_never_fires_for_a_dedicated_bank(monkeypatch):
+    info = BankInfo(bank_key="icici", display_name="ICICI", skill_name="icici",
+                    package="agents.skill_stub")
+    monkeypatch.setattr(pipeline_agent, "discover_banks", lambda: [info])
+    assert pipeline_agent._multi_file_stop("ICICI", ["a.xls", "b.xls"]) is None
+    # ... and still fires for the CSV route (second guard stays in place).
+    assert pipeline_agent._multi_file_stop("Other Bank (CSV)", ["a.csv", "b.csv"])

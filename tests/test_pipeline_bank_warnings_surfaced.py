@@ -108,6 +108,7 @@ def test_missing_statement_gap_warning_reaches_pipeline_result(tmp_path):
         gnucash_file=gnucash_file,
         output_path=str(out_path),
         config_path=None,
+        allow_balance_break=True,
     )
 
     assert "Step 1 warnings" in result, (

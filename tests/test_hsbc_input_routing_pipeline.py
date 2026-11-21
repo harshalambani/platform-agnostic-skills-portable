@@ -41,6 +41,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
@@ -50,7 +52,8 @@ if str(ROOT / "tests" / "skill_hsbc") not in sys.path:
 
 import hsbc_fixture_gen as fixture_gen  # noqa: E402
 import agents.skill_gnucash_pipeline.agent as pipeline_agent  # noqa: E402
-from agents.skill_gnucash_pipeline.agent import _resolve_hsbc_input  # noqa: E402
+from agents.bank_common.statements import StatementStop  # noqa: E402
+from agents.skill_hsbc.agent import _resolve_upload  # noqa: E402
 from agents.banks import BankInfo  # noqa: E402
 from agents.skill_hsbc.agent import HSBCSkill  # noqa: E402
 
@@ -68,6 +71,15 @@ class _StubHsbcSkill:
 
 
 _REAL_HSBC_SKILL = HSBCSkill()
+
+
+def _resolve_hsbc_input(path, skill):
+    """BNK-01: the routing moved from the pipeline into HSBCSkill; this keeps
+    the (resolved, error) shape the tests below were written against."""
+    try:
+        return _resolve_upload(path, skill), None
+    except StatementStop as e:
+        return None, f"## HSBC -> {e.title}" + chr(10) + chr(10) + str(e)
 
 
 # --------------------------------------------------------------------------
@@ -225,8 +237,8 @@ class _RecordingSkill:
     def detect(self, path):
         return self._detect_confidence
 
-    def parse(self, path, password=None):
-        self.received_path = str(path)
+    def parse(self, path, password=None, **kw):
+        self.received_path = path
         raise RuntimeError("test-sentinel-stop")
 
 
@@ -246,44 +258,61 @@ def _run_and_capture(monkeypatch, tmp_path, bank: str, statement_files: str):
     return skill, result
 
 
-def test_run_routes_hsbc_workbook_directory_to_parse_as_workbook_path(monkeypatch, tmp_path):
+def test_run_hands_the_hsbc_upload_to_the_reader_unchanged(monkeypatch, tmp_path):
+    """BNK-01: the pipeline does no shaping; the whole upload reaches parse()."""
+    upload_dir = tmp_path / "upload"
+    upload_dir.mkdir()
+    (upload_dir / "enriched.xlsx").write_bytes(fixture_gen.build_xlsx())
+
+    skill, result = _run_and_capture(monkeypatch, tmp_path, "HSBC", str(upload_dir))
+
+    assert skill.received_path == [str(upload_dir)]
+    assert "extraction error" in result
+
+
+def test_hsbc_reader_routes_a_workbook_folder_to_the_workbook(monkeypatch, tmp_path):
     upload_dir = tmp_path / "upload"
     upload_dir.mkdir()
     wb = upload_dir / "enriched.xlsx"
     wb.write_bytes(fixture_gen.build_xlsx())
+    seen = []
+    monkeypatch.setattr(HSBCSkill, "parse_one",
+                        lambda self, path, password=None: seen.append(str(path)) or (_ for _ in ()).throw(RuntimeError("stop")))
+    with pytest.raises(RuntimeError):
+        HSBCSkill().parse(str(upload_dir))
+    assert seen == [str(wb)]
 
-    skill, result = _run_and_capture(monkeypatch, tmp_path, "HSBC", str(upload_dir))
 
-    assert skill.received_path == str(wb)
-    assert "extraction error" in result
-
-
-def test_run_routes_hsbc_single_pdf_file_unchanged(monkeypatch, tmp_path):
+def test_hsbc_reader_never_swaps_a_single_pdf_for_its_folder(monkeypatch, tmp_path):
     target = tmp_path / "upload" / "target.pdf"
     target.parent.mkdir()
     target.write_bytes(b"%PDF-1.4 fake")
     (target.parent / "sibling.pdf").write_bytes(b"%PDF-1.4 fake sibling")
+    seen = []
+    monkeypatch.setattr(HSBCSkill, "parse_one",
+                        lambda self, path, password=None: seen.append(str(path)) or (_ for _ in ()).throw(RuntimeError("stop")))
+    with pytest.raises(RuntimeError):
+        HSBCSkill().parse(str(target))
+    assert seen == [str(target)]
 
-    skill, result = _run_and_capture(monkeypatch, tmp_path, "HSBC", str(target))
 
-    assert skill.received_path == str(target)
-    assert "extraction error" in result
-
-
-def test_run_bank_of_baroda_dispatch_is_unaffected(monkeypatch, tmp_path):
-    """BoB's own branch (an inline, no-PDFs-found guard just below HSBC's)
-    must behave exactly as before HSB-03: an empty upload directory is
-    rejected before parse() is ever called."""
+def test_run_bank_of_baroda_empty_upload_is_reported(monkeypatch, tmp_path):
+    """An empty upload directory is reported by the shared reader."""
+    from agents.skill_bob.agent import BoBSkill
     stmt_dir = tmp_path / "upload"
     stmt_dir.mkdir()
+    bank_info = BankInfo(bank_key="bob", display_name="Bank of Baroda",
+                         skill_name="bob", package="agents.skill_bob")
+    monkeypatch.setattr(pipeline_agent, "discover_banks", lambda: [bank_info])
+    monkeypatch.setattr(pipeline_agent, "load_bank_skill", lambda info: BoBSkill())
+    result = pipeline_agent.run(
+        bank="Bank of Baroda", statement_files=str(stmt_dir),
+        gnucash_file=str(tmp_path / "nonexistent.gnucash"),
+        output_path=str(tmp_path / "out.csv"))
+    assert "no statements found" in result
 
-    skill, result = _run_and_capture(monkeypatch, tmp_path, "Bank of Baroda", str(stmt_dir))
 
-    assert skill.received_path is None  # parse() never reached
-    assert "no PDFs found" in result
-
-
-def test_run_icici_dispatch_reaches_parse_with_resolved_file(monkeypatch, tmp_path):
+def test_run_icici_dispatch_reaches_parse_with_the_upload(monkeypatch, tmp_path):
     """ICICI's branch (_resolve_single_file, untouched by HSB-03) must
     still resolve a staged directory to the one matching file inside it."""
     stmt_dir = tmp_path / "upload"
@@ -293,5 +322,5 @@ def test_run_icici_dispatch_reaches_parse_with_resolved_file(monkeypatch, tmp_pa
 
     skill, result = _run_and_capture(monkeypatch, tmp_path, "ICICI", str(stmt_dir))
 
-    assert skill.received_path == str(xls)
+    assert skill.received_path == [str(stmt_dir)]
     assert "extraction error" in result

@@ -1,0 +1,354 @@
+{
+ "bob": [
+  {
+   "Account": "",
+   "Balance": "150000.0",
+   "Currency": "INR",
+   "Date": "2025-04-01",
+   "Deposit": "50000.0",
+   "Description": "NEFT SALARY CREDIT-SYNCO",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "148000.0",
+   "Currency": "INR",
+   "Date": "2025-04-02",
+   "Deposit": "0",
+   "Description": "UPI-GROCERY STORE-SYN",
+   "Transaction ID": "",
+   "Withdrawal": "2000.0"
+  },
+  {
+   "Account": "",
+   "Balance": "143000.0",
+   "Currency": "INR",
+   "Date": "2025-04-03",
+   "Deposit": "0",
+   "Description": "ACH D-BD-SYNTH MF-SIP0001",
+   "Transaction ID": "",
+   "Withdrawal": "5000.0"
+  },
+  {
+   "Account": "",
+   "Balance": "143500.0",
+   "Currency": "INR",
+   "Date": "2025-04-04",
+   "Deposit": "500.0",
+   "Description": "UPI-REFUND ORDER-SYNSHOP",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "140000.0",
+   "Currency": "INR",
+   "Date": "2025-04-05",
+   "Deposit": "0",
+   "Description": "CC AUTOPAY SI-SYN",
+   "Transaction ID": "654321",
+   "Withdrawal": "3500.0"
+  }
+ ],
+ "hdfc": [
+  {
+   "Account": "",
+   "Balance": "150000.00",
+   "Currency": "INR",
+   "Date": "2025-04-01",
+   "Deposit": "50000.00",
+   "Description": "NEFT SALARY CREDIT-SYNCO",
+   "Transaction ID": "500000001",
+   "Withdrawal": ""
+  },
+  {
+   "Account": "",
+   "Balance": "148000.00",
+   "Currency": "INR",
+   "Date": "2025-04-02",
+   "Deposit": "",
+   "Description": "UPI-GROCERY STORE-GROC@OKHDFC",
+   "Transaction ID": "500000002",
+   "Withdrawal": "2000.00"
+  },
+  {
+   "Account": "",
+   "Balance": "143000.00",
+   "Currency": "INR",
+   "Date": "2025-04-03",
+   "Deposit": "",
+   "Description": "ACH D- BD-SYNTH MF-SIP0001",
+   "Transaction ID": "500000003",
+   "Withdrawal": "5000.00"
+  },
+  {
+   "Account": "",
+   "Balance": "143500.00",
+   "Currency": "INR",
+   "Date": "2025-04-04",
+   "Deposit": "500.00",
+   "Description": "UPI-REFUND ORDER-SYNSHOP@OKHDFC",
+   "Transaction ID": "500000004",
+   "Withdrawal": ""
+  },
+  {
+   "Account": "",
+   "Balance": "140000.00",
+   "Currency": "INR",
+   "Date": "2025-04-05",
+   "Deposit": "",
+   "Description": "CC 000111111XXXXXX1111 AUTOPAY SI-SYN",
+   "Transaction ID": "555555555",
+   "Withdrawal": "3500.00"
+  }
+ ],
+ "hsbc": [
+  {
+   "Account": "",
+   "Balance": "100000.0",
+   "Currency": "INR",
+   "Date": "2025-04-01",
+   "Deposit": "0",
+   "Description": "BALANCE BROUGHT FORWARD",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "150000.0",
+   "Currency": "INR",
+   "Date": "2025-04-01",
+   "Deposit": "50000.0",
+   "Description": "SYN SALARY CREDIT",
+   "Transaction ID": "UPI3000000001",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "148000.0",
+   "Currency": "INR",
+   "Date": "2025-04-02",
+   "Deposit": "0",
+   "Description": "synshop purchase",
+   "Transaction ID": "",
+   "Withdrawal": "2000.0"
+  },
+  {
+   "Account": "",
+   "Balance": "143000.0",
+   "Currency": "INR",
+   "Date": "2025-04-03",
+   "Deposit": "0",
+   "Description": "SYN UTILITY BILL",
+   "Transaction ID": "NEFTSYN00000003",
+   "Withdrawal": "5000.0"
+  },
+  {
+   "Account": "",
+   "Balance": "143500.0",
+   "Currency": "INR",
+   "Date": "2025-04-04",
+   "Deposit": "500.0",
+   "Description": "SYN REFUND | ELECTRO 12:30:00",
+   "Transaction ID": "IMPS300000004",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "138500.0",
+   "Currency": "INR",
+   "Date": "2025-04-05",
+   "Deposit": "0",
+   "Description": "SYN CHEQUE DEPOSIT",
+   "Transaction ID": "654321",
+   "Withdrawal": "5000.0"
+  }
+ ],
+ "icici": [
+  {
+   "Account": "",
+   "Balance": "150000",
+   "Currency": "INR",
+   "Date": "2025-04-01",
+   "Deposit": "50000",
+   "Description": "SYN SALARY CREDIT",
+   "Transaction ID": "REF0000000001",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "148000",
+   "Currency": "INR",
+   "Date": "2025-04-02",
+   "Deposit": "0",
+   "Description": "synshop",
+   "Transaction ID": "300000000002",
+   "Withdrawal": "2000"
+  },
+  {
+   "Account": "",
+   "Balance": "143000",
+   "Currency": "INR",
+   "Date": "2025-04-03",
+   "Deposit": "0",
+   "Description": "SYN UTILITY BILL",
+   "Transaction ID": "REF0000000003",
+   "Withdrawal": "5000"
+  },
+  {
+   "Account": "",
+   "Balance": "143500",
+   "Currency": "INR",
+   "Date": "2025-04-04",
+   "Deposit": "500",
+   "Description": "synrefund/SYNdef0001gh",
+   "Transaction ID": "300000000004",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "138500",
+   "Currency": "INR",
+   "Date": "2025-04-05",
+   "Deposit": "0",
+   "Description": "CLG/SYN CHEQUE DEPOSIT",
+   "Transaction ID": "654321",
+   "Withdrawal": "5000"
+  }
+ ],
+ "kotak": [
+  {
+   "Account": "",
+   "Balance": "250000.00",
+   "Currency": "INR",
+   "Date": "2026-06-03",
+   "Deposit": "50000.00",
+   "Description": "NEFT SALARY CREDIT-SYNCO",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "247000.00",
+   "Currency": "INR",
+   "Date": "2026-06-05",
+   "Deposit": "0",
+   "Description": "UPI-SYNMART GROCERY-SYN",
+   "Transaction ID": "",
+   "Withdrawal": "3000.00"
+  },
+  {
+   "Account": "",
+   "Balance": "147000.00",
+   "Currency": "INR",
+   "Date": "2026-06-09",
+   "Deposit": "0",
+   "Description": "Sweep transfer to FD-SYN0001",
+   "Transaction ID": "",
+   "Withdrawal": "100000.00"
+  },
+  {
+   "Account": "",
+   "Balance": "142000.00",
+   "Currency": "INR",
+   "Date": "2026-06-15",
+   "Deposit": "0",
+   "Description": "ACH D-SYNTH MF-SIP0001",
+   "Transaction ID": "",
+   "Withdrawal": "5000.00"
+  },
+  {
+   "Account": "",
+   "Balance": "242000.00",
+   "Currency": "INR",
+   "Date": "2026-06-20",
+   "Deposit": "100000.00",
+   "Description": "Sweep transfer from FD-SYN0001",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "242500.00",
+   "Currency": "INR",
+   "Date": "2026-06-24",
+   "Deposit": "500.00",
+   "Description": "UPI-REFUND ORDER-SYNSHOP",
+   "Transaction ID": "",
+   "Withdrawal": "0"
+  },
+  {
+   "Account": "",
+   "Balance": "239000.00",
+   "Currency": "INR",
+   "Date": "2026-06-28",
+   "Deposit": "0",
+   "Description": "CC AUTOPAY SI-SYN",
+   "Transaction ID": "654321",
+   "Withdrawal": "3500.00"
+  }
+ ],
+ "sbm": [
+  {
+   "Account": "",
+   "Balance": "900.00",
+   "Currency": "INR",
+   "Date": "2025-05-01",
+   "Deposit": "",
+   "Description": "UPI/P2P/500000000001/MASKED PAYEE",
+   "Transaction ID": "500000000001",
+   "Withdrawal": "100.00"
+  },
+  {
+   "Account": "",
+   "Balance": "1000.50",
+   "Currency": "INR",
+   "Date": "2025-05-02",
+   "Deposit": "100.50",
+   "Description": "IFT/UPI_000111 FROM MASKED",
+   "Transaction ID": "",
+   "Withdrawal": ""
+  },
+  {
+   "Account": "",
+   "Balance": "650.00",
+   "Currency": "INR",
+   "Date": "2025-05-02",
+   "Deposit": "",
+   "Description": "ATM Cash Withdrawal",
+   "Transaction ID": "",
+   "Withdrawal": "350.50"
+  },
+  {
+   "Account": "",
+   "Balance": "632.00",
+   "Currency": "INR",
+   "Date": "2025-05-03",
+   "Deposit": "",
+   "Description": "IFT/0000AAAA1111 TO SELF",
+   "Transaction ID": "",
+   "Withdrawal": "18.00"
+  },
+  {
+   "Account": "",
+   "Balance": "682.00",
+   "Currency": "INR",
+   "Date": "2025-05-31",
+   "Deposit": "50.00",
+   "Description": "00000099999:Int.Pd:01-05-2025 to 31-05-2025",
+   "Transaction ID": "",
+   "Withdrawal": ""
+  },
+  {
+   "Account": "",
+   "Balance": "0.00",
+   "Currency": "INR",
+   "Date": "2025-06-01",
+   "Deposit": "",
+   "Description": "ATMISS/POSISS MASKED",
+   "Transaction ID": "",
+   "Withdrawal": "682.00"
+  }
+ ]
+}

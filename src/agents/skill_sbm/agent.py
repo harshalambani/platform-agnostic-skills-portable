@@ -20,6 +20,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from agents.bank_common import password as _password
+from agents.bank_common.statements import read_statements
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check, write_canonical_csv, write_sidecar
 
@@ -263,7 +264,13 @@ class SBMBankSkill:
     def detect(self, path) -> float:
         return detect(path)
 
-    def parse(self, path, password=None) -> BankResult:
+    def parse(self, path, password=None, *, allow_balance_break=False,
+              selected_account=None, account_resolver=None) -> BankResult:
+        return read_statements(
+            self, path, password, allow_balance_break=allow_balance_break,
+            selected_account=selected_account, account_resolver=account_resolver)
+
+    def parse_one(self, path, password=None) -> BankResult:
         return parse(path, password=password)
 
 
