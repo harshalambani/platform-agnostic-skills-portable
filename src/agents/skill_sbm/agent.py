@@ -63,7 +63,10 @@ def _open_workbook(path: str, password):
                              % type(e).__name__) from None
     buf.seek(0)
     try:
-        return openpyxl.load_workbook(buf, data_only=True)
+        # BNK-13: read-only. The reader needs only the sheet names and the cell
+        # values, and a real export carries a table definition that the full
+        # loader rejects (a TypeError), while read-only mode never parses it.
+        return openpyxl.load_workbook(buf, data_only=True, read_only=True)
     except Exception as e:
         raise ValueError("Decryption succeeded but the result is not a readable xlsx workbook: %s"
                          % type(e).__name__) from None
@@ -181,7 +184,10 @@ def _fmt(x):
 
 def _extract(path, password):
     wb = _open_workbook(path, password)
-    raw = _read_rows(wb)
+    try:
+        raw = _read_rows(wb)
+    finally:
+        wb.close()      # read-only mode keeps the file handle open
     if not raw:
         raise SBMParseError("No transactions found in the %r sheet." % SHEET_NAME)
     ordered = _chain(raw)
