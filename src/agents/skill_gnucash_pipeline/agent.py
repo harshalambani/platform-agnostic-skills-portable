@@ -917,7 +917,10 @@ def _get_gnucash_account_balance(
         """Pick ONE of ``pool`` by evidence, or None (tie / no evidence)."""
         nonlocal match_note
         bal_hits = []
-        if opening_balance is not None:
+        # BNK-01: a ZERO opening balance equal to a ZERO book balance fits every
+        # empty account, so it is not evidence and never picks (or blocks) one;
+        # the other evidence, else the caller asks.
+        if opening_balance is not None and abs(opening_balance) > 0.02:
             for aid, full in pool:
                 bal = _balance_before(splits_by_acc.get(aid, []), start_date)
                 if abs(bal - opening_balance) <= 0.02:
@@ -974,6 +977,15 @@ def _get_gnucash_account_balance(
             # statement shows no number at all); otherwise ask.
             no_digit_pool = [(aid, full) for aid, full in candidates
                              if not _normalize_digits(full)]
+            if no_digit_pool and fallback_warning:
+                # BNK-01: the bank has no BANK-type account, so these are IMP-10
+                # ASSET fallbacks (an FD, a fund, an empty asset). On a number
+                # that fits none of them, never pick one -- not even the last
+                # one standing: ask.
+                return _ask(
+                    f"The account number '{account_number}' is in none of your "
+                    f"account names at '{bank_name}', and none of them is a "
+                    f"BANK-type account.")
             if no_digit_pool:
                 picked = _decide(no_digit_pool)
                 if picked is not None:
