@@ -38,6 +38,7 @@ from agents.balance_utils import (
 )
 from agents.bank_common import normalize as _normalize
 from agents.bank_common import password as _password
+from agents.bank_common.account_number import find_account_number
 from agents.bank_common.statements import read_statements
 from agents.bank_common import tabular as _tabular
 from agents.bank_common import text_quality as _text_quality
@@ -726,6 +727,44 @@ def detect(path) -> float:
         return 0.3
 
 
+def _read_account_number(input_path, password, fmt):
+    """BNK-01: the statement's own account number, or None (never guessed).
+
+    Only a LABELLED number is taken ("Account No :", "AccountNo :"); a "CustID"
+    or an "A/C Open Date" is never read. A PDF is read from page 1 (the text
+    layer, else OCR of page 1); a native XLS/XLSX from the preamble rows above
+    the header. Header-less XLS exports and CSV exports carry no number.
+    """
+    try:
+        suffix = Path(str(input_path)).suffix.lower()
+        if suffix == ".pdf":
+            import pdfplumber
+            text = ""
+            with pdfplumber.open(str(input_path), password=password or "") as pdf:
+                if pdf.pages:
+                    text = pdf.pages[0].extract_text(x_tolerance=1) or ""
+            found = find_account_number(text.split("\n"))
+            if found is None and "OCR" in str(fmt):
+                import pypdfium2 as pdfium
+                import pytesseract
+                doc = pdfium.PdfDocument(str(input_path), password=password or None)
+                page_text = pytesseract.image_to_string(
+                    doc[0].render(scale=2.5).to_pil(), config="--psm 6")
+                found = find_account_number(page_text.split("\n"))
+            return found
+        if suffix in (".xls", ".xlsx", ".csv"):
+            rows = (_read_csv_rows(str(input_path)) if suffix == ".csv"
+                    else _read_xls_rows(str(input_path)))
+            header = _find_header_row(rows)
+            if header <= 0:
+                return None
+            return find_account_number(
+                [" ".join(str(c) for c in row if str(c).strip()) for row in rows[:header]])
+    except Exception:  # noqa: BLE001 - a missing number is safe, a crash is not
+        return None
+    return None
+
+
 def parse(path, password=None) -> BankResult:
     """Parse ``path`` into a :class:`BankResult` of canonical rows.
 
@@ -760,7 +799,7 @@ def parse(path, password=None) -> BankResult:
 
     meta = BankStatementMeta(
         bank_key=BANK_KEY,
-        account_number=None,
+        account_number=_read_account_number(input_path, password, fmt),
         period_from=None,
         period_to=None,
         source_format=fmt,

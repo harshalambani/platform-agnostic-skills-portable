@@ -204,40 +204,50 @@ def read_statements(
 
     # -- which account -------------------------------------------------------
     unreadable = [p.name for p in parts if not p.number]
-    if unreadable:
+    no_number_shown = len(unreadable) == len(parts)
+    if unreadable and not no_number_shown:
         raise StatementStop(
-            "The account number could not be read from: "
+            "Some statements show an account number and some do not. The "
+            "account number could not be read from: "
             + ", ".join(f"`{n}`" for n in unreadable)
             + ". With several statements the account must be known for each, "
-            "so nothing was joined.",
+            "or for none, so nothing was joined.",
             title="account number not readable")
 
-    wanted = _digits(selected_account)
-    if not wanted:
-        clusters: list[str] = []
+    if no_number_shown:
+        # None of the statements shows a number (e.g. header-less exports):
+        # they are all taken as the ONE account picked in the pipeline (the
+        # Bank account box, else the book account), nothing is skipped.
+        warnings.append(
+            "No statement shows an account number; all "
+            f"{len(parts)} statements were taken as the one account selected.")
+        kept, skipped = list(parts), []
+    else:
+        wanted = _digits(selected_account)
+        if not wanted:
+            clusters: list[str] = []
+            for p in parts:
+                if not any(_fits(p.number, c) for c in clusters):
+                    clusters.append(p.number)
+            if len(clusters) > 1:
+                if account_resolver is None:
+                    raise _stop_accounts(
+                        clusters, "These statements belong to more than one account.",
+                        "Upload the statements of one account at a time.")
+                wanted = _digits(account_resolver(clusters))
+            else:
+                wanted = clusters[0]
+        kept, skipped = [], []
         for p in parts:
-            if not any(_fits(p.number, c) for c in clusters):
-                clusters.append(p.number)
-        if len(clusters) > 1:
-            if account_resolver is None:
-                raise _stop_accounts(
-                    clusters, "These statements belong to more than one account.",
-                    "Upload the statements of one account at a time.")
-            wanted = _digits(account_resolver(clusters))
-        else:
-            wanted = clusters[0]
-    kept: list[_Part] = []
-    skipped: list[_Part] = []
-    for p in parts:
-        (kept if _fits(wanted, p.number) else skipped).append(p)
-    if not kept:
-        raise _stop_accounts(
-            [p.number for p in parts],
-            f"None of the statements is for the selected account ({_last4(wanted)}).",
-            "Nothing was joined.")
-    for n in sorted({_last4(p.number) for p in skipped}):
-        names = ", ".join(f"`{p.name}`" for p in skipped if _last4(p.number) == n)
-        warnings.append(f"Skipped, statement of another account ({n}): {names}")
+            (kept if _fits(wanted, p.number) else skipped).append(p)
+        if not kept:
+            raise _stop_accounts(
+                [p.number for p in parts],
+                f"None of the statements is for the selected account ({_last4(wanted)}).",
+                "Nothing was joined.")
+        for n in sorted({_last4(p.number) for p in skipped}):
+            names = ", ".join(f"`{p.name}`" for p in skipped if _last4(p.number) == n)
+            warnings.append(f"Skipped, statement of another account ({n}): {names}")
     parts = kept
 
     # -- order, dedupe, running balance -------------------------------------

@@ -968,7 +968,29 @@ def _get_gnucash_account_balance(
             _h, _n = _other_entity_holders(gnucash_file, account_number, entities_path)
             if _h:
                 return _wrong_book(match_warning)
-            return _result(False, warn=match_warning, cands=postable_paths)
+            # BNK-01: an account whose name carries OTHER digits is a different
+            # account and is never a target. Among the accounts whose names
+            # carry no number, evidence may still settle it (as it does when the
+            # statement shows no number at all); otherwise ask.
+            no_digit_pool = [(aid, full) for aid, full in candidates
+                             if not _normalize_digits(full)]
+            if no_digit_pool:
+                picked = _decide(no_digit_pool)
+                if picked is not None:
+                    target_id, target_name = picked
+                    match_warning = (
+                        f"The account number '{account_number}' is in none of the "
+                        f"account names at '{bank_name}'; resolved "
+                        f"'{_strip_root(target_name)}' by evidence instead (its name "
+                        f"carries no number). Put the account number in the GnuCash "
+                        f"account name so a statement for another account is caught.")
+                else:
+                    return _ask(
+                        f"The account number '{account_number}' is in none of your "
+                        f"account names at '{bank_name}' and nothing else on the "
+                        f"statement picks one.")
+            else:
+                return _result(False, warn=match_warning, cands=postable_paths)
         elif not candidates:
             # No account of this bank here at all. Stop only when another
             # entity's book holds the number (BNK-10); otherwise as before.

@@ -38,7 +38,10 @@ from pathlib import Path
 # importable regardless of how this script was invoked.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 from agents.bank_common.consolidate import StatementGroup, consolidate  # noqa: E402
-from agents.skill_hsbc.acct_number import find_account_number  # noqa: E402
+from agents.skill_hsbc.acct_number import (  # noqa: E402
+    find_account_number,
+    find_savings_heading_number,
+)
 
 # Fallback column right-edges (tuned for HSBC Premier Savings statements at
 # 300 DPI, portrait A4). Auto-detection from the header row normally wins;
@@ -69,6 +72,21 @@ def normalize_month(s: str):
         if cand in MONTH_MAP:
             return cand
     return None
+
+
+def statement_account_number(pages):
+    """IMP-08 / BNK-01: the statement's own account number from its page TSVs.
+
+    A LABELLED number on page 1 wins; otherwise the SAVINGS heading line of any
+    page (see ``agents.skill_hsbc.acct_number``). One distinct number, or None.
+    """
+    def _texts(tsv):
+        return [" ".join(w['text'] for w in L['words']) for L in load_tsv_lines(tsv)]
+
+    acct = find_account_number(_texts(pages[0])) if pages else None
+    if not acct:
+        acct = find_savings_heading_number([_texts(pg) for pg in pages])
+    return acct
 
 
 def load_tsv_lines(tsv_path: Path):
@@ -423,8 +441,7 @@ def main():
 
         # Auto-detect column edges from page 1, fall back to defaults/overrides.
         _p1_lines = load_tsv_lines(pages[0])
-        _acct = find_account_number(
-            [" ".join(w['text'] for w in L['words']) for L in _p1_lines])
+        _acct = statement_account_number(pages)
         if _acct and _acct not in account_numbers:
             account_numbers.append(_acct)
         edges = detect_column_edges(_p1_lines)
