@@ -12,6 +12,9 @@ category: "banks"
 version: "1.1.0"
 bank: true
 bank_key: "hsbc"
+rules_key: "HSBC"
+rules_order: 30
+hint_match: "substring"
 
 mode: "direct"
 entry_point: "agent:run"

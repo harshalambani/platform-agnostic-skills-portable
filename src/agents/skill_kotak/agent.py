@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Optional
 
 from agents.bank_common import normalize as _normalize
+from agents.bank_common.statements import read_statements
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import run_balance_check
 
@@ -179,10 +180,24 @@ class KotakSkill:
 
     def parse(
         self,
-        path: str | Path,
+        path,
         password: str | None = None,
+        *,
+        allow_balance_break: bool = False,
+        selected_account: str | None = None,
+        account_resolver=None,
     ) -> BankResult:
-        """Parse a Kotak statement PDF to a BankResult.
+        """Parse Kotak statement PDF(s): a file, a list of files or a folder.
+
+        The shared reading rule (``bank_common.statements``) joins several
+        statements; one statement comes back as ``parse_one`` made it.
+        """
+        return read_statements(
+            self, path, password, allow_balance_break=allow_balance_break,
+            selected_account=selected_account, account_resolver=account_resolver)
+
+    def parse_one(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse ONE Kotak statement PDF to a BankResult.
 
         Returns canonical rows only -- writing the CSV/sidecar is the
         caller's job via ``canonical_io`` (the shared tail), per the

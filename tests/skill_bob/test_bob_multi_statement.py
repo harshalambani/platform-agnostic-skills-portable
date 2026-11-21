@@ -57,7 +57,7 @@ def test_gap_between_batch_statements_produces_warning(tmp_path):
     (tmp_path / "stmt_mar.pdf").write_bytes(
         fixture_gen.build_pdf_for(_MAR_TXNS, "01-03-2025", "31-03-2025"))
 
-    result = BoBSkill().parse(tmp_path)
+    result = BoBSkill().parse(tmp_path, allow_balance_break=True)
 
     assert any("POSSIBLE MISSING STATEMENT" in w for w in result.warnings)
 

@@ -37,6 +37,7 @@ from agents.balance_utils import (
     format_balance_summary,
     _safe_float,
 )
+from agents.bank_common.statements import StatementStop
 from agents.banks import discover as discover_banks, load_bank_skill
 from agents.skill_gnucash_xml_extractor.agent import _is_structural_bank_account
 from agents.canonical_io import (
@@ -84,11 +85,10 @@ _NS = {
 # BNK-11: banks whose staged upload is reduced to ONE file by
 # _resolve_single_file(), with the extensions each one reads. More than one
 # candidate file for such a bank used to be dropped silently (first by name
-# won); it is now a hard stop.
+# won); it is now a hard stop. Since BNK-01 every dedicated bank reads a whole
+# upload through its own reader (bank_common.statements), so only the CSV
+# route is left here.
 _ONE_FILE_BANKS: dict[str, tuple[str, ...]] = {
-    "ICICI": (".xls", ".xlsx"),
-    "HDFC": (".csv", ".xls", ".xlsx", ".pdf"),
-    "SBM": (".xlsx",),
     "Other Bank (CSV)": (".csv", ".xls", ".xlsx"),
 }
 
@@ -98,9 +98,11 @@ def _multi_file_stop(bank: str, statement_files) -> str | None:
     that this pipeline would read only one of; ``None`` when it is safe.
 
     Reads only names and directory listings -- nothing is parsed or written.
-    Joining several statements into one run is a separate item (BNK-01), so
-    this refuses rather than picking one.
+    A dedicated bank joins several statements itself (BNK-01), so this is a
+    second guard for the routes that read only one: it never fires for them.
     """
+    if any(b.display_name == bank for b in discover_banks()):
+        return None
     if isinstance(statement_files, (list, tuple)):
         entries = [str(x).strip() for x in statement_files if str(x).strip()]
     else:
@@ -133,6 +135,20 @@ def _multi_file_stop(bank: str, statement_files) -> str | None:
                 return _stop([c.name for c in candidates])
     return None
 
+def _upload_entries(statement_files) -> list[str]:
+    """The upload as a list of paths (files or staged folders)."""
+    if isinstance(statement_files, (list, tuple)):
+        return [str(x).strip() for x in statement_files if str(x).strip()]
+    return [x.strip() for x in str(statement_files or "").split(",") if x.strip()]
+
+
+def _truthy(value) -> bool:
+    """A run argument that may arrive as a bool or as form text."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
     """If *path_or_dir* is a directory (staged uploads), return the first
     matching file inside it; otherwise return the path unchanged."""
@@ -147,70 +163,6 @@ def _resolve_single_file(path_or_dir: str, extensions: tuple[str, ...]) -> str:
         if children:
             return str(children[0])
     return path_or_dir
-
-
-def _resolve_hsbc_input(path_or_dir: str, hsbc_skill) -> tuple[str | None, str | None]:
-    """Resolve a staged HSBC upload for ``HSBCSkill.parse()``.
-
-    HSBC is the one bank whose ``parse()`` accepts either a directory of PDF
-    statements (OCR path) or a single already-enriched ``.xlsx``/``.xlsm``
-    workbook (fast path — see MAP-08 sibling task HSB-03). A single-file
-    upload must be passed through as-is (never swapped for its parent
-    directory, which would sweep every sibling PDF into OCR); a directory
-    upload must be inspected to tell which shape it holds.
-
-    Returns ``(resolved_path, None)`` on success, or ``(None, error_markdown)``
-    when the upload can't be resolved unambiguously — in the same
-    ``## HSBC → ...`` style as the Bank of Baroda branch just below.
-    """
-    src = Path(path_or_dir)
-
-    if not src.is_dir():
-        # Single file (PDF or already-enriched workbook): pass it through
-        # unchanged. Never substitute its parent directory.
-        return str(src), None
-
-    entries = sorted(src.iterdir())
-    pdfs = [p for p in entries if p.is_file() and p.suffix.lower() == ".pdf"]
-    workbooks = [p for p in entries if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm")]
-
-    if pdfs and workbooks:
-        return None, (
-            "## HSBC → mixed upload\n\n"
-            f"❌ The staged upload directory contains both PDF statement(s) "
-            f"and enriched workbook(s):\n`{path_or_dir}`\n\n"
-            "Upload either PDF statements (for OCR) or a single "
-            "already-enriched .xlsx/.xlsm workbook, not both."
-        )
-    if workbooks:
-        if len(workbooks) > 1:
-            return None, (
-                "## HSBC → multiple workbooks\n\n"
-                f"❌ The staged upload directory contains more than one "
-                f"enriched workbook:\n`{path_or_dir}`\n\n"
-                "Upload just one already-enriched HSBC .xlsx/.xlsm workbook."
-            )
-        wb = workbooks[0]
-        try:
-            confidence = hsbc_skill.detect(wb)
-        except Exception:
-            confidence = 0.0
-        if confidence <= 0:
-            return None, (
-                "## HSBC → unrecognised workbook\n\n"
-                f"❌ `{wb.name}` doesn't look like an already-enriched HSBC "
-                "workbook. Expected first-sheet headers: `Date, Transaction "
-                "Details, Transaction Date, Transaction Number, Extra "
-                "Information, Deposit, Withdrawals, Balance`."
-            )
-        return str(wb), None
-    if pdfs:
-        return str(src), None
-    return None, (
-        "## HSBC → no statements found\n\n"
-        f"❌ The staged upload directory contains no .pdf or .xlsx/.xlsm "
-        f"files:\n`{path_or_dir}`"
-    )
 
 
 def _read_sidecar(canonical_path: str) -> dict | None:
@@ -1016,7 +968,29 @@ def _get_gnucash_account_balance(
             _h, _n = _other_entity_holders(gnucash_file, account_number, entities_path)
             if _h:
                 return _wrong_book(match_warning)
-            return _result(False, warn=match_warning, cands=postable_paths)
+            # BNK-01: an account whose name carries OTHER digits is a different
+            # account and is never a target. Among the accounts whose names
+            # carry no number, evidence may still settle it (as it does when the
+            # statement shows no number at all); otherwise ask.
+            no_digit_pool = [(aid, full) for aid, full in candidates
+                             if not _normalize_digits(full)]
+            if no_digit_pool:
+                picked = _decide(no_digit_pool)
+                if picked is not None:
+                    target_id, target_name = picked
+                    match_warning = (
+                        f"The account number '{account_number}' is in none of the "
+                        f"account names at '{bank_name}'; resolved "
+                        f"'{_strip_root(target_name)}' by evidence instead (its name "
+                        f"carries no number). Put the account number in the GnuCash "
+                        f"account name so a statement for another account is caught.")
+                else:
+                    return _ask(
+                        f"The account number '{account_number}' is in none of your "
+                        f"account names at '{bank_name}' and nothing else on the "
+                        f"statement picks one.")
+            else:
+                return _result(False, warn=match_warning, cands=postable_paths)
         elif not candidates:
             # No account of this bank here at all. Stop only when another
             # entity's book holds the number (BNK-10); otherwise as before.
@@ -1667,6 +1641,7 @@ def run(
     bank_account: str = None,
     entity: str = None,
     entities_path: str = None,
+    allow_balance_break: bool = False,
 ) -> str:
     """
     Run the full GnuCash import pipeline.
@@ -1694,6 +1669,9 @@ def run(
                          password when the box is empty (BNK-05).
         entities_path:   Path to entities.yaml (the `{data_root}/itr/entities.yaml`
                          token).
+        allow_balance_break: Continue past a break in the running balance
+                         between two statements (BNK-01). Off unless asked;
+                         the closing-balance gate (BNK-09) is never skipped.
 
     Returns:
         Human-readable summary string for the UI.
@@ -1738,40 +1716,34 @@ def run(
         bank_info = next((b for b in discover_banks() if b.display_name == bank), None)
 
         if bank_info is not None:
-            bank_input = (
-                statement_files[0] if isinstance(statement_files, list)
-                else statement_files.split(",")[0].strip()
-            )
-            # Per-bank input shaping — the one piece of bank-specific logic
-            # that can't be pushed into a uniform call, since each skill's
-            # parse() expects a different shape for a staged multi-file
-            # upload (single resolved file vs. a whole PDF directory).
-            if bank == "ICICI":
-                bank_input = _resolve_single_file(bank_input, (".xls", ".xlsx"))
-            elif bank == "HDFC":
-                bank_input = _resolve_single_file(bank_input, (".csv", ".xls", ".xlsx", ".pdf"))
-            elif bank == "SBM":
-                bank_input = _resolve_single_file(bank_input, (".xlsx",))
-            elif bank == "HSBC":
-                # A directory may hold PDFs (OCR path) or a single already-
-                # enriched workbook (fast path); a single file is passed
-                # through as-is, never swapped for its parent directory. See
-                # _resolve_hsbc_input (HSB-03).
-                hsbc_resolved, hsbc_error = _resolve_hsbc_input(
-                    bank_input, load_bank_skill(bank_info),
-                )
-                if hsbc_error:
-                    return hsbc_error
-                bank_input = hsbc_resolved
-            elif bank == "Bank of Baroda":
-                bob_src = Path(bank_input)
-                if bob_src.is_dir() and not sorted(bob_src.glob("*.pdf")):
-                    return (
-                        f"## {bank} → no PDFs found\n\n"
-                        f"❌ The staged upload directory contains no .pdf files:\n"
-                        f"`{bank_input}`"
-                    )
-                bank_input = bob_src
+            # BNK-01: the whole upload goes to the bank's own reader, one rule
+            # for every bank (bank_common.statements). No per-bank shaping.
+            bank_inputs = _upload_entries(statement_files)
+            _chosen = (bank_account or "").strip()
+            _selected = _normalize_digits(_chosen.split(":")[-1]) if _chosen else ""
+
+            def _resolve_account(numbers, _bank=bank, _chosen=_chosen):
+                """Several own accounts in one upload: pick the ONE the book
+                holds at this bank, or stop and ask for the Bank account box."""
+                from agents.bank_common.statements import StatementStop  # noqa: PLC0415
+                listed = ", ".join(sorted({"..." + n[-4:] for n in numbers}))
+                if _chosen:
+                    raise StatementStop(
+                        f"The statements belong to more than one account "
+                        f"({listed}) and the account you picked has no number "
+                        f"in its name to tell them apart. Nothing was joined.",
+                        title="more than one account")
+                pool = postable_bank_accounts(gnucash_file, _bank)
+                fits = [n for n in numbers
+                        if any(_number_fits(n, acc.split(":")[-1]) for acc in pool)]
+                if len(fits) == 1:
+                    return fits[0]
+                raise StatementStop(
+                    f"The statements belong to more than one account ({listed}), "
+                    f"and {'none' if not fits else 'more than one'} of them can be "
+                    f"matched to your accounts at {_bank} in this book. Pick the "
+                    f"account in the Bank account box and run again. Nothing was "
+                    f"joined.", title="more than one account")
 
             _emit_progress(1, f"{bank}: extracting statement to canonical CSV")
             log_lines.append(f"**Step 1** — {bank}: extracting statement to canonical CSV")
@@ -1793,7 +1765,11 @@ def run(
                         f"({_derived}).")
             try:
                 skill = load_bank_skill(bank_info)
-                bank_result = skill.parse(bank_input, password=pdf_password)
+                bank_result = skill.parse(
+                    bank_inputs, password=pdf_password,
+                    allow_balance_break=_truthy(allow_balance_break),
+                    selected_account=_selected or None,
+                    account_resolver=_resolve_account)
                 write_canonical_csv(bank_result.rows, canonical_path)
                 write_sidecar(
                     canonical_path, bank_info.display_name, "derived",
@@ -1816,6 +1792,14 @@ def run(
                     )
                     for w in bank_result.warnings:
                         log_lines.append(f"⚠ {w}")
+            except StatementStop as e:
+                from agents.secret_redact import redact_text
+                return (
+                    f"## {bank} → {e.title}\n\n❌ "
+                    + redact_text(str(e), secrets=(pdf_password or "",))
+                )
+            except FileNotFoundError as e:
+                return f"## {bank} → no statements found\n\n❌ {e}"
             except Exception as e:
                 # SEC-15: an error text from a parser or an external tool must
                 # not carry the statement password (typed or derived).

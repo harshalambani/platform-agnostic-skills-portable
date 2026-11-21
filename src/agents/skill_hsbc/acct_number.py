@@ -1,38 +1,50 @@
-"""IMP-08: read the statement's own account number (page-1 header text).
+"""IMP-08: read the statement's own account number.
 
 Pure text logic, shared by the OCR parse stage (``scripts/parse_tsv.py``,
-which runs as a subprocess) and ``HSBCSkill.parse``. It only accepts a number
-that is LABELLED ("Account Number", "Account No", "A/C No") on the line; a
-bare digit run is never guessed. When page 1 carries two different labelled
-numbers the result is ambiguous and None is returned -- the pipeline then
-decides by evidence or stops and asks, it never guesses.
+which runs as a subprocess) and ``HSBCSkill.parse``.
 
-The label wording is unvalidated against a real statement specimen; a miss
-is safe (None -> IMP-08's evidence / stop-and-ask path).
+Two rules, both safe on a miss (None -> the pipeline decides by evidence or
+stops and asks, it never guesses):
+
+* the labelled rule ("Account Number", "Account No", "A/C No" on the line),
+  now in ``agents.bank_common.account_number`` and re-exported here;
+* BNK-01: the SAVINGS heading rule. A real HSBC statement has, on page 2 and
+  again on some later pages, a heading line that STARTS with
+  ``SAVINGS <WORD>-<CCY> NNN-NNNNNN-NNN`` (twelve digits, dashed 3-6-3) under a
+  "Details of Your ..." heading. Only that line is read, on every page. The
+  "Customer Number" of the address block, the Summary table row (OCR garbles
+  it) and the dashed numbers inside transaction narrations are never taken.
+  Exactly one distinct number gives that number; none, or two different ones,
+  gives None. A heading form not seen on a real statement (a current account)
+  gives None.
 """
 from __future__ import annotations
 
 import re
 
-MIN_DIGITS = 6
-
-_LABELLED = re.compile(
-    r"(?:a\s*/\s*c|acct\.?|account)\s*(?:no\.?|number|num\.?|#)\s*[:.\-]?\s*"
-    r"([0-9][0-9 \-]{4,28}[0-9])",
-    re.IGNORECASE,
+from agents.bank_common.account_number import (  # noqa: F401 - re-exported
+    MIN_DIGITS,
+    digits_only,
+    find_account_number,
 )
 
+_SAVINGS_HEADING = re.compile(
+    r"^\s*SAVINGS\s+[A-Za-z]+-[A-Za-z]{3}\s+(\d{3})-(\d{6})-(\d{3})(?!\d)")
 
-def digits_only(s: str | None) -> str:
-    return "".join(c for c in (s or "") if c.isdigit())
 
+def find_savings_heading_number(pages) -> str | None:
+    """Digits-only account number from the SAVINGS heading lines of every page.
 
-def find_account_number(lines) -> str | None:
-    """Digits-only account number from header text lines, or None."""
+    ``pages`` is a list (one entry per page) of text lines, or a flat list of
+    lines. Returns the number when exactly one distinct number is found.
+    """
     found: list[str] = []
-    for line in lines or []:
-        for m in _LABELLED.finditer(str(line)):
-            d = digits_only(m.group(1))
-            if len(d) >= MIN_DIGITS and d not in found:
-                found.append(d)
+    for page in pages or []:
+        lines = [page] if isinstance(page, str) else (page or [])
+        for line in lines:
+            m = _SAVINGS_HEADING.match(str(line))
+            if m:
+                d = "".join(m.groups())
+                if d not in found:
+                    found.append(d)
     return found[0] if len(found) == 1 else None

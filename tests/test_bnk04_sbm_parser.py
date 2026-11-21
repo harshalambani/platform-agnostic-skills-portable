@@ -180,5 +180,5 @@ def test_pipeline_routes_sbm_through_the_registry_and_shared_import_path():
     import inspect
     from agents.skill_gnucash_pipeline import agent as pipe
     src = inspect.getsource(pipe.run)
-    assert "skill.parse(bank_input, password=pdf_password)" in src
+    assert "skill.parse(" in src and "bank_inputs" in src
     assert "SBM" in pipe.DEDICATED_BANKS

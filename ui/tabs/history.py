@@ -27,17 +27,34 @@ from .. import _config
 # ---------------------------------------------------------------------------
 
 # Known suffixes from skill.yaml output.suffix fields.  Used to map
-# filenames back to a human-readable skill label.
-_SUFFIX_TO_SKILL: dict[str, str] = {
+# filenames back to a human-readable skill label.  The bank labels come from
+# the bank manifests (BNK-01: the bank's display name for its output suffix);
+# the rest are the non-bank skills.
+_NON_BANK_SUFFIX_TO_SKILL: dict[str, str] = {
     "26AS":             "Form 26AS Extractor",
-    "BoB":              "Bank of Baroda",
     "CC-Sort":          "CC Sort",
     "CC-Transactions":  "CC Transactions",
     "analysis":         "CSV Analyzer",
-    "HSBC":             "HSBC Cleanup",
     "summary":          "Summarizer",
     "translation":      "Translator",
 }
+
+
+def _bank_suffix_labels() -> dict[str, str]:
+    from agents import banks  # noqa: PLC0415
+    return {b.output_suffix: b.display_name for b in banks.by_rules_order() if b.output_suffix}
+
+
+def _suffix_to_skill() -> dict[str, str]:
+    """suffix -> label. Banks first (their old file names keep resolving: the
+    suffix did not change), then the non-bank skills."""
+    out = dict(_bank_suffix_labels())
+    for suffix, label in _NON_BANK_SUFFIX_TO_SKILL.items():
+        out.setdefault(suffix, label)
+    return out
+
+
+_SUFFIX_TO_SKILL: dict[str, str] = _suffix_to_skill()
 
 # Regex for the timestamp prefix: YYYY-MM-DD-HHMMSS
 _TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}-\d{6})-(.+)$")

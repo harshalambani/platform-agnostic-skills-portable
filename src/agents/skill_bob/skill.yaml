@@ -10,6 +10,9 @@ version: "1.1.0"
 
 bank: true
 bank_key: "bob"
+rules_key: "BoB"
+rules_order: 40
+hint_match: "substring"
 
 mode: "direct"
 entry_point: "agent:run"

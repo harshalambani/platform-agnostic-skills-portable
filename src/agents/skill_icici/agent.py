@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from agents.balance_utils import format_balance_summary as _fmt_bal
 from agents.bank_common import normalize as _normalize
 from agents.bank_common.consolidate import StatementGroup, consolidate as _consolidate
+from agents.bank_common.statements import read_statements
 from agents.bank_contract import BankResult, BankStatementMeta
 from agents.canonical_io import (
     CANONICAL_FIELDS,
@@ -1053,56 +1054,44 @@ class ICICISkill:
             return 0.9
         return 0.0
 
-    def parse(self, path: str | Path, password: str | None = None) -> BankResult:
-        """Parse an ICICI XLS (or directory of XLS) into a canonical BankResult.
+    # ICICI also reads an .xlsx download (see _convert_xlsx_to_csv), though
+    # its declared format stays .xls.
+    read_suffixes = (".xls", ".xlsx")
+
+    def parse(
+        self,
+        path,
+        password: str | None = None,
+        *,
+        allow_balance_break: bool = False,
+        selected_account: str | None = None,
+        account_resolver=None,
+    ) -> BankResult:
+        """Parse ICICI statement(s): a file, a list of files or a folder.
 
         ``password`` is accepted for ``BankSkill`` protocol conformance but
-        ignored — ICICI's XLS export is never password-protected.
+        ignored. The shared reading rule (``bank_common.statements``) joins
+        several statements; one statement comes back as ``parse_one`` made it.
         """
-        src = Path(path)
-        if src.is_dir():
-            xls_files = sorted(src.glob("*.xls"))
-        else:
-            xls_files = [src]
-        if not xls_files:
-            raise FileNotFoundError(f"No ICICI .xls file(s) found at: {path}")
+        return read_statements(
+            self, path, password, allow_balance_break=allow_balance_break,
+            selected_account=selected_account, account_resolver=account_resolver)
 
+    def parse_one(self, path: str | Path, password: str | None = None) -> BankResult:
+        """Parse ONE ICICI statement file into a canonical BankResult."""
+        src = Path(path)
+        if not src.is_file():
+            raise FileNotFoundError(f"No ICICI statement file found at: {path}")
+        xls_files = [src]
         warnings: list[str] = []
 
         with tempfile.TemporaryDirectory(prefix="pa-skills-icici-parse-") as tmp:
-            tmp_path = Path(tmp)
             # Write the canonical CSV with the unchanged transform writer so the
             # bytes match the pre-refactor output exactly (temp file; the
             # caller owns the permanent write via canonical_io).
-            target = tmp_path / "canonical.csv"
-            if len(xls_files) == 1:
-                result = transform_icici_statement(str(xls_files[0]), str(target))
-                warnings.extend(result.get("issues", []))
-            else:
-                # Order the batch by actual transaction date (not filename)
-                # and flag gaps/overlaps, via the shared bank_common helper.
-                groups = []
-                for i, xls in enumerate(xls_files):
-                    part = tmp_path / f"part_{i}.csv"
-                    result = transform_icici_statement(str(xls), str(part))
-                    warnings.extend(result.get("issues", []))
-                    part_rows = _read_canonical_csv(part)
-                    dates = sorted(r["Date"] for r in part_rows if r.get("Date"))
-                    groups.append(StatementGroup(
-                        name=xls.name,
-                        rows=part_rows,
-                        period_start=dates[0] if dates else None,
-                        period_end=dates[-1] if dates else None,
-                    ))
-                consolidated = _consolidate(groups)
-                warnings.extend(consolidated.warnings)
-
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with open(target, "w", newline="", encoding="utf-8") as f:
-                    writer = csv.DictWriter(f, fieldnames=list(CANONICAL_FIELDS))
-                    writer.writeheader()
-                    writer.writerows(consolidated.rows)
-
+            target = Path(tmp) / "canonical.csv"
+            result = transform_icici_statement(str(src), str(target))
+            warnings.extend(result.get("issues", []))
             rows = _read_canonical_csv(target)
 
         balance_check = run_balance_check(rows)

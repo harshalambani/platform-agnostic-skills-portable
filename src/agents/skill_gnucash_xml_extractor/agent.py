@@ -4,6 +4,7 @@
 import gzip
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -20,12 +21,38 @@ NS = {
     'ts': '{http://www.gnucash.org/XML/ts}',
 }
 
-BANK_PATTERNS = {
-    'ICICI': ['ICICI', 'icici'],
-    'HDFC': ['HDFC', 'hdfc'],
-    'HSBC': ['HSBC', 'hsbc'],
-    'BoB': ['Bank of Baroda', 'BoB', 'bob'],
-}
+def _bank_hints() -> tuple[dict[str, list[str]], dict[str, str]]:
+    """BNK-01: the per-bank name hints, derived from the bank manifests.
+
+    Each bank's hints are its display name and its bank key (matched without
+    regard to case); the section name is the manifest's ``rules_key``. The
+    order is the manifests' ``rules_order`` -- the first bank whose hint is in
+    an account name wins, as it always did. Returns (hints by rules_key, match
+    mode by rules_key).
+    """
+    from agents import banks  # noqa: PLC0415
+
+    hints: dict[str, list[str]] = {}
+    modes: dict[str, str] = {}
+    for info in banks.by_rules_order():
+        seen: list[str] = []
+        for h in (info.display_name, info.bank_key):
+            if h and h.lower() not in [x.lower() for x in seen]:
+                seen.append(h)
+        hints[info.rules_key] = seen
+        modes[info.rules_key] = info.hint_match
+    return hints, modes
+
+
+BANK_PATTERNS, _HINT_MODE = _bank_hints()
+
+
+def _hint_in(hint: str, name: str, mode: str) -> bool:
+    if mode == "substring":
+        return hint.lower() in name.lower()
+    return re.search(r"(?<![A-Za-z0-9])" + re.escape(hint) + r"(?![A-Za-z0-9])",
+                     name, re.IGNORECASE) is not None
+
 
 _ROOT_PREFIX = "Root Account:"
 
@@ -41,8 +68,9 @@ def _match_bank(account_name: str) -> Optional[str]:
     explicitly known account path (see _norm_account_path).
     """
     for bank, patterns in BANK_PATTERNS.items():
+        mode = _HINT_MODE.get(bank, "word")
         for pattern in patterns:
-            if pattern.lower() in account_name.lower():
+            if _hint_in(pattern, account_name, mode):
                 return bank
     return None
 

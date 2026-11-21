@@ -12,6 +12,8 @@ version: "1.0.0"
 
 bank: true
 bank_key: "sbm"
+rules_key: "SBM"
+rules_order: 50
 
 mode: "direct"
 entry_point: "agent:run"

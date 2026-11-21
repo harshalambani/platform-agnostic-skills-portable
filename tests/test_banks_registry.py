@@ -191,9 +191,10 @@ def test_all_discovered_banks_parse_signature_matches_contract():
         sig = inspect.signature(skill.parse)
         params = list(sig.parameters.values())
         names = [p.name for p in params]
-        assert names == ["path", "password"], (
+        assert names == ["path", "password", "allow_balance_break",
+                         "selected_account", "account_resolver"], (
             f"{info.bank_key}.parse() has parameters {names}, "
-            f"expected exactly ['path', 'password'] -- no output_path"
+            f"expected the contract's five -- no output_path"
         )
         assert params[1].default is None
 
