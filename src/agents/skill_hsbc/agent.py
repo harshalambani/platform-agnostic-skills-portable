@@ -211,11 +211,13 @@ def _read_enriched_rows(input_xlsx: str) -> list[dict]:
     """Read the enriched HSBC workbook's transaction sheet as a list of dicts."""
     import pandas as pd  # noqa: PLC0415
 
-    xls = pd.ExcelFile(input_xlsx)
-    # The transaction sheet is the first one ("HSBC Savings <period>"); the
-    # trailing "Summary" sheet is metadata. Prefer an explicit "Transactions".
-    sheet = "Transactions" if "Transactions" in xls.sheet_names else xls.sheet_names[0]
-    df = pd.read_excel(input_xlsx, sheet_name=sheet)
+    # BNK-12: closed explicitly -- an open handle keeps the file locked on
+    # Windows, so the scratch folder holding it could not be removed.
+    with pd.ExcelFile(input_xlsx) as xls:
+        # The transaction sheet is the first one ("HSBC Savings <period>"); the
+        # trailing "Summary" sheet is metadata. Prefer an explicit "Transactions".
+        sheet = "Transactions" if "Transactions" in xls.sheet_names else xls.sheet_names[0]
+        df = pd.read_excel(xls, sheet_name=sheet)
     if df.empty:
         return []
 
@@ -281,6 +283,9 @@ def _read_account_number(input_xlsx: str) -> Optional[str]:
         return None
 
 
+_SCRATCH_PREFIX = "hsbc_bankskill_"
+
+
 def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Path:
     """Run OCR -> parse -> enrich -> xlsx over ``pdf_paths`` in a fresh scratch
     dir and return the built enriched workbook's path.
@@ -291,7 +296,29 @@ def _run_ocr_pipeline(pdf_paths: list[Path], password: str | None = None) -> Pat
     continuity detection in ``scripts/parse_tsv.py`` kick in automatically
     for folders with more than one PDF) rather than a pre-existing directory.
     """
-    work_dir = Path(tempfile.mkdtemp(prefix="hsbc_bankskill_"))
+    work_dir = Path(tempfile.mkdtemp(prefix=_SCRATCH_PREFIX))
+    try:
+        return _ocr_into(work_dir, pdf_paths, password)
+    except BaseException:
+        # BNK-12: a failed run (OCR raises, bad PDF, wrong password, Ctrl-C)
+        # leaves no copy of the statement behind.
+        shutil.rmtree(work_dir, ignore_errors=True)
+        raise
+
+
+def discard_scratch(enriched_xlsx: Path) -> None:
+    """BNK-12: remove the scratch folder ``_run_ocr_pipeline`` built.
+
+    Only a folder this module made (its name carries ``_SCRATCH_PREFIX`` and it
+    holds ``enriched.xlsx``) is ever removed -- never the folder of a workbook
+    the user supplied, and never any other path.
+    """
+    d = Path(enriched_xlsx).parent
+    if d.name.startswith(_SCRATCH_PREFIX) and Path(enriched_xlsx).name == "enriched.xlsx":
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _ocr_into(work_dir: Path, pdf_paths: list[Path], password: str | None) -> Path:
     pdf_dir = work_dir / "pdfs"
     pdf_dir.mkdir()
     for src in pdf_paths:
@@ -461,12 +488,19 @@ class HSBCSkill:
         suffix = p.suffix.lower()
 
         if suffix in (".xlsx", ".xlsm"):
-            enriched_xlsx = p
-        elif suffix == ".pdf":
-            enriched_xlsx = _run_ocr_pipeline([p], password)
-        else:
+            return self._result_from_workbook(p, path, password)
+        if suffix != ".pdf":
             raise ValueError(f"Unsupported file type: {suffix or path}")
+        enriched_xlsx = _run_ocr_pipeline([p], password)
+        try:
+            return self._result_from_workbook(enriched_xlsx, path, password)
+        finally:
+            # BNK-12: rows and the account number are taken inside
+            # _result_from_workbook; nothing reads the scratch folder after
+            # this returns, so it goes, whether the read passed or raised.
+            discard_scratch(enriched_xlsx)
 
+    def _result_from_workbook(self, enriched_xlsx: Path, path, password) -> BankResult:
         rows = _read_enriched_rows(str(enriched_xlsx))
         if not rows:
             raise ValueError(f"No transaction rows found in HSBC statement: {path}")

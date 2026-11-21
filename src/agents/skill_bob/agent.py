@@ -16,6 +16,7 @@ import logging
 import re
 import subprocess
 import sys
+import shutil
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -66,6 +67,14 @@ def run(
 
     print(f"[BoB batch] Found {len(pdfs)} PDF(s) in {pdf_path}")
     tmp_dir = Path(tempfile.mkdtemp(prefix="pa-skills-bob-batch-"))
+    try:
+        return _run_batch(tmp_dir, pdfs, output_path)
+    finally:
+        # BNK-12: the per-PDF CSVs hold statement rows; remove them on every exit.
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _run_batch(tmp_dir: Path, pdfs, output_path) -> str:
     csv_parts: list[tuple[Path, Path]] = []
     replies: list[str] = []
     for i, pdf in enumerate(pdfs, 1):
