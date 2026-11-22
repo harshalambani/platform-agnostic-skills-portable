@@ -231,3 +231,126 @@ def test_the_leftover_check_can_fail(env, monkeypatch):               # NEGATIVE
     monkeypatch.setattr(_generic, "remove_run_temp", lambda folders: None)
     _drive(env)
     assert any(n.startswith("pa-skills-") for n in _left(env))
+
+
+# -- the download staging folder: the previous run's copies go when the next run starts --
+
+@pytest.fixture()
+def clock(monkeypatch):
+    """Each run gets its own output file name (the name carries the second)."""
+    import datetime as _dt
+    state = {"n": 0}
+
+    class _Now(_dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            state["n"] += 1
+            return _dt.datetime(2026, 1, 1, 0, 0, 0) + _dt.timedelta(seconds=state["n"])
+    monkeypatch.setattr(_generic, "datetime", _Now)
+
+
+def _handler():
+    return _generic._make_run_handler(registry.get("skill_bank_skills"))
+
+
+def _go(env, handler, files=None):
+    """One run; returns (all text, the final Download button update)."""
+    files = [str(env["xlsx"])] if files is None else files
+    texts, last = [], None
+    for t in handler("sbm", files, "", PW, False, ""):
+        texts.append(str(t[0]))
+        last = t[1]
+    return " ".join(texts), last
+
+
+def _dl(env):
+    return sorted(p.name for p in (env["temp"].parent / "dl").iterdir())
+
+
+def _button_path(update):
+    return Path(update["value"]) if isinstance(update, dict) and update.get("value") else None
+
+
+def test_run_two_removes_run_ones_copy_and_points_at_its_own(env, clock):
+    h = _handler()
+    _, b1 = _go(env, h)
+    c1 = _button_path(b1)
+    assert c1 and c1.is_file()
+    _, b2 = _go(env, h)
+    c2 = _button_path(b2)
+    assert not c1.exists()                   # run 1's copy is gone
+    assert c2.is_file() and c2 != c1         # run 2's copy is what the button points at
+    assert _dl(env) == [c2.name]
+
+
+def test_another_tabs_copy_survives_a_run_on_this_tab(env, clock):     # NEGATIVE
+    a, b = _handler(), _handler()
+    _, ba = _go(env, a)
+    _, bb = _go(env, b)
+    ca, cb = _button_path(ba), _button_path(bb)
+    _go(env, a)                              # a second run on tab A
+    assert not ca.exists()
+    assert cb.is_file()                      # tab B's copy is untouched
+
+
+def test_a_refused_run_leaves_the_previous_copy(env, clock):           # NEGATIVE
+    h = _handler()
+    _, b1 = _go(env, h)
+    c1 = _button_path(b1)
+    # a folder that does not exist: refused by the input checks, before any run starts
+    text = " ".join(str(t[0]) for t in h("hsbc", None, str(env["picked"] / "nope"), "", False, ""))
+    assert "does not exist" in text
+    assert c1.is_file()
+    # a run refused after staging (two uploads, one name) also leaves it
+    twin_dir = env["picked"].parent / "twin"
+    twin_dir.mkdir()
+    twin = twin_dir / env["xlsx"].name
+    twin.write_bytes(env["xlsx"].read_bytes())
+    text, _ = _go(env, h, files=[str(env["xlsx"]), str(twin)])
+    assert "both named" in text
+    assert c1.is_file()
+
+
+def test_the_real_result_in_the_outputs_folder_is_never_removed(env, clock):   # NEGATIVE
+    h = _handler()
+    _go(env, h)
+    _go(env, h)
+    outs = sorted(p.name for p in env["out"].glob("*.csv"))
+    assert len(outs) == 2                    # both runs' real results are still there
+    assert env["xlsx"].exists()
+
+
+def test_an_error_removing_a_copy_does_not_hide_the_new_result(env, clock, monkeypatch):   # NEGATIVE
+    h = _handler()
+    _go(env, h)
+    with monkeypatch.context() as m:
+        def deny(self, *a, **k):
+            raise PermissionError("synthetic")
+        m.setattr(Path, "unlink", deny)
+        text, b2 = _go(env, h)
+    assert ("Done" in text or "Result" in text) and _button_path(b2)
+
+
+def test_only_this_handlers_own_unchanged_copy_inside_staging_is_removed(env, clock, tmp_path):  # NEGATIVE
+    h = _handler()
+    _, b1 = _go(env, h)
+    c1 = _button_path(b1)
+    # another tab later wrote a different file under the same name
+    c1.write_bytes(c1.read_bytes() + b"another tab's content")
+    outside = env["picked"] / "elsewhere.csv"
+    outside.write_text("keep")
+    entries = [_generic._served_entry(outside)]
+    _generic.remove_served_copies(entries)   # a path outside the staging folder
+    assert outside.exists() and entries == []
+    _go(env, h)                              # run 2: c1 is no longer the copy it wrote
+    assert c1.is_file()
+    assert env["xlsx"].exists() and outside.exists()
+
+
+def test_removal_disabled_fails_the_run_one_copy_gone_check(env, clock, monkeypatch):   # mutation proof
+    monkeypatch.setattr(_generic, "remove_served_copies", lambda entries: None)
+    h = _handler()
+    _, b1 = _go(env, h)
+    c1 = _button_path(b1)
+    _go(env, h)
+    assert c1.exists()                       # with removal off, the old copy stays
