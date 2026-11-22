@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import re
 import shutil
+import time
 import tempfile
 import traceback
 from datetime import datetime
@@ -984,6 +985,42 @@ def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict
     return {"block": block, "updates": updates, "paths": paths}
 
 
+_RUN_TEMP_MADE: set[str] = set()
+
+
+def make_run_temp(prefix: str) -> Path:
+    """BNK-14: a folder in the temp folder for one run, remembered so that
+    remove_run_temp() will take away this folder and nothing else."""
+    folder = Path(tempfile.mkdtemp(prefix=prefix))
+    _RUN_TEMP_MADE.add(str(folder.resolve()))
+    return folder
+
+
+def remove_run_temp(folders) -> None:
+    """BNK-14: remove the staging folders a run made in the temp folder (the
+    copies of the uploaded statements, the run's work folder). Called when the
+    run ends: success, failure, stop, or the page closing the stream.
+
+    Only a folder made by make_run_temp() is touched. A path the user picked,
+    or anything else, is refused, however it is spelled. Never raises, so it
+    cannot hide the run's own result or error. Safe to call twice or with None."""
+    for folder in list(folders or ()):
+        try:
+            f = Path(folder)
+            key = str(f.resolve())
+            if key not in _RUN_TEMP_MADE or f.is_symlink() or not f.is_dir():
+                continue
+            for _ in range(5):
+                shutil.rmtree(f, ignore_errors=True)
+                if not f.exists():
+                    break
+                time.sleep(0.2)
+            if not f.exists():
+                _RUN_TEMP_MADE.discard(key)
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def _make_run_handler(skill: SkillInfo):
     """
     Return a Gradio-compatible generator function that runs the skill.
@@ -1083,9 +1120,10 @@ def _make_run_handler(skill: SkillInfo):
                         ), gr.update(interactive=False, value=None), gr.update()
                         return
 
-                    stage_dir = Path(tempfile.mkdtemp(
-                        prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-",
-                    ))
+                    stage_dir = make_run_temp(
+                        f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-")
+                    # BNK-14: removed when the run ends, whatever way it ends.
+                    state.setdefault("temp_dirs", []).append(stage_dir)
                     staged_names: set[str] = set()
                     for fp in file_list:
                         src = Path(fp.name if hasattr(fp, "name") else fp)
@@ -1259,7 +1297,8 @@ def _make_run_handler(skill: SkillInfo):
             return
 
         # -- Build kwargs from skill.run_args template --
-        work_dir = tempfile.mkdtemp(prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-")
+        work_dir = str(make_run_temp(f"pa-skills-{skill.name.lower().replace(' ', '-')}-"))
+        state.setdefault("temp_dirs", []).append(Path(work_dir))   # BNK-14
         kwargs = build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir)
 
         # CC-08: password inputs are never written to the run log.
@@ -1461,6 +1500,7 @@ def _make_run_handler(skill: SkillInfo):
             finally:
                 # AUD-02: success, error, cancel and GeneratorExit all end here.
                 _config.discard_legacy_config(state.get("legacy_cfg"))
+                remove_run_temp(state.get("temp_dirs"))
         return _run
 
     def _run_with_extras(*args):
@@ -1482,6 +1522,7 @@ def _make_run_handler(skill: SkillInfo):
                 yield (*t, *ext)
         finally:
             _config.discard_legacy_config(state.get("legacy_cfg"))
+            remove_run_temp(state.get("temp_dirs"))
     return _run_with_extras
 
 
