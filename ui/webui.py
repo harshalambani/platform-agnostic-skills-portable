@@ -550,6 +550,10 @@ def _split_banks_tabs(display_names: list[str]) -> tuple[list[str], list[str]]:
     return before, after
 
 
+import time  # PROTO
+def _protolog(k, v):  # PROTO
+    with open('C:/Users/inabm/proto.txt', 'a') as f: f.write(f'{k} {v:.3f} t={time.time():.3f}'+chr(10))  # PROTO
+
 def build_app(launch: bool = False) -> gr.Blocks:
     """
     Construct the Gradio Blocks object.
@@ -692,7 +696,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 # Mapping + AIS Reconcile), and an app-wide "Entities" sub-tab
                 # last. Every group ends in a "Review" tab.
                 if _cat_key == "gnucash":
-                    with gr.Tab(_cat_label):
+                    def _gnucash_body(_cat_skills=_cat_skills):  # PROTO: bind the loop variable NOW (late-binding trap)
                         with gr.Tabs():
                             with gr.Tab("Banks"):
                                 with gr.Tabs():
@@ -797,6 +801,18 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             # the workflow tabs stay in reading order.
                             with gr.Tab("Entities") as _et:
                                 tab_itr_entities.render(container_tab=_et)
+                    _proto = os.environ.get('PA_PROTO', '')  # PROTO
+                    with gr.Tab(_cat_label) as _gt:  # PROTO
+                        if _proto == 'c1':  # PROTO
+                            @gr.render(triggers=[_gt.select])  # PROTO
+                            def _lazy_gc():  # PROTO
+                                _t0 = time.perf_counter(); _gnucash_body(); _protolog('render_gnucash_s', time.perf_counter() - _t0)  # PROTO
+                        elif _proto == 'c2':  # PROTO
+                            @gr.render(triggers=[app.load])  # PROTO
+                            def _lazy_gc2():  # PROTO
+                                _t0 = time.perf_counter(); _gnucash_body(); _protolog('render_gnucash_s', time.perf_counter() - _t0)  # PROTO
+                        else:  # PROTO
+                            _gnucash_body()  # PROTO
                     continue
 
                 if not _cat_skills:
