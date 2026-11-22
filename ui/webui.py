@@ -46,6 +46,20 @@ import sys
 import threading
 from pathlib import Path
 
+# ── PERF-06: open the window first ───────────────────────────────────────────
+# Before gradio (about 60% of the start) is imported, open the app's own window
+# with a small local "Starting..." page; ui/_firstwindow.py then loads this very
+# module as `ui.webui` on a worker thread and switches the window to the app
+# once the server answers. It returns False (and nothing has changed) for a
+# headless / browser / script-dispatch launch or when no native window exists.
+if __name__ == "__main__":
+    _early_root = str(Path(__file__).resolve().parent.parent)
+    if _early_root not in sys.path:
+        sys.path.insert(0, _early_root)
+    from ui import _firstwindow as _first_window
+
+    _first_window.run(sys.argv[1:])
+
 # ── Managed warnings ─────────────────────────────────────────────────────────
 # Known/triaged warnings we have decided to handle. Each is (substring, reason).
 # Managed warnings are LOGGED to the warnings file (tagged "[MANAGED: ...]") but
@@ -118,6 +132,7 @@ from ui import _config as _config_mod  # noqa: E402
 from ui import _health  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
 from ui import _splash  # noqa: E402
+from ui import _firstwindow  # noqa: E402
 from ui import _update  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
@@ -128,6 +143,9 @@ _update.start_check()
 
 
 APP_TITLE = "PA Skills Portable"
+# PERF-06: the window opened before this module was imported (ui/_firstwindow.py
+# sets it); None when the window is opened the old way, after the app is up.
+_PREOPENED_WINDOW = None
 PORT_FILE_NAME = "ui_port.json"   # written next to the executable / project root
 
 # Override Gradio's default inline-code rendering so backtick spans don't render
@@ -816,7 +834,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
         )
         if window_mode:
             url = f"http://127.0.0.1:{port}"
-            _run_native_window(url)  # blocks until the window closes, then exits
+            if _PREOPENED_WINDOW is not None:
+                # PERF-06: the window is already open on its own thread; switch it
+                # to the app once the server answers. The window's `closing`
+                # handler (ui/_firstwindow.py) owns the exit.
+                _firstwindow.attach_app(_PREOPENED_WINDOW, url, _wait_for_server)
+            else:
+                _run_native_window(url)  # blocks until the window closes, then exits
     return app
 
 
