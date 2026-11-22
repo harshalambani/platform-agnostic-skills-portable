@@ -178,6 +178,9 @@ class PreopenedWindow:
         self._window = window
         self._shown = shown
         self._wait_s = wait_s
+        # Set once the window shows the app or an error page: the start-up
+        # watchdog stands down then.
+        self.done = threading.Event()
 
     def _ready(self) -> None:
         self._shown.wait(self._wait_s)
@@ -185,10 +188,12 @@ class PreopenedWindow:
     def load_url(self, url):
         self._ready()
         self._window.load_url(url)
+        self.done.set()
 
     def load_html(self, html_text):
         self._ready()
         self._window.load_html(html_text)
+        self.done.set()
 
 
 def show_error(window, headline: str, detail: str = "") -> None:
@@ -197,6 +202,23 @@ def show_error(window, headline: str, detail: str = "") -> None:
         window.load_html(error_html(headline, detail))
     except Exception:  # noqa: BLE001
         pass
+
+
+STARTUP_TIMEOUT_S = 90.0
+
+
+def start_watchdog(window, done: threading.Event, timeout_s: float = STARTUP_TIMEOUT_S):
+    """Never leave "Starting..." up for ever. If nothing has been shown in the
+    window (the app, or an error) within *timeout_s*, say so in the window.
+    Covers a loader that hangs before the server is even started, which the
+    server wait in attach_app() cannot see. Returns the (daemon) thread."""
+    def _watch():
+        if not done.wait(timeout_s):
+            show_error(window, "The app did not start in time",
+                       f"Nothing was ready after {int(timeout_s)} seconds.")
+    t = threading.Thread(target=_watch, name="pa-skills-watchdog", daemon=True)
+    t.start()
+    return t
 
 
 def attach_app(window, url: str, wait_for_server, timeout: float = 30.0) -> bool:
@@ -258,7 +280,9 @@ def run(argv) -> bool:
         window = webview.create_window(
             APP_TITLE, html=loading_html(), width=1200, height=820, js_api=_Api())
         shown = threading.Event()
-        window.events.closing += lambda: terminate_process()
+        pre = PreopenedWindow(window, shown)
+        # closing: stand the watchdog down, then the same exit sequence as ever
+        window.events.closing += lambda: (pre.done.set(), terminate_process())
         window.events.shown += lambda: shown.set()
         try:
             from ui import _splash  # noqa: PLC0415
@@ -269,11 +293,12 @@ def run(argv) -> bool:
             pass
 
         loader = threading.Thread(
-            target=_load, args=(PreopenedWindow(window, shown), list(argv)),
+            target=_load, args=(pre, list(argv)),
             name="pa-skills-loader", daemon=True)
         _LOADER_THREAD = loader
         started["loader"] = True
         loader.start()
+        start_watchdog(window, pre.done)
 
         icon = window_icon_path()
         if icon:

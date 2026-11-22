@@ -344,3 +344,69 @@ def test_the_loader_is_a_daemon_so_it_cannot_keep_the_process_alive(fake_webview
     monkeypatch.setattr("importlib.import_module", lambda n: types.SimpleNamespace(main=lambda a: None))
     _run([])
     assert fw._LOADER_THREAD.daemon is True
+
+
+# -- never a window with no app and no word about it; never a second app ---------------------
+
+def test_a_loader_that_hangs_ends_in_an_error_page_not_in_starting_for_ever():   # NEGATIVE
+    log = []
+    done = threading.Event()                           # nothing ever sets it: a stuck loader
+    th = fw.start_watchdog(FakeWindow(log, html="x"), done, timeout_s=0.2)
+    th.join(5)
+    assert not th.is_alive()
+    assert [e[0] for e in log] == ["load_html"]
+    assert "did not start in time" in log[0][1]
+
+
+def test_the_watchdog_stands_down_once_the_app_is_shown():           # NEGATIVE
+    log = []
+    pw = fw.PreopenedWindow(FakeWindow(log, html="x"), _set_event(), wait_s=1)
+    th = fw.start_watchdog(FakeWindow(log, html="x"), pw.done, timeout_s=0.3)
+    pw.load_url("http://127.0.0.1:1")
+    th.join(5)
+    assert not th.is_alive()
+    assert [e[0] for e in log] == ["load_url"]         # no error page over the app
+
+
+def test_an_error_page_also_stands_the_watchdog_down(fake_webview, monkeypatch):   # NEGATIVE
+    def boom(n):
+        raise RuntimeError("import failed")
+    monkeypatch.setattr("importlib.import_module", boom)
+    _run([])
+    pages = fake_webview.state["window"].pages
+    assert sum(1 for k, h in pages if k == "html" and "could not start" in h) == 1
+
+
+def _set_event():
+    e = threading.Event()
+    e.set()
+    return e
+
+
+def test_the_app_is_started_exactly_once_per_launch(fake_webview, monkeypatch):   # NEGATIVE
+    calls = []
+    monkeypatch.setattr("importlib.import_module",
+                        lambda n: types.SimpleNamespace(main=lambda a: calls.append(a)))
+    assert _run(["x"]) is True
+    assert calls == [["x"]]
+    assert sum(1 for e in fake_webview.log if e[0] == "create_window") == 1
+    assert sum(1 for e in fake_webview.log if e[0] == "start") == 1
+
+
+def test_a_window_library_that_fails_after_the_loader_began_does_not_start_a_second_app(fake_webview, monkeypatch):   # NEGATIVE
+    calls = []
+    monkeypatch.setattr("importlib.import_module",
+                        lambda n: types.SimpleNamespace(main=lambda a: calls.append(a)))
+
+    def boom(*a, **k):
+        raise RuntimeError("gui died")
+    sys.modules["webview"].start = boom
+    assert fw.run([]) is True                          # the old path must NOT take over
+    fw._LOADER_THREAD.join(10)
+    assert len(calls) <= 1
+    assert fake_webview.exits                          # and the process ends, it does not linger
+
+
+def test_the_helpers_exist_once():                                  # NEGATIVE
+    src = WEBUI.read_text(encoding="utf-8")
+    assert "winreg" not in src and "EdgeUpdate" not in src       # the one copy is in _firstwindow

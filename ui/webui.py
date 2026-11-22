@@ -917,73 +917,20 @@ def _resolve_launch_mode() -> str:
 
 
 def _native_window_available() -> bool:
-    """True if we can host the UI in a pywebview + WebView2 native window.
-
-    Gated to Windows for v2 (WebView2 backend). Requires both the pywebview
-    package to import and the WebView2 runtime to be installed. Deciding this up
-    front (rather than discovering it when the window fails to open) lets the
-    window/browser choice — and therefore the Exit-button gating — be correct
-    before the Blocks are built.
-    """
-    if sys.platform != "win32":
-        return False
-    try:
-        import webview  # noqa: F401,PLC0415
-    except Exception:
-        return False
-    return _webview2_runtime_present()
+    """True if we can host the UI in a pywebview + WebView2 native window
+    (Windows only; pywebview imports and the WebView2 runtime is installed).
+    One implementation, shared with the window-first path: ui/_firstwindow.py."""
+    return _firstwindow.native_window_available()
 
 
 def _webview2_runtime_present() -> bool:
-    """True if the Evergreen/standalone WebView2 runtime is installed.
-
-    pywebview's EdgeChromium backend needs the WebView2 runtime, which ships with
-    Windows 11 and current Edge but can be absent on older Windows 10. Check the
-    runtime's registered version ("pv") under the EdgeUpdate client GUID across
-    the per-machine (HKLM, incl. the 32-bit registry view) and per-user (HKCU)
-    install locations.
-    """
-    import winreg  # noqa: PLC0415
-
-    guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
-    locations = [
-        (winreg.HKEY_LOCAL_MACHINE,
-         rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{guid}"),
-        (winreg.HKEY_LOCAL_MACHINE,
-         rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
-        (winreg.HKEY_CURRENT_USER,
-         rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
-    ]
-    for root, path in locations:
-        try:
-            with winreg.OpenKey(root, path) as key:
-                pv, _ = winreg.QueryValueEx(key, "pv")
-                if pv and pv not in ("", "0.0.0.0"):
-                    return True
-        except OSError:
-            continue
-    return False
+    """True if the Evergreen/standalone WebView2 runtime is installed."""
+    return _firstwindow.webview2_runtime_present()
 
 
 def _window_icon_path() -> str | None:
-    """Absolute path to appicon.ico for the native window title bar, or None.
-
-    Frozen builds may bundle the icon under sys._MEIPASS; source mode reads it
-    from bundling/icons/. Ships with the v2 icon refresh (#43).
-    """
-    candidates: list[Path] = []
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        candidates.append(Path(meipass) / "appicon.ico")
-        candidates.append(Path(meipass) / "bundling" / "icons" / "appicon.ico")
-    candidates.append(PROJECT_ROOT / "bundling" / "icons" / "appicon.ico")
-    for c in candidates:
-        try:
-            if c.is_file():
-                return str(c)
-        except OSError:
-            continue
-    return None
+    """Absolute path to appicon.ico for the native window title bar, or None."""
+    return _firstwindow.window_icon_path()
 
 
 def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
