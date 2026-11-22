@@ -1,0 +1,125 @@
+# skill.yaml - Bank Skills: one tab for every bank's statement reader (BNK-01)
+
+name: "skill_bank_skills"
+display_name: "Bank Skills"
+description: >
+  Turn one bank account's statement file(s) into the standard canonical CSV.
+  Pick the bank, upload the statement(s) and, if the file is protected, enter
+  its password. Runs offline - no LLM. To also map the rows to GnuCash
+  accounts and import them, use GnuCash > Banks > Bank - Convert to GnuCash.
+category: "banks"
+version: "1.0.0"
+
+mode: "direct"
+entry_point: "agent:run"
+
+inputs:
+  - name: "bank"
+    type: "select"
+    label: "Bank"
+    options_from: "bank_parsers"
+    required: true
+
+  - name: "statement_files"
+    type: "files"
+    label: "Statement file(s)"
+    file_types: [".pdf", ".xls", ".xlsx", ".csv"]
+    hint_from: "bank"
+    required: false
+
+  - name: "hsbc_folder"
+    type: "directory"
+    label: "HSBC only: a folder of statement PDFs (instead of uploading them)"
+    visible_when: "bank=hsbc"
+    required: false
+
+  - name: "password"
+    type: "password"
+    label: "Statement password (if the file is protected)"
+    required: false
+
+  - name: "allow_balance_break"
+    type: "checkbox"
+    label: "Balance-break override for THIS run: join statements even if the balance does not carry on"
+    reset_after_run: true
+    required: false
+
+run_args:
+  bank: "{inputs.bank}"
+  statement_files: "{inputs.statement_files}"
+  hsbc_folder: "{inputs.hsbc_folder}"
+  password: "{inputs.password}"
+  allow_balance_break: "{inputs.allow_balance_break}"
+  output_path: "{output_path}"
+  config_path: "{config_path}"
+  model_override: "{model_override}"
+
+output:
+  extension: ".csv"
+  suffix: "Bank-Skills"
+  download_label: "Download CSV"
+
+requires:
+  native_binaries: []
+  external_tools: []
+  llm: false
+
+help:
+  overview: >
+    One tab for all six banks. It reads the statement(s) of ONE account with
+    that bank's own reader and writes the standard canonical CSV (Date,
+    Transaction ID, Description, Account, Deposit, Withdrawal, Balance,
+    Currency) with a summary file beside it. The statements are put in date
+    order, rows that two overlapping statements both carry are kept once, and
+    the running balance must carry on from one statement to the next.
+  when_to_use: >
+    Use this to get a clean CSV from a bank statement. To map the rows to
+    GnuCash accounts and import them in one step, use GnuCash > Banks >
+    Bank - Convert to GnuCash instead.
+  inputs:
+    - name: "bank"
+      tooltip: "The bank the statement comes from."
+      accepts: "One of the banks the app reads."
+    - name: "statement_files"
+      tooltip: "The statement file(s) of one account."
+      accepts: "Pick a bank to see which files it takes. One account per run: upload that account's statement file(s); a statement of a different account stops the run."
+    - name: "hsbc_folder"
+      tooltip: "HSBC statements can also be read from a folder."
+      accepts: "A folder of HSBC statement PDFs."
+    - name: "password"
+      tooltip: "The statement's open password."
+      accepts: "Text. Not stored."
+      gotchas: >
+        One password for the whole upload. A wrong password stops the run and
+        names the file.
+    - name: "allow_balance_break"
+      tooltip: "Off by default and back off after every run."
+      accepts: "A tick box."
+      gotchas: >
+        Ticking it lets statements be joined even when the balance does not
+        carry on from one to the next, and the result then says so. Use it only
+        when you know a statement is missing and want the rest anyway.
+  steps:
+    - "Pick the bank."
+    - "Upload the statement file(s) of one account (HSBC: or pick a folder)."
+    - "Enter the password if the file is protected."
+    - "Click Run and download the CSV."
+  outputs:
+    folder: "Data/outputs/"
+    files:
+      - name: "YYYY-MM-DD-HHMMSS-<input>-Bank-Skills.csv"
+        tooltip: >
+          One row per transaction: Date, Transaction ID, Description, Account,
+          Deposit, Withdrawal, Balance, Currency. A summary file with the
+          opening and closing balance sits beside it.
+  tips: >
+    HSBC statements are scanned, so reading them takes a while.
+  troubleshooting:
+    - problem: "The run stops saying more than one account."
+      fix: >
+        The upload holds statements of different accounts. Upload one account
+        per run.
+    - problem: "The run stops saying the balance does not carry on."
+      fix: >
+        A statement is missing from the upload. Add it, or tick the
+        balance-break override for this run only if you accept the gap.

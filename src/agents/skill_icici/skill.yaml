@@ -1,6 +1,8 @@
 # skill.yaml — ICICI skill manifest
 
-name: "ICICI"
+name: "skill_icici"
+aliases: ["ICICI"]
+hidden: true
 display_name: "ICICI"
 description: >
   Convert ICICI Bank statement XLS downloads to GnuCash-importable CSV.
@@ -12,6 +14,9 @@ category: "banks"
 version: "1.1.0"
 bank: true
 bank_key: "icici"
+rules_key: "ICICI"
+rules_order: 10
+hint_match: "substring"
 
 mode: "agent"
 entry_point: "agent:run"
@@ -51,7 +56,7 @@ help:
   inputs:
     - name: "statement_files"
       tooltip: "One or more ICICI .xls statement downloads."
-      accepts: "Excel 97-2003 (.xls) — one or many."
+      accepts: "Excel 97-2003 (.xls) — one or many. One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         Re-saving in Excel is fine — a re-saved .xls (where dates/amounts
         become real Excel cells) parses the same as the original download,

@@ -126,7 +126,7 @@ class TestInferSkill:
         assert _infer_skill("text-translation.txt") == "Translator"
 
     def test_known_suffix_hsbc(self):
-        assert _infer_skill("data-HSBC.xlsx") == "HSBC Cleanup"
+        assert _infer_skill("data-HSBC.xlsx") == "HSBC"
 
     def test_known_suffix_cc_sort_dir(self):
         # Directory outputs have just the suffix as the name.

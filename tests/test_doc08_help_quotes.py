@@ -39,13 +39,14 @@ def _missing(phrases, text):
 
 
 def _help_text(skill_name: str) -> str:
-    for s in registry.discover(refresh=True):
-        if s.name == skill_name:
-            h = s.help
-            parts = [h.overview, h.tips, h.when_to_use]
-            parts += [i.gotchas for i in h.inputs]
-            parts += [f"{t.problem} {t.fix}" for t in h.troubleshooting]
-            return " ".join(p for p in parts if p)
+    registry.discover(refresh=True)
+    s = registry.get(skill_name)          # resolves old names via aliases
+    if s is not None:
+        h = s.help
+        parts = [h.overview, h.tips, h.when_to_use]
+        parts += [i.gotchas for i in h.inputs]
+        parts += [f"{t.problem} {t.fix}" for t in h.troubleshooting]
+        return " ".join(p for p in parts if p)
     raise AssertionError(f"skill {skill_name} not found")
 
 
@@ -68,7 +69,7 @@ def test_a_wrong_quote_is_reported_missing():
 
 def test_multi_statement_stop_message_matches_the_help():
     from agents.skill_gnucash_pipeline import agent as pipe
-    msg = pipe._multi_file_stop("ICICI", ["a.xls", "b.xls"])
+    msg = pipe._multi_file_stop("Other Bank (CSV)", ["a.csv", "b.csv"])
     assert msg
     _check("gnucash_pipeline",
            ["more than one statement", "can only convert one statement per run"], msg)
@@ -76,7 +77,7 @@ def test_multi_statement_stop_message_matches_the_help():
 
 def test_one_statement_does_not_trigger_the_multi_statement_stop():
     from agents.skill_gnucash_pipeline import agent as pipe
-    assert pipe._multi_file_stop("ICICI", ["a.xls"]) is None
+    assert pipe._multi_file_stop("Other Bank (CSV)", ["a.csv"]) is None
 
 
 def test_wrong_book_message_matches_the_help():

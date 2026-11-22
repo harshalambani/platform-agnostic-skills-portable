@@ -11,7 +11,7 @@ Use this to get a clean CSV from an SBM statement. To also map the rows to GnuCa
 
 ## Inputs
 
-- **SBM statement (.xlsx)** (required) — accepts: Excel (.xlsx) - one file.
+- **SBM statement (.xlsx)** (required) — accepts: Excel (.xlsx). One account per run: upload that account's statement file(s); a statement of a different account stops the run.
   - Your SBM statement workbook.
   - ⚠️ The workbook is encrypted; enter its open password in the password field.
 - **Statement password (the workbook's open password)** (optional) — accepts: Text. Not stored.

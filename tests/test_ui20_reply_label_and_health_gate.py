@@ -35,7 +35,12 @@ def test_a_model_skill_still_renders_agent_reply():
 
 def test_bob_and_hsbc_are_deterministic_and_decide_from_their_own_flag():
     names = {s.name for s in DETERMINISTIC}
-    assert {"BoB", "HSBC"} <= names
+    assert {"skill_bob", "skill_hsbc"} <= names
+    from agents import registry
+    assert registry.get("BoB").name == "skill_bob"       # old names still resolve
+    assert registry.get("HSBC").name == "skill_hsbc"
+    assert registry.get("BoB") in DETERMINISTIC
+    assert registry.get("HSBC") in DETERMINISTIC
     assert skill_bob._reply_label() == "Result"
     assert skill_hsbc._reply_label() == "Result"
 

@@ -48,6 +48,7 @@ padding-top:14px}
 <input id="q" placeholder="Filter skills…" autocomplete="off">
 <a href="#skill_ais_reconcile">AIS Reconcile</a>
 <a href="#skill_gnucash_pipeline">Bank - Convert to GnuCash</a>
+<a href="#skill_bank_skills">Bank Skills</a>
 <a href="#skill_bob">Bank of Baroda</a>
 <a href="#skill_csv_analyzer">CSV Data Analyzer</a>
 <a href="#skill_26as">Convert</a>
@@ -193,12 +194,41 @@ only the rows absent from this bank&#x27;s account. It never writes to the book.
 <tr><td>Some rows mapped to the wrong account.</td><td>Fix them in GnuCash after import; future runs learn from the correction.</td></tr>
 </tbody></table>
 </section>
+<section id="skill_bank_skills" class="skill">
+<h2>Bank Skills <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
+<p class="overview">One tab for all six banks. It reads the statement(s) of ONE account with that bank&#x27;s own reader and writes the standard canonical CSV (Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency) with a summary file beside it. The statements are put in date order, rows that two overlapping statements both carry are kept once, and the running balance must carry on from one statement to the next.</p>
+<p class="whenuse"><b>When to use it.</b> Use this to get a clean CSV from a bank statement. To map the rows to GnuCash accounts and import them in one step, use GnuCash &gt; Banks &gt; Bank - Convert to GnuCash instead.</p>
+<h3>Inputs</h3><ul class="inputs">
+<li><b>Bank</b> <em>(required)</em> <span class="pa-tip" data-tip="The bank the statement comes from.">ℹ️</span><br><span class="fmt">accepts: One of the banks the app reads.</span></li>
+<li><b>Statement file(s)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The statement file(s) of one account.">ℹ️</span><br><span class="fmt">accepts: Pick a bank to see which files it takes. One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
+<li><b>HSBC only: a folder of statement PDFs (instead of uploading them)</b> <em>(optional)</em> <span class="pa-tip" data-tip="HSBC statements can also be read from a folder.">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC statement PDFs.</span></li>
+<li><b>Statement password (if the file is protected)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The statement&#x27;s open password. ⚠️ One password for the whole upload. A wrong password stops the run and names the file.">ℹ️</span><br><span class="fmt">accepts: Text. Not stored.</span></li>
+<li><b>Balance-break override for THIS run: join statements even if the balance does not carry on</b> <em>(optional)</em> <span class="pa-tip" data-tip="Off by default and back off after every run. ⚠️ Ticking it lets statements be joined even when the balance does not carry on from one to the next, and the result then says so. Use it only when you know a statement is missing and want the rest anyway.">ℹ️</span><br><span class="fmt">accepts: A tick box.</span></li>
+</ul>
+<h3>How to run</h3><ol>
+<li>Pick the bank.</li>
+<li>Upload the statement file(s) of one account (HSBC: or pick a folder).</li>
+<li>Enter the password if the file is protected.</li>
+<li>Click Run and download the CSV.</li>
+</ol>
+<h3>Output</h3>
+<p>Written to <code>Data/outputs/</code>:</p>
+<pre>Data/outputs/YYYY-MM-DD-HHMMSS-&lt;input&gt;-Bank-Skills.csv</pre>
+<ul class="outputs">
+<li><code>YYYY-MM-DD-HHMMSS-&lt;input&gt;-Bank-Skills.csv</code><span class="pa-tip" data-tip="One row per transaction: Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency. A summary file with the opening and closing balance sits beside it.">ℹ️</span> — One row per transaction: Date, Transaction ID, Description, Account, Deposit, Withdrawal, Balance, Currency. A summary file with the opening and closing balance sits beside it.</li>
+</ul>
+<h3>Tips</h3><p>HSBC statements are scanned, so reading them takes a while.</p>
+<h3>Troubleshooting</h3><table class="tbl"><thead><tr><th>If…</th><th>Then…</th></tr></thead><tbody>
+<tr><td>The run stops saying more than one account.</td><td>The upload holds statements of different accounts. Upload one account per run.</td></tr>
+<tr><td>The run stops saying the balance does not carry on.</td><td>A statement is missing from the upload. Add it, or tick the balance-break override for this run only if you accept the gap.</td></tr>
+</tbody></table>
+</section>
 <section id="skill_bob" class="skill">
 <h2>Bank of Baroda <span class="badge ok">Works offline</span> <span class="badge">direct</span></h2>
 <p class="overview">Turns one or more Bank of Baroda transaction-statement PDFs into a single flat CSV — one row per transaction. Works offline and does not use the LLM. It correctly stitches tables that overflow across pages without repeating the column header, so a transaction that wraps from the bottom of one page to the top of the next is captured as a single clean row.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have BoB account statements as PDFs and want them as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Convert to GnuCash&quot; pipeline (choose &quot;Bank of Baroda&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>Bank of Baroda statement PDF(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your BoB statement PDF(s). You can select several at once. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one or many, in any order.</span></li>
+<li><b>Bank of Baroda statement PDF(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your BoB statement PDF(s). You can select several at once. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. Password-protected PDFs must be unlocked first. Mixed accounts are fine but land in one CSV. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one or many, in any order. One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Click the input and pick one or more Bank of Baroda statement PDFs.</li>
@@ -511,7 +541,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <p class="overview">Converts HDFC statements — digital PDF, password-protected PDF, scanned/garbled-text PDF, net-banking XLS/XLSX, or CSV export — into a GnuCash-ready canonical CSV. All four shapes are parsed deterministically. A garbled/unusable PDF text layer (custom font encoding) is auto-detected and routed to OCR with Tesseract automatically. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this to get a clean, consistently-columned CSV from any HDFC statement format. To also map the rows to GnuCash accounts in one step, use the GnuCash Import skill and choose HDFC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>HDFC statement (PDF, XLS, XLSX, or CSV)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export. ⚠️ XLS/XLSX downloads are the most reliable and exact. Digital PDFs work directly; scanned or font-garbled PDFs are OCR&#x27;d automatically and OCR quality depends on the scan. CSV exports with renamed headers (e.g. &quot;Value Date&quot;/&quot;Number&quot;) are auto-mapped via an alias table. Prefer the bank&#x27;s original PDF (the one downloaded straight from net-banking, password-protected or not) over a derived/re-printed copy — e.g. one that was opened, printed to PDF, and re-saved. Re-printing strips the original digital text layer, so the derived copy is treated as scanned and routed to OCR with reduced fidelity even though the original would have parsed directly.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file.</span></li>
+<li><b>HDFC statement (PDF, XLS, XLSX, or CSV)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export. ⚠️ XLS/XLSX downloads are the most reliable and exact. Digital PDFs work directly; scanned or font-garbled PDFs are OCR&#x27;d automatically and OCR quality depends on the scan. CSV exports with renamed headers (e.g. &quot;Value Date&quot;/&quot;Number&quot;) are auto-mapped via an alias table. Prefer the bank&#x27;s original PDF (the one downloaded straight from net-banking, password-protected or not) over a derived/re-printed copy — e.g. one that was opened, printed to PDF, and re-saved. Re-printing strips the original digital text layer, so the derived copy is treated as scanned and routed to OCR with reduced fidelity even though the original would have parsed directly.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv). One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 <li><b>PDF password (only if the statement PDF is password-protected — for HDFC often the Cust ID)</b> <em>(optional)</em> <span class="pa-tip" data-tip="Only needed if the PDF itself is password-protected. ⚠️ Never required for XLS/XLSX/CSV. Left blank for non-encrypted PDFs. Never logged or included in output.">ℹ️</span><br><span class="fmt">accepts: The statement&#x27;s open password — for HDFC this is often the Cust ID.</span></li>
 </ul>
 <h3>How to run</h3><ol>
@@ -538,7 +568,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <p class="overview">Consolidates a folder of HSBC statement PDFs into one clean, reconciled Excel workbook: it OCRs scanned pages (Tesseract + Poppler) while skipping pages that already have text, extracts the transaction ID, splits out the transaction date, scrubs the description, and adds an Extra Information column plus a Summary sheet.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have one or more HSBC statement PDFs (savings or Premier) and want a single tidy, reconciled spreadsheet. For account-mapped output into GnuCash, use Banks &gt; Bank - Convert to GnuCash and choose HSBC instead.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>Folder of HSBC statement PDFs, or a single PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing one or more HSBC statement PDFs, or a single PDF. ⚠️ Scanned PDFs are OCR&#x27;d, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build). This tab only OCRs PDFs — if you already have an enriched HSBC .xlsx/.xlsm workbook (this skill&#x27;s own output), there is nothing to OCR; use Banks &gt; Bank - Convert to GnuCash and choose HSBC to import it instead.">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC PDF statements, or a single HSBC statement PDF.</span></li>
+<li><b>Folder of HSBC statement PDFs, or a single PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="A folder containing one or more HSBC statement PDFs, or a single PDF. ⚠️ Scanned PDFs are OCR&#x27;d, so the run takes longer and needs Tesseract + Poppler (bundled in the frozen build). This tab only OCRs PDFs — if you already have an enriched HSBC .xlsx/.xlsm workbook (this skill&#x27;s own output), there is nothing to OCR; use Banks &gt; Bank - Convert to GnuCash and choose HSBC to import it instead.">ℹ️</span><br><span class="fmt">accepts: A folder of HSBC PDF statements, or a single HSBC statement PDF. One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Put your HSBC PDFs in one folder (or use a single PDF).</li>
@@ -563,7 +593,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <p class="overview">Converts ICICI net-banking statement downloads (the .xls files) into a GnuCash-importable CSV in canonical columns. Works offline and does not use the LLM.</p>
 <p class="whenuse"><b>When to use it.</b> Use this for the .xls statements ICICI lets you download from net-banking. To also map rows to GnuCash accounts in one step, use Banks &gt; Convert to GnuCash and choose ICICI instead.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Re-saving in Excel is fine — a re-saved .xls (where dates/amounts become real Excel cells) parses the same as the original download, and an accidental .xlsx re-save is read automatically too. If it still fails to parse, export a fresh .xls from ICICI net-banking. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many.</span></li>
+<li><b>ICICI statement XLS file(s)</b> <em>(required)</em> <span class="pa-tip" data-tip="One or more ICICI .xls statement downloads. ⚠️ Re-saving in Excel is fine — a re-saved .xls (where dates/amounts become real Excel cells) parses the same as the original download, and an accidental .xlsx re-save is read automatically too. If it still fails to parse, export a fresh .xls from ICICI net-banking. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: Excel 97-2003 (.xls) — one or many. One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Download your statement(s) as .xls from ICICI net-banking.</li>
@@ -686,7 +716,7 @@ While it runs, the panel shows the newest step, in the form Reading statement 3 
 <p class="overview">Turns a Kotak Mahindra Bank savings-account transaction-statement PDF into a flat CSV — one row per transaction. Works offline and does not use the LLM. It reads the statement&#x27;s ruled/bordered table structure directly, so a table that overflows from one page to the next (without repeating the column header) is still captured correctly, and the trailing abbreviation-legend page is excluded rather than mistaken for transaction rows.</p>
 <p class="whenuse"><b>When to use it.</b> Use this when you have a Kotak savings-account statement as a PDF and want it as a tidy CSV you can open in Excel, reconcile, or feed into the Banks &quot;Bank - Convert to GnuCash&quot; pipeline (choose &quot;Kotak&quot; there to do extraction + account mapping in one step instead). This skill is extraction only — it does not categorise or assign accounts.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>Kotak statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Kotak statement PDF. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. This skill has no password box, so a password-protected statement stops it with a password message. To convert a protected statement, use &quot;Bank - Convert to GnuCash&quot;, choose Kotak, and type the password in the &quot;Statement password&quot; box there. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf) — one statement per run.</span></li>
+<li><b>Kotak statement PDF</b> <em>(required)</em> <span class="pa-tip" data-tip="Your Kotak statement PDF. ⚠️ Use the bank&#x27;s original text PDF, not a photo/scan. This skill has no password box, so a password-protected statement stops it with a password message. To convert a protected statement, use &quot;Bank - Convert to GnuCash&quot;, choose Kotak, and type the password in the &quot;Statement password&quot; box there. If two uploads share a file name (capital letters do not count as a difference) the run stops with &quot;two uploads are both named&quot; and the file name, and nothing is run. Rename one of them and upload again.">ℹ️</span><br><span class="fmt">accepts: PDF (.pdf). One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 </ul>
 <h3>How to run</h3><ol>
 <li>Click the input and pick a Kotak statement PDF.</li>
@@ -882,7 +912,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 <p class="overview">Turns an SBM Bank India account statement (a password-protected .xlsx with a single Transaction-Statement sheet) into a GnuCash-ready canonical CSV. The file is decrypted in memory; the password is never logged or stored. The statement carries no opening-balance row and rows within a day can be out of time order, so the parser orders them by the running-balance chain and derives the opening balance from the first row.</p>
 <p class="whenuse"><b>When to use it.</b> Use this to get a clean CSV from an SBM statement. To also map the rows to GnuCash accounts in one step, use the GnuCash Import skill and choose SBM.</p>
 <h3>Inputs</h3><ul class="inputs">
-<li><b>SBM statement (.xlsx)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your SBM statement workbook. ⚠️ The workbook is encrypted; enter its open password in the password field.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx) - one file.</span></li>
+<li><b>SBM statement (.xlsx)</b> <em>(required)</em> <span class="pa-tip" data-tip="Your SBM statement workbook. ⚠️ The workbook is encrypted; enter its open password in the password field.">ℹ️</span><br><span class="fmt">accepts: Excel (.xlsx). One account per run: upload that account&#x27;s statement file(s); a statement of a different account stops the run.</span></li>
 <li><b>Statement password (the workbook&#x27;s open password)</b> <em>(optional)</em> <span class="pa-tip" data-tip="The workbook&#x27;s open password. ⚠️ A wrong password stops the run with a clear message; it never produces an empty CSV.">ℹ️</span><br><span class="fmt">accepts: Text. Not stored.</span></li>
 </ul>
 <h3>How to run</h3><ol>
@@ -992,7 +1022,7 @@ Start with the Reconciliation sheet, then Exceptions -- a &quot;CANNOT RECONCILE
 <tr><td>Step 4 does not pass.</td><td>Run the 31 March close in the new year&#x27;s book, save, close GnuCash, and run step 4 again.</td></tr>
 </tbody></table>
 </section>
-<footer>Generated from skill manifests · 29 UI skills, 4 internal steps.</footer>
+<footer>Generated from skill manifests · 30 UI skills, 4 internal steps.</footer>
 </main>
 <script>
 const q=document.getElementById('q'),links=[...document.querySelectorAll('nav a')];

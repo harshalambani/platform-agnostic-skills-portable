@@ -166,11 +166,26 @@ class BankSkill(Protocol):
         """
         ...
 
-    def parse(self, path: str | Path, password: str | None = None) -> BankResult:
+    def parse(
+        self,
+        path: "str | Path | list[str | Path]",
+        password: str | None = None,
+        *,
+        allow_balance_break: bool = False,
+        selected_account: str | None = None,
+        account_resolver: Any = None,
+    ) -> BankResult:
         """Parse ``path`` into a :class:`BankResult` of canonical rows.
 
+        ``path`` is one statement file, a list of files or a folder of
+        statements (BNK-01); several statements are joined by the shared rule
+        in ``bank_common.statements``, which stops on a break in the running
+        balance unless ``allow_balance_break`` is set. ``selected_account``
+        (digits) keeps only that account's statements; ``account_resolver``
+        picks it when the upload holds several.
+
         ``password`` is only meaningful for formats that can be encrypted
-        (PDF); parsers that never see encrypted input may ignore it.
+        (PDF, xlsx); parsers that never see encrypted input may ignore it.
         """
         ...
 

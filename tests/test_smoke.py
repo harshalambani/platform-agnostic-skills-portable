@@ -83,13 +83,16 @@ def test_skill_cc_transactions_imports():
 
 def test_registry_discovers_all_skills():
     """Registry must find all 22 skills via skill.yaml manifests."""
-    from agents.registry import discover
+    from agents.registry import discover, get as registry_get
     skills = discover(refresh=True)
     names = {s.name for s in skills}
     # Phase 1-3 financial skills
     assert "26AS" in names
-    assert "BoB" in names
-    assert "HSBC" in names
+    assert "skill_bob" in names
+    assert "skill_hsbc" in names
+    assert registry_get("BoB").name == "skill_bob"       # old name resolves
+    assert registry_get("HSBC").name == "skill_hsbc"
+    assert "Bank Skills" in {s.display_name for s in skills}
     assert "CC Sort" in names
     assert "CC Transactions" in names
     # Phase 4C general skills
@@ -106,8 +109,10 @@ def test_registry_discovers_all_skills():
     # ITR Workbook scaffold (batch 1: eguile HTML parser + verification only)
     assert "ITR Workbook" in names
     # 5th bank onboarding (P4)
-    assert "Kotak" in names
-    assert "SBM" in names
+    assert "skill_kotak" in names
+    assert "skill_sbm" in names
+    assert registry_get("Kotak").name == "skill_kotak"
+    assert registry_get("SBM").name == "skill_sbm"
     # v3.x dev-time skill: scaffolds new skill packages (exposed as a
     # top-level tab, category "dev")
     assert "Skill Scaffold" in names
@@ -124,7 +129,7 @@ def test_registry_discovers_all_skills():
     # against Advisory, bank, 26AS and the return (structured YAML/JSON
     # input this build; PDF parsers under parsers/ are Stage 2 placeholders)
     assert "partner_comp_recon" in names
-    assert len(skills) == 29
+    assert len(skills) == 30   # 29 + the new Bank Skills registry skill
 
 
 def test_registry_get_by_name():
@@ -259,9 +264,37 @@ def test_every_registered_skill_gets_a_tab():
 
     app = webui.build_app(launch=False)
     tab_labels = {getattr(b, "label", None) for b in app.blocks.values()}
-    missing = [s.display_name for s in registry.discover(refresh=True)
-               if s.display_name not in tab_labels]
+    allskills = registry.discover(refresh=True)
+    hidden = [s for s in allskills if s.hidden]
+    # only hidden skills are exempt from needing their own tab
+    missing = [s.display_name for s in allskills
+               if not s.hidden and s.display_name not in tab_labels]
     assert not missing, f"registered skills with no tab in the UI: {missing}"
+    # the exemption cannot hide a missing tab
+    assert "Bank Skills" in tab_labels
+    assert {s.name for s in hidden} == {
+        "skill_bob", "skill_hsbc", "skill_hdfc", "skill_icici",
+        "skill_sbm", "skill_kotak"}
+    from agents import banks
+    reachable = {b.skill_name for b in banks.discover()}
+    from ui.tabs import _generic
+    in_dropdown = {k for _, k in _generic._options_from_bank_parsers()}
+    for s in hidden:
+        info = next((b for b in banks.discover() if b.skill_name == s.name), None)
+        assert info is not None and info.bank_key in in_dropdown, (
+            f"hidden skill {s.name} is not reachable from the Bank Skills dropdown")
+
+
+def test_tab_exemption_is_only_for_hidden_skills():                   # NEGATIVE
+    """A non-hidden skill with no tab must still be reported."""
+    from types import SimpleNamespace as NS
+    tab_labels = {"Has Tab"}
+    skills = [NS(display_name="Has Tab", hidden=False),
+              NS(display_name="No Tab", hidden=False),
+              NS(display_name="Hidden One", hidden=True)]
+    missing = [s.display_name for s in skills
+               if not s.hidden and s.display_name not in tab_labels]
+    assert missing == ["No Tab"]
 
 
 # ---------------------------------------------------------------------------

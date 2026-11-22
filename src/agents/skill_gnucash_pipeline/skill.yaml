@@ -10,6 +10,7 @@ description: >
   (PDF), and any other bank via CSV upload with LLM-assisted column
   normalisation.
   Chain: bank extraction → canonical format → account mapping.
+  To only turn a statement into the standard CSV, use the Bank Skills tab.
 category: "gnucash"
 version: "1.2.0"
 

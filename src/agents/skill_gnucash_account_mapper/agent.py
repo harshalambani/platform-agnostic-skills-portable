@@ -3770,13 +3770,15 @@ def map_accounts(
 # PA Skills UI entry point
 # ---------------------------------------------------------------------------
 
-# Map pipeline bank labels to extractor bank keys
-_BANK_KEY_MAP = {
-    'Bank of Baroda': 'BoB',
-    'HDFC': 'HDFC',
-    'HSBC': 'HSBC',
-    'ICICI': 'ICICI',
-}
+# Map pipeline bank labels to the saved-rules / history section names. Derived
+# from the bank manifests (BNK-01): display_name -> rules_key. The names BoB,
+# HDFC, HSBC and ICICI are exactly the ones saved rules were always filed under.
+def _bank_key_map() -> Dict[str, str]:
+    from agents import banks  # noqa: PLC0415
+    return {b.display_name: b.rules_key for b in banks.by_rules_order()}
+
+
+_BANK_KEY_MAP = _bank_key_map()
 
 
 def run(

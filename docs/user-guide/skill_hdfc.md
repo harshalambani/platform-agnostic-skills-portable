@@ -11,7 +11,7 @@ Use this to get a clean, consistently-columned CSV from any HDFC statement forma
 
 ## Inputs
 
-- **HDFC statement (PDF, XLS, XLSX, or CSV)** (required) — accepts: PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv) — one file.
+- **HDFC statement (PDF, XLS, XLSX, or CSV)** (required) — accepts: PDF (.pdf), Excel (.xls / .xlsx), or CSV (.csv). One account per run: upload that account's statement file(s); a statement of a different account stops the run.
   - Your HDFC statement — PDF (digital or scanned), net-banking spreadsheet, or CSV export.
   - ⚠️ XLS/XLSX downloads are the most reliable and exact. Digital PDFs work directly; scanned or font-garbled PDFs are OCR'd automatically and OCR quality depends on the scan. CSV exports with renamed headers (e.g. "Value Date"/"Number") are auto-mapped via an alias table. Prefer the bank's original PDF (the one downloaded straight from net-banking, password-protected or not) over a derived/re-printed copy — e.g. one that was opened, printed to PDF, and re-saved. Re-printing strips the original digital text layer, so the derived copy is treated as scanned and routed to OCR with reduced fidelity even though the original would have parsed directly.
 - **PDF password (only if the statement PDF is password-protected — for HDFC often the Cust ID)** (optional) — accepts: The statement's open password — for HDFC this is often the Cust ID.

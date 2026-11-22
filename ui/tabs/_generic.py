@@ -21,6 +21,9 @@ Supported input types (declared in skill.yaml):
                    by the user either way.
   - "directory"  → folder path (gr.Textbox plus a native Browse... button)
   - "text"       → free-text input (gr.Textbox)
+  - "checkbox"   → a tick box (gr.Checkbox); its value reaches the skill as
+                   "true" / "false". `reset_after_run: true` puts it back to off
+                   when a run ends.
   - "password"   → masked free-text input (gr.Textbox, type="password").
                    Shoulder-surfing protection only — the value is passed as
                    a run arg, not stored at rest. Use for secrets that aren't
@@ -226,20 +229,18 @@ def llm_precheck_warning(active: str, health, ep: dict) -> str:
 def skill_uses_llm(skill_name: str) -> bool:
     """True when the named skill's manifest says it needs a model (requires.llm).
     Gates the LLM-endpoint health check on the custom tabs."""
-    from agents.registry import discover
-    for sk in discover():
-        if sk.name == skill_name:
-            return bool(getattr(getattr(sk, "requires", None), "llm", True))
+    from agents.registry import get
+    sk = get(skill_name)          # resolves an earlier name (alias) too
+    if sk is not None:
+        return bool(getattr(getattr(sk, "requires", None), "llm", True))
     return True
 
 
 def reply_label_for(skill_name: str) -> str:
     """reply_label() for a skill looked up by manifest name (custom tabs)."""
-    from agents.registry import discover  # noqa: PLC0415
-    for sk in discover():
-        if sk.name == skill_name:
-            return reply_label(sk)
-    return "Agent reply"
+    from agents.registry import get  # noqa: PLC0415
+    sk = get(skill_name)          # resolves an earlier name (alias) too
+    return reply_label(sk) if sk is not None else "Agent reply"
 
 
 def _scoped_picker_state(inp, entity_key, fy=None):
@@ -316,7 +317,7 @@ def _entity_initial_value(skill, entity_name):
 # They may lead a form (UI-15: Entity first) but must never name the output
 # file, or every output would be called after the taxpayer / the year instead
 # of after the statement or document.
-_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods", "bank_parsers"})
 
 
 def _cc_sort_runs() -> list[tuple[str, str]]:
@@ -446,7 +447,7 @@ def _options_from_itr_ay_years() -> list[tuple[str, str]]:
 # They may lead a form (UI-15: Entity first) but must never name the output
 # file, or every output would be called after the taxpayer / the year instead
 # of after the statement or document.
-_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods"})
+_NAME_SKIP_OPTION_SOURCES = frozenset({"itr_entities", "itr_ay_years", "report_periods", "bank_parsers"})
 
 
 def _output_name_source(skill, input_map: dict[str, str]) -> str:
@@ -500,6 +501,44 @@ def _options_from_banks() -> list[tuple[str, str]]:
     return pairs
 
 
+def _options_from_bank_parsers() -> list[tuple[str, str]]:
+    """(display_name, bank_key) pairs from agents.banks.discover(), for the Bank
+    Skills tab's `bank` dropdown (options_from: "bank_parsers"). Unlike
+    "banks" it offers only registered parsers (no "Other Bank (CSV)")."""
+    from agents import banks
+    try:
+        return [(b.display_name, b.bank_key) for b in banks.discover()]
+    except Exception:
+        return []
+
+
+def bank_statement_hint(bank_key: str | None) -> str:
+    """The hint for one bank's statement upload: that bank's own `help.accepts`
+    (its first help input is its statement input). "" when unknown."""
+    if not bank_key:
+        return ""
+    try:
+        from agents import banks, registry
+        info = banks.get(str(bank_key))
+        skill = registry.get(info.skill_name) if info else None
+        if skill and skill.help and skill.help.inputs:
+            return skill.help.inputs[0].accepts or ""
+    except Exception:
+        return ""
+    return ""
+
+
+def input_visible(inp, values_by_name: dict) -> bool:
+    """False when `inp` declares visible_when "<input>=<value>" and the named
+    input holds a different value. Compared as trimmed, case-folded text."""
+    cond = getattr(inp, "visible_when", "") or ""
+    if not cond:
+        return True
+    name, _, want = cond.partition("=")
+    have = values_by_name.get(name.strip())
+    return str(have or "").strip().casefold() == want.strip().casefold()
+
+
 # Named dynamic option sources for SkillInput.options_from. Keyed by the
 # string used in skill.yaml (`options_from: <key>`); each resolver returns
 # (label, value) pairs. Add an entry here whenever a new skill needs a
@@ -508,6 +547,7 @@ _OPTIONS_FROM_RESOLVERS = {
     "itr_entities": _options_from_itr_entities,
     "itr_ay_years": _options_from_itr_ay_years,
     "banks": _options_from_banks,
+    "bank_parsers": _options_from_bank_parsers,
     "report_periods": lambda: [(o, o) for o in _report_period_options()],
 }
 
@@ -973,8 +1013,18 @@ def _make_run_handler(skill: SkillInfo):
 
         # Map positional args back to skill input names.
         input_map: dict[str, str] = {}
+        _raw_by_name = {d.name: (input_values[k] if k < len(input_values) else None)
+                        for k, d in enumerate(skill.inputs)}
         for i, inp_def in enumerate(skill.inputs):
             val = input_values[i] if i < len(input_values) else None
+            if not input_visible(inp_def, _raw_by_name):
+                # Not shown for the chosen value of its controlling select:
+                # never validated, and nothing it holds reaches the skill.
+                input_map[inp_def.name] = ""
+                continue
+            if inp_def.type == "checkbox":
+                input_map[inp_def.name] = "true" if val else "false"
+                continue
             if inp_def.type in ("file", "output_file"):
                 if val is None or (isinstance(val, str) and not val.strip()):
                     if inp_def.required:
@@ -1558,6 +1608,8 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             _group_stack = contextlib.ExitStack()
             _open_group = ""
             check_btn = None
+            visible_wiring = []   # (input_def, column) for visible_when
+            hint_wiring = []      # (input_def, Markdown) for hint_from
             for inp in skill.inputs:
                 _g = getattr(inp, "group", "") or ""
                 if _g != _open_group:
@@ -1567,6 +1619,22 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                     if _g:
                         _group_stack.enter_context(
                             gr.Accordion(_group_titles.get(_g, _g), open=False))
+                # BNK-01: visible_when draws the input in a column that shows or
+                # hides with the controlling select; hint_from puts the chosen
+                # bank's own file-type hint above the upload (a gr.File has no
+                # info= slot of its own).
+                _vis_stack = contextlib.ExitStack()
+                _vis_col = None
+                if getattr(inp, "visible_when", ""):
+                    _vis_col = _vis_stack.enter_context(gr.Column(visible=input_visible(
+                        inp, {i2.name: _select_initial_value(skill, i2.name)
+                              for i2 in skill.inputs})))
+                    visible_wiring.append((inp, _vis_col))
+                if getattr(inp, "hint_from", ""):
+                    _hint_md = gr.Markdown(
+                        bank_statement_hint(_select_initial_value(skill, inp.hint_from)),
+                        elem_classes=["pa-input-hint"])
+                    hint_wiring.append((inp, _hint_md))
                 if inp.type == "file" and inp.book_from:
                     # A GnuCash book is NOT an upload — it is a live file on
                     # disk that the skill opens read-only, in place. Handing
@@ -1765,6 +1833,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                             )
                         _fbtn = gr.Button("Browse…", scale=0, min_width=110)
                     folder_buttons.append((_fbtn, comp, inp))
+                elif inp.type == "checkbox":
+                    comp = gr.Checkbox(
+                        label=inp.label,
+                        value=str(getattr(inp, "default", "")).strip().lower() in ("1", "true", "yes", "on"),
+                        **_help.maybe_info(gr.Checkbox, _info.get(inp.name)),
+                    )
                 elif inp.type == "password":
                     comp = gr.Textbox(
                         label=inp.label,
@@ -1782,6 +1856,7 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 # UI-21: a collapsed "What does this file look like?" panel
                 # under the picker. Draws nothing for an input without one.
                 _help.mount_sample_panel(skill, inp.name)
+                _vis_stack.close()
                 # UI-25: under the drop zone, the Check button and then ONE
                 # panel gathering the samples of the pickers below it.
                 if getattr(inp, "gather_samples", ()):
@@ -1789,6 +1864,20 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                         check_btn = gr.Button(skill.check.label, variant="secondary")
                     _help.mount_gathered_panel(skill, inp)
             _group_stack.close()
+
+            # BNK-01: show/hide and re-hint inputs when their controlling select changes.
+            for _vinp, _vcol in visible_wiring:
+                _ctrl = input_by_name[_vinp.visible_when.partition("=")[0].strip()]
+
+                def _toggle(v, _i=_vinp):
+                    return gr.update(visible=input_visible(
+                        _i, {_i.visible_when.partition("=")[0].strip(): v}))
+
+                _ctrl.change(fn=_toggle, inputs=[_ctrl], outputs=[_vcol])
+            for _hinp, _hmd in hint_wiring:
+                _hctrl = input_by_name[_hinp.hint_from]
+                _hctrl.change(fn=lambda v: gr.update(value=bank_statement_hint(v)),
+                              inputs=[_hctrl], outputs=[_hmd])
 
             # Entity -> GnuCash book prefill wiring (Phase 5 core, 2026-07-30
             # handover): for each `file` input declaring `book_from`, wire the
@@ -2183,6 +2272,9 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             ))
         elif _inp.type in ("directory", "password"):
             reset_specs.append((_comp, lambda: gr.update(value="")))
+        elif _inp.type == "checkbox":
+            reset_specs.append((_comp, lambda d=(str(getattr(_inp, "default", "")).strip().lower()
+                                                 in ("1", "true", "yes", "on")): gr.update(value=d)))
         else:  # text: back to its declared default, as when the form opened
             reset_specs.append((_comp, lambda d=(getattr(_inp, "default", "") or ""): gr.update(value=d)))
 
@@ -2231,11 +2323,18 @@ def render(skill: SkillInfo, container_tab=None) -> None:
         )
 
     handler = _make_run_handler(skill)
-    run_btn.click(
+    _run_event = run_btn.click(
         fn=handler,
         inputs=input_components + [model_dd],
         outputs=[result_md, download, path_tb] + _extra_components,
     )
+    # BNK-01: a one-run override (reset_after_run) is back to off when the run
+    # ends, whether it finished, stopped or failed.
+    _reset_after = [_c for _i, _c in zip(skill.inputs, input_components)
+                    if getattr(_i, "reset_after_run", False)]
+    if _reset_after:
+        _run_event.then(fn=lambda: [gr.update(value=False) for _ in _reset_after],
+                        inputs=None, outputs=_reset_after)
 
     open_folder_btn.click(
         fn=lambda _s=skill.output.suffix, _d=(skill.output.type == "directory"):

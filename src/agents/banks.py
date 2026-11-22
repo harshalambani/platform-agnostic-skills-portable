@@ -38,6 +38,20 @@ class BankInfo:
     display_name: str
     skill_name: str
     package: str
+    # BNK-01 (commit 2): the section name this bank's learned rules and its
+    # per-bank history are saved under. Saved names are never changed (BoB,
+    # HDFC, HSBC, ICICI keep theirs exactly), so a manifest that names none
+    # falls back to its display_name.
+    rules_key: str = ""
+    # Precedence when one account name matches several banks' hints (lower
+    # first). The first four keep the order the extractor always used.
+    rules_order: int = 1000
+    # "word" (default): a hint must stand as a whole word in the account name.
+    # "substring": the legacy match kept for the four banks whose saved history
+    # was partitioned that way (a change would move saved history).
+    hint_match: str = "word"
+    # The file-name suffix this bank's outputs carry (History tab).
+    output_suffix: str = ""
 
 
 def _parse_bank_manifest(path: Path) -> BankInfo | None:
@@ -56,11 +70,21 @@ def _parse_bank_manifest(path: Path) -> BankInfo | None:
         return None
 
     skill_dir = path.parent
+    out = raw.get("output") if isinstance(raw.get("output"), dict) else {}
+    try:
+        order = int(raw.get("rules_order", 1000))
+    except (TypeError, ValueError):
+        order = 1000
+    hint_match = str(raw.get("hint_match", "word")).lower()
     return BankInfo(
         bank_key=str(raw.get("bank_key", raw["name"])).lower(),
         display_name=raw["display_name"],
         skill_name=raw["name"],
         package=f"agents.{skill_dir.name}",
+        rules_key=str(raw.get("rules_key") or raw["display_name"]),
+        rules_order=order,
+        hint_match="substring" if hint_match == "substring" else "word",
+        output_suffix=str(out.get("suffix") or ""),
     )
 
 
@@ -92,6 +116,16 @@ def discover(*, refresh: bool = False) -> list[BankInfo]:
     _cache = banks
     log.info("Discovered %d bank(s): %s", len(banks), [b.bank_key for b in banks])
     return list(_cache)
+
+
+def by_rules_order(*, refresh: bool = False) -> list[BankInfo]:
+    """The discovered banks in the order the extractor tries their hints."""
+    return sorted(discover(refresh=refresh), key=lambda b: (b.rules_order, b.display_name))
+
+
+def rules_keys() -> list[str]:
+    """Every bank's saved-rules / history section name, in hint order."""
+    return [b.rules_key for b in by_rules_order()]
 
 
 def get(bank_key: str) -> BankInfo | None:

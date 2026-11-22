@@ -113,13 +113,10 @@ def generate_rules(extractor_json: Dict[str, Any], min_freq: int = 3,
                         (newest history date when omitted; never today).
     """
     ref = _reference(reference_date, extractor_json.get('mappings'))
-    rules = {
-        '_global': [],
-        'ICICI': [],
-        'HDFC': [],
-        'HSBC': [],
-        'BoB': []
-    }
+    from agents import banks as _banks  # noqa: PLC0415
+    rules = {'_global': []}
+    for _key in _banks.rules_keys():     # BNK-01: sections come from the bank manifests
+        rules[_key] = []
 
     mappings = extractor_json.get('mappings', {})
 
@@ -231,7 +228,8 @@ def generate_yaml(approved_rules: List[Dict]) -> str:
             _append_rule_yaml(yaml_lines, rule)
         yaml_lines.append("")
 
-    for bank in ['ICICI', 'HDFC', 'HSBC', 'BoB']:
+    from agents import banks as _banks  # noqa: PLC0415
+    for bank in _banks.rules_keys():
         if bank in by_bank:
             yaml_lines.append(f"{bank}:")
             for rule in by_bank[bank]:

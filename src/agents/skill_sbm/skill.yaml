@@ -1,6 +1,8 @@
 # skill.yaml - SBM skill manifest
 
-name: "SBM"
+name: "skill_sbm"
+aliases: ["SBM"]
+hidden: true
 display_name: "SBM"
 description: >
   Convert an SBM Bank India savings-account statement (password-protected
@@ -12,6 +14,8 @@ version: "1.0.0"
 
 bank: true
 bank_key: "sbm"
+rules_key: "SBM"
+rules_order: 50
 
 mode: "direct"
 entry_point: "agent:run"
@@ -59,7 +63,7 @@ help:
   inputs:
     - name: "xlsx_path"
       tooltip: "Your SBM statement workbook."
-      accepts: "Excel (.xlsx) - one file."
+      accepts: "Excel (.xlsx). One account per run: upload that account's statement file(s); a statement of a different account stops the run."
       gotchas: >
         The workbook is encrypted; enter its open password in the password field.
     - name: "pdf_password"
