@@ -141,3 +141,12 @@ def test_ssl_cache_only_serves_the_default_verified_context():  # NEGATIVE
     unverified = dflt.create_ssl_context(verify=False)       # not the cached one
     assert unverified is not ctx and unverified.verify_mode.name == "CERT_NONE"
     assert httpx.Client() is not None
+
+
+def test_webui_really_loaded_the_fast_start_module():  # NEGATIVE
+    # webui swallows an import failure of _startup_fast so a start never fails
+    # over it; this test makes a silently broken module (syntax error, bad
+    # import) fail loudly instead of quietly turning the wins off.
+    from ui import webui
+    assert webui._startup_fast is sf
+    assert webui._launch_extra.__doc__

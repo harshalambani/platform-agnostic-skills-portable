@@ -4,8 +4,8 @@ Three things, each used only on versions it was measured and tested on, and
 each falling back to the stock path on any other version:
 
 1. The SSL context httpx builds on every Client() (about 0.85s: certifi is
-   re-read each time) is built once in a background thread while gradio is
-   still importing, and handed to httpx instead of being rebuilt.
+   re-read each time) is built once in a background thread right after the
+   gradio import (overlapping the tab build), and handed to httpx.
 2. ``Blocks.__exit__`` builds the config and the web app, and launch() builds
    both again. For the launched app the first build is skipped.
 3. launch(_frontend=False) skips gradio's own localhost probe; the window code

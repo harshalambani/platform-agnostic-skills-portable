@@ -107,16 +107,19 @@ try:
 except Exception:  # noqa: BLE001 - startup must never fail over a head start
     pass
 
-# PERF-04: build httpx's SSL context in the background while gradio imports.
+# PERF-04: httpx builds an SSL context (~0.85s) on every Client(). Build it once
+# in the background from the moment gradio is imported, so it overlaps the tab
+# build instead of being paid in launch(). (Started AFTER the gradio import:
+# started before, it contended with the import and made it slower.)
 try:
     from ui import _startup_fast
-    _startup_fast.start_ssl_warm()
 except Exception:  # noqa: BLE001 - a missed head start is never fatal
     _startup_fast = None
 
 import gradio as gr
 
 if _startup_fast is not None:
+    _startup_fast.start_ssl_warm()
     _startup_fast.install_ssl_cache()
 
 # Make `src/` importable when running in source mode (mirrors PyInstaller layout)
