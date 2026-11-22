@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import re
 import shutil
+import time
 import tempfile
 import traceback
 from datetime import datetime
@@ -909,7 +910,7 @@ def _direct_panel_text(elapsed: int, latest: dict, stopping: bool = False) -> st
     return text
 
 
-def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict | None:
+def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None, record=None) -> dict | None:
     """UI-24: the extra files (e.g. journal CSVs) THIS run reports writing.
 
     Returns None when the skill declares no `output.extra_outputs`. Otherwise
@@ -970,6 +971,8 @@ def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict
             else:
                 served = _config.download_staging_dir() / rp.name
                 shutil.copy2(rp, served)
+                if record is not None:
+                    record(served)
                 written.append(f"- **{x.label}:** {rp}{tail}")
                 paths.append(str(rp))
                 updates.append(gr.update(value=str(served.resolve()), interactive=True))
@@ -984,6 +987,79 @@ def _stage_extra_outputs(skill, agent_reply, run_dir=None, heading=None) -> dict
     return {"block": block, "updates": updates, "paths": paths}
 
 
+_RUN_TEMP_MADE: set[str] = set()
+
+
+def make_run_temp(prefix: str) -> Path:
+    """BNK-14: a folder in the temp folder for one run, remembered so that
+    remove_run_temp() will take away this folder and nothing else."""
+    folder = Path(tempfile.mkdtemp(prefix=prefix))
+    _RUN_TEMP_MADE.add(str(folder.resolve()))
+    return folder
+
+
+def remove_run_temp(folders) -> None:
+    """BNK-14: remove the staging folders a run made in the temp folder (the
+    copies of the uploaded statements, the run's work folder). Called when the
+    run ends: success, failure, stop, or the page closing the stream.
+
+    Only a folder made by make_run_temp() is touched. A path the user picked,
+    or anything else, is refused, however it is spelled. Never raises, so it
+    cannot hide the run's own result or error. Safe to call twice or with None."""
+    for folder in list(folders or ()):
+        try:
+            f = Path(folder)
+            key = str(f.resolve())
+            if key not in _RUN_TEMP_MADE or f.is_symlink() or not f.is_dir():
+                continue
+            for _ in range(5):
+                shutil.rmtree(f, ignore_errors=True)
+                if not f.exists():
+                    break
+                time.sleep(0.2)
+            if not f.exists():
+                _RUN_TEMP_MADE.discard(key)
+        except Exception:  # noqa: BLE001
+            continue
+
+
+def _served_entry(path) -> tuple:
+    """BNK-14: a staged download copy, with the size and time it had when this
+    handler wrote it, so it is later removed only if it is still THAT copy."""
+    p = Path(path)
+    st = p.stat()
+    return (p, st.st_size, st.st_mtime_ns)
+
+
+def remove_served_copies(entries: list) -> None:
+    """BNK-14: remove the download copies a handler staged for its previous run.
+
+    Only entries this handler recorded, only a file directly inside the
+    download staging folder, and only if it is still the copy that was written
+    (a same-named file another tab staged later is left alone). Never raises;
+    the list is emptied either way."""
+    pending = list(entries)
+    entries.clear()
+    staging = getattr(_config, "_DOWNLOAD_STAGING_DIR", None)
+    if staging is None:
+        return
+    try:
+        root = Path(staging).resolve()
+    except Exception:  # noqa: BLE001
+        return
+    for p, size, mtime in pending:
+        try:
+            p = Path(p)
+            if p.is_symlink() or not p.is_file() or p.resolve().parent != root:
+                continue
+            st = p.stat()
+            if (st.st_size, st.st_mtime_ns) != (size, mtime):
+                continue
+            p.unlink()
+        except Exception:  # noqa: BLE001
+            continue
+
+
 def _make_run_handler(skill: SkillInfo):
     """
     Return a Gradio-compatible generator function that runs the skill.
@@ -993,6 +1069,14 @@ def _make_run_handler(skill: SkillInfo):
     declares output.extra_outputs gets len(extra_outputs)+1 further outputs
     (one DownloadButton each, then the saved-path box).
     """
+
+    served_copies: list = []     # BNK-14: this handler's own download copies
+
+    def _record_served(path) -> None:
+        try:
+            served_copies.append(_served_entry(path))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _run_core(state, *args):
         # Last arg is always model_choice; everything before maps to skill.inputs.
@@ -1083,9 +1167,10 @@ def _make_run_handler(skill: SkillInfo):
                         ), gr.update(interactive=False, value=None), gr.update()
                         return
 
-                    stage_dir = Path(tempfile.mkdtemp(
-                        prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-",
-                    ))
+                    stage_dir = make_run_temp(
+                        f"pa-skills-{skill.name.lower().replace(' ', '-')}-uploads-")
+                    # BNK-14: removed when the run ends, whatever way it ends.
+                    state.setdefault("temp_dirs", []).append(stage_dir)
                     staged_names: set[str] = set()
                     for fp in file_list:
                         src = Path(fp.name if hasattr(fp, "name") else fp)
@@ -1259,8 +1344,13 @@ def _make_run_handler(skill: SkillInfo):
             return
 
         # -- Build kwargs from skill.run_args template --
-        work_dir = tempfile.mkdtemp(prefix=f"pa-skills-{skill.name.lower().replace(' ', '-')}-")
+        work_dir = str(make_run_temp(f"pa-skills-{skill.name.lower().replace(' ', '-')}-"))
+        state.setdefault("temp_dirs", []).append(Path(work_dir))   # BNK-14
         kwargs = build_run_kwargs(skill, input_map, out_path, legacy_cfg, model_choice, work_dir)
+        # BNK-14: the run starts now (every check above would have refused it
+        # with the previous Download button still showing). The previous run's
+        # download copies are no longer needed.
+        remove_served_copies(served_copies)
 
         # CC-08: password inputs are never written to the run log.
         secrets = [str(input_map.get(i.name) or "") for i in skill.inputs
@@ -1370,7 +1460,8 @@ def _make_run_handler(skill: SkillInfo):
                     review_section = ""
 
             extras = _stage_extra_outputs(skill, agent_reply, run_dir=out_path,
-                                          heading="Files written by this run")
+                                          heading="Files written by this run",
+                                          record=_record_served)
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
             outcome(f"Done. Output folder: {out_abs}\n\n{reply_label(skill)}:\n\n{agent_reply}")
@@ -1429,6 +1520,7 @@ def _make_run_handler(skill: SkillInfo):
                 staging = _config.download_staging_dir()
                 served_path = staging / out_path.name
                 shutil.copy2(out_path, served_path)
+                _record_served(served_path)
                 out_abs = str(served_path.resolve())
             except Exception as e:
                 outcome(f"Error: could not stage download file: {e}")
@@ -1438,7 +1530,7 @@ def _make_run_handler(skill: SkillInfo):
                 return
             # --- end security block ---
 
-            extras = _stage_extra_outputs(skill, agent_reply)
+            extras = _stage_extra_outputs(skill, agent_reply, record=_record_served)
             state["extras"] = extras
             extras_md = f"{extras['block']}\n\n" if extras else ""
             outcome(f"Done. File: {out_path.name}\n\n{reply_label(skill)}:\n\n{agent_reply}")
@@ -1461,6 +1553,7 @@ def _make_run_handler(skill: SkillInfo):
             finally:
                 # AUD-02: success, error, cancel and GeneratorExit all end here.
                 _config.discard_legacy_config(state.get("legacy_cfg"))
+                remove_run_temp(state.get("temp_dirs"))
         return _run
 
     def _run_with_extras(*args):
@@ -1482,6 +1575,7 @@ def _make_run_handler(skill: SkillInfo):
                 yield (*t, *ext)
         finally:
             _config.discard_legacy_config(state.get("legacy_cfg"))
+            remove_run_temp(state.get("temp_dirs"))
     return _run_with_extras
 
 

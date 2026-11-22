@@ -11,6 +11,7 @@ import ast
 import csv
 import gzip
 import json
+import os
 import re
 import subprocess
 import sys
@@ -384,7 +385,15 @@ def run_apply(xlsx_path: str, gnucash_path: str, output_path: str,
         args.append("--partner-comp-configured")
     if tds_expense_account:
         args += ["--tds-expense-account", tds_expense_account]
-    out = _run_script(args)
-    if out.startswith("ERROR"):
-        return out
-    return out + "\n\n" + _verify(output_path)
+    try:
+        out = _run_script(args)
+        if out.startswith("ERROR"):
+            return out
+        return out + "\n\n" + _verify(output_path)
+    finally:
+        # BNK-14: the overrides file is this run's own temp file; remove it
+        # when the run ends. A failure to remove never hides the result.
+        try:
+            os.remove(ov_path)
+        except OSError:
+            pass
