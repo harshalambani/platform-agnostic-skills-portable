@@ -320,13 +320,13 @@ def client_code_of(text):
 
 
 def parse_cn(pdf, pw):
-    scratch = f"/tmp/_cn_{Path(pdf).stem}.pdf"
-    decrypt(pdf, pw, scratch)
-    t = text_of(scratch)
-    try:
-        Path(scratch).unlink()
-    except OSError:
-        pass
+    # KRC-05: the decrypted copy lives in a private temp folder that is
+    # removed on success and on failure, never in a shared /tmp.
+    import tempfile
+    with tempfile.TemporaryDirectory(prefix="pa-skills-cn-") as scratch_dir:
+        scratch = str(Path(scratch_dir) / "cn.pdf")
+        decrypt(pdf, pw, scratch)
+        t = text_of(scratch)
     fname = Path(pdf).name
     if "SLB Session" in t or "LENDING & BORROWING" in t:
         rec, lines = parse_slbm(t, fname)
