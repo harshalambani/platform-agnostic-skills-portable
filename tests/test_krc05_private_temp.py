@@ -27,6 +27,7 @@ def mod():
 def _fake(mod, monkeypatch, seen, text="Net Amount Receivable/Payable By Client\n", fail=False):
     def decrypt(pdf, pw, out):
         seen["out"] = Path(out)
+        seen["parent"] = Path(out).parent.resolve()
         Path(out).write_bytes(b"decrypted")
 
     def text_of(path):
@@ -46,7 +47,8 @@ def test_decrypted_copy_is_in_a_private_folder_and_removed(mod, monkeypatch):
     rec, _ = mod.parse_cn("C:/somewhere/n.pdf", "pw")
     out = seen["out"]
     assert "pa-skills-cn-" in str(out.parent.name)
-    assert Path(tempfile.gettempdir()) in out.parents
+    # resolve both sides: a runner's TEMP can be an 8.3 short path
+    assert Path(tempfile.gettempdir()).resolve() in seen["parent"].parents
     assert not out.exists() and not out.parent.exists()
     assert "client_code" in rec
 
