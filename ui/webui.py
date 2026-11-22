@@ -644,13 +644,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 if _startup_fast is not None else None)
     if _skip_cm is not None:
         _skip_cm.__enter__()
-    try:
-        _blocks_cm = gr.Blocks(title=APP_TITLE, analytics_enabled=False, head=_ZOOM_HEAD)
-    except BaseException:
-        if _skip_cm is not None:
-            _skip_cm.__exit__(None, None, None)
-        raise
-    with _blocks_cm as app:
+    with gr.Blocks(title=APP_TITLE, analytics_enabled=False, head=_ZOOM_HEAD) as app:
         # Header. In browser/headless mode we add an always-visible Exit button
         # (the deterministic way to stop the windowless server — see shutdown
         # coordinator above) plus the tab-close shutdown wiring. In native-window
