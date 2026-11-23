@@ -94,6 +94,7 @@ def _read_locked(p: Path) -> dict:
 def record_scan(scan, now: datetime | None = None) -> bool:
     """Save a finished scan as the last check for each entity + year it covered.
     Never raises; True when the file was written."""
+    tmp = None
     try:
         new = entries_from_scan(scan, now)
         if not new:
@@ -109,6 +110,11 @@ def record_scan(scan, now: datetime | None = None) -> bool:
             os.replace(tmp, p)
         return True
     except Exception as e:  # noqa: BLE001
+        if tmp is not None:
+            try:                            # a failed save leaves the old file whole and no temp file
+                tmp.unlink()
+            except OSError:
+                pass
         _warn_once(f"{type(e).__name__}: {e}")
         return False
 

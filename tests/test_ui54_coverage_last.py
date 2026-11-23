@@ -111,7 +111,7 @@ def test_a_crash_before_the_swap_keeps_the_old_file(fy2425_book, tmp_path, store
     ep = _entities_path(tmp_path, fy2425_book)
     scan = _scan([fy2425_book], tmp_path, entities_path=ep)
     assert CL.record_scan(scan, now=datetime(2026, 1, 1))
-    before = store.read_text(encoding="utf-8")
+    before = store.read_bytes()
 
     def boom(a, b):
         raise OSError("synthetic crash")
@@ -120,8 +120,38 @@ def test_a_crash_before_the_swap_keeps_the_old_file(fy2425_book, tmp_path, store
         warnings.simplefilter("always")
         assert CL.record_scan(scan, now=datetime(2026, 6, 1)) is False
         assert CL.record_scan(scan, now=datetime(2026, 6, 2)) is False
-    assert store.read_text(encoding="utf-8") == before
+    assert store.read_bytes() == before                           # old file byte-identical
+    assert sorted(x.name for x in store.parent.iterdir()) == [store.name]   # and no .tmp left beside it
     assert len([x for x in w if "not saved" in str(x.message)]) == 1
+
+
+def test_a_failed_temp_write_also_leaves_no_temp_file(fy2425_book, tmp_path, store, monkeypatch):  # NEGATIVE
+    ep = _entities_path(tmp_path, fy2425_book)
+    scan = _scan([fy2425_book], tmp_path, entities_path=ep)
+    assert CL.record_scan(scan, now=datetime(2026, 1, 1))
+    before = store.read_bytes()
+    real = Path.write_text
+
+    def half(self, *a, **k):
+        real(self, "partial", encoding="utf-8")
+        raise OSError("synthetic: disk full while writing the temp file")
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", half)
+        assert CL.record_scan(scan, now=datetime(2026, 6, 1)) is False
+    assert store.read_bytes() == before
+    assert sorted(x.name for x in store.parent.iterdir()) == [store.name]
+
+
+def test_a_test_that_undoes_its_monkeypatch_still_writes_under_pytest_tmp(
+        fy2425_book, tmp_path, monkeypatch, tmp_path_factory):  # NEGATIVE
+    ep = _entities_path(tmp_path, fy2425_book)
+    scan = _scan([fy2425_book], tmp_path, entities_path=ep)
+    monkeypatch.setattr(_config, "data_root_dir", lambda: Path("Z:/not-a-real-place"))
+    monkeypatch.undo()                                            # lifts every patch this test made
+    base = tmp_path_factory.getbasetemp().resolve()
+    assert base in _config.data_root_dir().resolve().parents
+    assert CL.record_scan(scan, now=datetime(2026, 1, 1)) is True
+    assert base in CL.path().resolve().parents and CL.path().exists()
 
 
 def test_concurrent_saves_lose_no_entry(fy2425_book, fy2526_book, tmp_path, store):  # NEGATIVE
@@ -152,16 +182,17 @@ def test_report_and_workbook_are_identical_with_the_save_on_off_and_failing(fy24
     assert store.exists()
     store.unlink()
 
-    monkeypatch.setattr(cov, "_save_last_check", lambda scan: None)
-    go("off")
-    assert not store.exists()                                     # off means off
-    monkeypatch.undo()
+    with monkeypatch.context() as m:                              # scoped: never lifts the data-root redirect
+        m.setattr(cov, "_save_last_check", lambda scan: None)
+        go("off")
+        assert not store.exists()                                 # off means off
 
     def boom(*a, **k):
         raise OSError("synthetic: cannot save")
     monkeypatch.setattr(CL.os, "replace", boom)
     go("failing")
     assert results["on"] == results["off"] == results["failing"]
+    assert not list(store.parent.glob("*.tmp"))                   # a failed save leaves no temp file
 
 
 def test_a_save_that_raises_anything_still_returns_the_same_reply(fy2425_book, tmp_path, store, monkeypatch):  # NEGATIVE
