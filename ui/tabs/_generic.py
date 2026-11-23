@@ -1088,20 +1088,23 @@ def remove_served_copies(entries: list) -> None:
             continue
 
 
-_STOP_RX = re.compile(r"^stopped\b", re.IGNORECASE)
-_ERROR_RX = re.compile(r"^error\b", re.IGNORECASE)
+# The forms the skills really use (src/agents): Year-End Close "Stopped. ..."; "ERROR: ..." (most
+# skills), "ERROR - title: ..." (bank_common), "ERROR loading CSV ..." (csv analyzer), "Error processing
+# <file>: ..." (HDFC), "Error: ..." (parser generator). Case-sensitive, so a normal line such as
+# "Stopped cheque charges: 2" or "Error rate: 0" never matches.
+_STOP_RX = re.compile(r"^Stopped\. ")
+_ERROR_RX = re.compile(r"^(ERROR\b|Error: |Error processing )")
 
 
 def _reply_outcome(reply):
     """UI-54: (result, why) when a skill's own reply says the run stopped, failed or needs the
     user; None when it says nothing of the kind. Stopped / ERROR lines win over attention."""
     lines = [ln.strip().lstrip("#*-> ").strip() for ln in str(reply or "").splitlines()]
-    for ln in lines:
-        if _STOP_RX.match(ln):
-            return "stopped", ln
-    for ln in lines:
-        if _ERROR_RX.match(ln):
-            return "failed", ln
+    first = next((ln for ln in lines if ln), "")      # a skill that stops or fails says so first
+    if _STOP_RX.match(first):
+        return "stopped", first
+    if _ERROR_RX.match(first):
+        return "failed", first
     if _attention_count(reply):
         for ln in lines:
             if ln and _ATTENTION_RX.search(ln):
@@ -1141,7 +1144,7 @@ def _run_outcome(state: dict, final_text) -> tuple[str, str]:
     it yielded. Pure; the explicit notes (exception, cancelled, withheld) win."""
     override = state.get("override")
     if not state.get("completed"):
-        if override and override[0] == "cancelled":
+        if override and override[0] in ("cancelled", "failed"):   # a crash is a failure, a closed page is not
             return override
         return "interrupted", "The page was closed or the run was cut off before it finished."
     if override:
@@ -1155,7 +1158,7 @@ def _run_outcome(state: dict, final_text) -> tuple[str, str]:
         return from_reply
     if state.get("no_output"):
         return "failed", _first_line(state.get("reply")) or "No output was produced."
-    problem = _problem_line(final_text, ("error",))
+    problem = "" if state.get("delivered") else _problem_line(final_text, ("error",))
     if problem:
         return "failed", problem
     return "ok", ""
@@ -1583,6 +1586,7 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
             out_abs = str(out_path.resolve())
+            state["delivered"] = True       # UI-54: the folder is handed over
 
             # -- Surface any Review.csv the skill dropped in its output dir --
             # Generic across skills (not KRC-specific): any directory-output
@@ -1669,6 +1673,7 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
             # --- end security block ---
+            state["delivered"] = True       # UI-54: staging succeeded, the download is handed over
 
             extras = _stage_extra_outputs(skill, agent_reply, record=_record_served)
             state["extras"] = extras
@@ -1694,6 +1699,9 @@ def _make_run_handler(skill: SkillInfo):
                     last = t[0]
                     yield t
                 state["completed"] = True
+            except Exception as e:
+                state.setdefault("override", ("failed", f"{type(e).__name__}: {e}"))
+                raise
             finally:
                 # AUD-02: success, error, cancel and GeneratorExit all end here.
                 _config.discard_legacy_config(state.get("legacy_cfg"))
@@ -1721,6 +1729,9 @@ def _make_run_handler(skill: SkillInfo):
                     ext = [gr.update() for _ in range(len(declared) + 1)]
                 yield (*t, *ext)
             state["completed"] = True
+        except Exception as e:
+            state.setdefault("override", ("failed", f"{type(e).__name__}: {e}"))
+            raise
         finally:
             _config.discard_legacy_config(state.get("legacy_cfg"))
             remove_run_temp(state.get("temp_dirs"))

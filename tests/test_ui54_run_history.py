@@ -240,7 +240,18 @@ def test_scope_from_inputs():
     ("2 missing statements", ("attention", "2 missing statements")),
     ("Done. 12 rows written.", None),
     ("", None),
-    ("RED FLAG: x\nStopped. y", ("stopped", "Stopped. y")),         # Stopped / ERROR win over attention
+    ("Stopped. y\nRED FLAG: x", ("stopped", "Stopped. y")),         # a stop said first wins over attention
+    ("ERROR - Bank skill: bad file", ("failed", "ERROR - Bank skill: bad file")),
+    ("ERROR loading CSV: x", ("failed", "ERROR loading CSV: x")),
+    ("Error processing a.pdf: x", ("failed", "Error processing a.pdf: x")),
+    ("Error: please provide a parser path.", ("failed", "Error: please provide a parser path.")),
+    ("\n  ## Stopped. y", ("stopped", "Stopped. y")),                 # blank lines and markdown are skipped
+    # NEGATIVE: ordinary lines that merely begin with those words are not outcomes
+    ("Stopped cheque charges: 2", None),
+    ("- Stopped payments: none", None),
+    ("Error rate: 0", None),
+    ("Done.\nStopped. is mentioned later", None),
+    ("Done.\nERROR: only the first line counts", None),
 ])
 def test_reply_outcome(reply, expect):
     assert _generic._reply_outcome(reply) == expect
@@ -264,6 +275,12 @@ def test_run_outcome_table():
     assert o(_st(completed=False), "x")[0] == "interrupted"
     assert o(_st(completed=False, override=("cancelled", "c")), "x")[0] == "cancelled"
     assert o(_st(), "Error: could not stage download file: x")[0] == "failed"
+    # F1: a delivered run is not failed by a progress line in the log (NEGATIVE) ...
+    assert o(_st(delivered=True), "Error: page 3 could not be read, skipped") == ("ok", "")
+    assert o(_st(delivered=True, reply="Stopped. x"), "Error: p")[0] == "stopped"
+    # ... F3: a crash outside the skill run is a failure even though the run never completed
+    assert o(_st(completed=False, override=("failed", "KeyError: 'x'")), "") == ("failed", "KeyError: 'x'")
+    assert o(_st(completed=False), "")[0] == "interrupted"
 
 
 # --------------------------------------------------------------- the real hook ---
@@ -338,6 +355,37 @@ def test_a_red_flag_reply_is_recorded_attention(env, hist, monkeypatch):
     (r,) = _runhistory.tail(5)
     assert r["result"] == "attention" and r["why"].startswith("RED FLAG")
     assert r["out"]                                               # the file was written; it just needs a look
+
+
+def test_a_delivered_run_with_an_error_progress_line_is_ok(env, hist, monkeypatch):  # NEGATIVE
+    _stub_run(monkeypatch, _writes_output("Wrote 1 row.\nError: page 3 could not be read, skipped"))
+    _drive(env)
+    assert [r["result"] for r in _runhistory.tail(5)] == ["ok"]
+
+
+def test_a_staging_failure_is_still_recorded_failed(env, hist, monkeypatch):
+    _stub_run(monkeypatch, _writes_output("Wrote 1 row."))
+
+    real = _generic.shutil.copy2
+
+    def boom(src, dst, *a, **k):
+        if str(src).endswith("Bank-Skills.csv"):        # only the download staging copy fails
+            raise OSError("disk full")
+        return real(src, dst, *a, **k)
+    monkeypatch.setattr(_generic.shutil, "copy2", boom)
+    _drive(env)
+    (r,) = _runhistory.tail(5)
+    assert r["result"] == "failed" and "could not stage download file" in r["why"] and r["out"] == ""
+
+
+def test_a_crash_outside_the_skill_run_is_failed_and_reraised(env, hist, monkeypatch):  # NEGATIVE
+    def boom(*a, **k):
+        raise ValueError("synthetic crash outside the skill run")
+    monkeypatch.setattr(_generic._runlog, "new_log_path", boom)
+    with pytest.raises(ValueError):
+        _drive(env)
+    (r,) = _runhistory.tail(5)
+    assert r["result"] == "failed" and r["why"].startswith("ValueError")
 
 
 def test_the_password_never_reaches_the_record(env, hist, monkeypatch):  # NEGATIVE
