@@ -288,6 +288,7 @@ class AccountResult:
     trailing_months: list = field(default_factory=list)  # empty months after the last transaction
     quiet: bool = False
     suppressed: int = 0          # boundary months shown to be filed in the adjacent book
+    entity_key: str = ""         # the registered entity's key ("" for a book no entity owns); UI-54
 
     @property
     def is_core(self) -> bool:
@@ -527,6 +528,7 @@ def _process_account(
         gap_months=gap_months, trailing_months=trailing_months,
         quiet=(len(non_ob_in_fy) / len(months)) < QUIET_TXNS_PER_MONTH,
         suppressed=suppressed,
+        entity_key=entity_key or "",
     )
 
 
@@ -616,6 +618,16 @@ def scan_books(paths: list, entities_path: Optional[Path], include_other: bool,
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _save_last_check(scan) -> None:
+    """UI-54: remember this check as the last one for each entity + year, so the Home dashboard
+    can show it. Nothing it does can change the reply or the workbook: it never raises."""
+    try:
+        from ui import _coverage_last  # noqa: PLC0415
+        _coverage_last.record_scan(scan)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run(
     books,
     output_path: str,
@@ -648,4 +660,6 @@ def run(
     entities_path_obj = Path(entities_path) if entities_path else None
     scan = scan_books(paths, entities_path_obj, _truthy(include_other))
     XL.write_report_workbook(scan, output_path)
-    return scan.reply_text(output_path)
+    reply = scan.reply_text(output_path)
+    _save_last_check(scan)
+    return reply
