@@ -156,13 +156,38 @@ def test_trim_leaves_a_clean_file_alone(hist):
 
 def test_a_crash_mid_trim_keeps_the_old_file(hist, monkeypatch):  # NEGATIVE
     _seed(hist, [_rec(i) for i in range(1100)])
-    original = hist.read_text(encoding="utf-8")
+    original = hist.read_bytes()
 
     def boom(*a, **k):
         raise OSError("synthetic crash before the swap")
     monkeypatch.setattr(_runhistory.os, "replace", boom)
     assert _runhistory.trim() is False                            # never raises
-    assert hist.read_text(encoding="utf-8") == original
+    assert hist.read_bytes() == original          # old file byte-identical
+    assert sorted(x.name for x in hist.parent.iterdir()) == [hist.name]   # and no .tmp left beside it
+
+
+def test_a_failed_trim_write_also_leaves_no_temp_file(hist, monkeypatch):  # NEGATIVE
+    _seed(hist, [_rec(i) for i in range(1100)])
+    before = hist.read_bytes()
+    real = Path.write_text
+
+    def half(self, *a, **k):
+        real(self, "partial", encoding="utf-8")
+        raise OSError("synthetic: disk full while writing the temp file")
+    with monkeypatch.context() as m:
+        m.setattr(Path, "write_text", half)
+        assert _runhistory.trim() is False
+    assert hist.read_bytes() == before
+    assert sorted(x.name for x in hist.parent.iterdir()) == [hist.name]
+
+
+def test_a_test_that_undoes_its_monkeypatch_still_writes_under_pytest_tmp(monkeypatch, tmp_path_factory):  # NEGATIVE
+    monkeypatch.setattr(_config, "data_root_dir", lambda: Path("Z:/not-a-real-place"))
+    monkeypatch.undo()                                            # lifts every patch this test made
+    base = tmp_path_factory.getbasetemp().resolve()
+    assert base in _config.data_root_dir().resolve().parents
+    assert _runhistory.append(_rec(1)) is True
+    assert base in _runhistory.path().resolve().parents and _runhistory.path().exists()
 
 
 def test_the_first_append_of_a_process_trims(hist):

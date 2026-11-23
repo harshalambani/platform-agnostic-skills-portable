@@ -125,8 +125,15 @@ def _trim_locked(p: Path, now: datetime | None = None) -> None:
     if kept == lines:
         return
     tmp = p.with_name(p.name + ".tmp")
-    tmp.write_text("".join(k + "\n" for k in kept), encoding="utf-8")
-    os.replace(tmp, p)
+    try:
+        tmp.write_text("".join(k + "\n" for k in kept), encoding="utf-8")
+        os.replace(tmp, p)
+    except BaseException:
+        try:                                # a failed trim leaves the old file whole and no temp file
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def trim(now: datetime | None = None) -> bool:
