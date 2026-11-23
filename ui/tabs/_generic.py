@@ -50,6 +50,7 @@ from .. import _health
 from .. import _help
 from .. import _review_csv
 from .. import _runner
+from .. import _runhistory
 from .. import _runlog
 from . import _entity_book
 
@@ -1087,6 +1088,111 @@ def remove_served_copies(entries: list) -> None:
             continue
 
 
+# The forms the skills really use (src/agents): Year-End Close "Stopped. ..."; "ERROR: ..." (most
+# skills), "ERROR - title: ..." (bank_common), "ERROR loading CSV ..." (csv analyzer), "Error processing
+# <file>: ..." (HDFC), "Error: ..." (parser generator). Case-sensitive, so a normal line such as
+# "Stopped cheque charges: 2" or "Error rate: 0" never matches.
+_STOP_RX = re.compile(r"^Stopped\. ")
+_ERROR_RX = re.compile(r"^(ERROR\b|Error: |Error processing )")
+
+
+def _reply_outcome(reply):
+    """UI-54: (result, why) when a skill's own reply says the run stopped, failed or needs the
+    user; None when it says nothing of the kind. Stopped / ERROR lines win over attention."""
+    lines = [ln.strip().lstrip("#*-> ").strip() for ln in str(reply or "").splitlines()]
+    first = next((ln for ln in lines if ln), "")      # a skill that stops or fails says so first
+    if _STOP_RX.match(first):
+        return "stopped", first
+    if _ERROR_RX.match(first):
+        return "failed", first
+    if _attention_count(reply):
+        for ln in lines:
+            if ln and _ATTENTION_RX.search(ln):
+                return "attention", ln
+    return None
+
+
+def _first_line(text) -> str:
+    for ln in str(text or "").splitlines():
+        t = ln.strip().lstrip("#*-> ").strip()
+        if t:
+            return t
+    return ""
+
+
+_TAG_RX = re.compile(r"<[^>]+>")
+
+
+def _problem_line(text, kinds) -> str:
+    """The LAST error ("error") or warning ("warn") line of a status text, as plain text. The
+    status is the whole run log so far and _colorize_status has already turned these lines into
+    rag-error / rag-warn boxes, so the reason a run ended is the last such line."""
+    for ln in reversed(str(text or "").splitlines()):
+        raw = ln.strip()
+        plain = _TAG_RX.sub("", raw).strip().lstrip("#*-> ").strip()
+        plain = re.sub(r"^[^\w(\[]+", "", plain).strip()
+        low = plain.lower()
+        if "error" in kinds and ('class="rag-error"' in raw or low.startswith(("error:", "security error:"))):
+            return plain
+        if "warn" in kinds and ('class="rag-warn"' in raw or low.startswith("warning:")):
+            return plain
+    return ""
+
+
+def _run_outcome(state: dict, final_text) -> tuple[str, str]:
+    """UI-54: classify how a run ended, from what the handler noted in `state` and the last status
+    it yielded. Pure; the explicit notes (exception, cancelled, withheld) win."""
+    override = state.get("override")
+    if not state.get("completed"):
+        if override and override[0] in ("cancelled", "failed"):   # a crash is a failure, a closed page is not
+            return override
+        return "interrupted", "The page was closed or the run was cut off before it finished."
+    if override:
+        return override
+    if not state.get("started"):
+        # the status text is the whole log so far; the reason is its last Warning/Error line
+        why = (_problem_line(final_text, ("error", "warn")) or _first_line(final_text))
+        return "refused", re.sub(r"^(warning|error|security error):\s*", "", why, flags=re.I)
+    from_reply = _reply_outcome(state.get("reply"))
+    if from_reply:
+        return from_reply
+    if state.get("no_output"):
+        return "failed", _first_line(state.get("reply")) or "No output was produced."
+    problem = "" if state.get("delivered") else _problem_line(final_text, ("error",))
+    if problem:
+        return "failed", problem
+    return "ok", ""
+
+
+def _record_run(skill, state: dict, final_text) -> None:
+    """UI-54: write the one-line history record. Never raises, never changes the run."""
+    try:
+        if not _runhistory.ENABLED:
+            return
+        result, why = _run_outcome(state, final_text)
+        input_map = state.get("input_map") or {}
+        secrets = list(state.get("secrets") or [
+            str(input_map.get(i.name) or "") for i in skill.inputs
+            if getattr(i, "type", "") == "password"])
+        why = _runlog.redact(why, secrets)
+        entity, year = _runhistory.scope_from_inputs(skill, input_map)
+        lp = state.get("log_path")
+        op = state.get("out_path")
+        out = ""
+        try:
+            if op is not None and Path(op).exists() and result in ("ok", "attention", "stopped", "not_ready"):
+                out = Path(op).name
+        except OSError:
+            out = ""
+        t0 = state.get("t0")
+        _runhistory.append(_runhistory.make_record(
+            run=Path(lp).stem if lp else "", skill=skill.name, entity=entity, year=year,
+            result=result, why=why, secs=(time.monotonic() - t0) if t0 else 0,
+            log=Path(lp).name if lp and Path(lp).exists() else "", out=out))
+    except Exception:  # noqa: BLE001 -- the history must never be what breaks a run
+        pass
+
+
 def _make_run_handler(skill: SkillInfo):
     """
     Return a Gradio-compatible generator function that runs the skill.
@@ -1124,6 +1230,7 @@ def _make_run_handler(skill: SkillInfo):
 
         # Map positional args back to skill input names.
         input_map: dict[str, str] = {}
+        state["input_map"] = input_map      # UI-54: filled as the form is read
         _raw_by_name = {d.name: (input_values[k] if k < len(input_values) else None)
                         for k, d in enumerate(skill.inputs)}
         for i, inp_def in enumerate(skill.inputs):
@@ -1387,6 +1494,8 @@ def _make_run_handler(skill: SkillInfo):
         # UI-36: ONE log file per run, allocated once; every exit path that
         # saves writes to this same path.
         log_path = _runlog.new_log_path(skill.name)
+        state["log_path"], state["secrets"], state["out_path"] = log_path, secrets, out_path
+        state["started"] = True            # UI-54: past every check; the skill runs next
 
         def outcome(text):
             # the final error / result text also goes in the "Full log" file
@@ -1429,6 +1538,7 @@ def _make_run_handler(skill: SkillInfo):
                     work, tick_factory, on_event=on_event)
         except Exception as e:
             tb = "".join(traceback.format_exception(e))
+            state["override"] = ("failed", f"{type(e).__name__}: {e}")
             _runlog.write_run_log(
                 log_path, skill_name=skill.name, run_log_lines=log + direct_events, traceback_text=tb,
                 secrets=secrets,
@@ -1441,8 +1551,11 @@ def _make_run_handler(skill: SkillInfo):
             ), gr.update(interactive=False, value=None), gr.update()
             return
 
+        state["reply"] = agent_reply
+
         # -- Handle cancellation --
         if agent_reply == "__CANCELLED__":
+            state["override"] = ("cancelled", "The run was stopped by the user.")
             msg = add("**Cancelled** — run was stopped by user.")
             _runlog.write_run_log(log_path, skill_name=skill.name, run_log_lines=log + direct_events,
                                   secrets=secrets)
@@ -1462,6 +1575,7 @@ def _make_run_handler(skill: SkillInfo):
 
         if skill.output.type == "directory":
             if not out_path.is_dir() or not any(out_path.iterdir()):
+                state["no_output"] = True
                 outcome(f"Error: the run did not finish successfully - no output was produced at {out_path}.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
@@ -1472,6 +1586,7 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
             out_abs = str(out_path.resolve())
+            state["delivered"] = True       # UI-54: the folder is handed over
 
             # -- Surface any Review.csv the skill dropped in its output dir --
             # Generic across skills (not KRC-specific): any directory-output
@@ -1502,6 +1617,7 @@ def _make_run_handler(skill: SkillInfo):
             yield msg, gr.update(interactive=False, value=None), gr.update(value=out_abs)
         else:
             if not out_path.is_file():
+                state["no_output"] = True
                 outcome(f"Error: the run did not finish successfully - no output file was produced.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"Error: the run did not finish successfully — no output "
@@ -1516,6 +1632,7 @@ def _make_run_handler(skill: SkillInfo):
             # withhold_primary) when the run found a blocking problem; the
             # file stays on disk but no button is enabled and no copy staged.
             if getattr(agent_reply, "withhold_primary", False):
+                state["override"] = ("not_ready", "A problem must be fixed before the output can be used.")
                 outcome(f"Not ready to import: {out_path.name} was written but a problem must be fixed first; no download offered.\n\n{reply_label(skill)}:\n\n{agent_reply}")
                 yield add(
                     f"### Not ready to import\n\n"
@@ -1556,6 +1673,7 @@ def _make_run_handler(skill: SkillInfo):
                 ), gr.update(interactive=False, value=None), gr.update()
                 return
             # --- end security block ---
+            state["delivered"] = True       # UI-54: staging succeeded, the download is handed over
 
             extras = _stage_extra_outputs(skill, agent_reply, record=_record_served)
             state["extras"] = extras
@@ -1574,20 +1692,30 @@ def _make_run_handler(skill: SkillInfo):
     declared = tuple(getattr(skill.output, "extra_outputs", ()) or ())
     if not declared:
         def _run(*args):
-            state: dict = {}
+            state: dict = {"t0": time.monotonic()}
+            last = ""
             try:
-                yield from _run_core(state, *args)
+                for t in _run_core(state, *args):
+                    last = t[0]
+                    yield t
+                state["completed"] = True
+            except Exception as e:
+                state.setdefault("override", ("failed", f"{type(e).__name__}: {e}"))
+                raise
             finally:
                 # AUD-02: success, error, cancel and GeneratorExit all end here.
                 _config.discard_legacy_config(state.get("legacy_cfg"))
                 remove_run_temp(state.get("temp_dirs"))
+                _record_run(skill, state, last)     # UI-54
         return _run
 
     def _run_with_extras(*args):
-        state: dict = {}
+        state: dict = {"t0": time.monotonic()}
         first = True
+        last = ""
         try:
             for t in _run_core(state, *args):
+                last = t[0]
                 if first:
                     # A new run starts with every extra output disabled and empty.
                     ext = [gr.update(interactive=False, value=None) for _ in declared]
@@ -1600,9 +1728,14 @@ def _make_run_handler(skill: SkillInfo):
                 else:
                     ext = [gr.update() for _ in range(len(declared) + 1)]
                 yield (*t, *ext)
+            state["completed"] = True
+        except Exception as e:
+            state.setdefault("override", ("failed", f"{type(e).__name__}: {e}"))
+            raise
         finally:
             _config.discard_legacy_config(state.get("legacy_cfg"))
             remove_run_temp(state.get("temp_dirs"))
+            _record_run(skill, state, last)     # UI-54
     return _run_with_extras
 
 

@@ -111,9 +111,104 @@ def _app_stage_dirs_under_tmp_path(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(tempfile, "mkdtemp", _mkdtemp)
 
 
+# ---------------------------------------------------------------------------
+# UI-54: nothing a test does may reach the real data root.
+# Under pytest ui._config.data_root_dir() resolves to <repo>/Data (or the folder
+# of a live config). Three layers keep tests out of it:
+#   1. a session-wide FLOOR (its own MonkeyPatch, undone only at session end)
+#      points data_root_dir at a folder inside pytest's base temp, so a test's
+#      own monkeypatch.undo() falls back to the floor, never to the real root;
+#   2. a per-test autouse redirect on top of it;
+#   3. a backstop that lists every file under the real root at session start and
+#      fails the run if anything was added, changed or removed (temp files too).
+# ---------------------------------------------------------------------------
+
+_REAL_ROOT = {"path": None, "before": None}
+
+
+def _real_root_snapshot(root):
+    """{'exists': bool, 'entries': {relative path: (size, mtime_ns) or 'dir'}}; stat only."""
+    import os
+    snap = {"exists": False, "entries": {}}
+    try:
+        snap["exists"] = os.path.isdir(root)
+        if not snap["exists"]:
+            return snap
+        for here, dirs, files in os.walk(root):
+            for d in dirs:
+                snap["entries"][os.path.relpath(os.path.join(here, d), root)] = "dir"
+            for f in files:
+                full = os.path.join(here, f)
+                try:
+                    st = os.stat(full)
+                    snap["entries"][os.path.relpath(full, root)] = (st.st_size, st.st_mtime_ns)
+                except OSError:
+                    snap["entries"][os.path.relpath(full, root)] = "unreadable"
+    except OSError:
+        pass
+    return snap
+
+
+def _snapshot_diff(before, after) -> list:
+    out = []
+    if before["exists"] != after["exists"]:
+        out.append(f"root exists: {before['exists']} -> {after['exists']}")
+    b, a = before["entries"], after["entries"]
+    out += [f"added: {k}" for k in sorted(set(a) - set(b))]
+    out += [f"removed: {k}" for k in sorted(set(b) - set(a))]
+    out += [f"changed: {k}" for k in sorted(set(a) & set(b)) if a[k] != b[k]]
+    return out
+
+
+def pytest_sessionstart(session):
+    try:
+        from ui import _config
+        root = _config.data_root_dir()
+    except Exception:  # noqa: BLE001 -- UI package not importable
+        return
+    _REAL_ROOT["path"] = root
+    _REAL_ROOT["before"] = _real_root_snapshot(root)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _data_root_floor(tmp_path_factory):
+    try:
+        from ui import _config
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    floor = tmp_path_factory.getbasetemp().resolve() / "_data_root_floor"
+    floor.mkdir(parents=True, exist_ok=True)
+    mp = pytest.MonkeyPatch()
+    mp.setattr(_config, "data_root_dir", lambda: floor)
+    try:
+        yield
+    finally:
+        mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _data_root_under_pytest_tmp(tmp_path_factory, monkeypatch):
+    try:
+        from ui import _config
+    except Exception:  # noqa: BLE001 -- UI package not importable in this test
+        return
+    root = tmp_path_factory.getbasetemp().resolve() / "_data_root"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_config, "data_root_dir", lambda: root)
+
+
 def pytest_sessionfinish(session, exitstatus):
-    """LEG-12 backstop: fail the run if any test left a stray file in the
-    template settings folder (only the tracked config.yaml belongs there)."""
+    """Backstops: LEG-12 (a stray file in the template settings folder; only
+    the tracked config.yaml belongs there) and UI-54 (nothing added, changed or
+    removed under the real data root)."""
+    if _REAL_ROOT["before"] is not None:
+        diff = _snapshot_diff(_REAL_ROOT["before"], _real_root_snapshot(_REAL_ROOT["path"]))
+        if diff:
+            print(f"\nUI-54: tests touched the real data root {_REAL_ROOT['path']}:")
+            for line in diff:
+                print(f"  {line}")
+            session.exitstatus = 1
     extra = _template_settings_files() - _TEMPLATE_SETTINGS_TRACKED
     if extra:
         print(f"\nLEG-12: tests left files in {_TEMPLATE_SETTINGS}: {sorted(extra)}")
