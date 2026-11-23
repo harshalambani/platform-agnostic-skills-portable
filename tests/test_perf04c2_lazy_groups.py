@@ -26,7 +26,8 @@ from ui import _lazy_tabs, webui  # noqa: E402
 from ui.tabs import _generic  # noqa: E402
 from ui.tabs import home as tab_home  # noqa: E402
 
-GROUPS = ["Banks", "Partner", "Inter-entity", "26AS", "KRChoksey", "ITR", "Entities"]
+GROUPS = ["Banks", "Credit Card", "Partner", "Inter-entity", "26AS", "KRChoksey", "ITR",
+          "Coverage", "Year-End Close", "Entities"]
 LOADING = "Loading models"
 
 
@@ -145,7 +146,7 @@ def test_lazy_page_starts_with_the_groups_empty(real):
     assert set(GROUPS) <= labels                      # every tab button is on the page
     assert "Review" not in labels and "Review Mapping" not in labels   # their contents are not
     assert len(cfg["components"]) < len(real["eager_cfg"]["components"]) // 2
-    assert len(_render_deps(cfg)) == 7
+    assert len(_render_deps(cfg)) == len(GROUPS)
 
 
 def test_each_group_builds_exactly_once_per_page_load_in_order(real, loaded):  # a
@@ -167,7 +168,7 @@ def test_groups_run_one_at_a_time_through_one_queue_slot(real):  # b
 
 
 def test_every_group_lands_with_content(loaded):  # NEGATIVE b: never left empty
-    assert len(loaded["outs"]) == 7
+    assert len(loaded["outs"]) == len(GROUPS)
     for rid, out in loaded["outs"].items():
         assert len(out["render_config"]["components"]) > 5, rid
 
@@ -237,9 +238,9 @@ def test_no_duplicated_or_missing_handlers_after_the_build(real, loaded):  # NEG
     eager_n = len(real["eager_cfg"]["dependencies"])
     base_n = len(real["cfg"]["dependencies"])
     built = sum(len(o["render_config"]["dependencies"]) for o in loaded["outs"].values())
-    # 7 render triggers are the only additions; the page-wide model fill is
+    # one render trigger per group are the only additions; the page-wide model fill is
     # the one event that may disappear when no eager dropdown is left
-    assert base_n + built - 7 in (eager_n, eager_n - 1), (base_n, built, eager_n)
+    assert base_n + built - len(GROUPS) in (eager_n, eager_n - 1), (base_n, built, eager_n)
     ids = [d["id"] for o in loaded["outs"].values() for d in o["render_config"]["dependencies"]]
     assert len(ids) == len(set(ids))
 
