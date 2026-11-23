@@ -111,9 +111,61 @@ def _app_stage_dirs_under_tmp_path(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(tempfile, "mkdtemp", _mkdtemp)
 
 
+# ---------------------------------------------------------------------------
+# UI-54: the run history and the last-coverage store must never be written to
+# the real data root. Under pytest ui._config.data_root_dir() resolves to
+# <repo>/Data (or the folder of a live config), so every test gets a data root
+# inside pytest's own base temp instead; a test that wants its own simply
+# patches data_root_dir again. The session backstop below proves it.
+# ---------------------------------------------------------------------------
+
+_UI54_FILES = ("run-history.jsonl", "coverage-last.json")
+
+
+def _ui54_real_paths():
+    try:
+        from ui import _config
+    except Exception:  # noqa: BLE001
+        return []
+    root = _config.data_root_dir()
+    return [root / "logs" / n for n in _UI54_FILES]
+
+
+def _stat_sig(p):
+    try:
+        st = p.stat()
+        return (st.st_size, st.st_mtime_ns)
+    except OSError:
+        return None
+
+
+_UI54_BEFORE: dict = {}
+
+
+def pytest_sessionstart(session):
+    for p in _ui54_real_paths():
+        _UI54_BEFORE[p] = _stat_sig(p)
+
+
+@pytest.fixture(autouse=True)
+def _data_root_under_pytest_tmp(tmp_path_factory, monkeypatch):
+    try:
+        from ui import _config
+    except Exception:  # noqa: BLE001 -- UI package not importable in this test
+        return
+    root = tmp_path_factory.getbasetemp().resolve() / "_data_root"
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_config, "data_root_dir", lambda: root)
+
+
 def pytest_sessionfinish(session, exitstatus):
-    """LEG-12 backstop: fail the run if any test left a stray file in the
-    template settings folder (only the tracked config.yaml belongs there)."""
+    """Backstops: LEG-12 (a stray file in the template settings folder; only
+    the tracked config.yaml belongs there) and UI-54 (nothing written to the
+    real data root's run history or coverage store)."""
+    moved = [str(p) for p, before in _UI54_BEFORE.items() if _stat_sig(p) != before]
+    if moved:
+        print(f"\nUI-54: tests wrote to the real data root: {moved}")
+        session.exitstatus = 1
     extra = _template_settings_files() - _TEMPLATE_SETTINGS_TRACKED
     if extra:
         print(f"\nLEG-12: tests left files in {_TEMPLATE_SETTINGS}: {sorted(extra)}")
