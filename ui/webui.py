@@ -107,7 +107,20 @@ try:
 except Exception:  # noqa: BLE001 - startup must never fail over a head start
     pass
 
+# PERF-04: httpx builds an SSL context (~0.85s) on every Client(). Build it once
+# in the background from the moment gradio is imported, so it overlaps the tab
+# build instead of being paid in launch(). (Started AFTER the gradio import:
+# started before, it contended with the import and made it slower.)
+try:
+    from ui import _startup_fast
+except Exception:  # noqa: BLE001 - a missed head start is never fatal
+    _startup_fast = None
+
 import gradio as gr
+
+if _startup_fast is not None:
+    _startup_fast.start_ssl_warm()
+    _startup_fast.install_ssl_cache()
 
 # Make `src/` importable when running in source mode (mirrors PyInstaller layout)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -624,6 +637,13 @@ def build_app(launch: bool = False) -> gr.Blocks:
     mode = _resolve_launch_mode() if launch else "browser"
     window_mode = mode == "window"
 
+    # PERF-04: for the launched app, skip Blocks.__exit__'s config + web-app
+    # build (launch() redoes both). Tested gradio versions only; unlaunched
+    # (test) apps keep the stock behaviour.
+    _skip_cm = (_startup_fast.skip_exit_build(gr, enabled=launch)
+                if _startup_fast is not None else None)
+    if _skip_cm is not None:
+        _skip_cm.__enter__()
     with gr.Blocks(title=APP_TITLE, analytics_enabled=False, head=_ZOOM_HEAD) as app:
         # Header. In browser/headless mode we add an always-visible Exit button
         # (the deterministic way to stop the windowless server — see shutdown
@@ -802,6 +822,9 @@ def build_app(launch: bool = False) -> gr.Blocks:
         tab_generic.wire_deferred_model_loads(app)
         tab_home.wire_deferred_status_loads(app)
 
+    if _skip_cm is not None:
+        _skip_cm.__exit__(None, None, None)
+
     if launch:
         port = _pick_free_port()
         _write_port_file(port)
@@ -827,6 +850,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
             share=False,
             inbrowser=mode == "browser",
             prevent_thread_lock=window_mode,
+            **_launch_extra(window_mode),
             quiet=False,
             theme=_theme.make_theme(),
             css=APP_CSS,
@@ -931,6 +955,15 @@ def _webview2_runtime_present() -> bool:
 def _window_icon_path() -> str | None:
     """Absolute path to appicon.ico for the native window title bar, or None."""
     return _firstwindow.window_icon_path()
+
+
+def _launch_extra(window_mode: bool) -> dict:
+    """PERF-04: extra launch() arguments. In window mode on a tested gradio
+    version, skip gradio's own localhost probe (_wait_for_server is the one
+    readiness probe). Empty otherwise."""
+    if window_mode and _startup_fast is not None and _startup_fast.gradio_is_tested(gr):
+        return {"_frontend": False}
+    return {}
 
 
 def _wait_for_server(url: str, timeout: float = 30.0) -> bool:
