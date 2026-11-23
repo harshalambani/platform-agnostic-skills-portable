@@ -152,7 +152,46 @@ def test_real_lock_has_no_gpl_family_package():
     lock = ROOT / "requirements-lock.txt"
     violations, absent = lg.check_installed(lg.lock_names(lock.read_text(encoding="utf-8")))
     assert violations == {}
-    assert set(absent) <= lg.EXPECTED_ABSENT
+    assert unexpected_absent(absent) == set()
+
+
+def unexpected_absent(absent, env=None):
+    """Absent lock packages that fail the gate.
+
+    DEP-06: the weekly compatibility check installs the loose pins, where the
+    newest versions may no longer pull a lock package (greenlet, six), so it
+    sets PA_COMPAT_LOOSE_PINS=1 and absences are tolerated there only. A
+    package that IS installed is still checked for GPL-family licences.
+    """
+    import os
+    env = os.environ if env is None else env
+    if env.get("PA_COMPAT_LOOSE_PINS") == "1":
+        return set()
+    return set(absent) - lg.EXPECTED_ABSENT
+
+
+def test_unexpected_absent_package_fails_without_the_loose_pin_flag():  # NEGATIVE
+    assert unexpected_absent({"greenlet"}, env={}) == {"greenlet"}
+    assert unexpected_absent({"greenlet"}, env={"PA_COMPAT_LOOSE_PINS": "0"}) == {"greenlet"}
+    assert unexpected_absent({"pywebview"}, env={}) == set()
+
+
+def test_loose_pin_flag_tolerates_absence_but_not_an_installed_gpl_package(monkeypatch):  # NEGATIVE
+    monkeypatch.setenv("PA_COMPAT_LOOSE_PINS", "1")
+    assert unexpected_absent({"greenlet", "six"}) == set()
+
+    class _Md(dict):
+        def get_all(self, k):
+            return []
+
+    def lookup(name):
+        if name == "badpkg":
+            return _Md({"License": "GNU General Public License v3"})
+        raise lg.metadata.PackageNotFoundError(name)
+
+    violations, absent = lg.check_installed(["badpkg", "six"], lookup=lookup)
+    assert "badpkg" in violations      # still fails with the flag set
+    assert unexpected_absent(absent) == set()
 
 
 def test_extract_msg_chain_is_not_in_the_lock():
@@ -168,3 +207,9 @@ def test_packages_the_app_imports_were_not_only_there_via_the_removed_chain():
     lock = (ROOT / "requirements-lock.txt").read_text(encoding="utf-8").lower()
     assert "beautifulsoup4" in reqs
     assert "beautifulsoup4==" in lock and "soupsieve==" in lock
+
+
+def test_only_the_weekly_check_sets_the_loose_pin_flag():  # NEGATIVE
+    wf = ROOT / ".github" / "workflows"
+    setters = [p.name for p in wf.glob("*.yml") if "PA_COMPAT_LOOSE_PINS" in p.read_text(encoding="utf-8")]
+    assert setters == ["compat-check.yml"]

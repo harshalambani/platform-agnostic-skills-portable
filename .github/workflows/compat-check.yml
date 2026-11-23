@@ -63,6 +63,10 @@ jobs:
       # ----------------------------------------------------------------
       - name: Run tests
         shell: pwsh
+        env:
+          # DEP-06: loose pins may drop lock packages; the licence test then
+          # tolerates absent ones (an installed GPL-family package still fails).
+          PA_COMPAT_LOOSE_PINS: "1"
         run: |
           cd src
           python -m pytest ..\tests\ -v --tb=short
