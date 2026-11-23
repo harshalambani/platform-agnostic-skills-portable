@@ -146,6 +146,7 @@ from ui import _health  # noqa: E402
 from ui import _help as _help_mod  # noqa: E402
 from ui import _splash  # noqa: E402
 from ui import _firstwindow  # noqa: E402
+from ui import _lazy_tabs  # noqa: E402
 from ui import _update  # noqa: E402
 
 # Skill registry — auto-discovers agents/*/skill.yaml.
@@ -550,7 +551,7 @@ def _split_banks_tabs(display_names: list[str]) -> tuple[list[str], list[str]]:
     return before, after
 
 
-def build_app(launch: bool = False) -> gr.Blocks:
+def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
     """
     Construct the Gradio Blocks object.
 
@@ -668,6 +669,20 @@ def build_app(launch: bool = False) -> gr.Blocks:
             app.load(fn=_cancel_pending_shutdown, inputs=None, outputs=None)
             app.unload(lambda: _schedule_shutdown(_UNLOAD_GRACE_SECONDS))
 
+        # PERF-04 C2: the heavy GnuCash sub-tab groups are built after the page
+        # is drawn (see ui/_lazy_tabs.py). Launched apps only; unlaunched
+        # (test) builds stay eager so every component exists.
+        _lazy = launch if lazy is None else lazy
+        if _lazy:
+            _lazy_tabs.reset_build_log()
+
+        def _lazy_group(label, body):
+            with gr.Tab(label) as _gt:
+                if _lazy:
+                    _lazy_tabs.register_group(app, _gt, label, body)
+                else:
+                    body(_gt)
+
         with gr.Tabs():
             with gr.Tab("Home"):
                 tab_home.render(skills=skills)
@@ -688,7 +703,7 @@ def build_app(launch: bool = False) -> gr.Blocks:
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
-                            with gr.Tab("Banks"):
+                            def _banks_body(_t_outer, _cat_skills=_cat_skills):
                                 with gr.Tabs():
                                     # See _split_banks_tabs / _BANKS_TAB_ORDER:
                                     # Coverage Gap Detector is a read-only
@@ -711,14 +726,16 @@ def build_app(launch: bool = False) -> gr.Blocks:
                             # 26AS and the Advisory, not a return, so "ITR" (a
                             # collection of return-building tools) was the wrong
                             # home for it.
+                            _lazy_group('Banks', _banks_body)
                             _partner_skills = _grouped.get("partner", [])
                             if _partner_skills:
-                                with gr.Tab("Partner"):
+                                def _partner_body(_t_outer, _partner_skills=_partner_skills):
                                     with gr.Tabs():
                                         for _skill in _partner_skills:
                                             with gr.Tab(_skill.display_name) as _t:
                                                 tab_generic.render(_skill, container_tab=_t)
-                            with gr.Tab("Inter-entity"):
+                                _lazy_group('Partner', _partner_body)
+                            def _ic_body(_t_outer):
                                 with gr.Tabs():
                                     # The pairwise Reconcile is the primary tool
                                     # per the skills' own manifests; Matrix is
@@ -731,14 +748,16 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                     ):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
-                            with gr.Tab("26AS"):
+                            _lazy_group('Inter-entity', _ic_body)
+                            def _tds_body(_t_outer):
                                 with gr.Tabs():
                                     for _skill in _grouped.get("26as", []):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review") as _jt:
                                         tab_tds_journal_review.render(container_tab=_jt)
-                            with gr.Tab("KRChoksey"):
+                            _lazy_group('26AS', _tds_body)
+                            def _krc_body(_t_outer):
                                 with gr.Tabs():
                                     # Order the KRChoksey sub-tabs by workflow
                                     # (Part I -> II -> III), not alphabetically.
@@ -752,9 +771,10 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                             tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review") as _kt:
                                         tab_krc_gnucash_review.render(container_tab=_kt)
+                            _lazy_group('KRChoksey', _krc_body)
                             _itr_skills = _grouped.get("itr", [])
                             if _itr_skills:
-                                with gr.Tab("ITR"):
+                                def _itr_body(_t_outer, _itr_skills=_itr_skills):
                                     with gr.Tabs():
                                         # Every skill in the "itr" category gets a
                                         # sub-tab. This used to render _itr_skills[0]
@@ -783,14 +803,16 @@ def build_app(launch: bool = False) -> gr.Blocks:
                                         for _skill in [s for s in _itr_sorted if _rank(s) >= 50]:
                                             with gr.Tab(_skill.display_name) as _t:
                                                 tab_generic.render(_skill, container_tab=_t)
+                                _lazy_group('ITR', _itr_body)
                             # Entities is master data for the WHOLE app, not an
                             # ITR sub-feature: entities.yaml feeds the Entity
                             # dropdown on Banks, Inter-entity, 26AS, KRChoksey
                             # and ITR alike, and its books: registry is what
                             # auto-fills every GnuCash book field. Kept last so
                             # the workflow tabs stay in reading order.
-                            with gr.Tab("Entities") as _et:
+                            def _entities_body(_et):
                                 tab_itr_entities.render(container_tab=_et)
+                            _lazy_group("Entities", _entities_body)
                     continue
 
                 if not _cat_skills:
