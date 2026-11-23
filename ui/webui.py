@@ -551,6 +551,47 @@ def _split_banks_tabs(display_names: list[str]) -> tuple[list[str], list[str]]:
     return before, after
 
 
+# UI-55: the GnuCash second row, in display order. Every "gnucash"-category
+# skill used to default into "Banks"; three of them are not bank-import steps
+# and now get a tab of their own. The tab name is what the user sees in the row.
+GNUCASH_ROW = (
+    "Banks", "Credit Card", "Partner", "Inter-entity", "26AS",
+    "KRChoksey", "ITR", "Coverage", "Year-End Close", "Entities",
+)
+
+# display_name of a "gnucash"-category skill -> the GnuCash tab that holds it.
+# Anything not listed here stays in "Banks" (the default, rank 0).
+_GNUCASH_TAB_OF = {
+    "Credit Card - Book Spends": "Credit Card",
+    "Coverage Gap Detector": "Coverage",
+    "Year-End Close": "Year-End Close",
+}
+
+
+def _split_gnucash_skills(skills: list) -> dict[str, list]:
+    """
+    Partition the "gnucash"-category skills by the GnuCash tab that holds them
+    (UI-55). Pure, so placement is unit-testable without a Gradio render.
+    Order within a tab follows the incoming (discovery) order; each skill lands
+    in exactly one tab.
+    """
+    out: dict[str, list] = {t: [] for t in
+                            ("Banks", "Credit Card", "Coverage", "Year-End Close")}
+    for s in skills:
+        out[_GNUCASH_TAB_OF.get(s.display_name, "Banks")].append(s)
+    return out
+
+
+def _gnucash_group_body(group_skills: list):
+    """Body for a GnuCash tab that holds skills as sub-tabs (UI-55)."""
+    def _body(_t_outer, _skills=list(group_skills)):
+        with gr.Tabs():
+            for _skill in _skills:
+                with gr.Tab(_skill.display_name) as _t:
+                    tab_generic.render(_skill, container_tab=_t)
+    return _body
+
+
 def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
     """
     Construct the Gradio Blocks object.
@@ -703,7 +744,8 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                 if _cat_key == "gnucash":
                     with gr.Tab(_cat_label):
                         with gr.Tabs():
-                            def _banks_body(_t_outer, _cat_skills=_cat_skills):
+                            _gc = _split_gnucash_skills(_cat_skills)
+                            def _banks_body(_t_outer, _cat_skills=_gc["Banks"]):
                                 with gr.Tabs():
                                     # See _split_banks_tabs / _BANKS_TAB_ORDER:
                                     # Coverage Gap Detector is a read-only
@@ -727,6 +769,12 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                             # collection of return-building tools) was the wrong
                             # home for it.
                             _lazy_group('Banks', _banks_body)
+                            # UI-55: row order is GNUCASH_ROW. Credit Card, Coverage
+                            # and Year-End Close are built like Banks: a tab holding
+                            # a group of skills as sub-tabs (see _gnucash_group_body).
+                            if _gc["Credit Card"]:
+                                _lazy_group('Credit Card',
+                                            _gnucash_group_body(_gc["Credit Card"]))
                             _partner_skills = _grouped.get("partner", [])
                             if _partner_skills:
                                 def _partner_body(_t_outer, _partner_skills=_partner_skills):
@@ -804,6 +852,14 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                                             with gr.Tab(_skill.display_name) as _t:
                                                 tab_generic.render(_skill, container_tab=_t)
                                 _lazy_group('ITR', _itr_body)
+                            # UI-55: Coverage and Year-End Close follow ITR. They stay
+                            # in the lazy mechanism: both were built inside Banks'
+                            # lazy body before, so building them eagerly would add
+                            # start-up work for no benefit.
+                            for _tab_name in ("Coverage", "Year-End Close"):
+                                if _gc[_tab_name]:
+                                    _lazy_group(_tab_name,
+                                                _gnucash_group_body(_gc[_tab_name]))
                             # Entities is master data for the WHOLE app, not an
                             # ITR sub-feature: entities.yaml feeds the Entity
                             # dropdown on Banks, Inter-entity, 26AS, KRChoksey
