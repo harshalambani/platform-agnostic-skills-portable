@@ -32,6 +32,7 @@ Supported input types (declared in skill.yaml):
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import re
 import shutil
 import time
@@ -684,17 +685,43 @@ def wire_deferred_model_loads(app) -> None:
 
     app.load(fn=_fill, inputs=None, outputs=dropdowns)
 
+    wire_model_focus(dropdowns)
+
+
+def _on_model_focus(current):
     # UI-49: after an endpoint switch the list is stale; opening a dropdown
     # re-reads it for the ACTIVE endpoint (cached per endpoint, so cheap).
-    def _on_focus(current):
-        choices = _refresh_models(use_cache=True)
-        values = [v for _, v in choices]
-        value = current if current in values else _default_model_value(choices)
-        return gr.update(choices=choices, value=value)
+    choices = _refresh_models(use_cache=True)
+    values = [v for _, v in choices]
+    value = current if current in values else _default_model_value(choices)
+    return gr.update(choices=choices, value=value)
 
+
+def wire_model_focus(dropdowns) -> None:
+    """UI-49 focus refresh for each dropdown (also used by lazily built groups)."""
     for _dd in dropdowns:
         if hasattr(_dd, "focus"):
-            _dd.focus(fn=_on_focus, inputs=_dd, outputs=_dd)
+            _dd.focus(fn=_on_model_focus, inputs=_dd, outputs=_dd)
+
+
+# PERF-04 C2: a tab group built AFTER the page loaded cannot be filled by the
+# one page-load event (its dropdowns did not exist yet, and a component made
+# inside a gr.render cannot be an output outside it). While such a group builds
+# it runs inside lazy_group_scope(): each LLM Model dropdown is then created
+# already holding the real list, and is collected here instead of in the
+# page-wide registry (which would leak one entry per page load).
+_lazy_dropdowns: contextvars.ContextVar = contextvars.ContextVar(
+    "pa_lazy_dropdowns", default=None)
+
+
+@contextlib.contextmanager
+def lazy_group_scope():
+    sink: list = []
+    token = _lazy_dropdowns.set(sink)
+    try:
+        yield sink
+    finally:
+        _lazy_dropdowns.reset(token)
 
 
 _LOADING_MODELS_LABEL = "Loading models…"
@@ -2100,7 +2127,15 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             # Construction must not go to the wire; the real list arrives via
             # the deferred load registered just below. See _startup_model_choices
             # for what stands in until then and why it is not a spinner.
-            initial_choices, initial_value = _startup_model_choices()
+            _lazy_sink = _lazy_dropdowns.get()
+            if _lazy_sink is None:
+                initial_choices, initial_value = _startup_model_choices()
+            else:
+                # Built after the page loaded, on a request thread: the real
+                # list is a cache read (the background prime has answered) or
+                # one bounded probe, so there is nothing to defer.
+                initial_choices = _refresh_models()
+                initial_value = _default_model_value(initial_choices)
             model_dd = gr.Dropdown(
                 label="Model",
                 choices=initial_choices,
@@ -2110,7 +2145,10 @@ def render(skill: SkillInfo, container_tab=None) -> None:
                 visible=skill.requires.llm,
             )
             if skill.requires.llm:
-                _deferred_model_dropdowns.append(model_dd)
+                if _lazy_sink is None:
+                    _deferred_model_dropdowns.append(model_dd)
+                else:
+                    _lazy_sink.append(model_dd)
             refresh_models_btn = gr.Button(
                 "Refresh model list", variant="secondary", visible=skill.requires.llm,
             )
