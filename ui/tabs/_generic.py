@@ -2131,10 +2131,12 @@ def render(skill: SkillInfo, container_tab=None) -> None:
             if _lazy_sink is None:
                 initial_choices, initial_value = _startup_model_choices()
             else:
-                # Built after the page loaded, on a request thread: the real
-                # list is a cache read (the background prime has answered) or
-                # one bounded probe, so there is nothing to defer.
-                initial_choices = _refresh_models()
+                # Built after the page loaded, on a request thread. Serve the
+                # shared choices cache (the startup prime and the page-wide
+                # fill have already answered); only a missing or stale cache
+                # probes, and that fills the cache for every later dropdown.
+                # Never a placeholder, and never a re-probe per dropdown.
+                initial_choices = _refresh_models(use_cache=True)
                 initial_value = _default_model_value(initial_choices)
             model_dd = gr.Dropdown(
                 label="Model",
