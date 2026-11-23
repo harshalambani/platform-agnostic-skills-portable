@@ -24,7 +24,7 @@ import gradio as gr  # noqa: E402
 
 from ui import _lazy_tabs, webui  # noqa: E402
 from ui.tabs import _generic  # noqa: E402
-from ui.tabs import home as tab_home  # noqa: E402
+from ui.tabs import settings as tab_settings  # noqa: E402
 
 GROUPS = ["Banks", "Credit Card", "Partner", "Inter-entity", "26AS", "KRChoksey", "ITR",
           "Coverage", "Year-End Close", "Entities"]
@@ -231,7 +231,7 @@ def test_page_wide_loads_only_target_components_that_exist_at_load(real):  # NEG
     for d in cfg["dependencies"]:
         if d.get("render_id") is None and any(t[1] == "load" for t in d["targets"]):
             assert set(d["outputs"]) <= page_ids
-    assert len(tab_home._deferred_status_panels) <= 1
+    assert len(tab_settings._deferred_status_panels) <= 1
 
 
 def test_no_duplicated_or_missing_handlers_after_the_build(real, loaded):  # NEGATIVE f

@@ -568,6 +568,82 @@ _GNUCASH_TAB_OF = {
 }
 
 
+# Top-level tab groups, in tab order: (category key, tab label). Module level so the
+# Home launch pad and build_app read the SAME list. "Bank Skills" (not "Banks")
+# because GnuCash > Banks is a different tab: this one holds the individual
+# per-bank statement parsers, that one holds the end-to-end book pipeline.
+GROUP_ORDER = [
+    ("banks",       "Bank Skills"),
+    ("credit_card", "Credit Card"),
+    ("26as",        "26AS"),
+    ("gnucash",     "GnuCash"),
+    ("utilities",   "Other"),
+]
+
+# Categories with no top-level tab of their own: each is a sub-tab of GnuCash
+# (category key -> the sub-tab's name). "26as" is in GROUP_ORDER too, but it is
+# skipped there for the same reason.
+_GNUCASH_NESTED_CATEGORIES = {
+    "26as": "26AS",
+    "krc": "KRChoksey",
+    "intercompany": "Inter-entity",
+    "itr": "ITR",
+    "partner": "Partner",
+}
+
+# Launch-pad group name for a category that renders as flat top-level tabs.
+_FLAT_CATEGORY_GROUP = {"dev": "Developer"}
+
+
+def skill_tab_paths(skills: list) -> list[tuple]:
+    """UI-54: [(skill, tab path)] for every skill, in the incoming order. The tab path is
+    what the user clicks to reach the skill, e.g. ("GnuCash", "Credit Card", "Credit Card -
+    Book Spends"). The ONE place that knows the nesting rules build_app follows: GROUP_ORDER,
+    the GnuCash sub-tabs (_GNUCASH_NESTED_CATEGORIES, _GNUCASH_TAB_OF), and "a group with
+    exactly one skill renders flat". Pass the visible (non-hidden) skills. Pure."""
+    top = dict(GROUP_ORDER)
+    per_cat: dict[str, int] = {}
+    for s in skills:
+        per_cat[s.category] = per_cat.get(s.category, 0) + 1
+    gc_tab = {s.name: tab
+              for tab, group in _split_gnucash_skills([s for s in skills if s.category == "gnucash"]).items()
+              for s in group}
+    out = []
+    for s in skills:
+        cat = s.category
+        if cat in _GNUCASH_NESTED_CATEGORIES:
+            path = ("GnuCash", _GNUCASH_NESTED_CATEGORIES[cat], s.display_name)
+        elif cat == "gnucash":
+            path = ("GnuCash", gc_tab[s.name], s.display_name)
+        elif cat in top:
+            path = (top[cat],) if per_cat[cat] == 1 else (top[cat], s.display_name)
+        else:
+            path = (s.display_name,)
+        out.append((s, path))
+    return out
+
+
+def launch_pad_groups(skills: list) -> list[tuple[str, list[tuple[str, str]]]]:
+    """UI-54: the Home launch pad. [(group label, [(skill display name, "full > tab > path")])]
+    in tab order, one group per top-level tab, skills A-Z by display name (ties by path).
+    ITR, 26AS, Inter-entity, KRChoksey and Partner sit inside GnuCash; the flat "dev" tabs
+    share one "Developer" group. Empty groups are left out. Pass the visible skills. Pure."""
+    labels = [label for key, label in GROUP_ORDER if key not in _GNUCASH_NESTED_CATEGORIES]
+    groups: dict[str, list[tuple[str, str]]] = {label: [] for label in labels}
+    top = dict(GROUP_ORDER)
+    for s, path in skill_tab_paths(skills):
+        cat = s.category
+        if cat in _GNUCASH_NESTED_CATEGORIES:
+            label = "GnuCash"
+        elif cat in top:
+            label = top[cat]
+        else:
+            label = _FLAT_CATEGORY_GROUP.get(cat, str(cat).replace("_", " ").title() or "Other")
+        groups.setdefault(label, []).append((s.display_name, " > ".join(path)))
+    return [(label, sorted(items, key=lambda t: (t[0].casefold(), t[1].casefold())))
+            for label, items in groups.items() if items]
+
+
 def _split_gnucash_skills(skills: list) -> dict[str, list]:
     """
     Partition the "gnucash"-category skills by the GnuCash tab that holds them
@@ -635,7 +711,8 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
     # Components from a previous build_app() in this process must not be wired
     # into this one's load event.
     tab_generic.reset_deferred_model_dropdowns()
-    tab_home.reset_deferred_status_panels()
+    tab_settings.reset_deferred_status_panels()
+    tab_home.reset_deferred_home_panels()
 
     # ── Grouped navigation ──────────────────────────────────────────────────
     # Ordered list of (category_key, tab_label). Skills within each group
@@ -643,16 +720,6 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
     # Skills whose category is not in GROUP_ORDER appear as flat top-level tabs.
     from collections import defaultdict  # noqa: PLC0415
 
-    GROUP_ORDER = [
-        # "Bank Skills" (not "Banks") because GnuCash > Banks is a different
-        # tab: this one holds the individual per-bank statement parsers, that
-        # one holds the end-to-end book pipeline.
-        ("banks",       "Bank Skills"),
-        ("credit_card", "Credit Card"),
-        ("26as",        "26AS"),
-        ("gnucash",     "GnuCash"),
-        ("utilities",   "Other"),
-    ]
     # "krc", "intercompany" and "partner" have no top-level GROUP_ORDER entry
     # of their own — "krc" is nested as a "KRChoksey" sub-tab, "intercompany"
     # as an "Inter-entity" sub-tab, and "partner" as a "Partner" sub-tab
@@ -664,7 +731,7 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
     # getting a flat top-level tab. Exclude them here too, otherwise the
     # fallback loop at the end of this function (for skills whose category
     # isn't in _known_cats) renders them a second time as flat top-level tabs.
-    _known_cats = {k for k, _ in GROUP_ORDER} | {"krc", "intercompany", "itr", "partner"}
+    _known_cats = {k for k, _ in GROUP_ORDER} | set(_GNUCASH_NESTED_CATEGORIES)
 
     _grouped = defaultdict(list)
     for _s in skills:
@@ -724,9 +791,12 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                 else:
                     body(_gt)
 
-        with gr.Tabs():
-            with gr.Tab("Home"):
-                tab_home.render(skills=skills)
+        with gr.Tabs() as _main_tabs:
+            with gr.Tab("Home") as _home_t:
+                tab_home.render(
+                    skills=skills, home_tab=_home_t, main_tabs=_main_tabs,
+                    skill_groups=launch_pad_groups(skills),
+                    display_names={s.name: s.display_name for s in skills_all})
 
             for _cat_key, _cat_label in GROUP_ORDER:
                 # 26AS is no longer a top-level tab — it's nested under GnuCash.
@@ -890,15 +960,16 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
 
             with gr.Tab("Help"):
                 tab_help.render(skills=skills_all)
-            with gr.Tab("History"):
+            with gr.Tab("History", id=tab_home.HISTORY_TAB_ID):
                 tab_history.render()
-            with gr.Tab("Settings"):
+            with gr.Tab("Settings", id=tab_home.SETTINGS_TAB_ID):
                 tab_settings.render()
 
         # Every Model dropdown built above is filled by this one load event,
         # once, when the page connects — see _generic.wire_deferred_model_loads.
         tab_generic.wire_deferred_model_loads(app)
-        tab_home.wire_deferred_status_loads(app)
+        tab_settings.wire_deferred_status_loads(app)
+        tab_home.wire_deferred_home_loads(app)
 
     if _skip_cm is not None:
         _skip_cm.__exit__(None, None, None)

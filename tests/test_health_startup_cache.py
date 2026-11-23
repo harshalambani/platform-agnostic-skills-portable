@@ -182,7 +182,7 @@ def test_generic_refresh_models_with_allow_probe_false_stays_offline():
 def test_home_status_panel_starts_as_a_placeholder():
     """Home renders a placeholder, not probe output — the real panel arrives
     via wire_deferred_status_loads."""
-    from ui.tabs import home
+    from ui.tabs import settings as home
 
     assert "Checking" in home._PROBING_PLACEHOLDER
 
@@ -191,7 +191,7 @@ def test_status_placeholder_matches_the_resolved_panel_shape():
     """The placeholder must have the same line count and the same block shape
     as the probed panel, per endpoint. If it does not, the panel changes size
     when the deferred load lands and everything below it jumps."""
-    from ui.tabs import home
+    from ui.tabs import settings as home
 
     cfg = {
         "active_endpoint": "local",
@@ -273,7 +273,7 @@ def test_check_always_goes_to_the_wire_and_updates_the_shared_cache():
 
 
 def test_home_refresh_button_handler_reprobes():
-    from ui.tabs import home
+    from ui.tabs import settings as home
 
     cfg = {"active_endpoint": "a", "endpoints": {"a": EP_A}}
     fake, calls = _counting_check()
@@ -305,7 +305,7 @@ class _FakeApp:
 @pytest.mark.parametrize("mod_name, reset, wire, registry", [
     ("ui.tabs._generic", "reset_deferred_model_dropdowns",
      "wire_deferred_model_loads", "_deferred_model_dropdowns"),
-    ("ui.tabs.home", "reset_deferred_status_panels",
+    ("ui.tabs.settings", "reset_deferred_status_panels",
      "wire_deferred_status_loads", "_deferred_status_panels"),
 ])
 def test_deferred_registry_wires_once_and_resets(mod_name, reset, wire, registry):
