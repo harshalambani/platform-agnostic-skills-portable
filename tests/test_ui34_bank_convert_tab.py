@@ -28,7 +28,7 @@ def test_banks_pipeline_is_renamed_and_other_tabs_are_not():
 
 def test_krchoksey_order_is_unchanged():
     text = (ROOT / "ui" / "webui.py").read_text(encoding="utf-8")
-    assert re.search(r'_krc_order = \{"Convert": 0,\s*"Reconcile": 1,\s*"Convert to GnuCash": 2\}', text)
+    assert re.search(r'_KRC_ORDER = \{"Convert": 0,\s*"Reconcile": 1,\s*"Convert to GnuCash": 2\}', text)
 
 
 def test_bank_convert_renders_first_even_when_discovered_late():

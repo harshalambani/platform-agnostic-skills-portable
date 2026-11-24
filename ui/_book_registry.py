@@ -251,6 +251,19 @@ def registered_book_paths(entities_path: str | Path | None = None) -> set[str]:
     return found
 
 
+def registered_entity_years(entities_path: str | Path | None = None) -> dict[str, list[str]]:
+    """{entity_key: [FY, ...]} (newest first) for every entity with FY-keyed books registered.
+    Read-only: reads entities.yaml only, never opens a book. {} on any missing or malformed
+    file. For the Home screen's "coverage not checked yet" lines."""
+    path = Path(entities_path) if entities_path is not None else _default_entities_path()
+    out: dict[str, list[str]] = {}
+    for key, profile in _load_entities_tolerant(path).items():
+        years = sorted((str(fy) for fy in (profile.books or {})), reverse=True)
+        if years:
+            out[str(key)] = years
+    return out
+
+
 def is_registered_book(
     book_path: str | Path | None,
     entities_path: str | Path | None = None,
