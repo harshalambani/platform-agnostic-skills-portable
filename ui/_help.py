@@ -279,9 +279,25 @@ EDIT_HELP_MD = (
 )
 
 
-def render_help_tab(skills: list["SkillInfo"]) -> None:
-    """Render the central Help tab: pick a skill, read its full guide."""
-    helped = [s for s in skills if s.help and not s.help.is_empty()]
+def help_entries(entries: list[tuple[str, "SkillInfo"]]) -> list[tuple[str, "SkillInfo"]]:
+    """UI-56: keep only the (label, skill) entries whose skill has help. Pure."""
+    return [(label, s) for label, s in entries if s.help and not s.help.is_empty()]
+
+
+def help_page(entries: list[tuple[str, "SkillInfo"]], value: str) -> tuple[str, str]:
+    """UI-56: the (markdown, outputs html) for the dropdown value (a skill.name). Two skills
+    can share a display name, so the value is the unique skill name; an unknown value falls
+    back to the first page. Pure."""
+    helped = help_entries(entries)
+    by_value = {s.name: s for _, s in helped}
+    s = by_value.get(value, helped[0][1])
+    return _markdown_body(s), _outputs_html(s)
+
+
+def render_help_tab(entries: list[tuple[str, "SkillInfo"]]) -> None:
+    """Render the central Help tab: pick a page (the tab path, in app order), read its guide.
+    `entries` is [(label, skill)] from webui.help_page_order."""
+    helped = help_entries(entries)
     gr.Markdown(
         "## Help\n\nEvery skill writes to the **`Data/outputs/`** folder with a "
         "timestamped filename. Pick a skill below for its inputs, formats, steps "
@@ -291,17 +307,15 @@ def render_help_tab(skills: list["SkillInfo"]) -> None:
         gr.Markdown("_No skill help authored yet._")
         return
 
-    choices = [s.display_name for s in helped]
-    picker = gr.Dropdown(label="Skill", choices=choices, value=choices[0],
+    choices = [(label, s.name) for label, s in helped]
+    picker = gr.Dropdown(label="Skill", choices=choices, value=choices[0][1],
                          interactive=True)
-    body = gr.Markdown(_markdown_body(helped[0]))
-    outs = gr.HTML(_outputs_html(helped[0]))
+    first = help_page(helped, choices[0][1])
+    body = gr.Markdown(first[0])
+    outs = gr.HTML(first[1])
 
-    by_name = {s.display_name: s for s in helped}
-
-    def _show(name: str):
-        s = by_name.get(name, helped[0])
-        return _markdown_body(s), _outputs_html(s)
+    def _show(value: str):
+        return help_page(helped, value)
 
     picker.change(_show, inputs=picker, outputs=[body, outs])
 
