@@ -647,19 +647,20 @@ def app_tab_order(skills: list) -> list[tuple]:
             gc = _split_gnucash_skills(cat)
             before, after = _split_banks_skills(gc["Banks"])
             itr_before, itr_after = _split_itr(grouped.get("itr", []))
-            tabs = {
-                "Banks": before + after,
-                "Credit Card": gc["Credit Card"],
-                "Partner": grouped.get("partner", []),
-                "Inter-entity": _sort_intercompany(grouped.get("intercompany", [])),
-                "26AS": grouped.get("26as", []),
-                "KRChoksey": _sort_krc(grouped.get("krc", [])),
-                "ITR": itr_before + itr_after,
-                "Coverage": gc["Coverage"],
-                "Year-End Close": gc["Year-End Close"],
-            }
+            tabs = [
+                ("Banks", before + after),
+                ("Credit Card", gc["Credit Card"]),
+                ("Partner", grouped.get("partner", [])),
+                ("Inter-entity", _sort_intercompany(grouped.get("intercompany", []))),
+                ("26AS", grouped.get("26as", [])),
+                ("KRChoksey", _sort_krc(grouped.get("krc", []))),
+                ("ITR", itr_before + itr_after),
+                ("Coverage", gc["Coverage"]),
+                ("Year-End Close", gc["Year-End Close"]),
+            ]
+            by_tab = dict(tabs)
             for tab in GNUCASH_ROW:
-                for s in tabs.get(tab, []):
+                for s in by_tab.get(tab, []):
                     out.append((s, (label, tab, s.display_name)))
         elif len(cat) == 1:
             out.append((cat[0], (label,)))
