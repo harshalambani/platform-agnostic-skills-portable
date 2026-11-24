@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import sys
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -239,6 +240,47 @@ def test_terminate_before_the_config_is_loaded_does_not_import_it(monkeypatch): 
     assert "ui._config" not in sys.modules
 
 
+def assert_threads_end(before, wait_s=5.0, poll_s=0.02):
+    """PERF-07: every thread started since `before` (a set of idents) must END within wait_s.
+    Polls instead of checking once, so a thread that is a moment from returning is not a
+    failure; on failure names each leftover thread with its daemon flag."""
+    allowed = set(before) | {threading.get_ident()}
+    deadline = time.monotonic() + wait_s
+    while True:
+        left = [t for t in threading.enumerate() if t.ident not in allowed and t.is_alive()]
+        if not left:
+            return
+        if time.monotonic() >= deadline:
+            names = ", ".join(f"{t.name!r} (daemon={t.daemon})" for t in left)
+            raise AssertionError(f"{len(left)} thread(s) still alive after {wait_s}s: {names}")
+        time.sleep(poll_s)
+
+
+def test_the_thread_wait_helper_fails_on_a_blocked_thread_and_names_it():   # NEGATIVE
+    before = {t.ident for t in threading.enumerate()}
+    gate = threading.Event()
+    th = threading.Thread(target=gate.wait, name="perf07-blocked", daemon=True)
+    th.start()
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(AssertionError) as exc:
+            assert_threads_end(before, wait_s=0.3)
+        assert time.monotonic() - t0 < 3
+        assert "perf07-blocked" in str(exc.value) and "daemon=True" in str(exc.value)
+    finally:
+        gate.set()
+        th.join(5)
+    assert not th.is_alive()
+
+
+def test_the_thread_wait_helper_passes_when_a_thread_ends_within_the_bound():
+    before = {t.ident for t in threading.enumerate()}
+    th = threading.Thread(target=time.sleep, args=(0.2,), name="perf07-short")
+    th.start()
+    assert_threads_end(before, wait_s=5.0)
+    th.join(5)
+
+
 def test_closing_during_starting_leaves_no_thread_behind(fake_webview, monkeypatch):   # NEGATIVE
     started = threading.Event()
     release = threading.Event()
@@ -260,7 +302,7 @@ def test_closing_during_starting_leaves_no_thread_behind(fake_webview, monkeypat
     th.join(5)
     fw._LOADER_THREAD.join(5)
     assert not th.is_alive() and not fw._LOADER_THREAD.is_alive()
-    assert {t.ident for t in threading.enumerate()} <= before | {threading.get_ident()}
+    assert_threads_end(before)
 
 
 # -- the splash -----------------------------------------------------------------------------------
