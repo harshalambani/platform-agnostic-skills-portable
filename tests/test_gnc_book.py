@@ -323,3 +323,30 @@ def test_path_conventions_unchanged(books):
     # parse_gnucash keeps its own "A/B" form
     book = pg.parse_book(books["gz"])
     assert "Assets/Bank/Demo Bank Savings" in {a.path for a in book.accounts.values()}
+
+
+def test_corrupt_gzip_body_always_raises_gnc_book_unreadable(tmp_path):
+    """Flipped bytes inside the deflate body: never a zlib.error."""
+    import zlib
+
+    good = gzip.compress(_book_xml().encode())
+    raised_zlib = 0
+    for pos in range(12, len(good) - 8, 7):
+        bad = bytearray(good)
+        bad[pos] ^= 0xFF
+        p = tmp_path / f"bad_{pos}.gnucash"
+        p.write_bytes(bytes(bad))
+        try:
+            gzip.decompress(bytes(bad))
+        except zlib.error:
+            raised_zlib += 1
+        except Exception:
+            pass
+        clear_cache()
+        try:
+            read_xml_root(p)
+        except GncBookUnreadable:
+            pass
+        except zlib.error:
+            pytest.fail(f"zlib.error escaped at byte {pos}")
+    assert raised_zlib >= 1, "no corrupted position exercised zlib.error"

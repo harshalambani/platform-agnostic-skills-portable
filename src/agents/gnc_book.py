@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import gzip
 import os
+import zlib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Union
@@ -65,7 +66,7 @@ def read_xml_root(path: Union[str, Path]) -> ET.Element:
     if raw[:2] == _GZIP_MAGIC:
         try:
             data = gzip.decompress(raw)
-        except (OSError, EOFError) as exc:
+        except (OSError, EOFError, zlib.error) as exc:
             raise GncBookUnreadable(p, "damaged or truncated gzip data") from exc
     else:
         data = raw
