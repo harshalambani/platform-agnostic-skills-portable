@@ -671,6 +671,39 @@ def app_tab_order(skills: list) -> list[tuple]:
     return out
 
 
+def help_page_order(skills_all: list) -> list[tuple[str, object]]:
+    """UI-56: [(label, skill)] for the Help tab, every skill with help once. Visible skills
+    follow app_tab_order, the label being the tab path joined with " > ". The hidden bank
+    readers sit right after the Bank Skills entry, in the Bank picker's own order
+    (agents.banks.discover()), labelled "Bank Skills > <bank>". Any other hidden skill goes at
+    the end under its display name. Skills without help are left out. Pure."""
+    from agents import banks as _banks
+
+    def _helped(s) -> bool:
+        return bool(s.help and not s.help.is_empty())
+
+    visible = [s for s in skills_all if not s.hidden]
+    hidden = {s.name: s for s in skills_all if s.hidden and _helped(s)}
+    readers: list[tuple[str, object]] = []
+    for b in _banks.discover():
+        s = hidden.pop(b.skill_name, None)
+        if s is not None:
+            readers.append((f"Bank Skills > {b.display_name}", s))
+    out: list[tuple[str, object]] = []
+    placed = False
+    for s, path in app_tab_order(visible):
+        if not _helped(s):
+            continue
+        out.append((" > ".join(path), s))
+        if path == ("Bank Skills",):
+            out.extend(readers)
+            placed = True
+    if not placed:
+        out.extend(readers)
+    out.extend((s.display_name, s) for s in hidden.values())
+    return out
+
+
 def skill_tab_paths(skills: list) -> list[tuple]:
     """[(skill, tab path)] in the incoming order (see app_tab_order). Pure."""
     path_of = {s.name: p for s, p in app_tab_order(skills)}
@@ -1021,7 +1054,7 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                         tab_generic.render(_skill, container_tab=_t)
 
             with gr.Tab("Help"):
-                tab_help.render(skills=skills_all)
+                tab_help.render(entries=help_page_order(skills_all))
             with gr.Tab("History", id=tab_home.HISTORY_TAB_ID):
                 tab_history.render()
             with gr.Tab("Settings", id=tab_home.SETTINGS_TAB_ID):

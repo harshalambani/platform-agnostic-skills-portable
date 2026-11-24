@@ -14,5 +14,5 @@ if TYPE_CHECKING:
     from agents.registry import SkillInfo
 
 
-def render(skills: list["SkillInfo"]) -> None:
-    _help.render_help_tab(skills)
+def render(entries: list[tuple[str, "SkillInfo"]]) -> None:
+    _help.render_help_tab(entries)
