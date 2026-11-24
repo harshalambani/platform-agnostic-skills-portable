@@ -87,6 +87,36 @@ def test_ok_refused_and_cancelled_raise_nothing(result):  # NEGATIVE
     assert [ln for ln in _lines(_model([_rec(result=result)])) if ln[2] == "problem"] == []
 
 
+@pytest.mark.parametrize("later", ["refused", "cancelled"])
+def test_a_later_refused_or_cancelled_run_does_not_hide_a_failure(later):  # NEGATIVE
+    h = [_rec(result="failed", why="boom", ts="2026-11-20T10:00:00"), _rec(result=later, ts="2026-11-21T10:00:00")]
+    got = [ln for ln in _lines(_model(h)) if ln[2] == "problem"]
+    assert len(got) == 1 and "boom" in got[0][3]
+
+
+def test_failed_then_refused_then_ok_is_cleared():
+    h = [_rec(result="failed", ts="2026-11-20T10:00:00"), _rec(result="refused", ts="2026-11-21T10:00:00"),
+         _rec(result="ok", ts="2026-11-22T10:00:00")]
+    assert [ln for ln in _lines(_model(h)) if ln[2] == "problem"] == []
+
+
+def test_a_later_problem_still_replaces_an_earlier_one_past_a_refused_run():
+    h = [_rec(result="failed", why="first", ts="2026-11-20T10:00:00"), _rec(result="refused", ts="2026-11-21T10:00:00"),
+         _rec(result="stopped", why="second", ts="2026-11-22T10:00:00")]
+    got = [ln for ln in _lines(_model(h)) if ln[2] == "problem"]
+    assert len(got) == 1 and "second" in got[0][3] and "stopped" in got[0][3]
+
+
+@pytest.mark.parametrize("only", ["refused", "cancelled"])
+def test_a_lone_refused_or_cancelled_run_raises_no_line(only):  # NEGATIVE
+    assert _lines(_model([_rec(result=only)])) == []
+
+
+def test_recent_runs_still_lists_the_refused_run_after_a_failure():
+    h = [_rec(result="failed", ts="2026-11-20T10:00:00"), _rec(result="refused", ts="2026-11-21T10:00:00")]
+    assert [r["result"] for r in H.build_recent(h, NAMES)] == ["refused", "failed"]
+
+
 def test_a_later_ok_run_clears_a_stopped_line():
     h = [_rec(result="stopped", ts="2026-11-20T10:00:00"), _rec(result="ok", ts="2026-11-21T10:00:00")]
     assert [ln for ln in _lines(_model(h)) if ln[2] == "problem"] == []
@@ -336,7 +366,7 @@ def _sk(name, display, cat, hidden=False):
     return SimpleNamespace(name=name, display_name=display, category=cat, hidden=hidden)
 
 
-def test_launch_pad_groups_in_tab_order_with_full_paths_and_developer_group():
+def test_launch_pad_groups_in_tab_order_with_sub_tabs_and_developer_group():
     from ui import webui
     skills = [
         _sk("b2", "Zeta Bank", "banks"), _sk("b1", "Alpha Bank", "banks"),
@@ -346,13 +376,29 @@ def test_launch_pad_groups_in_tab_order_with_full_paths_and_developer_group():
         _sk("u1", "Misc", "utilities"),
     ]
     groups = webui.launch_pad_groups(skills)
-    labels = [g for g, _ in groups]
-    assert labels == ["Bank Skills", "Credit Card", "GnuCash", "Other", "Developer"]
+    assert [g for g, _ in groups] == ["Bank Skills", "Credit Card", "GnuCash", "Other", "Developer"]
     d = dict(groups)
-    assert [n for n, _ in d["Bank Skills"]] == ["Alpha Bank", "Zeta Bank"]
-    assert dict(d["GnuCash"])["ITR Workbook"] == "GnuCash > ITR > ITR Workbook"
-    assert dict(d["GnuCash"])["26AS Extract"] == "GnuCash > 26AS > 26AS Extract"
-    assert [n for n, _ in d["Developer"]] == ["Dev One", "Dev Two"]
+    # app order (discovery order within a plain group), NOT A-Z: Zeta stays first
+    assert [n for _, n in d["Bank Skills"]] == ["Zeta Bank", "Alpha Bank"]
+    assert d["GnuCash"] == [("26AS", "26AS Extract"), ("ITR", "ITR Workbook")]
+    assert [n for _, n in d["Developer"]] == ["Dev One", "Dev Two"]
+    assert all(tab == "" for g in ("Bank Skills", "Credit Card", "Other", "Developer") for tab, _ in d[g])
+
+
+def test_each_gnucash_sub_tab_is_named_once_on_its_first_line():
+    from ui import webui
+    skills = [_sk("k1", "Convert", "krc"), _sk("k2", "Reconcile", "krc"), _sk("k3", "Convert to GnuCash", "krc"),
+              _sk("t1", "Convert", "26as"), _sk("t2", "Convert to GnuCash", "26as")]
+    rows = dict(webui.launch_pad_groups(skills))["GnuCash"]
+    assert rows == [("26AS", "Convert"), ("", "Convert to GnuCash"),
+                    ("KRChoksey", "Convert"), ("", "Reconcile"), ("", "Convert to GnuCash")]
+
+
+def test_launch_pad_rows_draw_a_sub_tab_column_only_where_there_is_one():
+    from ui.tabs import home as tab_home
+    a, b = tab_home.launch_pad_rows([("GnuCash", [("26AS", "Convert"), ("", "Other")]), ("Other", [("", "Misc")])])
+    assert "26AS" in a[2] and a[1] == 2
+    assert b[2].count("<span") == 1
 
 
 def test_credit_card_and_gnucash_credit_card_read_differently():
@@ -360,18 +406,121 @@ def test_credit_card_and_gnucash_credit_card_read_differently():
     skills = [_sk("c1", "Credit Card", "credit_card"), _sk("c2", "Credit Card", "gnucash"),
               _sk("c3", "Other Card", "credit_card")]
     d = dict(webui.launch_pad_groups(skills))
-    paths = [p for g in d.values() for n, p in g if n == "Credit Card"]
-    assert len(paths) == 2 and len(set(paths)) == 2 and any(p.startswith("GnuCash >") for p in paths)
+    assert [n for _, n in d["Credit Card"]] == ["Credit Card", "Other Card"]
+    assert d["GnuCash"] == [("Banks", "Credit Card")]
+    paths = {s.name: p for s, p in webui.app_tab_order(skills)}
+    assert paths["c1"] != paths["c2"]
 
 
 def test_every_visible_real_skill_appears_once_in_the_launch_pad():
     from ui import webui
     skills_all = webui._discover_skills()
     visible = [s for s in skills_all if not s.hidden]
-    flat = [n for _, items in webui.launch_pad_groups(visible) for n, _ in items]
+    flat = [n for _, items in webui.launch_pad_groups(visible) for _, n in items]
     assert sorted(flat) == sorted(s.display_name for s in visible)
     only_hidden = {s.display_name for s in skills_all if s.hidden} - {s.display_name for s in visible}
     assert not (only_hidden & set(flat))
+
+
+# ------------------------------------------------------------------ labels for shared names ---
+
+def test_two_skills_sharing_a_display_name_get_their_sub_tab_added():
+    from ui import webui
+    skills = [_sk("t1", "Convert", "26as"), _sk("k1", "Convert", "krc"), _sk("k2", "Reconcile", "krc")]
+    labels = webui.skill_labels(skills)
+    assert labels["t1"] == "Convert (26AS)" and labels["k1"] == "Convert (KRChoksey)"
+
+
+def test_a_unique_display_name_gets_no_suffix():  # NEGATIVE
+    from ui import webui
+    skills = [_sk("t1", "Convert", "26as"), _sk("k1", "Convert", "krc"), _sk("k2", "Reconcile", "krc"),
+              _sk("b1", "Solo Bank", "banks")]
+    labels = webui.skill_labels(skills)
+    assert labels["k2"] == "Reconcile" and labels["b1"] == "Solo Bank"
+
+
+def test_labels_flow_into_the_two_panels_and_an_unknown_skill_falls_back():
+    from ui import webui
+    names = webui.skill_labels([_sk("t1", "Convert", "26as"), _sk("k1", "Convert", "krc")])
+    h = [_rec(skill="t1", result="failed"), _rec(skill="gone_skill", result="failed", entity="Entity 2")]
+    out = H.render_needs_you(H.build_needs_you(h, {}, {}, names))
+    assert "Convert (26AS)" in out and "gone_skill" in out
+    rows = H.build_recent(h, names)
+    assert {r["skill"] for r in rows} == {"Convert (26AS)", "gone_skill"}
+
+
+# ------------------------------------------------------------------ one source of order ---
+
+def _tab_paths_in_app_order(app):
+    """Every tab of a built app as its path of labels, depth first, in drawing order."""
+    cfg = app.get_config_file()
+    label = {c["id"]: (c.get("props") or {}).get("label") for c in cfg["components"] if c.get("type") == "tabitem"}
+    out = []
+
+    def walk(node, path):
+        here = path
+        if node["id"] in label:
+            here = path + (label[node["id"]],)
+            out.append(here)
+        for child in node.get("children", []) or []:
+            walk(child, here)
+    walk(cfg["layout"], ())
+    return out
+
+
+def order_matches(tab_paths, expected):
+    """True when every expected path is a tab of the app and they appear in this order."""
+    pos = -1
+    for path in expected:
+        try:
+            nxt = tab_paths.index(tuple(path), pos + 1)
+        except ValueError:
+            return False
+        pos = nxt
+    return True
+
+
+def test_the_launch_pad_order_is_the_order_of_the_built_app():
+    from ui import webui
+    visible = [s for s in webui._discover_skills() if not s.hidden]
+    expected = [p for _, p in webui.app_tab_order(visible)]
+    assert expected and order_matches(_tab_paths_in_app_order(webui.build_app(launch=False)), expected)
+
+
+def test_the_guard_catches_a_wrong_order():  # NEGATIVE
+    from ui import webui
+    visible = [s for s in webui._discover_skills() if not s.hidden]
+    expected = [p for _, p in webui.app_tab_order(visible)]
+    app_paths = _tab_paths_in_app_order(webui.build_app(launch=False))
+    swapped = list(expected)
+    swapped[3], swapped[4] = swapped[4], swapped[3]
+    assert not order_matches(app_paths, swapped)
+    assert not order_matches(app_paths, expected + [("No", "Such", "Tab")])
+
+
+def test_app_tab_order_returns_every_visible_skill_once():
+    from ui import webui
+    visible = [s for s in webui._discover_skills() if not s.hidden]
+    names = [s.name for s, _ in webui.app_tab_order(visible)]
+    assert sorted(names) == sorted(s.name for s in visible)
+
+
+# ------------------------------------------------------------------ the status row ---
+
+def test_the_status_row_is_hidden_when_empty_and_shown_when_filled():
+    from ui.tabs import home as tab_home
+    assert tab_home.status_update("").visible is False
+    filled = tab_home.status_update("Checked 2 book(s).")
+    assert filled.visible is True and filled.value == "Checked 2 book(s)."
+
+
+def test_the_built_home_starts_with_the_status_row_hidden():  # NEGATIVE
+    from ui import webui
+    from ui.tabs import home as tab_home
+    app = webui.build_app(launch=False)
+    sid = tab_home._deferred_home["status"]._id
+    row = next(c for c in app.get_config_file()["components"] if c["id"] == sid)
+    assert row["props"]["visible"] is False and row["props"]["value"] == ""
 
 
 # ------------------------------------------------------------------ the built app ---

@@ -33,6 +33,10 @@ from . import _book_registry, _config, _coverage_last, _health, _runhistory
 # cancelled raise nothing.
 PROBLEM_RESULTS = ("stopped", "failed", "attention", "not_ready", "interrupted")
 
+# A refused or cancelled run did not do the work and did not fail at it: it neither raises a line
+# nor clears or replaces an earlier one. (RECENT RUNS still lists it.)
+NEUTRAL_RESULTS = ("refused", "cancelled")
+
 _RESULT_WORD = {
     "ok": "OK", "stopped": "stopped", "failed": "failed", "attention": "needs a look",
     "not_ready": "not ready", "interrupted": "cut off", "cancelled": "cancelled",
@@ -134,6 +138,8 @@ def build_needs_you(history: list, coverage: dict, registered: dict, display_nam
             continue
         entity, year = canon(rec.get("entity")), normalize_year(rec.get("year"))
         seen_years.setdefault(entity, set()).add(year)
+        if _s(rec.get("result")) in NEUTRAL_RESULTS:
+            continue          # refused / cancelled never clear nor replace an earlier problem
         latest[(_s(rec.get("skill")), entity, year)] = rec
     for (skill, entity, year), rec in latest.items():
         result = _s(rec.get("result"))

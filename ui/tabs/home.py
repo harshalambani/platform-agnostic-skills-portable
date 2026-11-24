@@ -46,15 +46,23 @@ def _version_line() -> str:
 
 
 def launch_pad_rows(groups: list) -> list[tuple[str, int, str]]:
-    """[(group label, count, escaped html body)] for the collapsed launch pad."""
+    """[(group label, count, escaped html body)] for the collapsed launch pad. Each item is
+    (sub-tab, skill name); the sub-tab column is drawn only when a group has any."""
     out = []
     for label, items in groups:
+        has_tabs = any(tab for tab, _ in items)
         rows = "".join(
-            f"<div style='display:flex;gap:.75rem'><span style='min-width:16rem'>{html.escape(name)}</span>"
-            f"<span style='opacity:.7'>{html.escape(path)}</span></div>"
-            for name, path in items)
+            "<div style='display:flex;gap:.75rem'>"
+            + (f"<span style='min-width:9rem;opacity:.7'>{html.escape(tab)}</span>" if has_tabs else "")
+            + f"<span>{html.escape(name)}</span></div>"
+            for tab, name in items)
         out.append((label, len(items), rows))
     return out
+
+
+def status_update(message: str):
+    """The status row under the NEEDS YOU header: shown only while it has text."""
+    return gr.Markdown(value=message or "", visible=bool(message))
 
 
 def render(skills: list[SkillInfo] | None = None, *, home_tab=None, main_tabs=None,
@@ -79,7 +87,7 @@ def render(skills: list[SkillInfo] | None = None, *, home_tab=None, main_tabs=No
     with gr.Row():
         gr.Markdown("### NEEDS YOU")
         check_btn = gr.Button("Check coverage now", size="sm", scale=0, min_width=170)
-    check_status = gr.Markdown("")
+    check_status = gr.Markdown("", visible=False)
     needs = gr.HTML(_LOADING)
 
     # -- recent runs --
@@ -106,16 +114,17 @@ def render(skills: list[SkillInfo] | None = None, *, home_tab=None, main_tabs=No
         return _home_data.load_home(display_names)
 
     panels = [ai, needs, recent]
-    _deferred_home.update(fill=_fill, panels=panels)
+    _deferred_home.update(fill=_fill, panels=panels, status=check_status)
 
     if home_tab is not None:
         home_tab.select(fn=_fill, inputs=None, outputs=panels, show_progress="hidden")
 
     def _busy():
-        return gr.Button(interactive=False), "_Checking the registered books..._"
+        return gr.Button(interactive=False), status_update("_Checking the registered books..._")
 
     (check_btn.click(fn=_busy, inputs=None, outputs=[check_btn, check_status], show_progress="hidden")
-     .then(fn=_home_data.run_check_now, inputs=None, outputs=check_status, show_progress="hidden")
+     .then(fn=lambda: status_update(_home_data.run_check_now()), inputs=None, outputs=check_status,
+           show_progress="hidden")
      .then(fn=_fill, inputs=None, outputs=panels, show_progress="hidden")
      .then(fn=lambda: gr.Button(interactive=True), inputs=None, outputs=check_btn, show_progress="hidden"))
 

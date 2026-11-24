@@ -595,53 +595,128 @@ _GNUCASH_NESTED_CATEGORIES = {
 _FLAT_CATEGORY_GROUP = {"dev": "Developer"}
 
 
-def skill_tab_paths(skills: list) -> list[tuple]:
-    """UI-54: [(skill, tab path)] for every skill, in the incoming order. The tab path is
-    what the user clicks to reach the skill, e.g. ("GnuCash", "Credit Card", "Credit Card -
-    Book Spends"). The ONE place that knows the nesting rules build_app follows: GROUP_ORDER,
-    the GnuCash sub-tabs (_GNUCASH_NESTED_CATEGORIES, _GNUCASH_TAB_OF), and "a group with
-    exactly one skill renders flat". Pass the visible (non-hidden) skills. Pure."""
-    top = dict(GROUP_ORDER)
-    per_cat: dict[str, int] = {}
+# Per-tab skill order inside the GnuCash sub-tabs. Module level so build_app and
+# app_tab_order() read the SAME ranks (UI-54 follow-up).
+_IC_ORDER = {"Inter-entity Reconcile": 0, "Inter-entity Matrix": 1}
+# KRChoksey sub-tabs follow the workflow (Part I -> II -> III), not the alphabet.
+_KRC_ORDER = {"Convert": 0, "Reconcile": 1, "Convert to GnuCash": 2}
+# ITR: ranks < 50 render before the hand-written "Review Mapping" / "Advance Tax" tabs,
+# ranks >= 50 after them; unknown skills land at 99 (after).
+_ITR_ORDER = {"ITR Workbook": 0, "AIS Reconcile": 50, "MF Capital Gain Statement": 60}
+
+
+def _sort_intercompany(skills: list) -> list:
+    return sorted(skills, key=lambda s: _IC_ORDER.get(s.display_name, 99))
+
+
+def _sort_krc(skills: list) -> list:
+    return sorted(skills, key=lambda s: _KRC_ORDER.get(s.display_name, 99))
+
+
+def _split_itr(skills: list) -> tuple[list, list]:
+    """(before "Review Mapping", after "Advance Tax") for the ITR sub-tab."""
+    ordered = sorted(skills, key=lambda s: _ITR_ORDER.get(s.display_name, 99))
+    return ([s for s in ordered if _ITR_ORDER.get(s.display_name, 99) < 50],
+            [s for s in ordered if _ITR_ORDER.get(s.display_name, 99) >= 50])
+
+
+def _split_banks_skills(skills: list) -> tuple[list, list]:
+    """(before "Review", after "Review") skills of GnuCash > Banks, keyed by display name
+    exactly as the tab body builds them."""
+    by_name = {s.display_name: s for s in skills}
+    before, after = _split_banks_tabs(list(by_name))
+    return [by_name[n] for n in before], [by_name[n] for n in after]
+
+
+def app_tab_order(skills: list) -> list[tuple]:
+    """UI-54: [(skill, tab path)] for every visible skill, in the order the app draws its
+    tabs. The ONE place that knows the nesting and order rules: GROUP_ORDER, GNUCASH_ROW,
+    _GNUCASH_TAB_OF, the per-tab orders above, "a group with exactly one skill renders
+    flat" and the flat fallback tabs. build_app reads the same tables; a test walks the
+    built app and compares. The tab path is what the user clicks, e.g.
+    ("GnuCash", "Credit Card", "Credit Card - Book Spends"). Pass visible skills. Pure."""
+    grouped: dict[str, list] = {}
     for s in skills:
-        per_cat[s.category] = per_cat.get(s.category, 0) + 1
-    gc_tab = {s.name: tab
-              for tab, group in _split_gnucash_skills([s for s in skills if s.category == "gnucash"]).items()
-              for s in group}
-    out = []
-    for s in skills:
-        cat = s.category
-        if cat in _GNUCASH_NESTED_CATEGORIES:
-            path = ("GnuCash", _GNUCASH_NESTED_CATEGORIES[cat], s.display_name)
-        elif cat == "gnucash":
-            path = ("GnuCash", gc_tab[s.name], s.display_name)
-        elif cat in top:
-            path = (top[cat],) if per_cat[cat] == 1 else (top[cat], s.display_name)
+        grouped.setdefault(s.category, []).append(s)
+    out: list[tuple] = []
+    for key, label in GROUP_ORDER:
+        if key in _GNUCASH_NESTED_CATEGORIES:
+            continue                                   # drawn under GnuCash
+        cat = grouped.get(key, [])
+        if key == "gnucash":
+            gc = _split_gnucash_skills(cat)
+            before, after = _split_banks_skills(gc["Banks"])
+            itr_before, itr_after = _split_itr(grouped.get("itr", []))
+            tabs = {
+                "Banks": before + after,
+                "Credit Card": gc["Credit Card"],
+                "Partner": grouped.get("partner", []),
+                "Inter-entity": _sort_intercompany(grouped.get("intercompany", [])),
+                "26AS": grouped.get("26as", []),
+                "KRChoksey": _sort_krc(grouped.get("krc", [])),
+                "ITR": itr_before + itr_after,
+                "Coverage": gc["Coverage"],
+                "Year-End Close": gc["Year-End Close"],
+            }
+            for tab in GNUCASH_ROW:
+                for s in tabs.get(tab, []):
+                    out.append((s, (label, tab, s.display_name)))
+        elif len(cat) == 1:
+            out.append((cat[0], (label,)))
         else:
-            path = (s.display_name,)
-        out.append((s, path))
+            out.extend((s, (label, s.display_name)) for s in cat)
+    known = {k for k, _ in GROUP_ORDER} | set(_GNUCASH_NESTED_CATEGORIES)
+    out.extend((s, (s.display_name,)) for s in skills if s.category not in known)
+    return out
+
+
+def skill_tab_paths(skills: list) -> list[tuple]:
+    """[(skill, tab path)] in the incoming order (see app_tab_order). Pure."""
+    path_of = {s.name: p for s, p in app_tab_order(skills)}
+    return [(s, path_of[s.name]) for s in skills]
+
+
+def skill_labels(skills: list) -> dict[str, str]:
+    """{skill name: label} for NEEDS YOU and RECENT RUNS. A display name shared by two or
+    more visible skills gets its own sub-tab added, e.g. "Convert (26AS)" and "Convert
+    (KRChoksey)"; a unique name is left as it is. Derived from app_tab_order. Pure."""
+    ordered = app_tab_order(skills)
+    count: dict[str, int] = {}
+    for s, _ in ordered:
+        count[s.display_name] = count.get(s.display_name, 0) + 1
+    out = {}
+    for s, path in ordered:
+        label = s.display_name
+        if count[label] > 1 and len(path) >= 2:
+            label = f"{s.display_name} ({path[-2]})"
+        out[s.name] = label
     return out
 
 
 def launch_pad_groups(skills: list) -> list[tuple[str, list[tuple[str, str]]]]:
-    """UI-54: the Home launch pad. [(group label, [(skill display name, "full > tab > path")])]
-    in tab order, one group per top-level tab, skills A-Z by display name (ties by path).
-    ITR, 26AS, Inter-entity, KRChoksey and Partner sit inside GnuCash; the flat "dev" tabs
-    share one "Developer" group. Empty groups are left out. Pass the visible skills. Pure."""
-    labels = [label for key, label in GROUP_ORDER if key not in _GNUCASH_NESTED_CATEGORIES]
-    groups: dict[str, list[tuple[str, str]]] = {label: [] for label in labels}
+    """UI-54: the Home launch pad. [(group label, [(sub-tab, skill display name)])]: one group
+    per top-level tab in GROUP_ORDER, then the flat fallback groups ("Developer"); skills in
+    the app's own tab order. The sub-tab is named once, on its first line, and blank on the
+    rest; groups without sub-tabs have it blank throughout. Empty groups are left out. Pass
+    the visible skills. Pure."""
     top = dict(GROUP_ORDER)
-    for s, path in skill_tab_paths(skills):
+    groups: dict[str, list[tuple[str, str]]] = {}
+    last_tab: dict[str, str] = {}
+    for s, path in app_tab_order(skills):
         cat = s.category
-        if cat in _GNUCASH_NESTED_CATEGORIES:
-            label = "GnuCash"
+        if cat in _GNUCASH_NESTED_CATEGORIES or cat == "gnucash":
+            label, tab = "GnuCash", path[1]
         elif cat in top:
-            label = top[cat]
+            label, tab = top[cat], ""
         else:
-            label = _FLAT_CATEGORY_GROUP.get(cat, str(cat).replace("_", " ").title() or "Other")
-        groups.setdefault(label, []).append((s.display_name, " > ".join(path)))
-    return [(label, sorted(items, key=lambda t: (t[0].casefold(), t[1].casefold())))
-            for label, items in groups.items() if items]
+            label, tab = _FLAT_CATEGORY_GROUP.get(cat, str(cat).replace("_", " ").title() or "Other"), ""
+        shown = tab if tab and last_tab.get(label) != tab else ""
+        if tab:
+            last_tab[label] = tab
+        groups.setdefault(label, []).append((shown, s.display_name))
+    order = [top[k] for k, _ in GROUP_ORDER if k not in _GNUCASH_NESTED_CATEGORIES]
+    rest = [g for g in groups if g not in order]
+    return [(g, groups[g]) for g in order + rest if groups.get(g)]
 
 
 def _split_gnucash_skills(skills: list) -> dict[str, list]:
@@ -796,7 +871,8 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                 tab_home.render(
                     skills=skills, home_tab=_home_t, main_tabs=_main_tabs,
                     skill_groups=launch_pad_groups(skills),
-                    display_names={s.name: s.display_name for s in skills_all})
+                    display_names={**{s.name: s.display_name for s in skills_all},
+                                   **skill_labels(skills)})
 
             for _cat_key, _cat_label in GROUP_ORDER:
                 # 26AS is no longer a top-level tab — it's nested under GnuCash.
@@ -822,16 +898,15 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                                     # diagnostic you run before/after an
                                     # import, not a step in the import
                                     # workflow itself, so it renders last.
-                                    _by_name = {s.display_name: s for s in _cat_skills}
-                                    _before_names, _after_names = _split_banks_tabs(list(_by_name))
-                                    for _name in _before_names:
-                                        with gr.Tab(_name) as _t:
-                                            tab_generic.render(_by_name[_name], container_tab=_t)
+                                    _before_skills, _after_skills = _split_banks_skills(_cat_skills)
+                                    for _skill in _before_skills:
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review") as _rt:
                                         tab_gnucash_review.render(container_tab=_rt)
-                                    for _name in _after_names:
-                                        with gr.Tab(_name) as _t:
-                                            tab_generic.render(_by_name[_name], container_tab=_t)
+                                    for _skill in _after_skills:
+                                        with gr.Tab(_skill.display_name) as _t:
+                                            tab_generic.render(_skill, container_tab=_t)
                             # UI-01: Partner Compensation Reconciliation gets its
                             # own sub-tab, between "Banks" and "Inter-entity" — it
                             # reconciles the partner's own pay against the bank,
@@ -858,12 +933,7 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                                     # The pairwise Reconcile is the primary tool
                                     # per the skills' own manifests; Matrix is
                                     # the optional all-family roll-up on it.
-                                    _ic_order = {"Inter-entity Reconcile": 0,
-                                                 "Inter-entity Matrix": 1}
-                                    for _skill in sorted(
-                                        _grouped.get("intercompany", []),
-                                        key=lambda s: _ic_order.get(s.display_name, 99),
-                                    ):
+                                    for _skill in _sort_intercompany(_grouped.get("intercompany", [])):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
                             _lazy_group('Inter-entity', _ic_body)
@@ -879,12 +949,7 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                                 with gr.Tabs():
                                     # Order the KRChoksey sub-tabs by workflow
                                     # (Part I -> II -> III), not alphabetically.
-                                    _krc_order = {"Convert": 0, "Reconcile": 1,
-                                                  "Convert to GnuCash": 2}
-                                    for _skill in sorted(
-                                        _grouped.get("krc", []),
-                                        key=lambda s: _krc_order.get(s.display_name, 99),
-                                    ):
+                                    for _skill in _sort_krc(_grouped.get("krc", [])):
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review") as _kt:
@@ -906,19 +971,15 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                                         # the skill list is split around it rather than
                                         # iterated once. Ranks >= 50 sort after it;
                                         # unknown skills land at 99 (last).
-                                        _itr_order = {"ITR Workbook": 0,
-                                                      "AIS Reconcile": 50,
-                                                      "MF Capital Gain Statement": 60}  # renders after AIS Reconcile
-                                        _rank = lambda s, _o=_itr_order: _o.get(s.display_name, 99)  # noqa: E731
-                                        _itr_sorted = sorted(_itr_skills, key=_rank)
-                                        for _skill in [s for s in _itr_sorted if _rank(s) < 50]:
+                                        _itr_before, _itr_after = _split_itr(_itr_skills)
+                                        for _skill in _itr_before:
                                             with gr.Tab(_skill.display_name) as _t:
                                                 tab_generic.render(_skill, container_tab=_t)
                                         with gr.Tab("Review Mapping") as _mt:
                                             tab_itr_mapping_review.render(container_tab=_mt)
                                         with gr.Tab("Advance Tax") as _at:
                                             tab_advance_tax.render(container_tab=_at)
-                                        for _skill in [s for s in _itr_sorted if _rank(s) >= 50]:
+                                        for _skill in _itr_after:
                                             with gr.Tab(_skill.display_name) as _t:
                                                 tab_generic.render(_skill, container_tab=_t)
                                 _lazy_group('ITR', _itr_body)
