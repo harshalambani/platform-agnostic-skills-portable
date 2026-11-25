@@ -300,17 +300,6 @@ def test_unreadable_is_never_cached_as_a_result(tmp_path):
 # No caller changed: the four path conventions stay as they were
 # --------------------------------------------------------------------------
 
-def test_no_reader_imports_the_new_module():
-    """PR 1 adds the opener only; call-site swaps are PR 2."""
-    hits = []
-    for py in (SRC).rglob("*.py"):
-        if py.name == "gnc_book.py":
-            continue
-        if "gnc_book" in py.read_text(encoding="utf-8", errors="replace"):
-            hits.append(py.name)
-    assert hits == []
-
-
 def test_path_conventions_unchanged(books):
     from agents import gnucash_accounts as ga
     from agents.skill_itr_workbook.scripts import parse_gnucash as pg

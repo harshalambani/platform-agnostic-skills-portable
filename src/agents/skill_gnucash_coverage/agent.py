@@ -38,7 +38,6 @@ this skill only ever reads.
 """
 from __future__ import annotations
 
-import gzip
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -48,6 +47,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+from agents.gnc_book import GncBookUnreadable, read_xml_root
 from agents.gnucash_accounts import GncAccount, load_accounts, postable_accounts
 from agents.skill_gnucash_coverage import excel_writer as XL
 
@@ -100,17 +100,13 @@ _FY_RE = re.compile(r"^(\d{4})-(\d{2})$")
 # XML reading
 # ---------------------------------------------------------------------------
 
-def _read_root(path: Path) -> Optional[ET.Element]:
-    """Parse a .gnucash file (gzipped or plain XML); None if unreadable.
+def _read_root(path: Path) -> ET.Element:
+    """Parse a .gnucash file (gzipped or plain XML) via the shared opener;
+    raises GncBookUnreadable if unreadable.
     Read-only -- never touches the file otherwise, and proceeds even if a
     sibling .LCK (book open in GnuCash) is present, matching the read-only
     convention already used by skill_gnucash_intercompany's load_book()."""
-    try:
-        raw = path.read_bytes()
-        data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-        return ET.fromstring(data)
-    except Exception:
-        return None
+    return read_xml_root(path)
 
 
 def _collect_account_dates(root: ET.Element, ob_ids: frozenset) -> dict:
@@ -458,8 +454,9 @@ def _boundary_has_adjacent_evidence(
     except OSError:
         return False
 
-    adj_root = _read_root(adj_path)
-    if adj_root is None:
+    try:
+        adj_root = _read_root(adj_path)
+    except GncBookUnreadable:
         return False
     adj_accounts = load_accounts(adj_path)
     match = next((a for a in adj_accounts if a.path == account_path), None)
@@ -561,8 +558,9 @@ def scan_books(paths: list, entities_path: Optional[Path], include_other: bool,
         if not book_path.is_file():
             warnings.append(f"WARNING: book not found, skipped: {p}")
             continue
-        root = _read_root(book_path)
-        if root is None:
+        try:
+            root = _read_root(book_path)
+        except GncBookUnreadable:
             warnings.append(f"WARNING: could not read as a GnuCash book, skipped: {p}")
             continue
 

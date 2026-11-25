@@ -9,14 +9,12 @@ choices. The deterministic builder always writes a valid, balanced CSV
 """
 import ast
 import csv
-import gzip
 import json
 import os
 import re
 import subprocess
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 SCRIPT = Path(__file__).parent / "scripts" / "build_tds_journals.py"
@@ -31,6 +29,7 @@ _SCRIPTS_DIR = str(Path(__file__).parent / "scripts")
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import build_tds_journals as _BTJ  # noqa: E402
+from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402
 
 
 def _run_script(args: list[str]) -> str:
@@ -193,14 +192,10 @@ def run_build(xlsx_path: str, gnucash_path: str, output_path: str,
 
 
 def _existing_account_paths(gnucash_path: str):
-    """Set of full account paths in the .gnucash book (without 'Root Account:'),
-    or None if it can't be read. Used to compute accounts-to-create."""
-    try:
-        raw = Path(gnucash_path).read_bytes()
-        data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-        root = ET.fromstring(data)
-    except Exception:
-        return None
+    """Set of full account paths in the .gnucash book (without 'Root Account:').
+    Raises GncBookUnreadable if the book can't be read. Used to compute
+    accounts-to-create."""
+    root = read_xml_root(gnucash_path)
     ns = {"act": "http://www.gnucash.org/XML/act"}
     by_id = {}
     for a in root.iter("{http://www.gnucash.org/XML/gnc}account"):
@@ -336,7 +331,12 @@ def final_summary(output_path: str, gnucash_path: str = "",
                     "Suspense; create or unhide a postable account): "
                     + ", ".join((r.get("Deductor") or "?").strip() for r in blocked_rows))
 
-    existing = _existing_account_paths(gnucash_path) if gnucash_path else None
+    existing = None
+    if gnucash_path:
+        try:
+            existing = _existing_account_paths(gnucash_path)
+        except GncBookUnreadable as exc:
+            lines.append(f"- Accounts to create in GnuCash: NOT CHECKED, {exc}")
     if existing is not None and out.is_file():
         with out.open(newline="", encoding="utf-8") as f:
             used = {(r.get("Account") or "").strip() for r in csv.DictReader(f)}
