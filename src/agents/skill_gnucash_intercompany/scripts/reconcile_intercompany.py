@@ -30,7 +30,6 @@ Exit codes: 0 = clean tie, 2 = completed with exceptions/difference, 1 = error.
 from __future__ import annotations
 
 import argparse
-import gzip
 import re
 import sys
 from dataclasses import dataclass, field
@@ -38,6 +37,13 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 import xml.etree.ElementTree as ET
+
+try:
+    from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: F401
+except ImportError:  # stand-alone run: find the module by path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402,F401
 
 # --------------------------------------------------------------------------- #
 # GnuCash XML namespaces (element tags are fully-qualified in ElementTree).
@@ -127,8 +133,7 @@ def load_book(path: str) -> Book:
     if lck.exists():
         print(f"WARNING: {p.name}.LCK present -- book may be open in GnuCash. "
               f"Reading anyway (read-only).", file=sys.stderr)
-    with gzip.open(p, "rt", encoding="utf-8") as f:
-        root = ET.parse(f).getroot()
+    root = read_xml_root(p)
 
     accounts: dict[str, Account] = {}
     for a in root.iter(f"{GNC}account"):

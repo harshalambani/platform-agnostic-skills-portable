@@ -78,7 +78,6 @@ from __future__ import annotations
 
 import csv
 import datetime as _dt
-import gzip
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -101,6 +100,12 @@ import tds_learnings  # noqa: E402
 # process, so it finds the module by path, not through the `agents` package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import book_check as shared_book_check  # noqa: E402
+try:
+    from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: F401
+except ImportError:  # stand-alone run: find the module by path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402,F401
 from part_labels import PART_II_LABEL  # noqa: E402
 
 # -------------------- fixed account names --------------------
@@ -496,9 +501,7 @@ def monthly_debits_for_account(gnucash_path: Path, account_path: str,
     Never writes to gnucash_path. Returns {} if no account in the book
     matches account_path exactly.
     """
-    raw = gnucash_path.read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    root = ET.fromstring(data)
+    root = read_xml_root(gnucash_path)
 
     by_id: dict[str, tuple[str, Optional[str]]] = {}
     for a in root.iter(f"{_GNC_NS}account"):
@@ -712,9 +715,7 @@ def _account_flag_set(acc_el: ET.Element, ns: dict) -> frozenset:
 
 
 def load_accounts(gnucash_path: Path) -> list[Account]:
-    raw = gnucash_path.read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    root = ET.fromstring(data)
+    root = read_xml_root(gnucash_path)
     ns = {"gnc": "http://www.gnucash.org/XML/gnc",
           "act": "http://www.gnucash.org/XML/act"}
     by_id = {}
@@ -1689,9 +1690,7 @@ def load_account_balances(gnucash_path: Path) -> dict[str, float]:
     Per-FY books (one book per entity+FY) make the whole-book figure the FY
     figure; for a multi-year book it is the running balance, which is what an
     'income account has gone debit' check needs to be conservative about."""
-    raw = Path(gnucash_path).read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    root = ET.fromstring(data)
+    root = read_xml_root(gnucash_path)
     by_id: dict = {}
     for a in root.iter(f"{_GNC_NS}account"):
         name = a.find(f"{_ACT_NS}name")
@@ -1879,9 +1878,7 @@ def load_book_journals_by_num(gnucash_path: Path) -> dict:
     every transaction in the book that carries a Num. Same matching key as the
     Partner Comp posted check (Transaction ID == Num). The book is only read
     (read_bytes), never opened for write."""
-    raw = Path(gnucash_path).read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    root = ET.fromstring(data)
+    root = read_xml_root(gnucash_path)
     by_id: dict = {}
     for a in root.iter(f"{_GNC_NS}account"):
         name = a.find(f"{_ACT_NS}name")
@@ -1936,9 +1933,7 @@ LOOKALIKE_WINDOW_DAYS = 0
 def load_book_txns(gnucash_path: Path) -> list:
     """Read-only: every book transaction as a shared_book_check.BookTxn (legs in
     paise). The book is only read (read_bytes), never opened for write."""
-    raw = Path(gnucash_path).read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    root = ET.fromstring(data)
+    root = read_xml_root(gnucash_path)
     paths: dict = {}
     names = {}
     for a in root.iter(f"{_GNC_NS}account"):
