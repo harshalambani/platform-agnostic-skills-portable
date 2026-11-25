@@ -64,6 +64,7 @@ from pathlib import Path
 import yaml
 
 from .. import gnucash_accounts
+from ..gnc_book import GncBookUnreadable
 from ..entity_scope import check_26as_fy as check_fy_26as
 from ..entity_scope import check_26as_owner as check_owner_26as
 from .engine import (
@@ -430,7 +431,10 @@ def _resolve_accounts_for_journal(
             ],
             None,
         )
-    validation_errors = _validate_accounts_against_book(accounts, gnucash_path)
+    try:
+        validation_errors = _validate_accounts_against_book(accounts, gnucash_path)
+    except GncBookUnreadable as exc:
+        return {}, [], f"ERROR: the GnuCash book could not be read, so nothing was written. {exc}"
     if validation_errors:
         return {}, [], "\n".join(validation_errors)
     return accounts, [], None

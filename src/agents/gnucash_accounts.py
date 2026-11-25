@@ -31,11 +31,12 @@ to :data:`BOOL_FLAG_KEYS` here.
 """
 from __future__ import annotations
 
-import gzip
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Union
+
+from agents.gnc_book import read_xml_root
 
 # GnuCash XML namespaces (URIs are stable across GnuCash versions).
 _GNC = "http://www.gnucash.org/XML/gnc"
@@ -126,20 +127,15 @@ def _account_flags(acc_el: ET.Element) -> frozenset:
     return frozenset(flags)
 
 
-def _read_root(gnucash_path: Union[str, Path]) -> Union[ET.Element, None]:
-    """Parse a .gnucash file (gzipped or plain XML) and return its root, or
-    None if it can't be read."""
-    try:
-        raw = Path(gnucash_path).read_bytes()
-        data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-        return ET.fromstring(data)
-    except Exception:
-        return None
+def _read_root(gnucash_path: Union[str, Path]) -> ET.Element:
+    """Parse a .gnucash file (gzipped or plain XML) through the shared opener.
+    Raises GncBookUnreadable if the book cannot be read -- never None."""
+    return read_xml_root(gnucash_path)
 
 
 def load_accounts(gnucash_path: Union[str, Path]) -> list[GncAccount]:
     """Read EVERY account in the book (placeholders/hidden included) with its
-    special-type flags resolved. Returns [] if the file can't be read.
+    special-type flags resolved. Raises GncBookUnreadable if the file can't be read.
 
     Callers that want only valid posting targets should pass the result through
     :func:`postable_accounts` (or use :func:`read_postable_paths`). The full
@@ -147,8 +143,6 @@ def load_accounts(gnucash_path: Union[str, Path]) -> list[GncAccount]:
     exist?") must still see placeholders — only *candidacy* is gated on flags.
     """
     root = _read_root(gnucash_path)
-    if root is None:
-        return []
 
     ns = {"act": _ACT}
     raw: dict[str, dict] = {}
@@ -261,12 +255,10 @@ def fy_start_year_of(iso_date: str) -> Union[int, None]:
 def read_account_activity(gnucash_path: Union[str, Path]):
     """Return ``(fy_years, balance)`` per account id, read from the book's
     transactions: the set of FY start years in which the account has a split,
-    and the net balance (as a Fraction) over all time. ``({}, {})`` if the
-    book cannot be read. Hidden accounts are included (nothing is dropped)."""
+    and the net balance (as a Fraction) over all time. Raises
+    GncBookUnreadable if the book cannot be read. Hidden accounts are included (nothing is dropped)."""
     from fractions import Fraction
     root = _read_root(gnucash_path)
-    if root is None:
-        return {}, {}
     years: dict[str, set] = {}
     bal: dict[str, "Fraction"] = {}
     for trn in root.iter(f"{{{_GNC}}}transaction"):

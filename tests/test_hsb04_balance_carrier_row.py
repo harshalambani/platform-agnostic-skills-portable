@@ -111,7 +111,7 @@ def test_drop_runs_after_the_balance_and_opening_checks():
     src = inspect.getsource(pipe)
     drop = src.index("n_carrier = _drop_balance_carriers(output_path")
     for earlier in ("verify_running_balance(canonical_rows)",
-                    "_reconcile_opening_balance(\n            canonical_rows",
+                    "_reconcile_opening_balance(\n                canonical_rows",
                     "detect_contra_entries(\n                    canonical_rows",
                     "mapper_run("):
         assert src.index(earlier) < drop, earlier

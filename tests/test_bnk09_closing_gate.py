@@ -71,6 +71,7 @@ def _write_book(tmp_path: Path, txns: list, name: str = "book.gnucash") -> Path:
            'xmlns:trn="http://www.gnucash.org/XML/trn" '
            'xmlns:split="http://www.gnucash.org/XML/split" '
            'xmlns:ts="http://www.gnucash.org/XML/ts">',
+           '<gnc:book version="2.0.0">',
            '<gnc:account version="2.0.0"><act:name>Root Account</act:name>'
            '<act:id type="guid">root</act:id><act:type>ROOT</act:type></gnc:account>']
     for pth in sorted(paths):
@@ -88,6 +89,7 @@ def _write_book(tmp_path: Path, txns: list, name: str = "book.gnucash") -> Path:
             f'<gnc:transaction version="2.0.0"><trn:description>{desc}</trn:description>'
             f'<trn:date-posted><ts:date>{d} 00:00:00 +0000</ts:date></trn:date-posted>'
             f'<trn:splits>{sp}</trn:splits></gnc:transaction>')
+    xml.append("</gnc:book>")
     xml.append("</gnc-v2>")
     book = tmp_path / name
     with gzip.open(book, "wt", encoding="utf-8") as f:

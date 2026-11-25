@@ -121,6 +121,7 @@ _GNC_XML = """<?xml version="1.0" encoding="utf-8"?>
         xmlns:split="http://www.gnucash.org/XML/split"
         xmlns:ts="http://www.gnucash.org/XML/ts"
         xmlns:cmdty="http://www.gnucash.org/XML/cmdty">
+ <gnc:book version="2.0.0">
  <gnc:account version="2.0.0">
   <act:name>HDFC Bank</act:name>
   <act:id type="guid">aaa</act:id>
@@ -143,6 +144,7 @@ _GNC_XML = """<?xml version="1.0" encoding="utf-8"?>
    </trn:split>
   </trn:splits>
  </gnc:transaction>
+</gnc:book>
 </gnc-v2>
 """
 

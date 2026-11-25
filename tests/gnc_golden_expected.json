@@ -1,0 +1,1206 @@
+{
+ "gnucash_accounts:TargetGuard.from_book": {
+  "known": true,
+  "reasons": {
+   "": null,
+   "Assets": "target is a placeholder account in the book",
+   "Assets:Bank": null,
+   "Assets:Bank:Demo Bank Savings": null,
+   "Assets:Bank:Old Demo Account": "target is hidden in the book",
+   "Assets:Stocks": null,
+   "Assets:Stocks:ACME LTD": null,
+   "Equity": null,
+   "Equity:Opening Balances": null,
+   "Expenses": null,
+   "Expenses:Food": null,
+   "Income": null,
+   "Income:Salary": null
+  }
+ },
+ "gnucash_accounts:load_accounts": [
+  {
+   "id": "r0",
+   "name": "Root Account",
+   "parent_id": null,
+   "path": "",
+   "special_flags": [],
+   "type": "ROOT"
+  },
+  {
+   "id": "a1",
+   "name": "Assets",
+   "parent_id": "r0",
+   "path": "Assets",
+   "special_flags": [
+    "placeholder"
+   ],
+   "type": "ASSET"
+  },
+  {
+   "id": "a2",
+   "name": "Bank",
+   "parent_id": "a1",
+   "path": "Assets:Bank",
+   "special_flags": [],
+   "type": "ASSET"
+  },
+  {
+   "id": "a3",
+   "name": "Demo Bank Savings",
+   "parent_id": "a2",
+   "path": "Assets:Bank:Demo Bank Savings",
+   "special_flags": [],
+   "type": "BANK"
+  },
+  {
+   "id": "a4",
+   "name": "Old Demo Account",
+   "parent_id": "a2",
+   "path": "Assets:Bank:Old Demo Account",
+   "special_flags": [
+    "hidden"
+   ],
+   "type": "BANK"
+  },
+  {
+   "id": "a5",
+   "name": "Stocks",
+   "parent_id": "a1",
+   "path": "Assets:Stocks",
+   "special_flags": [],
+   "type": "ASSET"
+  },
+  {
+   "id": "a6",
+   "name": "ACME LTD",
+   "parent_id": "a5",
+   "path": "Assets:Stocks:ACME LTD",
+   "special_flags": [],
+   "type": "STOCK"
+  },
+  {
+   "id": "e1",
+   "name": "Expenses",
+   "parent_id": "r0",
+   "path": "Expenses",
+   "special_flags": [],
+   "type": "EXPENSE"
+  },
+  {
+   "id": "e2",
+   "name": "Food",
+   "parent_id": "e1",
+   "path": "Expenses:Food",
+   "special_flags": [],
+   "type": "EXPENSE"
+  },
+  {
+   "id": "i1",
+   "name": "Income",
+   "parent_id": "r0",
+   "path": "Income",
+   "special_flags": [],
+   "type": "INCOME"
+  },
+  {
+   "id": "i2",
+   "name": "Salary",
+   "parent_id": "i1",
+   "path": "Income:Salary",
+   "special_flags": [],
+   "type": "INCOME"
+  },
+  {
+   "id": "q1",
+   "name": "Equity",
+   "parent_id": "r0",
+   "path": "Equity",
+   "special_flags": [],
+   "type": "EQUITY"
+  },
+  {
+   "id": "q2",
+   "name": "Opening Balances",
+   "parent_id": "q1",
+   "path": "Equity:Opening Balances",
+   "special_flags": [
+    "opening-balance"
+   ],
+   "type": "EQUITY"
+  }
+ ],
+ "gnucash_accounts:read_account_activity": {
+  "bal": {
+   "a3": "49500",
+   "a6": "1000",
+   "e2": "500",
+   "i2": "-50000",
+   "q2": "-1000"
+  },
+  "years": {
+   "a3": [
+    2025
+   ],
+   "a6": [
+    2025
+   ],
+   "e2": [
+    2025
+   ],
+   "i2": [
+    2025
+   ],
+   "q2": [
+    2025
+   ]
+  }
+ },
+ "skill_26as_journal.scripts.build_tds_journals:load_account_balances": {
+  "Assets:Bank:Demo Bank Savings": 49500.0,
+  "Assets:Stocks:ACME LTD": 1000.0,
+  "Equity:Opening Balances": -1000.0,
+  "Expenses:Food": 500.0,
+  "Income:Salary": -50000.0
+ },
+ "skill_26as_journal.scripts.build_tds_journals:load_accounts": [
+  {
+   "blocked": true,
+   "leaf": "Assets",
+   "path": "Assets",
+   "special": true,
+   "type": "ASSET"
+  },
+  {
+   "blocked": false,
+   "leaf": "Bank",
+   "path": "Assets:Bank",
+   "special": false,
+   "type": "ASSET"
+  },
+  {
+   "blocked": false,
+   "leaf": "Demo Bank Savings",
+   "path": "Assets:Bank:Demo Bank Savings",
+   "special": false,
+   "type": "BANK"
+  },
+  {
+   "blocked": true,
+   "leaf": "Old Demo Account",
+   "path": "Assets:Bank:Old Demo Account",
+   "special": true,
+   "type": "BANK"
+  },
+  {
+   "blocked": false,
+   "leaf": "Stocks",
+   "path": "Assets:Stocks",
+   "special": false,
+   "type": "ASSET"
+  },
+  {
+   "blocked": false,
+   "leaf": "ACME LTD",
+   "path": "Assets:Stocks:ACME LTD",
+   "special": false,
+   "type": "STOCK"
+  },
+  {
+   "blocked": false,
+   "leaf": "Expenses",
+   "path": "Expenses",
+   "special": false,
+   "type": "EXPENSE"
+  },
+  {
+   "blocked": false,
+   "leaf": "Food",
+   "path": "Expenses:Food",
+   "special": false,
+   "type": "EXPENSE"
+  },
+  {
+   "blocked": false,
+   "leaf": "Income",
+   "path": "Income",
+   "special": false,
+   "type": "INCOME"
+  },
+  {
+   "blocked": false,
+   "leaf": "Salary",
+   "path": "Income:Salary",
+   "special": false,
+   "type": "INCOME"
+  },
+  {
+   "blocked": false,
+   "leaf": "Equity",
+   "path": "Equity",
+   "special": false,
+   "type": "EQUITY"
+  },
+  {
+   "blocked": false,
+   "leaf": "Opening Balances",
+   "path": "Equity:Opening Balances",
+   "special": true,
+   "type": "EQUITY"
+  }
+ ],
+ "skill_26as_journal.scripts.build_tds_journals:load_book_journals_by_num": {
+  "100": [
+   {
+    "Assets:Bank:Demo Bank Savings": 1000.0,
+    "Equity:Opening Balances": -1000.0
+   }
+  ],
+  "101": [
+   {
+    "Assets:Bank:Demo Bank Savings": 50000.0,
+    "Income:Salary": -50000.0
+   }
+  ],
+  "102": [
+   {
+    "Assets:Bank:Demo Bank Savings": -500.0,
+    "Expenses:Food": 500.0
+   }
+  ],
+  "103": [
+   {
+    "Assets:Bank:Demo Bank Savings": -1000.0,
+    "Assets:Stocks:ACME LTD": 1000.0
+   }
+  ]
+ },
+ "skill_26as_journal.scripts.build_tds_journals:load_book_txns": [
+  {
+   "date": "datetime.date(2025, 5, 1)",
+   "id": "0",
+   "legs": [
+    [
+     "Assets:Bank:Demo Bank Savings",
+     100000
+    ],
+    [
+     "Equity:Opening Balances",
+     -100000
+    ]
+   ],
+   "num": "100",
+   "qty": []
+  },
+  {
+   "date": "datetime.date(2025, 6, 10)",
+   "id": "1",
+   "legs": [
+    [
+     "Assets:Bank:Demo Bank Savings",
+     5000000
+    ],
+    [
+     "Income:Salary",
+     -5000000
+    ]
+   ],
+   "num": "101",
+   "qty": []
+  },
+  {
+   "date": "datetime.date(2025, 6, 12)",
+   "id": "2",
+   "legs": [
+    [
+     "Expenses:Food",
+     50000
+    ],
+    [
+     "Assets:Bank:Demo Bank Savings",
+     -50000
+    ]
+   ],
+   "num": "102",
+   "qty": []
+  },
+  {
+   "date": "datetime.date(2025, 6, 15)",
+   "id": "3",
+   "legs": [
+    [
+     "Assets:Stocks:ACME LTD",
+     100000
+    ],
+    [
+     "Assets:Bank:Demo Bank Savings",
+     -100000
+    ]
+   ],
+   "num": "103",
+   "qty": []
+  }
+ ],
+ "skill_26as_journal.scripts.build_tds_journals:monthly_debits_for_account": {
+  "2025-05": 1000.0,
+  "2025-06": 48500.0
+ },
+ "skill_26as_journal.tools:_existing_account_paths": [
+  "",
+  "Assets",
+  "Assets:Bank",
+  "Assets:Bank:Demo Bank Savings",
+  "Assets:Bank:Old Demo Account",
+  "Assets:Stocks",
+  "Assets:Stocks:ACME LTD",
+  "Equity",
+  "Equity:Opening Balances",
+  "Expenses",
+  "Expenses:Food",
+  "Income",
+  "Income:Salary"
+ ],
+ "skill_gnucash_coverage.agent:_read_root+_collect_account_dates": {
+  "a3": [
+   [
+    "2025-05-01",
+    true
+   ],
+   [
+    "2025-06-10",
+    false
+   ],
+   [
+    "2025-06-12",
+    false
+   ],
+   [
+    "2025-06-15",
+    false
+   ]
+  ],
+  "a6": [
+   [
+    "2025-06-15",
+    false
+   ]
+  ],
+  "e2": [
+   [
+    "2025-06-12",
+    false
+   ]
+  ],
+  "i2": [
+   [
+    "2025-06-10",
+    false
+   ]
+  ],
+  "q2": [
+   [
+    "2025-05-01",
+    true
+   ]
+  ]
+ },
+ "skill_gnucash_intercompany.scripts.reconcile_intercompany:load_book": {
+  "accounts": {
+   "a1": {
+    "atype": "ASSET",
+    "guid": "a1",
+    "name": "Assets",
+    "parent": "r0"
+   },
+   "a2": {
+    "atype": "ASSET",
+    "guid": "a2",
+    "name": "Bank",
+    "parent": "a1"
+   },
+   "a3": {
+    "atype": "BANK",
+    "guid": "a3",
+    "name": "Demo Bank Savings",
+    "parent": "a2"
+   },
+   "a4": {
+    "atype": "BANK",
+    "guid": "a4",
+    "name": "Old Demo Account",
+    "parent": "a2"
+   },
+   "a5": {
+    "atype": "ASSET",
+    "guid": "a5",
+    "name": "Stocks",
+    "parent": "a1"
+   },
+   "a6": {
+    "atype": "STOCK",
+    "guid": "a6",
+    "name": "ACME LTD",
+    "parent": "a5"
+   },
+   "e1": {
+    "atype": "EXPENSE",
+    "guid": "e1",
+    "name": "Expenses",
+    "parent": "r0"
+   },
+   "e2": {
+    "atype": "EXPENSE",
+    "guid": "e2",
+    "name": "Food",
+    "parent": "e1"
+   },
+   "i1": {
+    "atype": "INCOME",
+    "guid": "i1",
+    "name": "Income",
+    "parent": "r0"
+   },
+   "i2": {
+    "atype": "INCOME",
+    "guid": "i2",
+    "name": "Salary",
+    "parent": "i1"
+   },
+   "q1": {
+    "atype": "EQUITY",
+    "guid": "q1",
+    "name": "Equity",
+    "parent": "r0"
+   },
+   "q2": {
+    "atype": "EQUITY",
+    "guid": "q2",
+    "name": "Opening Balances",
+    "parent": "q1"
+   },
+   "r0": {
+    "atype": "ROOT",
+    "guid": "r0",
+    "name": "Root Account",
+    "parent": null
+   }
+  },
+  "fy": null,
+  "owner": "BOOKSTEM"
+ },
+ "skill_gnucash_pipeline.agent:_get_gnucash_account_balance": {
+  "account_name": "Root Account:Assets:Bank:Demo Bank Savings",
+  "ambiguous": false,
+  "balance": 49500.0,
+  "balance_before_start": 49500.0,
+  "candidates": [
+   "Assets:Bank:Demo Bank Savings"
+  ],
+  "double_booking": [],
+  "found": true,
+  "last_txn_date": "2025-06-15",
+  "match_note": null,
+  "match_warning": null,
+  "other_book_notes": [],
+  "refused": false,
+  "wrong_book": false
+ },
+ "skill_gnucash_reconciler.agent:parse_gnucash_for_reconcile": {
+  "account_filter": null,
+  "accounts": {
+   "a1": {
+    "name": "Assets",
+    "parent_id": "r0",
+    "path": "Root Account:Assets",
+    "type": "ASSET"
+   },
+   "a2": {
+    "name": "Bank",
+    "parent_id": "a1",
+    "path": "Root Account:Assets:Bank",
+    "type": "ASSET"
+   },
+   "a3": {
+    "name": "Demo Bank Savings",
+    "parent_id": "a2",
+    "path": "Root Account:Assets:Bank:Demo Bank Savings",
+    "type": "BANK"
+   },
+   "a4": {
+    "name": "Old Demo Account",
+    "parent_id": "a2",
+    "path": "Root Account:Assets:Bank:Old Demo Account",
+    "type": "BANK"
+   },
+   "a5": {
+    "name": "Stocks",
+    "parent_id": "a1",
+    "path": "Root Account:Assets:Stocks",
+    "type": "ASSET"
+   },
+   "a6": {
+    "name": "ACME LTD",
+    "parent_id": "a5",
+    "path": "Root Account:Assets:Stocks:ACME LTD",
+    "type": "STOCK"
+   },
+   "e1": {
+    "name": "Expenses",
+    "parent_id": "r0",
+    "path": "Root Account:Expenses",
+    "type": "EXPENSE"
+   },
+   "e2": {
+    "name": "Food",
+    "parent_id": "e1",
+    "path": "Root Account:Expenses:Food",
+    "type": "EXPENSE"
+   },
+   "i1": {
+    "name": "Income",
+    "parent_id": "r0",
+    "path": "Root Account:Income",
+    "type": "INCOME"
+   },
+   "i2": {
+    "name": "Salary",
+    "parent_id": "i1",
+    "path": "Root Account:Income:Salary",
+    "type": "INCOME"
+   },
+   "q1": {
+    "name": "Equity",
+    "parent_id": "r0",
+    "path": "Root Account:Equity",
+    "type": "EQUITY"
+   },
+   "q2": {
+    "name": "Opening Balances",
+    "parent_id": "q1",
+    "path": "Root Account:Equity:Opening Balances",
+    "type": "EQUITY"
+   },
+   "r0": {
+    "name": "Root Account",
+    "parent_id": null,
+    "path": "Root Account",
+    "type": "ROOT"
+   }
+  },
+  "transactions": [
+   {
+    "account": "Root Account:Assets:Bank:Demo Bank Savings",
+    "amount": 1000.0,
+    "date": "2025-05-01",
+    "description": "OPENING 100",
+    "num": "100",
+    "other_accounts": [
+     "Root Account:Equity:Opening Balances"
+    ]
+   },
+   {
+    "account": "Root Account:Equity:Opening Balances",
+    "amount": -1000.0,
+    "date": "2025-05-01",
+    "description": "OPENING 100",
+    "num": "100",
+    "other_accounts": [
+     "Root Account:Assets:Bank:Demo Bank Savings"
+    ]
+   },
+   {
+    "account": "Root Account:Assets:Bank:Demo Bank Savings",
+    "amount": 50000.0,
+    "date": "2025-06-10",
+    "description": "SALARY JUNE 101",
+    "num": "101",
+    "other_accounts": [
+     "Root Account:Income:Salary"
+    ]
+   },
+   {
+    "account": "Root Account:Income:Salary",
+    "amount": -50000.0,
+    "date": "2025-06-10",
+    "description": "SALARY JUNE 101",
+    "num": "101",
+    "other_accounts": [
+     "Root Account:Assets:Bank:Demo Bank Savings"
+    ]
+   },
+   {
+    "account": "Root Account:Expenses:Food",
+    "amount": 500.0,
+    "date": "2025-06-12",
+    "description": "CAFE LUNCH 102",
+    "num": "102",
+    "other_accounts": [
+     "Root Account:Assets:Bank:Demo Bank Savings"
+    ]
+   },
+   {
+    "account": "Root Account:Assets:Bank:Demo Bank Savings",
+    "amount": -500.0,
+    "date": "2025-06-12",
+    "description": "CAFE LUNCH 102",
+    "num": "102",
+    "other_accounts": [
+     "Root Account:Expenses:Food"
+    ]
+   },
+   {
+    "account": "Root Account:Assets:Stocks:ACME LTD",
+    "amount": 1000.0,
+    "date": "2025-06-15",
+    "description": "BUY ACME 103",
+    "num": "103",
+    "other_accounts": [
+     "Root Account:Assets:Bank:Demo Bank Savings"
+    ]
+   },
+   {
+    "account": "Root Account:Assets:Bank:Demo Bank Savings",
+    "amount": -1000.0,
+    "date": "2025-06-15",
+    "description": "BUY ACME 103",
+    "num": "103",
+    "other_accounts": [
+     "Root Account:Assets:Stocks:ACME LTD"
+    ]
+   }
+  ]
+ },
+ "skill_gnucash_reconciler.agent:parse_gnucash_for_reconcile(filter)": {
+  "account_filter": "Assets:Bank:Demo Bank Savings",
+  "accounts": {
+   "a1": {
+    "name": "Assets",
+    "parent_id": "r0",
+    "path": "Root Account:Assets",
+    "type": "ASSET"
+   },
+   "a2": {
+    "name": "Bank",
+    "parent_id": "a1",
+    "path": "Root Account:Assets:Bank",
+    "type": "ASSET"
+   },
+   "a3": {
+    "name": "Demo Bank Savings",
+    "parent_id": "a2",
+    "path": "Root Account:Assets:Bank:Demo Bank Savings",
+    "type": "BANK"
+   },
+   "a4": {
+    "name": "Old Demo Account",
+    "parent_id": "a2",
+    "path": "Root Account:Assets:Bank:Old Demo Account",
+    "type": "BANK"
+   },
+   "a5": {
+    "name": "Stocks",
+    "parent_id": "a1",
+    "path": "Root Account:Assets:Stocks",
+    "type": "ASSET"
+   },
+   "a6": {
+    "name": "ACME LTD",
+    "parent_id": "a5",
+    "path": "Root Account:Assets:Stocks:ACME LTD",
+    "type": "STOCK"
+   },
+   "e1": {
+    "name": "Expenses",
+    "parent_id": "r0",
+    "path": "Root Account:Expenses",
+    "type": "EXPENSE"
+   },
+   "e2": {
+    "name": "Food",
+    "parent_id": "e1",
+    "path": "Root Account:Expenses:Food",
+    "type": "EXPENSE"
+   },
+   "i1": {
+    "name": "Income",
+    "parent_id": "r0",
+    "path": "Root Account:Income",
+    "type": "INCOME"
+   },
+   "i2": {
+    "name": "Salary",
+    "parent_id": "i1",
+    "path": "Root Account:Income:Salary",
+    "type": "INCOME"
+   },
+   "q1": {
+    "name": "Equity",
+    "parent_id": "r0",
+    "path": "Root Account:Equity",
+    "type": "EQUITY"
+   },
+   "q2": {
+    "name": "Opening Balances",
+    "parent_id": "q1",
+    "path": "Root Account:Equity:Opening Balances",
+    "type": "EQUITY"
+   },
+   "r0": {
+    "name": "Root Account",
+    "parent_id": null,
+    "path": "Root Account",
+    "type": "ROOT"
+   }
+  },
+  "transactions": []
+ },
+ "skill_gnucash_xml_extractor.agent:parse_gnucash_file": {
+  "account_tree": {
+   "a1": "Assets",
+   "a2": "Bank",
+   "a3": "Demo Bank Savings",
+   "a4": "Old Demo Account",
+   "a5": "Stocks",
+   "a6": "ACME LTD",
+   "e1": "Expenses",
+   "e2": "Food",
+   "i1": "Income",
+   "i2": "Salary",
+   "q1": "Equity",
+   "q2": "Opening Balances",
+   "r0": "Root Account"
+  },
+  "mappings": {
+   "BoB": [],
+   "HDFC": [],
+   "HSBC": [],
+   "ICICI": [],
+   "Kotak": [],
+   "SBM": []
+  },
+  "metadata": {
+   "gnucash_file": "BOOK",
+   "partition_summary": {},
+   "total_accounts": 13,
+   "total_transactions_parsed": 4,
+   "total_transactions_skipped": 4
+  },
+  "own_bank_accounts": [
+   "Root Account:Assets:Bank:Demo Bank Savings"
+  ]
+ },
+ "skill_itr_workbook.scripts.parse_gnucash:parse_book": {
+  "accounts": {
+   "a1": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a1",
+    "name": "Assets",
+    "parent_guid": "r0",
+    "path": "Assets",
+    "type": "ASSET"
+   },
+   "a2": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a2",
+    "name": "Bank",
+    "parent_guid": "a1",
+    "path": "Assets/Bank",
+    "type": "ASSET"
+   },
+   "a3": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a3",
+    "name": "Demo Bank Savings",
+    "parent_guid": "a2",
+    "path": "Assets/Bank/Demo Bank Savings",
+    "type": "BANK"
+   },
+   "a4": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a4",
+    "name": "Old Demo Account",
+    "parent_guid": "a2",
+    "path": "Assets/Bank/Old Demo Account",
+    "type": "BANK"
+   },
+   "a5": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a5",
+    "name": "Stocks",
+    "parent_guid": "a1",
+    "path": "Assets/Stocks",
+    "type": "ASSET"
+   },
+   "a6": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "a6",
+    "name": "ACME LTD",
+    "parent_guid": "a5",
+    "path": "Assets/Stocks/ACME LTD",
+    "type": "STOCK"
+   },
+   "e1": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "e1",
+    "name": "Expenses",
+    "parent_guid": "r0",
+    "path": "Expenses",
+    "type": "EXPENSE"
+   },
+   "e2": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "e2",
+    "name": "Food",
+    "parent_guid": "e1",
+    "path": "Expenses/Food",
+    "type": "EXPENSE"
+   },
+   "i1": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "i1",
+    "name": "Income",
+    "parent_guid": "r0",
+    "path": "Income",
+    "type": "INCOME"
+   },
+   "i2": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "i2",
+    "name": "Salary",
+    "parent_guid": "i1",
+    "path": "Income/Salary",
+    "type": "INCOME"
+   },
+   "q1": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "q1",
+    "name": "Equity",
+    "parent_guid": "r0",
+    "path": "Equity",
+    "type": "EQUITY"
+   },
+   "q2": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "q2",
+    "name": "Opening Balances",
+    "parent_guid": "q1",
+    "path": "Equity/Opening Balances",
+    "type": "EQUITY"
+   },
+   "r0": {
+    "commodity_id": "INR",
+    "commodity_space": "CURRENCY",
+    "guid": "r0",
+    "name": "Root Account",
+    "parent_guid": null,
+    "path": "Root Account",
+    "type": "ROOT"
+   }
+  },
+  "transactions": [
+   {
+    "date_posted": "datetime.date(2025, 5, 1)",
+    "description": "OPENING",
+    "guid": "t1",
+    "num": "100",
+    "splits": [
+     {
+      "account_guid": "a3",
+      "action": null,
+      "guid": "t10",
+      "quantity": "Fraction(1000, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(1000, 1)"
+     },
+     {
+      "account_guid": "q2",
+      "action": null,
+      "guid": "t11",
+      "quantity": "Fraction(-1000, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(-1000, 1)"
+     }
+    ]
+   },
+   {
+    "date_posted": "datetime.date(2025, 6, 10)",
+    "description": "SALARY JUNE",
+    "guid": "t2",
+    "num": "101",
+    "splits": [
+     {
+      "account_guid": "a3",
+      "action": null,
+      "guid": "t20",
+      "quantity": "Fraction(50000, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(50000, 1)"
+     },
+     {
+      "account_guid": "i2",
+      "action": null,
+      "guid": "t21",
+      "quantity": "Fraction(-50000, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(-50000, 1)"
+     }
+    ]
+   },
+   {
+    "date_posted": "datetime.date(2025, 6, 12)",
+    "description": "CAFE LUNCH",
+    "guid": "t3",
+    "num": "102",
+    "splits": [
+     {
+      "account_guid": "e2",
+      "action": null,
+      "guid": "t30",
+      "quantity": "Fraction(500, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(500, 1)"
+     },
+     {
+      "account_guid": "a3",
+      "action": null,
+      "guid": "t31",
+      "quantity": "Fraction(-500, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(-500, 1)"
+     }
+    ]
+   },
+   {
+    "date_posted": "datetime.date(2025, 6, 15)",
+    "description": "BUY ACME",
+    "guid": "t4",
+    "num": "103",
+    "splits": [
+     {
+      "account_guid": "a6",
+      "action": null,
+      "guid": "t40",
+      "quantity": "Fraction(10, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(1000, 1)"
+     },
+     {
+      "account_guid": "a3",
+      "action": null,
+      "guid": "t41",
+      "quantity": "Fraction(-1000, 1)",
+      "reconciled_state": "n",
+      "value": "Fraction(-1000, 1)"
+     }
+    ]
+   }
+  ]
+ },
+ "skill_krc_gnucash.scripts.build_krc_gnucash:load_book": {
+  "acc": {
+   "a1": {
+    "hidden": false,
+    "name": "Assets",
+    "par": "r0",
+    "special": true,
+    "typ": "ASSET"
+   },
+   "a2": {
+    "hidden": false,
+    "name": "Bank",
+    "par": "a1",
+    "special": false,
+    "typ": "ASSET"
+   },
+   "a3": {
+    "hidden": false,
+    "name": "Demo Bank Savings",
+    "par": "a2",
+    "special": false,
+    "typ": "BANK"
+   },
+   "a4": {
+    "hidden": true,
+    "name": "Old Demo Account",
+    "par": "a2",
+    "special": true,
+    "typ": "BANK"
+   },
+   "a5": {
+    "hidden": false,
+    "name": "Stocks",
+    "par": "a1",
+    "special": false,
+    "typ": "ASSET"
+   },
+   "a6": {
+    "hidden": false,
+    "name": "ACME LTD",
+    "par": "a5",
+    "special": false,
+    "typ": "STOCK"
+   },
+   "e1": {
+    "hidden": false,
+    "name": "Expenses",
+    "par": "r0",
+    "special": false,
+    "typ": "EXPENSE"
+   },
+   "e2": {
+    "hidden": false,
+    "name": "Food",
+    "par": "e1",
+    "special": false,
+    "typ": "EXPENSE"
+   },
+   "i1": {
+    "hidden": false,
+    "name": "Income",
+    "par": "r0",
+    "special": false,
+    "typ": "INCOME"
+   },
+   "i2": {
+    "hidden": false,
+    "name": "Salary",
+    "par": "i1",
+    "special": false,
+    "typ": "INCOME"
+   },
+   "q1": {
+    "hidden": false,
+    "name": "Equity",
+    "par": "r0",
+    "special": false,
+    "typ": "EQUITY"
+   },
+   "q2": {
+    "hidden": false,
+    "name": "Opening Balances",
+    "par": "q1",
+    "special": true,
+    "typ": "EQUITY"
+   },
+   "r0": {
+    "hidden": false,
+    "name": "Root Account",
+    "par": null,
+    "special": false,
+    "typ": "ROOT"
+   }
+  },
+  "holdings": {
+   "Assets:Stocks:ACME LTD": [
+    [
+     "datetime.date(2025, 6, 15)",
+     "Fraction(10, 1)",
+     "Fraction(100, 1)"
+    ]
+   ]
+  },
+  "paths": {
+   "a1": "Assets",
+   "a2": "Assets:Bank",
+   "a3": "Assets:Bank:Demo Bank Savings",
+   "a4": "Assets:Bank:Old Demo Account",
+   "a5": "Assets:Stocks",
+   "a6": "Assets:Stocks:ACME LTD",
+   "e1": "Expenses",
+   "e2": "Expenses:Food",
+   "i1": "Income",
+   "i2": "Income:Salary",
+   "q1": "Equity",
+   "q2": "Equity:Opening Balances",
+   "r0": ""
+  },
+  "stock_guids": [
+   "a6"
+  ]
+ },
+ "skill_krc_gnucash.scripts.build_krc_gnucash:load_book_txns": [
+  {
+   "date": "datetime.date(2025, 5, 1)",
+   "num": "100",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     100000,
+     "Fraction(1000, 1)"
+    ],
+    "Equity:Opening Balances": [
+     -100000,
+     "Fraction(-1000, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 10)",
+   "num": "101",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     5000000,
+     "Fraction(50000, 1)"
+    ],
+    "Income:Salary": [
+     -5000000,
+     "Fraction(-50000, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 12)",
+   "num": "102",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     -50000,
+     "Fraction(-500, 1)"
+    ],
+    "Expenses:Food": [
+     50000,
+     "Fraction(500, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 15)",
+   "num": "103",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     -100000,
+     "Fraction(-1000, 1)"
+    ],
+    "Assets:Stocks:ACME LTD": [
+     100000,
+     "Fraction(10, 1)"
+    ]
+   }
+  }
+ ],
+ "skill_year_end_close.closing_check:check_closed": {
+  "closing_entries": 0,
+  "expense_nonzero": [
+   "Expenses:Food"
+  ],
+  "failed": [
+   "(a) Income accounts are not zero at 31 March",
+   "(a) Expense accounts are not zero at 31 March",
+   "(b) no closing entries dated 31 March"
+  ],
+  "income_nonzero": [
+   "Income:Salary"
+  ],
+  "note": "",
+  "ok": false
+ }
+}

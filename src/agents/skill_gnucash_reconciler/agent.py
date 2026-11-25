@@ -7,14 +7,19 @@ Flags: duplicates, balance gaps, missing transactions.
 
 import json
 import csv
-import gzip
 import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Any
 from datetime import datetime, timedelta
 from collections import defaultdict
-import xml.etree.ElementTree as ET
 import logging
+
+try:
+    from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: F401
+except ImportError:  # stand-alone run: find the module by path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402,F401
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +29,7 @@ logger = logging.getLogger(__name__)
 
 def parse_gnucash_for_reconcile(file_path: str, account_filter: Optional[str] = None) -> Dict[str, Any]:
     """Parse GnuCash and extract transactions for specified account."""
-    with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-        root = ET.parse(f).getroot()
+    root = read_xml_root(file_path)
 
     # Extract accounts
     accounts = {}
