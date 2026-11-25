@@ -18,6 +18,7 @@ for _p in (ROOT / "src", ROOT / "src" / "agents", ROOT / "tests"):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
+from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402
 from agents.skill_gnucash_mapping_generator import agent as gen  # noqa: E402
 
@@ -107,7 +108,7 @@ def _run_pipeline(tmp_path, monkeypatch, history, rows, existing_yaml=None,
         for d in rows:
             w.writerow({"Date": "05-01-2026", "Description": d, "Withdrawal": "10.00", "Deposit": ""})
     out = tmp_path / "mapped.csv"
-    m.run(gnucash_file=str(tmp_path / "book.gnucash"), canonical_csv=str(csv_in),
+    m.run(gnucash_file=str(write_min_book(tmp_path / "book.gnucash")), canonical_csv=str(csv_in),
           output_path=str(out), config_path=None, model_override=None,
           bank_name=bank_name, gnucash_bank_account=None)
     with open(out, newline="", encoding="utf-8") as f:

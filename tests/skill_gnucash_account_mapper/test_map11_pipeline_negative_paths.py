@@ -78,6 +78,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import sys as _sys_mb
+from pathlib import Path as _Path_mb
+_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
+from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
 
@@ -778,7 +782,7 @@ def test_run_end_to_end_routes_hsbc_and_hdfc_self_transfers_never_to_sbm(tmp_pat
     monkeypatch.setattr(urllib.request, "urlopen", _blocked_urlopen)
 
     agent.run(
-        gnucash_file=str(tmp_path / "synthetic-nonexistent.gnucash"),
+        gnucash_file=str(write_min_book(tmp_path / "synthetic.gnucash")),
         canonical_csv=str(canonical_csv),
         output_path=str(output_path),
         config_path="fake-config.yaml",
