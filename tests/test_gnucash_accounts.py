@@ -142,12 +142,14 @@ def test_gzip_and_plain_parse_identically(book, gzbook):
             == sorted(a.path for a in ga.load_accounts(gzbook)))
 
 
-def test_unreadable_file_returns_empty(tmp_path):
+def test_unreadable_file_raises_one_clear_error(tmp_path):
+    from agents.gnc_book import GncBookUnreadable
     bad = tmp_path / "nope.gnucash"
     bad.write_text("not xml at all", encoding="utf-8")
-    assert ga.load_accounts(bad) == []
-    assert ga.read_postable_paths(bad) == set()
-    assert ga.read_special_paths(bad) == set()
+    for fn in (ga.load_accounts, ga.read_postable_paths,
+               ga.read_special_paths, ga.read_account_activity):
+        with pytest.raises(GncBookUnreadable):
+            fn(bad)
 
 
 # ---------------------------------------------------------------------------

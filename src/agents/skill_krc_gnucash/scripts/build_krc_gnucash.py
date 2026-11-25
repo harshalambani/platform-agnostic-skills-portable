@@ -51,7 +51,7 @@ Usage:
 Exit codes: 0 ok; 1 bad args/inputs; 2 produced but some rows need review.
 """
 from __future__ import annotations
-import csv, gzip, re, sys
+import csv, re, sys
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
@@ -60,6 +60,7 @@ from pathlib import Path
 # so it finds the module by path rather than relying on the `agents` package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import book_check as shared_book_check  # noqa: E402
+from gnc_book import GncBookUnreadable, read_book_bytes  # noqa: E402
 
 DEFAULT_CONFIG = "Data/settings/krc_gnucash_config.yaml"
 
@@ -172,8 +173,7 @@ def _is_hidden(account_xml):
 
 
 def load_book(gnucash_path):
-    raw = Path(gnucash_path).read_bytes()
-    xml = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
+    xml = read_book_bytes(gnucash_path).decode("utf-8", "replace")
     acc = {}
     for a in re.findall(r"<gnc:account[^>]*>.*?</gnc:account>", xml, re.S):
         gid = (re.search(r"<act:id[^>]*>(.*?)</act:id>", a) or [None, ""])[1]
@@ -331,8 +331,7 @@ def load_book_txns(gnucash_path, paths):
     """Every book transaction as {num, date, splits{path: [cents, qty]}} - read
     only for the already-in-book check. Raises on anything it cannot read, so
     the caller can say NOT CHECKED instead of guessing."""
-    raw = Path(gnucash_path).read_bytes()
-    xml = (gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw).decode("utf-8", "replace")
+    xml = read_book_bytes(gnucash_path).decode("utf-8", "replace")
     out = []
     for t in re.findall(r"<gnc:transaction[^>]*>.*?</gnc:transaction>", xml, re.S):
         dm = re.search(r"<trn:date-posted>.*?<ts:date>(.*?)</ts:date>", t, re.S)
@@ -927,7 +926,11 @@ def main():
     out = Path(out_dir); out.mkdir(parents=True, exist_ok=True)
 
     cfg, cfg_path = load_config(config_yaml)
-    acc, paths, stock_guids, holdings = load_book(gnucash_path)
+    try:
+        acc, paths, stock_guids, holdings = load_book(gnucash_path)
+    except GncBookUnreadable as exc:
+        print(f"ERROR: {exc}. Nothing was written.", file=sys.stderr)
+        return 1
     global _stock_paths
     # Match candidates exclude placeholder/hidden STOCK/MUTUAL accounts (not
     # valid post targets). FIFO holdings (stock_guids) are left whole so a

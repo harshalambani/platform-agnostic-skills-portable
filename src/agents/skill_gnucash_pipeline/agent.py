@@ -20,17 +20,16 @@ Public surface:
 """
 
 import csv
-import gzip
 import json
 import logging
 import os
 import re
 import sys
 import tempfile
-import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
+from agents.gnc_book import GncBookUnreadable, read_xml_root
 from agents.balance_utils import (
     verify_running_balance,
     extract_opening_closing,
@@ -756,16 +755,8 @@ def _get_gnucash_account_balance(
             "candidates": list[str],       # postable same-bank paths
         }
     """
-    try:
-        with gzip.open(gnucash_file, 'rt', encoding='utf-8') as f:
-            tree = ET.parse(f)
-    except Exception:
-        return {
-            "found": False, "account_name": "", "balance": 0.0,
-            "last_txn_date": None, "match_warning": None,
-        }
-
-    root = tree.getroot()
+    # An unreadable book raises GncBookUnreadable; the run stops (no found=False).
+    root = read_xml_root(gnucash_file)
 
     # Build account map: id → {name, parent_id, type}
     acc_map = {}
@@ -821,6 +812,8 @@ def _get_gnucash_account_balance(
                           if not _guard.is_blocked(full)]
         else:
             _guard = None
+    except GncBookUnreadable:
+        raise
     except Exception:  # noqa: BLE001 - the guard must never break the pick
         _guard = None
 
@@ -1906,9 +1899,15 @@ def run(
         # Same evidence for both picks below (before any duplicate rows are
         # trimmed), so the two resolutions can never land on different accounts.
         _ev2 = _statement_evidence(canonical_rows)
-        recon = _reconcile_opening_balance(
-            canonical_rows, gnucash_file, bank, stmt_account_number,
-            chosen_account=bank_account)
+        try:
+            recon = _reconcile_opening_balance(
+                canonical_rows, gnucash_file, bank, stmt_account_number,
+                chosen_account=bank_account)
+        except GncBookUnreadable as exc:
+            return (
+                f"**The GnuCash book could not be read**{chr(10) * 2}{exc}{chr(10) * 2}"
+                "Nothing was written. Open a readable book and run again."
+            )
         if recon.get("stop") and recon.get("wrong_book"):
             # BNK-10: the statement's account number belongs to another account
             # or another entity's book. No output file is written.

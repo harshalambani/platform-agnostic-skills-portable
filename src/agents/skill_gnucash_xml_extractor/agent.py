@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """GnuCash XML Extractor — Extract description→account mappings from .gnucash files."""
 
-import gzip
 import json
 import logging
 import re
@@ -9,7 +8,13 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
-import xml.etree.ElementTree as ET
+
+try:
+    from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: F401
+except ImportError:  # stand-alone run: find the module by path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402,F401
 
 logger = logging.getLogger(__name__)
 
@@ -206,9 +211,7 @@ def parse_gnucash_file(gnucash_file: str, gnucash_bank_account: Optional[str] = 
     if not gnucash_path.exists():
         raise FileNotFoundError(f"File not found: {gnucash_file}")
 
-    with gzip.open(gnucash_path, 'rt', encoding='utf-8') as f:
-        tree = ET.parse(f)
-    root = tree.getroot()
+    root = read_xml_root(gnucash_path)
 
     # Extract accounts
     accounts = root.findall(f'.//{NS["gnc"]}account')

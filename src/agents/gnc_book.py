@@ -42,6 +42,38 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+def _decompressed_bytes(p: Path, abs_path: str) -> bytes:
+    """The book's XML bytes: gzip sniffed by magic bytes, plain passed through.
+    Raises GncBookUnreadable for an empty file or damaged gzip data."""
+    try:
+        raw = Path(abs_path).read_bytes()
+    except OSError as exc:
+        raise GncBookUnreadable(p, f"cannot read: {type(exc).__name__}") from exc
+    if not raw:
+        raise GncBookUnreadable(p, "file is empty")
+    if raw[:2] == _GZIP_MAGIC:
+        try:
+            return gzip.decompress(raw)
+        except (OSError, EOFError, zlib.error) as exc:
+            raise GncBookUnreadable(p, "damaged or truncated gzip data") from exc
+    return raw
+
+
+def read_book_bytes(path: Union[str, Path]) -> bytes:
+    """The book's XML as bytes (same sniff, same error as read_xml_root), for
+    the readers that scan the text rather than the tree. Not cached."""
+    p = Path(path)
+    try:
+        abs_path = os.path.abspath(p)
+        os.stat(abs_path)
+    except OSError as exc:
+        raise GncBookUnreadable(p, f"cannot open: {type(exc).__name__}") from exc
+    data = _decompressed_bytes(p, abs_path)
+    if b"<gnc:book" not in data:
+        raise GncBookUnreadable(p, "no GnuCash book found in the XML")
+    return data
+
+
 def read_xml_root(path: Union[str, Path]) -> ET.Element:
     """Return the parsed root of a GnuCash XML book (gzip or plain)."""
     p = Path(path)
@@ -56,20 +88,7 @@ def read_xml_root(path: Union[str, Path]) -> ET.Element:
     if hit is not None:
         return hit
 
-    try:
-        raw = Path(abs_path).read_bytes()
-    except OSError as exc:
-        raise GncBookUnreadable(p, f"cannot read: {type(exc).__name__}") from exc
-    if not raw:
-        raise GncBookUnreadable(p, "file is empty")
-
-    if raw[:2] == _GZIP_MAGIC:
-        try:
-            data = gzip.decompress(raw)
-        except (OSError, EOFError, zlib.error) as exc:
-            raise GncBookUnreadable(p, "damaged or truncated gzip data") from exc
-    else:
-        data = raw
+    data = _decompressed_bytes(p, abs_path)
 
     try:
         root = ET.fromstring(data)

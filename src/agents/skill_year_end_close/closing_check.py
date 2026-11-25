@@ -12,12 +12,11 @@ Failures list account paths only -- never amounts.
 """
 from __future__ import annotations
 
-import gzip
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from fractions import Fraction
 from pathlib import Path
 
+from agents.gnc_book import read_xml_root
 from agents.gnucash_accounts import load_accounts
 
 _GNC = "{http://www.gnucash.org/XML/gnc}"
@@ -44,9 +43,7 @@ def _fraction(text: str) -> Fraction:
 
 
 def _read_book(path: Path):
-    raw = Path(path).read_bytes()
-    data = gzip.decompress(raw) if raw[:2] == b"\x1f\x8b" else raw
-    return ET.fromstring(data)
+    return read_xml_root(path)
 
 
 def check_closed(book_path: str | Path, closing_end_year: int) -> CheckResult:

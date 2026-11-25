@@ -17,12 +17,18 @@ Per the plan (2026-07-12-itr-workbook-skill-plan.md, section 1.2):
 """
 from __future__ import annotations
 
-import gzip
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from fractions import Fraction
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+try:
+    from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: F401
+except ImportError:  # stand-alone run: find the module by path
+    import sys as _sys
+    _sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+    from gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402,F401
 
 NS = {
     "gnc": "http://www.gnucash.org/XML/gnc",
@@ -109,15 +115,14 @@ def _is_gzip(path: Path) -> bool:
 
 
 def parse_book(path: str | Path) -> Book:
-    path = Path(path)
-    opener = gzip.open if _is_gzip(path) else open
-    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
-        text = f.read()
-    return parse_book_text(text)
+    return _build_book(read_xml_root(Path(path)))
 
 
 def parse_book_text(xml_text: str) -> Book:
-    root = ET.fromstring(xml_text)
+    return _build_book(ET.fromstring(xml_text))
+
+
+def _build_book(root: ET.Element) -> Book:
 
     accounts: dict[str, Account] = {}
     for acc_el in root.iter(f"{{{NS['gnc']}}}account"):

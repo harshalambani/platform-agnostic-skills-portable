@@ -41,6 +41,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import sys as _sys_mb
+from pathlib import Path as _Path_mb
+_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
+from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
 
@@ -354,12 +358,10 @@ def test_run_completes_and_reports_correctly_when_rules_resolve_every_row(tmp_pa
     output_path = tmp_path / "mapped_full_match.csv"
     report_path = tmp_path / "mapped_full_match_confidence.txt"
 
-    # gnucash_file deliberately does not exist: run()'s special-account
-    # filter (agents.gnucash_accounts.read_special_paths) is wrapped in a
-    # broad try/except that only logs and continues, so a missing/synthetic
-    # path is safe here and needs no separate mock.
+    # The book is a minimal VALID synthetic one (tests/gnc_minbook.py): an
+    # unreadable book stops run() before anything is mapped.
     result_str = agent.run(
-        gnucash_file=str(tmp_path / "synthetic-nonexistent.gnucash"),
+        gnucash_file=str(write_min_book(tmp_path / "synthetic.gnucash")),
         canonical_csv=str(canonical_csv),
         output_path=str(output_path),
         config_path=None,

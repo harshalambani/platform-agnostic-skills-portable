@@ -54,6 +54,10 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+import sys as _sys_mb
+from pathlib import Path as _Path_mb
+_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
+from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
 # run()'s sibling-agent imports resolve via `sys.path.insert(0, agents_root)`
@@ -502,7 +506,7 @@ def test_weak_rows_reconsidered_by_llm_replace_and_keep_with_correct_counts(tmp_
     report_path = tmp_path / "mapped_weak_confidence.txt"
 
     result_str = agent.run(
-        gnucash_file=str(tmp_path / "synthetic-nonexistent.gnucash"),
+        gnucash_file=str(write_min_book(tmp_path / "synthetic.gnucash")),
         canonical_csv=str(canonical_csv),
         output_path=str(output_path),
         config_path="dummy-config-truthy",  # only needs to be truthy; LLM call is faked
