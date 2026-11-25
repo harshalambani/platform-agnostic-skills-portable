@@ -56,9 +56,12 @@ if __name__ == "__main__":
     _early_root = str(Path(__file__).resolve().parent.parent)
     if _early_root not in sys.path:
         sys.path.insert(0, _early_root)
+    from ui import _tracing_off  # noqa: F401  (tracing off before any langchain import)
     from ui import _firstwindow as _first_window
 
     _first_window.run(sys.argv[1:])
+
+from ui import _tracing_off  # noqa: E402,F401,I001  (also for an import as ui.webui)
 
 # ── Managed warnings ─────────────────────────────────────────────────────────
 # Known/triaged warnings we have decided to handle. Each is (substring, reason).

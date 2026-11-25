@@ -3,9 +3,8 @@ ui/_config.py — adapter between the portable multi-endpoint settings schema
 (Data\\settings\\config.yaml) and the legacy single-provider config.yaml
 that agents.base_agent.load_model still consumes.
 
-The agents/ tree is mirrored verbatim from the upstream platform-agnostic-skills
-project (build-time-pull contract, locked decision §15.1). We must not modify
-it, so this adapter writes a transient legacy-shaped file in the user's
+agents.base_agent.load_model still reads the legacy single-provider shape, so
+this adapter writes a transient legacy-shaped file in the user's
 %TEMP% / /tmp and hands its path to load_model().
 
 The portable schema lives at Data\\settings\\config.yaml and has the shape:

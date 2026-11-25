@@ -2,9 +2,8 @@
 # Copied to Data\settings\config.yaml on first launch by the PortableApps Launcher.
 # Subsequent runs read and write this file directly; PA Launcher does not overwrite it.
 #
-# SECURITY: api_key values are stored UNENCRYPTED in this file.
+# api_key values are stored encrypted (Windows DPAPI) in this file.
 # Keep this file private; do not share the Data\ folder.
-# Full keyring/DPAPI encryption is tracked as a future improvement (MP-04).
 
 active_endpoint: local_ollama
 

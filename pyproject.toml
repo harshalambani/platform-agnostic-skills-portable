@@ -30,7 +30,6 @@ classifiers = [
 # Keep the two in sync.
 dependencies = [
     "langchain>=0.3.0",
-    "langchain-community>=0.3.0",
     "langgraph>=0.2.0",
     "langchain-ollama>=0.2.0",
     "langchain-openai>=0.2.0",
@@ -40,11 +39,11 @@ dependencies = [
     "openpyxl>=3.1.0",
     "pandas>=2.2.0",
     "beautifulsoup4>=4.12",    # HTML parsing (skill_itr_workbook/scripts/parse_eguile.py); was only present via extract-msg
+    "xlrd>=1.2.0",             # BIFF .xls reader (ICICI statements)
     "olefile>=0.46",           # .msg reader (agents/msg_reader.py: skill_cc_sort, skill_msg_parser)
     "msoffcrypto-tool>=5.4.0",  # password-protected .xlsx (skill_sbm, skill_mf_cas)
     "gradio>=6.0,<7.0",
     "pyyaml>=6.0",
-    "python-dotenv>=1.0.0",
     "cryptography>=44",        # AES-256-CBC/PBKDF2 decryption of AIS JSON (skill_ais_reconcile)
     # Native window (v2, #40): pywebview + pythonnet/clr WebView2 backend.
     "pywebview>=6.0,<7.0",
