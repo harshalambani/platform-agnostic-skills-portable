@@ -177,3 +177,43 @@ def test_closing_check_still_gives_its_own_clear_verdict_on_an_unreadable_book(t
     res = cc.check_closed(_bad_books(tmp_path)["junk"], 2026)
     assert res.ok is False
     assert "could not be read" in " ".join(res.problems if hasattr(res, "problems") else [str(res)])
+
+
+# ---- group 3: the guard rule -------------------------------------------------
+
+def test_guard_from_book_never_goes_quietly_unknown_on_an_unreadable_book(tmp_path):
+    from agents import gnucash_accounts as ga
+    for bad in _bad_books(tmp_path).values():
+        with pytest.raises(GncBookUnreadable):
+            ga.TargetGuard.from_book(bad)
+
+
+def test_mapper_stops_with_one_line_and_never_builds_a_guard(tmp_path, monkeypatch):
+    from agents import gnucash_accounts as ga
+    from agents.skill_gnucash_account_mapper import agent as mapper
+
+    def _boom(*a, **k):
+        raise AssertionError("the mapper must not build a guard for an unreadable book")
+    monkeypatch.setattr(ga.TargetGuard, "from_book", classmethod(_boom))
+    csv_path = tmp_path / "canon.csv"
+    csv_path.write_text("Date,Description,Deposit,Withdrawal\n", encoding="utf-8")
+    out = tmp_path / "out" / "mapped.csv"
+    for bad in _bad_books(tmp_path).values():
+        msg = mapper.run(str(bad), str(csv_path), str(out))
+        assert msg.startswith("The GnuCash book could not be read")
+        assert "\n" not in msg and "Traceback" not in msg
+        assert not out.exists() and not out.parent.exists()
+
+
+def test_pipeline_run_stops_without_output_on_an_unreadable_book(tmp_path):
+    from agents.skill_gnucash_pipeline import agent as pipe
+    import inspect
+    src = inspect.getsource(pipe.run)
+    assert "except GncBookUnreadable" in src
+
+
+def test_partner_comp_validation_stops_cleanly_on_an_unreadable_book(tmp_path):
+    from agents.skill_partner_comp_recon import agent as pc
+    import inspect
+    src = inspect.getsource(pc)
+    assert "except GncBookUnreadable" in src

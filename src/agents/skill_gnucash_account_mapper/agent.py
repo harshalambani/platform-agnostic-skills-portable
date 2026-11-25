@@ -3832,12 +3832,21 @@ def run(
         sys.path.insert(0, str(agents_root))
 
     from skill_gnucash_xml_extractor.agent import parse_gnucash_file          # noqa: E402
+    from agents.gnc_book import GncBookUnreadable, read_xml_root              # noqa: E402
     from skill_gnucash_mapping_generator.agent import generate_rules         # noqa: E402
     from skill_gnucash_account_mapper.persistent_rules import (              # noqa: E402
         merge_auto_rules, load_overrides,
         migrate_legacy_overrides, rules_path as persistent_rules_path,
         save_rules, load_rules,
     )
+
+    # GNC-01: an unreadable book stops the run here, with one clear line. The
+    # mapper never runs without its hidden/placeholder guard, and the guard is
+    # built from this book.
+    try:
+        read_xml_root(gnucash_file)
+    except GncBookUnreadable as exc:
+        return f"The GnuCash book could not be read, so nothing was mapped. {exc}"
 
     out_path = Path(output_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3893,6 +3902,8 @@ def run(
                 )
         else:
             guard = None
+    except GncBookUnreadable:
+        raise
     except Exception as e:  # noqa: BLE001 — never let flag-filtering break mapping
         guard = None
         _emit_mapper_progress(f"target guard unavailable: {e}")
@@ -4008,6 +4019,8 @@ def run(
         from agents.gnucash_accounts import load_accounts as _load_accts  # noqa: PLC0415
         _run_accounts = list(_load_accts(gnucash_file))
         _run_accounts_err = None
+    except GncBookUnreadable:
+        raise
     except Exception as e:  # noqa: BLE001
         _run_accounts, _run_accounts_err = [], str(e)
     _set_account_types(_run_accounts)
