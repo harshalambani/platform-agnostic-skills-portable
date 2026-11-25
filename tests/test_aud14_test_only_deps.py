@@ -41,3 +41,4 @@ def test_ci_installs_aiohttp_for_the_browser_tests_and_fails_on_a_skip():
     assert "test_ui09_hover_and_header_bleed.py" in ci
     assert "test_ui11_resizable_columns.py" in ci
     assert "browser-render tests were skipped" in ci
+    assert "test_real_drag_widens_only_that_column" in ci

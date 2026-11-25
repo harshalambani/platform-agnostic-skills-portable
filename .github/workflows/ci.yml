@@ -262,8 +262,13 @@ jobs:
           grep -E '^(PASSED|SKIPPED|FAILED|ERROR)' "$RUNNER_TEMP/browser-out.txt" || true
           tail -3 "$RUNNER_TEMP/browser-out.txt"
           if [ "$rc" -ne 0 ]; then echo "::error::browser-render tests failed (exit ${rc})"; exit 1; fi
-          if grep -q '^SKIPPED' "$RUNNER_TEMP/browser-out.txt"; then echo "::error::browser-render tests were skipped"; exit 1; fi
-          if ! grep -q '^PASSED' "$RUNNER_TEMP/browser-out.txt"; then echo "::error::no browser-render test passed"; exit 1; fi
+          # The "leaves nothing in the temp folder" tests start a child browser in a
+          # sandboxed temp dir and skip by design when that one cannot start; any
+          # OTHER skip, or a missing real-browser pass, fails this step.
+          if grep '^SKIPPED' "$RUNNER_TEMP/browser-out.txt" | grep -v 'no profile to check'; then echo "::error::browser-render tests were skipped"; exit 1; fi
+          for t in test_no_accent_pixels_in_the_sticky_header_band_in_a_real_browser test_real_drag_widens_only_that_column; do
+            if ! grep -q "^PASSED .*$t" "$RUNNER_TEMP/browser-out.txt"; then echo "::error::$t did not pass"; exit 1; fi
+          done
 
       # SEC-13/16/17: no real credentials or account data in tracked files.
       # Hash denylist + shape check; the script holds no real value.
