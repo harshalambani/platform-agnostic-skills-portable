@@ -206,18 +206,59 @@ def test_mapper_stops_with_one_line_and_never_builds_a_guard(tmp_path, monkeypat
         assert not out.exists() and not out.parent.exists()
 
 
-def test_pipeline_run_stops_without_output_on_an_unreadable_book(tmp_path):
+def _pipeline_run(tmp_path, book_path, out_dir):
+    import hdfc_fixture_gen  # noqa: F401  (tests/skill_hdfc on sys.path via the dedup test module)
     from agents.skill_gnucash_pipeline import agent as pipe
-    import inspect
-    src = inspect.getsource(pipe.run)
-    assert "except GncBookUnreadable" in src
+    csv_path = tmp_path / "syn_hdfc.csv"
+    csv_path.write_text(hdfc_fixture_gen.build_csv_text(), encoding="utf-8")
+    out_dir.mkdir(exist_ok=True)
+    return pipe.run(bank="HDFC", statement_files=str(csv_path), gnucash_file=str(book_path),
+                    output_path=str(out_dir / "out.csv"), config_path=None)
 
 
-def test_partner_comp_validation_stops_cleanly_on_an_unreadable_book(tmp_path):
+@pytest.mark.parametrize("case", ["junk", "truncated", "empty", "missing"])
+def test_pipeline_run_stops_cleanly_on_an_unreadable_book(tmp_path, case):
+    import test_gnucash_dedup_account_scope  # noqa: F401  (puts tests/skill_hdfc on sys.path)
+    bad = _bad_books(tmp_path)[case]
+    out_dir = tmp_path / "outputs"
+    msg = _pipeline_run(tmp_path, bad, out_dir)
+    assert "could not be read" in msg and "Nothing was written" in msg
+    assert "Traceback" not in msg
+    assert list(out_dir.iterdir()) == []          # no output file or folder
+
+
+def test_pipeline_run_on_a_readable_book_does_not_return_the_unreadable_message(tmp_path):
+    import test_gnucash_dedup_account_scope as dd
+    book = dd._build_book_with_unrelated_same_date_amount_posting(tmp_path)
+    out_dir = tmp_path / "outputs"
+    msg = _pipeline_run(tmp_path, book, out_dir)
+    assert "could not be read" not in msg
+    assert (out_dir / "out.csv").is_file()
+
+
+def _partner_profile():
+    from types import SimpleNamespace
+    from agents.skill_partner_comp_recon.jv_emitter import ACCOUNT_KEYS
+    return SimpleNamespace(partner_comp_accounts={k: f"Assets:Demo:{k}" for k in ACCOUNT_KEYS})
+
+
+@pytest.mark.parametrize("case", ["junk", "truncated", "empty", "missing"])
+def test_partner_comp_account_check_stops_on_an_unreadable_book(tmp_path, case):
     from agents.skill_partner_comp_recon import agent as pc
-    import inspect
-    src = inspect.getsource(pc)
-    assert "except GncBookUnreadable" in src
+    bad = _bad_books(tmp_path)[case]
+    before = sorted(p.name for p in tmp_path.iterdir())
+    accounts, notes, err = pc._resolve_accounts_for_journal(_partner_profile(), "demo", str(bad))
+    assert accounts == {} and notes == []
+    assert err.startswith("ERROR: the GnuCash book could not be read")
+    assert "Traceback" not in err
+    assert sorted(p.name for p in tmp_path.iterdir()) == before   # nothing written
+
+
+def test_partner_comp_account_check_on_a_readable_book_gives_its_own_error(tmp_path):
+    from agents.skill_partner_comp_recon import agent as pc
+    good = _make(tmp_path, "gz")
+    accounts, notes, err = pc._resolve_accounts_for_journal(_partner_profile(), "demo", str(good))
+    assert err and "could not be read" not in err   # the demo book lacks the accounts: a normal validation error
 
 
 # ---- group 4: the KRC regex readers (read_book_bytes) -------------------------
