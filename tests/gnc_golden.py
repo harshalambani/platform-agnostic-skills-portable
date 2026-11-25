@@ -102,3 +102,25 @@ def collect_group2(book) -> dict:
     out["skill_26as_journal.scripts.build_tds_journals:monthly_debits_for_account"] = _norm(
         btj.monthly_debits_for_account(book, "Assets:Bank:Demo Bank Savings"))
     return _scrub(out, book)
+
+
+def collect_group4(book) -> dict:
+    """KRC regex readers. The script is loaded by path (it runs as its own
+    process in the app), the same way tests/test_krc_gnucash_flags_charges.py
+    loads it."""
+    import importlib.util
+    pkg = importlib.util.find_spec("agents").submodule_search_locations[0]
+    script = Path(pkg) / "skill_krc_gnucash" / "scripts" / "build_krc_gnucash.py"
+    spec = importlib.util.spec_from_file_location("build_krc_gnucash_golden", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    book = Path(book)
+    acc, paths, stock_guids, holdings = mod.load_book(str(book))
+    out = {
+        "skill_krc_gnucash.scripts.build_krc_gnucash:load_book": _norm(
+            {"acc": acc, "paths": paths, "stock_guids": stock_guids,
+             "holdings": holdings}),
+        "skill_krc_gnucash.scripts.build_krc_gnucash:load_book_txns": _norm(
+            mod.load_book_txns(str(book), paths)),
+    }
+    return _scrub(out, book)

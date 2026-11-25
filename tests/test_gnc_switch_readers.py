@@ -41,7 +41,8 @@ G1 = {k: v for k, v in EXPECTED.items() if k in (
     "skill_gnucash_coverage.agent:_read_root+_collect_account_dates",
     "skill_year_end_close.closing_check:check_closed",
     "skill_26as_journal.tools:_existing_account_paths")}
-G2 = {k: v for k, v in EXPECTED.items() if k not in G1}
+G4 = {k: v for k, v in EXPECTED.items() if k.startswith("skill_krc_gnucash")}
+G2 = {k: v for k, v in EXPECTED.items() if k not in G1 and k not in G4}
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +65,7 @@ def _make(tmp_path, kind):
 
 
 def test_expected_files_cover_every_switched_reader():
-    assert len(G1) == 6 and len(G2) == 11
+    assert len(G1) == 6 and len(G2) == 11 and len(G4) == 2
 
 
 # ---- group 1: readers that already sniffed ---------------------------------
@@ -217,3 +218,37 @@ def test_partner_comp_validation_stops_cleanly_on_an_unreadable_book(tmp_path):
     import inspect
     src = inspect.getsource(pc)
     assert "except GncBookUnreadable" in src
+
+
+# ---- group 4: the KRC regex readers (read_book_bytes) -------------------------
+
+def test_group4_krc_gzip_output_identical_to_main(tmp_path):
+    assert gnc_golden.collect_group4(_make(tmp_path, "gz")) == G4
+
+
+def test_group4_krc_plain_book_gives_the_same_output(tmp_path):
+    assert gnc_golden.collect_group4(_make(tmp_path, "plain")) == G4
+
+
+@pytest.mark.parametrize("case", ["missing", "empty", "junk", "truncated"])
+def test_krc_readers_raise_on_an_unreadable_book(tmp_path, case):
+    import importlib.util
+    script = SRC / "agents" / "skill_krc_gnucash" / "scripts" / "build_krc_gnucash.py"
+    spec = importlib.util.spec_from_file_location("build_krc_gnucash_neg", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    bad = _bad_books(tmp_path)[case]
+    for fn in (lambda: mod.load_book(str(bad)), lambda: mod.load_book_txns(str(bad), {})):
+        with pytest.raises(Exception) as ei:
+            fn()
+        assert type(ei.value).__name__ == "GncBookUnreadable"
+
+
+def test_read_book_bytes_matches_the_tree_reader(tmp_path):
+    from agents.gnc_book import read_book_bytes
+    g, p = _make(tmp_path, "gz"), _make(tmp_path, "plain")
+    assert read_book_bytes(g) == gzip.decompress(g.read_bytes())
+    assert read_book_bytes(p) == p.read_bytes()
+    for bad in _bad_books(tmp_path).values():
+        with pytest.raises(GncBookUnreadable):
+            read_book_bytes(bad)

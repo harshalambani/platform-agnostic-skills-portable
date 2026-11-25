@@ -1007,6 +1007,186 @@
    }
   ]
  },
+ "skill_krc_gnucash.scripts.build_krc_gnucash:load_book": {
+  "acc": {
+   "a1": {
+    "hidden": false,
+    "name": "Assets",
+    "par": "r0",
+    "special": true,
+    "typ": "ASSET"
+   },
+   "a2": {
+    "hidden": false,
+    "name": "Bank",
+    "par": "a1",
+    "special": false,
+    "typ": "ASSET"
+   },
+   "a3": {
+    "hidden": false,
+    "name": "Demo Bank Savings",
+    "par": "a2",
+    "special": false,
+    "typ": "BANK"
+   },
+   "a4": {
+    "hidden": true,
+    "name": "Old Demo Account",
+    "par": "a2",
+    "special": true,
+    "typ": "BANK"
+   },
+   "a5": {
+    "hidden": false,
+    "name": "Stocks",
+    "par": "a1",
+    "special": false,
+    "typ": "ASSET"
+   },
+   "a6": {
+    "hidden": false,
+    "name": "ACME LTD",
+    "par": "a5",
+    "special": false,
+    "typ": "STOCK"
+   },
+   "e1": {
+    "hidden": false,
+    "name": "Expenses",
+    "par": "r0",
+    "special": false,
+    "typ": "EXPENSE"
+   },
+   "e2": {
+    "hidden": false,
+    "name": "Food",
+    "par": "e1",
+    "special": false,
+    "typ": "EXPENSE"
+   },
+   "i1": {
+    "hidden": false,
+    "name": "Income",
+    "par": "r0",
+    "special": false,
+    "typ": "INCOME"
+   },
+   "i2": {
+    "hidden": false,
+    "name": "Salary",
+    "par": "i1",
+    "special": false,
+    "typ": "INCOME"
+   },
+   "q1": {
+    "hidden": false,
+    "name": "Equity",
+    "par": "r0",
+    "special": false,
+    "typ": "EQUITY"
+   },
+   "q2": {
+    "hidden": false,
+    "name": "Opening Balances",
+    "par": "q1",
+    "special": true,
+    "typ": "EQUITY"
+   },
+   "r0": {
+    "hidden": false,
+    "name": "Root Account",
+    "par": null,
+    "special": false,
+    "typ": "ROOT"
+   }
+  },
+  "holdings": {
+   "Assets:Stocks:ACME LTD": [
+    [
+     "datetime.date(2025, 6, 15)",
+     "Fraction(10, 1)",
+     "Fraction(100, 1)"
+    ]
+   ]
+  },
+  "paths": {
+   "a1": "Assets",
+   "a2": "Assets:Bank",
+   "a3": "Assets:Bank:Demo Bank Savings",
+   "a4": "Assets:Bank:Old Demo Account",
+   "a5": "Assets:Stocks",
+   "a6": "Assets:Stocks:ACME LTD",
+   "e1": "Expenses",
+   "e2": "Expenses:Food",
+   "i1": "Income",
+   "i2": "Income:Salary",
+   "q1": "Equity",
+   "q2": "Equity:Opening Balances",
+   "r0": ""
+  },
+  "stock_guids": [
+   "a6"
+  ]
+ },
+ "skill_krc_gnucash.scripts.build_krc_gnucash:load_book_txns": [
+  {
+   "date": "datetime.date(2025, 5, 1)",
+   "num": "100",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     100000,
+     "Fraction(1000, 1)"
+    ],
+    "Equity:Opening Balances": [
+     -100000,
+     "Fraction(-1000, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 10)",
+   "num": "101",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     5000000,
+     "Fraction(50000, 1)"
+    ],
+    "Income:Salary": [
+     -5000000,
+     "Fraction(-50000, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 12)",
+   "num": "102",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     -50000,
+     "Fraction(-500, 1)"
+    ],
+    "Expenses:Food": [
+     50000,
+     "Fraction(500, 1)"
+    ]
+   }
+  },
+  {
+   "date": "datetime.date(2025, 6, 15)",
+   "num": "103",
+   "splits": {
+    "Assets:Bank:Demo Bank Savings": [
+     -100000,
+     "Fraction(-1000, 1)"
+    ],
+    "Assets:Stocks:ACME LTD": [
+     100000,
+     "Fraction(10, 1)"
+    ]
+   }
+  }
+ ],
  "skill_year_end_close.closing_check:check_closed": {
   "closing_entries": 0,
   "expense_nonzero": [
