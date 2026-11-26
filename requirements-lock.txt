@@ -1042,9 +1042,9 @@ ollama==0.6.3 \
     --hash=sha256:41fc49a8095c4a75939c4c1f8582e4d0671692fb6eac2a5a7ede8c9872b67096 \
     --hash=sha256:6a20bc42c1a5f889295d7ec490d35e5132fc31f339561530f43a8abd4dbfe508
     # via langchain-ollama
-openai==2.53.0 \
-    --hash=sha256:baf5802ad08980e1d9d561e1b996e800c8bcd14af5847c6d0e7a5cc59e4d4116 \
-    --hash=sha256:c694ffc747a3c4d1663ef2b07b811315a476164ee5efa3a993967349ebca7618
+openai==3.57.0 \
+    --hash=sha256:5a0a89d6a542efc85e2a8cec701ca9265b795d578c777828e10fafdf80e333b6 \
+    --hash=sha256:f97bc74024c06ced8428b56c4a3594066709d3082779bf9d0b4b6092fbf587a8
     # via langchain-openai
 openpyxl==3.1.5 \
     --hash=sha256:5282c12b107bffeef825f4617dc029afaf41d0ea60823bbb665ef3079dc79de2 \
