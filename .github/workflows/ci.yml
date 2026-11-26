@@ -193,7 +193,12 @@ jobs:
           # statements -- reportlab writes the PDFs, xlwt the legacy .xls.
           # Separate call: --require-hashes above applies per-command, and these
           # are not in the lock.
-          pip install pytest reportlab xlwt
+          #
+          # aiohttp is test-only too: the UI-09 / UI-11 browser-render tests
+          # use it to serve a page to a headless browser. It is NOT in the lock,
+          # so the packaged app does not ship it (tests/test_aud14_test_only_deps.py
+          # guards that). The step after the main test run fails if those tests skip.
+          pip install pytest reportlab xlwt aiohttp
 
       # PIPE-19: the real PDF-decryption tests need a working qpdf. The bundled
       # one is a Windows binary in LFS (not fetched here, to protect the LFS
@@ -243,6 +248,27 @@ jobs:
             5) echo "::error::pytest collected NO tests. The suite did not run."; exit 1 ;;
             *) echo "::error::pytest could not complete the run (exit ${rc}) -- collection error, internal error, or bad invocation. This is NOT a test failure: the suite did not run."; exit 1 ;;
           esac
+
+      # The browser-render tests skip quietly when no browser, aiohttp or Pillow is
+      # there, and a skip is green. This step runs just those two files and fails
+      # if any test in them was skipped, so a missing piece shows up as red.
+      - name: Browser-render tests ran (UI-09, UI-11 passed, not skipped)
+        run: |
+          cd src
+          set +e
+          python -m pytest ../tests/test_ui09_hover_and_header_bleed.py ../tests/test_ui11_resizable_columns.py -rA -q > "$RUNNER_TEMP/browser-out.txt" 2>&1
+          rc=$?
+          set -e
+          grep -E '^(PASSED|SKIPPED|FAILED|ERROR)' "$RUNNER_TEMP/browser-out.txt" || true
+          tail -3 "$RUNNER_TEMP/browser-out.txt"
+          if [ "$rc" -ne 0 ]; then echo "::error::browser-render tests failed (exit ${rc})"; exit 1; fi
+          # The "leaves nothing in the temp folder" tests start a child browser in a
+          # sandboxed temp dir and skip by design when that one cannot start; any
+          # OTHER skip, or a missing real-browser pass, fails this step.
+          if grep '^SKIPPED' "$RUNNER_TEMP/browser-out.txt" | grep -v 'no profile to check'; then echo "::error::browser-render tests were skipped"; exit 1; fi
+          for t in test_no_accent_pixels_in_the_sticky_header_band_in_a_real_browser test_real_drag_widens_only_that_column; do
+            if ! grep -q "^PASSED .*$t" "$RUNNER_TEMP/browser-out.txt"; then echo "::error::$t did not pass"; exit 1; fi
+          done
 
       # SEC-13/16/17: no real credentials or account data in tracked files.
       # Hash denylist + shape check; the script holds no real value.

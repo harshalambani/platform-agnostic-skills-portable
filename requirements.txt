@@ -5,7 +5,6 @@
 
 # --- LangChain / LangGraph (skills runtime) ---
 langchain>=0.3.0
-langchain-community>=0.3.0
 langgraph>=0.2.0
 
 # --- LLM provider adapters ---
@@ -27,7 +26,6 @@ pandas>=2.2.0
 beautifulsoup4>=4.12           # HTML parsing (skill_itr_workbook parse_eguile); was only present via extract-msg
 olefile>=0.46                 # Outlook .msg reader (agents/msg_reader.py: cc_sort, msg_parser)
 pyyaml>=6.0
-python-dotenv>=1.0.0
 cryptography>=44              # AES-256-CBC/PBKDF2 decryption of AIS JSON (skill_ais_reconcile)
 
 # --- Web UI ---

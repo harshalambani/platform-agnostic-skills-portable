@@ -22,7 +22,6 @@ _DIST_TO_IMPORT = {
     "msoffcrypto-tool": "msoffcrypto",
     "pyyaml": "yaml",
     "pillow": "PIL",
-    "python-dotenv": "dotenv",
     "beautifulsoup4": "bs4",
 }
 
