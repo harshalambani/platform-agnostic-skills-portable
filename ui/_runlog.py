@@ -15,16 +15,59 @@ agent-mode skills, doubles as the tool-call transcript -- see
 """
 from __future__ import annotations
 
+import os
+import re
+import time
 from datetime import datetime
 from pathlib import Path
 
 from ui import _config
 
 
+# AUD-13: run logs are kept for 90 days. Only files in this one folder whose
+# name is a run-log name (<timestamp>-<skill>.log) and whose own modified date is
+# older than the limit are removed; nothing else is looked at.
+RETENTION_DAYS = 90
+_RUN_LOG_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}-\d{6}-.+\.log$")
+
+
+def prune_old_logs(logs_dir: Path, *, days: int = RETENTION_DAYS, now: float | None = None) -> int:
+    """Remove run-log files in `logs_dir` older than `days`. Returns how many
+    were removed. Never raises: a failed prune must never stop a run.
+
+    Only plain files named like a run log are considered (a link, a folder or
+    any other file is left alone), and nothing outside `logs_dir` is touched:
+    if `logs_dir` is itself a link to somewhere else, nothing is pruned."""
+    removed = 0
+    try:
+        logs_dir = Path(logs_dir)
+        if logs_dir.is_symlink() or logs_dir.is_junction():
+            return 0
+        cutoff = (time.time() if now is None else now) - days * 86400
+        with os.scandir(logs_dir) as it:
+            entries = list(it)
+        for e in entries:
+            try:
+                if not _RUN_LOG_NAME.match(e.name):
+                    continue
+                if e.is_symlink() or e.is_junction() or not e.is_file(follow_symlinks=False):
+                    continue
+                if e.stat(follow_symlinks=False).st_mtime >= cutoff:
+                    continue
+                os.unlink(e.path)
+                removed += 1
+            except Exception:
+                continue   # locked or read-only: leave it, carry on
+    except Exception:
+        pass
+    return removed
+
+
 def new_log_path(skill_name: str) -> Path:
     """Allocate (but don't create) a timestamped log path for one run."""
     logs_dir = _config.data_root_dir() / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+    prune_old_logs(logs_dir)   # AUD-13: once per new run log
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in skill_name)
     return logs_dir / f"{stamp}-{safe_name}.log"
