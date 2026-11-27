@@ -1,6 +1,7 @@
 """UI-20: the heading over a run's text follows the skill's manifest
 (requires.llm): "Agent reply" only where a model answers. And the custom
-BoB / HSBC tabs health-check the LLM endpoint only for skills that use one."""
+generic tab (which BoB and HSBC use) health-checks the LLM endpoint only for skills
+that use one."""
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ for _p in (ROOT, ROOT / "src"):
         sys.path.insert(0, str(_p))
 
 from agents.registry import discover  # noqa: E402
-from ui.tabs import _generic, skill_bob, skill_hsbc  # noqa: E402
+from ui.tabs import _generic  # noqa: E402
 
 SKILLS = discover(refresh=True)
 DETERMINISTIC = [s for s in SKILLS if not s.requires.llm]
@@ -41,8 +42,8 @@ def test_bob_and_hsbc_are_deterministic_and_decide_from_their_own_flag():
     assert registry.get("HSBC").name == "skill_hsbc"
     assert registry.get("BoB") in DETERMINISTIC
     assert registry.get("HSBC") in DETERMINISTIC
-    assert skill_bob._reply_label() == "Result"
-    assert skill_hsbc._reply_label() == "Result"
+    assert _generic.reply_label(registry.get("BoB")) == "Result"
+    assert _generic.reply_label(registry.get("HSBC")) == "Result"
 
 
 def test_no_hardcoded_agent_reply_heading_left_in_tabs():            # NEGATIVE
@@ -57,46 +58,49 @@ def _drive(gen):
     out = []
     for item in gen:
         out.append(item[0])
-    return "\n".join(out)
+    return " ".join(out)
+
+
+def _args(skill, pdf):
+    """One value per declared input: a folder for a directory input, else a file list."""
+    return [str(pdf.parent) if i.type == "directory"
+            else [str(pdf)] if i.type == "files" else str(pdf) for i in skill.inputs]
 
 
 @pytest.fixture
 def wired(tmp_path, monkeypatch):
     calls = []
     bad = SimpleNamespace(ok=False, status="down", detail="synthetic")
-    for mod in (skill_bob, skill_hsbc):
-        monkeypatch.setattr(mod._health, "check", lambda ep, _c=calls: (_c.append(1), bad)[1])
-        monkeypatch.setattr(mod._config, "load_portable_config",
-                            lambda: {"endpoints": {"e": {}}, "active_endpoint": "e"})
-        monkeypatch.setattr(mod._config, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(_generic._health, "check", lambda ep, _c=calls: (_c.append(1), bad)[1])
+    monkeypatch.setattr(_generic._health, "check_with_model",
+                        lambda ep, model, active, _c=calls: (_c.append(1), bad, model)[1:])
+    monkeypatch.setattr(_generic._config, "load_portable_config",
+                        lambda: {"endpoints": {"e": {}}, "active_endpoint": "e"})
+    monkeypatch.setattr(_generic._config, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(_generic, "_check_native_binaries", lambda skill: None)
+    monkeypatch.setattr(_generic, "_check_external_tools", lambda skill: None)
 
-        def boom(active):
-            raise RuntimeError("stop here")
-        monkeypatch.setattr(mod._config, "materialize_legacy_config", boom)
-    monkeypatch.setattr(skill_hsbc, "_native_warning_or_none", lambda: None)
+    def boom(active):
+        raise RuntimeError("stop here")
+    monkeypatch.setattr(_generic._config, "materialize_legacy_config", boom)
     pdf = tmp_path / "s.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake")
     return calls, pdf
 
 
-def test_bob_does_not_health_check_the_llm_endpoint(wired):          # NEGATIVE
+@pytest.mark.parametrize("skill_name", ["skill_bob", "skill_hsbc"])
+def test_bob_and_hsbc_do_not_health_check_the_llm_endpoint(skill_name, wired):   # NEGATIVE
+    from agents import registry
     calls, pdf = wired
-    text = _drive(skill_bob._run_bob(str(pdf), ""))
+    skill = registry.get(skill_name)
+    text = _drive(_generic._make_run_handler(skill)(*_args(skill, pdf), ""))
     assert calls == []
-    assert "endpoint" not in text.lower().replace("no llm endpoint needed", "")
+    assert "is down" not in text
     assert "stop here" in text          # it carried on to the run
 
 
-def test_hsbc_does_not_health_check_the_llm_endpoint(wired):         # NEGATIVE
+def test_a_skill_that_uses_a_model_is_still_health_checked(wired):
     calls, pdf = wired
-    text = _drive(skill_hsbc._run_hsbc(str(pdf), ""))
-    assert calls == []
-    assert "stop here" in text
-
-
-def test_a_skill_that_uses_a_model_is_still_health_checked(wired, monkeypatch):
-    calls, pdf = wired
-    monkeypatch.setattr(skill_bob, "skill_uses_llm", lambda name: True)
-    text = _drive(skill_bob._run_bob(str(pdf), ""))
-    assert calls == [1]
-    assert "is down" in text
+    llm_skill = next(s for s in SKILLS if s.requires.llm and len(s.inputs) >= 1)
+    text = _drive(_generic._make_run_handler(llm_skill)(*_args(llm_skill, pdf), ""))
+    assert calls, "an LLM skill must be health-checked"

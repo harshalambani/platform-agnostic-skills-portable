@@ -129,8 +129,8 @@ a future skill) can consume manually.
 6. **Excel/CSV writer** (`cg_writer.write_report_workbook`) -- writes the
    five-sheet workbook (MatchedLots / SchemeSummary / PeriodSummary /
    Reconciliation / Exceptions) plus a MatchedLots CSV sibling, following
-   `excel_writer.py`'s styling conventions (`FONT_NAME = "Arial"`, grey
-   header fill, red/yellow flag fills, autosize, freeze panes).
+   the styling conventions of the other report writers (`FONT_NAME = "Arial"`,
+   grey header fill, red/yellow flag fills, autosize, freeze panes).
 
 ## Kept-but-unused modules
 - `parser.py` -- the old CAS-text regex parser (`parse_cas_text`,
@@ -144,11 +144,9 @@ a future skill) can consume manually.
   FIFO reconstruction (see Process step 5 above). Kept intact, with its
   existing tests unchanged, for the same future-statement reason as
   `parser.py`.
-- `excel_writer.py` -- the old CAS-shaped report writer (Transactions/
-  Holdings/RealisedGains/Exceptions, driven by `SchemeBlock`/
-  `SchemeReconciliation`). Kept intact for the same reason; the new xlsx
-  path uses `cg_writer.py` instead, a separate module with its own
-  five-sheet shape driven by `cg_parser`'s dataclasses.
+- `cg_writer.py` -- the xlsx path's report writer, a five-sheet shape
+  driven by `cg_parser`'s dataclasses. (The older CAS-shaped report
+  writer, `excel_writer.py`, was removed: nothing used it.)
 
 ## Output
 `...-MF-CAS.xlsx` in `Data/outputs/`, plus `..._matched_lots.csv` (this
@@ -178,9 +176,9 @@ downstream.
   `password_error_message` gained an optional `doc_type` parameter
   (default `"PDF"`, unchanged for every other caller) so this skill's
   message correctly says "xlsx is password-protected" instead.
-- `cg_writer.py` follows `excel_writer.py`'s styling conventions (same
-  font, header fill, flag colours, autosize/freeze-pane helpers) so this
-  skill's output continues to look like the rest of the GnuCash/ITR-family
+- `cg_writer.py` uses the same styling conventions as the other report
+  writers (font, header fill, flag colours, autosize/freeze-pane helpers)
+  so this skill's output looks like the rest of the GnuCash/ITR-family
   skills.
 
 ## v2 non-goals (explicit, not deferred silently)
