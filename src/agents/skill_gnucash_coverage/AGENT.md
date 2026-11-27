@@ -63,7 +63,7 @@ in `Data/outputs/`:
   with no gaps: kind of account, transactions in the year, months with
   transactions ("x of y"), first and last transaction in the year.
 
-Tab placement is unchanged: GnuCash > Banks (`_BANKS_TAB_ORDER`).
+Tab placement: its own GnuCash > Coverage tab (`_GNUCASH_TAB_OF`).
 
 ## Reuse / relationship
 - `agents.gnucash_accounts` supplies account typing and opening-balance

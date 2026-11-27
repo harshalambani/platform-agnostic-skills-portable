@@ -2095,14 +2095,6 @@ def _redact_llm_text(text, api_key=None) -> str:
     return _llm_errors.redact(text, (api_key,) if api_key else (), "***")
 
 
-def _message_from_body(body) -> str:
-    try:
-        from agents.llm_errors import message_from_body  # noqa: PLC0415
-    except ImportError:  # CLI / bare-import usage
-        from llm_errors import message_from_body  # type: ignore  # noqa: PLC0415
-    return message_from_body(body)
-
-
 def _provider_message(err, api_key=None) -> str:
     """The provider's own error text from an HTTPError body (OpenAI style
     {"error": {"message": ...}}), redacted and capped. "" when there is none."""
@@ -2371,16 +2363,6 @@ def _build_historical_prompt(historical_mappings: List[Dict], desc: str, amt_inf
     )
 
 
-def _register_pacing(cfg: dict) -> None:
-    """MAP-20: register this endpoint's pacing (min gap / daily cap) with the
-    shared pacer that `_llm_chat` and base_agent.load_model both wait on."""
-    try:
-        from agents import llm_pacing  # noqa: PLC0415
-    except ImportError:
-        import llm_pacing  # noqa: PLC0415
-    llm_pacing.configure_from_legacy(cfg)
-
-
 _AI_CLOCK = time.monotonic     # tests swap this for a fake clock
 
 
@@ -2460,21 +2442,17 @@ try:
     from agents.llm_model_params import (  # noqa: PLC0415
         LLM_REPLY_MAX_TOKENS, LLM_REPLY_MAX_TOKENS_THINKING,
         chat_model_name as _chat_model_name,
-        reasoning_effort_for as _reasoning_effort_for,
+        reasoning_effort_for as _reasoning_effort_for,  # noqa: F401 (re-exported; a test reads it)
         reply_cap_for as _reply_cap_for)
 except ImportError:  # CLI / bare-import usage
     from llm_model_params import (  # type: ignore  # noqa: PLC0415
         LLM_REPLY_MAX_TOKENS, LLM_REPLY_MAX_TOKENS_THINKING,
         chat_model_name as _chat_model_name,
-        reasoning_effort_for as _reasoning_effort_for,
+        reasoning_effort_for as _reasoning_effort_for,  # noqa: F401 (re-exported; a test reads it)
         reply_cap_for as _reply_cap_for)
 
 
 _Reply = _llm_client.Reply
-
-
-def _wants_reasoning_effort(model: str) -> bool:
-    return _reasoning_effort_for(model) is not None
 
 
 def _address_refused(base_url, api_key=None) -> bool:
@@ -3390,10 +3368,6 @@ _CASHBACK_REASON = "card cash back = reduction in spend"
 _CASHBACK_UNRESOLVED_REASON = (
     _CASHBACK_REASON + " - no Drawings account found in the book; pick the account "
     "your card spend goes to")
-
-
-def _is_cashback_reason(reason: str) -> bool:
-    return (reason or '').startswith(_CASHBACK_REASON)
 
 
 # MAP-34: an employer NEFT credit that reimburses the owner's spend. The marker

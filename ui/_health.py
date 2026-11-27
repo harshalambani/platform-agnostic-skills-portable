@@ -314,14 +314,6 @@ def get_model_choices(endpoint: dict[str, Any]) -> list[tuple[str, str]]:
     return _choices_from(check(endpoint), endpoint)
 
 
-def get_model_choices_cached(endpoint: dict[str, Any]) -> list[tuple[str, str]]:
-    """As get_model_choices, but served from the shared probe cache — this is
-    the startup path, where re-probing an endpoint the prime thread has
-    already answered for would just re-spend the seconds prime_async exists
-    to hide."""
-    return _choices_from(check_cached(endpoint), endpoint)
-
-
 def get_model_choices_if_known(endpoint: dict[str, Any]) -> list[tuple[str, str]] | None:
     """Choices for an endpoint that has already been probed, else None.
 

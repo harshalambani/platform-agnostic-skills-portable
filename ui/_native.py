@@ -215,7 +215,3 @@ def ensure_native_path() -> NativeStatus:
     return status
 
 
-def shutil_which(name: str) -> str | None:
-    """Convenience: shutil.which() but always after ensure_native_path()."""
-    ensure_native_path()
-    return shutil.which(name)

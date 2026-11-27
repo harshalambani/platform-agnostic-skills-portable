@@ -298,46 +298,52 @@ def test_tab_exemption_is_only_for_hidden_skills():                   # NEGATIVE
 
 
 # ---------------------------------------------------------------------------
-# Banks sub-tab order (ledger item: Coverage Gap Detector moved to the end
-# of the row). The gr.Tabs() render order is not reliably introspectable
-# from the constructed Blocks object, so the ordering logic is exercised
-# directly via the extracted pure helper, per the standing rule that a
-# tracker fix ships with a negative test proving the wrong behaviour is
-# gone, not just that the new behaviour works.
+# Banks sub-tab order. Coverage Gap Detector used to be pinned last in Banks;
+# it now has its own "Coverage" tab (_GNUCASH_TAB_OF), so it is not ranked in
+# Banks at all. The ordering logic is exercised through the extracted pure
+# helper (the gr.Tabs() render order is not introspectable from the Blocks).
 # ---------------------------------------------------------------------------
 
-def test_banks_tab_order_puts_coverage_gap_detector_last():
+def test_banks_tab_order_puts_bank_convert_first_and_nothing_after_review():
     from ui import webui
     before, after = webui._split_banks_tabs(
-        ["Coverage Gap Detector", "Bank - Convert to GnuCash"]
+        ["Some Future Skill", "Bank - Convert to GnuCash"]
     )
-    assert before == ["Bank - Convert to GnuCash"]
-    assert after == ["Coverage Gap Detector"]
+    assert before == ["Bank - Convert to GnuCash", "Some Future Skill"]
+    assert after == []
 
 
-def test_banks_tab_order_coverage_gap_detector_not_before_review():
-    """Negative test: the OLD behaviour (Coverage Gap Detector rendered
-    before the hand-written Review tab, since it iterated _cat_skills in
-    discovery order) must not recur. before_review is exactly what renders
-    ahead of the Review tab in webui.py, so asserting it is absent there
-    directly guards against the regression, not just the happy path."""
+def test_coverage_gap_detector_is_not_in_the_banks_ranking():
+    """NEGATIVE: the old pin (Coverage Gap Detector rank 50, rendered after
+    Review in Banks) must not come back; the skill lives on its own tab."""
     from ui import webui
-    before, _after = webui._split_banks_tabs(
+    assert "Coverage Gap Detector" not in webui._BANKS_TAB_ORDER
+    assert webui._banks_tab_rank("Coverage Gap Detector") == 0   # the unknown-skill default
+    assert webui._GNUCASH_TAB_OF["Coverage Gap Detector"] == "Coverage"
+    assert "Coverage" in webui.GNUCASH_ROW
+    # and it is not rendered in a Banks "after Review" slot
+    _before, after = webui._split_banks_tabs(
         ["Bank - Convert to GnuCash", "Coverage Gap Detector"]
     )
-    assert "Coverage Gap Detector" not in before
+    assert "Coverage Gap Detector" not in after
+
+
+def test_banks_tab_order_has_no_rank_after_review():
+    """build_app draws only the 'before Review' list for Banks. A rank >= 50
+    would silently drop its tab, so adding one must also add a render loop."""
+    from ui import webui
+    assert all(r < 50 for r in webui._BANKS_TAB_ORDER.values())
 
 
 def test_banks_tab_order_unknown_skill_defaults_before_review():
-    """A future gnucash skill with no entry in _BANKS_TAB_ORDER must still
-    land before Review, matching pre-existing behaviour for every skill
-    that isn't explicitly pinned last."""
+    """A future gnucash skill with no entry in _BANKS_TAB_ORDER lands before
+    Review (rank 0), after the pinned-first Bank - Convert to GnuCash."""
     from ui import webui
     before, after = webui._split_banks_tabs(
-        ["Bank - Convert to GnuCash", "Coverage Gap Detector", "Some Future Skill"]
+        ["Bank - Convert to GnuCash", "Some Future Skill"]
     )
-    assert "Some Future Skill" in before
-    assert after == ["Coverage Gap Detector"]
+    assert before == ["Bank - Convert to GnuCash", "Some Future Skill"]
+    assert after == []
 
 
 # ---------------------------------------------------------------------------

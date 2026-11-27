@@ -1017,25 +1017,6 @@ def _cents(x) -> int:
     return int(round(round(float(x), 2) * 100))
 
 
-def _journal_legs(journal, ignore: set | None = None) -> Counter:
-    ignore = ignore or set()
-    return Counter(
-        (round(s.debit - s.credit, 2), s.account)
-        for s in journal.splits if s.account not in ignore
-    )
-
-
-def _book_legs(txn, colon_paths: dict, ignore: set | None = None) -> Counter:
-    ignore = ignore or set()
-    out: Counter = Counter()
-    for sp in txn.splits:
-        acct = colon_paths.get(sp.account_guid, "")
-        if acct in ignore:
-            continue
-        out[(round(float(sp.value), 2), acct)] += 1
-    return out
-
-
 def _fallback_classify(journal, fy_txns, colon_paths: dict) -> tuple[str, str]:
     """Exact (2dp-rounded) date+amount+account fallback match, used only
     when no trn:num hit exists. Returns (status, detail)."""

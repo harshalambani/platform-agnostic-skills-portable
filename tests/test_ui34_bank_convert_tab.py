@@ -35,9 +35,9 @@ def test_bank_convert_renders_first_even_when_discovered_late():
     from ui import webui
     before, after = webui._split_banks_tabs(["Some Future Skill", "Coverage Gap Detector", NEW])
     assert before[0] == NEW
-    assert after == ["Coverage Gap Detector"]
-    before, after = webui._split_banks_tabs([NEW, "Coverage Gap Detector"])
-    assert before == [NEW] and after == ["Coverage Gap Detector"]
+    assert after == []     # Coverage Gap Detector has its own tab now (UI-55); nothing is ranked last
+    before, after = webui._split_banks_tabs([NEW, "Some Future Skill"])
+    assert before == [NEW, "Some Future Skill"] and after == []
 
 
 def test_saved_inputs_are_keyed_on_the_skill_name_not_the_tab_label():
