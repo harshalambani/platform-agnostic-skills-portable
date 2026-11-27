@@ -136,6 +136,52 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
+  # Advisory check on the lock (AUD-15). pip-audit looks every pinned package in
+  # requirements-lock.txt up in the public advisory list and the job fails on
+  # any finding. An advisory that has been reviewed goes in
+  # .github/pip-audit-ignore.txt (one id per line, with the reason). The tool is
+  # pinned and lives in its own venv, so the app's test environment is never
+  # touched. scripts/lock_advisory_check.py also fails when the lock holds fewer
+  # than the floor of pinned packages, or when pip-audit checked fewer, so it
+  # cannot pass over zero packages.
+  # ---------------------------------------------------------------------------
+  advisory-check:
+    name: Locked packages advisory check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the audit tool (own venv)
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-venv"
+          "$RUNNER_TEMP/audit-venv/bin/pip" install --quiet pip-audit==2.10.1 pytest
+          "$RUNNER_TEMP/audit-venv/bin/pip-audit" --version
+
+      - name: Check the locked packages against the advisory list
+        run: |
+          python scripts/lock_advisory_check.py \
+            --pip-audit "$RUNNER_TEMP/audit-venv/bin/pip-audit"
+
+      # Proof that the check bites: a one-package lock with a known-vulnerable
+      # pin must fail, a clean one must pass, an empty lock must fail the floor.
+      # PASK_REQUIRE_PIP_AUDIT=1 turns a skip into a failure here.
+      - name: The check fails on a vulnerable pin and on an empty lock
+        env:
+          PASK_REQUIRE_PIP_AUDIT: "1"
+          PIP_AUDIT_BIN: ${{ runner.temp }}/audit-venv/bin/pip-audit
+        run: |
+          "$RUNNER_TEMP/audit-venv/bin/python" -m pytest tests/test_lock_advisory_check.py -rA -q 2>&1 | tee "$RUNNER_TEMP/audit-tests.txt"
+          grep -q "^PASSED .*test_real_audit_fails_on_a_known_vulnerable_pin" "$RUNNER_TEMP/audit-tests.txt"
+          grep -q "^PASSED .*test_an_empty_lock_fails_the_floor" "$RUNNER_TEMP/audit-tests.txt"
+          if grep -q "^SKIPPED" "$RUNNER_TEMP/audit-tests.txt"; then echo "::error::a test was skipped"; exit 1; fi
+
+  # ---------------------------------------------------------------------------
   # Job 2: Lint + tests (runs on every push/PR, independent of lock-check).
   # ---------------------------------------------------------------------------
   test:

@@ -1,0 +1,3 @@
+# Advisories reviewed and accepted for the locked packages (AUD-15).
+# One advisory id per line (GHSA-..., PYSEC-..., CVE-...), then a "#" and the reason.
+# Starts empty on purpose: each id is added only after it has been reviewed.
