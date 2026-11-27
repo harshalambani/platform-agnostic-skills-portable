@@ -47,38 +47,19 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from pathlib import Path
 
 import yaml
 
+from agents import _paths
 from . import _config as _config_mod
 
 _FY_RE = re.compile(r"^\d{4}-\d{2}$")
 
-_SCRIPTS_ON_PATH = False
-
-
-def _ensure_itr_scripts_importable() -> None:
-    """Put the ITR Workbook skill's flat scripts/ dir on sys.path once, the
-    same way ui/tabs/itr_mapping_review.py and ui/tabs/itr_entities.py do
-    (frozen-build-safe: resolved via the agents.skill_itr_workbook package,
-    not a source-tree-relative guess)."""
-    global _SCRIPTS_ON_PATH
-    if _SCRIPTS_ON_PATH:
-        return
-    import agents.skill_itr_workbook as _itr_pkg  # noqa: PLC0415
-
-    scripts_dir = Path(_itr_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-    _SCRIPTS_ON_PATH = True
-
-
 def _configs_mod():
     """Import and return the skill's configs module (importable in both
     source and frozen builds)."""
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     import configs  # noqa: PLC0415
     return configs
 

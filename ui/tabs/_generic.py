@@ -6,7 +6,7 @@ the metadata in skill.yaml to determine input fields, output type, and
 execution flow. Replaces the hand-coded per-skill tab files.
 
 The run handler follows the same accumulating-log + yield-from pattern
-established in skill_26as.py / skill_bob.py / skill_hsbc.py.
+used by the per-skill tab files this module replaced.
 
 Supported input types (declared in skill.yaml):
   - "file"      → single file upload (gr.File)

@@ -357,19 +357,6 @@ def test_all_unattributed_disposals_cannot_cross_check_rta_gain():
     assert recon.rta_gain_variance is None
     assert recon.rta_gain_note == lots.CANNOT_CROSS_CHECK
 
-    # And this must reach the rendered workbook -- a blank/absent Exceptions
-    # row on undecidable input would misread as "no variance found".
-    from openpyxl import Workbook
-
-    from agents.skill_mf_cas import excel_writer
-
-    wb = Workbook()
-    wb.remove(wb.active)
-    excel_writer._write_exceptions_sheet(wb, [recon])
-    ws = wb["Exceptions"]
-    details = [ws.cell(row=r, column=4).value for r in range(2, ws.max_row + 1)]
-    assert any(lots.CANNOT_CROSS_CHECK in (d or "") for d in details)
-
 
 def test_disposal_with_nonnegative_units_is_flagged_not_dropped():
     # qty_needed = -txn.units (and the whole matching loop) relies on

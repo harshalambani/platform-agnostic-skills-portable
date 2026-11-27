@@ -95,12 +95,12 @@ from __future__ import annotations
 import datetime
 import html as _html
 import shutil
-import sys
 from pathlib import Path
 
 import gradio as gr
 import yaml
 
+from agents import _paths
 from .. import _config as _config_mod
 from .._review_engine import (
     Column,
@@ -126,25 +126,10 @@ PAYLOAD_VAR = "_itrMapSavePayload"
 # sys.path once, then import the bare module names.
 # ---------------------------------------------------------------------------
 
-_SCRIPTS_ON_PATH = False
-
-
-def _ensure_itr_scripts_importable() -> None:
-    global _SCRIPTS_ON_PATH
-    if _SCRIPTS_ON_PATH:
-        return
-    import agents.skill_itr_workbook as _itr_pkg  # noqa: PLC0415
-
-    scripts_dir = Path(_itr_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-    _SCRIPTS_ON_PATH = True
-
-
 def _itr_modules():
     """Return (configs, tags, apply_mapping_corrections) modules, importable
     in both source and frozen builds."""
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     import apply_mapping_corrections as amc  # noqa: PLC0415
     import configs  # noqa: PLC0415
     import tags as tag_vocab  # noqa: PLC0415
