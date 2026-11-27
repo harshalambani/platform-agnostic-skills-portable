@@ -1,5 +1,6 @@
-"""DBT-01: the balance self-check row on BS_Transcript is written again, and the
-Reconciliation sheet shows the same result. Synthetic Balance Sheet reports only,
+"""DBT-01: the balance self-check row on BS_Transcript is written again. The
+Reconciliation sheet is unchanged: its existing "Identity checks" line already
+covers an unbalanced book. Synthetic Balance Sheet reports only,
 built from a small double-entry ledger so the totals follow the report's own
 sign conventions (liabilities and equity positive, Retained Earnings = net income).
 """
@@ -22,7 +23,7 @@ import parse_eguile  # noqa: E402
 import write_workbook as ww  # noqa: E402
 
 LABEL = "Assets - Equity - NetIncome (self-check, should be 0)"
-CHECK_LABEL_START = "Balance sheet self-check"
+CHECK_LABEL_START = "Balance sheet self-check"  # must NOT appear on Reconciliation
 
 
 def _html(*, assets: float, liabilities: float, trading: float, equity: float,
@@ -97,12 +98,6 @@ def _recon_text(tree, identity_failures=()):
     return {str(a): b for a, b in _sheet_rows(wb["Reconciliation"])}
 
 
-def _check_line(text):
-    hits = [v for k, v in text.items() if k.startswith(CHECK_LABEL_START)]
-    assert len(hits) == 1, text
-    return hits[0]
-
-
 # ---- the formula holds for a correctly balanced book --------------------------
 
 def test_the_three_section_totals_of_a_balanced_book_net_to_zero():
@@ -170,22 +165,22 @@ def test_entries_are_the_same_with_and_without_a_balanced_book():
     assert [r for _, r in a] == [r for _, r in b]
 
 
-# ---- the Reconciliation (Checks) sheet --------------------------------------
+# ---- the Reconciliation sheet is not touched ---------------------------------
 
-def test_reconciliation_says_ok_for_a_balanced_book():
-    assert _check_line(_recon_text(_tree(**BALANCED))) == "OK"
-
-
-def test_reconciliation_fails_clearly_for_an_unbalanced_book():          # NEGATIVE
-    value = _check_line(_recon_text(_tree(**UNBALANCED)))
-    assert value != "OK"
-    assert value.startswith("FAILED")
-    assert "-7.25" in value
+@pytest.mark.parametrize("book", [BALANCED, UNBALANCED])
+def test_reconciliation_has_no_self_check_line(book):                   # NEGATIVE
+    text = _recon_text(_tree(**book))
+    assert not [k for k in text if k.startswith(CHECK_LABEL_START)]
 
 
-def test_within_a_cent_is_ok_and_beyond_is_not():
-    assert _check_line(_recon_text(_tree(**dict(BALANCED, assets=1000.005)))) == "OK"
-    assert _check_line(_recon_text(_tree(**dict(BALANCED, assets=1000.02)))) != "OK"
+def test_identity_checks_already_flags_an_unbalanced_book():
+    tree = _tree(**UNBALANCED)
+    failures = parse_eguile.verify(tree)
+    assert failures
+    text = _recon_text(tree, failures)
+    assert text["Identity checks"] != "OK"
+    assert text["Identity checks"] == f"{len(failures)} FAILURE(S)"
+    assert any(k.strip() == "failure" for k in text)
 
 
 def test_the_existing_reconciliation_lines_are_still_there():

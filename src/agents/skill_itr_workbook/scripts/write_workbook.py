@@ -911,9 +911,6 @@ def write_is_transcript(wb: Workbook, tree) -> list:
     return entries
 
 
-BALANCE_SELF_CHECK_TOLERANCE = 0.01
-
-
 def balance_self_check_difference(tree) -> float:
     """Assets Accounts - "Equity, Trading, and Liabilities" - Retained Earnings,
     from the Balance Sheet report's own section totals (the report shows
@@ -1289,12 +1286,6 @@ def write_reconciliation_sheet(
     sw.label_value("Identity checks", "OK" if not identity_failures else f"{len(identity_failures)} FAILURE(S)", number_format=None)
     for f in identity_failures:
         sw.label_value("  failure", f, number_format=None)
-    bs_diff = balance_self_check_difference(tree)
-    sw.label_value(
-        "Balance sheet self-check (Assets - Equity, Trading, Liabilities - Retained Earnings)",
-        "OK" if abs(bs_diff) <= BALANCE_SELF_CHECK_TOLERANCE else f"FAILED -- difference {bs_diff:.2f}",
-        number_format=None,
-    )
     sw.label_value("Capital Gains reconciliation (lots vs control)", "OK" if cg_reconciliation_ok else "MISMATCH", number_format=None)
     # Salary sheet's OWN arithmetic (gross - s.10 exempt - std deduction -
     # prof tax vs income chargeable) -- a DIFFERENT check to the "17(1)
