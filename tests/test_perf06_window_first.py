@@ -15,9 +15,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent
-for _p in (ROOT.parent / "src", ROOT.parent):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from ui import _firstwindow as fw  # noqa: E402
 

@@ -8,7 +8,6 @@ They do NOT touch a real LLM endpoint, do NOT require Tesseract/Poppler
 binaries to be present, and do NOT spin a port.
 """
 import importlib
-import sys
 from pathlib import Path
 
 import pytest
@@ -17,8 +16,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
 
 # Make src/ importable in source mode (mirrors how the frozen build resolves it)
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 
 # ---------------------------------------------------------------------------

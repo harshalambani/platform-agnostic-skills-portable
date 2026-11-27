@@ -26,8 +26,6 @@ REAL_SAMPLES_DIR = ROOT / "Data" / "GNUCashReports"
 
 
 def _load_module():
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("parse_eguile", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod
@@ -37,7 +35,6 @@ def _load_module():
 
 pe = _load_module()
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import fixture_gen  # noqa: E402
 
 

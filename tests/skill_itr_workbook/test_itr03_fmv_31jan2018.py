@@ -8,7 +8,6 @@ silently. Synthetic symbols only.
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -17,9 +16,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 import lots as lots_engine  # noqa: E402

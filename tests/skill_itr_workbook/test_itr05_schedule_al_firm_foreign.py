@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,9 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
-for p in (str(SCRIPTS), str(SCRIPTS.parent), str(Path(__file__).resolve().parent), str(ROOT / "src"), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import apply_mapping_corrections as amc  # noqa: E402
 import configs  # noqa: E402

@@ -44,9 +44,6 @@ COVERAGE_DIR = SRC / "agents" / "skill_gnucash_coverage"
 # that did so was hand-building a condition the real app never has -- see
 # test_run_works_without_own_dir_on_syspath below, which pins this down as a
 # regression guard (ledger item COV-01).
-for _p in (str(SRC), str(ITR_SCRIPTS)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs  # noqa: E402
 from agents.skill_gnucash_coverage import agent as cov  # noqa: E402

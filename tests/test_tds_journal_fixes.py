@@ -19,8 +19,6 @@ SCRIPT = SRC / "agents" / "skill_26as_journal" / "scripts" / "build_tds_journals
 
 
 def _load():
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("build_tds_journals", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod

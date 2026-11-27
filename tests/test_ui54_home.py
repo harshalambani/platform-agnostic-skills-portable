@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import json
-import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,9 +9,6 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from ui import (  # noqa: E402
     _book_registry, _config, _coverage_last as CL, _health, _home_data as H, _runhistory as RH,

@@ -1,13 +1,9 @@
 """UI-33: CC Transactions and CC Spend Booking offer the CC Sort runs' folders."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (str(ROOT / "src"), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents import registry  # noqa: E402
 from ui.tabs import _generic  # noqa: E402

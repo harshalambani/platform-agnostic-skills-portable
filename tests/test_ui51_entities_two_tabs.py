@@ -6,16 +6,12 @@ Synthetic entities and cards only (tmp_path); the real settings folder is never 
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import gradio as gr
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from ui.tabs import _entity_cards as ec                      # noqa: E402
 from ui.tabs import itr_entities as ui_mod                   # noqa: E402

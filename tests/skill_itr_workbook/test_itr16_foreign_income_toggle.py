@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_itr05_schedule_al_firm_foreign as t5  # noqa: E402
 import test_itr06_foreign_tax_credit as t6  # noqa: E402
 from test_itr05_schedule_al_firm_foreign import (  # noqa: E402

@@ -7,7 +7,6 @@ The native Win32 dialog is monkeypatched; only temp directories are used.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,9 +16,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(SRC), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from ui import _filedialog  # noqa: E402
 from ui.tabs import _generic as generic_mod  # noqa: E402

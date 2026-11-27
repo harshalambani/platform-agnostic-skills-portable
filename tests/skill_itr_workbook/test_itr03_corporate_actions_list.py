@@ -7,7 +7,6 @@ overlay is never created or read.
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -19,9 +18,6 @@ SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = SRC / "agents" / "skill_itr_workbook"
 BUNDLED = AGENT_DIR / "data" / "corporate_actions_after_31jan2018.csv"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-for p in (str(SRC), str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 import schedules as sch  # noqa: E402

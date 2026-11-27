@@ -6,12 +6,9 @@ raises nothing. Synthetic data only.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_itr02_partner_tds_194t as base  # noqa: E402
 from test_itr02_partner_tds_194t import (  # noqa: E402,F401
     NEW, TDS_INT_GUID, _retag, _rules, _txn, as26_engine, sch,

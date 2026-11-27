@@ -16,14 +16,11 @@ warning, while a required "file" input still does.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from ui.tabs._generic import _make_run_handler
 

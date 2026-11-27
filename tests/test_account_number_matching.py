@@ -18,13 +18,10 @@ tests only exercise account *resolution*, not balance summation.
 from __future__ import annotations
 
 import gzip
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents.skill_gnucash_pipeline.agent import _get_gnucash_account_balance  # noqa: E402
 

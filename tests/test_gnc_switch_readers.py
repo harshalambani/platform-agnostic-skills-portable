@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import gzip
 import json
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -20,13 +19,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (SRC,
-           SRC / "agents" / "skill_itr_workbook" / "scripts",
-           SRC / "agents" / "skill_26as_journal" / "scripts",
-           SRC / "agents" / "skill_gnucash_intercompany" / "scripts",
-           Path(__file__).resolve().parent):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import gnc_golden  # noqa: E402
 from test_gnc_book import _book_xml  # noqa: E402

@@ -7,7 +7,6 @@ hard stop. Offline; synthetic fixtures; the key is a fake.
 from __future__ import annotations
 
 import dataclasses
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,9 +17,6 @@ SRC = ROOT / "src"
 SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = SRC / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-for p in (str(SRC), str(SCRIPTS), str(AGENT_DIR), str(ROOT), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import agent  # noqa: E402
 import fixture_gen  # noqa: E402

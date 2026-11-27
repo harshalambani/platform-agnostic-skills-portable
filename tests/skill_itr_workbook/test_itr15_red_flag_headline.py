@@ -5,12 +5,9 @@ status, and never touches the credit figure. Synthetic data only.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_itr01_precheck_warn as base  # noqa: E402
 from test_itr01_precheck_warn import FIXTURES, _agent_run, agent  # noqa: E402,F401
 sch = agent.sch

@@ -2,16 +2,12 @@
 Entities screen, stored in the same partner_comp_drivers keys. Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                                          # noqa: E402
 from agents.skill_partner_comp_recon import writer                       # noqa: E402

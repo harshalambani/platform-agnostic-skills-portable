@@ -7,15 +7,11 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src", ROOT / "src" / "agents", Path(__file__).parent):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from gnc_book_fixture import (  # noqa: E402
     HDFC1, HSBC1, P_HDFC1, P_HSBC1, account_xml, standard_accounts, txn_xml, write_book,

@@ -9,7 +9,6 @@ read anywhere in this file.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -20,9 +19,6 @@ SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FIXTURE_XLSX = FIXTURES / "syn_indmoney_tax_report.xlsx"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_foreign as pf  # noqa: E402
 

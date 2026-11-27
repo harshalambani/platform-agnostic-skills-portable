@@ -23,20 +23,12 @@ from __future__ import annotations
 
 import gzip
 import io
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-for _sub in ("skill_bob", "skill_hdfc"):
-    p = ROOT / _sub
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
 REPO_ROOT = ROOT.parent
 SRC = REPO_ROOT / "src"
-for _p in (SRC, SRC / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import bob_fixture_gen  # noqa: E402
 import hdfc_fixture_gen  # noqa: E402

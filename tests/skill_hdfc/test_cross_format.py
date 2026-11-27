@@ -16,17 +16,12 @@ from __future__ import annotations
 
 import csv
 import os
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hdfc_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_hdfc import agent  # noqa: E402

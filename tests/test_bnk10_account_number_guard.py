@@ -16,16 +16,12 @@ entities.yaml. The lookup is read-only and never raises.
 from __future__ import annotations
 
 import hashlib
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (SRC, SRC / "agents", ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_gnucash_pipeline import agent as pipe  # noqa: E402
 import gnc_book_fixture as fx  # noqa: E402

@@ -18,7 +18,6 @@ import email.mime.multipart
 import email.mime.text
 import email.mime.base
 import json
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -31,11 +30,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents.skill_msg_parser.agent import run, _parse_eml, _parse_msg  # noqa: E402
-sys.path.insert(0, str(ROOT / "tests"))
 from msg_fixtures import build_msg, signed_mime, utc  # noqa: E402
 
 

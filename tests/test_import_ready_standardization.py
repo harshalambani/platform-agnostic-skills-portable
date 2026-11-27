@@ -22,15 +22,11 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # _save_changes lazily imports from the `agents` package, so src/ must be on the
 # path alongside the repo root and ui/.
-for _p in (ROOT, ROOT / "src", ROOT / "ui"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.canonical_io import CANONICAL_FIELDS, IMPORT_READY_FIELDS, IMPORT_READY_HEADERS  # noqa: E402
 

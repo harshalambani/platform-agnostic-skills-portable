@@ -25,10 +25,6 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
-for p in (str(ROOT), str(SRC), str(SCRIPTS), str(SRC / "agents" / "skill_itr_workbook"),
-          str(Path(__file__).resolve().parent), str(ROOT / "tests")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import _review_js as js  # noqa: E402
 import tag_suggest  # noqa: E402

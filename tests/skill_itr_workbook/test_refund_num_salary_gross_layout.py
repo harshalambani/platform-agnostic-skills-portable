@@ -47,7 +47,6 @@ bundle:
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -59,9 +58,6 @@ AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_gnucash as pg  # noqa: E402
 import configs  # noqa: E402

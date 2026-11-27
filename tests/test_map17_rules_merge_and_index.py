@@ -5,15 +5,11 @@ pass must be indexed without changing which rows map.
 from __future__ import annotations
 
 import random
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402
 from agents.skill_gnucash_account_mapper import persistent_rules as pr  # noqa: E402

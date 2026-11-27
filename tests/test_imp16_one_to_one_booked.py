@@ -1,13 +1,9 @@
 """IMP-16: the bank pipeline's already-in-book match is one-to-one. Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-for _p in (str(ROOT / "skill_hdfc"), str(ROOT.parent / "src"), str(ROOT.parent / "src" / "agents")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import hdfc_fixture_gen as fixture_gen                                  # noqa: E402
 from agents.skill_gnucash_pipeline.agent import run as pipeline_run       # noqa: E402

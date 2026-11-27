@@ -6,7 +6,6 @@ nothing here touches the network.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,9 +16,6 @@ from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import base_agent                                    # noqa: E402
 from agents.skill_csv_analyzer import agent as csv_agent         # noqa: E402

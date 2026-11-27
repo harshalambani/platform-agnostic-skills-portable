@@ -8,15 +8,11 @@ Every behaviour carries NEGATIVE tests: the old min_freq=1 must NOT come back.
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "src" / "agents", ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402

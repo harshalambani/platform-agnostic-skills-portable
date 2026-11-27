@@ -2,16 +2,12 @@
 (requires.llm): "Agent reply" only where a model answers. And the custom
 generic tab (which BoB and HSBC use) health-checks the LLM endpoint only for skills
 that use one."""
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.registry import discover  # noqa: E402
 from ui.tabs import _generic  # noqa: E402

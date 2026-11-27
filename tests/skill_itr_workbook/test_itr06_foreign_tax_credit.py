@@ -10,7 +10,6 @@ broker reports.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -22,9 +21,6 @@ SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 import fixture_gen  # noqa: E402
@@ -272,7 +268,6 @@ def test_book_figures_never_added_to_the_reports(tmp_path):
 
 
 def test_agent_stops_loudly_and_builds_nothing(tmp_path, monkeypatch):
-    sys.path.insert(0, str(SCRIPTS.parent))
     import agent
     rep = _report(ordinary_dividend=700.0)
     monkeypatch.setattr(agent.foreign_engine, "load_foreign_income_report", lambda p: rep)

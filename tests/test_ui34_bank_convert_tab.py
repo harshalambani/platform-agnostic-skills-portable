@@ -2,16 +2,12 @@
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(SRC), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 NEW = "Bank - Convert to GnuCash"
 

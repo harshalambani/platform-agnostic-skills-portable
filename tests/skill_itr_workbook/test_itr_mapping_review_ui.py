@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,11 +35,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 SRC = ROOT / "src"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import agent  # noqa: E402
 import configs  # noqa: E402

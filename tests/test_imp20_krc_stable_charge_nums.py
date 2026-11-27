@@ -4,10 +4,7 @@ not from its position in the ledger. Synthetic data only.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_imp17_krc_already_in_book as t17  # noqa: E402
 
 bk = t17.bk

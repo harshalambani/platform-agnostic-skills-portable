@@ -3,7 +3,6 @@ Synthetic data only; invented companies, round amounts."""
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -11,9 +10,6 @@ from unittest.mock import patch
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                         # noqa: E402
 import foreign_dividend_journal as fdj                 # noqa: E402

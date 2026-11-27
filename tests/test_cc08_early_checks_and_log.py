@@ -3,7 +3,6 @@ matching, and the "Full log" file holds the run's final error or result text.
 Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,9 +10,6 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_spend_booking import agent as ccsb          # noqa: E402
 from agents.skill_cc_spend_booking import matcher as M           # noqa: E402

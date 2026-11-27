@@ -7,7 +7,6 @@ the HUF's workbook, because "newest file wins". Everything here is synthetic
 (made-up names and PANs).
 """
 import os
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -15,9 +14,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import entity_scope  # noqa: E402
 from agents.registry import discover  # noqa: E402

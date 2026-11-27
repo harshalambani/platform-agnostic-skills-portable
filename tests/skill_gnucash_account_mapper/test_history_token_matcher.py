@@ -10,17 +10,11 @@ names, fake account numbers, and fake IFSC codes.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-import sys as _sys_mb
-from pathlib import Path as _Path_mb
-_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
 from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
@@ -80,14 +74,7 @@ def test_sweep_rows_excluded_from_llm_via_run_step_wiring(tmp_path, monkeypatch)
     # sweep rows ever reach the LLM: their prompts never appear, and the
     # real call count reflects only the one genuinely unrelated row.
     import csv
-    import sys as _sys
-    from pathlib import Path as _Path
 
-    ROOT_ = _Path(__file__).resolve().parent.parent.parent
-    SRC_ = ROOT_ / "src"
-    AGENTS_ROOT_ = SRC_ / "agents"
-    if str(AGENTS_ROOT_) not in _sys.path:
-        _sys.path.insert(0, str(AGENTS_ROOT_))
 
     import skill_gnucash_xml_extractor.agent as xml_agent_mod
     import skill_gnucash_mapping_generator.agent as mapgen_mod

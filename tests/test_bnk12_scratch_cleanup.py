@@ -11,7 +11,6 @@ pytest's tmp_path, so these tests never look at the real %TEMP%.
 from __future__ import annotations
 
 import subprocess
-import sys
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -19,8 +18,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT / "src") not in sys.path:
-    sys.path.insert(0, str(ROOT / "src"))
 
 from agents.skill_bob import agent as bob  # noqa: E402
 from agents.skill_hsbc import agent as hsbc  # noqa: E402

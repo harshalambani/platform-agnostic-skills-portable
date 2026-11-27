@@ -17,14 +17,10 @@ real family names, PANs, or data files are read.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
-for p in (str(SCRIPTS),):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 

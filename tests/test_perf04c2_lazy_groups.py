@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -17,8 +16,6 @@ import httpx
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
 import gradio as gr  # noqa: E402
 

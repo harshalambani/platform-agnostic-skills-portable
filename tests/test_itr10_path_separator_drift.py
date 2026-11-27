@@ -1,15 +1,11 @@
 """ITR-10: a separator-only difference (":" vs "/") is never "path drifted"."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                   # noqa: E402
 from apply_mapping_corrections import refresh_drifted_paths   # noqa: E402

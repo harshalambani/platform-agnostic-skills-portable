@@ -38,18 +38,12 @@ from __future__ import annotations
 
 import csv
 import gzip
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-if str(ROOT / "skill_bob") not in sys.path:
-    sys.path.insert(0, str(ROOT / "skill_bob"))
 
 REPO_ROOT = ROOT.parent
 SRC = REPO_ROOT / "src"
-for _p in (SRC, SRC / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import bob_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_gnucash_pipeline.agent import run as pipeline_run  # noqa: E402

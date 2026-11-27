@@ -16,15 +16,11 @@ import os
 import fnmatch
 import gzip
 import hashlib
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "src" / "agents", ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import bank_balance_gate as bg  # noqa: E402
 from agents.canonical_io import (IMPORT_READY_HEADERS, IMPORT_DEPOSIT_HEADER,  # noqa: E402

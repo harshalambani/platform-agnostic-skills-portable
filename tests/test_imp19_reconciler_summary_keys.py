@@ -1,10 +1,7 @@
 """IMP-19: the reconciler's UI summary reads the keys reconcile() returns."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from agents.skill_gnucash_reconciler import agent as R  # noqa: E402
 
 

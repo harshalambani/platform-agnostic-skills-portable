@@ -27,7 +27,6 @@ Fully offline; synthetic fixtures only. No access to any Data/ path, any
 from __future__ import annotations
 
 import shutil
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -43,11 +42,6 @@ FIXTURES = Path(__file__).resolve().parent / "fixtures"
 BS_HTML_FIXTURE = FIXTURES / "syn_ind.html"                        # AY-of "31-03-2025" -> FY 2024-25
 FOREIGN_XLSX_FIXTURE = FIXTURES / "syn_indmoney_tax_report.xlsx"   # synthetic, see test_parse_foreign.py
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from ui.tabs import advance_tax as ui_mod  # noqa: E402
 

@@ -16,9 +16,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (str(SRC), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_parser_generator import tools  # noqa: E402
 

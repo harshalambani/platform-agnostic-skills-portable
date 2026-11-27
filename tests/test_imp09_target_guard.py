@@ -20,9 +20,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (SRC, ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import gnucash_accounts as ga  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent as mapper  # noqa: E402

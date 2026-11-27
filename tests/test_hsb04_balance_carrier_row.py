@@ -8,12 +8,9 @@ from __future__ import annotations
 
 import csv
 import inspect
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
 
 from agents import canonical_io as cio  # noqa: E402
 from agents.balance_utils import extract_opening_closing, verify_running_balance  # noqa: E402

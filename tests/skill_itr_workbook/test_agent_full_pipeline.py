@@ -9,7 +9,6 @@ never fails CI, never hand-tags/hard-codes real data).
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -23,9 +22,6 @@ REAL_SAMPLES_DIR = ROOT / "Data" / "GNUCashReports"
 REAL_MAPPINGS_DIR = ROOT / "Data" / "itr" / "mappings"
 REAL_ENTITIES_PATH = ROOT / "Data" / "itr" / "entities.yaml"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 import as26  # noqa: E402

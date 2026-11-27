@@ -15,7 +15,6 @@ SCRIPT = SRC / "agents" / "skill_krc_recon" / "scripts" / "parse_krc_bills.py"
 
 @pytest.fixture()
 def mod():
-    sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("krc05_bills", SCRIPT)
     m = importlib.util.module_from_spec(spec)
     sys.modules["krc05_bills"] = m

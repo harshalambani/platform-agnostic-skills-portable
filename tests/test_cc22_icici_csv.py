@@ -15,9 +15,6 @@ ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 SCRIPT = SRC / "agents" / "skill_cc_transactions" / "scripts" / "create_cc_transaction_list.py"
 SORT_SCRIPT = SRC / "agents" / "skill_cc_sort" / "scripts" / "extract_sort_cc_pdfs.py"
-for _p in (str(SRC), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_sort import completeness as comp  # noqa: E402
 from agents.skill_cc_sort import icici_csv as ic  # noqa: E402

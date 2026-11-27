@@ -25,8 +25,6 @@ SCRIPT = SRC / "agents" / "skill_26as_journal" / "scripts" / "build_tds_journals
 
 
 def _load():
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("build_tds_journals", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod  # needed for dataclass annotation resolution
@@ -1292,7 +1290,6 @@ def test_csv_roundtrips_and_balances(tmp_path):
 # End-to-end on a wholly synthetic statement and book (no real data)
 # ---------------------------------------------------------------------------
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # synthetic_26as helper
 import synthetic_26as as syn  # noqa: E402
 
 
@@ -1353,8 +1350,6 @@ TOOLS = SRC / "agents" / "skill_26as_journal" / "tools.py"
 
 
 def _load_tools():
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("t26as_tools", TOOLS)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = mod

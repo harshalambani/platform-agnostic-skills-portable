@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import HTTPError, URLError
@@ -14,9 +13,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT / "src" / "agents"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_gnucash_account_mapper import agent as m          # noqa: E402
 

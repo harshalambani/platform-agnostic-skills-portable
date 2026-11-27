@@ -12,15 +12,11 @@ limits are real). Fake clock and sleep: nothing really sleeps.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import llm_pacing as lp  # noqa: E402
 

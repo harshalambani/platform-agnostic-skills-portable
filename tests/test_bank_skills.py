@@ -20,7 +20,6 @@ import csv
 import json
 import os
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -31,8 +30,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents.bank_contract import BankResult, BankSkill
 from agents.skill_bob.agent import BoBSkill, _native_csv_to_canonical

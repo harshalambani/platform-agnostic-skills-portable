@@ -39,7 +39,6 @@ Run with:
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -49,9 +48,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 SRC = ROOT / "src"
-for p in (str(SCRIPTS), str(SRC), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import configs  # noqa: E402
 

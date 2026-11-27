@@ -5,14 +5,10 @@
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 TEMPLATE_SETTINGS = ROOT / "bundling" / "templates" / "DefaultData" / "settings"
 

@@ -6,7 +6,6 @@ sign conventions (liabilities and equity positive, Retained Earnings = net incom
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -14,9 +13,6 @@ from openpyxl import Workbook
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
-for _p in (str(HERE), str(ROOT / "src"), str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import fixture_gen as fg  # noqa: E402
 import parse_eguile  # noqa: E402

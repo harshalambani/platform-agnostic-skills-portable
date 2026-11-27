@@ -11,7 +11,6 @@ Synthetic data only.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,10 +21,6 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
-for p in (str(ROOT), str(SRC), str(SCRIPTS), str(SRC / "agents" / "skill_itr_workbook"),
-          str(Path(__file__).resolve().parent), str(ROOT / "tests")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import _review_js as js  # noqa: E402
 import agent  # noqa: E402

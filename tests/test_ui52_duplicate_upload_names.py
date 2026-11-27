@@ -1,13 +1,11 @@
 ﻿"""UI-52: two uploads with the same file name must never stage as one."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parent))
 import test_input_caps as caps  # noqa: E402  (reuse its handler-driving helpers)
 
 import ui.tabs._generic as generic  # noqa: E402

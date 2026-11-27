@@ -7,15 +7,11 @@ amounts. The fixture is encrypted with msoffcrypto so the decrypt path is real.
 from __future__ import annotations
 
 import io
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent
-for _p in (ROOT.parent / "src", ROOT.parent / "src" / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import openpyxl  # noqa: E402
 from agents import banks  # noqa: E402

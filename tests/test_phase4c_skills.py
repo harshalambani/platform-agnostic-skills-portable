@@ -39,9 +39,6 @@ class TestRegistryDiscovery:
 
     @pytest.fixture(autouse=True)
     def _setup(self):
-        import sys
-        if str(SRC) not in sys.path:
-            sys.path.insert(0, str(SRC))
         from agents.registry import discover
         self.skills = {s.name: s for s in discover(refresh=True)}
 
@@ -130,9 +127,6 @@ class TestSummarizerHelpers:
 
     @pytest.fixture(autouse=True)
     def _setup(self):
-        import sys
-        if str(SRC) not in sys.path:
-            sys.path.insert(0, str(SRC))
         # Import helpers directly — avoid triggering base_agent (needs langgraph).
         # We parse the module file and extract the functions manually.
         self._mod_path = SKILLS_DIR / "skill_summarize" / "agent.py"

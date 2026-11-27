@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 import urllib.error as ue
 from pathlib import Path
 from urllib import request
@@ -16,9 +15,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import llm_client, llm_pacing  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402

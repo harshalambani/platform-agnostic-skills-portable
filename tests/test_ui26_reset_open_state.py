@@ -6,7 +6,6 @@ Synthetic/empty config only; nothing under Data/ is read.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,9 +13,6 @@ import gradio as gr
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (str(ROOT / "src"), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents.registry import discover  # noqa: E402
 from ui.tabs import _generic  # noqa: E402

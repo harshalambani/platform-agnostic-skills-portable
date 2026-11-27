@@ -17,8 +17,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents import _native_resolve as nr  # noqa: E402
 from ui import _native as ui_native  # noqa: E402

@@ -12,7 +12,6 @@ Run with:
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -24,8 +23,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from ui import _update
 from ui._update import _parse_version, _pick_windows_asset, UpdateInfo, format_banner, check_now, _result

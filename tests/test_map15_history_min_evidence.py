@@ -5,11 +5,9 @@ bank-account names), never from a stop-word list.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402
 

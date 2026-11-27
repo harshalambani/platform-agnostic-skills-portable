@@ -1,16 +1,12 @@
 """IMP-18: the partner journal CSVs no longer offer journals the book already
 holds. Synthetic fixtures only (made-up entity, accounts, amounts)."""
 import csv
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import tests.test_skill_partner_comp_recon as T  # noqa: E402
 from agents.skill_partner_comp_recon import agent as A  # noqa: E402

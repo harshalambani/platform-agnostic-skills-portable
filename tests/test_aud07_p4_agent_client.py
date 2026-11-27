@@ -18,9 +18,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from langchain_core.tools import tool  # noqa: E402
 

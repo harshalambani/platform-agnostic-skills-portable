@@ -9,17 +9,12 @@ docstrings of agents.skill_hsbc.acct_number and agents.skill_hdfc.agent).
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (ROOT / "src", ROOT / "src" / "agents", ROOT / "tests", ROOT / "tests" / "skill_hdfc",
-          ROOT / "tests" / "skill_hsbc", ROOT / "src" / "agents" / "skill_hsbc" / "scripts"):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
 import gnc_book_fixture as fx  # noqa: E402
 import hdfc_fixture_gen as hfx  # noqa: E402

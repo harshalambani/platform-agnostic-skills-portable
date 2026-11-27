@@ -11,15 +11,11 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests"))
-sys.path.insert(0, str(ROOT / "src"))
 
 import _review_js as js  # noqa: E402
 from ui.tabs import gnucash_review as rv  # noqa: E402

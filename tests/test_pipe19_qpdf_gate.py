@@ -2,15 +2,11 @@
 qpdf is missing; without the variable it skips. Synthetic only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(Path(__file__).resolve().parent)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import qpdf_helper  # noqa: E402
 

@@ -12,9 +12,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_year_end_close import agent as ye            # noqa: E402
 from agents.skill_year_end_close import cleanup, closing_check  # noqa: E402

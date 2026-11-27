@@ -25,14 +25,11 @@ from openpyxl import Workbook, load_workbook
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # synthetic_26as helper
 SCRIPT = SRC / "agents" / "skill_26as" / "scripts" / "extract_26as_to_xlsx.py"
 
 
 def _load_module():
     """Load the extraction script as a module straight from its file path."""
-    if str(SRC) not in sys.path:
-        sys.path.insert(0, str(SRC))
     spec = importlib.util.spec_from_file_location("extract_26as_to_xlsx", SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     # Register before exec: dataclass annotation resolution looks the module up
@@ -513,7 +510,6 @@ def test_synthetic_statement_holds_only_the_test_pattern_pan():
     test pattern, and the repo's real-data scanner finds nothing in it."""
     import re
     import synthetic_26as as syn
-    sys.path.insert(0, str(ROOT / "scripts"))
     import check_no_real_data as guard
     pans = set(re.findall(r"\b[A-Z]{5}\d{4}[A-Z]\b", syn.SYNTHETIC_26AS_TEXT))
     assert pans == {syn.TEST_PAN}

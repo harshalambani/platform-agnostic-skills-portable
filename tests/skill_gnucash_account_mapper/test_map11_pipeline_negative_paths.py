@@ -69,18 +69,12 @@ no real names, account numbers, FD numbers, PANs, or IFSC codes.
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 from typing import Dict, List
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-import sys as _sys_mb
-from pathlib import Path as _Path_mb
-_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
 from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
@@ -708,14 +702,7 @@ def test_ifsc_contradiction_does_not_revert_an_stcb_row_no_own_account_spells_ou
 
 def test_run_end_to_end_routes_hsbc_and_hdfc_self_transfers_never_to_sbm(tmp_path, monkeypatch):
     import csv as _csv
-    import sys as _sys
-    from pathlib import Path as _Path
 
-    ROOT_ = _Path(__file__).resolve().parent.parent.parent
-    SRC_ = ROOT_ / "src"
-    AGENTS_ROOT_ = SRC_ / "agents"
-    if str(AGENTS_ROOT_) not in _sys.path:
-        _sys.path.insert(0, str(AGENTS_ROOT_))
 
     import skill_gnucash_xml_extractor.agent as xml_agent_mod
     import skill_gnucash_mapping_generator.agent as mapgen_mod
@@ -914,9 +901,6 @@ def _map11_patch_pipeline(monkeypatch, tmp_path):
     Step 3.6 history matcher (real) — mirrors
     test_end_to_end_run_sweeps_to_fd_and_self_transfer_to_hsbc_never_sbm_or_hdfc
     in test_bank_split_classification.py, adapted to this file."""
-    agents_root = SRC / "agents"
-    if str(agents_root) not in sys.path:
-        sys.path.insert(0, str(agents_root))
 
     import skill_gnucash_mapping_generator.agent as mapgen_mod
     import skill_gnucash_account_mapper.persistent_rules as persistent_rules_mod

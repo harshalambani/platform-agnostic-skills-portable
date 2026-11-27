@@ -1,14 +1,11 @@
 """UI-55: the GnuCash second row. Tab placement only; synthetic, no user data."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
 from agents import registry  # noqa: E402
 from ui import webui  # noqa: E402
