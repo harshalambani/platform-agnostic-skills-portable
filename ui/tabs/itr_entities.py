@@ -68,11 +68,11 @@ import copy
 import datetime
 import re
 import shutil
-import sys
 from pathlib import Path
 
 import gradio as gr
 
+from agents import _paths
 from .. import _config as _config_mod
 from .. import _filedialog
 from ._generic import _MAX_UPLOAD_SIZE_BYTES
@@ -82,23 +82,8 @@ from ._generic import _MAX_UPLOAD_SIZE_BYTES
 # pattern as itr_mapping_review.py.
 # ---------------------------------------------------------------------------
 
-_SCRIPTS_ON_PATH = False
-
-
-def _ensure_itr_scripts_importable() -> None:
-    global _SCRIPTS_ON_PATH
-    if _SCRIPTS_ON_PATH:
-        return
-    import agents.skill_itr_workbook as _itr_pkg  # noqa: PLC0415
-
-    scripts_dir = Path(_itr_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-    _SCRIPTS_ON_PATH = True
-
-
 def _configs_mod():
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     import configs  # noqa: PLC0415
     return configs
 

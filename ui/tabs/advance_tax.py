@@ -12,7 +12,7 @@ never a requirement, and its own failure never blocks manual use of the tab.
 Follows the established hand-written-tab conventions:
   - ui/tabs/itr_entities.py: the "one key = value per line" / "one item per
     line" textbox editors (simpler and more testable than a Dataframe for a
-    handful of rows), the lazy `_ensure_itr_scripts_importable()` sys.path
+    handful of rows), the lazy `_paths.ensure_scripts("skill_itr_workbook")` sys.path
     shim, and the named-item CRUD shape (dropdown + Load/Save/Delete,
     archive-not-delete on removal).
   - ui/tabs/itr_mapping_review.py: path anchoring exclusively via
@@ -36,11 +36,11 @@ import datetime
 import os
 import re
 import shutil
-import sys
 from pathlib import Path
 
 import gradio as gr
 
+from agents import _paths
 from .. import _config as _config_mod
 
 # ---------------------------------------------------------------------------
@@ -48,23 +48,8 @@ from .. import _config as _config_mod
 # pattern as itr_entities.py / itr_mapping_review.py.
 # ---------------------------------------------------------------------------
 
-_SCRIPTS_ON_PATH = False
-
-
-def _ensure_itr_scripts_importable() -> None:
-    global _SCRIPTS_ON_PATH
-    if _SCRIPTS_ON_PATH:
-        return
-    import agents.skill_itr_workbook as _itr_pkg  # noqa: PLC0415
-
-    scripts_dir = Path(_itr_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-    _SCRIPTS_ON_PATH = True
-
-
 def _adv_mod():
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     import advance_tax  # noqa: PLC0415
     return advance_tax
 
@@ -451,7 +436,7 @@ def _handle_compute(*values):
         return "Error(s):\n" + "\n".join(f"- {e}" for e in errors), gr.update(interactive=False, value=None), ""
 
     adv = _adv_mod()
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     import rules as rules_engine  # noqa: PLC0415
     import write_advance_tax_workbook as writer  # noqa: PLC0415
 
@@ -615,7 +600,7 @@ def _handle_prefill_from_book(
     if bs_path is None:
         return (*[gr.update() for _ in _FORM_FIELDS], "Could not locate the uploaded balance-sheet file -- try re-uploading.")
 
-    _ensure_itr_scripts_importable()
+    _paths.ensure_scripts("skill_itr_workbook")
     foreign_lines: list[str] = []
     foreign_report_obj = None
     foreign_dividends_in_book = False
