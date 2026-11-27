@@ -75,73 +75,6 @@ def test_exit_cleanup_still_works_after_a_per_run_delete(made):
     _config._cleanup_legacy_temp_dirs()                  # and is safe to run twice
 
 
-# ---- BoB and HSBC tabs ------------------------------------------------------
-
-def _tab(name, monkeypatch, tmp_path):
-    out = tmp_path / "outputs"
-    out.mkdir(exist_ok=True)
-    monkeypatch.setattr(_config, "output_dir", lambda: out)
-    if name == "bob":
-        from ui.tabs import skill_bob as mod
-        fn, agent_mod, agent_name = mod._run_bob, "agents.skill_bob.agent", "run"
-    else:
-        from ui.tabs import skill_hsbc as mod
-        fn, agent_mod, agent_name = mod._run_hsbc, "agents.skill_hsbc.agent", "run"
-        monkeypatch.setattr(mod, "_native_warning_or_none", lambda: None)
-    monkeypatch.setattr(mod, "skill_uses_llm", lambda n: False)
-    pdf = tmp_path / "s.pdf"
-    pdf.write_bytes(b"%PDF-1.4 synthetic")
-    return mod, fn, agent_mod, agent_name, pdf
-
-
-@pytest.mark.parametrize("tab", ["bob", "hsbc"])
-@pytest.mark.parametrize("how", ["success", "error", "cancel", "close"])
-def test_bob_and_hsbc_leave_no_config_folder(tab, how, made, monkeypatch, tmp_path):     # NEGATIVE
-    mod, fn, agent_mod, agent_name, pdf = _tab(tab, monkeypatch, tmp_path)
-    seen = {}
-
-    def work_stub(**kw):
-        cfg = Path(kw["config_path"])
-        seen["during"] = cfg.is_file()            # still there while the run needs it
-        if how == "error":
-            raise RuntimeError("synthetic failure")
-        return "ok"
-
-    import importlib
-    monkeypatch.setattr(importlib.import_module(agent_mod), agent_name, work_stub)
-
-    if how == "cancel":
-        def fake(work, tick_factory, **kw):
-            seen["during"] = True
-            return "__CANCELLED__"
-            yield  # pragma: no cover
-        monkeypatch.setattr(_runner, "run_with_progress", fake)
-    elif how == "close":
-        def fake(work, tick_factory, **kw):
-            yield tick_factory(1)
-            yield tick_factory(2)
-        monkeypatch.setattr(_runner, "run_with_progress", fake)
-
-    gen = fn(str(pdf), "m")
-    if how == "close":
-        for _ in gen:
-            if made:
-                break
-        assert made[0].is_file()                  # created and still there mid-run
-        gen.close()
-    else:
-        list(gen)
-        assert seen.get("during") is True
-    _gone(made)
-
-
-@pytest.mark.parametrize("tab", ["bob", "hsbc"])
-def test_a_run_that_fails_before_the_config_makes_none(tab, made, monkeypatch, tmp_path):
-    mod, fn, *_ = _tab(tab, monkeypatch, tmp_path)
-    list(fn(None, "m"))
-    assert made == []
-
-
 # ---- generic tab ------------------------------------------------------------
 
 def _generic_handler(monkeypatch, tmp_path, run_fn, extras=False):
@@ -209,3 +142,16 @@ def test_generic_tab_with_extra_outputs_wrapper_also_cleans_up(made, monkeypatch
                           extras=True)
     list(h2("", "m"))
     _gone(made)
+
+
+@pytest.mark.parametrize("skill_name", ["skill_bob", "skill_hsbc"])
+def test_a_run_that_fails_before_the_config_makes_none(skill_name, made, monkeypatch, tmp_path):
+    """The real BoB and HSBC skills, through the generic tab: no upload, no config."""
+    from ui.tabs import _generic
+    import agents.registry as reg
+    out = tmp_path / "outputs"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setattr(_config, "output_dir", lambda: out)
+    h = _generic._make_run_handler(reg.get(skill_name))
+    list(h(None, "m"))
+    assert made == []

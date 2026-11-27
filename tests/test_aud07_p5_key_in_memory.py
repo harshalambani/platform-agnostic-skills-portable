@@ -117,35 +117,9 @@ def test_a_blank_or_placeholder_key_is_not_held(tmp_path):
 
 
 @pytest.mark.parametrize("how", ["success", "error"])
-def test_no_file_under_the_run_tree_has_the_key_after_a_run(how, portable, monkeypatch, tmp_path):    # NEGATIVE
-    from ui.tabs import skill_bob as mod
-    out = tmp_path / "outputs"
-    out.mkdir()
-    monkeypatch.setattr(_config, "output_dir", lambda: out)
-    monkeypatch.setattr(mod, "skill_uses_llm", lambda n: False)
-    pdf = tmp_path / "s.pdf"
-    pdf.write_bytes(b"%PDF-1.4 synthetic")
-    seen = {}
-
-    def work(**kw):
-        cfg = Path(kw["config_path"])
-        seen["bytes"] = _tree_bytes(cfg.parent)       # mid-run: the folder has no key
-        if how == "error":
-            raise RuntimeError("synthetic failure")
-        return "ok"
-    monkeypatch.setattr(importlib.import_module("agents.skill_bob.agent"), "run", work)
-    msgs = [str(m) for m in mod._run_bob(str(pdf), "m")]
-    assert seen["bytes"] and KEY_A.encode() not in seen["bytes"]
-    assert portable and not portable[0].parent.exists()
-    assert lc.key_for(portable[0]) is None
-    assert KEY_A not in " ".join(msgs)
-    assert KEY_A.encode() not in b"".join(f.read_bytes() for f in tmp_path.rglob("*") if f.is_file())
-
-
-@pytest.mark.parametrize("how", ["success", "error"])
 def test_generic_tab_run_leaves_no_file_with_the_key(how, portable, monkeypatch, tmp_path):    # NEGATIVE
-    """The same run-level check as above, through the tab every skill really uses:
-    ui/tabs/_generic.py _make_run_handler (not the retired per-skill tab)."""
+    """Run-level check through the tab every skill really uses:
+    ui/tabs/_generic.py _make_run_handler."""
     from types import SimpleNamespace
 
     from ui.tabs import _generic

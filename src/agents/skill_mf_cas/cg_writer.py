@@ -2,13 +2,9 @@
 cg_writer.py -- writes the KFintech Capital Gain / Loss Statement skill's
 report workbook + CSV siblings.
 
-Separate from excel_writer.py deliberately -- excel_writer.py writes the
-older CAS-text/FIFO-derived shape (Transactions/Holdings/RealisedGains/
-Exceptions, driven by parser.SchemeBlock + lots.SchemeReconciliation) and is
-kept intact for that still-supported path (see AGENT.md). This module
-writes the RTA-already-matched shape driven by cg_parser's dataclasses.
-Same styling conventions (font, header fill, autosize/freeze-pane helpers)
-reused from excel_writer.py so both skill outputs look alike.
+Writes the RTA-already-matched shape driven by cg_parser's dataclasses.
+Styling follows the other report writers (font, header fill,
+autosize/freeze-pane helpers).
 
 Five sheets:
   1. "MatchedLots"     -- every RTA-matched acquisition/outflow/gain row,
@@ -22,7 +18,7 @@ Five sheets:
                            could not be reconciled, collected in one place.
 
 CSV sibling for MatchedLots is written alongside the XLSX (same stem,
-"_matched_lots.csv" suffix), mirroring excel_writer.py's sidecar pattern.
+"_matched_lots.csv" suffix).
 
 No PAN, investor name, address, email, or mobile number is ever written
 here -- cg_parser.parse_transaction_details never reads rows 1-2 of
