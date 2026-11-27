@@ -144,6 +144,13 @@ def _stubs(tmp: Path) -> Path:
     log.mkdir()
     scripts = {
         "sudo": '#!/bin/bash\nexec "$@"\n',
+        # present on disk from the start, but behaves as "not installed" until the
+        # apt-get stub marks the install as done
+        "qpdf": (
+            '#!/bin/bash\n'
+            'if [ ! -f "$LOG/installed" ]; then echo "qpdf: command not found" >&2; exit 127; fi\n'
+            'echo x >> "$LOG/qpdf"\n'
+            'echo qpdf version 0\n'),
         "sleep": '#!/bin/bash\necho "$1" >> "$LOG/sleep"\nexit 0\n',
         "apt-get": (
             '#!/bin/bash\n'
@@ -154,10 +161,7 @@ def _stubs(tmp: Path) -> Path:
             '    if [ -f "$LOG/install" ]; then while read -r _; do n=$((n+1)); done < "$LOG/install"; fi\n'
             '    echo x >> "$LOG/install"\n'
             '    if [ "$n" -lt "${INSTALL_FAIL_FIRST:-0}" ]; then exit 100; fi\n'
-            '    if [ "${INSTALL_PUTS_QPDF:-1}" = 1 ]; then\n'
-            "      printf '%s\n' '#!/bin/bash' 'echo x >> \"$LOG/qpdf\"' 'echo qpdf version 0' > \"$STUBDIR/qpdf\"\n"
-            '      chmod +x "$STUBDIR/qpdf"\n'
-            '    fi\n'
+            '    if [ "${INSTALL_PUTS_QPDF:-1}" = 1 ]; then echo x > "$LOG/installed"; fi\n'
             '    exit 0\n'
             '  fi\n'
             'done\n'
