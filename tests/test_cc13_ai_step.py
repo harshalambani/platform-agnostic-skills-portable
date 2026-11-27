@@ -62,8 +62,8 @@ def test_the_chosen_model_is_the_one_the_mapper_is_given(tmp_path, monkeypatch):
 
 def test_run_mapper_passes_model_override_to_the_real_mapper(monkeypatch, tmp_path):
     got = {}
-    if str(ccsb._AGENTS_ROOT) not in sys.path:
-        sys.path.insert(0, str(ccsb._AGENTS_ROOT))
+    from agents import _paths
+    _paths.ensure_agents_dir()
     import skill_gnucash_account_mapper.agent as mm        # the module _run_mapper imports
     monkeypatch.setattr(mm, "run", lambda *a, **k: got.update(k))
     ccsb._run_mapper("b.gnucash", "in.csv", "out.csv", "cfg.yaml", [], "", "model-x")
