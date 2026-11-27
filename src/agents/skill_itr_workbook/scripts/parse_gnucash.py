@@ -109,11 +109,6 @@ def _build_paths(accounts: dict[str, Account]) -> None:
         _resolve(guid)
 
 
-def _is_gzip(path: Path) -> bool:
-    with open(path, "rb") as f:
-        return f.read(2) == b"\x1f\x8b"
-
-
 def parse_book(path: str | Path) -> Book:
     return _build_book(read_xml_root(Path(path)))
 
@@ -200,6 +195,3 @@ def account_fy_sum(book: Book, guid: str, year_key: str) -> float:
     return normalize_value(total, acct.type)
 
 
-def accounts_by_name_substring(book: Book, substring: str) -> list[Account]:
-    needle = substring.lower()
-    return [a for a in book.accounts.values() if needle in a.name.lower()]

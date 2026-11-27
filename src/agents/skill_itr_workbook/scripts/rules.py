@@ -9,7 +9,6 @@ slab, or section number -- every figure comes from the loaded YAML.
 """
 from __future__ import annotations
 
-import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -56,17 +55,6 @@ class RulesConfig:
             return self.raw["regimes"][regime]
         except KeyError:
             raise RulesError(f"unknown regime {regime!r} in {self.year_key} rules config") from None
-
-
-def _year_key_from_filename(path: Path) -> str | None:
-    m = re.search(r"AY(\d{4})-(\d{2})", path.stem)
-    if m:
-        start = int(m.group(1)) - 1
-        return f"{start}-{str(start + 1)[-2:]}"
-    m = re.search(r"TY(\d{4})-(\d{2})", path.stem)
-    if m:
-        return f"{m.group(1)}-{m.group(2)}"
-    return None
 
 
 def load_rules(rules_dir: str | Path | Sequence[str | Path], year_key: str) -> RulesConfig:

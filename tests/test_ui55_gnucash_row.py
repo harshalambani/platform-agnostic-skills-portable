@@ -106,6 +106,9 @@ def test_remaining_banks_skills_unchanged_and_in_order():
     b, a = webui._split_banks_tabs(got)
     assert (b + a) == sorted(got, key=webui._banks_tab_rank)   # same ordering rule as before
     assert "Bank - Convert to GnuCash" in b
+    assert a == []                                    # nothing renders after Review in Banks
+    assert "Coverage Gap Detector" not in got         # NEGATIVE: it is on its own tab, not in Banks
+    assert "Coverage Gap Detector" not in webui._BANKS_TAB_ORDER
 
 
 def _name_of(display):

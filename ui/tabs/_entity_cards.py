@@ -222,13 +222,6 @@ def grouped_markdown(rows: list[dict]) -> str:
     return "\n".join(out)
 
 
-def _card_choices(rows: list[dict]) -> list[tuple[str, str]]:
-    out = [("(new card)", _NEW)]
-    for i, r in enumerate(rows):
-        out.append((f"{r['holder'] or '(no holder)'} - {r['bank']}-{r['card']} ending {', '.join(r['last4'])}", str(i)))
-    return out
-
-
 def rows_for_entity(rows: list[dict], key: str) -> list[tuple[int, dict]]:
     """(index in the whole list, row) for the cards whose holder is exactly `key`. An empty key
     (a new, unsaved entity) has no cards. The index stays the whole-list index so a save or a

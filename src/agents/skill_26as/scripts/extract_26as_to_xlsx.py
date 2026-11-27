@@ -473,10 +473,6 @@ def parse_part_viii(body: str) -> list[P8Row]:
     return rows
 
 
-def is_empty_part(body: str) -> bool:
-    return "No Transactions Present" in body
-
-
 def reconcile_part_i(deductors: list[P1Deductor]) -> list[dict]:
     """Compare each deductor's transaction sub-total against the total the 26AS
     prints in its header row.

@@ -142,6 +142,45 @@ def test_no_file_under_the_run_tree_has_the_key_after_a_run(how, portable, monke
     assert KEY_A.encode() not in b"".join(f.read_bytes() for f in tmp_path.rglob("*") if f.is_file())
 
 
+@pytest.mark.parametrize("how", ["success", "error"])
+def test_generic_tab_run_leaves_no_file_with_the_key(how, portable, monkeypatch, tmp_path):    # NEGATIVE
+    """The same run-level check as above, through the tab every skill really uses:
+    ui/tabs/_generic.py _make_run_handler (not the retired per-skill tab)."""
+    from types import SimpleNamespace
+
+    from ui.tabs import _generic
+    out = tmp_path / "outputs"
+    out.mkdir()
+    monkeypatch.setattr(_config, "output_dir", lambda: out)
+    monkeypatch.setattr(_config, "data_root_dir", lambda: tmp_path)
+    monkeypatch.setattr(_config, "download_staging_dir", lambda: tmp_path)
+    seen = {}
+
+    def work(**kw):
+        cfg = Path(kw["config_path"])
+        seen["bytes"] = _tree_bytes(cfg.parent)       # mid-run: the folder has no key
+        if how == "error":
+            raise RuntimeError("synthetic failure")
+        return "ok"
+
+    import agents.registry as reg
+    monkeypatch.setattr(reg, "load_run_function", lambda skill: work)
+    monkeypatch.setattr(_generic, "skill_uses_llm", lambda n: False, raising=False)
+    skill = SimpleNamespace(
+        name="aud07_generic_test", display_name="AUD07 generic test", description="", inputs=[],
+        output=SimpleNamespace(type="file", suffix="t", extension=".csv", download_label="Download",
+                               extra_outputs=()),
+        requires=SimpleNamespace(native_binaries=[], external_tools=[], llm=False),
+        run_args={"config_path": "{config_path}", "output_path": "{output_path}"},
+        mode="direct", entry_point="")
+    msgs = [str(m) for m in _generic._make_run_handler(skill)("", "m")]
+    assert seen["bytes"] and KEY_A.encode() not in seen["bytes"]
+    assert portable and not portable[0].parent.exists()
+    assert lc.key_for(portable[0]) is None
+    assert KEY_A not in " ".join(msgs)
+    assert KEY_A.encode() not in b"".join(f.read_bytes() for f in tmp_path.rglob("*") if f.is_file())
+
+
 def test_a_failed_send_does_not_put_the_key_in_the_error_or_the_log(portable, monkeypatch, caplog):   # NEGATIVE
     p = _config.materialize_legacy_config("e1")
     ep = lc.resolve_endpoint(p)

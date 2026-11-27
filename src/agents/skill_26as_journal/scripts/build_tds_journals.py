@@ -758,13 +758,6 @@ def load_accounts(gnucash_path: Path) -> list[Account]:
     return accounts
 
 
-def find_account(accounts: list[Account], path: str) -> Optional[Account]:
-    for a in accounts:
-        if a.path == path:
-            return a
-    return None
-
-
 # -------------------- matching --------------------
 
 def _tokens(s: str) -> list[str]:

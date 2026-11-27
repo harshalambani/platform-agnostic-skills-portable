@@ -78,11 +78,6 @@ def check(url: str, api_key=None, name: str = "") -> str:
     return ""
 
 
-def check_address(url: str, name: str = "") -> str:
-    """Address rule only (no key)."""
-    return check(url, None, name)
-
-
 def check_save(url: str, api_key, name: str = "") -> str:
     """Save-time check: same rule as check_send."""
     return check(url, api_key, name)

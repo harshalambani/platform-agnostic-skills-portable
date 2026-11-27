@@ -529,12 +529,13 @@ def _setup_warning_log() -> Path | None:
 
 
 # Rank map for the GnuCash "Banks" sub-tab row. Skills with rank < 50 render
-# before the hand-written "Review" tab (the import workflow itself);
-# rank >= 50 renders after it. Coverage Gap Detector is a read-only
-# diagnostic you run before/after an import, not a step in the import
-# workflow, so it is pinned last. Unknown/future skills default to rank 0
-# and keep landing before Review, matching the pre-existing behaviour.
-_BANKS_TAB_ORDER = {"Bank - Convert to GnuCash": -10, "Coverage Gap Detector": 50}
+# before the hand-written "Review" tab (the import workflow itself). Nothing is
+# ranked >= 50 today, so nothing renders after Review: Coverage Gap Detector,
+# the one skill that used to, has its own "Coverage" tab (_GNUCASH_TAB_OF).
+# Unknown/future skills default to rank 0 and land before Review.
+# build_app draws only the "before" list; adding a rank >= 50 needs a render
+# loop after Review there too (a test guards this).
+_BANKS_TAB_ORDER = {"Bank - Convert to GnuCash": -10}
 
 
 def _banks_tab_rank(display_name: str) -> int:
@@ -705,12 +706,6 @@ def help_page_order(skills_all: list) -> list[tuple[str, object]]:
         out.extend(readers)
     out.extend((s.display_name, s) for s in hidden.values())
     return out
-
-
-def skill_tab_paths(skills: list) -> list[tuple]:
-    """[(skill, tab path)] in the incoming order (see app_tab_order). Pure."""
-    path_of = {s.name: p for s, p in app_tab_order(skills)}
-    return [(s, path_of[s.name]) for s in skills]
 
 
 def skill_labels(skills: list) -> dict[str, str]:
@@ -931,19 +926,13 @@ def build_app(launch: bool = False, lazy: bool | None = None) -> gr.Blocks:
                             def _banks_body(_t_outer, _cat_skills=_gc["Banks"]):
                                 with gr.Tabs():
                                     # See _split_banks_tabs / _BANKS_TAB_ORDER:
-                                    # Coverage Gap Detector is a read-only
-                                    # diagnostic you run before/after an
-                                    # import, not a step in the import
-                                    # workflow itself, so it renders last.
-                                    _before_skills, _after_skills = _split_banks_skills(_cat_skills)
+                                    # every Banks skill renders before Review.
+                                    _before_skills, _ = _split_banks_skills(_cat_skills)
                                     for _skill in _before_skills:
                                         with gr.Tab(_skill.display_name) as _t:
                                             tab_generic.render(_skill, container_tab=_t)
                                     with gr.Tab("Review") as _rt:
                                         tab_gnucash_review.render(container_tab=_rt)
-                                    for _skill in _after_skills:
-                                        with gr.Tab(_skill.display_name) as _t:
-                                            tab_generic.render(_skill, container_tab=_t)
                             # UI-01: Partner Compensation Reconciliation gets its
                             # own sub-tab, between "Banks" and "Inter-entity" — it
                             # reconciles the partner's own pay against the bank,
@@ -1192,11 +1181,6 @@ def _native_window_available() -> bool:
     (Windows only; pywebview imports and the WebView2 runtime is installed).
     One implementation, shared with the window-first path: ui/_firstwindow.py."""
     return _firstwindow.native_window_available()
-
-
-def _webview2_runtime_present() -> bool:
-    """True if the Evergreen/standalone WebView2 runtime is installed."""
-    return _firstwindow.webview2_runtime_present()
 
 
 def _window_icon_path() -> str | None:
