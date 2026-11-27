@@ -1,0 +1,49 @@
+# .github/workflows/lock-advisory-weekly.yml
+#
+# AUD-19: run the locked-packages advisory check (AUD-15) every week on main,
+# not only when a pull request or a push happens. A new advisory can appear
+# against a package that has not changed in months; without this the lock is
+# only looked at when someone happens to push.
+#
+# It runs exactly the commands of the "Locked packages advisory check" job in
+# ci.yml: the same pinned tool, the same script (so the same floor on the
+# number of packages and the same ignore file), no extra flags.
+# tests/test_lock_advisory_weekly.py fails if the two drift apart.
+#
+# A finding turns the run red, and that is the whole signal. There is no
+# notification service on purpose. Runs on main only (a scheduled run always
+# uses the default branch). Can also be started by hand.
+
+name: Locked packages advisory check (weekly)
+
+on:
+  schedule:
+    - cron: "0 5 * * 1"   # 05:00 UTC every Monday
+  workflow_dispatch:       # manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  advisory-check:
+    name: Locked packages advisory check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the audit tool (own venv)
+        run: |
+          python -m venv "$RUNNER_TEMP/audit-venv"
+          "$RUNNER_TEMP/audit-venv/bin/pip" install --quiet pip-audit==2.10.1 pytest
+          "$RUNNER_TEMP/audit-venv/bin/pip-audit" --version
+
+      - name: Check the locked packages against the advisory list
+        run: |
+          python scripts/lock_advisory_check.py \
+            --pip-audit "$RUNNER_TEMP/audit-venv/bin/pip-audit"
