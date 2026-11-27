@@ -47,6 +47,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
+from agents import _paths
 from agents.gnc_book import GncBookUnreadable, read_xml_root
 from agents.gnucash_accounts import GncAccount, load_accounts, postable_accounts
 from agents.skill_gnucash_coverage import excel_writer as XL
@@ -222,17 +223,6 @@ def _resolve_entity(book_path: Path, entities_path: Optional[Path]) -> tuple:
     owner, fy_tuple = derive_owner_and_fy(book_path)
     fy_key = f"{fy_tuple[0]:04d}-{str(fy_tuple[1])[-2:]}" if fy_tuple else None
     return owner, None, fy_key
-
-
-def _ensure_itr_scripts_importable() -> None:
-    """Same mechanism ui._book_registry uses -- puts the ITR Workbook
-    skill's flat scripts/ dir on sys.path so `import configs` and
-    `from ui import _book_registry` both resolve, frozen-build-safe."""
-    import agents.skill_itr_workbook as _itr_pkg  # noqa: PLC0415
-    scripts_dir = Path(_itr_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in sys.path:
-        sys.path.insert(0, str(scripts_dir))
-
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +428,7 @@ def _boundary_has_adjacent_evidence(
         return False
 
     try:
-        _ensure_itr_scripts_importable()
+        _paths.ensure_scripts("skill_itr_workbook")
         from ui import _book_registry as reg  # noqa: PLC0415
     except Exception:
         return False
