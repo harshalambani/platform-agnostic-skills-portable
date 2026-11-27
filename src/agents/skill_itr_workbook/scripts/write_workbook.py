@@ -911,6 +911,18 @@ def write_is_transcript(wb: Workbook, tree) -> list:
     return entries
 
 
+def balance_self_check_difference(tree) -> float:
+    """Assets Accounts - "Equity, Trading, and Liabilities" - Retained Earnings,
+    from the Balance Sheet report's own section totals (the report shows
+    liabilities and equity as positive amounts and Retained Earnings as net
+    income). 0 for a balanced book. The same identity parse_eguile.verify()
+    checks, shown as a number."""
+    totals = tree.section_totals
+    return (totals.get("Assets Accounts", 0.0)
+            - totals.get("Equity, Trading, and Liabilities", 0.0)
+            - totals.get("Retained Earnings", 0.0))
+
+
 def write_bs_transcript(wb: Workbook, tree) -> list:
     """Returns [(account path, amount-cell A1 ref), ...] -- see
     write_is_transcript."""
@@ -929,11 +941,12 @@ def write_bs_transcript(wb: Workbook, tree) -> list:
             sw.cell(4, n.section)
             entries.append((n.path, f"B{sw.row}"))
             sw.row += 1
-    return entries
+    # The balance self-check goes AFTER the account rows, so every cell
+    # reference in `entries` above is unchanged.
     sw.blank()
-    sw.label_value("Assets - Equity - NetIncome (self-check, should be 0)", tree.section_totals.get("Assets Accounts", 0.0)
-                    - tree.section_totals.get("Equity, Trading, and Liabilities", 0.0)
-                    - tree.section_totals.get("Retained Earnings", 0.0))
+    sw.label_value("Assets - Equity - NetIncome (self-check, should be 0)",
+                   balance_self_check_difference(tree))
+    return entries
 
 
 # ---------------------------------------------------------------------------
