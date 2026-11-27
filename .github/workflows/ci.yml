@@ -250,10 +250,32 @@ jobs:
       # one is a Windows binary in LFS (not fetched here, to protect the LFS
       # quota), so use the system package. PASK_REQUIRE_QPDF=1 on the test step
       # makes those tests fail, not skip, if it is ever missing.
+      #
+      # PIPE-20: the install decides, not the list refresh. The runner image can
+      # carry an extra package source that refuses a request now and then, which
+      # makes `apt-get update` exit non-zero even though qpdf comes from the
+      # Ubuntu archive. So a failed refresh is only a warning, the update and the
+      # install are retried together (3 tries), and a failed last install still
+      # fails the step. `qpdf --version` stays untolerated as the final check.
       - name: Install qpdf
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qpdf
+          installed=0
+          for attempt in 1 2 3; do
+            if ! sudo apt-get -o Acquire::Retries=3 update; then
+              echo "::warning::apt-get update failed (attempt ${attempt} of 3); trying the install anyway"
+            fi
+            if sudo apt-get install -y qpdf -o Acquire::Retries=3; then
+              installed=1
+              break
+            fi
+            if [ "${attempt}" -lt 3 ]; then
+              sleep $((attempt * 20))
+            fi
+          done
+          if [ "${installed}" -ne 1 ]; then
+            echo "::error::qpdf could not be installed after 3 attempts"
+            exit 1
+          fi
           qpdf --version
 
       # Nothing here is advisory any more. A failing TEST fails the job, and so

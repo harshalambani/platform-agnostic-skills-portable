@@ -1,7 +1,7 @@
 """
 filed_return.py -- parses the ACTUALLY FILED ITR return (ground truth, per
 the SESSION spec, better than the CA working Excels) into a comparable model
-for diffing against our own workbook output (see outlier_report.py).
+for diffing against our own workbook output.
 
 JSON path: reads the income-tax e-filing utility's own JSON schema directly
 (ITR-2/ITR-3 style, confirmed against real AY2025-26 filed returns in
