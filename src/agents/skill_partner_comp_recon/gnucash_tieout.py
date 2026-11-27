@@ -40,11 +40,9 @@ it does not touch or replace parse_gnucash.py's own "/"-path convention.
 """
 from __future__ import annotations
 
-import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date as _date
-from pathlib import Path
 
 from .. import book_check
 
@@ -69,9 +67,8 @@ from .jv_emitter import (
 )
 from .jv_emitter import _strip_root as _jv_strip_root
 
-_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-if str(_ITR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_ITR_SCRIPTS))
+from .. import _paths  # noqa: E402
+_paths.ensure_scripts("skill_itr_workbook")
 import parse_gnucash  # noqa: E402
 
 _TIEOUT_LABEL = "GnuCash tie-out"

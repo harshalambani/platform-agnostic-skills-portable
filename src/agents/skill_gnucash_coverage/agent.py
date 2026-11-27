@@ -39,7 +39,6 @@ this skill only ever reads.
 from __future__ import annotations
 
 import re
-import sys
 import xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -55,10 +54,7 @@ from agents.skill_gnucash_coverage import excel_writer as XL
 # Reuse the Inter-entity Matrix's own reuse target: reconcile_intercompany's
 # filename-based owner/FY derivation, as the FALLBACK label for a book that
 # isn't registered to any entity in entities.yaml (see _resolve_entity()).
-_PAIR_SCRIPTS = (Path(__file__).resolve().parents[1]
-                 / "skill_gnucash_intercompany" / "scripts")
-if str(_PAIR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_PAIR_SCRIPTS))
+_paths.ensure_scripts("skill_gnucash_intercompany")
 
 from reconcile_intercompany import derive_owner_and_fy  # noqa: E402
 

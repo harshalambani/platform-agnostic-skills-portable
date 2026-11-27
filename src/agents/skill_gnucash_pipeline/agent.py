@@ -24,7 +24,6 @@ import json
 import logging
 import os
 import re
-import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -662,9 +661,8 @@ def _other_entity_holders(
     if not want:
         return holders, notes
     try:
-        scripts = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-        if str(scripts) not in sys.path:
-            sys.path.insert(0, str(scripts))
+        from agents import _paths  # noqa: PLC0415
+        _paths.ensure_scripts("skill_itr_workbook")
         from ui import _book_registry as reg  # noqa: PLC0415
         from agents.gnucash_accounts import TargetGuard, load_accounts  # noqa: PLC0415
 
@@ -1491,9 +1489,8 @@ def _normalise_to_canonical(
     8-column schema and writes the result to output_path. Reserved for
     "Other Bank (CSV)" — HDFC always uses skill_hdfc's deterministic parser.
     """
-    agents_root = Path(__file__).resolve().parent.parent
-    if str(agents_root) not in sys.path:
-        sys.path.insert(0, str(agents_root))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_agents_dir()
     from agents.base_agent import run_direct  # noqa: E402
     from agents import llm_client  # noqa: E402
 
@@ -1597,9 +1594,6 @@ def _normalise_to_canonical(
             writer.writerow(out_row)
 
 
-_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-
-
 def _load_entity_profile(entity, entities_path):
     """(profile, error). No entity picked -> (None, None): the entity is
     optional and nothing entity-driven applies. An entity picked but not
@@ -1607,8 +1601,8 @@ def _load_entity_profile(entity, entities_path):
     entity = (entity or "").strip()
     if not entity:
         return None, None
-    if str(_ITR_SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(_ITR_SCRIPTS))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_scripts("skill_itr_workbook")
     try:
         import configs  # noqa: PLC0415
         entities = configs.load_entities(entities_path)
@@ -1689,9 +1683,8 @@ def run(
     Returns:
         Human-readable summary string for the UI.
     """
-    agents_root = Path(__file__).resolve().parent.parent
-    if str(agents_root) not in sys.path:
-        sys.path.insert(0, str(agents_root))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_agents_dir()
 
     # BNK-11: refuse a multi-statement upload before anything is written.
     _multi_stop = _multi_file_stop((bank or "").strip(), statement_files)

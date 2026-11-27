@@ -284,11 +284,9 @@ def _txn_id_for(fy_prefix: str, sr: str, category: str) -> str:
     # id absent from the journal CSV and _find_credit_split would silently
     # find nothing, dropping the row on Save without any indication why).
     try:
-        import sys as _sys
+        from agents import _paths  # noqa: PLC0415
 
-        _src = Path(__file__).resolve().parent.parent.parent / "src"
-        if str(_src) not in _sys.path:
-            _sys.path.insert(0, str(_src))
+        _paths.ensure_src()
         from agents.skill_26as_journal.scripts.build_tds_journals import (
             series_for_category,
         )
@@ -361,11 +359,9 @@ def _load_split_part_ii():
     loaded (a guess here could regenerate the Part I file wrong, or not at
     all, without any indication why)."""
     try:
-        import sys as _sys
+        from agents import _paths  # noqa: PLC0415
 
-        _src = Path(__file__).resolve().parent.parent.parent / "src"
-        if str(_src) not in _sys.path:
-            _sys.path.insert(0, str(_src))
+        _paths.ensure_src()
         from agents.skill_26as_journal.scripts.build_tds_journals import (
             part_i_path_for,
             split_part_ii,
@@ -572,12 +568,8 @@ def _import_tds_learnings():
     importing persistent_rules via the `agents` package rather than a bare
     sys.path insert.
     """
-    import sys as _sys
-
-    import agents.skill_26as_journal as _skill_pkg
-    scripts_dir = Path(_skill_pkg.__file__).resolve().parent / "scripts"
-    if str(scripts_dir) not in _sys.path:
-        _sys.path.insert(0, str(scripts_dir))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_scripts("skill_26as_journal")
     import tds_learnings
     return tds_learnings
 
@@ -638,11 +630,9 @@ def _load_preflight_tools():
     """build_tds_journals' balance reader + pre-flight (single source of truth;
     fails loud like _load_split_part_ii rather than guessing)."""
     try:
-        import sys as _sys
+        from agents import _paths  # noqa: PLC0415
 
-        _src = Path(__file__).resolve().parent.parent.parent / "src"
-        if str(_src) not in _sys.path:
-            _sys.path.insert(0, str(_src))
+        _paths.ensure_src()
         from agents.skill_26as_journal.scripts import build_tds_journals as _b
     except ImportError as e:
         raise ImportError("could not load the income-balance pre-flight from "

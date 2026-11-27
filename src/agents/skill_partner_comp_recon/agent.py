@@ -58,7 +58,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import sys
 from pathlib import Path
 
 import yaml
@@ -173,9 +172,8 @@ def apply_capital_rule_defaults(data: dict, admission_date) -> None:
 # tax-rules loader for these values anywhere else in the codebase, and
 # entities.yaml's own closed-dataclass shape already carries a generic
 # passthrough dict for exactly this kind of skill-specific extension.
-_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-if str(_ITR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_ITR_SCRIPTS))
+from .. import _paths  # noqa: E402
+_paths.ensure_scripts("skill_itr_workbook")
 import configs  # noqa: E402
 
 

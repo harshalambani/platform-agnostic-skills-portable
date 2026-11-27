@@ -28,7 +28,6 @@ import json
 import os
 import re
 import shutil
-import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -163,10 +162,8 @@ class Ctx:
 
 
 def _registry():
-    import agents.skill_itr_workbook as pkg  # noqa: PLC0415
-    scripts = Path(pkg.__file__).resolve().parent / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_scripts("skill_itr_workbook")
     import configs  # noqa: PLC0415
     from ui import _book_registry as reg  # noqa: PLC0415
     return configs, reg

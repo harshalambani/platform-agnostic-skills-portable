@@ -26,7 +26,6 @@ from .bookio import CCP_PATH, read_book
 from .report import RunReport, build_message, csv_label, write_workbook
 from .settings_io import resolve_cred_max_overage, resolve_large_spend_threshold
 
-_AGENTS_ROOT = Path(__file__).resolve().parent.parent
 _MAPPER_FEE_REASON = "Fixed account: card fee or fee reversal -> the entity's Bank Service Charge account"
 _MAPPER_DRAW_REASON = "Fixed account: card cashback or CRED overage -> the entity's Drawings account"
 
@@ -198,8 +197,8 @@ def _extract(pdf_dir, xlsx, start, end, label, cards=None, cards_problem=None,
 def _run_mapper(gnucash_path, canonical_csv, out_csv, config_path, drawings, default_account, model=None):
     """The existing account mapper over the canonical CSV: history across ALL
     banks (decision 6.1), no bank account (Transfer Account is set here)."""
-    if str(_AGENTS_ROOT) not in sys.path:
-        sys.path.insert(0, str(_AGENTS_ROOT))
+    from agents import _paths  # noqa: PLC0415
+    _paths.ensure_agents_dir()
     from skill_gnucash_account_mapper.agent import run as map_run
     return map_run(str(gnucash_path), str(canonical_csv), str(out_csv), config_path=config_path,
                    bank_name=None, gnucash_bank_account=None,

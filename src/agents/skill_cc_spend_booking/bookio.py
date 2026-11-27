@@ -7,14 +7,11 @@ reduced to plain records: a transaction is its date, its Num and its splits as
 """
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass, field
 from datetime import date
-from pathlib import Path
 
-_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-if str(_ITR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_ITR_SCRIPTS))
+from agents import _paths  # noqa: E402
+_paths.ensure_scripts("skill_itr_workbook")
 import parse_gnucash  # noqa: E402
 
 CCP_PATH = "Expense:Withdrawals:Credit Card Payment"

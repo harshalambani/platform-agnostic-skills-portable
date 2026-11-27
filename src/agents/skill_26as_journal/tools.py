@@ -25,9 +25,8 @@ SCRIPT = Path(__file__).parent / "scripts" / "build_tds_journals.py"
 # authoritative summary agent.py returns -- see final_summary's docstring.
 # scripts/ is not a package (mirrors that module's own sys.path-insert
 # comment for tds_learnings.py), so import it the same way.
-_SCRIPTS_DIR = str(Path(__file__).parent / "scripts")
-if _SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPTS_DIR)
+from agents import _paths  # noqa: E402
+_paths.ensure_scripts("skill_26as_journal")
 import build_tds_journals as _BTJ  # noqa: E402
 from agents.gnc_book import GncBookUnreadable, read_xml_root  # noqa: E402
 
