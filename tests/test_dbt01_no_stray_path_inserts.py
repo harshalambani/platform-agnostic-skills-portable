@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 import os
+import sys
 import warnings
 from pathlib import Path
 
