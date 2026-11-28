@@ -5,12 +5,9 @@ each keeps its help page. Synthetic, no user data."""
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
 from agents import banks, registry  # noqa: E402
 from ui import webui  # noqa: E402

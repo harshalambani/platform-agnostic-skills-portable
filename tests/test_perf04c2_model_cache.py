@@ -3,12 +3,9 @@ cache; they probe only when it is missing. Synthetic only."""
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from tests.test_perf04c2_lazy_groups import _free_port, fire_page_load  # noqa: E402
 
 from ui import _health, webui  # noqa: E402

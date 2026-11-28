@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import csv
 import re
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,9 +12,6 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src"), str(ROOT / "ui")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_spend_booking import agent as ccsb                      # noqa: E402
 from tests.test_cc_spend_booking import basic, fake_mapper_factory           # noqa: E402

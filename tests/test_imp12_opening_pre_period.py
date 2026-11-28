@@ -11,14 +11,9 @@ Synthetic book only. Every behaviour carries NEGATIVE tests.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-for _p in (ROOT.parent / "src", ROOT.parent / "src" / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import gnc_book_fixture as fx  # noqa: E402
 from agents.skill_gnucash_pipeline import agent as pipe  # noqa: E402

@@ -2,16 +2,12 @@
 send-time guard at every place a key is attached. Synthetic values only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import endpoint_policy as ep  # noqa: E402
 

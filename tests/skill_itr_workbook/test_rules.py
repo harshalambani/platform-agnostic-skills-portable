@@ -6,7 +6,6 @@ committed Data/itr/rules/*.yaml config (public, non-PII).
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -16,8 +15,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 import rules as rules_engine  # noqa: E402
 

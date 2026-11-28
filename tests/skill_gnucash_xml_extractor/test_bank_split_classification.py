@@ -32,15 +32,11 @@ shaped codes. No real book data anywhere in this file.
 from __future__ import annotations
 
 import gzip
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 AGENTS_ROOT = SRC / "agents"
-for _p in (SRC, AGENTS_ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from skill_gnucash_xml_extractor.agent import parse_gnucash_file  # noqa: E402
 

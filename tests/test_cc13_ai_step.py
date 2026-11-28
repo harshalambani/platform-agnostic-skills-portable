@@ -5,15 +5,11 @@ Synthetic data only; no network."""
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import registry                                              # noqa: E402
 from agents.skill_cc_spend_booking import agent as ccsb                  # noqa: E402
@@ -62,8 +58,6 @@ def test_the_chosen_model_is_the_one_the_mapper_is_given(tmp_path, monkeypatch):
 
 def test_run_mapper_passes_model_override_to_the_real_mapper(monkeypatch, tmp_path):
     got = {}
-    from agents import _paths
-    _paths.ensure_agents_dir()
     import skill_gnucash_account_mapper.agent as mm        # the module _run_mapper imports
     monkeypatch.setattr(mm, "run", lambda *a, **k: got.update(k))
     ccsb._run_mapper("b.gnucash", "in.csv", "out.csv", "cfg.yaml", [], "", "model-x")

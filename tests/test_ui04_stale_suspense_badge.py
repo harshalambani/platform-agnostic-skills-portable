@@ -7,14 +7,11 @@ These run the real client code under node against a fake DOM.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests"))
 
 import _review_js as js  # noqa: E402
 from ui import _review_engine as eng  # noqa: E402

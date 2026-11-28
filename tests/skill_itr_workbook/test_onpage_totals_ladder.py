@@ -37,7 +37,6 @@ data, no real PII, PAN, account numbers or amounts anywhere in this file.
 from __future__ import annotations
 
 import re
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -49,9 +48,6 @@ SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_eguile as pe  # noqa: E402
 import parse_gnucash as pg  # noqa: E402

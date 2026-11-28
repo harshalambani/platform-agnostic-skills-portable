@@ -3,7 +3,6 @@ statement extraction, the book and the account mapper are replaced by fakes."""
 from __future__ import annotations
 
 import csv
-import sys
 from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,9 +11,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT), str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_spend_booking import agent as ccsb          # noqa: E402
 from agents.skill_cc_spend_booking import journal as J           # noqa: E402

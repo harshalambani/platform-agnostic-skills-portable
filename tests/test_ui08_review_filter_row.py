@@ -15,15 +15,11 @@ asserted on the generated stylesheet only.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import _review_js as js  # noqa: E402
 from ui import _review_engine as eng  # noqa: E402

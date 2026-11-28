@@ -19,7 +19,6 @@ Covers the acceptance gates from the handover prompt:
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,11 +30,6 @@ SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 SRC = ROOT / "src"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import configs  # noqa: E402
 

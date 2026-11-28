@@ -14,15 +14,11 @@ from __future__ import annotations
 
 import csv
 import gzip
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # Frozen app puts both src/ (for the `agents.` package) and src/agents/ (for
 # bare skill_* imports) on the path; mirror that so the pipeline module loads.
-for _p in (ROOT / "src", ROOT / "src" / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from skill_gnucash_reconciler.agent import (  # noqa: E402
     detect_contra_entries,

@@ -79,6 +79,31 @@ where = ["src"]
 testpaths = ["tests", "src/agents"]
 python_files = ["test_*.py"]
 addopts = "-q"
+# Folders put on sys.path for every test, so a test file does not edit sys.path
+# itself (DBT-01 part 5). Paths are relative to this file. No module name is
+# provided by two of these folders; tests/test_dbt01_test_path_guard.py checks that
+# and fails if a test file adds its own sys.path entry.
+pythonpath = [
+    ".",
+    "src",
+    "src/agents",
+    "src/agents/skill_itr_workbook",
+    "src/agents/skill_itr_workbook/scripts",
+    "src/agents/skill_26as_journal/scripts",
+    "src/agents/skill_gnucash_intercompany/scripts",
+    "src/agents/skill_gnucash_intercompany_matrix/scripts",
+    "src/agents/skill_hsbc/scripts",
+    "ui",
+    "scripts",
+    "tests",
+    "tests/skill_hdfc",
+    "tests/skill_hsbc",
+    "tests/skill_bob",
+    "tests/skill_icici",
+    "tests/skill_kotak",
+    "tests/skill_itr_workbook",
+    "tests/skill_gnucash_xml_extractor",
+]
 # Build outputs contain a full copy of the app and its vendored packages. If
 # pytest walks them it imports that copy alongside the source tree, which is
 # how test_native_resolve started failing only when run as part of a wider

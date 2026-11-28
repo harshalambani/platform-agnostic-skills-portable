@@ -31,19 +31,13 @@ map_accounts() and the final CSV write. All data is synthetic.
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-import sys as _sys_mb
-from pathlib import Path as _Path_mb
-_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
 from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
@@ -300,8 +294,6 @@ _FULL_MATCH_CANONICAL_ROWS = [
 ]
 
 AGENTS_ROOT = SRC / "agents"
-if str(AGENTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(AGENTS_ROOT))
 
 
 def test_run_completes_and_reports_correctly_when_rules_resolve_every_row(tmp_path, monkeypatch):

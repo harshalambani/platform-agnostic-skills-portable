@@ -9,7 +9,6 @@ plain-English treatments from tags.py.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -18,9 +17,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_eguile as pe  # noqa: E402
 import configs  # noqa: E402

@@ -7,16 +7,10 @@ registry, so it runs on the old and the new code alike.
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (ROOT / "src", ROOT / "tests", ROOT / "tests" / "skill_bob",
-          ROOT / "tests" / "skill_hdfc", ROOT / "tests" / "skill_hsbc",
-          ROOT / "tests" / "skill_icici", ROOT / "tests" / "skill_kotak"):
-    if str(p) not in sys.path:
-        sys.path.insert(0, str(p))
 
 
 def build_all(tmp: Path) -> dict[str, tuple[Path, str | None]]:

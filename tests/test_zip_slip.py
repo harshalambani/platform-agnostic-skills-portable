@@ -25,8 +25,6 @@ import pytest
 
 # Make the bundling/ package importable when running from the project root.
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from bundling.refresh_binaries import _safe_extractall  # noqa: E402
 

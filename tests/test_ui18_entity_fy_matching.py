@@ -4,7 +4,6 @@ matching on the partner and AIS forms. The pickers and the run path agree:
 what is not offered is also refused when passed directly. Everything here is
 synthetic (made-up names and PANs).
 """
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,9 +12,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import entity_scope  # noqa: E402
 from agents.registry import discover  # noqa: E402

@@ -12,15 +12,12 @@ test_src_agents_never_polluted below, which asserts that directly.
 These run in source mode and need no LLM, no network, no gradio, no native
 binaries.
 """
-import sys
 from pathlib import Path
 
 import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents import registry  # noqa: E402
 from agents.skill_scaffold import scaffold  # noqa: E402

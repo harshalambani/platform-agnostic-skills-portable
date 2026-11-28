@@ -1,15 +1,11 @@
 """UI-32: a result line is green only when it really reports success."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from markdown_it import MarkdownIt
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (str(ROOT / "src"), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from ui.tabs._generic import _colorize_status  # noqa: E402
 

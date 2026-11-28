@@ -3,14 +3,10 @@ account; an asset account reached by anything but a saved user rule). Synthetic
 data only; the book, statements and mapper are fakes."""
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from tests import test_cc_spend_booking as T                     # noqa: E402
 from tests.test_cc_spend_booking import APR, MAY, Guard, book_pay, go, may_rows, row, stmt, tie   # noqa: E402

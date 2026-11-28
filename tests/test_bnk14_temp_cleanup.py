@@ -7,16 +7,12 @@ Only what the app made in the temp folder is removed. Synthetic data only.
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent
-for _p in (ROOT.parent / "src", ROOT.parent / "src" / "agents", ROOT.parent):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import registry  # noqa: E402
 from tests.test_bnk04_sbm_parser import ACCT, PW, _rows, _write  # noqa: E402

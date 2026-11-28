@@ -2,7 +2,6 @@
 (cc_cred_max_overage in entities.yaml), editable on the Entities screen. Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -10,9 +9,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_spend_booking import settings_io                  # noqa: E402
 import configs                                                       # noqa: E402

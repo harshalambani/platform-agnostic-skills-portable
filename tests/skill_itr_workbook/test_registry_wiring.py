@@ -15,7 +15,6 @@ nothing under Data/ or C:\\PortableApps is read.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,11 +22,6 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 SRC = ROOT / "src"
 
-for p in (str(SCRIPTS), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import configs  # noqa: E402
 

@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import gzip
 import os
-import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -20,9 +19,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (SRC, SRC / "agents" / "skill_itr_workbook" / "scripts"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import gnc_book  # noqa: E402
 from agents.gnc_book import GncBookUnreadable, clear_cache, read_xml_root  # noqa: E402

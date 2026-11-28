@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import csv
 import io
-import sys
 from email.message import Message
 from pathlib import Path
 from urllib.error import HTTPError
@@ -19,9 +18,6 @@ from urllib.error import HTTPError
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402
 import gnc_book_fixture as fx  # noqa: E402

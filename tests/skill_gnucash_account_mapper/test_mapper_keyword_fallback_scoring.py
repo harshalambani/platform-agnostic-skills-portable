@@ -46,17 +46,11 @@ from __future__ import annotations
 
 import csv
 import random
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-import sys as _sys_mb
-from pathlib import Path as _Path_mb
-_sys_mb.path.insert(0, str(_Path_mb(__file__).resolve().parents[1]))
 from gnc_minbook import write_min_book  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 
@@ -66,8 +60,6 @@ from agents.skill_gnucash_account_mapper import agent  # noqa: E402
 # Importing under the same undotted keys here is what makes monkeypatching
 # them (in the Part 3 test) visible to run().
 AGENTS_ROOT = SRC / "agents"
-if str(AGENTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(AGENTS_ROOT))
 
 
 # ---------------------------------------------------------------------------

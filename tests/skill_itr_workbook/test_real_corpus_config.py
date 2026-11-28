@@ -2,14 +2,11 @@
 Synthetic names and tmp_path only; runs in CI."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 HERE = Path(__file__).resolve().parent
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
 
 import real_corpus_config as rcc  # noqa: E402
 

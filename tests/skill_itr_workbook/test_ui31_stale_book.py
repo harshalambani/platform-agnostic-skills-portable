@@ -14,15 +14,11 @@ Synthetic names only; every ".gnucash" path is an empty tmp_path placeholder.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-for p in (str(SRC / "agents" / "skill_itr_workbook" / "scripts"), str(SRC), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import gradio as gr  # noqa: E402
 

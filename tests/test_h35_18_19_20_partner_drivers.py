@@ -3,15 +3,11 @@ and the 40% / 48-month capital rule driven by the admission date.
 All entities and figures are invented."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (str(ROOT / "src"), str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents.skill_partner_comp_recon.jv_emitter import build_journals  # noqa: E402
 from agents.skill_partner_comp_recon.agent import apply_capital_rule_defaults  # noqa: E402

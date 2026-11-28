@@ -10,7 +10,6 @@ Fully offline; synthetic fixtures only.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -21,9 +20,6 @@ SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 RULES_DIR = ROOT / "bundling" / "canonical" / "itr" / "rules"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_eguile as pe  # noqa: E402
 import parse_gnucash as pg  # noqa: E402

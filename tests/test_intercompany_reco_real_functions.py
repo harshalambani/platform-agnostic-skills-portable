@@ -17,7 +17,6 @@ exception list and the workbook).
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -26,9 +25,6 @@ from openpyxl import load_workbook
 ROOT = Path(__file__).resolve().parent.parent
 _PAIR = ROOT / "src" / "agents" / "skill_gnucash_intercompany" / "scripts"
 _MATRIX = ROOT / "src" / "agents" / "skill_gnucash_intercompany_matrix" / "scripts"
-for _p in (str(_PAIR), str(_MATRIX), str(Path(__file__).resolve().parent)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import gnc_book_fixture as fx  # noqa: E402
 import reconcile_intercompany as ric  # noqa: E402

@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,8 +14,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
 
 from agents import llm_client as lc  # noqa: E402
 from agents import llm_errors, llm_pacing  # noqa: E402

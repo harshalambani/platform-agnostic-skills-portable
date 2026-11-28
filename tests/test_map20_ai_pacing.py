@@ -2,7 +2,6 @@
 
 All state goes under tmp_path; fake clock so the suite stays fast.
 """
-import sys
 import threading
 import time
 from pathlib import Path
@@ -11,8 +10,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
 from agents import llm_pacing as lp  # noqa: E402
 import agents.skill_gnucash_account_mapper.agent as m  # noqa: E402

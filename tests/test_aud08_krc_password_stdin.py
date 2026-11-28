@@ -13,8 +13,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 LEDGER_SCRIPT = SRC / "agents" / "skill_krc" / "scripts" / "parse_krc_ledger.py"
 BILLS_SCRIPT = SRC / "agents" / "skill_krc_recon" / "scripts" / "parse_krc_bills.py"
@@ -137,8 +135,6 @@ def test_no_krc_subprocess_call_passes_a_password_variable_in_its_argv():       
 
 # ---- end to end on a synthetic encrypted PDF -------------------------------
 
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 from qpdf_helper import needs_qpdf  # noqa: E402  (PIPE-19: skip locally, fail on CI)
 
 

@@ -10,7 +10,6 @@ there -- that's the learning loop working).
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -23,9 +22,6 @@ AGENT_DIR = SRC / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 REAL_SAMPLES_DIR = ROOT / "Data" / "GNUCashReports"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_eguile as pe  # noqa: E402
 import fixture_gen  # noqa: E402

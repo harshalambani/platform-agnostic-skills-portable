@@ -7,16 +7,11 @@ Synthetic book, real naming shape (see gnc_book_fixture): four HDFC accounts
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
-for _p in (ROOT.parent / "src", ROOT.parent / "src" / "agents"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import gnc_book_fixture as fx  # noqa: E402
 from agents.skill_gnucash_pipeline import agent as pipe  # noqa: E402
@@ -40,9 +35,6 @@ def _rows(opening=100000.00, narr="NEFT SALARY CREDIT"):
 
 
 def _hdfc_csv(tmp_path):
-    sp = str(ROOT / "skill_hdfc")
-    if sp not in sys.path:
-        sys.path.insert(0, sp)
     import hdfc_fixture_gen
     stmt = tmp_path / "stmt.csv"
     stmt.write_text(hdfc_fixture_gen.build_csv_text(), encoding="utf-8")

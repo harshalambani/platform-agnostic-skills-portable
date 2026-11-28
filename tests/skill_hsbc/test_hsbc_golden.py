@@ -12,15 +12,10 @@ test. The OCR stage itself stays covered by tests/skill_hsbc/test_parse_tsv.py
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import hsbc_fixture_gen as fixture_gen  # noqa: E402
 from agents.bank_contract import BankSkill  # noqa: E402

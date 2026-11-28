@@ -22,7 +22,6 @@ acceptance gates ("Best-effort workbook instead of block-to-nothing", see
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import openpyxl
@@ -33,9 +32,6 @@ SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 AGENT_DIR = ROOT / "src" / "agents" / "skill_itr_workbook"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
-for p in (str(SCRIPTS), str(AGENT_DIR), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import agent  # noqa: E402
 import configs  # noqa: E402

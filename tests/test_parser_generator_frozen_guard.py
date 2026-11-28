@@ -2,11 +2,9 @@
 from __future__ import annotations
 
 import sys
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from agents.skill_parser_generator import __main__ as pg_main  # noqa: E402
 from agents.skill_parser_generator import agent as pg_agent  # noqa: E402

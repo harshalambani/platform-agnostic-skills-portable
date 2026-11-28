@@ -3,15 +3,12 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import urllib.request
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 
 import gradio as gr  # noqa: E402
 import gradio.blocks as gblocks  # noqa: E402

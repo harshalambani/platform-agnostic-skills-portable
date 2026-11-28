@@ -4,16 +4,12 @@ Per entity: ``folder_name`` in entities.yaml (one path segment). Global: ``drive
 ``gnucash_profile_root`` in the portable config.yaml, edited on the Entities screen. Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                                       # noqa: E402
 from tests.test_ui35_entities_all_fields import _call, _profiles, _seed   # noqa: E402

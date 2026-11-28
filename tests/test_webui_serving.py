@@ -21,7 +21,6 @@ Also tests the _config.py helpers introduced by MP-05:
 """
 from __future__ import annotations
 
-import sys
 import tempfile
 from pathlib import Path
 
@@ -131,12 +130,6 @@ class TestNativeWindowDownloads:
 
         # Load the helper from webui without triggering a full Gradio import
         # chain: exec the module in a namespace is heavy, so import the package.
-        ui_path = str(ROOT)
-        if ui_path not in sys.path:
-            sys.path.insert(0, ui_path)
-        src = str(ROOT / "src")
-        if src not in sys.path:
-            sys.path.insert(0, src)
         webview.settings["ALLOW_DOWNLOADS"] = False  # start from the unsafe default
         from ui.webui import _enable_native_downloads  # noqa: PLC0415
         _enable_native_downloads()
@@ -317,14 +310,7 @@ class TestDownloadStagingDir:
     """
 
     def _get_fn(self):
-        # Add the src/ dir to path if needed so _config is importable.
-        src = str(ROOT / "src")
-        if src not in sys.path:
-            sys.path.insert(0, src)
         # Import from the ui package relative to root.
-        ui_path = str(ROOT)
-        if ui_path not in sys.path:
-            sys.path.insert(0, ui_path)
         from ui import _config
         return _config
 

@@ -14,15 +14,10 @@ balances silently came from the wrong statement.
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(Path(__file__).resolve().parent) not in sys.path:
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import icici_fixture_gen as fixture_gen  # noqa: E402
 from agents.skill_icici.agent import run as icici_run  # noqa: E402

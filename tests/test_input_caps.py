@@ -15,7 +15,6 @@ directly and collect the yielded (markdown, download_update, path_update) tuples
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -24,8 +23,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from ui.tabs._generic import _MAX_FILE_COUNT, _MAX_UPLOAD_SIZE_BYTES
 

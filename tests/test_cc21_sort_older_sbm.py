@@ -4,15 +4,11 @@ only a month-year statement date ("Statement Date : April-2025"). Synthetic text
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (str(SRC), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_cc_sort import completeness as C  # noqa: E402
 

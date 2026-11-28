@@ -13,7 +13,6 @@ import sys
 from fractions import Fraction
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_krc_gnucash_flags_charges as base  # noqa: E402
 
 bk = base.bk

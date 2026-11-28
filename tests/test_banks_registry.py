@@ -8,19 +8,12 @@ Run with:
 from __future__ import annotations
 
 import inspect
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-for _extra in ("skill_bob", "skill_icici", "skill_hsbc", "skill_kotak"):
-    _dir = ROOT / "tests" / _extra
-    if str(_dir) not in sys.path:
-        sys.path.insert(0, str(_dir))
 
 from agents import banks
 from agents.bank_contract import BankResult, BankSkill

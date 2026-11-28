@@ -27,15 +27,11 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(ROOT), str(ROOT / "ui"), str(SRC)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from ui.tabs import itr_mapping_review as ui_mod  # noqa: E402
 

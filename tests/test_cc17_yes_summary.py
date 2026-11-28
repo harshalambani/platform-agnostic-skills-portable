@@ -14,9 +14,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
 SCRIPT = SRC / "agents" / "skill_cc_transactions" / "scripts" / "create_cc_transaction_list.py"
-for _p in (str(SRC), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 
 def _load_module():

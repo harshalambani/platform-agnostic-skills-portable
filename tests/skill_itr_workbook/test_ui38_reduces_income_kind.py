@@ -1,13 +1,8 @@
 """UI-38: an explicit per-tag 'reduces income' kind, no prefix fallback."""
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SRC = ROOT / "src"
-for p in (str(ROOT), str(SRC), str(SRC / "agents" / "skill_itr_workbook" / "scripts"),
-          str(SRC / "agents" / "skill_itr_workbook")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import tag_suggest  # noqa: E402
 import tags  # noqa: E402

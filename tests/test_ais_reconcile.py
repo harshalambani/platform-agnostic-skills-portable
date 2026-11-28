@@ -23,22 +23,17 @@ from __future__ import annotations
 
 import copy
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 # configs.py (skill_itr_workbook) does a bare `import tags` assuming its own
 # scripts/ dir is on sys.path directly (the convention used throughout
 # tests/skill_itr_workbook/) -- add it so the package-path import below of
 # configs.py (for Phase C's MappingEntry/MappingLoadResult) succeeds too.
 _ITR_SCRIPTS = SRC / "agents" / "skill_itr_workbook" / "scripts"
-if str(_ITR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_ITR_SCRIPTS))
 
 from agents.skill_ais_reconcile import decrypt as D  # noqa: E402
 from agents.skill_ais_reconcile import normalize as N  # noqa: E402

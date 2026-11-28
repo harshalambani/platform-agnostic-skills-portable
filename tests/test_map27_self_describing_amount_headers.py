@@ -16,17 +16,11 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "tests"))
-sys.path.insert(0, str(ROOT / "tests" / "skill_hdfc"))
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "src" / "agents"))
 
 import hdfc_fixture_gen as fixture_gen  # noqa: E402
 import test_gnucash_dedup_account_scope as dedup_fixture  # noqa: E402

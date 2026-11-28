@@ -21,12 +21,9 @@ import pytest
 import csv
 import json
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "ui"))
 
 from ui.tabs import gnucash_review as gr_review  # noqa: E402
 

@@ -2,15 +2,11 @@
 no user data."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import banks  # noqa: E402
 from ui import _help, webui  # noqa: E402

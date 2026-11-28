@@ -4,7 +4,6 @@ Synthetic data only: invented names, generic issuers, neutral last-four digits a
 The email is EVIDENCE: it never creates, changes or doubles a booking."""
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +16,6 @@ from agents.skill_cc_spend_booking import cred_email as CE
 from agents.skill_cc_spend_booking import matcher as M
 from tests.test_cc_spend_booking import APR, MAY, april_rows, book_pay, go, may_rows, stmt, tie
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 from msg_fixtures import build_msg  # noqa: E402
 
 _ORIG_RUN = ccsb.run

@@ -56,8 +56,6 @@ def load_extractor():
     import sys
     root = Path(__file__).resolve().parent.parent
     src = root / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
     script = src / "agents" / "skill_26as" / "scripts" / "extract_26as_to_xlsx.py"
     name = "extract_26as_to_xlsx_synthetic"
     spec = importlib.util.spec_from_file_location(name, script)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 import urllib.error as ue
 from pathlib import Path
 from urllib import request
@@ -15,8 +14,6 @@ from urllib import request
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
 
 from tests.test_aud07_llm_client import _Fake  # noqa: E402
 from ui import _config, _health  # noqa: E402

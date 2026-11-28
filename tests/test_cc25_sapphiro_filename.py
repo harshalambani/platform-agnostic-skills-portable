@@ -7,9 +7,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SORT_SCRIPT = ROOT / "src" / "agents" / "skill_cc_sort" / "scripts" / "extract_sort_cc_pdfs.py"
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 _spec = importlib.util.spec_from_file_location("extract_sort_cc_pdfs_cc25", SORT_SCRIPT)
 sort = importlib.util.module_from_spec(_spec)

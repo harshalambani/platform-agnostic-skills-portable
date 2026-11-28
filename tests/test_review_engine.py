@@ -13,12 +13,9 @@ and payload parsing.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "ui"))
 
 from ui import _review_engine as engine  # noqa: E402
 

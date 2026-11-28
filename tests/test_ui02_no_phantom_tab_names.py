@@ -10,15 +10,12 @@ against the set of rendered labels.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 # Labels that were once used in prose but are not rendered anywhere.
 KNOWN_PHANTOMS = ["Partner Comp Recon", "26AS Journal", "ITR Mapping tab",

@@ -3,16 +3,12 @@ stdin-capable parser on stdin, never in argv. Synthetic data only."""
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (SRC, ROOT / "tests"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_parser_generator import tools  # noqa: E402
 from test_aud08_krc_password_stdin import (  # noqa: E402

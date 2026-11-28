@@ -12,15 +12,12 @@ agents.skill_icici.agent.parse_icici_date(), incl.:
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents.skill_icici.agent import parse_icici_date  # noqa: E402
 

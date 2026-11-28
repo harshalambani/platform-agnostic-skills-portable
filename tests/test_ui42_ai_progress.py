@@ -4,15 +4,11 @@ and a time-left estimate while the AI pass runs. Fake pacer clock, scripted LLM,
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT), str(ROOT / "tests")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import agents.skill_gnucash_account_mapper.agent as m  # noqa: E402
 from agents import base_agent  # noqa: E402

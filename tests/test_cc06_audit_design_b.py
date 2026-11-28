@@ -4,13 +4,10 @@ shipped HSBC EMI work. Synthetic fixtures only.
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
-from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 import test_cc06_hsbc_emi as base  # noqa: E402
 from agents.skill_cc_spend_booking import journal as J
 

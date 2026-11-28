@@ -3,7 +3,6 @@ save never deletes a key the form does not own. Synthetic data only."""
 from __future__ import annotations
 
 import dataclasses
-import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,9 +10,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"), str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                   # noqa: E402
 from ui.tabs import itr_entities as ui_mod       # noqa: E402

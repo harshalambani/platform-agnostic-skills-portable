@@ -19,7 +19,6 @@ import datetime as _dt
 import json
 import math
 import re
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,9 +27,6 @@ from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_partner_comp_recon import writer  # noqa: E402
 from agents.skill_partner_comp_recon.engine import build_report  # noqa: E402

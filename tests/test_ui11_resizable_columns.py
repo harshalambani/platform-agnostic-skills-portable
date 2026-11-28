@@ -22,7 +22,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 import urllib.request
@@ -32,9 +31,6 @@ from unittest.mock import patch
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "tests", ROOT / "ui", ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 import _review_js as js  # noqa: E402
 from ui import _review_engine as eng  # noqa: E402

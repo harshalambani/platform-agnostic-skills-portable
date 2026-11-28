@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib
 import io
 import logging
-import sys
 import tempfile
 from pathlib import Path
 from urllib import error as uerror, request
@@ -14,9 +13,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import llm_client as lc  # noqa: E402
 from ui import _config, _health, _runner  # noqa: E402

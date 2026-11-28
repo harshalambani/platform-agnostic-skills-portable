@@ -2,14 +2,10 @@
 from __future__ import annotations
 
 import json
-import sys
 from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for p in (str(ROOT / "src"), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents.skill_cc_sort import agent as cc_agent  # noqa: E402
 from agents.skill_cc_sort import completeness as C  # noqa: E402

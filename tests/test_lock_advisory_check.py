@@ -18,7 +18,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "lock_advisory_check.py"
-sys.path.insert(0, str(ROOT / "scripts"))
 import lock_advisory_check as lac  # noqa: E402
 
 HASH = "--hash=sha256:" + "0" * 64

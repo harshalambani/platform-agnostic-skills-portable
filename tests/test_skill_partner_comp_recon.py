@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import csv
 import re
-import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date
@@ -20,8 +19,6 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC = PROJECT_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents.skill_partner_comp_recon import engine, jv_emitter, writer
 from agents.skill_partner_comp_recon.agent import run

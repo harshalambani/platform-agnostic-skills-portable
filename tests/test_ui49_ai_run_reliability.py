@@ -3,16 +3,12 @@ from __future__ import annotations
 
 import io
 import json
-import sys
 import urllib.error
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT / "src" / "agents"))
 
 import agents.skill_gnucash_account_mapper.agent as m  # noqa: E402
 from agents import llm_errors as le  # noqa: E402

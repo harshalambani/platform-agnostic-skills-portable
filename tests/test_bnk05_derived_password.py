@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import datetime
 import gzip
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,9 +15,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent
-for _p in (ROOT.parent / "src", ROOT.parent / "src" / "agents", ROOT):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import banks  # noqa: E402
 from agents.skill_gnucash_pipeline import agent as pipe  # noqa: E402

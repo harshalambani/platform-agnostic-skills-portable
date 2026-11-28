@@ -11,16 +11,11 @@ tests/skill_hsbc/test_parse_tsv.py -- unit tests for HSBC's parse_tsv.py fixes:
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SRC = ROOT / "src"
 SCRIPTS = ROOT / "src" / "agents" / "skill_hsbc" / "scripts"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 import parse_tsv  # noqa: E402
 from agents.bank_common.consolidate import StatementGroup, consolidate  # noqa: E402

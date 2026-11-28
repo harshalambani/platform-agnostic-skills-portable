@@ -26,24 +26,17 @@ Covers:
 from __future__ import annotations
 
 import io
-import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 import bundling.refresh_binaries as refresh_binaries  # noqa: E402
 
 SCRIPTS_DIR = ROOT / "src" / "agents" / "skill_hsbc" / "scripts"
-if str(SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS_DIR))
 import ocr_to_tsv  # noqa: E402
 
 

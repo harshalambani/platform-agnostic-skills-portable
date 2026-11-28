@@ -23,8 +23,6 @@ import pytest
 # Make ui package importable from project root.
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 import ui._config as cfg_mod
 from ui._config import (

@@ -2,16 +2,12 @@
 from the AI-model settings file handed in as `config_path`. Everything here is
 synthetic (made-up entity keys, names, PANs, accounts and amounts)."""
 import csv
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.registry import discover  # noqa: E402
 from agents.skill_partner_comp_recon import agent as partner_agent  # noqa: E402

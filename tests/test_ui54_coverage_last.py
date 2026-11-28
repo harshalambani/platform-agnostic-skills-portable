@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 import threading
 import warnings
 from datetime import date, datetime
@@ -14,9 +13,6 @@ import pytest
 from openpyxl import load_workbook
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src"), str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents.skill_gnucash_coverage import agent as cov  # noqa: E402
 from tests.test_gnucash_coverage import (  # noqa: E402,F401  (fixtures + helpers)

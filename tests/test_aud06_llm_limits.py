@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,9 +14,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import base_agent as ba  # noqa: E402
 from agents import llm_chat_model, llm_client  # noqa: E402

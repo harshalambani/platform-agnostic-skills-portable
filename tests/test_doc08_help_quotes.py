@@ -8,20 +8,12 @@ contains it. A deliberately wrong phrase must be reported missing.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for _p in (
-    SRC, SRC / "agents", ROOT / "tests", ROOT / "tests" / "skill_kotak",
-    SRC / "agents" / "skill_gnucash_intercompany_matrix" / "scripts",
-    SRC / "agents" / "skill_gnucash_intercompany" / "scripts",
-):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import registry  # noqa: E402
 

@@ -7,7 +7,6 @@ count-only behaviour must NOT come back.
 from __future__ import annotations
 
 import csv
-import sys
 import tempfile
 from datetime import date, timedelta
 from pathlib import Path
@@ -15,9 +14,6 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT / "src", ROOT / "tests", ROOT / "tests" / "skill_gnucash_xml_extractor"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents import recency  # noqa: E402
 from agents.skill_gnucash_account_mapper import agent as m  # noqa: E402

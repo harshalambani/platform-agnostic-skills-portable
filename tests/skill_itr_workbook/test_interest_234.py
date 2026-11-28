@@ -26,7 +26,6 @@ appear in this file.
 """
 from __future__ import annotations
 
-import sys
 from datetime import date
 from pathlib import Path
 
@@ -34,8 +33,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 import interest_234 as i234  # noqa: E402
 
@@ -383,8 +380,6 @@ def test_using_book_tds_instead_of_26as_materially_understates_the_interest():
 # ---------------------------------------------------------------------------
 
 SCRIPTS_STR = str(SCRIPTS)
-if SCRIPTS_STR not in sys.path:
-    sys.path.insert(0, SCRIPTS_STR)
 import schedules as sch  # noqa: E402
 
 

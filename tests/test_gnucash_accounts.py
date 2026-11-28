@@ -26,8 +26,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 from agents import gnucash_accounts as ga  # noqa: E402
 
@@ -284,8 +282,6 @@ def test_krc_match_candidates_exclude_special_stock(tmp_path):
 
 def test_review_picker_excludes_special_accounts(book):
     pytest.importorskip("gradio")
-    if str(ROOT) not in sys.path:
-        sys.path.insert(0, str(ROOT))
     from ui.tabs.gnucash_review import _extract_account_tree
     paths = _extract_account_tree(str(book))
     assert "Income:Interest Income:Interest on HDFC - FD" in paths

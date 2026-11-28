@@ -14,9 +14,6 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import cc_cards as cc  # noqa: E402
 from agents.cc_cards import Card, CardListError, CardListMissing  # noqa: E402

@@ -2,14 +2,10 @@
 cancel -- written once per run, with no secret in it. Synthetic data only."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from tests.test_cc08_early_checks_and_log import _handler, _logs   # noqa: E402
 from ui import _runlog                                              # noqa: E402

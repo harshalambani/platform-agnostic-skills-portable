@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,9 +13,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(SRC), str(ROOT / "tests")):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents.msg_reader import MsgReadError, read_msg  # noqa: E402
 from msg_fixtures import build_msg, cfb_bytes, signed_mime, utc  # noqa: E402

@@ -137,8 +137,6 @@ def test_sec22_real_hash_list_is_populated_and_nonempty():
 
 def _load_journal_module():
     src = ROOT / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
     path = src / "agents" / "skill_26as_journal" / "scripts" / "build_tds_journals.py"
     spec = importlib.util.spec_from_file_location("build_tds_journals_nrd", path)
     mod = importlib.util.module_from_spec(spec)

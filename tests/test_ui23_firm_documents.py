@@ -7,7 +7,6 @@ name, PAN or account number appears anywhere.
 """
 import csv
 import re
-import sys
 import zipfile
 from pathlib import Path
 
@@ -15,9 +14,6 @@ import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.registry import discover  # noqa: E402
 from agents.skill_partner_comp_recon import agent as agent_module  # noqa: E402

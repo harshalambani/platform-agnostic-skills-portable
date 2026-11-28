@@ -16,9 +16,6 @@ import openpyxl
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "ui"))
-sys.path.insert(0, str(ROOT / "src"))
 SCRIPT = ROOT / "src" / "agents" / "skill_krc_gnucash" / "scripts" / "build_krc_gnucash.py"
 
 _spec = importlib.util.spec_from_file_location("build_krc_gnucash_t", SCRIPT)

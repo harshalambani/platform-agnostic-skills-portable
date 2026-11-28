@@ -3,15 +3,11 @@ tests/test_h35_10_duplicate_month.py -- H35-10: two payout documents for the
 same month are REFUSED (never counted twice, never silently de-duplicated).
 Everything is synthetic.
 """
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_partner_comp_recon import agent as agent_module  # noqa: E402
 from agents.skill_partner_comp_recon.mapper import DuplicateMonthError, build_input_data  # noqa: E402

@@ -9,13 +9,9 @@ from __future__ import annotations
 
 import csv
 import json
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src", ROOT / "ui"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 from agents.skill_gnucash_pipeline import agent as pipe  # noqa: E402
 from ui.tabs import gnucash_review as rev  # noqa: E402

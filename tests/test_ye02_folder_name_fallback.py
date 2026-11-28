@@ -4,16 +4,11 @@ registered book must sit in GnuCash root \ years \ effective folder) is what mak
 fallback safe, so every refusal below also asserts nothing was created or copied."""
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT / "tests"), str(ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"),
-           str(ROOT / "src"), str(ROOT)):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 import configs                                                       # noqa: E402
 from test_ye01_year_end_skill import (                                # noqa: E402,F401

@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import importlib
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (ROOT, ROOT / "src"):
-    if str(_p) not in sys.path:
-        sys.path.insert(0, str(_p))
 
 
 def test_tracing_is_false_after_startup_import_even_if_the_environment_said_true(monkeypatch):

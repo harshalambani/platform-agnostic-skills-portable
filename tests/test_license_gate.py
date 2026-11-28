@@ -2,14 +2,12 @@
 permissive ones, and the real lock is clean."""
 from __future__ import annotations
 
-import sys
 from importlib import metadata
 from pathlib import Path
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
 
 import license_gate as lg  # noqa: E402
 

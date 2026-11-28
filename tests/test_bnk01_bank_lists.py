@@ -11,7 +11,6 @@ never against the code under test.
 from __future__ import annotations
 
 import csv
-import sys
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -21,9 +20,6 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-for p in (str(SRC), str(ROOT)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 from agents import banks  # noqa: E402
 from agents.skill_gnucash_xml_extractor import agent as ex  # noqa: E402

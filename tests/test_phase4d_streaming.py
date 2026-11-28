@@ -13,7 +13,6 @@ Run with:
 from __future__ import annotations
 
 import queue
-import sys
 import threading
 import time
 from pathlib import Path
@@ -27,13 +26,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
 # We need ui/ on the path too for the _runner import.
 UI = ROOT / "ui"
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 
 # ===========================================================================

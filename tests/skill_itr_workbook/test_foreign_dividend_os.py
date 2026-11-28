@@ -20,7 +20,6 @@ No real financial data, and nothing under Data/ is touched.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -28,9 +27,6 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent.parent
 SCRIPTS = ROOT / "src" / "agents" / "skill_itr_workbook" / "scripts"
 
-for p in (str(SCRIPTS), str(Path(__file__).resolve().parent)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
 
 import parse_foreign as pf  # noqa: E402
 import quarters as quarters_engine  # noqa: E402

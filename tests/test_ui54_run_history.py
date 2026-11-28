@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
 import threading
 import time
 import warnings
@@ -14,9 +13,6 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
-for _p in (str(ROOT), str(ROOT / "src")):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
 
 from agents import registry  # noqa: E402
 from agents.outputs import ReplyWithOutputs  # noqa: E402
