@@ -28,7 +28,6 @@ portal on the taxpayer's behalf.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 from agents.entity_scope import check_26as_fy, check_26as_owner
@@ -46,9 +45,8 @@ from agents.skill_ais_reconcile import excel_writer as XL
 # agents.* package path) that carries the entity/mapping/rules/26AS/gnucash
 # loaders this skill reuses rather than re-implementing -- same sys.path
 # pattern skill_itr_workbook/agent.py uses for its own scripts/ dir.
-_ITR_SCRIPTS = Path(__file__).resolve().parent.parent / "skill_itr_workbook" / "scripts"
-if str(_ITR_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_ITR_SCRIPTS))
+from agents import _paths  # noqa: E402
+_paths.ensure_scripts("skill_itr_workbook")
 import configs  # noqa: E402
 import filed_return as filed_return_engine  # noqa: E402
 import parse_gnucash as pg  # noqa: E402

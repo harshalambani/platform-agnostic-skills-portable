@@ -8,11 +8,11 @@ pass a path (small local models garble long Windows paths). The model only:
 The deterministic builder always writes a valid, balanced CSV; the override
 step is pure polish.
 """
-import sys
 from pathlib import Path
 
 from langchain_core.tools import tool
 
+from agents import _paths
 from agents.base_agent import build_agent
 from agents.entity_scope import check_26as_owner
 from agents.skill_26as_journal import tools as T
@@ -24,9 +24,7 @@ SYSTEM_PROMPT = (Path(__file__).parent / "AGENT.md").read_text(encoding="utf-8")
 # `agents` — see that file's SPECIAL_BOOL_FLAG_KEYS comment). Mirrors
 # skill_partner_comp_recon/agent.py's and skill_ais_reconcile/agent.py's own
 # sys.path insert to reach configs.load_entities()/EntityProfile.
-_ITR_SCRIPTS_DIR = str(Path(__file__).parent.parent / "skill_itr_workbook" / "scripts")
-if _ITR_SCRIPTS_DIR not in sys.path:
-    sys.path.insert(0, _ITR_SCRIPTS_DIR)
+_paths.ensure_scripts("skill_itr_workbook")
 
 
 class EntityResolutionError(Exception):

@@ -14,7 +14,6 @@ import functools
 import json
 import math
 import re
-import sys
 import threading
 import time
 from pathlib import Path
@@ -23,6 +22,7 @@ from urllib.error import HTTPError as _HTTPError
 
 import yaml
 
+from agents import _paths
 from agents.balance_utils import _safe_float
 from agents import llm_client as _llm_client
 from agents import llm_errors as _llm_errors
@@ -3801,9 +3801,7 @@ def run(
         Human-readable result string for the UI.
     """
     # Make sibling agents importable
-    agents_root = Path(__file__).resolve().parent.parent
-    if str(agents_root) not in sys.path:
-        sys.path.insert(0, str(agents_root))
+    _paths.ensure_agents_dir()
 
     from skill_gnucash_xml_extractor.agent import parse_gnucash_file          # noqa: E402
     from agents.gnc_book import GncBookUnreadable, read_xml_root              # noqa: E402

@@ -10,12 +10,9 @@ unmatched item. Writes an Excel workbook to output_path.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from agents import _paths
 
-_SCRIPTS = Path(__file__).parent / "scripts"
-if str(_SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS))
+_paths.ensure_scripts("skill_gnucash_intercompany")
 
 
 def _tol(value, default: int = 7) -> int:
